@@ -516,7 +516,7 @@ class PiRuntime(GenericRuntime):
     def capabilities(self) -> RuntimeCapabilities:
         """Take the platform's MCP relay, through the image's bridge, and an effort level.
 
-        Native resume is declared by :class:`drivers.PiDriver`, not here.
+        Native resume is declared by its :class:`drivers.LiveDriver`, not here.
         """
         return RuntimeCapabilities(
             mcp=PI.mcp,

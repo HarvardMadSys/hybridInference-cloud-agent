@@ -18,15 +18,11 @@ from cloud_agent_host.drivers import (
     TURN_COMPLETED,
     TURN_FAILED,
     TURN_STARTED,
-    ClaudeCodeDriver,
-    CodexDriver,
     DriverError,
     HttpAgentLiveSession,
-    KiloDriver,
     LaunchContext,
-    OpenCodeDriver,
-    PiDriver,
     TurnInput,
+    driver_for,
 )
 from cloud_agent_host.runtimes import (
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -106,7 +102,7 @@ def test_two_turns_ride_one_process(tmp_path):
     """The point of HOT: the second turn is a stdin line, not a sandbox."""
     process = _LiveProcess()
     context, spawned = _live(process, tmp_path)
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+    session = driver_for(ClaudeCodeRuntime()).launch_live(context)
 
     process.feed = _turn_lines(_ANSWER, _RESULT)
     first = session.start_turn(TurnInput(prompt="fix it", model="glm-5.1"))
@@ -135,7 +131,7 @@ def test_two_turns_ride_one_process(tmp_path):
 def test_live_spawn_binds_subagents_after_the_empty_model_template(tmp_path, model):
     process = _LiveProcess()
     context, spawned = _live(process, tmp_path)
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+    session = driver_for(ClaudeCodeRuntime()).launch_live(context)
     assert spawned == []
 
     session.ensure_started(model=model, reasoning_effort=None)
@@ -153,7 +149,7 @@ def test_claude_child_reply_stays_in_the_stream_without_becoming_the_final_answe
 ):
     """Delegated findings remain inspectable and never substitute for the main reply."""
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     child = {
         "type": "assistant",
         "parent_tool_use_id": "delegate-call",
@@ -221,7 +217,7 @@ def test_claude_turn_ends_once_its_background_agent_is_answered(
     the prompt's result; read by the next turn, it would be taken as its answer.
     """
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     finished = [_running(), _finished("agent-1")]
     process.feed = _turn_lines(
         _running(("agent-1", "local_agent")),
@@ -248,7 +244,7 @@ def test_claude_turn_ends_once_its_background_agent_is_answered(
 
 def test_claude_turn_waits_for_every_background_agent(tmp_path):
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(
         _running(("a", "local_agent"), ("b", "local_agent")),
         _say("launched two"),
@@ -279,7 +275,7 @@ def test_claude_turn_does_not_wait_for_a_background_shell_or_take_its_answer_as_
     reads that turn but ends only with the answer to its own prompt.
     """
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(_running(("shell-1", "local_bash")), _say("server up"), _RESULT)
     assert session.start_turn(TurnInput(prompt="serve", model="m")).wait().final_output == (
         "server up"
@@ -305,7 +301,7 @@ def test_claude_turn_does_not_wait_for_a_background_shell_or_take_its_answer_as_
 def test_claude_turn_ends_with_a_notification_turn_that_took_its_prompt(tmp_path):
     """Read while Claude answers a notification, the prompt is answered in that turn."""
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(_running(("shell-1", "local_bash")), _RESULT)
     session.start_turn(TurnInput(prompt="serve", model="m")).wait()
 
@@ -330,7 +326,7 @@ def test_claude_cancel_while_waiting_stops_the_background_agents(tmp_path, stopp
     Should an agent still be listed, the process retires so it ends with it.
     """
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     killed = [_running(), _finished("agent-1", "stopped")] if stopped else []
     process.feed = _turn_lines(
         _running(("agent-1", "local_agent")),
@@ -352,7 +348,7 @@ def test_claude_cancel_while_waiting_stops_the_background_agents(tmp_path, stopp
 
 def test_claude_message_sent_while_waiting_goes_as_the_next_turn(tmp_path):
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(
         _running(("agent-1", "local_agent")),
         _RESULT,
@@ -374,7 +370,7 @@ def test_claude_message_sent_while_waiting_goes_as_the_next_turn(tmp_path):
 
 def test_a_model_switch_mid_session_is_a_restart_not_a_lie(tmp_path):
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(_RESULT)
     session.start_turn(TurnInput(prompt="p", model="a")).wait()
 
@@ -385,7 +381,7 @@ def test_a_model_switch_mid_session_is_a_restart_not_a_lie(tmp_path):
 def test_a_process_dying_mid_turn_settles_as_failed(tmp_path):
     """The stream ending without a result event is a death, not a success."""
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(_ANSWER)  # no result: the process died
     process._exit = 0  # even a clean exit code must not read as a settled turn
 
@@ -410,7 +406,7 @@ def test_claude_error_result_fails_the_turn_without_poisoning_next_turn(
 ):
     process = _LiveProcess()
     context, spawned = _live(process, tmp_path)
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+    session = driver_for(ClaudeCodeRuntime()).launch_live(context)
     process.feed = _turn_lines(
         _ANSWER,
         {"type": "result", "subtype": "success", "result": "API Error: 503", **failure_fields},
@@ -434,7 +430,7 @@ def test_claude_error_result_fails_the_turn_without_poisoning_next_turn(
 
 def test_close_ends_the_residency(tmp_path, monkeypatch):
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(_RESULT)
     session.start_turn(TurnInput(prompt="p", model="m")).wait()
 
@@ -449,7 +445,7 @@ def test_close_ends_the_residency(tmp_path, monkeypatch):
 
 def test_settled_claude_close_allows_pending_native_history_to_flush(tmp_path, monkeypatch):
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(_ANSWER, _RESULT)
     session.start_turn(TurnInput(prompt="p", model="m")).wait()
     flushed = False
@@ -473,7 +469,7 @@ def test_settled_claude_close_allows_pending_native_history_to_flush(tmp_path, m
 @pytest.mark.parametrize("settled", [False, True])
 def test_api_retry_rotates_only_after_native_result(tmp_path, monkeypatch, consume_events, settled):
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     retry = {"type": "system", "subtype": "api_retry", "attempt": 1}
     # Pre-observe a notification: later notices still require rotation
     # independently of their normalized progress rows.
@@ -500,14 +496,14 @@ def test_launch_live_without_the_live_spawn_refuses(tmp_path):
     context, _ = _live(_LiveProcess(), tmp_path)
     object.__setattr__(context, "spawn_live", None)
     with pytest.raises(DriverError, match="live-input spawn"):
-        ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+        driver_for(ClaudeCodeRuntime()).launch_live(context)
 
 
 def test_process_alive_tracks_spawn_death_and_close(tmp_path):
     """What the platform labels ``hot`` hangs off this: unspawned and closed
     sessions are not alive, and a process that died idle stops counting."""
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     assert session.process_alive() is False  # lazy spawn: nothing yet
 
     process.feed = _turn_lines(_RESULT)
@@ -526,9 +522,7 @@ def test_launch_resident_live_resumes_the_threads_session(tmp_path):
     """The HOT mirror of launch_resident: same on-disk resume, live process."""
     process = _LiveProcess()
     context, spawned = _live(process, tmp_path)
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_resident_live(
-        context, session_id="sess-prev"
-    )
+    session = driver_for(ClaudeCodeRuntime()).launch_resident_live(context, session_id="sess-prev")
 
     process.feed = _turn_lines(_RESULT)
     session.start_turn(TurnInput(prompt="p", model="m")).wait()
@@ -542,14 +536,14 @@ def test_launch_resident_live_needs_the_state_mount(tmp_path):
     context, _ = _live(_LiveProcess(), tmp_path)
     object.__setattr__(context, "state_dir", None)
     with pytest.raises(DriverError, match="native session state"):
-        ClaudeCodeDriver(ClaudeCodeRuntime()).launch_resident_live(context, session_id="s")
+        driver_for(ClaudeCodeRuntime()).launch_resident_live(context, session_id="s")
 
 
 @pytest.mark.parametrize("kind", ["init", "assistant", "result"])
 def test_claude_rejects_a_different_root_session_before_accepting_its_output(tmp_path, kind):
     process = _LiveProcess()
     context, _ = _live(process, tmp_path)
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_resident_live(
+    session = driver_for(ClaudeCodeRuntime()).launch_resident_live(
         context, session_id="retained-session"
     )
     record = (
@@ -567,7 +561,7 @@ def test_claude_rejects_a_different_root_session_before_accepting_its_output(tmp
 def test_claude_does_not_treat_a_child_agent_session_as_a_root_reset(tmp_path):
     process = _LiveProcess()
     context, _ = _live(process, tmp_path)
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_resident_live(context, session_id="root")
+    session = driver_for(ClaudeCodeRuntime()).launch_resident_live(context, session_id="root")
     process.feed = _turn_lines(
         {"type": "system", "subtype": "init", "session_id": "root"},
         {
@@ -590,7 +584,7 @@ def test_the_first_turn_fixes_the_sessions_effort(tmp_path):
     """Effort is a launch flag, so the resident process carries the first one."""
     process = _LiveProcess()
     context, spawned = _live(process, tmp_path)
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+    session = driver_for(ClaudeCodeRuntime()).launch_live(context)
 
     process.feed = _turn_lines(_RESULT)
     session.start_turn(
@@ -607,7 +601,7 @@ def test_the_first_turn_fixes_the_sessions_effort(tmp_path):
 def test_an_effort_switch_mid_session_is_a_restart_not_a_lie(tmp_path):
     """Silently serving the old depth would be indistinguishable from success."""
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(_RESULT)
     session.start_turn(TurnInput(prompt="p", model="m", reasoning_effort="low")).wait()
 
@@ -618,7 +612,7 @@ def test_an_effort_switch_mid_session_is_a_restart_not_a_lie(tmp_path):
 def test_dropping_back_to_auto_mid_session_is_also_a_restart(tmp_path):
     """Auto is a depth like any other, not "no opinion" the process can absorb."""
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(_RESULT)
     session.start_turn(TurnInput(prompt="p", model="m", reasoning_effort="high")).wait()
 
@@ -630,7 +624,7 @@ def test_an_auto_session_spawns_without_the_flag(tmp_path):
     """Auto adds nothing to the argv — today's behaviour, bit for bit."""
     process = _LiveProcess()
     context, spawned = _live(process, tmp_path)
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+    session = driver_for(ClaudeCodeRuntime()).launch_live(context)
 
     process.feed = _turn_lines(_RESULT)
     session.start_turn(TurnInput(prompt="p", model="m")).wait()
@@ -641,7 +635,7 @@ def test_an_auto_session_spawns_without_the_flag(tmp_path):
 
 def test_claude_interrupt_is_native_and_keeps_the_process(tmp_path):
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(_RESULT)
     turn = session.start_turn(TurnInput(prompt="stop", model="m"))
 
@@ -664,7 +658,7 @@ def test_codex_app_server_two_turns_and_prompt_free_fork(tmp_path):
         {"id": "initialize-1", "result": {"userAgent": "codex"}},
         {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
     )
-    session = CodexDriver(CodexRuntime()).launch_live(context)
+    session = driver_for(CodexRuntime()).launch_live(context)
     session.ensure_started(model="gpt", reasoning_effort="high")
 
     process.feed = _turn_lines(
@@ -741,7 +735,7 @@ def test_codex_mutable_tool_updates_emit_one_tool_use(tmp_path):
         {"id": "initialize-1", "result": {"userAgent": "codex"}},
         {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
     )
-    session = CodexDriver(CodexRuntime()).launch_live(context)
+    session = driver_for(CodexRuntime()).launch_live(context)
     session.ensure_started(model="gpt", reasoning_effort=None)
     process.feed = _turn_lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
     turn = session.start_turn(TurnInput(prompt="run it", model="gpt"))
@@ -781,7 +775,7 @@ def test_codex_subagent_thread_events_belong_to_the_call_that_spawned_it(tmp_pat
         {"id": "initialize-1", "result": {"userAgent": "codex"}},
         {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
     )
-    session = CodexDriver(CodexRuntime()).launch_live(context)
+    session = driver_for(CodexRuntime()).launch_live(context)
     session.ensure_started(model="gpt", reasoning_effort=None)
     process.feed = _turn_lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
     turn = session.start_turn(TurnInput(prompt="delegate", model="gpt"))
@@ -853,7 +847,7 @@ def test_pi_rpc_two_turns_and_native_abort(tmp_path):
             "data": {"sessionId": "pi-a", "sessionFile": "/agent-state/pi-a.jsonl"},
         }
     )
-    session = PiDriver(PiRuntime()).launch_live(context)
+    session = driver_for(PiRuntime()).launch_live(context)
     session.ensure_started(model="m", reasoning_effort=None)
 
     turn = session.start_turn(TurnInput(prompt="hello", model="m"))
@@ -887,7 +881,7 @@ def _codex_turn(tmp_path):
         {"id": "initialize-1", "result": {"userAgent": "codex"}},
         {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
     )
-    session = CodexDriver(CodexRuntime()).launch_live(context)
+    session = driver_for(CodexRuntime()).launch_live(context)
     session.ensure_started(model="gpt", reasoning_effort=None)
     process.feed = _turn_lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
     return process, session.start_turn(TurnInput(prompt="read", model="gpt"))
@@ -1022,7 +1016,7 @@ def test_pi_reports_a_prompt_it_refused_before_running(tmp_path):
             "data": {"sessionId": "pi-a", "sessionFile": "/agent-state/pi-a.jsonl"},
         }
     )
-    session = PiDriver(PiRuntime()).launch_live(context)
+    session = driver_for(PiRuntime()).launch_live(context)
     session.ensure_started(model="m", reasoning_effort=None)
     turn = session.start_turn(TurnInput(prompt="hello", model="m"))
     prompt_id = json.loads(process.sent[-1])["id"]
@@ -1056,7 +1050,7 @@ def _pi_turn(tmp_path):
             "data": {"sessionId": "pi-a", "sessionFile": "/agent-state/pi-a.jsonl"},
         }
     )
-    session = PiDriver(PiRuntime()).launch_live(context)
+    session = driver_for(PiRuntime()).launch_live(context)
     session.ensure_started(model="m", reasoning_effort=None)
     turn = session.start_turn(TurnInput(prompt="hello", model="m"))
     prompt_id = json.loads(process.sent[-1])["id"]
@@ -1169,10 +1163,8 @@ def test_pi_records_the_server_an_mcp_call_went_to(tmp_path):
     ]
 
 
-@pytest.mark.parametrize(
-    ("driver", "runtime"), [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
-)
-def test_http_runtimes_record_the_server_an_mcp_call_went_to(tmp_path, driver, runtime):
+@pytest.mark.parametrize("runtime", [OpencodeRuntime, KiloRuntime])
+def test_http_runtimes_record_the_server_an_mcp_call_went_to(tmp_path, runtime):
     """OpenCode and Kilo name a relay tool ``session_<alias>__<tool>``.
 
     Their own ``task`` is a delegation and names no server; the relay's tool of
@@ -1181,7 +1173,7 @@ def test_http_runtimes_record_the_server_an_mcp_call_went_to(tmp_path, driver, r
     process = _LiveProcess()
     context, _spawned = _protocol_context(process, tmp_path)
     process.feed = _turn_lines({"bridge": "ready", "session_id": "ses-a"})
-    session = driver(runtime()).launch_live(context)
+    session = driver_for(runtime()).launch_live(context)
     session.ensure_started(model="m", reasoning_effort=None)
     turn = session.start_turn(TurnInput(prompt="hello", model="m"))
     turn_id = json.loads(process.sent[-1])["id"]
@@ -1231,7 +1223,7 @@ def test_pi_rpc_forks_before_the_next_native_prompt(tmp_path):
             "data": {"sessionId": "pi-a"},
         }
     )
-    session = PiDriver(PiRuntime()).launch_live(context)
+    session = driver_for(PiRuntime()).launch_live(context)
     session.ensure_started(model="m", reasoning_effort=None)
     process.feed = _turn_lines(
         {
@@ -1275,17 +1267,14 @@ def test_pi_rpc_forks_before_the_next_native_prompt(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("driver", "runtime", "runtime_name"),
-    [
-        (OpenCodeDriver, OpencodeRuntime, "opencode"),
-        (KiloDriver, KiloRuntime, "kilo"),
-    ],
+    ("runtime", "runtime_name"),
+    [(OpencodeRuntime, "opencode"), (KiloRuntime, "kilo")],
 )
-def test_http_server_bridge_two_turns_and_native_fork(tmp_path, driver, runtime, runtime_name):
+def test_http_server_bridge_two_turns_and_native_fork(tmp_path, runtime, runtime_name):
     process = _LiveProcess()
     context, spawned = _protocol_context(process, tmp_path)
     process.feed = _turn_lines({"bridge": "ready", "runtime": runtime_name, "session_id": "ses-a"})
-    session = driver(runtime()).launch_live(context)
+    session = driver_for(runtime()).launch_live(context)
     assert isinstance(session, HttpAgentLiveSession)
     session.ensure_started(model="m", reasoning_effort="high")
 
@@ -1346,14 +1335,8 @@ def test_http_server_bridge_two_turns_and_native_fork(tmp_path, driver, runtime,
 
 
 def test_every_bundled_driver_only_advertises_shared_live_after_wiring():
-    for driver, runtime in (
-        (ClaudeCodeDriver, ClaudeCodeRuntime),
-        (CodexDriver, CodexRuntime),
-        (PiDriver, PiRuntime),
-        (OpenCodeDriver, OpencodeRuntime),
-        (KiloDriver, KiloRuntime),
-    ):
-        capabilities = driver(runtime()).capabilities()
+    for runtime in (ClaudeCodeRuntime, CodexRuntime, PiRuntime, OpencodeRuntime, KiloRuntime):
+        capabilities = driver_for(runtime()).capabilities()
         assert capabilities.resident_transport == "supervisor_live"
         assert capabilities.concurrent_shared_workspace is True
         assert capabilities.fork == "at_anchor"
@@ -1366,7 +1349,7 @@ def test_codex_previews_its_answer_in_batches_under_the_item_id(tmp_path):
         {"id": "initialize-1", "result": {"userAgent": "codex"}},
         {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
     )
-    session = CodexDriver(CodexRuntime()).launch_live(context)
+    session = driver_for(CodexRuntime()).launch_live(context)
     session.ensure_started(model="gpt", reasoning_effort=None)
     process.feed = _turn_lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
     turn = session.start_turn(TurnInput(prompt="read", model="gpt"))
@@ -1400,7 +1383,7 @@ def test_codex_trajectory_keeps_native_identity_and_structured_streams(tmp_path)
         {"id": "initialize-1", "result": {"userAgent": "codex"}},
         {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
     )
-    session = CodexDriver(CodexRuntime()).launch_live(context)
+    session = driver_for(CodexRuntime()).launch_live(context)
     session.ensure_started(model="gpt", reasoning_effort=None)
     process.feed = _turn_lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
     turn = session.start_turn(TurnInput(prompt="read", model="gpt"))

@@ -65,7 +65,7 @@ def native_driver(tmp_path, monkeypatch):
     sessions = []
 
     def open_session(session_id=None, *, extra_env=None):
-        driver = drivers.ClaudeCodeDriver(ClaudeCodeRuntime())
+        driver = drivers.driver_for(ClaudeCodeRuntime())
         launch_context = replace(
             context,
             spawn_live=lambda argv, env: spawn(argv, {**env, **(extra_env or {})}),

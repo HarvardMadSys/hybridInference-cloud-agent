@@ -99,7 +99,7 @@ class KiloRuntime(GenericRuntime):
         resume_session_id: str | None = None,
         activation_dir: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
-        """Launch the reviewed stdlib bridge around Kilo 7.4.17 serve."""
+        """Launch the reviewed stdlib bridge around the pinned Kilo's ``serve``."""
         _argv, env = self.prepare(
             workdir=workdir,
             task_prompt="",

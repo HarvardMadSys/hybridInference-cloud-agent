@@ -5,12 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_shared.shared_protocol import SHARED_SANDBOX_RUNTIME_PINS
 
 if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 
 KILO_MCP_PATCH_SHA256 = "1ea8a24628c39800cce5e592bd272cc8bb358f2b8ea07f92f2b96beef8bb2657"
-KILO_MCP_VERSION = "7.4.17"
+#: The one Kilo version whose MCP isolation patch was reviewed: the deployment's pin.
+KILO_MCP_VERSION = SHARED_SANDBOX_RUNTIME_PINS["kilo"]
 
 _ACTIVATE = r"""
 import os

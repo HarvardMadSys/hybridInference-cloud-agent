@@ -2309,10 +2309,6 @@ def _run_shared_live_attempt(
     if not host or not job.thread_id:
         finish_attempt("failed", "shared live chats require an enrolled host and thread id")
         return 2
-    driver = driver_for(runtime)
-    if getattr(driver, "launch_live", None) is None:
-        finish_attempt("failed", f"runtime {job.runtime!r} has no shared live transport")
-        return 2
     mcp_url = _sandbox_mcp_url()
     if job.mcp_bindings and not mcp_url:
         if any(not alias.startswith(PLATFORM_MCP_SERVER_PREFIX) for alias in job.mcp_bindings):
