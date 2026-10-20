@@ -1,12 +1,7 @@
 // Project recorded Codex item identities and recognize runtime-only notices.
 // Callers must retain the original records for Raw/export.
+import { record } from './storedEvents';
 import type { StoredEvent } from './trajectorySteps';
-
-export function record(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
 
 function rawRecord(event: StoredEvent): Record<string, unknown> | null {
   if (event.event_type !== 'raw') return null;

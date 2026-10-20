@@ -18,6 +18,7 @@ import { useMemo, useState } from 'react';
 
 import { formatDuration, rounded, trim } from '@/lib/format';
 
+import { pairToolCalls } from './storedEvents';
 import type {
   AgentEvent,
   AgentJob,
@@ -69,32 +70,34 @@ export function formatCpu(usec: number | null | undefined): string | null {
  * the model's call, not when the sandbox begins running it, so it brackets
  * execution with platform delay on either side. Unpaired calls keep their row
  * with a null duration rather than being dropped — a call that never returned
- * is exactly what a reader is looking for.
+ * is exactly what a reader is looking for. Pairing follows `pairToolCalls`, as
+ * the adapter's folding does, so an id stored twice is timed by neither.
  */
 export function toolTimings(events: AgentEvent[], attemptNo?: number): ToolTiming[] {
   const scoped =
     attemptNo === undefined
       ? events
       : events.filter((event) => event.attemptNo === undefined || event.attemptNo === attemptNo);
-  // Results that survived folding, keyed within their own attempt: a retried
-  // turn repeats its tool ids, and pairing on the bare id would time a call
-  // against a different attempt's result.
-  const results = new Map<string, { at: string | null; isError: boolean }>();
-  for (const event of scoped) {
+  // Results that survived folding, keyed within their own attempt.
+  const pairs = pairToolCalls(scoped, (event) => {
+    if (event.kind === 'tool_use' && event.id)
+      return { call: `${event.attemptNo ?? ''}:${event.id}` };
     if (event.kind === 'tool_result' && event.toolUseId) {
-      results.set(`${event.attemptNo ?? ''}:${event.toolUseId}`, {
-        at: event.at ?? null,
-        isError: event.isError,
-      });
+      return { result: `${event.attemptNo ?? ''}:${event.toolUseId}` };
     }
-  }
+    return {};
+  });
   const timings: ToolTiming[] = [];
   for (const event of scoped) {
     if (event.kind !== 'tool_use') continue;
     // The common case: the adapter folded this call's result into the row and
     // resolved the window there, because the result row no longer exists by
     // the time anything downstream sees the stream.
-    const result = event.id ? results.get(`${event.attemptNo ?? ''}:${event.id}`) : undefined;
+    const answer = event.id ? pairs.resultOf(`${event.attemptNo ?? ''}:${event.id}`) : undefined;
+    const result =
+      answer?.kind === 'tool_result'
+        ? { at: answer.at ?? null, isError: answer.isError }
+        : undefined;
     let ms = event.durationMs ?? null;
     if (ms === null) {
       const start = event.at ? Date.parse(event.at) : NaN;

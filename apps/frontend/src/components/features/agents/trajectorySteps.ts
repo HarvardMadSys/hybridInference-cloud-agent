@@ -21,6 +21,7 @@ import {
   isRuntimeTelemetry,
   projectProtocolEvents,
 } from './trajectoryProtocol';
+import { isTruncated, pairToolCalls, record as asRecord, text as asText } from './storedEvents';
 
 /** A stored event, with or without the conversation labels a thread read adds. */
 export type StoredEvent = AgentJobEventApi | AgentThreadEventApi;
@@ -244,23 +245,6 @@ const CONTENT_KEYS = ['content_tokens', 'text_tokens'];
 
 const RESULT_TEXT_KEYS = ['content', 'output', 'aggregated_output', 'text'] as const;
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function asText(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  if (value === null || value === undefined) return '';
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return '';
-  }
-}
-
 /** First recorded finite, non-negative count among a runtime's spellings. */
 function firstCount(record: Record<string, unknown>, keys: string[]): number | null {
   for (const key of keys) {
@@ -348,10 +332,6 @@ function callIdOf(event: StoredEvent): string {
 function resultCallIdOf(event: AgentThreadEventApi | AgentJobEventApi): string {
   const payload = asRecord(event.payload);
   return event.event_type === 'tool_result' ? asText(payload.tool_use_id) : '';
-}
-
-export function isTruncatedPayload(payload: Record<string, unknown>): boolean {
-  return payload.truncated === true || typeof payload.truncation_notice === 'string';
 }
 
 function assistantKeyOf(event: StoredEvent, usageId: string): string {
@@ -457,21 +437,19 @@ export function buildTrajectorySteps(
   const originals = new Map(storedEvents.map((event) => [event.id, event]));
   // Pass one: the identities a step can be matched on. Results are indexed
   // before calls are emitted so a call always finds the answer that arrived.
-  const resultsByCall = new Map<string, StoredEvent[]>();
-  const callCounts = new Map<string, number>();
+  const pairs = pairToolCalls(events, (event) => {
+    const call = callIdOf(event);
+    const answered = resultCallIdOf(event);
+    return {
+      ...(call ? { call: `${scopeOf(event)}:${call}` } : {}),
+      ...(answered ? { result: `${scopeOf(event)}:${answered}` } : {}),
+    };
+  });
   const outputByCall = new Map<string, StoredEvent[]>();
-  for (let index = 0; index < events.length; index += 1) {
-    const event = events[index];
+  for (const event of events) {
     if (event.event_type === 'tool_output') {
       const id = asText(asRecord(event.payload).tool_use_id);
       appendTo(outputByCall, `${scopeOf(event)}:${id}`, event);
-    }
-    const callId = resultCallIdOf(event);
-    if (callId) appendTo(resultsByCall, `${scopeOf(event)}:${callId}`, event);
-    const call = callIdOf(event);
-    if (call) {
-      const key = `${scopeOf(event)}:${call}`;
-      callCounts.set(key, (callCounts.get(key) ?? 0) + 1);
     }
   }
 
@@ -546,7 +524,7 @@ export function buildTrajectorySteps(
         : block?.type === 'text'
           ? 'completed'
           : 'recorded',
-      truncated: isTruncatedPayload(asRecord(event.payload)),
+      truncated: isTruncated(asRecord(event.payload)),
       timing: { source: null, startedAt: null, finishedAt: null, durationMs: null },
       ...(typeof payload.native_item_id === 'string'
         ? { nativeItemId: payload.native_item_id }
@@ -567,13 +545,13 @@ export function buildTrajectorySteps(
     const callId = asText(payload.id);
     const key = toolStepKey(event, callId);
     const hasInput = Object.prototype.hasOwnProperty.call(payload, 'input');
-    const resultEvents = resultsByCall.get(`${scopeOf(event)}:${callId}`) ?? [];
+    const resultEvents = pairs.resultsOf(`${scopeOf(event)}:${callId}`);
     const outputs = outputByCall.get(`${scopeOf(event)}:${callId}`) ?? [];
     // A call id stored twice, or a call answered more than once, leaves the
     // pairing unverified. The records are all kept, but a status and a duration
     // would be claims about a pairing the platform cannot prove, so neither is
     // computed: the step reports what it can, which is that the records exist.
-    const repeatedCall = callId !== '' && (callCounts.get(`${scopeOf(event)}:${callId}`) ?? 0) > 1;
+    const repeatedCall = pairs.callsOf(`${scopeOf(event)}:${callId}`) > 1;
     const ambiguous = repeatedCall || resultEvents.length > 1;
     const timing: StepTiming = ambiguous
       ? { source: null, startedAt: event.created_at ?? null, finishedAt: null, durationMs: null }
@@ -608,8 +586,7 @@ export function buildTrajectorySteps(
         resultEvents.some((item) => asRecord(item.payload).is_error === true),
       status: ambiguous ? 'unknown' : statusOfTool(event, resultEvents[0], context),
       truncated:
-        isTruncatedPayload(payload) ||
-        resultEvents.some((item) => isTruncatedPayload(asRecord(item.payload))),
+        isTruncated(payload) || resultEvents.some((item) => isTruncated(asRecord(item.payload))),
       timing,
       callId,
       toolName: asText(payload.name || payload.tool) || 'tool',
@@ -657,7 +634,7 @@ export function buildTrajectorySteps(
         step.inputText = asText(payload.text);
         step.detail = preview(payload.text);
       }
-      step.truncated ||= isTruncatedPayload(payload);
+      step.truncated ||= isTruncated(payload);
       continue;
     }
 
@@ -736,7 +713,7 @@ export function buildTrajectorySteps(
             current.status = 'recorded';
           }
         }
-        current.truncated = current.truncated || isTruncatedPayload(payload);
+        current.truncated = current.truncated || isTruncated(payload);
         continue;
       }
       const step = pushAssistant(event, messageId);
@@ -794,7 +771,7 @@ export function buildTrajectorySteps(
         at: event.created_at ?? null,
         isError: payload.is_error === true,
         status: 'recorded',
-        truncated: isTruncatedPayload(payload),
+        truncated: isTruncated(payload),
         timing: timingOf(undefined, event),
         ...(callId ? { callId } : {}),
         result: resultView([event]),
@@ -806,7 +783,7 @@ export function buildTrajectorySteps(
       // The call indexes all its fragments before rendering; an orphan stays
       // available as a runtime record instead of inventing a completed result.
       const id = asText(payload.tool_use_id);
-      if (callCounts.has(`${scopeOf(event)}:${id}`)) continue;
+      if (pairs.callsOf(`${scopeOf(event)}:${id}`) > 0) continue;
     }
 
     const row = toTrajectory([event])[0];
@@ -834,7 +811,7 @@ export function buildTrajectorySteps(
       const existing = byKey.get(key);
       if (existing) {
         existing.sourceEvents.push(event);
-        existing.truncated ||= isTruncatedPayload(payload);
+        existing.truncated ||= isTruncated(payload);
         existing.detail = `${existing.sourceEvents.length} runtime records`;
         continue;
       }
@@ -866,7 +843,7 @@ export function buildTrajectorySteps(
       isError: row.isError || protocolError || lifecycleFailure,
       status:
         event.event_type === 'error' || protocolError || lifecycleFailure ? 'failed' : 'recorded',
-      truncated: isTruncatedPayload(payload),
+      truncated: isTruncated(payload),
       timing: { source: null, startedAt: null, finishedAt: null, durationMs: null },
       ...(harness ? { harness } : {}),
       ...(diagnostic ? { diagnostic: true } : {}),

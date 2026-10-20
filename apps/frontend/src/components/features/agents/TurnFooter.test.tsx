@@ -104,6 +104,25 @@ describe('toolTimings', () => {
     expect(timings[1].ms).toBeNull();
   });
 
+  it('times neither call of an id stored twice, as the transcript leaves both unpaired', () => {
+    const repeated: AgentEvent[] = [
+      { kind: 'tool_use', tool: 'Bash', detail: 'one', id: 'dup', at: '2026-08-19T10:00:00.000Z' },
+      { kind: 'tool_use', tool: 'Bash', detail: 'two', id: 'dup', at: '2026-08-19T10:00:01.000Z' },
+      {
+        kind: 'tool_result',
+        text: 'ok',
+        toolUseId: 'dup',
+        isError: true,
+        at: '2026-08-19T10:00:05.000Z',
+      },
+    ];
+
+    expect(toolTimings(repeated).map((timing) => [timing.ms, timing.isError])).toEqual([
+      [null, false],
+      [null, false],
+    ]);
+  });
+
   it('marks a failed call from either the result or the tool row', () => {
     const failed: AgentEvent[] = [
       {

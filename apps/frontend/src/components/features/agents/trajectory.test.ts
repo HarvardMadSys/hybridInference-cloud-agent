@@ -82,6 +82,24 @@ describe('toTrajectory', () => {
     expect(rows[1].durationMs).toBe(2000);
   });
 
+  it('times no call whose id its attempt stored twice', () => {
+    // Which answer belongs to which call is unknowable, so neither gets one:
+    // the rule the transcript and the steps already follow.
+    const rows = toTrajectory([
+      event({ id: 1, event_type: 'tool_use', payload: { id: 'dup', name: 'Bash' } }),
+      event({ id: 2, event_type: 'tool_use', payload: { id: 'dup', name: 'Bash' } }),
+      event({
+        id: 3,
+        event_type: 'tool_result',
+        payload: { tool_use_id: 'dup' },
+        created_at: '2026-08-19T10:00:02.000Z',
+      }),
+    ]);
+
+    expect(rows.map((row) => row.durationMs)).toEqual([undefined, undefined, undefined]);
+    expect(rows.map((row) => row.resultOf)).toEqual([undefined, undefined, undefined]);
+  });
+
   it('leaves a call that never returned without a duration', () => {
     const [row] = toTrajectory([
       event({ id: 1, event_type: 'tool_use', payload: { id: 't1', name: 'Read' } }),

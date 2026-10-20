@@ -12,6 +12,8 @@
 
 import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 
+import { pairToolCalls, record as asRecord, text as asText } from './storedEvents';
+
 /** The lanes the minimap groups events into, coarse on purpose. */
 export type TrajectoryLane = 'input' | 'model' | 'tools' | 'other';
 
@@ -66,23 +68,6 @@ const ACTOR_BY_TYPE: Record<string, TrajectoryRow['actor']> = {
   raw: 'runtime',
 };
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function asText(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  if (value === null || value === undefined) return '';
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return '';
-  }
-}
-
 /** A single line, trimmed and bounded — rows are one line high. */
 export function preview(value: unknown, limit = 160): string {
   const text = asText(value).replace(/\s+/g, ' ').trim();
@@ -112,25 +97,29 @@ function detailOf(eventType: string, payload: Record<string, unknown>): string {
 /**
  * Project stored events into trajectory rows, pairing calls with results.
  *
- * Pairing is scoped to the attempt, because a retried turn repeats its tool
- * ids: matching on the bare id would time a call against another attempt's
- * answer. The duration is message-level — it opens when the model asked for
- * the call, so it carries whatever thinking preceded execution — and the view
- * says so rather than implying it measured the tool itself.
+ * Pairing follows `pairToolCalls`: within the attempt, since a retried turn
+ * repeats its tool ids, and never for an id stored twice. The duration is
+ * message-level — it opens when the model asked for the call, so it carries
+ * whatever thinking preceded execution — and the view says so rather than
+ * implying it measured the tool itself.
  */
 export function toTrajectory(events: (AgentJobEventApi | AgentThreadEventApi)[]): TrajectoryRow[] {
-  const resultByCall = new Map<string, AgentJobEventApi>();
-  for (const event of events) {
-    if (event.event_type !== 'tool_result') continue;
-    const id = asText(asRecord(event.payload).tool_use_id);
-    if (id) resultByCall.set(`${event.attempt_id}:${id}`, event);
-  }
+  const pairs = pairToolCalls(events, (event) => {
+    const payload = asRecord(event.payload);
+    if (event.event_type === 'tool_use') {
+      const id = asText(payload.id);
+      return id ? { call: `${event.attempt_id}:${id}` } : {};
+    }
+    if (event.event_type !== 'tool_result') return {};
+    const id = asText(payload.tool_use_id);
+    return id ? { result: `${event.attempt_id}:${id}` } : {};
+  });
 
   return events.map((event) => {
     const payload = asRecord(event.payload);
     const eventType = event.event_type;
     const callId = eventType === 'tool_use' ? asText(payload.id) : '';
-    const result = callId ? resultByCall.get(`${event.attempt_id}:${callId}`) : undefined;
+    const result = callId ? pairs.resultOf(`${event.attempt_id}:${callId}`) : undefined;
     const started = event.created_at ? Date.parse(event.created_at) : NaN;
     const ended = result?.created_at ? Date.parse(result.created_at) : NaN;
     const durationMs =

@@ -20,7 +20,8 @@ import {
   recordedAt,
 } from './StepDetailParts';
 import { formatDuration } from '@/lib/format';
-import { isTruncatedPayload, STATUS_LABEL, type TrajectoryStep } from './trajectorySteps';
+import { isTruncated } from './storedEvents';
+import { STATUS_LABEL, type TrajectoryStep } from './trajectorySteps';
 import { parseToolActivity, recordedDelegationReply } from './toolActivity';
 import { DelegationReplyDetails, ToolActivityDetails } from './ToolActivityDetails';
 
@@ -266,7 +267,7 @@ export function ToolStepDetails({
     output: step.result?.text,
     isError: step.result?.isError,
     structuredOutput: resultPayload.structured_output,
-    outputTruncated: isTruncatedPayload(resultPayload),
+    outputTruncated: isTruncated(resultPayload),
   });
 
   return (

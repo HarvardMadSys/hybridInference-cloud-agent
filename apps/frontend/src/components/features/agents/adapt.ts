@@ -36,9 +36,9 @@ import {
   notificationHasError,
   projectProtocolEvents,
   rawNotification,
-  record,
   replyPreviewPiece,
 } from './trajectoryProtocol';
+import { pairToolCalls, record } from './storedEvents';
 import { agentLiveStatus } from './agentLiveStatus';
 import { projectKey } from '@/lib/temporaryWorkspace';
 
@@ -733,15 +733,13 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
       .filter((event) => ['tool_use', 'tool_result', 'thinking'].includes(event.event_type))
       .map((event) => [event.id, event]),
   );
-  const callCounts = new Map<string, number>();
-  const resultCounts = new Map<string, number>();
-  for (const event of activityEvents.values()) {
-    const id = asText(event.payload, event.event_type === 'tool_use' ? 'id' : 'tool_use_id');
-    if (!id) continue;
+  const toolPairs = pairToolCalls(activityEvents.values(), (event) => {
+    const call = event.event_type === 'tool_use';
+    const id = asText(event.payload, call ? 'id' : 'tool_use_id');
+    if (!id) return {};
     const key = `${attemptNoById.get(event.attempt_id)}:${id}`;
-    const counts = event.event_type === 'tool_use' ? callCounts : resultCounts;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
+    return call ? { call: key } : { result: key };
+  });
   for (const storedEvent of events) {
     // Chat has its own answer-preview folding. Project native reasoning and
     // tools without projecting message fragments a second time.
@@ -755,16 +753,11 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
       if (
         event.payload?.native_tool_request === true &&
         row.id &&
-        callCounts.get(`${attemptNo}:${row.id}`) === 1
+        toolPairs.callsOf(`${attemptNo}:${row.id}`) === 1
       ) {
         row.activityKey = `${event.attempt_id}:${row.id}`;
       }
-      if (
-        row.id &&
-        ((callCounts.get(`${attemptNo}:${row.id}`) ?? 0) > 1 ||
-          (resultCounts.get(`${attemptNo}:${row.id}`) ?? 0) > 1)
-      )
-        row.resultState = 'unknown';
+      if (row.id && toolPairs.ambiguous(`${attemptNo}:${row.id}`)) row.resultState = 'unknown';
       row.resultState ??= row.outputIsError
         ? 'failed'
         : row.output !== undefined

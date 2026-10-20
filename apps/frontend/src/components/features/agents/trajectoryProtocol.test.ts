@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { AgentThreadEventApi } from '@/lib/api/agents';
 import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
 import { toSessionLog } from './trajectory';
-import { projectProtocolEvents, record } from './trajectoryProtocol';
+import { record } from './storedEvents';
+import { projectProtocolEvents } from './trajectoryProtocol';
 
 function event(
   id: number,

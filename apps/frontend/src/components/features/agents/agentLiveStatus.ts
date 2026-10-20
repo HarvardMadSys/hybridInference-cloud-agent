@@ -1,5 +1,6 @@
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
-import { projectProtocolEvents, rawNotification, record } from './trajectoryProtocol';
+import { record } from './storedEvents';
+import { projectProtocolEvents, rawNotification } from './trajectoryProtocol';
 
 export interface AgentLiveStatus {
   note: string;
