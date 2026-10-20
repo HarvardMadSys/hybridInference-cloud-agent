@@ -34,7 +34,6 @@ from cloud_agent.storage._sql.goals import (
     SPENT_ROUNDS_SQL,
 )
 from cloud_agent.storage._sql.rows import thread_goal
-from cloud_agent.storage.repositories.goal_wakeups import _insert as _insert_wakeup
 
 if TYPE_CHECKING:
     import asyncpg
@@ -142,20 +141,6 @@ class PostgresGoalRepository:
             return await conn.fetchval(sql, thread_id)
         async with self._pool.acquire() as acquired:
             return await acquired.fetchval(sql, thread_id)
-
-    async def get_goal_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        """The goal of the conversation the job belongs to, or ``None``."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                SELECT {_GOAL_READ_COLUMNS_QUALIFIED}
-                FROM agent_threads t
-                JOIN agent_jobs j ON j.thread_id = t.id
-                WHERE j.id = $1
-                """,
-                job_id,
-            )
-        return None if row is None else goal_row_to_dict(row)
 
     async def get_thread_goal_state(self, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
         """A conversation's goal *and* its control version, owner-checked.
@@ -734,6 +719,20 @@ def _action_columns(
     return None, None, None, None, None
 
 
+#: One obligation, inserted once. The partial unique index is what makes a
+#: retried owner write find the row it already made; a *processed* row does not
+#: block a genuinely new event with the same name, because the index only covers
+#: ``pending``.
+_ARM_SQL = """
+INSERT INTO agent_goal_wakeups
+    (id, thread_id, goal_id, revision, trigger, trigger_ref, waiting_job_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (thread_id, trigger, trigger_ref) WHERE state = 'pending'
+DO NOTHING
+RETURNING id
+"""
+
+
 async def _arm(
     conn: Any,
     *,
@@ -744,11 +743,14 @@ async def _arm(
     trigger_ref: str,
     waiting_job_id: str | None = None,
 ) -> str | None:
-    """Insert one scheduling obligation, or nothing when it already exists.
-
-    Through the wakeup queue's own INSERT, so the obligation a goal write arms
-    and the one the queue arms cannot drift apart.
-    """
-    return await _insert_wakeup(
-        conn, thread_id, goal_id, revision, trigger, trigger_ref, waiting_job_id
+    """Insert one scheduling obligation, or nothing when it already exists."""
+    return await conn.fetchval(
+        _ARM_SQL,
+        uuid.uuid4().hex,
+        thread_id,
+        goal_id,
+        revision,
+        trigger,
+        trigger_ref,
+        waiting_job_id,
     )

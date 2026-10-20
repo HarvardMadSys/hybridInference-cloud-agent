@@ -301,102 +301,6 @@ class PostgresConversationCommands:
         result["title_source"] = "fallback"
         return result
 
-    async def create_follow_up(
-        self,
-        *,
-        parent_job_id: str,
-        user_id: str,
-        prompt: str,
-        runtime: str | None = None,
-        model: str | None = None,
-        reasoning_effort: str | None = None,
-        reset_reasoning_effort: bool = False,
-        skills: list[dict[str, Any]] | None = None,
-        attachments: list[dict[str, Any]] | None = None,
-        goal: GoalInput | None = None,
-        turn_source: str = "human",
-        goal_round: int | None = None,
-        goal_round_kind: str | None = None,
-        goal_revision: int | None = None,
-        yield_to_queued: bool = False,
-        client_request_id: str | None = None,
-        client_request_fingerprint: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Append a user turn and create the run that will answer it.
-
-        ``yield_to_queued`` refuses to append while another turn of this
-        conversation is already queued or running, answering
-        ``{"error": "yielded"}``. It is asked inside this transaction's thread
-        lock, which is the only place the answer cannot go stale.
-
-        ``goal`` sets or replaces the conversation's completion condition in the
-        same transaction that appends this turn.
-
-        ``turn_source``, ``goal_round``, ``goal_round_kind`` and
-        ``goal_revision`` describe an automatic round the platform is running
-        toward the conversation's goal. They are written by the continuation
-        path only; a person's message never sets them, and there is deliberately
-        no parameter here that could change the objective — an automatic round
-        cannot edit the goal it is running for.
-
-        ``reasoning_effort`` overrides the inherited depth; omitting it keeps
-        the parent's, as an omitted model does. ``reset_reasoning_effort``
-        clears it back to Auto — the one thing a null override cannot express,
-        since null is what "inherit" already sends.
-
-        Every follow-up is ``queued`` until all earlier turns have finished.
-        The thread row is locked before selecting the latest turn, so
-        concurrent submissions form one linear chain instead of siblings that
-        could later mutate the same branch at once. A request made from an old
-        turn also appends to the current tip, matching chat semantics.
-
-        ``client_request_id`` and ``client_request_fingerprint`` work as for
-        :meth:`create_job`: a resend returns the turn the first send made,
-        the same key under different content returns
-        ``{"error": "client_request_conflict"}``.
-        """
-        check_client_request(client_request_id, client_request_fingerprint)
-        if client_request_id is not None:
-            replayed = await self.replayed_submission(
-                user_id=user_id,
-                client_request_id=client_request_id,
-                fingerprint=client_request_fingerprint,
-            )
-            if replayed is not None:
-                return replayed
-        try:
-            return await self._create_follow_up(
-                parent_job_id=parent_job_id,
-                user_id=user_id,
-                prompt=prompt,
-                runtime=runtime,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                reset_reasoning_effort=reset_reasoning_effort,
-                skills=skills,
-                attachments=attachments,
-                goal=goal,
-                turn_source=turn_source,
-                goal_round=goal_round,
-                goal_round_kind=goal_round_kind,
-                goal_revision=goal_revision,
-                yield_to_queued=yield_to_queued,
-                client_request_id=client_request_id,
-                client_request_fingerprint=client_request_fingerprint,
-            )
-        except asyncpg.UniqueViolationError as exc:
-            if exc.constraint_name != "uq_agent_jobs_client_request":
-                raise
-            # The violated constraint is on client_request_id, so the winner has one.
-            assert client_request_id is not None
-            replayed = await self.replayed_submission(
-                user_id=user_id,
-                client_request_id=client_request_id,
-                fingerprint=client_request_fingerprint,
-            )
-            assert replayed is not None
-            return replayed
-
     async def replayed_submission(
         self, *, user_id: str, client_request_id: str, fingerprint: str | None
     ) -> dict[str, Any] | None:
@@ -407,9 +311,10 @@ class PostgresConversationCommands:
         entitlement, tool-server connections, whether the session is still
         open. A resend must reach the job the first send made whatever has
         happened since; only a key that has never been used runs those checks.
-        :meth:`create_job` and :meth:`create_follow_up` still ask it
-        themselves, so a race that slips past the route is still resolved by
-        the unique index rather than by a second task.
+        :meth:`create_job` still asks it itself, and the message queue asks
+        its own under the conversation's lock, so a race that slips past the
+        route is still resolved by the unique index rather than by a second
+        task.
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -796,10 +701,11 @@ class PostgresConversationCommands:
         """Append one automatic round inside the caller's transaction.
 
         The scheduling obligation and the turn it produced commit together —
-        that pair is the whole reason this is not a second call to
-        :meth:`create_follow_up`. ``conn`` is already holding the conversation's
-        lock, taken by the controller before it read the state this decision was
-        made from, so nothing can be appended between the read and this write.
+        that pair is the whole reason this appends on the caller's transaction
+        rather than one of its own. ``conn`` is already holding the
+        conversation's lock, taken by the controller before it read the state
+        this decision was made from, so nothing can be appended between the read
+        and this write.
 
         Returns ``None`` when this event already produced a round. That is not
         an error: a replayed wakeup is supposed to find the work it already did
@@ -937,50 +843,6 @@ class PostgresConversationCommands:
         row = await conn.fetchrow(f"{JOB_SELECT} WHERE j.id = $1", job_id)
         return job_row_to_dict(row)
 
-    async def _create_follow_up(
-        self,
-        *,
-        parent_job_id: str,
-        user_id: str,
-        prompt: str,
-        runtime: str | None,
-        model: str | None,
-        reasoning_effort: str | None,
-        reset_reasoning_effort: bool,
-        skills: list[dict[str, Any]] | None,
-        attachments: list[dict[str, Any]] | None,
-        goal: GoalInput | None,
-        turn_source: str,
-        goal_round: int | None,
-        goal_round_kind: str | None,
-        goal_revision: int | None,
-        yield_to_queued: bool,
-        client_request_id: str | None,
-        client_request_fingerprint: str | None,
-    ) -> dict[str, Any] | None:
-        """The one-transaction body of :meth:`create_follow_up`."""
-        async with self._pool.acquire() as conn, conn.transaction():
-            return await insert_follow_up(
-                conn,
-                parent_job_id=parent_job_id,
-                user_id=user_id,
-                prompt=prompt,
-                runtime=runtime,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                reset_reasoning_effort=reset_reasoning_effort,
-                skills=skills,
-                attachments=attachments,
-                goal=goal,
-                turn_source=turn_source,
-                goal_round=goal_round,
-                goal_round_kind=goal_round_kind,
-                goal_revision=goal_revision,
-                yield_to_queued=yield_to_queued,
-                client_request_id=client_request_id,
-                client_request_fingerprint=client_request_fingerprint,
-            )
-
 
 async def insert_follow_up(
     conn: Any,
@@ -1006,13 +868,40 @@ async def insert_follow_up(
 ) -> dict[str, Any] | None:
     """Append a user turn inside the caller's transaction.
 
-    Everything :meth:`PostgresConversationCommands.create_follow_up` does after
-    its replay check, on a connection the caller already holds, so that a turn
-    can be appended in the same commit as whatever decided to append it. The
-    caller owns the transaction: a ``None`` or ``{"error": ...}`` answer is
-    returned from inside it, and whether what was written before that answer
-    commits is the caller's decision, exactly as it was when this was the body
-    of ``create_follow_up``'s own transaction.
+    How a person's turn after the first is written: on a connection the caller
+    already holds, so that it commits with whatever decided to append it — the
+    queue's settlement sending a waiting message, or an idle-only message. An
+    automatic goal round has its own insert,
+    :meth:`PostgresConversationCommands.create_goal_round`. The caller owns the
+    transaction: a ``None`` or ``{"error": ...}`` answer is returned from inside
+    it, and whether what was written before that answer commits is the
+    caller's decision.
+
+    Every follow-up is ``queued`` until all earlier turns have finished. The
+    thread row is locked before selecting the latest turn, so concurrent
+    submissions form one linear chain instead of siblings that could later
+    mutate the same branch at once. A request made from an old turn also
+    appends to the current tip, matching chat semantics.
+
+    ``yield_to_queued`` refuses to append while another turn of this
+    conversation is already queued or running, answering
+    ``{"error": "yielded"}``. It is asked under this transaction's thread lock,
+    which is the only place the answer cannot go stale.
+
+    ``goal`` sets or replaces the conversation's completion condition in the
+    same transaction that appends this turn. ``turn_source``, ``goal_round``,
+    ``goal_round_kind`` and ``goal_revision`` describe an automatic round the
+    platform is running toward that goal; a person's message never sets them,
+    and nothing here can change the objective an automatic round runs for.
+
+    ``reasoning_effort`` overrides the inherited depth; omitting it keeps the
+    parent's, as an omitted model does. ``reset_reasoning_effort`` clears it
+    back to Auto — the one thing a null override cannot express, since null is
+    what "inherit" already sends.
+
+    ``client_request_id`` and ``client_request_fingerprint`` are stored on the
+    turn, whose unique index resolves two sends of one key racing; the caller
+    checks for a replay first.
 
     ``pending_message_id`` names the waiting message this turn is sent from,
     whose pinned uploads it may claim; every other turn claims only uploads no

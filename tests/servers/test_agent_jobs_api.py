@@ -146,12 +146,6 @@ class FakeGoalWakeups:
         """Nothing is consumed here; the decision's own tests own that path."""
         return []
 
-    async def pending_wakeup(self, *, thread_id: str) -> dict[str, Any] | None:
-        for row in self.rows:
-            if row["thread_id"] == thread_id and row["state"] == "pending":
-                return dict(row)
-        return None
-
     def invalidate(self, thread_id: str, detail: str) -> None:
         """Pause, clear and resume void every obligation waiting on that goal."""
         for row in self.rows:
@@ -189,10 +183,6 @@ class FakeGoals:
     async def get_goal(self, *, thread_id: str) -> dict[str, Any] | None:
         goal = self._goal(thread_id)
         return None if goal is None else dict(goal)
-
-    async def get_goal_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        job = self._store.jobs.get(job_id)
-        return None if job is None else await self.get_goal(thread_id=str(job["thread_id"]))
 
     async def get_thread_goal_state(self, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
         """The goal and its control version, or ``None`` for a foreign thread.

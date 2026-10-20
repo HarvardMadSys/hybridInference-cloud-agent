@@ -30,6 +30,7 @@ import pytest_asyncio
 from tests.integration.storage.test_agent_job_store import _claim, _create_job
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
+from tests.support.usage import job_usage_inputs
 
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
@@ -189,12 +190,12 @@ async def test_the_stats_inputs_carry_the_threads_jobs_attempts_and_events(
 
 
 async def test_the_usage_inputs_and_telemetry_answer_for_their_job(
-    store: Storage, queries: PostgresExecutionQueries
+    db, store: Storage, queries: PostgresExecutionQueries
 ) -> None:
     """Three aggregates read the same turn from different tables."""
     job, claim = await _running_job(store)
 
-    usage = await queries.job_usage_inputs(job_id=job["id"])
+    usage = await job_usage_inputs(db, job_id=job["id"])
     attempts = await queries.job_attempts_telemetry(job_id=job["id"])
     turn = await queries.job_turn_telemetry(job_id=job["id"], attempt_id=claim["attempt_id"])
 

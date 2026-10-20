@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import asyncpg
+from tests.support.follow_ups import append_follow_up
 
 # The controller explicitly supplies the old checkout, never this repository.
 #
@@ -231,7 +232,8 @@ async def main() -> None:
             job_id=parent["id"], user_id=owner
         )
         assert await store.mcp.list_mcp_connections(user_id=owner) == []
-        followup = await store.conversation_commands.create_follow_up(
+        followup = await append_follow_up(
+            pool,
             parent_job_id=parent["id"],
             user_id=owner,
             prompt="Continue",

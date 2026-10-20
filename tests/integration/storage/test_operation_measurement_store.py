@@ -81,6 +81,11 @@ async def store():
         await pool.close()
 
 
+async def _profiling_run(store, run_id: str) -> dict[str, Any] | None:
+    """One experiment, read through the catalogue the admin page lists."""
+    return next((run for run in await store.list_profiling_runs() if run["run_id"] == run_id), None)
+
+
 class _Store:
     """The repository, plus the pool the arrival seam needs.
 
@@ -198,7 +203,7 @@ async def test_a_measurement_conflict_does_not_create_a_phantom_run(store):
     )
 
     assert result == "conflict"
-    assert await store.get_profiling_run("run-phantom") is None
+    assert await _profiling_run(store, "run-phantom") is None
 
 
 async def test_the_record_round_trips_through_jsonb(store):
@@ -464,9 +469,9 @@ async def test_the_experiment_catalogue_is_readable(store):
     assert runs[0]["target"] == {"sandbox_id": "asbx_1"}
     assert runs[0]["admission_instances"] == [{"instance": "cp-1", "max_operations": 200}]
 
-    one = await store.get_profiling_run("run-1")
+    one = await _profiling_run(store, "run-1")
     assert one is not None and one["run_id"] == "run-1"
-    assert await store.get_profiling_run("run-missing") is None
+    assert await _profiling_run(store, "run-missing") is None
 
 
 async def test_catalogue_recency_advances_when_a_new_sample_arrives(store):
@@ -485,7 +490,7 @@ async def test_catalogue_recency_advances_when_a_new_sample_arrives(store):
         run=_run(),
     )
 
-    run = await store.get_profiling_run("run-1")
+    run = await _profiling_run(store, "run-1")
     assert run is not None
     assert run["received_at"] > old
 
@@ -536,7 +541,7 @@ async def test_a_sample_from_a_listed_instance_neither_locks_nor_rewrites_its_ru
         assert result == "stored"
 
     assert await _run_row_version(store.pool) == before
-    run = await store.get_profiling_run("run-1")
+    run = await _profiling_run(store, "run-1")
     assert run is not None
     assert run["admission_instances"] == [{"instance": "cp-1", "max_operations": 200}]
 
@@ -547,7 +552,7 @@ async def test_a_measurement_without_a_run_row_is_still_stored(store):
         await store.record_operation_measurement(measurement=_measurement(), run=None) == "stored"
     )
 
-    assert await store.get_profiling_run("run-1") is None
+    assert await _profiling_run(store, "run-1") is None
     stored = await store.get_operation_measurement("msm_1")
     assert stored is not None
     assert stored["profiling_run_id"] == "run-1"
@@ -694,7 +699,7 @@ async def test_a_second_manifest_under_one_run_id_is_refused(store):
     # The sample was not stored: a record filed under a catalogue entry that
     # describes something else is worse than a missing sample.
     assert await store.get_operation_measurement("msm_2") is None
-    run = await store.get_profiling_run("run-1")
+    run = await _profiling_run(store, "run-1")
     assert run is not None and run["target"] == {"host": "host-a"}
 
 
@@ -729,7 +734,7 @@ async def test_an_experiment_that_ends_later_is_a_different_experiment(store):
 
     assert result == "run_conflict"
     assert await store.get_operation_measurement("msm_2") is None
-    run = await store.get_profiling_run("run-1")
+    run = await _profiling_run(store, "run-1")
     assert run is not None and run["expires_at"] == RUN_EXPIRES_AT
 
 
@@ -774,7 +779,7 @@ async def test_a_second_admission_instance_joins_the_manifest(store):
         == "stored"
     )
 
-    run = await store.get_profiling_run("run-1")
+    run = await _profiling_run(store, "run-1")
     assert run is not None
     assert [item["instance"] for item in run["admission_instances"]] == ["cp-1", "cp-2"]
 
@@ -792,7 +797,7 @@ async def test_an_instance_reporting_a_different_budget_is_refused(store):
     )
 
     assert result == "run_conflict"
-    run = await store.get_profiling_run("run-1")
+    run = await _profiling_run(store, "run-1")
     assert run is not None
     assert run["admission_instances"] == [{"instance": "cp-1", "max_operations": 200}]
 
@@ -837,7 +842,7 @@ async def test_two_writers_creating_one_run_at_once_both_succeed(store):
     # Both samples survive, and the manifest names both admission instances.
     assert await store.get_operation_measurement("msm_a") is not None
     assert await store.get_operation_measurement("msm_b") is not None
-    run = await store.get_profiling_run("run-1")
+    run = await _profiling_run(store, "run-1")
     assert run is not None
     assert sorted(item["instance"] for item in run["admission_instances"]) == ["cp-1", "cp-2"]
 
@@ -856,7 +861,7 @@ async def test_two_incompatible_manifests_at_once_admit_exactly_one(store):
     )
 
     assert sorted(results) == ["run_conflict", "stored"]
-    run = await store.get_profiling_run("run-1")
+    run = await _profiling_run(store, "run-1")
     assert run is not None
     # The catalogue describes the winner, and it kept exactly its own sample.
     winner = "msm_a" if run["target"] == {"host": "host-a"} else "msm_b"
@@ -902,5 +907,5 @@ async def test_continuous_and_timed_manifests_cannot_share_an_identity(
         == "run_conflict"
     )
     assert await store.get_operation_measurement("msm_changed") is None
-    stored = await store.get_profiling_run("run-1")
+    stored = await _profiling_run(store, "run-1")
     assert stored["expires_at"] == first_expiry

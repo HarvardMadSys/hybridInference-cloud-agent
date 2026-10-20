@@ -2061,27 +2061,6 @@ class PostgresComputeResourceRepository:
         if hosts:
             await release_covered_sandboxes(conn, hosts)
 
-    async def upsert_node(
-        self,
-        *,
-        allocation_id: str,
-        node: dict[str, Any],
-        operation_id: str | None = None,
-        generation: int | None = None,
-        worker_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Observe an immutable node identity without rebinding retained execution state."""
-        async with self._pool.acquire() as conn, conn.transaction():
-            await lock_compute_entry(conn, exclusive=True)
-            await self._fence(conn, operation_id, generation, worker_id, allocation_id)
-            allocation = await conn.fetchrow(
-                "SELECT desired_state FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
-                allocation_id,
-            )
-            if allocation is None or allocation["desired_state"] != "present":
-                raise ValueError("resource_retiring")
-            return await self._upsert_node(conn, allocation_id, node)
-
     async def _upsert_node(
         self, conn: Any, allocation_id: str, node: dict[str, Any]
     ) -> dict[str, Any]:

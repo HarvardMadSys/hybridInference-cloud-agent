@@ -31,6 +31,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
+from tests.support.uploads import thread_uploads
 
 from cloud_agent.api import routes, uploads, worker
 from cloud_agent.api._owner_auth import authenticate_agent_owner
@@ -2014,7 +2015,7 @@ async def test_a_message_attaching_a_file_again_is_sent_and_replaces_it(api: Api
 
     turns = await api.turns(thread_id)
     assert [turn["task_prompt"] for turn in turns] == ["fix it", "use the new report"]
-    rows = await api.store.attachments.list_thread_attachments(thread_id=thread_id)
+    rows = await thread_uploads(api.pool, thread_id=thread_id)
     assert [row["id"] for row in rows] == [second["id"]]
 
 
