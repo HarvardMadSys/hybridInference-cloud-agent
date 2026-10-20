@@ -854,6 +854,7 @@ class SharedChatSessionSupervisor:
                     member.window_sampler = None
                     member.window_checkpoints = None
                     member.window_accumulator = None
+                    member.window_journal_offset = 0
                     if member.resident_state == "live":
                         member.resident_state = "restarting"
         for transport in transports:
@@ -2593,6 +2594,14 @@ class SharedChatSessionSupervisor:
                     if window is not None
                     else None
                 )
+                # The journal read fence starts at the window's opening cursor,
+                # not at zero and not at where a previous window stopped: the
+                # observer may have rotated the journal before this window
+                # began, and a stale offset would sit behind that fence and
+                # silence every later census read for this member.
+                member.window_journal_offset = (
+                    getattr(observer_cursor, "offset", 0) or 0 if window is not None else 0
+                )
         if not admitted:
             with contextlib.suppress(Exception):
                 turn.interrupt()
@@ -2752,6 +2761,7 @@ class SharedChatSessionSupervisor:
                 member.window_sampler = None
                 member.window_checkpoints = None
                 member.window_accumulator = None
+                member.window_journal_offset = 0
                 transport = member.transport
                 if boundary_error is not None:
                     member.transport = None
@@ -3525,6 +3535,7 @@ class SharedChatSessionSupervisor:
                 member.window = None
                 member.window_sampler = None
                 member.window_checkpoints = None
+                member.window_journal_offset = 0
             member.transport = None
             member.residency_generation = 0
             member.resident_state = "restarting" if member.native_session_id else "stopped"
