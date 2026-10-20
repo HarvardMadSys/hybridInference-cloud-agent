@@ -39,12 +39,11 @@ import {
 } from './activityOverview';
 import { useAttachments } from './attachments/useAttachments';
 import { codeReviewPrompt } from './codeReview';
-import { composerCommandMatches } from './composerCommands';
 import { hasLostContext, isActiveConversationState, isBusyJob, latestJob } from './conversationJob';
 import { useFirstRun } from './firstRun';
 import { isGoalRevisionConflict, writeGoal } from './goal/goalApi';
 import { hasLiveWork } from './goal/liveWork';
-import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
+import { useGoalCommand } from './goal/useGoalCommand';
 import { useThreadComposerMcp } from './mcp/useThreadComposerMcp';
 import { useThreadComposerSsh } from './ssh/useComposerSsh';
 import { createRecordedOutputsSelector } from './recordedTurnOutputs';
@@ -273,27 +272,10 @@ export function JobDetail({
 
   useEffect(() => setWatchPrAcceptedJobId(null), [job.id]);
 
-  /**
-   * The plus menu's Goal row: put `/goal ` in the box and leave the caret after
-   * it. Nothing opens, because there is nothing left to open — the band above
-   * the messages is where a goal is read and managed, and this row is how the
-   * sentence that sets one gets started.
-   */
+  /** The plus menu's Goal row, which also drops a stale `/goal` hint. */
   function insertGoalCommand() {
     setGoalHint(null);
-    setFollowUp((current) => {
-      // Switching menus while typing a command completes its partial token.
-      if (composerCommandMatches(current).some((entry) => entry.name === 'goal')) {
-        return GOAL_COMMAND_PREFIX;
-      }
-      // Already the command: nothing to add, and prefixing again would make
-      // `/goal /goal …` an objective nobody wrote.
-      if (/^\s*\/goal(\s|$)/i.test(current)) return current;
-      // Anything already typed *is* the objective — the row means "make this
-      // message a goal", and an objective is a whole sentence.
-      return current.trim() ? `${GOAL_COMMAND_PREFIX}${current}` : GOAL_COMMAND_PREFIX;
-    });
-    followUpBox.current?.focus();
+    goalCommand.insert();
   }
 
   /**

@@ -71,6 +71,13 @@ export interface GoalCommandControls {
   onChoose: (index: number) => void;
   /** Hide suggestions while another composer menu takes focus. */
   dismiss: () => void;
+  /**
+   * The plus menu's Goal row: put `/goal ` in the box and hand the caret back.
+   *
+   * There is nothing else for the row to open. A goal is an objective, and
+   * the band above the messages manages it afterwards.
+   */
+  insert: () => void;
   /** True while a `/goal <objective>` write is in flight. */
   busy: boolean;
   /** Take a key while the menu is open; true means it was consumed. */
@@ -128,6 +135,22 @@ export function useGoalCommand({
   );
 
   const onHighlight = useCallback((index: number) => setActiveIndex(index), []);
+
+  const insert = useCallback(() => {
+    setValue((current) => {
+      // Switching menus while typing a command completes its partial token.
+      if (composerCommandMatches(current).some((entry) => entry.name === 'goal')) {
+        return GOAL_COMMAND_PREFIX;
+      }
+      // Already the command: nothing to add, and prefixing again would make
+      // `/goal /goal …` an objective nobody wrote.
+      if (/^\s*\/goal(\s|$)/i.test(current)) return current;
+      // Anything already typed *is* the objective — the row means "make this
+      // message a goal", and an objective is a whole sentence.
+      return current.trim() ? `${GOAL_COMMAND_PREFIX}${current}` : GOAL_COMMAND_PREFIX;
+    });
+    focusComposer();
+  }, [focusComposer, setValue]);
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
     if (!open) return false;
@@ -203,6 +226,7 @@ export function useGoalCommand({
     onHighlight,
     onChoose: choose,
     dismiss: () => setDismissed(true),
+    insert,
     busy,
     onKeyDown,
     submit,

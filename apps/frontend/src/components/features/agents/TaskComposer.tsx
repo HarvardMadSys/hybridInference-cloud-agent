@@ -31,11 +31,10 @@ import { ComposerDialogLoading } from './ComposerDialogLoading';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
 import { PromptRewrite } from './PromptRewrite';
-import { composerCommandMatches } from './composerCommands';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
-import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
+import { useGoalCommand } from './goal/useGoalCommand';
 import { useComposerMcp } from './mcp/useComposerMcp';
 import { useComposerSsh } from './ssh/useComposerSsh';
 import { useSkillLibrary } from './skills/useSkillLibrary';
@@ -525,30 +524,10 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     }
   }
 
-  /**
-   * The plus menu's Goal row: put `/goal ` in the box and leave the caret after
-   * it, so the interaction is typing where the owner was already typing.
-   *
-   * There is nothing else for the row to open. A goal is an objective and the
-   * band above the messages manages it afterwards, so a dialog here would be a
-   * second place to say the same one thing — and the one the owner has to
-   * dismiss before they can type the sentence they came to type.
-   */
+  /** The plus menu's Goal row, which also drops a stale `/goal` hint. */
   function insertGoalCommand() {
     setGoalHint(null);
-    setTask((current) => {
-      // Switching menus while typing a command completes its partial token.
-      if (composerCommandMatches(current).some((entry) => entry.name === 'goal')) {
-        return GOAL_COMMAND_PREFIX;
-      }
-      // Already the command: nothing to add, and prefixing again would make
-      // `/goal /goal …` an objective nobody wrote.
-      if (/^\s*\/goal(\s|$)/i.test(current)) return current;
-      // Anything already typed *is* the objective — the row means "make this
-      // message a goal", and an objective is a whole sentence.
-      return current.trim() ? `${GOAL_COMMAND_PREFIX}${current}` : GOAL_COMMAND_PREFIX;
-    });
-    taskBox.current?.focus();
+    goalCommand.insert();
   }
 
   /**
