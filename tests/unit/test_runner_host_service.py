@@ -28,7 +28,10 @@ from cloud_agent_host.host_runtime import (
 )
 from cloud_agent_host.sandbox import ProcessBackend
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
-from cloud_agent_shared.shared_protocol import HOST_SETTINGS_CAPABILITY
+from cloud_agent_shared.shared_protocol import (
+    HOST_SETTINGS_CAPABILITY,
+    PROFILING_CONTROL_CAPABILITY,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -808,6 +811,26 @@ def test_a_saved_limit_is_taken_up_and_reported_back(service, monkeypatch):
     assert beat.kwargs["slots_total"]() == 5
     assert HOST_CONCURRENCY_CAPABILITY in beat.kwargs["capabilities"]()
     assert beat.wakes >= 1, "a limit this host adopted is told to the scheduler now"
+
+
+def test_enrollment_advertises_what_every_heartbeat_advertises(service, monkeypatch):
+    """A newly enrolled host is not shown without a capability its first beat adds."""
+    identity, backend, _released = service
+    enrolled: dict[str, Any] = {}
+
+    def ensure_enrolled(**kwargs: Any) -> HostIdentity:
+        enrolled.update(kwargs)
+        return identity
+
+    monkeypatch.setattr(runner_mod, "ensure_enrolled", ensure_enrolled)
+    monkeypatch.setattr(runner_mod, "claim_payload", _queue([]))
+
+    _serve(backend, launch=lambda _payload: LaunchResult(LAUNCH_NOT_STARTED, None))
+
+    beat = FakeHeartbeat.last
+    assert beat is not None
+    assert enrolled["capabilities"] == beat.kwargs["capabilities"]()
+    assert PROFILING_CONTROL_CAPABILITY in enrolled["capabilities"]
 
 
 def test_each_turn_is_handed_the_admin_settings_from_the_latest_beat(service, monkeypatch):

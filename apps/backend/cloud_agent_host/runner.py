@@ -1340,6 +1340,23 @@ def _environment_host_capabilities(backend: SandboxBackend, stamp: dict[str, Any
     ]
 
 
+def _advertised_host_capabilities(backend: SandboxBackend, stamp: dict[str, Any]) -> list[str]:
+    """What this host advertises, at enrollment and on every heartbeat alike.
+
+    The concurrency, profiling-control and host-settings capabilities say this
+    runner applies ``slots_desired``, a runtime profiling configuration and the
+    admin's host settings. They let the admin page tell a host that will pick
+    up a new value from one that needs a redeploy. They are advertised beside
+    the shared-live capabilities, never instead of them.
+    """
+    return [
+        *_environment_host_capabilities(backend, stamp),
+        HOST_CONCURRENCY_CAPABILITY,
+        PROFILING_CONTROL_CAPABILITY,
+        HOST_SETTINGS_CAPABILITY,
+    ]
+
+
 def _claim_secret_values(job: ClaimedJob) -> dict[str, str]:
     """Every value the claim put in the sandbox that output must never show."""
     values = job.environment.secrets() if job.environment else {}
@@ -4189,21 +4206,12 @@ def run_forever(
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
 
-    # Advertised beside the shared-live capabilities, never instead of them: it
-    # says this runner applies ``slots_desired``, which is what lets the admin
-    # page tell a host that will honour a new number from one that needs a
-    # redeploy to change.
-    host_capabilities = [
-        *_environment_host_capabilities(backend, stamp),
-        HOST_CONCURRENCY_CAPABILITY,
-        HOST_SETTINGS_CAPABILITY,
-    ]
     identity = ensure_enrolled(
         base_url=base_url,
         host=host,
         sandbox_manager_url=_sandbox_manager_url_from_env(),
         slots_total=host_default,
-        capabilities=host_capabilities,
+        capabilities=_advertised_host_capabilities(backend, stamp),
         runner_version=_runner_version(),
     )
     if identity is None:
@@ -4341,15 +4349,9 @@ def run_forever(
         # operator's number.
         slots_total=lambda: limit,
         launch_error=lambda: qualification_error or turns.launch_error,
-        capabilities=lambda: [
-            *_environment_host_capabilities(backend, stamp),
-            HOST_CONCURRENCY_CAPABILITY,
-            # Advertised so an operator can tell a host that will pick up a
-            # runtime configuration from one that needs a redeploy, which is
-            # the same distinction the concurrency capability draws.
-            PROFILING_CONTROL_CAPABILITY,
-            HOST_SETTINGS_CAPABILITY,
-        ],
+        # Read per beat: the claim loop replaces ``stamp`` when a qualification
+        # refresh changes what this host can run.
+        capabilities=lambda: _advertised_host_capabilities(backend, stamp),
         runner_version=_runner_version(),
         sandbox_runtime=stamp.get("sandbox_runtime"),
         sandbox_image_digest=stamp.get("sandbox_image_digest"),
