@@ -1,15 +1,15 @@
 """The merged host endpoint: every connection of one job behind a single URL.
 
-The per-connection route forwards JSON-RPC and lets the CLI own the protocol.
-This one owns it: the platform answers ``initialize``, merges the catalogues,
-namespaces the tool names and routes a call back to the connection it came from.
+The platform owns the protocol here: it answers ``initialize``, merges the
+catalogues, namespaces the tool names and routes a call back to the connection
+it came from.
 
-Four properties carry the weight, and each is a way the merged surface could be
-worse than the per-connection one:
+Three properties carry the weight, and each is a way a merged surface could go
+wrong:
 
-- **The decision path is shared, not copied.** A held call here creates the same
-  pending invocation the other route does, so an approval granted on the
-  Integrations page is consumed by whichever surface the retry arrives on.
+- **A held call is the owner's to decide.** ``confirm`` records the same
+  pending invocation the Integrations page lists, so an approval granted there
+  is consumed by the retry that matches it.
 - **Routing is a catalogue lookup, not a string split.** An alias may itself
   contain the separator, so ``a__b`` plus tool ``c`` and alias ``a`` plus tool
   ``b__c`` present the same string; only the map built from the catalogue can
@@ -17,9 +17,6 @@ worse than the per-connection one:
 - **One broken connection does not empty the catalogue.** A server that is
   disconnected or needs re-authorization is skipped with a log, because losing
   every other tool is a far worse outcome than the failure that caused it.
-- **The bare prefix is unshadowable.** ``/{server_name}`` needs a non-empty
-  segment, so the merged endpoint cannot be reached as a connection named
-  ``host`` or anything else a user could pick.
 """
 
 from __future__ import annotations
@@ -61,10 +58,6 @@ def _secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     """Provide the signing secret and the key connection credentials use."""
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "mcp-host-secret-value-32-bytes-xx")
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", _ENCRYPTION_KEY)
-    # The target above is loopback and plain HTTP, so the deployment has to
-    # admit both for the guard to let the per-connection route through.
-    monkeypatch.setenv("AGENT_MCP_ALLOW_PRIVATE_TARGETS", "1")
-    monkeypatch.setenv("AGENT_MCP_ALLOW_PLAIN_HTTP", "1")
     monkeypatch.setattr(agent_mcp_router.web_search, "configured", lambda: False)
     yield
 
@@ -615,7 +608,7 @@ class TestRoutingACall:
     async def test_a_held_call_is_recorded_and_not_dispatched(
         self, store: FakeStore, host: StubHost
     ) -> None:
-        """``confirm`` holds on this surface exactly as it does on the other."""
+        """``confirm`` holds the call and records it for the owner to decide."""
         store.bindings = [
             _binding(7, "github", rules={"get_issue": {"policy": "confirm", "fingerprint": ""}})
         ]
@@ -768,16 +761,15 @@ class TestTheHandshake:
 
 
 class TestTheBarePrefix:
-    """Why the merged endpoint cannot be shadowed."""
+    """The merged endpoint is the relay's only address."""
 
-    async def test_the_bare_prefix_reaches_the_host_not_a_connection(
-        self, client: AsyncClient, store: FakeStore, host: StubHost
+    async def test_an_alias_has_no_route_of_its_own(
+        self, client: AsyncClient, store: FakeStore
     ) -> None:
-        """``/{server_name}`` needs a non-empty segment, so there is no collision.
+        """A connection is reached through the catalogue, never at ``/<alias>``.
 
-        A connection literally named ``host`` would still be addressed at
-        ``/v1/agent/mcp/host``; the merged endpoint is reachable only at the
-        bare prefix, which no alias can produce.
+        A connection literally named ``host`` is listed like any other, and the
+        address its alias would name answers nothing.
         """
         store.bindings = [
             _binding(7, "host", rules={"get_issue": {"policy": "allow", "fingerprint": ""}})
@@ -785,13 +777,10 @@ class TestTheBarePrefix:
         merged = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
         assert _tool_names(merged) == _catalogue("host__get_issue")
 
-        # The per-connection route still answers for the alias itself.
-        per_connection = await client.post(
-            "/v1/agent/mcp/host",
-            json=_rpc("tools/list", 2),
-            headers=_auth(),
+        by_alias = await client.post(
+            f"{_HOST_URL}/host", json=_rpc("tools/list", 2), headers=_auth()
         )
-        assert per_connection.status_code in (200, 502)
+        assert by_alias.status_code == 404
 
     async def test_the_merged_endpoint_requires_an_mcp_scoped_token(
         self, client: AsyncClient
@@ -1218,7 +1207,7 @@ async def test_inactive_connection_never_refreshes_or_delays_healthy_tools(
     assert host.called[-1]["name"] == "search"
 
 
-@pytest.mark.parametrize("surface", ["tool", "resource", "prompt", "direct"])
+@pytest.mark.parametrize("surface", ["tool", "resource", "prompt"])
 async def test_legacy_duplicate_aliases_cannot_route_to_the_first_connection(
     client, store, host, surface
 ):
@@ -1227,15 +1216,10 @@ async def test_legacy_duplicate_aliases_cannot_route_to_the_first_connection(
         "tool": _rpc("tools/call", name="github__get_issue"),
         "resource": _rpc("resources/read", uri="mcp-resource://7/repo://notes"),
         "prompt": _rpc("prompts/get", name="github__summary"),
-        "direct": _rpc("tools/call", name="get_issue"),
     }[surface]
     listed = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
     assert _tool_names(listed) == _catalogue("docs__search")
-    response = await client.post(
-        f"{_HOST_URL}/github" if surface == "direct" else _HOST_URL,
-        json=request,
-        headers=_auth(),
-    )
+    response = await client.post(_HOST_URL, json=request, headers=_auth())
     assert response.status_code == 403 or "error" in response.json()
     assert host.opened == []
     assert host.called == []

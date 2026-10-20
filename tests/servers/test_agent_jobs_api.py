@@ -3996,10 +3996,6 @@ async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: Fake
         params={"path": "README.md"},
         json={"content": "forbidden"},
     )
-    terminal = await client.post(
-        f"/v1/agent/jobs/{foreign['id']}/terminal",
-        json={"command": "pwd", "cwd": "/workspace"},
-    )
     terminal_session_requests = [
         await client.post(
             f"/v1/agent/jobs/{foreign['id']}/terminals",
@@ -4018,7 +4014,6 @@ async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: Fake
         await client.delete(f"/v1/agent/jobs/{foreign['id']}/terminals/term_1"),
     ]
     assert write.status_code == 404
-    assert terminal.status_code == 404
     assert all(response.status_code == 404 for response in terminal_session_requests)
     cancel = await client.post(f"/v1/agent/jobs/{foreign['id']}/cancel")
     assert cancel.status_code == 404
@@ -4034,7 +4029,7 @@ async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: Fake
 
 
 async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStorage, monkeypatch):
-    """Files, terminal and Git address the same retained chat workspace."""
+    """Files and Git address the same retained chat workspace."""
 
     class SandboxManager:
         def __init__(self) -> None:
@@ -4067,10 +4062,6 @@ async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStor
                 "source": "workspace",
             }
 
-        async def terminal(self, workspace_id: str, **kwargs):
-            self.calls.append(("terminal", workspace_id, kwargs["command"], kwargs["cwd"]))
-            return {"output": "ok\n", "stderr": "", "exit_code": 0, "cwd": "/workspace"}
-
         async def git(self, workspace_id: str, base_sha: str | None = None):
             self.calls.append(("git", workspace_id, base_sha))
             return {
@@ -4094,26 +4085,20 @@ async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStor
             params={"path": "README.md"},
             json={"content": "updated"},
         )
-        terminal = await local_client.post(
-            f"/v1/agent/jobs/{job_id}/terminal",
-            json={"command": "pwd", "cwd": "/workspace"},
-        )
         git = await local_client.get(f"/v1/agent/jobs/{job_id}/git")
 
     assert listing.status_code == 200
     assert listing.json()["writable"] is True
     assert listing.json()["source"] == "workspace"
     assert saved.status_code == 200
-    assert terminal.json()["output"] == "ok\n"
     assert git.json()["branch"] == "agent/thread"
     assert sandbox_manager.calls == [
         ("files", workspace_id, ""),
         ("write", workspace_id, "README.md", "updated"),
-        ("terminal", workspace_id, "pwd", "/workspace"),
         ("git", workspace_id, store.jobs[job_id].get("base_sha")),
     ]
     # Each request may start the stopped container, so each fences it first.
-    assert store.workspace_start_fences == [workspace_id] * 4
+    assert store.workspace_start_fences == [workspace_id] * 3
 
 
 async def test_binary_workspace_payload_preserves_owner_and_path_checks(
@@ -4227,10 +4212,6 @@ async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn
             self.calls.append(("write", workspace_id, path, content))
             raise AssertionError("durably fenced write reached the sandbox manager")
 
-        async def terminal(self, workspace_id: str, **kwargs):
-            self.calls.append(("terminal", workspace_id, kwargs["command"]))
-            raise AssertionError("durably fenced command reached the sandbox manager")
-
         async def terminal_input(self, workspace_id: str, terminal_id: str, *, data: str):
             self.calls.append(("input", workspace_id, terminal_id, data))
             raise AssertionError("durably fenced input reached the sandbox manager")
@@ -4259,10 +4240,6 @@ async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn
             f"/v1/agent/jobs/{job_id}/files?path=README.md",
             json={"content": "blocked"},
         )
-        command = await client.post(
-            f"/v1/agent/jobs/{job_id}/terminal",
-            json={"command": "touch blocked", "cwd": "/workspace"},
-        )
         wrote = await client.post(
             f"/v1/agent/jobs/{job_id}/terminals/term_1/input",
             json={"data": "eA=="},
@@ -4273,8 +4250,8 @@ async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn
         )
         killed = await client.delete(f"/v1/agent/jobs/{job_id}/terminals/term_1")
 
-    assert {saved.status_code, command.status_code, wrote.status_code, resized.status_code} == {409}
-    for response in (saved, command, wrote, resized):
+    assert {saved.status_code, wrote.status_code, resized.status_code} == {409}
+    for response in (saved, wrote, resized):
         assert response.json()["detail"]["error"]["type"] == "workspace_not_ready"
     assert killed.status_code == 200
     assert sandbox_manager.calls == [("delete", job["thread_id"], "term_1")]

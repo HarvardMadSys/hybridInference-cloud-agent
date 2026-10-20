@@ -386,16 +386,6 @@ class FileWriteRequest(BaseModel):
     content: str = Field(..., max_length=MAX_FILE_WRITE_BYTES)
 
 
-class TerminalRequest(BaseModel):
-    """One interactive-shell command inside the retained workspace."""
-
-    environment: BoundEnvironment | None = Field(None, repr=False)
-    model_config = ConfigDict(extra="forbid")
-    command: str = Field(..., min_length=1, max_length=8000)
-    cwd: str = Field("/workspace", min_length=1, max_length=4096)
-    timeout_seconds: float = Field(DEFAULT_COMMAND_TIMEOUT_S, gt=0, le=120)
-
-
 class TerminalCreateRequest(BaseModel):
     """Dimensions and fixed environment for one interactive terminal."""
 
@@ -1935,59 +1925,6 @@ def _run_sandbox(
     if isinstance(workdir, Path):
         os.utime(workdir, None)
     return exit_code, "".join(chunks), stderr
-
-
-def _run_terminal(
-    backend: SandboxBackend,
-    workdir: Path | str,
-    request: TerminalRequest,
-    *,
-    default_timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S,
-    max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
-) -> dict[str, Any]:
-    from cloud_agent_host.environment_process import tool_environment
-
-    marker = secrets.token_hex(16)
-    script = (
-        "umask 0002; "
-        'cd "$WORKSPACE_CWD" 2>/dev/null || { printf "invalid working directory\\n" >&2; '
-        "exit 125; }; "
-        'eval "$WORKSPACE_COMMAND"; status=$?; '
-        f'printf "\\n__HYI_{marker}_CWD__%s\\n__HYI_{marker}_STATUS__%s\\n" "$PWD" "$status"'
-    )
-    process_status, stdout, stderr = _run_sandbox(
-        backend,
-        workdir=workdir,
-        script=script,
-        env={
-            **(tool_environment() if request.environment else {}),
-            **(request.environment.values("runtime") if request.environment else {}),
-            "WORKSPACE_COMMAND": request.command,
-            "WORKSPACE_CWD": request.cwd,
-        },
-        timeout_s=(
-            request.timeout_seconds
-            if "timeout_seconds" in request.model_fields_set
-            else default_timeout_s
-        ),
-        max_output_bytes=max_output_bytes,
-    )
-    cwd_marker = f"\n__HYI_{marker}_CWD__"
-    status_marker = f"\n__HYI_{marker}_STATUS__"
-    cwd = request.cwd
-    status = process_status
-    marker_index = stdout.rfind(cwd_marker)
-    if marker_index >= 0:
-        trailer = stdout[marker_index + len(cwd_marker) :]
-        stdout = stdout[:marker_index]
-        cwd_line, separator, status_text = trailer.partition(status_marker)
-        if separator:
-            cwd = cwd_line.strip() or request.cwd
-            try:
-                status = int(status_text.strip().splitlines()[0])
-            except (ValueError, IndexError):
-                status = process_status
-    return {"output": stdout, "stderr": stderr, "exit_code": status, "cwd": cwd}
 
 
 class SnapshotBaseMissing(HTTPException):
@@ -3988,37 +3925,6 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc
 
-    @app.post("/workspaces/{workspace_id}/terminal")
-    async def terminal(
-        workspace_id: str,
-        request: Request,
-        body: TerminalRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        start_seq = parse_start_fence(request.headers.get(START_FENCE_HEADER))
-        if body.environment is not None and body.environment.required:
-            owner = await endpoint_calls.run(retained_owner, workspace_id)
-            await endpoint_calls.run(
-                owner.prepare_environment,
-                workspace_id,
-                body.environment,
-                environment_preparation,
-                start_seq=start_seq,
-            )
-        return await owner_command(
-            workspace_id,
-            lambda retained, _call: _run_terminal(
-                retained,
-                "/workspace",
-                body,
-                default_timeout_s=applied_settings["workspace_command_timeout_s"],
-                max_output_bytes=int(applied_settings["workspace_command_output_max_mib"])
-                * 1024
-                * 1024,
-            ),
-            start_seq=start_seq,
-        )
-
     @app.post("/workspaces/{workspace_id}/terminals")
     async def create_terminal(
         workspace_id: str,
@@ -4299,7 +4205,6 @@ __all__ = [
     "FileWriteRequest",
     "TerminalCreateRequest",
     "TerminalInputRequest",
-    "TerminalRequest",
     "TerminalResizeRequest",
     "create_app",
 ]

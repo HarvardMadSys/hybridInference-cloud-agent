@@ -169,9 +169,8 @@ def test_no_two_surfaces_shadow_each_other() -> None:
     comparing prefixes — and every surface carries ``/v1/agent``, so every
     pair was skipped and the loop below compared nothing.
 
-    The overlaps between the *other* routers the app mounts (`mcp/catalog`
-    against `mcp/{server_name}`, for one) predate this split and are not this
-    test's subject — the surfaces in ``SURFACE_ROUTERS`` are.
+    The overlaps between the *other* routers the app mounts predate this split
+    and are not this test's subject — the surfaces in ``SURFACE_ROUTERS`` are.
     """
     overlapping = _shadowing_pairs(_surface_routes())
 
