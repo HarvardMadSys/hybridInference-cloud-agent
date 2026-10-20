@@ -4,8 +4,10 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, expect, it, vi } from 'vitest';
 import { EnvironmentDialog } from './EnvironmentDialog';
 import {
+  getEnvironmentHistory,
   importEnvironmentVariables,
   previewEnvironmentImport,
+  restoreEnvironment,
   saveEnvironment,
   saveGlobalVariables,
   suggestEnvironmentScript,
@@ -267,4 +269,79 @@ it('creates an environment for a team you administer when you choose it', async 
   // Once created, its owner is fixed.
   expect(screen.queryByLabelText('environment.owner')).toBeNull();
   expect(screen.getByText('environment.teamShared')).toBeInTheDocument();
+});
+
+it('adds, edits, reorders and removes actions, and saves them in their order', async () => {
+  vi.mocked(saveEnvironment).mockResolvedValue({ ...config, revision: 2 });
+  open();
+  fireEvent.click(screen.getByRole('tab', { name: 'environment.tab.actions' }));
+  expect(screen.getByText('environment.noActions')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'environment.addAction' }));
+  fireEvent.click(screen.getByRole('button', { name: 'environment.addAction' }));
+  fireEvent.click(screen.getByRole('button', { name: 'environment.addAction' }));
+  const names = screen.getAllByLabelText('environment.actionName');
+  const commands = screen.getAllByLabelText('environment.command');
+  ['Build', 'Test', 'Lint'].forEach((name, index) => {
+    fireEvent.change(names[index], { target: { value: name } });
+    fireEvent.change(commands[index], { target: { value: name.toLowerCase() } });
+  });
+  fireEvent.change(screen.getAllByLabelText('environment.directory')[2], {
+    target: { value: 'web' },
+  });
+  // The ends cannot move past themselves.
+  expect(screen.getAllByRole('button', { name: 'environment.moveUp' })[0]).toBeDisabled();
+  expect(screen.getAllByRole('button', { name: 'environment.moveDown' })[2]).toBeDisabled();
+
+  fireEvent.click(screen.getAllByRole('button', { name: 'environment.moveUp' })[1]);
+  fireEvent.click(screen.getAllByRole('button', { name: 'environment.removeAction' })[2]);
+  fireEvent.click(screen.getByRole('button', { name: 'environment.save' }));
+
+  await waitFor(() => expect(saveEnvironment).toHaveBeenCalledTimes(1));
+  expect(vi.mocked(saveEnvironment).mock.calls[0][0].actions).toEqual([
+    { id: expect.any(String), name: 'Test', command: 'test', cwd: '.' },
+    { id: expect.any(String), name: 'Build', command: 'build', cwd: '.' },
+  ]);
+});
+
+it('lists earlier versions and restores one only once it is confirmed', async () => {
+  const current = { ...config, revision: 3 };
+  const older = {
+    ...config,
+    revision: 2,
+    variables: [
+      { name: 'MODE', value: 'dev', secret: false, phase: 'runtime' as const },
+      { name: 'TOKEN', value: null, secret: true, phase: 'runtime' as const },
+    ],
+    setup_script: 'make setup',
+    actions: [{ id: 'a1', name: 'Build', command: 'make', cwd: '.' }],
+  };
+  vi.mocked(getEnvironmentHistory).mockResolvedValue({ versions: [current, older] });
+  vi.mocked(restoreEnvironment).mockResolvedValue({ ...older, revision: 4 });
+  const onSaved = vi.fn();
+  render(
+    <EnvironmentDialog initial={current} globals={globals} onSaved={onSaved} onClose={vi.fn()} />,
+  );
+
+  fireEvent.click(screen.getByRole('tab', { name: 'environment.tab.history' }));
+  const versions = await screen.findAllByRole('listitem');
+  expect(getEnvironmentHistory).toHaveBeenCalledWith('env', false);
+  // The current version is labelled and offers nothing to restore.
+  expect(within(versions[0]).getByText('environment.currentVersion')).toBeInTheDocument();
+  expect(within(versions[0]).queryByRole('button', { name: 'environment.restore' })).toBeNull();
+  // An older one shows what it held, a secret by its name only.
+  expect(within(versions[1]).getByText('MODE')).toBeInTheDocument();
+  expect(within(versions[1]).getByText('dev')).toBeInTheDocument();
+  expect(within(versions[1]).getByText('environment.secret')).toBeInTheDocument();
+  expect(within(versions[1]).getByText('make setup')).toBeInTheDocument();
+
+  fireEvent.click(within(versions[1]).getByRole('button', { name: 'environment.restore' }));
+  fireEvent.click(within(versions[1]).getByRole('button', { name: 'environment.cancel' }));
+  expect(restoreEnvironment).not.toHaveBeenCalled();
+
+  fireEvent.click(within(versions[1]).getByRole('button', { name: 'environment.restore' }));
+  fireEvent.click(within(versions[1]).getByRole('button', { name: 'environment.confirmRestore' }));
+
+  await waitFor(() => expect(restoreEnvironment).toHaveBeenCalledWith('env', 3, 2, false));
+  await waitFor(() => expect(onSaved).toHaveBeenCalledWith({ ...older, revision: 4 }));
 });
