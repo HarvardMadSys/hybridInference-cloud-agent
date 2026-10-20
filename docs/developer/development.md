@@ -284,13 +284,9 @@ fixtures to skip rather than fail. Parallel workers need separate pre-created
 databases. See [ENVIRONMENT.md](../../ENVIRONMENT.md#database) for defaults and
 worker naming.
 
-Deployment tests read the sandbox CLI version settings. If your development
-tool exports a different `CODEX_VERSION`, remove that inherited value for the
-check:
-
-```bash
-env -u CODEX_VERSION make check
-```
+Every test process runs with CI's umask of `022` and without an inherited
+`CODEX_VERSION` (see `tests/conftest.py`), so your shell's settings do not
+change the result of `make check`.
 
 For a frontend change, run these checks from the repository root:
 
