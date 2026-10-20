@@ -258,6 +258,28 @@ def quiet_idle_deadline(group: str, timeout: str, *, operations: int = 0) -> str
     END"""
 
 
+def end_member_turn(member: str | None = None) -> str:
+    """SET-clause SQL: end a member's turn for job ``$1`` and attempt ``$2``.
+
+    Clears the activation the attempt holds and the admission of the job,
+    leaving any other attempt's or job's untouched. ``member`` qualifies the
+    membership's columns when the statement aliases the table.
+    """
+    m = "" if member is None else f"{member}."
+    return f"""active_attempt_id = CASE
+            WHEN {m}active_attempt_id = $2 THEN NULL
+            ELSE {m}active_attempt_id
+        END,
+        admitted_job_id = CASE
+            WHEN {m}admitted_job_id = $1 THEN NULL
+            ELSE {m}admitted_job_id
+        END,
+        admitted_at = CASE
+            WHEN {m}admitted_job_id = $1 THEN NULL
+            ELSE {m}admitted_at
+        END"""
+
+
 # SET-clause fragment for ``agent_sandboxes``: count one more start the
 # control plane let through and drop the restore point a start would make
 # stale. A checkpoint receipt covers the group only while the sequence it

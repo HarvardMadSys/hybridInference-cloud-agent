@@ -63,6 +63,7 @@ from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, stored_arc
 from cloud_agent.storage._sql.sandbox import (
     THREAD_SANDBOX_CLAIM_SOURCE,
     THREAD_SANDBOX_SOURCE,
+    end_member_turn,
     group_has_live_peer,
     group_is_quiet,
     member_turn_running,
@@ -612,6 +613,45 @@ def _claim_payload(job_row: Any, attempt: Any, thread_sandbox: Any) -> dict[str,
     return claim
 
 
+def _reap_outcome(
+    row: Any,
+    *,
+    attempt_id: int,
+    retained_activation_expired: bool,
+    settled_finalization_expired: bool,
+    restore_exhausted: bool,
+    admitted_ambiguously: bool,
+) -> tuple[str, str | None] | None:
+    """What an expired attempt's job becomes, and the detail it records.
+
+    ``closed_stale`` leaves the job as it is: the attempt was stale, and
+    closing it is enough. A ``None`` detail keeps the job's own. ``None`` is
+    returned when only the retry budget can decide, so the caller counts the
+    attempts spent only then.
+    """
+    if row["current_attempt_id"] != attempt_id or row["state"] in TERMINAL_STATES:
+        return "closed_stale", None
+    cancelled = bool(row["cancel_requested"])
+    if retained_activation_expired:
+        if cancelled:
+            return CANCELLED, "cancelled after an indeterminate retained Agent CLI turn"
+        if admitted_ambiguously:
+            return FAILED, "retained Agent CLI turn became indeterminate after prompt admission"
+        return FAILED, "retained sandbox activation lease expired; context marked lost"
+    if settled_finalization_expired:
+        if cancelled:
+            return CANCELLED, "cancelled after the Agent CLI turn settled"
+        return (
+            FAILED,
+            "Agent CLI context settled, but job finalization expired; the prompt was not replayed",
+        )
+    if restore_exhausted and not cancelled:
+        return FAILED, f"the sandbox could not be restored after {MAX_RESTORE_ATTEMPTS} attempts"
+    if cancelled:
+        return CANCELLED, None
+    return None
+
+
 class PostgresAttemptCommands:
     """Claim, heartbeat, transition and reap -- every fenced write a worker makes."""
 
@@ -1107,7 +1147,7 @@ class PostgresAttemptCommands:
                 # on an attempt the reaper will no longer visit.
                 if updated["thread_id"] is not None:
                     sandbox_transition = await conn.fetchrow(
-                        """
+                        f"""
                         UPDATE agent_thread_sandbox_memberships m
                         SET context_status = CASE
                                 WHEN m.last_settled_job_id IS DISTINCT FROM $1
@@ -1134,18 +1174,7 @@ class PostgresAttemptCommands:
                                     THEN 'stopped'
                                 ELSE 'restarting'
                             END,
-                            active_attempt_id = CASE
-                                WHEN m.active_attempt_id = $2 THEN NULL
-                                ELSE m.active_attempt_id
-                            END,
-                            admitted_job_id = CASE
-                                WHEN m.admitted_job_id = $1 THEN NULL
-                                ELSE m.admitted_job_id
-                            END,
-                            admitted_at = CASE
-                                WHEN m.admitted_job_id = $1 THEN NULL
-                                ELSE m.admitted_at
-                            END,
+                            {end_member_turn("m")},
                             last_error = CASE
                                 WHEN m.last_settled_job_id = $1 THEN m.last_error
                                 ELSE COALESCE($4, 'retained turn ended before settlement')
@@ -1877,22 +1906,11 @@ class PostgresAttemptCommands:
             # that a retry is safe; ordinary CLI/process replacement
             # at a clean turn boundary remains supported.
             lost_member = await conn.fetchrow(
-                """
+                f"""
                 UPDATE agent_thread_sandbox_memberships
                 SET native_state = 'lost', context_status = 'lost',
                     resident_state = 'lost',
-                    active_attempt_id = CASE
-                        WHEN active_attempt_id = $2 THEN NULL
-                        ELSE active_attempt_id
-                    END,
-                    admitted_job_id = CASE
-                        WHEN admitted_job_id = $1 THEN NULL
-                        ELSE admitted_job_id
-                    END,
-                    admitted_at = CASE
-                        WHEN admitted_job_id = $1 THEN NULL
-                        ELSE admitted_at
-                    END,
+                    {end_member_turn()},
                     last_error = CASE
                         WHEN admitted_job_id = $1
                             THEN 'attempt lease expired after prompt admission'
@@ -1976,20 +1994,9 @@ class PostgresAttemptCommands:
             # preserve the settled idle deadline, and fail the job for
             # explicit operator/user review.
             await conn.execute(
-                """
+                f"""
                 UPDATE agent_thread_sandbox_memberships
-                SET active_attempt_id = CASE
-                        WHEN active_attempt_id = $2 THEN NULL
-                        ELSE active_attempt_id
-                    END,
-                    admitted_job_id = CASE
-                        WHEN admitted_job_id = $1 THEN NULL
-                        ELSE admitted_job_id
-                    END,
-                    admitted_at = CASE
-                        WHEN admitted_job_id = $1 THEN NULL
-                        ELSE admitted_at
-                    END,
+                SET {end_member_turn()},
                     last_error = 'job finalization expired after context settlement',
                     updated_at = NOW()
                 WHERE thread_id = $3
@@ -1999,84 +2006,41 @@ class PostgresAttemptCommands:
                 attempt_id,
                 sandbox_thread_id,
             )
-        if row["current_attempt_id"] != attempt_id or row["state"] in TERMINAL_STATES:
-            # Stale attempt of an already-moved-on job: closing it is enough.
-            action = "closed_stale"
-        elif retained_activation_expired:
-            action = CANCELLED if row["cancel_requested"] else FAILED
+        outcome = _reap_outcome(
+            row,
+            attempt_id=attempt_id,
+            retained_activation_expired=retained_activation_expired,
+            settled_finalization_expired=settled_finalization_expired,
+            restore_exhausted=restore_exhausted,
+            admitted_ambiguously=admitted_ambiguously,
+        )
+        if outcome is None:
+            # Only the retry budget decides, so it is counted only now.
+            outcome = (
+                (FAILED, f"exhausted {max_attempts} attempts (lease expired)")
+                if await self._attempts_spent(conn, job_id) >= max_attempts
+                else (QUEUED, None)
+            )
+        action, detail = outcome
+        if action in TERMINAL_STATES:
             await conn.execute(
                 """
                 UPDATE agent_jobs
                 SET state = $2,
-                    detail = $3,
+                    detail = COALESCE($3, detail),
                     terminal_resume_pending = TRUE,
                     updated_at = NOW()
                 WHERE id = $1
                 """,
                 job_id,
                 action,
-                (
-                    "cancelled after an indeterminate retained Agent CLI turn"
-                    if row["cancel_requested"]
-                    else (
-                        "retained Agent CLI turn became indeterminate after prompt admission"
-                        if admitted_ambiguously
-                        else "retained sandbox activation lease expired; context marked lost"
-                    )
-                ),
+                detail,
             )
-        elif settled_finalization_expired:
-            action = CANCELLED if row["cancel_requested"] else FAILED
-            await conn.execute(
-                """
-                UPDATE agent_jobs
-                SET state = $2,
-                    detail = $3,
-                    terminal_resume_pending = TRUE,
-                    updated_at = NOW()
-                WHERE id = $1
-                """,
-                job_id,
-                action,
-                (
-                    "cancelled after the Agent CLI turn settled"
-                    if row["cancel_requested"]
-                    else (
-                        "Agent CLI context settled, but job finalization expired; "
-                        "the prompt was not replayed"
-                    )
-                ),
-            )
-        elif restore_exhausted and not row["cancel_requested"]:
-            action = FAILED
-            await conn.execute(
-                "UPDATE agent_jobs SET state = 'failed', detail = $2, "
-                "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
-                job_id,
-                f"the sandbox could not be restored after {MAX_RESTORE_ATTEMPTS} attempts",
-            )
-        elif row["cancel_requested"]:
-            action = CANCELLED
-            await conn.execute(
-                "UPDATE agent_jobs SET state = 'cancelled', "
-                "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
-                job_id,
-            )
-        elif await self._attempts_spent(conn, job_id) >= max_attempts:
-            action = FAILED
-            await conn.execute(
-                "UPDATE agent_jobs SET state = 'failed', detail = $2, "
-                "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
-                job_id,
-                f"exhausted {max_attempts} attempts (lease expired)",
-            )
-        else:
-            action = QUEUED
-            # The next attempt answers for itself. A report the
-            # abandoned attempt left behind is not evidence about the
-            # retry: inheriting a `complete` from a turn that never
-            # finished would complete the goal on the strength of a
-            # claim whose work was thrown away.
+        elif action == QUEUED:
+            # The next attempt answers for itself. A report the abandoned
+            # attempt left behind is not evidence about the retry: inheriting
+            # a `complete` from a turn that never finished would complete the
+            # goal on the strength of a claim whose work was thrown away.
             await conn.execute(
                 "UPDATE agent_jobs SET state = 'queued', "
                 "goal_report_parse = NULL, goal_report_outcome = NULL, "
