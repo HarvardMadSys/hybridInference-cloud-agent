@@ -236,26 +236,9 @@ fresh_databases() {
 
 # The fixtures skip, rather than fail, when they cannot reach their database,
 # so a green pytest alone does not prove the tier ran. CI and
-# scripts/ci-local.sh apply the same check to the JUnit report.
+# scripts/ci-local.sh read their reports with the same script, and a floor.
 check_tier_ran() {
-  ${UV_RUN} python - "$1" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-
-root = ET.parse(sys.argv[1]).getroot()
-cases = list(root.iter("testcase"))
-skipped = [
-    f"{case.get('classname')}::{case.get('name')}"
-    for case in cases
-    for skip in case.findall("skipped")
-    if skip.get("type") == "pytest.skip"
-]
-print(f"test-db-local: {len(cases)} collected, {len(skipped)} skipped")
-if not cases:
-    raise SystemExit("test-db-local: no database test ran")
-if skipped:
-    raise SystemExit(f"test-db-local: database tests skipped, so this run proved nothing: {skipped[:5]}")
-PY
+  ${UV_RUN} python scripts/ci_tests_ran.py "$1"
 }
 
 cmd="${1:-run}"

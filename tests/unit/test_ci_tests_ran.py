@@ -4,7 +4,8 @@ Each external test skips when the job did not hand it its image, binary or SDK,
 and pytest reports a run that only skipped as a success. The steps therefore
 keep a junit report, and `scripts/ci_tests_ran.py` reads it. The script is
 exercised here against reports real pytest writes, and the workflow is checked
-for an external run that writes no report or never has it read.
+for an external run that writes no report or never has it read, and for a
+database tier whose report is read without a floor.
 """
 
 from __future__ import annotations
@@ -126,6 +127,41 @@ def test_a_report_without_a_single_test_fails_the_step(tmp_path: Path) -> None:
     report = _report(tmp_path, "")
     assert ci_tests_ran.declined(report) == (0, [])
     assert ci_tests_ran.main([str(report)]) == 1
+
+
+def test_a_report_below_its_floor_fails_the_step(tmp_path: Path) -> None:
+    """A tier that stopped being selected still ran something; the floor sees it."""
+    report = _report(
+        tmp_path,
+        """
+        def test_one():
+            pass
+
+        def test_two():
+            pass
+        """,
+    )
+    assert ci_tests_ran.main(["--min", "2", str(report)]) == 0
+    assert ci_tests_ran.main(["--min", "3", str(report)]) == 1
+
+
+def test_the_database_tier_is_read_with_a_floor() -> None:
+    """The dbtest run keeps a report, and a later step of its job reads it with `--min`."""
+    for job_name, job in yaml.safe_load(CI.read_text())["jobs"].items():
+        runs = [str(step.get("run", "")).replace("\\\n", " ") for step in job.get("steps", [])]
+        for index, run in enumerate(runs):
+            if not re.search(r'pytest .*-m "dbtest"', run):
+                continue
+            report = _REPORT.search(run)
+            assert report, f"{job_name}: the dbtest run keeps no junit report"
+            readers = [
+                later
+                for later in runs[index + 1 :]
+                if "scripts/ci_tests_ran.py --min" in later and f'"{report.group(1)}"' in later
+            ]
+            assert readers, f"{job_name}: the dbtest report is never read with a floor"
+            return
+    raise AssertionError("no job runs the dbtest tier")
 
 
 _REPORT = re.compile(r'--junitxml="(\$\{RUNNER_TEMP\}/[\w.-]+\.xml)"')
