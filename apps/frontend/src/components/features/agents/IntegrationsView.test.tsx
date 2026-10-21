@@ -190,6 +190,7 @@ beforeEach(() => {
     last_model: 'model-a',
     effective_model: 'model-a',
     deployment_default: null,
+    models: ['model-a', 'model-b'],
   });
   vi.mocked(getAgentConfig).mockResolvedValue({
     models: ['model-a', 'model-b'],

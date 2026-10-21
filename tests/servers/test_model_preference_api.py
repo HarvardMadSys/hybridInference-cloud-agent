@@ -86,6 +86,8 @@ async def test_a_new_owner_follows_their_last_used_model(app):
         "effective_model": "qwen-next",
         # This test sets no deployment default, so nothing is reported.
         "deployment_default": None,
+        # The card's options come from here, not from the composer's config.
+        "models": MODELS,
     }
 
 
@@ -95,6 +97,7 @@ async def test_the_pin_outranks_the_last_used_model_and_clearing_restores_it(app
         cleared = await client.put(PATH, headers=headers(), json={"default_model": None})
     assert pinned.status_code == 200
     assert pinned.json()["effective_model"] == "glm-5.1"
+    assert pinned.json()["models"] == MODELS
     assert cleared.status_code == 200
     # Clearing is not a reset to the deployment default: the last used model
     # takes over again.
@@ -141,6 +144,8 @@ async def test_a_catalog_outage_withholds_every_choice(app):
         write = await client.put(PATH, headers=headers(), json={"default_model": "glm-5.1"})
     assert read.json()["effective_model"] is None
     assert read.json()["last_model"] == "qwen-next"
+    # An empty list is how the card tells an outage from a retired pin.
+    assert read.json()["models"] == []
     # Nothing can be verified against an unreadable catalog, so nothing is pinned.
     assert write.status_code == 400
 
@@ -165,6 +170,7 @@ async def test_one_owner_never_sees_or_sets_another_owners_choice(app):
         "last_model": None,
         "effective_model": None,
         "deployment_default": None,
+        "models": MODELS,
     }
     assert mine.json()["effective_model"] == "glm-5.1"
     assert app.state.repository.set_default_model.await_args.args[0] == "owner-1"

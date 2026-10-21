@@ -638,6 +638,10 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.model.followDescription': '跟随上次使用的模型（{model}）',
   'settings.model.followDescriptionEmpty': '跟随上次使用的模型',
   'settings.model.followDeployment': '跟随上次使用的模型（在你有记录之前使用 {model}）',
+  'settings.model.followRetired': '跟随上次使用的模型（{last} 已不可用）',
+  'settings.model.followRetiredDeployment': '跟随上次使用的模型（{last} 已不可用，暂用 {model}）',
+  'settings.model.noneApplies':
+    '新任务还没有默认模型。可以在这里选一个，也可以创建任务时在输入框里选。',
   'settings.model.retired': '{model}（已不可用）',
   'settings.model.effective': '新任务将使用 {model}。',
   'settings.model.noModels': '暂时没有可用模型。在有可用模型之前，新任务无法开始。',

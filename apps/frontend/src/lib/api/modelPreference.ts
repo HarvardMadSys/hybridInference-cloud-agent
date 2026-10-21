@@ -19,9 +19,14 @@ export interface ModelPreference {
   /**
    * The deployment's starting point, shown to a user with no history of their
    * own. Null when the administrator set none, or when it is not a model this
-   * user can call. Absent on a control plane that predates it.
+   * user can call.
    */
-  deployment_default?: string | null;
+  deployment_default: string | null;
+  /**
+   * The models this owner may pin, as the gateway offers them. Empty means the
+   * catalog could not be read — not that every model was retired.
+   */
+  models: string[];
 }
 
 export async function getModelPreference(signal?: AbortSignal): Promise<ModelPreference> {

@@ -13781,8 +13781,8 @@
         "title": "MessageRequestDetail",
         "type": "object"
       },
-      "ModelPreferenceView": {
-        "description": "An owner's pinned model, the one they used last, and what that resolves to.",
+      "ModelPreferenceResponse": {
+        "description": "The preference, resolved, beside the catalog it was resolved against.",
         "properties": {
           "default_model": {
             "anyOf": [
@@ -13827,9 +13827,17 @@
               }
             ],
             "title": "Last Model"
+          },
+          "models": {
+            "description": "The models this owner may pin, in the gateway's order. Empty means the catalog could not be read, not that a pin has been retired.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
           }
         },
-        "title": "ModelPreferenceView",
+        "title": "ModelPreferenceResponse",
         "type": "object"
       },
       "NodeRegistrationRequest": {
@@ -35230,7 +35238,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ModelPreferenceView"
+                  "$ref": "#/components/schemas/ModelPreferenceResponse"
                 }
               }
             },
@@ -35288,7 +35296,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ModelPreferenceView"
+                  "$ref": "#/components/schemas/ModelPreferenceResponse"
                 }
               }
             },

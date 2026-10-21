@@ -22,7 +22,7 @@ class ModelPreferenceRepository(Protocol):
     async def set_default_model(self, user_id: str, model: str | None) -> ModelPreferenceView:
         """Pin the default model, or clear the pin with ``None``.
 
-        Clearing returns to following the last used model; it is not a reset to
-        a deployment-wide default, because this service does not own one.
+        Clearing returns to following the last used model. The deployment
+        default still applies below it, as it does for anyone with no pin.
         """
         ...

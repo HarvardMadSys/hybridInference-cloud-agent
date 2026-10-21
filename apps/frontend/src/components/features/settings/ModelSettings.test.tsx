@@ -4,12 +4,10 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
-import { getAgentConfig } from '@/lib/api/agents';
 import { getModelPreference, saveModelPreference } from '@/lib/api/modelPreference';
 import type { ModelPreference } from '@/lib/api/modelPreference';
 import { ModelSettings } from './ModelSettings';
 
-vi.mock('@/lib/api/agents', () => ({ getAgentConfig: vi.fn() }));
 vi.mock('@/lib/api/modelPreference', () => ({
   getModelPreference: vi.fn(),
   saveModelPreference: vi.fn(),
@@ -17,22 +15,13 @@ vi.mock('@/lib/api/modelPreference', () => ({
 
 const MODELS = ['glm-5.1', 'qwen-next'];
 
-function config(models = MODELS) {
-  return {
-    repos: [],
-    runtimes: ['claude-code'],
-    models,
-    github_connected: true,
-    github_install_url: null,
-  };
-}
-
 function preference(overrides: Partial<ModelPreference> = {}): ModelPreference {
   return {
     default_model: null,
     last_model: 'qwen-next',
     effective_model: 'qwen-next',
     deployment_default: null,
+    models: MODELS,
     ...overrides,
   };
 }
@@ -48,10 +37,8 @@ function renderSettings() {
 beforeEach(() => {
   localStorage.clear();
   localStorage.setItem(LOCALE_STORAGE_KEY, 'en');
-  vi.mocked(getAgentConfig).mockReset();
   vi.mocked(getModelPreference).mockReset();
   vi.mocked(saveModelPreference).mockReset();
-  vi.mocked(getAgentConfig).mockResolvedValue(config());
   vi.mocked(getModelPreference).mockResolvedValue(preference());
 });
 
@@ -159,15 +146,76 @@ describe('default model settings', () => {
   });
 
   it('offers no model when the catalog is empty and says so', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(config([]));
     vi.mocked(getModelPreference).mockResolvedValue(
-      preference({ last_model: null, effective_model: null }),
+      preference({ last_model: null, effective_model: null, models: [] }),
     );
     renderSettings();
 
     expect(await screen.findByLabelText('Default model')).toHaveValue('__follow_last__');
     expect(screen.getByRole('option', { name: 'Follow my last model' })).toBeVisible();
     // No fallback to hide behind: with no model on offer, nothing starts.
+    expect(
+      screen.getByText('No model is available yet. A new task waits until one is offered.'),
+    ).toBeInTheDocument();
+  });
+
+  it('reads the catalog from the preference alone, not the composer config', async () => {
+    renderSettings();
+
+    await screen.findByLabelText('Default model');
+    expect(getModelPreference).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('option', { name: 'glm-5.1' })).toBeInTheDocument();
+  });
+
+  it('names where "follow" lands when the last model is retired', async () => {
+    vi.mocked(getModelPreference).mockResolvedValue(
+      preference({
+        last_model: 'retired-model',
+        effective_model: 'glm-5.1',
+        deployment_default: 'glm-5.1',
+      }),
+    );
+    renderSettings();
+
+    // Not "Follow my last model (retired-model)" above "New tasks start on
+    // glm-5.1": the option says the same thing as the sentence under it.
+    expect(
+      await screen.findByRole('option', {
+        name: 'Follow my last model (glm-5.1, since retired-model is no longer available)',
+      }),
+    ).toBeVisible();
+    expect(screen.getByText('New tasks start on glm-5.1.')).toBeInTheDocument();
+  });
+
+  it('asks for a choice when the last model is retired and nothing else applies', async () => {
+    vi.mocked(getModelPreference).mockResolvedValue(
+      preference({ last_model: 'retired-model', effective_model: null }),
+    );
+    renderSettings();
+
+    expect(
+      await screen.findByRole('option', {
+        name: 'Follow my last model (retired-model is no longer available)',
+      }),
+    ).toBeVisible();
+    // The catalog was read, so this is not an outage: the owner just has to choose.
+    expect(
+      screen.getByText(
+        'Nothing is chosen for new tasks yet. Pick a model here or in the composer.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('does not call a pin retired when the catalog could not be read', async () => {
+    vi.mocked(getModelPreference).mockResolvedValue(
+      preference({ default_model: 'glm-5.1', effective_model: null, models: [] }),
+    );
+    renderSettings();
+
+    const select = await screen.findByLabelText('Default model');
+    expect(select).toHaveValue('glm-5.1');
+    expect(screen.getByRole('option', { name: 'glm-5.1' })).toBeInTheDocument();
+    expect(screen.queryByText(/no longer available/)).not.toBeInTheDocument();
     expect(
       screen.getByText('No model is available yet. A new task waits until one is offered.'),
     ).toBeInTheDocument();

@@ -676,6 +676,11 @@ export const en = {
   'settings.model.followDescription': 'Follow my last model ({model})',
   'settings.model.followDescriptionEmpty': 'Follow my last model',
   'settings.model.followDeployment': 'Follow my last model ({model} until you have one)',
+  'settings.model.followRetired': 'Follow my last model ({last} is no longer available)',
+  'settings.model.followRetiredDeployment':
+    'Follow my last model ({model}, since {last} is no longer available)',
+  'settings.model.noneApplies':
+    'Nothing is chosen for new tasks yet. Pick a model here or in the composer.',
   'settings.model.retired': '{model} (no longer available)',
   'settings.model.effective': 'New tasks start on {model}.',
   'settings.model.noModels': 'No model is available yet. A new task waits until one is offered.',

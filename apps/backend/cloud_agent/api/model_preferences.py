@@ -2,9 +2,11 @@
 
 Two routes, both scoped to the signed-in owner:
 
-* ``GET`` answers the pin, the model their newest turn used, and which of the
-  two a new task would start on. The Settings card needs all three to explain
-  what "follow my last model" currently resolves to.
+* ``GET`` answers the pin, the model their newest turn used, which of the two
+  a new task would start on, and the models this owner may choose from. The
+  Settings card needs all of them to explain what "follow my last model"
+  currently resolves to, and reading the catalog here spares it the whole
+  composer configuration.
 * ``PUT`` pins a model, or clears the pin with ``null``.
 
 **A pin is checked against the catalog, not stored blindly.** The gateway owns
@@ -18,6 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import Field
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_gateway_client, get_storage, require_store
@@ -47,7 +50,19 @@ class _ModelPreferenceStorage(Protocol):
     model_preferences: ModelPreferenceRepository
 
 
-def _view(preference: ModelPreferenceView, models: list[str]) -> ModelPreferenceView:
+class ModelPreferenceResponse(ModelPreferenceView):
+    """The preference, resolved, beside the catalog it was resolved against."""
+
+    models: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The models this owner may pin, in the gateway's order. Empty means "
+            "the catalog could not be read, not that a pin has been retired."
+        ),
+    )
+
+
+def _view(preference: ModelPreferenceView, models: list[str]) -> ModelPreferenceResponse:
     """Attach what a new task would actually start on, narrowed to the catalog.
 
     The pin and the last-used model are reported exactly as recorded — both are
@@ -60,35 +75,36 @@ def _view(preference: ModelPreferenceView, models: list[str]) -> ModelPreference
     pointing somewhere the task will not run.
     """
     deployment_default = deployment_default_model()
-    return ModelPreferenceView(
+    return ModelPreferenceResponse(
         default_model=preference.default_model,
         last_model=preference.last_model,
         effective_model=resolve_model(models, preference, deployment_default),
         deployment_default=(deployment_default if deployment_default in models else None),
+        models=models,
     )
 
 
-@router.get("", response_model=ModelPreferenceView)
+@router.get("", response_model=ModelPreferenceResponse)
 async def read_model_preference(
     response: Response,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _ModelPreferenceStorage | None = Depends(get_storage),
     gateway: Any = Depends(get_gateway_client),
-) -> ModelPreferenceView:
+) -> ModelPreferenceResponse:
     """Read what a new task would start on, and where that came from."""
     response.headers["Cache-Control"] = "no-store"
     preference = await require_store(store).model_preferences.get_model_preference(user["user_id"])
     return _view(preference, await agent_visible_models(gateway, user_id=user["user_id"]))
 
 
-@router.put("", response_model=ModelPreferenceView)
+@router.put("", response_model=ModelPreferenceResponse)
 async def save_model_preference(
     body: UpdateModelPreference,
     response: Response,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _ModelPreferenceStorage | None = Depends(get_storage),
     gateway: Any = Depends(get_gateway_client),
-) -> ModelPreferenceView:
+) -> ModelPreferenceResponse:
     """Pin the model a new task starts on, or go back to following the last one.
 
     ``{"default_model": null}`` is a real choice, distinct from omitting the

@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
-import { getAgentConfig } from '@/lib/api/agents';
 import { getModelPreference, saveModelPreference } from '@/lib/api/modelPreference';
 import type { ModelPreference } from '@/lib/api/modelPreference';
 
@@ -49,10 +48,12 @@ export function ModelSettings() {
     request.current = controller;
     setStatus('loading');
     setSaveError(false);
-    void Promise.all([getAgentConfig(), getModelPreference(controller.signal)])
-      .then(([config, saved]) => {
+    // One read: the preference arrives with the catalog it was resolved
+    // against, so the card never waits on the composer's repositories.
+    void getModelPreference(controller.signal)
+      .then((saved) => {
         if (!mounted.current || controller.signal.aborted) return;
-        setModels(config.models ?? []);
+        setModels(saved.models);
         setPreference(saved);
         setStatus('ready');
       })
@@ -70,6 +71,7 @@ export function ModelSettings() {
     try {
       const saved = await saveModelPreference(value);
       if (!mounted.current) return;
+      setModels(saved.models);
       setPreference(saved);
     } catch {
       if (mounted.current) setSaveError(true);
@@ -81,20 +83,31 @@ export function ModelSettings() {
   const effective = preference?.effective_model ?? null;
   const pinned = preference?.default_model ?? null;
   const selected = pinned ?? FOLLOW_LAST;
-  // A pin the deployment has retired is not in the list, so the select would
-  // silently show "follow my last model" while the owner's saved choice is
-  // something else entirely. It is kept as an option, labelled as unavailable,
-  // so the control shows what is saved and the sentence below says what is
-  // actually applied.
-  const retiredPin = pinned !== null && !models.includes(pinned) ? pinned : null;
-  // "Follow my last model" names where it currently lands. With no history of
-  // their own it lands on the deployment default, and a user who has never
-  // created a task has no other way to learn what their first one will use.
-  const followDescription = preference?.last_model
-    ? t('settings.model.followDescription', { model: preference.last_model })
-    : preference?.deployment_default
-      ? t('settings.model.followDeployment', { model: preference.deployment_default })
-      : t('settings.model.followDescriptionEmpty');
+  // An empty catalog is an unreadable one, not a deployment that retired
+  // everything: nothing is called unavailable on the strength of it.
+  const catalogRead = models.length > 0;
+  // A pin missing from the list would otherwise make the select silently show
+  // "follow my last model" while the owner's saved choice is something else
+  // entirely. It is kept as an option — labelled unavailable only when the
+  // catalog actually says so — so the control shows what is saved and the
+  // sentence below says what is actually applied.
+  const unlistedPin = pinned !== null && !models.includes(pinned) ? pinned : null;
+  const last = preference?.last_model ?? null;
+  const fallback = preference?.deployment_default ?? null;
+  // "Follow my last model" names where it currently lands, which is not always
+  // the last model: a retired one is skipped for the deployment default, and a
+  // user who has never created a task has no other way to learn what their
+  // first one will use.
+  const followDescription =
+    last && (models.includes(last) || !catalogRead)
+      ? t('settings.model.followDescription', { model: last })
+      : last && fallback
+        ? t('settings.model.followRetiredDeployment', { last, model: fallback })
+        : last
+          ? t('settings.model.followRetired', { last })
+          : fallback
+            ? t('settings.model.followDeployment', { model: fallback })
+            : t('settings.model.followDescriptionEmpty');
 
   return (
     <section aria-labelledby="settings-model" className="ui-card mt-4 bg-surface p-3 sm:p-4">
@@ -127,9 +140,9 @@ export function ModelSettings() {
             className="ui-input mt-1 block min-h-11 w-full max-w-sm rounded-lg"
           >
             <option value={FOLLOW_LAST}>{followDescription}</option>
-            {retiredPin ? (
-              <option value={retiredPin}>
-                {t('settings.model.retired', { model: retiredPin })}
+            {unlistedPin ? (
+              <option value={unlistedPin}>
+                {catalogRead ? t('settings.model.retired', { model: unlistedPin }) : unlistedPin}
               </option>
             ) : null}
             {models.map((model) => (
@@ -144,7 +157,9 @@ export function ModelSettings() {
               ? t('settings.model.loading')
               : effective
                 ? t('settings.model.effective', { model: effective })
-                : t('settings.model.noModels')}
+                : catalogRead
+                  ? t('settings.model.noneApplies')
+                  : t('settings.model.noModels')}
           </p>
           {saveError ? (
             <p role="alert" className="mt-2 text-sm text-status-error">
