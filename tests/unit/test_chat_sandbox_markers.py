@@ -1,9 +1,10 @@
-"""The marker programs, run for real against a temporary directory.
+"""The marker programs, and how the manager runs them.
 
-In production they run as guest root inside the exact container, expecting
-uid and gid 0. Here they run as whoever runs the tests, told to expect that
-user instead: the checks are the same checks, against a directory the test
-controls.
+The programs run for real against a temporary directory. In production they
+run as guest root inside the exact container, expecting uid and gid 0. Here
+they run as whoever runs the tests, told to expect that user instead: the
+checks are the same checks, against a directory the test controls. What
+production tells them is pinned at the manager's exec call instead.
 """
 
 from __future__ import annotations
@@ -12,11 +13,16 @@ import os
 import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 
 from cloud_agent_host import chat_sandbox_markers as markers
+from cloud_agent_host.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
+from cloud_agent_host.sandbox import ContainerBackend
+from cloud_agent_shared.environment_snapshots import SETUP_MARKER_NAME
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -150,3 +156,72 @@ def test_deleting_removes_only_the_marker_the_caller_read(root: Path) -> None:
 
     assert _run(markers._DELETE_PROGRAM, root, stdin=b"receipt").returncode == 0
     assert _run(markers._READ_PROGRAM, root).returncode == markers._ABSENT
+
+
+CONTAINER = "sha256:container-one"
+PAYLOAD = b"receipt"
+INITIAL = (markers.INITIAL_ARCHIVE_MARKER_NAME, markers.INITIAL_ARCHIVE_MARKER_MAX_BYTES)
+SETUP = (SETUP_MARKER_NAME, markers.SETUP_MARKER_MAX_BYTES)
+FINAL = (markers.FINAL_ARCHIVE_MARKER_NAME, markers.FINAL_ARCHIVE_MARKER_MAX_BYTES)
+
+#: Each manager method that runs a program: the program, its marker and bound,
+#: what follows the five arguments every program takes, and whether it sends a
+#: payload on stdin.
+INVOCATIONS = {
+    "read_initial_archive_marker": (markers._READ_PROGRAM, INITIAL, (), False),
+    # The only safe retry proof: a different initial marker is never replaced.
+    "write_initial_archive_marker": (markers._WRITE_PROGRAM, INITIAL, ("0",), True),
+    "delete_initial_archive_marker": (markers._DELETE_PROGRAM, INITIAL, (), True),
+    "read_environment_setup_marker": (markers._READ_PROGRAM, SETUP, (), False),
+    "write_environment_setup_marker": (markers._WRITE_PROGRAM, SETUP, ("1",), True),
+    "read_running_final_archive_marker": (markers._READ_PROGRAM, FINAL, (), False),
+    "write_final_archive_marker": (markers._WRITE_PROGRAM, FINAL, ("1",), True),
+    "clear_final_archive_marker": (markers._CLEAR_PROGRAM, FINAL, (), False),
+}
+
+
+@pytest.mark.parametrize("method", list(INVOCATIONS))
+def test_the_manager_runs_each_program_as_guest_root_trusting_only_root(
+    monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    program, (name, limit), extra, sends_payload = INVOCATIONS[method]
+    spec = ChatSandboxSpec(
+        thread_id="athr_01", sandbox_id="asbx_01", generation=3, runtime_id="claude-code"
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    # The final marker's methods first check that this is the exact running container.
+    monkeypatch.setattr(
+        manager, "_require", lambda _spec: SimpleNamespace(container_id=CONTAINER, running=True)
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def exec_capture(_spec: ChatSandboxSpec, argv: list[str], **options: object) -> SimpleNamespace:
+        calls.append((list(argv), options))
+        return SimpleNamespace(returncode=0, stdout=PAYLOAD, stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", exec_capture)
+    payload = (PAYLOAD,) if sends_payload else ()
+
+    getattr(manager, method)(spec, *payload, expected_container_id=CONTAINER)
+
+    ((argv, options),) = calls
+    # Root, name and bound, then the only owner a program trusts: guest root.
+    assert argv == [
+        "python3",
+        "-c",
+        program,
+        markers.INITIAL_ARCHIVE_MARKER_ROOT,
+        name,
+        str(limit),
+        "0",
+        "0",
+        *extra,
+    ]
+    assert options == {
+        "workdir": "/",
+        "timeout_s": 20,
+        "user_uid": 0,
+        "user_gid": 0,
+        "expected_container_id": CONTAINER,
+        **({"input_bytes": PAYLOAD} if sends_payload else {}),
+    }
