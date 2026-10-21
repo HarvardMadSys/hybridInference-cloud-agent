@@ -14,10 +14,7 @@ and only the second one is consumed.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
-
-if TYPE_CHECKING:
-    from cloud_agent.goals.models import GoalWakeupTrigger
+from typing import Any, Protocol
 
 
 class GoalWakeupRepository(Protocol):
@@ -41,27 +38,6 @@ class GoalWakeupRepository(Protocol):
         It is on this port because every method here takes the connection it
         produces: the queue is the only subject whose work spans a transaction
         the caller owns end to end.
-        """
-        ...
-
-    async def arm_wakeup(
-        self,
-        *,
-        thread_id: str,
-        goal_id: str | None,
-        revision: int,
-        trigger: GoalWakeupTrigger,
-        trigger_ref: str,
-        waiting_job_id: str | None = None,
-        conn: Any | None = None,
-    ) -> str | None:
-        """Record the obligation, or return ``None`` if it already exists.
-
-        Idempotent on ``(thread, goal_id, revision, trigger, trigger_ref)``: a
-        replayed finish or a retried owner write finds the wakeup it already
-        made instead of making a second one. ``conn`` lets a caller that is
-        already inside the transaction that moved the goal arm the wakeup in
-        that same commit.
         """
         ...
 
@@ -134,8 +110,4 @@ class GoalWakeupRepository(Protocol):
         Check the wall clock: NOW() stays fixed while a transaction waits for
         the conversation lock and can predate the lease's expiry.
         """
-        ...
-
-    async def pending_wakeup(self, *, thread_id: str) -> dict[str, Any] | None:
-        """The newest unprocessed wakeup of a conversation, if any."""
         ...

@@ -451,9 +451,6 @@ class FakeStore(AllCapabilities):
         }
         return row["capability_revision"]
 
-    async def delete_mcp_capabilities(self, *, connection_id: int) -> None:
-        self.capabilities.pop(connection_id, None)
-
     async def create_mcp_oauth_flow(self, **kwargs: Any) -> int | None:
         """Allocate the next generation and keep a single pending flow."""
         row = self.connections.get(kwargs["connection_id"])
@@ -470,13 +467,6 @@ class FakeStore(AllCapabilities):
         self.oauth_flow = {**kwargs, "oauth_generation": generation}
         self.oauth_state_hash = kwargs["state_hash"]
         return generation
-
-    async def delete_mcp_oauth_flows(self, *, connection_id: int) -> int:
-        if self.oauth_flow and str(self.oauth_flow.get("connection_id")) == str(connection_id):
-            self.oauth_flow = None
-            self.oauth_state_hash = None
-            return 1
-        return 0
 
     async def list_mcp_bindings(self, *, thread_id: str) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []

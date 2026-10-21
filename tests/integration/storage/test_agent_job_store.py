@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from tests.support.db import reset_agent_tables
+from tests.support.follow_ups import append_follow_up
 from tests.support.migrations import apply_migrations
 
 from cloud_agent.mcp.registry import binding_from_row
@@ -870,8 +871,8 @@ async def test_snapshot_publication_uses_latest_current_attempt_replies_from_inc
             generation=prior_publication["generation"],
             container_id=prior_publication["container_id"],
         )
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id=parent["user_id"], prompt="also update the docs"
+    child = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id=parent["user_id"], prompt="also update the docs"
     )
     assert child is not None
     child_claim = await _claim(
@@ -940,8 +941,11 @@ async def test_snapshot_publication_uses_latest_current_attempt_replies_from_inc
             payload={"text": "A response from a noncurrent attempt."},
         )
 
-    later = await store.conversation_commands.create_follow_up(
-        parent_job_id=child["id"], user_id=child["user_id"], prompt="start unrelated later work"
+    later = await append_follow_up(
+        pool,
+        parent_job_id=child["id"],
+        user_id=child["user_id"],
+        prompt="start unrelated later work",
     )
     assert later is not None
     later_claim = await _claim(
@@ -1353,8 +1357,11 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
         assert observed["target_resident_slot_id"] == operation["target_resident_slot_id"]
         expected_members = {job["thread_id"], observed["target_thread_id"]}
     elif next_action == "follow_up":
-        follow = await store.conversation_commands.create_follow_up(
-            parent_job_id=job["id"], user_id=job["user_id"], prompt="continue after failed Fork"
+        follow = await append_follow_up(
+            pool,
+            parent_job_id=job["id"],
+            user_id=job["user_id"],
+            prompt="continue after failed Fork",
         )
         assert follow is not None and follow.get("error") is None
         follow_claim = await _claim(
@@ -1958,12 +1965,14 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     )
     assert same_request is not None and same_request["state"] == "ready"
 
-    source_follow_up = await store.conversation_commands.create_follow_up(
+    source_follow_up = await append_follow_up(
+        pool,
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="continue source",
     )
-    child_follow_up = await store.conversation_commands.create_follow_up(
+    child_follow_up = await append_follow_up(
+        pool,
         parent_job_id=child["id"],
         user_id=child["user_id"],
         prompt="continue child",
@@ -2200,6 +2209,7 @@ async def test_deleted_fork_child_gives_its_resident_slot_back_once_stopped(
 
 
 async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_failed(
+    pool,
     store: Storage,
 ):
     """Provider history and platform terminal state cannot drift by one turn."""
@@ -2228,7 +2238,8 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         idle_timeout_seconds=1800,
         base_sha=first["base_sha"],
     )
-    second = await store.conversation_commands.create_follow_up(
+    second = await append_follow_up(
+        pool,
         parent_job_id=first["id"],
         user_id=first["user_id"],
         prompt="continue after a lost final response",
@@ -2379,8 +2390,8 @@ async def test_execution_profile_persists_and_is_inherited_by_follow_up(pool, st
     async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET state = 'cancelled' WHERE id = $1", source["id"])
 
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=source["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=source["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert follow_up["execution_profile"] == "untrusted-kata-v1"
@@ -2479,6 +2490,7 @@ async def test_conversations_filter_pins_before_paginating_owned_active_threads(
 
 
 async def test_conversations_search_canonical_title_and_repo_with_literal_unicode(
+    pool,
     store: Storage,
 ):
     """Later turns and prompt body text cannot replace the durable task title."""
@@ -2487,8 +2499,8 @@ async def test_conversations_search_canonical_title_and_repo_with_literal_unicod
     )
     tip = original
     for _ in range(52):
-        tip = await store.conversation_commands.create_follow_up(
-            parent_job_id=tip["id"], user_id="user-1", prompt="later-turn-only keyword"
+        tip = await append_follow_up(
+            pool, parent_job_id=tip["id"], user_id="user-1", prompt="later-turn-only keyword"
         )
         assert tip is not None and "error" not in tip
     await _create_job(store, task_prompt="Unrelated task")
@@ -2578,8 +2590,8 @@ async def test_conversations_archive_repo_and_tenant_filters_are_independent(poo
 async def test_conversations_cannot_hold_a_foreign_turn(pool, store: Storage):
     """A turn's owner is its thread's owner; the schema refuses any other row."""
     parent = await _create_job(store)
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="turn body"
+    child = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="turn body"
     )
     assert child is not None
     import asyncpg
@@ -2741,11 +2753,11 @@ async def test_projects_sort_by_message_and_job_activity_preserving_pins(pool, s
     ]
 
 
-async def test_projects_summarize_a_user_s_repos_and_page_one_at_a_time(store: Storage):
+async def test_projects_summarize_a_user_s_repos_and_page_one_at_a_time(pool, store: Storage):
     """The sidebar's task tree: a folder per repo, and a page inside one."""
     first = await _create_job(store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="and the docs"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="user-1", prompt="and the docs"
     )
     assert follow_up is not None
     other = await _create_job(store, repo="example-org/other-repo")
@@ -2782,12 +2794,13 @@ async def test_archived_threads_leave_the_active_project_tree(store: Storage):
 
 
 async def test_archive_and_restore_filter_owned_threads_without_cancelling(
+    pool,
     store: Storage,
 ):
     """One owned job id archives every turn without changing run state."""
     parent = await _create_job(store)
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="also update the docs"
+    child = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="also update the docs"
     )
     assert child is not None
     foreign = await _create_job(
@@ -2866,8 +2879,8 @@ async def test_rename_persists_across_turns_and_search_without_changing_prompts(
 ):
     """The canonical thread title survives reads, follow-ups, and owner isolation."""
     parent = await _create_job(store)
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="also update the docs"
+    child = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="also update the docs"
     )
     foreign = await _create_job(store, user_id="user-2")
     title = "Renamed CSV conversation"
@@ -2892,8 +2905,8 @@ async def test_rename_persists_across_turns_and_search_without_changing_prompts(
         user_id="user-1", q="Renamed CSV"
     )
     assert [item["title"] for item in conversations["conversations"]] == [title]
-    next_turn = await store.conversation_commands.create_follow_up(
-        parent_job_id=child["id"], user_id="user-1", prompt="one more change"
+    next_turn = await append_follow_up(
+        pool, parent_job_id=child["id"], user_id="user-1", prompt="one more change"
     )
     assert next_turn["title"] == title
     for job_id in (foreign["id"], "ajob_missing"):
@@ -2921,8 +2934,8 @@ async def test_pin_and_unpin_owned_threads_are_idempotent_and_reorder_lists(
 ):
     """A pin covers every turn and its project, while foreign jobs remain private."""
     parent = await _create_job(store)
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="also update the docs"
+    child = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="also update the docs"
     )
     assert child is not None
     newer = await _create_job(store, repo="example-org/newer-repo")
@@ -2999,15 +3012,15 @@ async def test_pin_and_unpin_owned_threads_are_idempotent_and_reorder_lists(
     ]
 
 
-async def test_concurrent_follow_ups_form_one_linear_thread(store: Storage):
+async def test_concurrent_follow_ups_form_one_linear_thread(pool, store: Storage):
     """The thread lock serializes simultaneous sends instead of forking."""
     parent = await _create_job(store)
     children = await asyncio.gather(
-        store.conversation_commands.create_follow_up(
-            parent_job_id=parent["id"], user_id="user-1", prompt="first concurrent turn"
+        append_follow_up(
+            pool, parent_job_id=parent["id"], user_id="user-1", prompt="first concurrent turn"
         ),
-        store.conversation_commands.create_follow_up(
-            parent_job_id=parent["id"], user_id="user-1", prompt="second concurrent turn"
+        append_follow_up(
+            pool, parent_job_id=parent["id"], user_id="user-1", prompt="second concurrent turn"
         ),
     )
     ordered = sorted(
@@ -3019,7 +3032,7 @@ async def test_concurrent_follow_ups_form_one_linear_thread(store: Storage):
     assert [job["state"] for job in ordered] == ["queued", "queued"]
 
 
-async def test_shared_queued_follow_up_runs_before_snapshot_publish(store: Storage):
+async def test_shared_queued_follow_up_runs_before_snapshot_publish(pool, store: Storage):
     """A queued live turn never waits for the asynchronous group publisher."""
     parent, claim, sandbox = await _reserve_shared_chat(store)
     fence = {
@@ -3037,8 +3050,8 @@ async def test_shared_queued_follow_up_runs_before_snapshot_publish(store: Stora
     assert await store.sandbox.admit_thread_sandbox_turn(
         **fence, residency_generation=sandbox["residency_generation"], job_id=parent["id"]
     )
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id=parent["user_id"], prompt="already waiting"
+    child = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id=parent["user_id"], prompt="already waiting"
     )
     assert child is not None and child["state"] == "queued"
     assert (
@@ -3093,14 +3106,14 @@ async def test_shared_queued_follow_up_runs_before_snapshot_publish(store: Stora
     assert next_claim is not None and next_claim["id"] == child["id"]
 
 
-async def test_concurrent_claims_keep_queued_turns_in_order(store: Storage):
+async def test_concurrent_claims_keep_queued_turns_in_order(pool, store: Storage):
     """SKIP LOCKED must never turn the next row in one chat into parallel work."""
     parent = await _create_job(store)
-    first = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="second turn"
+    first = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="second turn"
     )
-    second = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="third turn"
+    second = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="third turn"
     )
     other = await _create_job(store, task_prompt="an independent chat")
     assert first is not None and second is not None
@@ -3259,6 +3272,7 @@ async def test_disabled_archive_policy_allows_legacy_host_and_replica(store: Sto
 
 @pytest.mark.parametrize("parent_already_running", [False, True])
 async def test_cancelled_intermediate_turns_do_not_bypass_unfinished_ancestor(
+    pool,
     store: Storage,
     parent_already_running: bool,
 ):
@@ -3271,8 +3285,8 @@ async def test_cancelled_intermediate_turns_do_not_bypass_unfinished_ancestor(
     )
     children = []
     for number in range(3):
-        child = await store.conversation_commands.create_follow_up(
-            parent_job_id=parent["id"], user_id="user-1", prompt=f"follow-up {number}"
+        child = await append_follow_up(
+            pool, parent_job_id=parent["id"], user_id="user-1", prompt=f"follow-up {number}"
         )
         assert child is not None and child["state"] == "queued"
         children.append(child)
@@ -3357,7 +3371,8 @@ async def test_settlement_and_concurrent_follow_up_use_one_lock_order(pool, stor
         )
         await asyncio.sleep(0.05)
         follow_up = asyncio.create_task(
-            store.conversation_commands.create_follow_up(
+            append_follow_up(
+                pool,
                 parent_job_id=parent["id"],
                 user_id=parent["user_id"],
                 prompt="send while settlement holds its locks",
@@ -4339,6 +4354,7 @@ async def test_retained_container_identity_cannot_be_replaced_or_reimaged(
 
 
 async def test_retained_follow_up_keeps_owning_host_image_and_cli_pin_after_pool_switch(
+    pool,
     store: Storage,
 ):
     job = await _create_job(store)
@@ -4422,7 +4438,8 @@ async def test_retained_follow_up_keeps_owning_host_image_and_cli_pin_after_pool
         is None
     )
     assert await store.host_pool.set_active_runner_host(host="runner-b")
-    child = await store.conversation_commands.create_follow_up(
+    child = await append_follow_up(
+        pool,
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="continue",
@@ -4634,11 +4651,13 @@ async def test_an_activation_whose_lease_lapsed_cannot_be_released_as_intact(
 
 
 async def test_invalid_context_before_admission_marks_chat_and_queued_turns_lost(
+    pool,
     store: Storage,
 ):
     """A missing native locator fails closed before any new prompt is sent."""
     job, claim, sandbox = await _reserve_retained_chat(store)
-    child = await store.conversation_commands.create_follow_up(
+    child = await append_follow_up(
+        pool,
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="do not leave this turn waiting forever",
@@ -4662,7 +4681,8 @@ async def test_invalid_context_before_admission_marks_chat_and_queued_turns_lost
     queued = await store.conversation_queries.get_job(child["id"])
     assert queued["state"] == "failed"
     assert "lost the retained sandbox context" in queued["detail"]
-    assert await store.conversation_commands.create_follow_up(
+    assert await append_follow_up(
+        pool,
         parent_job_id=child["id"],
         user_id=job["user_id"],
         prompt="still must not be accepted",
@@ -4670,6 +4690,7 @@ async def test_invalid_context_before_admission_marks_chat_and_queued_turns_lost
 
 
 async def test_failed_admitted_turn_fails_queued_follow_up(
+    pool,
     store: Storage,
 ):
     """A terminal job and a LOST context are different scheduling signals."""
@@ -4689,7 +4710,8 @@ async def test_failed_admitted_turn_fails_queued_follow_up(
     assert await store.sandbox.admit_thread_sandbox_turn(
         **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
     )
-    child = await store.conversation_commands.create_follow_up(
+    child = await append_follow_up(
+        pool,
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="this cannot run after an ambiguous turn",
@@ -4928,7 +4950,8 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
         residency_generation=residency["generation"],
         job_id=job["id"],
     )
-    child = await store.conversation_commands.create_follow_up(
+    child = await append_follow_up(
+        pool,
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="must not run after an ambiguous shared turn",
@@ -5045,7 +5068,8 @@ async def test_expired_shared_finalization_preserves_context_and_snapshot_progre
         idle_timeout_seconds=1800,
         base_sha=job["base_sha"],
     )
-    child = await store.conversation_commands.create_follow_up(
+    child = await append_follow_up(
+        pool,
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="continue from the settled shared context",
@@ -5113,7 +5137,8 @@ async def test_expired_job_finalization_preserves_an_already_settled_context(
         )
         is not None
     )
-    child = await store.conversation_commands.create_follow_up(
+    child = await append_follow_up(
+        pool,
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="continue from the already-settled context",
@@ -5163,7 +5188,8 @@ async def test_expired_retained_admission_fails_closed_instead_of_replaying(
     assert await store.sandbox.admit_thread_sandbox_turn(
         **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
     )
-    child = await store.conversation_commands.create_follow_up(
+    child = await append_follow_up(
+        pool,
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="must not run after an expired admitted turn",
@@ -6664,7 +6690,7 @@ async def test_a_row_cannot_claim_a_number_is_both_exclusive_and_shared(
     assert job["id"]
 
 
-async def test_thread_events_span_every_turn_and_page(store: Storage):
+async def test_thread_events_span_every_turn_and_page(pool, store: Storage):
     """A thread's complete log stays ordered and pageable across follow-ups."""
     first = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
@@ -6684,8 +6710,8 @@ async def test_thread_events_span_every_turn_and_page(store: Storage):
         to_state="failed",
         detail="synthetic first-turn failure",
     )
-    second = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="and the docs"
+    second = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="user-1", prompt="and the docs"
     )
     assert second is not None
 
@@ -6720,13 +6746,13 @@ async def test_thread_events_stop_at_the_owner(store: Storage):
     )
 
 
-async def test_session_pages_count_threads_and_keep_long_conversation_titles(store: Storage):
+async def test_session_pages_count_threads_and_keep_long_conversation_titles(pool, store: Storage):
     """A long thread cannot consume the history window or replace its title."""
     jobs = [await _create_job(store, task_prompt=f"History task {index}") for index in range(55)]
     long_thread = jobs[0]
     for index in range(60):
-        child = await store.conversation_commands.create_follow_up(
-            parent_job_id=long_thread["id"], user_id="user-1", prompt=f"Follow-up {index}"
+        child = await append_follow_up(
+            pool, parent_job_id=long_thread["id"], user_id="user-1", prompt=f"Follow-up {index}"
         )
         assert child is not None and child["turn_no"] == index + 2
     await store.conversation_commands.set_sessions_archived(
@@ -6807,8 +6833,8 @@ async def test_idle_sessions_filter_latest_turn_before_pagination_and_facets(poo
     published = await _create_job(store, task_prompt="Published", repo="acme/web")
     stopped = await _create_job(store, task_prompt="Stopped", repo="acme/api")
     older_completed = await _create_job(store, task_prompt="Continued", repo="acme/api")
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=older_completed["id"], user_id="user-1", prompt="Continue working"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=older_completed["id"], user_id="user-1", prompt="Continue working"
     )
     assert follow_up is not None and follow_up["state"] == "queued"
     foreign = await _create_job(store, user_id="user-2", repo="acme/api")
@@ -6880,8 +6906,8 @@ async def test_conversation_state_keeps_active_work_visible_after_cancelling_que
     store: Storage,
 ):
     first = await _create_job(store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="Queued follow-up"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="user-1", prompt="Queued follow-up"
     )
     assert follow_up is not None and follow_up["state"] == "queued"
     assert (await store.conversation_queries.get_job(first["id"]))["conversation_state"] == "queued"
@@ -7033,8 +7059,8 @@ async def test_session_mutations_are_atomic_owner_scoped_and_irreversible(pool, 
     ) == {"error": "not_found"}
     assert (await store.conversation_queries.get_job(busy["id"]))["archived_at"] is not None
     assert (
-        await store.conversation_commands.create_follow_up(
-            parent_job_id=mine["id"], user_id="user-1", prompt="must not resurrect"
+        await append_follow_up(
+            pool, parent_job_id=mine["id"], user_id="user-1", prompt="must not resurrect"
         )
         is None
     )
@@ -7071,8 +7097,8 @@ async def test_archiving_serializes_with_follow_up_creation(pool, store: Storage
             "UPDATE agent_threads SET archived_at = NOW() WHERE id = $1", job["thread_id"]
         )
         follow_up = asyncio.create_task(
-            store.conversation_commands.create_follow_up(
-                parent_job_id=job["id"], user_id="user-1", prompt="racing message"
+            append_follow_up(
+                pool, parent_job_id=job["id"], user_id="user-1", prompt="racing message"
             )
         )
         await asyncio.sleep(0.03)
@@ -7091,8 +7117,8 @@ async def test_archiving_serializes_with_follow_up_creation(pool, store: Storage
     await store.conversation_commands.set_sessions_archived(
         thread_ids=[job["thread_id"]], user_id="user-1", archived=False
     )
-    resumed = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="resume"
+    resumed = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="resume"
     )
     assert resumed is not None and resumed["turn_no"] == 2
 
@@ -7188,8 +7214,8 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
             """,
             claim["attempt_id"],
         )
-    sibling_turn = await store.conversation_commands.create_follow_up(
-        parent_job_id=sibling["id"], user_id="user-1", prompt="independent work"
+    sibling_turn = await append_follow_up(
+        pool, parent_job_id=sibling["id"], user_id="user-1", prompt="independent work"
     )
     assert sibling_turn is not None and sibling_turn["state"] == "queued"
     before = await store.sandbox.thread_sandbox(thread_id=source["thread_id"])
@@ -7484,7 +7510,7 @@ async def test_sandbox_of_deleted_sessions_is_stopped_then_deleted(
     assert retained is not None and retained["task_prompt"] == source["task_prompt"]
 
 
-async def test_generated_title_is_canonical_and_stable_across_turns(store: Storage):
+async def test_generated_title_is_canonical_and_stable_across_turns(pool, store: Storage):
     """The prompt remains intact while each turn reads the same short summary."""
     prompt = "Please implement the CSV export for SPRUCE_8462 with detailed validation."
     job, claim, sandbox = await _reserve_shared_chat(store, task_prompt=prompt)
@@ -7532,8 +7558,8 @@ async def test_generated_title_is_canonical_and_stable_across_turns(store: Stora
     assert await store.attempt_commands.transition(
         **fence, from_states=("running",), to_state="succeeded"
     )
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id=job["user_id"], prompt="Now add JSON too"
+    child = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="Now add JSON too"
     )
     assert child is not None and child.get("error") is None
     assert child["title"] == saved["title"]
@@ -7746,8 +7772,8 @@ async def test_followup_recovers_original_topic_and_legacy_warmup_title(pool, st
     assert await store.attempt_commands.transition(
         **fence, from_states=("running",), to_state="succeeded"
     )
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id=job["user_id"], prompt="Now add JSON too"
+    child = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="Now add JSON too"
     )
     assert child is not None and child.get("error") is None
     next_claim = await _claim(
@@ -7800,6 +7826,7 @@ async def test_successful_short_task_accepts_delayed_title(pool, store: Storage)
 
 
 async def test_a_cancelled_parent_released_by_the_platform_unblocks_its_queued_child(
+    pool,
     store: Storage,
 ):
     """A platform-side release that lands as ``cancelled`` is a turn boundary too.
@@ -7810,8 +7837,8 @@ async def test_a_cancelled_parent_released_by_the_platform_unblocks_its_queued_c
     parent = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None and claim["id"] == parent["id"]
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="and then this"
+    child = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="and then this"
     )
     assert child is not None and child["state"] == "queued"
 
@@ -7838,8 +7865,8 @@ async def test_queued_follow_up_needs_no_promotion_after_parent_finishes(
     parent = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="and then this"
+    child = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="and then this"
     )
     assert child is not None and child["state"] == "queued"
     # A terminal parent without the scoped continuity cleanup, as can exist
@@ -7864,11 +7891,11 @@ async def test_queued_cleanup_fails_tail_after_success_without_retained_context(
 ):
     """Legacy success cannot cause a queued follow-up to start a fresh sandbox."""
     parent = await _create_job(store)
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="second turn"
+    child = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="second turn"
     )
-    grandchild = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="third turn"
+    grandchild = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="third turn"
     )
     assert child is not None and grandchild is not None
     async with pool.acquire() as conn:
@@ -7910,8 +7937,8 @@ async def test_queued_child_with_lost_membership_is_not_claimed_before_cleanup(
     assert await store.sandbox.admit_thread_sandbox_turn(
         **fence, residency_generation=sandbox["residency_generation"], job_id=parent["id"]
     )
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="second turn"
+    child = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="second turn"
     )
     assert child is not None and child["state"] == "queued"
     assert await store.sandbox.settle_thread_sandbox(
@@ -7984,8 +8011,8 @@ async def test_conversations_activity_counts_an_earlier_turn_finishing_last(
     parent = await _create_job(store, task_prompt="first conversation")
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None and claim["id"] == parent["id"]
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="never mind"
+    child = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="never mind"
     )
     assert child is not None and child["state"] == "queued"
     assert (
@@ -8017,8 +8044,8 @@ async def test_conversations_activity_counts_a_publication_of_an_earlier_turn(
 ):
     """Publication stamps the turns it included, and that is activity too."""
     parent = await _create_job(store, task_prompt="first conversation")
-    child = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="never mind"
+    child = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="never mind"
     )
     assert child is not None
     assert (

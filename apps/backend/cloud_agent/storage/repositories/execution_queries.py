@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cloud_agent.storage._sql.ledger import USAGE_EVENT_PAYLOAD_SQL, fetch_job_usage_inputs
+from cloud_agent.storage._sql.ledger import USAGE_EVENT_PAYLOAD_SQL
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 
@@ -147,19 +147,6 @@ class PostgresExecutionQueries:
                 for row in events
             ],
         }
-
-    async def job_usage_inputs(self, *, job_id: str) -> dict[str, Any]:
-        """Read runtime usage for this job's attempts, excluding sibling turns.
-
-        Keep the same compact payload projection as thread_stats_inputs so
-        output-presence detection and retry deduplication have identical
-        semantics when compared with this job's Gateway snapshots.
-        """
-        async with (
-            self._pool.acquire() as conn,
-            conn.transaction(isolation="repeatable_read", readonly=True),
-        ):
-            return await fetch_job_usage_inputs(conn, job_id)
 
     async def job_attempts_telemetry(self, *, job_id: str) -> list[dict[str, Any]]:
         """Read lightweight attempt summaries without tool or process rows."""
