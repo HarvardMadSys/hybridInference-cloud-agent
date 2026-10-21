@@ -35,9 +35,11 @@ from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
+from cloud_agent.storage._sql.environment_runs import env_run_blocks_host, env_runs_holding_slots
 from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.goals import arm_finish_wakeup, goal_after_terminal
 from cloud_agent.storage._sql.hosts import (
+    DELETED_GROUP_STATES_SQL,
     LIVE_ATTEMPT_HOST,
     SILENT_HOST_GROUP_SQL,
     host_slots_exhausted,
@@ -49,16 +51,20 @@ from cloud_agent.storage._sql.jobs import (
     fail_discontinuous_follow_ups,
     fail_unrunnable_follow_ups,
     lock_conversation_by_job,
+    runnable_queued_turn,
 )
 from cloud_agent.storage._sql.ledger import (
     REQUEST_ATTEMPT_LEDGER_REFRESH_SQL,
     carries_model_usage,
 )
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
-from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
+from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, stored_archive_settings
 from cloud_agent.storage._sql.sandbox import (
     THREAD_SANDBOX_CLAIM_SOURCE,
     THREAD_SANDBOX_SOURCE,
+    group_has_live_peer,
+    group_is_quiet,
+    member_turn_running,
     release_restore,
     restore_claim_due,
 )
@@ -240,16 +246,8 @@ class PostgresAttemptCommands:
             if host_slots_exhausted(host_row):
                 return None
             capabilities = load_json(host_row["capabilities"]) or []
-            archive_raw = (
-                {}
-                if policy is None
-                else {
-                    **(load_json(policy["sandbox_archive_settings"]) or {}),
-                    "revision": policy["sandbox_archive_revision"],
-                }
-            )
             try:
-                archive_policy = load_stored_archive_policy(archive_raw)
+                archive_policy = load_stored_archive_policy(stored_archive_settings(policy))
             except SandboxArchivePolicyError:
                 return None
             archive_required = archive_policy.enabled
@@ -299,32 +297,9 @@ class PostgresAttemptCommands:
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id = j.thread_id
                 LEFT JOIN {THREAD_SANDBOX_CLAIM_SOURCE} ON s.thread_id = j.thread_id
-                WHERE j.state = 'queued' AND j.cancel_requested = FALSE
-                  AND (j.claim_retry_at IS NULL OR j.claim_retry_at <= clock_timestamp())
-                  AND NOT EXISTS (
-                        SELECT 1 FROM agent_jobs earlier
-                        WHERE earlier.thread_id = j.thread_id
-                          AND earlier.turn_no < j.turn_no
-                          AND earlier.state IN ('queued', 'running')
-                  )
-                  -- An automatic round is re-checked against the goal it was
-                  -- created for, here, immediately before it is handed to a
-                  -- host. A round that was queued for an objective the owner
-                  -- has since replaced, paused or cleared must never run: it
-                  -- would work toward a withdrawn objective and pay for it.
-                  -- The sweep in ``sweep_goal_scheduling`` cancels what this
-                  -- skips, so nothing waits here forever.
-                  AND (
-                        j.turn_source <> 'goal'
-                        OR EXISTS (
-                            SELECT 1 FROM agent_threads goal_thread
-                            WHERE goal_thread.id = j.thread_id
-                              AND goal_thread.deleted_at IS NULL
-                              AND goal_thread.goal_state = 'active'
-                              AND goal_thread.goal_id = j.goal_id
-                              AND goal_thread.goal_revision = j.goal_revision
-                        )
-                  )
+                -- An automatic round is re-checked against the goal it was
+                -- created for here, immediately before it is handed out.
+                WHERE {runnable_queued_turn("j")}
                   AND COALESCE(j.metadata->'requires', '[]'::jsonb) <@ $1::jsonb
                   AND (
                         t.execution_profile = '{ExecutionProfile.TRUSTED_V1.value}'
@@ -348,7 +323,7 @@ class PostgresAttemptCommands:
                             AND NOT EXISTS (
                                 SELECT 1 FROM agent_sandboxes deleting
                                 WHERE deleting.id = s.sandbox_id
-                                  AND deleting.deletion_state IN ('pending', 'archived', 'deleted')
+                                  AND deleting.deletion_state IN {DELETED_GROUP_STATES_SQL}
                             )
                             AND s.fork_operation_id IS NULL
                             AND s.context_status <> 'lost'
@@ -377,7 +352,7 @@ class PostgresAttemptCommands:
                             AND NOT EXISTS (
                                 SELECT 1 FROM agent_sandboxes deleting
                                 WHERE deleting.id = s.sandbox_id
-                                  AND deleting.deletion_state IN ('pending', 'archived', 'deleted')
+                                  AND deleting.deletion_state IN {DELETED_GROUP_STATES_SQL}
                             )
                             AND s.fork_operation_id IS NULL
                             AND s.context_status <> 'lost'
@@ -439,7 +414,7 @@ class PostgresAttemptCommands:
                     "OR ($2 AND state = 'cold' AND restore_checkpoint_id IS NOT NULL AND "
                     f"{restore_claim_due('restore_attempts', 'last_activity_at')})) "
                     "AND stop_requested_at IS NULL "
-                    "AND deletion_state NOT IN ('pending', 'archived', 'deleted') "
+                    f"AND deletion_state NOT IN {DELETED_GROUP_STATES_SQL} "
                     "FROM agent_sandboxes "
                     "WHERE id = $1 " + ("FOR UPDATE" if restore or take_silent else "FOR SHARE"),
                     thread_sandbox["sandbox_id"],
@@ -477,11 +452,10 @@ class PostgresAttemptCommands:
                 SET slots_used = slots_used + 1
                 WHERE host = $1
                   AND status = '{HOST_ONLINE}'
-                  AND (slots_total IS NULL OR slots_used + (SELECT COUNT(*) FROM agent_environment_runs er WHERE er.host=$1 AND NOT er.cleanup_complete AND er.lease_expires_at>NOW() AND er.started_at>NOW()-INTERVAL '30 minutes') < slots_total)
-                  AND (slots_desired IS NULL OR slots_used + (SELECT COUNT(*) FROM agent_environment_runs er WHERE er.host=$1 AND NOT er.cleanup_complete AND er.lease_expires_at>NOW() AND er.started_at>NOW()-INTERVAL '30 minutes') < slots_desired)
+                  AND (slots_total IS NULL OR slots_used + {env_runs_holding_slots("$1")} < slots_total)
+                  AND (slots_desired IS NULL OR slots_used + {env_runs_holding_slots("$1")} < slots_desired)
                   AND NOT EXISTS (SELECT 1 FROM agent_environment_runs er
-                      WHERE er.host=$1 AND NOT er.cleanup_complete
-                      AND (er.lease_expires_at<=NOW() OR er.started_at<=NOW()-INTERVAL '30 minutes'))
+                      WHERE er.host=$1 AND {env_run_blocks_host("er")})
                   AND credential_hash = $2
                   AND (
                         $3::boolean
@@ -1060,46 +1034,21 @@ class PostgresAttemptCommands:
                     )
                     if sandbox_transition is not None:
                         await conn.execute(
-                            """
+                            f"""
                             UPDATE agent_sandboxes g
                             SET state = CASE
                                     WHEN $3 AND g.container_id IS NULL THEN 'lost'
                                     WHEN $2 THEN 'running'
-                                    WHEN g.active_operation_count > 0 OR EXISTS (
-                                        SELECT 1
-                                        FROM agent_thread_sandbox_memberships peer
-                                        WHERE peer.sandbox_id = g.id
-                                          AND peer.active_attempt_id IS NOT NULL
-                                    ) THEN 'running'
-                                    WHEN EXISTS (
-                                        SELECT 1
-                                        FROM agent_thread_sandbox_memberships peer
-                                        WHERE peer.sandbox_id = g.id
-                                          AND peer.thread_id <> $4
-                                          AND peer.context_status <> 'lost'
-                                          AND peer.native_state <> 'lost'
-                                    ) THEN 'running'
+                                    WHEN g.active_operation_count > 0 OR {member_turn_running("g")} THEN 'running'
+                                    WHEN {group_has_live_peer("g", excluding="$4")} THEN 'running'
                                     ELSE 'stopping'
                                 END,
                                 last_activity_at = NOW(),
                                 idle_deadline = CASE
                                     WHEN (
-                                        $2 OR EXISTS (
-                                            SELECT 1
-                                            FROM agent_thread_sandbox_memberships peer
-                                            WHERE peer.sandbox_id = g.id
-                                              AND peer.thread_id <> $4
-                                              AND peer.context_status <> 'lost'
-                                              AND peer.native_state <> 'lost'
-                                        )
+                                        $2 OR {group_has_live_peer("g", excluding="$4")}
                                      )
-                                     AND g.active_operation_count = 0
-                                     AND NOT EXISTS (
-                                        SELECT 1
-                                        FROM agent_thread_sandbox_memberships peer
-                                        WHERE peer.sandbox_id = g.id
-                                          AND peer.active_attempt_id IS NOT NULL
-                                     )
+                                     AND {group_is_quiet("g")}
                                     THEN COALESCE(
                                         g.idle_deadline,
                                         clock_timestamp() + make_interval(secs => g.idle_timeout_seconds)
@@ -1829,42 +1778,19 @@ class PostgresAttemptCommands:
             )
             if lost_member is not None:
                 await conn.execute(
-                    """
+                    f"""
                     UPDATE agent_sandboxes g
                     SET state = CASE
                             WHEN g.container_id IS NULL THEN 'lost'
-                            WHEN g.active_operation_count > 0 OR EXISTS (
-                                SELECT 1
-                                FROM agent_thread_sandbox_memberships peer
-                                WHERE peer.sandbox_id = g.id
-                                  AND peer.active_attempt_id IS NOT NULL
-                            ) THEN 'running'
-                            WHEN EXISTS (
-                                SELECT 1
-                                FROM agent_thread_sandbox_memberships peer
-                                WHERE peer.sandbox_id = g.id
-                                  AND peer.context_status <> 'lost'
-                                  AND peer.native_state <> 'lost'
-                            ) THEN 'running'
+                            WHEN g.active_operation_count > 0 OR {member_turn_running("g")} THEN 'running'
+                            WHEN {group_has_live_peer("g")} THEN 'running'
                             ELSE 'stopping'
                         END,
                         last_activity_at = NOW(),
                         idle_deadline = CASE
                             WHEN g.container_id IS NOT NULL
-                             AND g.active_operation_count = 0
-                             AND NOT EXISTS (
-                                SELECT 1
-                                FROM agent_thread_sandbox_memberships peer
-                                WHERE peer.sandbox_id = g.id
-                                  AND peer.active_attempt_id IS NOT NULL
-                             )
-                             AND EXISTS (
-                                SELECT 1
-                                FROM agent_thread_sandbox_memberships peer
-                                WHERE peer.sandbox_id = g.id
-                                  AND peer.context_status <> 'lost'
-                                  AND peer.native_state <> 'lost'
-                             )
+                             AND {group_is_quiet("g")}
+                             AND {group_has_live_peer("g")}
                             THEN clock_timestamp() + make_interval(
                                 secs => g.idle_timeout_seconds
                             )
