@@ -42,8 +42,7 @@ if TYPE_CHECKING:
     from cloud_agent.goals.models import GoalInput, GoalPauseReason
 
 #: The goal's own columns, read back after every write so the caller always
-#: sees what the row now says rather than what it asked for. Written once as
-#: names because there are two projections of them and they must not drift.
+#: sees what the row now says rather than what it asked for.
 _GOAL_COLUMN_NAMES = (
     "goal_id",
     "goal_objective",
@@ -65,16 +64,9 @@ _GOAL_COLUMN_NAMES = (
 #: not introduce.
 _GOAL_COLUMNS = ", ".join(_GOAL_COLUMN_NAMES)
 
-#: For reads that join. ``0019`` put ``goal_revision`` on ``agent_jobs`` as well
-#: — the revision *that turn* was created for — so an unqualified name is
-#: ambiguous there, and Postgres refuses the whole statement (42702) rather than
-#: picking one.
-_GOAL_COLUMNS_QUALIFIED = ", ".join(f"t.{name}" for name in _GOAL_COLUMN_NAMES)
-
 #: Everything a caller needs to decide what a write means, with the two derived
 #: counters, formatted for a read that has ``agent_threads t`` in scope.
 _GOAL_READ_COLUMNS = f"{_GOAL_COLUMNS}, {ROUNDS_USED_SQL}, {REPAIRS_USED_SQL}"
-_GOAL_READ_COLUMNS_QUALIFIED = f"{_GOAL_COLUMNS_QUALIFIED}, {ROUNDS_USED_SQL}, {REPAIRS_USED_SQL}"
 
 #: The columns a caller needs to decide whether the objective changed, and
 #: whether the goal being set is one that was already complete.
