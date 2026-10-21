@@ -72,14 +72,13 @@ from cloud_agent.mcp.jsonrpc import (
     METHOD_NOT_FOUND,
     PARSE_ERROR,
 )
-from cloud_agent.mcp.models import CapabilityKind, McpServer
+from cloud_agent.mcp.models import CapabilityKind
 from cloud_agent.mcp.net_policy import policy_from_environment
 from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
 from cloud_agent.mcp.registry import (
     binding_from_row,
     invocation_cipher,
     resolve_connection,
-    server_for,
 )
 from cloud_agent.mcp.resources import (
     ResourceResolutionError,
@@ -166,7 +165,6 @@ class Authorized:
     compile and authorize the wrong thing.
     """
 
-    server: McpServer
     job_id: str
     user_id: str
     thread_id: str
@@ -524,18 +522,7 @@ async def _resolve_binding(
         )
         raise _refused(503, "server_error", f"The {alias!r} MCP connection is not usable.")
     binding = binding_from_row(binding_row)
-    if binding.selection_pending and resolved.snapshot is not None:
-        # A migrated session advertises what the server offers and confirms
-        # every call, which is how it keeps working without inheriting an
-        # approval its owner never gave.
-        allowed = visible_capabilities(binding, resolved.snapshot.tools, CapabilityKind.TOOL)
-    else:
-        allowed = visible_capabilities(
-            binding, resolved.snapshot.tools if resolved.snapshot else (), CapabilityKind.TOOL
-        )
-    server = server_for(resolved, binding, tools=allowed)
     return Authorized(
-        server=server,
         job_id=job_id,
         user_id=identity["user_id"],
         thread_id=identity["thread_id"],
@@ -831,7 +818,6 @@ async def _wait_for_approval(  # noqa: PLR0912 complexity baseline, #771
                     if claimed is not None:
                         # OAuth may have refreshed while the user was deciding.
                         # Use the checked connection's current credential for dispatch.
-                        authorized.server = current.server
                         authorized.connection = current.connection
                         authorized.secret = current.secret
                         authorized.dispatches.append(
