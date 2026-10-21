@@ -31,8 +31,6 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_THREAD_LABEL,
     CHAT_WORKDIR,
-    FINAL_ARCHIVE_MARKER_NAME,
-    INITIAL_ARCHIVE_MARKER_ROOT,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
     TURN_NETWORK_PROOF_S,
@@ -45,6 +43,10 @@ from cloud_agent_host.chat_sandbox import (
     SandboxActionFacts,
     _RetainedTerminalProcess,
     claude_member_config_dir,
+)
+from cloud_agent_host.chat_sandbox_markers import (
+    FINAL_ARCHIVE_MARKER_NAME,
+    INITIAL_ARCHIVE_MARKER_ROOT,
 )
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,

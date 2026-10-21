@@ -11,7 +11,7 @@ from cloud_agent.sandbox_manager_routing import (
 )
 from cloud_agent.schemas import HostRegisterRequest
 from cloud_agent.source_control import SourceControlCipher
-from cloud_agent_host.chat_sandbox import INITIAL_ARCHIVE_MARKER_ROOT
+from cloud_agent_host.chat_sandbox_markers import INITIAL_ARCHIVE_MARKER_ROOT
 from cloud_agent_host.runner import _sandbox_manager_url_from_env
 from cloud_agent_shared.sandbox_manager_compat import LEGACY_ENV_NAMES, manager_env
 
