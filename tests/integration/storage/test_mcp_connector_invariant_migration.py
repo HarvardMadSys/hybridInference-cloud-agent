@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import asyncpg
 import pytest
@@ -22,7 +22,7 @@ _NEXT = "0059_counter_constraints"
 _HEAD = "0089_superseded_removals"
 _OWNER = "user-owner"
 _OTHER = "user-other"
-_PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
+_PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=UTC)
 
 
 def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:

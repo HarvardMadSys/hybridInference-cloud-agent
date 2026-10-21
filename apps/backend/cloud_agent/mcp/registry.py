@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.logging_utils import get_logger
@@ -304,8 +304,8 @@ def _has_expired(row: Mapping[str, Any], *, margin_seconds: int = 0) -> bool:
     if expires_at is None:
         return False
     if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
+        expires_at = expires_at.replace(tzinfo=UTC)
+    now = datetime.now(UTC)
     if margin_seconds:
         from datetime import timedelta
 

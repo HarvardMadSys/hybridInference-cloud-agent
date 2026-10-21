@@ -72,7 +72,7 @@ async def _set(
     thread_id: str,
     *,
     objective: str = GOAL["objective"],
-    max_rounds: int | None | object = OMITTED,
+    max_rounds: int | object | None = OMITTED,
     revision: int | None = None,
 ) -> dict[str, Any]:
     """Write the goal and hand back the response body.

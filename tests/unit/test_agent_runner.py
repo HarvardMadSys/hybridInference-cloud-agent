@@ -8,7 +8,7 @@ import socket
 import threading
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -2073,7 +2073,7 @@ def _enable_profiling(monkeypatch, **overrides):
     run = {
         "run_id": "runner-stages-1",
         "operations": [runner_mod.STARTUP_OPERATION],
-        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=30)).isoformat(),
         "max_operations": 5,
     }
     run.update(overrides)

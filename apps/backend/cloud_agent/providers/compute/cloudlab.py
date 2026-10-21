@@ -12,7 +12,7 @@ import re
 import socket
 import ssl
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlencode, urlsplit
 from uuid import UUID
@@ -1009,7 +1009,7 @@ class CloudLabProvider(ComputeProvider):
             ref=ref,
             state=state,
             raw_state=raw[:128],
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
             expires_at=expires,
             lease_known=expires is not None,
             nodes=tuple(nodes),
@@ -1155,7 +1155,7 @@ class CloudLabProvider(ComputeProvider):
                 config.credential_ref,
                 diagnostic_context=diagnostic_context,
                 payload={
-                    "expires_at": request.target_expires_at.astimezone(timezone.utc).isoformat(),
+                    "expires_at": request.target_expires_at.astimezone(UTC).isoformat(),
                     "reason": request.reason,
                 },
             )
@@ -1248,7 +1248,7 @@ class CloudLabProvider(ComputeProvider):
                 ref=ref,
                 state="terminated",
                 raw_state="delete_acknowledged",
-                observed_at=datetime.now(timezone.utc),
+                observed_at=datetime.now(UTC),
                 lease_known=True,
                 scope_complete=True,
             ),

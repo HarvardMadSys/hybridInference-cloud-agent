@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import secrets
 from contextlib import suppress
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -142,7 +142,7 @@ def _preferred_host_key(keys: list[str]) -> str:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _provider_observation_is_fresh(observation: ResourceObservation) -> bool:
@@ -150,7 +150,7 @@ def _provider_observation_is_fresh(observation: ResourceObservation) -> bool:
     observed_at = observation.observed_at
     if observed_at.tzinfo is None:
         return False
-    age = (_now() - observed_at.astimezone(timezone.utc)).total_seconds()
+    age = (_now() - observed_at.astimezone(UTC)).total_seconds()
     return -30 <= age <= 300
 
 

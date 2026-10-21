@@ -1269,7 +1269,7 @@ class SharedChatSessionSupervisor:
         self,
         group: _Group,
         *,
-        start_seq: int | None | _SameRun = _SAME_RUN,
+        start_seq: int | _SameRun | None = _SAME_RUN,
         facts: SandboxActionFacts | None = None,
         observer: StageRecorder | None = None,
     ) -> ChatSandboxInspection:
@@ -2101,7 +2101,7 @@ class SharedChatSessionSupervisor:
         group.run_unfenced = start_seq is None
 
     @staticmethod
-    def _join_run_locked(group: _Group, start_seq: int | None | _SameRun) -> None:
+    def _join_run_locked(group: _Group, start_seq: int | _SameRun | None) -> None:
         """Count a request admitted while the group runs in that run's label.
 
         Called where the request is admitted, under the lock that keeps the
@@ -3851,7 +3851,7 @@ class SharedChatSessionSupervisor:
         preparer: Any,
         *,
         activation_owner: str | None = None,
-        start_seq: int | None | _SameRun = _SAME_RUN,
+        start_seq: int | _SameRun | None = _SAME_RUN,
     ) -> dict[str, Any]:
         """Serialize preparation with writers, preserving this activation's lease.
 
@@ -5300,7 +5300,7 @@ class SharedChatSessionSupervisor:
         return "resume" if launch.native_session_id else "new"
 
     def _ensure_running(
-        self, group: _Group, *, start_seq: int | None | _SameRun = _SAME_RUN
+        self, group: _Group, *, start_seq: int | _SameRun | None = _SAME_RUN
     ) -> None:
         current = self._manager.inspect(group.spec.container_name)
         if current is None:

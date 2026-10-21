@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from tests.servers.test_mcp_relay_host import (
@@ -30,7 +30,7 @@ _HANG_GUARD_S = 10
 def _oauth(store):
     store.connections[7].update(
         auth_kind="oauth",
-        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
         refresh_token_ciphertext=mcp_cipher().encrypt("refresh-fixture"),
         issuer="http://127.0.0.1:9",
         resource="http://127.0.0.1:9/mcp",

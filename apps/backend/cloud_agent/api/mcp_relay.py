@@ -45,7 +45,7 @@ import asyncio
 import contextlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import httpx
@@ -797,7 +797,7 @@ async def _decide_call(
         authorization_epoch=authorized.connection.authorization_epoch,
         capability_revision=authorized.connection.capability_revision,
         policy_revision=authorized.binding.policy_revision,
-        expires_at=deadline_for(created_at=datetime.now(timezone.utc)).expires_at,
+        expires_at=deadline_for(created_at=datetime.now(UTC)).expires_at,
         **_residency_fence({"residency_generation": authorized.residency_generation}),
     )
     logger.info(
@@ -849,7 +849,7 @@ async def _wait_for_approval(
             while True:
                 if request is not None and await request.is_disconnected():
                     raise asyncio.CancelledError
-                if datetime.now(timezone.utc) >= invocation["expires_at"]:
+                if datetime.now(UTC) >= invocation["expires_at"]:
                     message = (
                         "MCP approval expired while waiting for the owner's decision; "
                         "this call was not sent to the server. Ask the owner to review "
@@ -940,7 +940,7 @@ async def _until_decided(
 ) -> None:
     """Wait for the held call's decision, its expiry, or the next look anyway."""
     look = _APPROVAL_IDLE_S if signal is not None and signal.listening else _APPROVAL_POLL_S
-    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    remaining = (expires_at - datetime.now(UTC)).total_seconds()
     timeout_s = max(0.0, min(look, remaining))
     if signal is None or woken is None:
         await asyncio.sleep(timeout_s)

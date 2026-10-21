@@ -7,7 +7,7 @@ import logging
 import math
 import uuid
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .clock import clock
@@ -302,7 +302,7 @@ def _manifest_deadline(manifest: Mapping[str, Any]) -> float | None:
         return math.inf
     if not isinstance(expires_at, datetime):
         return None
-    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    remaining = (expires_at - datetime.now(UTC)).total_seconds()
     if remaining <= 0:
         return None
     return clock().monotonic() + remaining
@@ -319,8 +319,8 @@ def _parse_context_instant(value: Any) -> datetime | None:
     except ValueError:
         return None
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
 
 
 def _context_control_revision(context: Mapping[str, Any]) -> int:
@@ -355,8 +355,8 @@ def _context_expiry(context: Mapping[str, Any]) -> datetime | None:
     except ValueError:
         return None
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
 
 
 def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measurement | None:

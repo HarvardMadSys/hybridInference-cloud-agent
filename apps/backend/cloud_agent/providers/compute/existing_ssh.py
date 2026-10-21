@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.ports.external.compute_provider import (
@@ -105,7 +105,7 @@ class ExistingSSHProvider(ComputeProvider):
             ref=observed_ref,
             state="ready",
             raw_state="ssh_verified",
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
             lease_known=False,
             scope_complete=True,
             nodes=(

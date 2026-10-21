@@ -13,7 +13,7 @@ import hashlib
 import json
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -2394,7 +2394,7 @@ async def test_execution_profile_persists_and_is_inherited_by_follow_up(pool, st
 async def test_conversations_page_all_history_with_pins_and_equal_activity(pool, store: Storage):
     """Keyset pages cross the pinned boundary without missing tied threads."""
     jobs = [await _create_job(store, task_prompt=f"Historical task {i}") for i in range(61)]
-    same_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    same_time = datetime(2026, 1, 1, tzinfo=UTC)
     async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET created_at = $1, updated_at = $1", same_time)
         await conn.execute("UPDATE agent_threads SET created_at = $1, updated_at = $1", same_time)
@@ -2689,7 +2689,7 @@ async def test_projects_sort_by_message_and_job_activity_preserving_pins(pool, s
     """An older project's new reply or completion changes its recency."""
     older = await _create_job(store, repo="owner/older")
     newer = await _create_job(store, repo="owner/newer")
-    dates = [datetime(2026, 1, day, tzinfo=timezone.utc) for day in range(1, 5)]
+    dates = [datetime(2026, 1, day, tzinfo=UTC) for day in range(1, 5)]
     async with pool.acquire() as conn:
         for job, timestamp in zip((older, newer), dates[:2], strict=True):
             await conn.execute(
@@ -2933,17 +2933,17 @@ async def test_pin_and_unpin_owned_threads_are_idempotent_and_reorder_lists(
         await conn.execute(
             "UPDATE agent_jobs SET created_at = $2 WHERE id = $1",
             parent["id"],
-            datetime(2026, 7, 1, tzinfo=timezone.utc),
+            datetime(2026, 7, 1, tzinfo=UTC),
         )
         await conn.execute(
             "UPDATE agent_jobs SET created_at = $2 WHERE id = $1",
             child["id"],
-            datetime(2026, 7, 2, tzinfo=timezone.utc),
+            datetime(2026, 7, 2, tzinfo=UTC),
         )
         await conn.execute(
             "UPDATE agent_jobs SET created_at = $2 WHERE id = $1",
             newer["id"],
-            datetime(2026, 7, 3, tzinfo=timezone.utc),
+            datetime(2026, 7, 3, tzinfo=UTC),
         )
 
     pinned = await store.conversation_commands.set_thread_pinned(
@@ -4230,7 +4230,7 @@ async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
         idle_remaining_seconds=120,
     )
     rearmed = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
-    assert rearmed["idle_deadline"] > datetime.now(timezone.utc)
+    assert rearmed["idle_deadline"] > datetime.now(UTC)
 
     # A sandbox manager can restart between turns, reconstruct the immutable container
     # identity from Docker, and know no activation generation. A terminal that
@@ -4256,7 +4256,7 @@ async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
     )
     rearmed_after_restart = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert rearmed_after_restart["state"] == "running"
-    assert rearmed_after_restart["idle_deadline"] > datetime.now(timezone.utc)
+    assert rearmed_after_restart["idle_deadline"] > datetime.now(UTC)
 
     # When a replacement sandbox manager has neither activity tokens nor a monotonic
     # deadline, it reports activity as unknown. The control plane grants one
@@ -8032,7 +8032,7 @@ async def test_conversations_activity_counts_a_publication_of_an_earlier_turn(
     assert [item["job"]["id"] for item in before["conversations"]] == [other["id"], child["id"]]
     # What ``record_snapshot_publish`` writes on every included, succeeded
     # turn: the pull request, the commit, and a fresh ``updated_at``.
-    published_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    published_at = datetime(2030, 1, 1, tzinfo=UTC)
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET state = 'succeeded', native_turn_no = 1, "

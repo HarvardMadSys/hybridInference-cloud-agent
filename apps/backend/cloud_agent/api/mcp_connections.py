@@ -26,7 +26,7 @@ import json
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
@@ -1278,7 +1278,7 @@ async def authorize_connection(
         token_endpoint=metadata.token_endpoint,
         revocation_endpoint=metadata.revocation_endpoint,
         registration_endpoint=metadata.registration_endpoint,
-        expires_at=datetime.now(timezone.utc) + oauth.FLOW_LIFETIME,
+        expires_at=datetime.now(UTC) + oauth.FLOW_LIFETIME,
     )
     if allocated is None:
         raise _conflict("this connection changed while you were authorizing it")
@@ -1872,10 +1872,8 @@ async def _invocation_view(
     # A worker persists expiry asynchronously. Display an elapsed deadline
     # immediately, without writing during a read or reviving any decision.
     if isinstance(expires_at, datetime) and status in {Status.PENDING, Status.APPROVED}:
-        deadline = (
-            expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=timezone.utc)
-        )
-        if deadline <= datetime.now(timezone.utc):
+        deadline = expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=UTC)
+        if deadline <= datetime.now(UTC):
             status = Status.EXPIRED
     invocation = Invocation(
         invocation_id=str(row["id"]),

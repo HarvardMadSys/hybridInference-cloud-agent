@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import asyncpg
@@ -187,7 +187,7 @@ async def _invocation(
         authorization_epoch=int(connection["authorization_epoch"]),
         capability_revision=int(connection["capability_revision"]),
         policy_revision=policy_revision,
-        expires_at=datetime.now(timezone.utc) + expires_in,
+        expires_at=datetime.now(UTC) + expires_in,
     )
 
 
@@ -607,7 +607,7 @@ async def test_disconnecting_clears_the_secret_and_bumps_the_epoch(
         _OWNER,
         refresh_token="ciphertext-refresh",
         client_secret="ciphertext-client-secret",
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
 
     assert (
@@ -738,7 +738,7 @@ async def test_consuming_an_oauth_flow_has_exactly_one_winner(store: Storage) ->
         token_endpoint="https://issuer.example.com/token",
         revocation_endpoint=None,
         registration_endpoint=None,
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
     assert created_generation == row["oauth_generation"] + 1
 
@@ -784,7 +784,7 @@ def _oauth_start(row: dict[str, Any], *, state_hash: str) -> dict[str, Any]:
         "token_endpoint": "https://issuer.example.com/token",
         "revocation_endpoint": None,
         "registration_endpoint": None,
-        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
+        "expires_at": datetime.now(UTC) + timedelta(minutes=10),
     }
 
 
@@ -1721,7 +1721,7 @@ async def test_dispatch_rechecks_attempt_expiry_after_waiting_on_connection_auth
         authorization_epoch=int(connection["authorization_epoch"]),
         capability_revision=int(connection["capability_revision"]),
         policy_revision=int(binding["policy_revision"]),
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
     approved = await store.mcp.decide_mcp_invocation(
         invocation_id=invocation["id"], approve=True, decided_by=_OWNER
@@ -1859,7 +1859,7 @@ async def test_replacing_permissions_invalidates_old_approvals(store: Storage, c
         authorization_epoch=connection["authorization_epoch"],
         capability_revision=connection["capability_revision"],
         policy_revision=original["policy_revision"],
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
     await store.mcp.decide_mcp_invocation(
         invocation_id=invocation["id"], approve=True, decided_by=_OWNER
@@ -2148,7 +2148,7 @@ async def test_target_edit_invalidates_only_its_previous_discovery_and_flow(stor
         token_endpoint="https://issuer.example.com/token",
         revocation_endpoint=None,
         registration_endpoint=None,
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
     assert created_generation == row["oauth_generation"] + 1
     changes = {
@@ -2184,7 +2184,7 @@ async def _authorized(store: Storage, auth_kind: str) -> dict[str, Any]:
         access_token_ciphertext="old-target-access",
         refresh_token_ciphertext="old-target-refresh" if oauth else None,
         client_secret_ciphertext="old-target-client-secret" if oauth else None,
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=1) if oauth else None,
+        expires_at=datetime.now(UTC) + timedelta(hours=1) if oauth else None,
         scopes=["read"] if oauth else None,
         issuer="https://issuer.example.com" if oauth else None,
         resource=_URL if oauth else None,

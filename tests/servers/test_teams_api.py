@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -28,7 +28,7 @@ from cloud_agent.domain.teams import (
 from cloud_agent.gateway import GatewayError
 from cloud_agent.user_avatar import generate_user_avatar
 
-NOW = datetime(2026, 10, 15, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 15, tzinfo=UTC)
 TOKEN = "A" * 43
 TEAM = TeamRecord(
     id="ateam_1",
