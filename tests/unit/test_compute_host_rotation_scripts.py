@@ -27,17 +27,19 @@ from cloud_agent.ports.external.compute_provider import (
 )
 from cloud_agent.ports.external.host_bootstrap import BootstrapIntent, DeploymentProfile
 from cloud_agent.providers.compute.host_bootstrap import (
-    _AUTHORIZE_TRANSFER,
     _DEPLOY,
-    _PUSH,
-    _REVOKE_TRANSFER_TARGET,
     _STOP,
-    _TRANSFER_KEY,
-    _TRANSFER_RECEIVE,
     _WIPE,
     SshHostBootstrap,
 )
 from cloud_agent.providers.compute.ssh import known_hosts_line
+from cloud_agent.providers.compute.transfer_scripts import (
+    _AUTHORIZE_TRANSFER,
+    _PUSH,
+    _REVOKE_TRANSFER_TARGET,
+    _TRANSFER_KEY,
+    _TRANSFER_RECEIVE,
+)
 
 IDENTITY = {
     "allocation_id": "b",
