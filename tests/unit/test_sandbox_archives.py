@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 import pytest
 
+from cloud_agent_host import sandbox_archives
 from cloud_agent_host.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxManager,
@@ -21,6 +22,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxStatus,
     RetainedChatBackend,
 )
+from cloud_agent_host.sandbox_archive_bundle import SpooledSandboxArchive
 from cloud_agent_host.sandbox_archive_s3 import (
     ArchivePhase,
     SandboxArchiveAlreadyExists,
@@ -28,7 +30,11 @@ from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,
 )
-from cloud_agent_host.sandbox_archives import SandboxArchiveService, SandboxInitialArchiveMarker
+from cloud_agent_host.sandbox_archives import (
+    INITIAL_ARCHIVE_MARKER_FORMAT_VERSION,
+    SandboxArchiveService,
+    SandboxInitialArchiveMarker,
+)
 from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
 from cloud_agent_shared.errors import SandboxError
 
@@ -757,6 +763,336 @@ def test_transient_initial_head_failure_preserves_marker_and_fails_closed() -> N
         service.close()
 
     assert manager.marker == marker
+
+
+def _record_write_levels(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record the gzip level of every bundle the service writes from now on."""
+    levels: list[int] = []
+    write = SpooledSandboxArchive.write
+
+    def recording(
+        self: SpooledSandboxArchive, out: BinaryIO, *, compression_level: int
+    ) -> dict[str, object]:
+        levels.append(compression_level)
+        return write(self, out, compression_level=compression_level)
+
+    monkeypatch.setattr(SpooledSandboxArchive, "write", recording)
+    return levels
+
+
+def _gzip_xfl(payload: bytes) -> int:
+    """RFC 1952 XFL, byte 8: 2 for level 9, 0 for the levels between 1 and 9."""
+    return payload[8]
+
+
+def _marked_without_upload(
+    service: SandboxArchiveService,
+    manager: _Manager,
+    spec: ChatSandboxSpec,
+    *,
+    levels: tuple[int, ...] = sandbox_archives.INITIAL_ARCHIVE_COMPRESSION_LEVELS,
+) -> bytes:
+    """Capture on a host writing ``levels``; the upload dies after the marker."""
+    with pytest.MonkeyPatch.context() as host:
+        host.setattr(sandbox_archives, "INITIAL_ARCHIVE_COMPRESSION_LEVELS", levels)
+        with pytest.raises(SystemExit):
+            service.capture_initial(
+                RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+                expected_container_id=_CONTAINER_ID,
+                preparation_id=_PREPARATION_ID,
+                base_sha=_BASE_SHA,
+                members=(),
+            )
+    assert manager.marker is not None
+    return manager.marker
+
+
+def _lost_upload() -> _Uploader:
+    """An uploader whose first upload dies and whose later HEAD finds nothing."""
+    return _Uploader(
+        _config(),
+        outcomes=[SystemExit("upload process died")],
+        exists_outcomes=[False],
+    )
+
+
+def test_initial_and_final_bundles_are_written_at_gzip_level_6(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    levels = _record_write_levels(monkeypatch)
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(_config())
+    service = _service(manager, uploader)
+    service.start()
+    try:
+        service.capture_initial(
+            RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            base_sha=_BASE_SHA,
+            members=(),
+        )
+        manager.current = _inspection(spec, running=False)
+        service.queue_final(spec, manager.current, ())
+    finally:
+        service.close()
+
+    assert levels == [6, 6]
+    assert [(call["phase"], _gzip_xfl(call["payload"])) for call in uploader.calls] == [
+        ("initial", 0),
+        ("final", 0),
+    ]
+
+
+def test_a_new_marker_keeps_its_format_and_is_rebuilt_at_level_6(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _lost_upload()
+    service = _service(manager, uploader)
+    service.start()
+    levels = _record_write_levels(monkeypatch)
+    try:
+        marker = _marked_without_upload(service, manager, spec)
+        status = service.probe_initial(
+            RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            members=(),
+        )
+    finally:
+        service.close()
+
+    original, retried = uploader.calls
+    # The capture and then one rebuild, which matched at the first level.
+    assert levels == [6, 6]
+    assert _gzip_xfl(original["payload"]) == 0
+    assert retried["payload"] == original["payload"]
+    assert status["stored"] is True
+    assert manager.marker == marker
+    assert json.loads(marker)["format_version"] == INITIAL_ARCHIVE_MARKER_FORMAT_VERSION == 2
+    assert SandboxInitialArchiveMarker.decode(marker).bundle_sha256 == original["sha256"]
+
+
+def test_a_marker_from_before_level_6_is_still_rebuilt_at_level_9(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosts before #760 wrote level 9 bundles under this same marker format."""
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _lost_upload()
+    service = _service(manager, uploader)
+    service.start()
+    try:
+        marker = _marked_without_upload(service, manager, spec, levels=(9,))
+        levels = _record_write_levels(monkeypatch)
+        status = service.probe_initial(
+            RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            members=(),
+        )
+    finally:
+        service.close()
+
+    original, retried = uploader.calls
+    assert _gzip_xfl(original["payload"]) == 2
+    # One fetch of the frozen workspace, written at 6 and then at 9.
+    assert levels == [6, 9]
+    assert [call["path"] for call in manager.export_calls] == ["/workspace", "/workspace"]
+    assert retried["payload"] == original["payload"]
+    assert (retried["size"], retried["sha256"]) == (original["size"], original["sha256"])
+    assert {key: status[key] for key in ("enabled", "prepared", "stored", "base_sha")} == {
+        "enabled": True,
+        "prepared": True,
+        "stored": True,
+        "base_sha": _BASE_SHA,
+    }
+    assert manager.marker == marker
+    assert service.status()["phases"]["initial"] == {"pending": 0, "uploaded": 1, "failed": 1}
+
+
+@pytest.mark.parametrize("marker_level", [6, 9])
+def test_a_changed_workspace_fails_the_probe_at_every_level(
+    monkeypatch: pytest.MonkeyPatch, marker_level: int
+) -> None:
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _lost_upload()
+    service = _service(manager, uploader)
+    service.start()
+    try:
+        marker = _marked_without_upload(service, manager, spec, levels=(marker_level,))
+        manager.payloads["/workspace"] = b"workspace changed after the marked capture"
+        levels = _record_write_levels(monkeypatch)
+        with pytest.raises(SandboxError, match="no longer matches"):
+            service.probe_initial(
+                RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+                expected_container_id=_CONTAINER_ID,
+                preparation_id=_PREPARATION_ID,
+                members=(),
+            )
+    finally:
+        service.close()
+
+    assert levels == [6, 9]
+    assert manager.marker == marker
+    assert len(uploader.calls) == 1
+    assert [call["path"] for call in manager.export_calls] == ["/workspace", "/workspace"]
+
+
+def test_a_rebuild_too_large_at_one_level_still_tries_the_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A level the marker never used can outgrow a ceiling its own bundle fitted under."""
+    ceiling = 64 * 1024
+    config = replace(_config(), max_archive_bytes=ceiling, multipart_threshold_bytes=ceiling)
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(
+        config,
+        outcomes=[SystemExit("upload process died")],
+        exists_outcomes=[False],
+    )
+    service = _service(manager, uploader)
+    service.start()
+    attempted: list[int] = []
+    write = SpooledSandboxArchive.write
+
+    def level_6_outgrows_the_ceiling(
+        self: SpooledSandboxArchive, out: BinaryIO, *, compression_level: int
+    ) -> dict[str, object]:
+        attempted.append(compression_level)
+        if compression_level == 6:
+            out.write(bytes(ceiling + 1))
+        return write(self, out, compression_level=compression_level)
+
+    try:
+        marker = _marked_without_upload(service, manager, spec, levels=(9,))
+        monkeypatch.setattr(SpooledSandboxArchive, "write", level_6_outgrows_the_ceiling)
+        status = service.probe_initial(
+            RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            members=(),
+        )
+    finally:
+        service.close()
+
+    assert attempted == [6, 9]
+    assert status["stored"] is True
+    assert uploader.calls[1]["payload"] == uploader.calls[0]["payload"]
+    assert manager.marker == marker
+
+
+def test_a_rebuild_failure_other_than_size_is_not_a_level_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _lost_upload()
+    service = _service(manager, uploader)
+    service.start()
+    attempted: list[int] = []
+
+    def timed_out(
+        self: SpooledSandboxArchive, out: BinaryIO, *, compression_level: int
+    ) -> dict[str, object]:
+        attempted.append(compression_level)
+        raise SandboxError("sandbox archive operation timed out")
+
+    try:
+        marker = _marked_without_upload(service, manager, spec)
+        monkeypatch.setattr(SpooledSandboxArchive, "write", timed_out)
+        with pytest.raises(SandboxError, match="timed out"):
+            service.probe_initial(
+                RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+                expected_container_id=_CONTAINER_ID,
+                preparation_id=_PREPARATION_ID,
+                members=(),
+            )
+    finally:
+        service.close()
+
+    assert attempted == [6]
+    assert manager.marker == marker
+    assert len(uploader.calls) == 1
+
+
+def test_a_capture_over_the_object_ceiling_still_fails_as_a_sandbox_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Archive failure diagnostics name the exception class, so it must not change."""
+    ceiling = 64 * 1024
+    config = replace(_config(), max_archive_bytes=ceiling, multipart_threshold_bytes=ceiling)
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(config)
+    service = _service(manager, uploader)
+    service.start()
+
+    def oversized(
+        self: SpooledSandboxArchive, out: BinaryIO, *, compression_level: int
+    ) -> dict[str, object]:
+        out.write(bytes(ceiling + 1))
+        raise AssertionError("the bounded writer accepted an oversized bundle")
+
+    monkeypatch.setattr(SpooledSandboxArchive, "write", oversized)
+    try:
+        with pytest.raises(
+            SandboxError, match=f"exceeds the {ceiling}-byte object limit"
+        ) as caught:
+            service.capture_initial(
+                RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+                expected_container_id=_CONTAINER_ID,
+                preparation_id=_PREPARATION_ID,
+                base_sha=_BASE_SHA,
+                members=(),
+            )
+    finally:
+        service.close()
+
+    assert type(caught.value) is SandboxError
+    assert manager.marker is None
+    assert uploader.calls == []
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"format_version": 1}, "invalid values"),
+        ({"format_version": 3}, "invalid values"),
+        ({"format_version": 3, "compression_level": 6}, "invalid schema"),
+    ],
+)
+def test_the_marker_format_is_unchanged_and_other_versions_are_refused(
+    change: dict[str, object], message: str
+) -> None:
+    """A marker recording its level would be a version this decoder refuses.
+
+    So would every host's before it, which is why the level is not recorded.
+    """
+    marker = SandboxInitialArchiveMarker(
+        namespace_sha256=hashlib.sha256(_NAMESPACE.encode()).hexdigest(),
+        sandbox_id="sandbox-123",
+        generation=7,
+        container_id=_CONTAINER_ID,
+        preparation_id=_PREPARATION_ID,
+        base_sha=_BASE_SHA,
+        policy=_config().as_policy(),
+        bundle_size_bytes=123,
+        bundle_sha256="a" * 64,
+    )
+    payload = marker.encode()
+    value = json.loads(payload)
+    assert value["format_version"] == INITIAL_ARCHIVE_MARKER_FORMAT_VERSION == 2
+    assert SandboxInitialArchiveMarker.decode(payload) == marker
+
+    changed = json.dumps({**value, **change}, sort_keys=True, separators=(",", ":")) + "\n"
+    with pytest.raises(SandboxError, match=message):
+        SandboxInitialArchiveMarker.decode(changed.encode("ascii"))
 
 
 def test_final_capture_requires_the_exact_stopped_container() -> None:

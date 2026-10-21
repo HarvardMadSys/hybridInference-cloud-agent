@@ -8,10 +8,17 @@ Any future restore path must validate an inner archive before extracting it.
 The fetch callback is deliberately injected. Lifecycle code can prove either
 the running pre-prompt barrier or the stopped final barrier before supplying
 Docker's stream, without coupling this primitive to Docker or the manager.
+
+Fetching and writing are separate steps. :func:`spool_sandbox_archive` fetches
+the inputs once, and its spool can then be written at more than one gzip
+level, so a caller can find the level an earlier bundle was written at
+without asking Docker for the same bytes again.
+:func:`build_sandbox_archive_bundle` does both for one level.
 """
 
 from __future__ import annotations
 
+import copy
 import gzip
 import hashlib
 import io
@@ -19,8 +26,8 @@ import json
 import math
 import tarfile
 import tempfile
-from collections.abc import Mapping
-from contextlib import ExitStack
+from collections.abc import Iterator, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import BinaryIO, Literal, Protocol, cast
 
@@ -30,6 +37,12 @@ ArchivePhase = Literal["initial", "final"]
 
 DEFAULT_MAX_ARCHIVE_MEMBER_BYTES = 8 * 1024 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_TOTAL_BYTES = 16 * 1024 * 1024 * 1024
+# The gzip level a new bundle is written at. On a tar of source, .git and
+# .venv, level 9 compressed 7.2 MB/s and level 6 32.5 MB/s, for an output
+# about 1% larger (#760). Every level is the same ``tar.gz`` format, but the
+# bytes differ: a bundle rebuilt to match an earlier digest must be written
+# at the level that earlier bundle used.
+DEFAULT_ARCHIVE_COMPRESSION_LEVEL = 6
 _FORMAT_NAME = "cloud-agent-stopped-sandbox"
 _FORMAT_VERSION = 1
 
@@ -79,6 +92,11 @@ _PATH_ARCHIVES = (
 def _validate_limit(name: str, value: int) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
+
+
+def _validate_compression_level(value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 9:
+        raise ValueError("compression_level must be an integer from 1 to 9")
 
 
 class _BoundedDigestWriter:
@@ -279,39 +297,94 @@ def _manifest(
     }
 
 
-def build_sandbox_archive_bundle(
-    out: BinaryIO,
+class SpooledSandboxArchive:
+    """One lifecycle point's fetched path archives, ready to be written.
+
+    Only :func:`spool_sandbox_archive` makes one, and it is usable only inside
+    that context. Every write at the same level produces the same bytes, the
+    bytes :func:`build_sandbox_archive_bundle` produces for the same inputs.
+    """
+
+    def __init__(
+        self,
+        phase: ArchivePhase,
+        archives: list[_SpooledArchive],
+        metadata: dict[str, object],
+    ) -> None:
+        self._phase = phase
+        self._archives = archives
+        self._metadata = metadata
+        self._open = True
+
+    def write(self, out: BinaryIO, *, compression_level: int) -> dict[str, object]:
+        """Write the deterministic ``tar.gz`` bundle to ``out`` and return its manifest.
+
+        An output failure can leave a partial bundle, which the caller must
+        discard. The spool is unchanged by a write, failed or not, so it can be
+        written again.
+        """
+        _validate_compression_level(compression_level)
+        if not self._open:
+            raise SandboxError("sandbox archive spool is closed")
+        # Each manifest gets its own metadata copy: changing one returned
+        # manifest cannot change a later bundle written from this spool.
+        manifest = _manifest(self._phase, self._archives, copy.deepcopy(self._metadata))
+        manifest_bytes = (
+            json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+                "ascii"
+            )
+            + b"\n"
+        )
+        try:
+            # GzipFile lets us fix the timestamp; tarfile's ``w:gz`` shorthand
+            # would stamp the bundle with wall-clock time.
+            with (
+                gzip.GzipFile(
+                    filename="",
+                    mode="wb",
+                    compresslevel=compression_level,
+                    fileobj=out,
+                    mtime=0,
+                ) as compressed,
+                tarfile.open(
+                    fileobj=compressed,
+                    mode="w|",
+                    format=tarfile.PAX_FORMAT,
+                ) as bundle,
+            ):
+                bundle.addfile(
+                    _tar_info("manifest.json", len(manifest_bytes), mode=0o444),
+                    io.BytesIO(manifest_bytes),
+                )
+                for item in self._archives:
+                    item.stream.seek(0)
+                    bundle.addfile(
+                        _tar_info(item.spec.archive_path, item.size_bytes, mode=0o400),
+                        item.stream,
+                    )
+        except (OSError, tarfile.TarError) as exc:
+            raise SandboxError(f"sandbox archive bundle could not be written: {exc}") from exc
+        return manifest
+
+    def _close(self) -> None:
+        self._open = False
+
+
+@contextmanager
+def spool_sandbox_archive(
     *,
     phase: ArchivePhase,
     fetch_archive: ArchiveFetcher,
     metadata: Mapping[str, object] | None = None,
     max_member_bytes: int = DEFAULT_MAX_ARCHIVE_MEMBER_BYTES,
     max_total_bytes: int = DEFAULT_MAX_ARCHIVE_TOTAL_BYTES,
-) -> dict[str, object]:
-    """Write a deterministic ``tar.gz`` bundle and return its manifest.
+) -> Iterator[SpooledSandboxArchive]:
+    """Fetch, bound, hash and spool the path archives of one lifecycle point.
 
-    For an ``initial`` bundle, ``fetch_archive`` is called once for
-    ``/workspace``.  A ``final`` bundle additionally fetches ``/agent-state``
-    and ``/home/agent/.freeinference-platform`` in that order.  The callback
-    writes each Docker tar stream to the supplied sink and returns the number
-    of bytes written.  The platform path is omitted from a final bundle when
-    the callback raises :class:`FileNotFoundError` before writing any bytes;
-    the other paths are required.
-
-    ``metadata`` is defensively copied after accepting only JSON objects,
-    arrays and finite scalar values.  Canonical key ordering makes equivalent
-    mappings serialize identically; caller mutation cannot change the returned
-    manifest or bundle.
-
-    Inputs are completely fetched, bounded, hashed and spooled to anonymous
-    temporary files before the first output byte is written.  Therefore a
-    fetch or limit failure leaves ``out`` untouched.  An output failure can
-    leave a partial bundle, which the caller must discard.
-
-    Determinism covers the outer member order, JSON encoding, tar metadata and
-    gzip timestamp.  Identical callback bytes and arguments produce identical
-    output; the opaque Docker tar headers themselves are intentionally not
-    rewritten.
+    The callback, limit and metadata rules are those of
+    :func:`build_sandbox_archive_bundle`. Nothing is written to any output
+    here, so a fetch or limit failure never reaches one. The temporary files
+    are removed when the context exits.
     """
     if phase not in {"initial", "final"}:
         raise ValueError("sandbox archive phase must be 'initial' or 'final'")
@@ -350,50 +423,66 @@ def build_sandbox_archive_bundle(
                     sha256=sha256,
                 )
             )
-
-        manifest = _manifest(phase, archives, copied_metadata)
-        manifest_bytes = (
-            json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
-                "ascii"
-            )
-            + b"\n"
-        )
+        spooled = SpooledSandboxArchive(phase, archives, copied_metadata)
         try:
-            # GzipFile lets us fix the timestamp; tarfile's ``w:gz`` shorthand
-            # would stamp the bundle with wall-clock time.
-            with (
-                gzip.GzipFile(
-                    filename="",
-                    mode="wb",
-                    compresslevel=9,
-                    fileobj=out,
-                    mtime=0,
-                ) as compressed,
-                tarfile.open(
-                    fileobj=compressed,
-                    mode="w|",
-                    format=tarfile.PAX_FORMAT,
-                ) as bundle,
-            ):
-                bundle.addfile(
-                    _tar_info("manifest.json", len(manifest_bytes), mode=0o444),
-                    io.BytesIO(manifest_bytes),
-                )
-                for item in archives:
-                    item.stream.seek(0)
-                    bundle.addfile(
-                        _tar_info(item.spec.archive_path, item.size_bytes, mode=0o400),
-                        item.stream,
-                    )
-        except (OSError, tarfile.TarError) as exc:
-            raise SandboxError(f"sandbox archive bundle could not be written: {exc}") from exc
-    return manifest
+            yield spooled
+        finally:
+            spooled._close()
+
+
+def build_sandbox_archive_bundle(
+    out: BinaryIO,
+    *,
+    phase: ArchivePhase,
+    fetch_archive: ArchiveFetcher,
+    metadata: Mapping[str, object] | None = None,
+    max_member_bytes: int = DEFAULT_MAX_ARCHIVE_MEMBER_BYTES,
+    max_total_bytes: int = DEFAULT_MAX_ARCHIVE_TOTAL_BYTES,
+    compression_level: int = DEFAULT_ARCHIVE_COMPRESSION_LEVEL,
+) -> dict[str, object]:
+    """Write a deterministic ``tar.gz`` bundle and return its manifest.
+
+    For an ``initial`` bundle, ``fetch_archive`` is called once for
+    ``/workspace``.  A ``final`` bundle additionally fetches ``/agent-state``
+    and ``/home/agent/.freeinference-platform`` in that order.  The callback
+    writes each Docker tar stream to the supplied sink and returns the number
+    of bytes written.  The platform path is omitted from a final bundle when
+    the callback raises :class:`FileNotFoundError` before writing any bytes;
+    the other paths are required.
+
+    ``metadata`` is defensively copied after accepting only JSON objects,
+    arrays and finite scalar values.  Canonical key ordering makes equivalent
+    mappings serialize identically; caller mutation cannot change the returned
+    manifest or bundle.
+
+    Inputs are completely fetched, bounded, hashed and spooled to anonymous
+    temporary files before the first output byte is written.  Therefore a
+    fetch or limit failure leaves ``out`` untouched.  An output failure can
+    leave a partial bundle, which the caller must discard.
+
+    ``compression_level`` is the gzip level, 1 to 9.  Determinism covers the
+    outer member order, JSON encoding, tar metadata, gzip timestamp and gzip
+    level.  Identical callback bytes and arguments produce identical output;
+    the opaque Docker tar headers themselves are intentionally not rewritten.
+    """
+    _validate_compression_level(compression_level)
+    with spool_sandbox_archive(
+        phase=phase,
+        fetch_archive=fetch_archive,
+        metadata=metadata,
+        max_member_bytes=max_member_bytes,
+        max_total_bytes=max_total_bytes,
+    ) as spooled:
+        return spooled.write(out, compression_level=compression_level)
 
 
 __all__ = [
+    "DEFAULT_ARCHIVE_COMPRESSION_LEVEL",
     "DEFAULT_MAX_ARCHIVE_MEMBER_BYTES",
     "DEFAULT_MAX_ARCHIVE_TOTAL_BYTES",
     "ArchiveFetcher",
     "ArchivePhase",
+    "SpooledSandboxArchive",
     "build_sandbox_archive_bundle",
+    "spool_sandbox_archive",
 ]

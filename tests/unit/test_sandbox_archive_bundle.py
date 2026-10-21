@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
@@ -9,7 +10,11 @@ import tarfile
 
 import pytest
 
-from cloud_agent_host.sandbox_archive_bundle import build_sandbox_archive_bundle
+from cloud_agent_host.sandbox_archive_bundle import (
+    DEFAULT_ARCHIVE_COMPRESSION_LEVEL,
+    build_sandbox_archive_bundle,
+    spool_sandbox_archive,
+)
 from cloud_agent_shared.errors import SandboxError
 
 CONTAINER_PATHS = (
@@ -39,6 +44,7 @@ def _build(
     metadata: dict[str, object] | None = None,
     max_member_bytes: int = 1024 * 1024,
     max_total_bytes: int = 3 * 1024 * 1024,
+    compression_level: int | None = None,
 ) -> tuple[bytes, dict[str, object], list[str]]:
     fetched: list[str] = []
 
@@ -60,6 +66,7 @@ def _build(
         metadata=metadata,
         max_member_bytes=max_member_bytes,
         max_total_bytes=max_total_bytes,
+        **({} if compression_level is None else {"compression_level": compression_level}),
     )
     return out.getvalue(), manifest, fetched
 
@@ -142,6 +149,111 @@ def test_bundle_is_byte_deterministic_for_identical_inputs(phase: str) -> None:
     # RFC 1952 MTIME is bytes 4..8 of the gzip header.
     assert first[:2] == b"\x1f\x8b"
     assert first[4:8] == b"\0\0\0\0"
+
+
+def test_new_bundles_are_written_at_gzip_level_6() -> None:
+    default, _, _ = _build(_payloads(), phase="initial")
+    level_6, _, _ = _build(_payloads(), phase="initial", compression_level=6)
+    level_9, _, _ = _build(_payloads(), phase="initial", compression_level=9)
+
+    assert DEFAULT_ARCHIVE_COMPRESSION_LEVEL == 6
+    assert default == level_6
+    assert default != level_9
+
+
+@pytest.mark.parametrize("level", [1, 6, 9])
+@pytest.mark.parametrize("phase", ["initial", "final"])
+def test_bundle_is_byte_deterministic_at_every_level(phase: str, level: int) -> None:
+    first, _, _ = _build(_payloads(), phase=phase, compression_level=level)
+    second, _, _ = _build(_payloads(), phase=phase, compression_level=level)
+
+    assert first == second
+    assert first[4:8] == b"\0\0\0\0"
+
+
+def test_the_level_changes_only_the_compressed_bytes() -> None:
+    level_6, manifest_6, _ = _build(_payloads(), compression_level=6)
+    level_9, manifest_9, _ = _build(_payloads(), compression_level=9)
+
+    assert level_6 != level_9
+    assert gzip.decompress(level_6) == gzip.decompress(level_9)
+    assert manifest_6 == manifest_9
+    # RFC 1952 XFL is byte 8: 2 marks the slowest, best compression (level 9)
+    # and 0 the levels between it and the fastest.
+    assert (level_6[8], level_9[8]) == (0, 2)
+
+
+@pytest.mark.parametrize("bad_level", [0, 10, -1, True, 6.0, "6", None])
+def test_compression_level_is_checked_before_any_fetch(bad_level) -> None:
+    called = False
+
+    def fetch(_path: str, _destination, *, max_bytes: int) -> int:
+        nonlocal called
+        called = True
+        return max_bytes
+
+    out = io.BytesIO()
+    with pytest.raises(ValueError, match="compression_level"):
+        build_sandbox_archive_bundle(
+            out,
+            phase="final",
+            fetch_archive=fetch,
+            compression_level=bad_level,
+        )
+
+    assert not called
+    assert out.getvalue() == b""
+
+
+def test_one_spool_writes_every_level_exactly_as_a_fresh_build() -> None:
+    payloads = _payloads()
+    fetched: list[str] = []
+
+    def fetch(path: str, destination, *, max_bytes: int) -> int:
+        fetched.append(path)
+        assert len(payloads[path]) <= max_bytes
+        return destination.write(payloads[path])
+
+    written: list[tuple[int, bytes, dict[str, object]]] = []
+    with spool_sandbox_archive(phase="final", fetch_archive=fetch) as spooled:
+        for level in (6, 9, 6):
+            out = io.BytesIO()
+            manifest = spooled.write(out, compression_level=level)
+            written.append((level, out.getvalue(), manifest))
+
+    assert fetched == list(CONTAINER_PATHS)
+    for level, bundle, manifest in written:
+        assert (bundle, manifest) == _build(payloads, compression_level=level)[:2]
+    assert written[0][1] == written[2][1]
+    assert written[0][1] != written[1][1]
+
+
+def test_a_returned_manifest_cannot_change_a_later_write() -> None:
+    with spool_sandbox_archive(
+        phase="initial",
+        fetch_archive=lambda _path, destination, *, max_bytes: destination.write(b"tar"),
+        metadata={"sandbox": {"generation": 7}},
+    ) as spooled:
+        first = io.BytesIO()
+        manifest = spooled.write(first, compression_level=6)
+        manifest["metadata"]["sandbox"]["generation"] = 8  # type: ignore[index]
+        second = io.BytesIO()
+        spooled.write(second, compression_level=6)
+
+    assert first.getvalue() == second.getvalue()
+
+
+def test_a_spool_cannot_be_written_once_its_inputs_are_removed() -> None:
+    with spool_sandbox_archive(
+        phase="initial",
+        fetch_archive=lambda _path, destination, *, max_bytes: destination.write(b"tar"),
+    ) as spooled:
+        pass
+
+    out = io.BytesIO()
+    with pytest.raises(SandboxError, match="spool is closed"):
+        spooled.write(out, compression_level=6)
+    assert out.getvalue() == b""
 
 
 def test_inner_tar_names_are_opaque_and_cannot_escape_the_outer_bundle() -> None:
