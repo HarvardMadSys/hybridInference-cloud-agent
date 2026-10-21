@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 from dotenv import dotenv_values
 from pydantic import SecretStr, ValidationError
+from tests.support.host_docker import Docker, probe, sandbox, service
 
 from cloud_agent.ports.external.compute_provider import (
     NodeObservation,
@@ -27,6 +28,7 @@ from cloud_agent.providers.compute.host_bootstrap import (
     _DEPLOY,
     _INVENTORY,
     _PREFLIGHT,
+    _QUIESCE,
     _READINESS,
     _REQUIRED_ENV,
     SshHostBootstrap,
@@ -366,14 +368,15 @@ async def test_inventory_includes_stopped_containers_and_orphans(tmp_path):
     assert inventory.complete and inventory.retained_containers == 1 and inventory.orphan_state
     command = transport.run.call_args.args[1]
     script = shlex.split(command)[4]
-    assert "['docker', 'ps', '-aq']" in script
+    assert "'docker', 'ps', '-a', '--no-trunc', '--format'" in script
+    assert "'docker', 'inspect'" not in script
     assert "['docker', 'volume', 'ls', '-q']" in script
 
 
 def test_remote_scripts_compile_and_deployment_refuses_existing_unowned_root(
     tmp_path, monkeypatch, capsys
 ):
-    for script in (_PREFLIGHT, _DEPLOY, _READINESS, _INVENTORY):
+    for script in (_PREFLIGHT, _DEPLOY, _READINESS, _INVENTORY, _QUIESCE):
         compile(script, "remote-bootstrap", "exec")
     root = tmp_path / "existing-host"
     root.mkdir()
@@ -1038,6 +1041,172 @@ def test_inventory_still_counts_an_administrators_archive_request(tmp_path, monk
 
     recorded = {"checkpoints": {}, "removals": {"delete-1": _REMOVAL}}
     assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
+#: The Compose project, and sandbox namespace, of the deployment on ``INTENT``'s node.
+_PROJECT = "ca-" + INTENT.node_id.replace("-", "").lower()
+
+
+def _quiesce(tmp_path, monkeypatch, capsys, docker: Docker, root=None) -> dict:
+    params = {
+        "root": str(root or tmp_path / "no-deploy-yet"),
+        "identity": {"host": INTENT.host, "node_id": INTENT.node_id},
+    }
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/docker")
+    monkeypatch.setattr("subprocess.check_output", docker.check_output)
+    monkeypatch.setattr("subprocess.check_call", docker.check_call)
+    with pytest.raises(SystemExit) as answered:
+        exec(_QUIESCE, {})
+    assert answered.value.code == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_quiesce_stops_the_runner_and_removes_only_its_own_self_tests(
+    tmp_path, monkeypatch, capsys
+):
+    docker = Docker(
+        service("runner-1", _PROJECT, "runner"),
+        service("manager", _PROJECT, "sandbox-manager"),
+        probe("probe-mine", _PROJECT),
+        # Left by a runner stopped mid-test: no longer running, still there.
+        {**probe("probe-stopped", _PROJECT), "running": False},
+        probe("probe-elsewhere", "ca-another"),
+        sandbox("chat", _PROJECT, **{"org.freeinference.chat-probe-created": "1760000000"}),
+        sandbox("chat-plain", _PROJECT),
+        # Each of the three marks is required, not just one.
+        sandbox("chat-unmarked", _PROJECT, runtime="preflight"),
+    )
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker) == {
+        "quiesced": True,
+        "probes_removed": 2,
+    }
+    assert docker.changes[0] == ["docker", "stop", "-t", "60", "runner-1"]
+    assert sorted(docker.changes[1][3:]) == ["probe-mine", "probe-stopped"]
+    assert len(docker.changes) == 2
+    # The release still removes through the sandbox manager; chats are its to keep.
+    assert docker.containers["manager"]["running"] is True
+    assert {"probe-elsewhere", "chat", "chat-plain", "chat-unmarked"} <= set(docker.containers)
+
+
+def test_quiesce_reports_a_runner_still_running(tmp_path, monkeypatch, capsys):
+    docker = Docker(service("runner-1", _PROJECT, "runner"), probe("probe", _PROJECT), stops=False)
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker) == {
+        "quiesced": False,
+        "reason": "host_quiesce_failed",
+    }
+    # Nothing is removed while something could still be making more.
+    assert "probe" in docker.containers
+
+
+def test_quiesce_never_touches_another_deployment(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "deployed"
+    root.mkdir()
+    (root / ".compute-identity.json").write_text(json.dumps({"host": "someone-else"}))
+    docker = Docker(service("runner-1", _PROJECT, "runner"), probe("probe", _PROJECT))
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker, root=root) == {
+        "quiesced": False,
+        "reason": "deployment_identity_conflict",
+    }
+    assert docker.changes == []
+
+
+def test_inventory_reads_every_container_from_one_listing(tmp_path, monkeypatch, capsys):
+    """A container that goes between two Docker calls cannot fail the read."""
+    docker = Docker(
+        service("runner-1", _PROJECT, "runner"),
+        {**sandbox("chat", _PROJECT), "running": False},
+        {"id": "stray", "running": True, "labels": {}},
+    )
+    monkeypatch.setattr("subprocess.check_output", docker.check_output)
+    params = {
+        "root": str(tmp_path / "no-deploy-yet"),
+        "identity": {"host": INTENT.host, "node_id": INTENT.node_id},
+    }
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/docker")
+
+    exec(_INVENTORY, {})
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["complete"] is True
+    assert result["retained_containers"] == 1
+    assert result["unknown_containers"] == 1
+
+
+def test_inventory_that_cannot_read_a_listing_is_incomplete(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "subprocess.check_output",
+        lambda args, **kwargs: "not json" if args[:2] == ["docker", "ps"] else "",
+    )
+    params = {
+        "root": str(tmp_path / "no-deploy-yet"),
+        "identity": {"host": INTENT.host, "node_id": INTENT.node_id},
+    }
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/docker")
+
+    exec(_INVENTORY, {})
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["complete"] is False
+    assert result["blocked_reasons"] == ["host_inventory_unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_quiesce_returns_how_many_self_tests_it_removed(tmp_path):
+    bootstrap, profile, transport, _ = setup(tmp_path)
+    transport.run.side_effect = [json.dumps({"quiesced": True, "probes_removed": 3})]
+
+    assert await bootstrap.quiesce(NODE, profile, INTENT) == 3
+    script = shlex.split(transport.run.call_args.args[1])[4]
+    assert script == _QUIESCE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "code", "retryable"),
+    [
+        ({"quiesced": False, "reason": "host_quiesce_failed"}, "host_quiesce_failed", True),
+        (
+            {"quiesced": False, "reason": "deployment_identity_conflict"},
+            "deployment_identity_conflict",
+            False,
+        ),
+        # A node can print anything; it is believed only in our vocabulary.
+        ({"quiesced": False, "reason": "rm -rf /"}, "host_quiesce_failed", True),
+        ({"quiesced": True}, "host_quiesce_failed", True),
+    ],
+)
+async def test_quiesce_failures_keep_the_inventory_from_running(tmp_path, answer, code, retryable):
+    bootstrap, profile, transport, _ = setup(tmp_path)
+    transport.run.side_effect = [json.dumps(answer)]
+
+    with pytest.raises(ProviderError) as refused:
+        await bootstrap.quiesce(NODE, profile, INTENT)
+    assert refused.value.code == code
+    assert refused.value.retryable is retryable
+
+
+@pytest.mark.asyncio
+async def test_inventory_believes_only_its_own_reasons(tmp_path):
+    bootstrap, profile, transport, _ = setup(tmp_path)
+    transport.run.side_effect = [
+        json.dumps(
+            {
+                "complete": False,
+                "blocked_reasons": ["host_inventory_unavailable", "<script>alert(1)</script>"],
+            }
+        )
+    ]
+
+    inventory = await bootstrap.inventory(NODE, profile, INTENT)
+    assert inventory.blocked_reasons == ("host_inventory_unavailable",)
 
 
 @pytest.mark.asyncio

@@ -730,7 +730,12 @@ _REMOTE_REASONS = frozenset(
         "unsafe_deployment_path",
         "invalid_deployment_archive",
         "host_stop_failed",
+        "host_quiesce_failed",
         "transfer_failed",
+        "host_inventory_unavailable",
+        "retained_containers_present",
+        "unmanaged_containers_present",
+        "orphan_state_present",
     }
 )
 
@@ -1074,7 +1079,32 @@ class SshHostBootstrap:
         result = self._json(
             await self._transport.run(self._connection(node), script, stdin=records, timeout=60)
         )
-        return HostInventory.model_validate(result)
+        return HostInventory.model_validate(
+            {**result, "blocked_reasons": _remote_reasons(result.get("blocked_reasons"))}
+        )
+
+    async def quiesce(
+        self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
+    ) -> int:
+        """Stop a releasing node's runner and remove the self-test sandboxes it left."""
+        params = self._params(profile, intent)
+        script = (
+            "sudo -n python3 -c " + shlex.quote(_QUIESCE) + " " + shlex.quote(json.dumps(params))
+        )
+        result = self._json(
+            await self._transport.run(
+                self._connection(node), script, timeout=_QUIESCE_TIMEOUT_SECONDS
+            )
+        )
+        removed = result.get("probes_removed")
+        if result.get("quiesced") is not True or not isinstance(removed, int):
+            reason = _remote_reason(result.get("reason"))
+            raise ProviderError(
+                reason or "host_quiesce_failed",
+                "The releasing Host's runner could not be stopped",
+                retryable=reason in {None, "host_quiesce_failed"},
+            )
+        return removed
 
     async def stop(
         self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
@@ -1210,7 +1240,54 @@ _TRANSFER_TIMEOUT_SECONDS = 4 * 3600
 # The sandbox manager's drain must end early enough inside the stop's SSH deadline to
 # leave time for the runner, the remaining containers and the daemons.
 _STOP_TIMEOUT_SECONDS = 900
+#: The runner's own 60 second stop grace, with room for Docker around it.
+_QUIESCE_TIMEOUT_SECONDS = 180
 _SANDBOX_MANAGER_DRAIN_SECONDS = 600
+
+# A runner that stops when its credential is refused would, under its restart
+# policy, start again and qualify the machine on a fresh self-test sandbox each
+# time; the inventory would count one that is running. `docker stop` marks the
+# runner stopped on purpose, so nothing starts it again short of a redeploy.
+# The sandbox manager keeps running: the release still removes through it.
+# A self-test sandbox carries its own label in this deployment's namespace and
+# runs no one's chat; one its runner was stopped in the middle of is removed.
+_QUIESCE = r"""
+import json, shutil, subprocess, sys
+from pathlib import Path
+params = json.loads(sys.argv[1])
+root = Path(params['root'])
+marker = root / '.compute-identity.json'
+def answer(**fields):
+    print(json.dumps(fields))
+    raise SystemExit(0)
+if root.exists() and any(root.iterdir()) and (not marker.is_file() or marker.is_symlink() or json.loads(marker.read_text()) != params['identity']):
+    answer(quiesced=False, reason='deployment_identity_conflict')
+if not shutil.which('docker'):
+    answer(quiesced=True, probes_removed=0)
+project = params.get('project') or 'ca-' + params['identity']['node_id'].replace('-', '').lower()
+quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
+def listed(*filters):
+    return subprocess.check_output(['docker', 'ps', '-q', '--no-trunc', *filters], stderr=subprocess.DEVNULL, text=True).split()
+runner = ('--filter', 'label=com.docker.compose.project=' + project, '--filter', 'label=com.docker.compose.service=runner')
+probe = (
+    '-a', '--filter', 'label=org.freeinference.chat-probe-created',
+    '--filter', 'label=org.freeinference.chat-sandbox=true',
+    '--filter', 'label=org.freeinference.sandbox-namespace=' + project,
+    '--filter', 'label=org.freeinference.chat-runtime=preflight',
+)
+try:
+    running = listed(*runner)
+    if running:
+        subprocess.check_call(['docker', 'stop', '-t', '60', *running], **quiet)
+    if listed(*runner):
+        answer(quiesced=False, reason='host_quiesce_failed')
+    probes = listed(*probe)
+    if probes:
+        subprocess.check_call(['docker', 'rm', '--force', *probes], **quiet)
+except (subprocess.SubprocessError, OSError):
+    answer(quiesced=False, reason='host_quiesce_failed')
+answer(quiesced=True, probes_removed=len(probes))
+"""
 
 _STOP = r"""
 import json, subprocess, sys
@@ -1490,14 +1567,17 @@ else:
     def output(args):
         return subprocess.check_output(args, stderr=subprocess.DEVNULL, text=True).strip()
     try:
-        ids = output(['docker', 'ps', '-aq']).split()
-        containers = json.loads(output(['docker', 'inspect', *ids])) if ids else []
+        # One listing, labels and all: a container removed between a list and
+        # a separate inspect of it would fail the whole read.
+        listing = output(['docker', 'ps', '-a', '--no-trunc', '--format',
+                          '{"sandbox":{{json (.Label "org.freeinference.chat-sandbox")}},'
+                          '"project":{{json (.Label "com.docker.compose.project")}}}'])
         project = params.get('project') or 'ca-' + params['identity']['node_id'].replace('-', '').lower()
-        for container in containers:
-            labels = (container.get('Config') or {}).get('Labels') or {}
-            if labels.get('org.freeinference.chat-sandbox') == 'true':
+        for line in listing.splitlines():
+            labels = json.loads(line)
+            if labels['sandbox'] == 'true':
                 result['retained_containers'] += 1
-            elif labels.get('com.docker.compose.project') != project:
+            elif labels['project'] != project:
                 result['unknown_containers'] += 1
         networks = output(['docker', 'network', 'ls', '-q', '--filter', 'label=org.freeinference.chat-sandbox-network=true'])
         volumes = output(['docker', 'volume', 'ls', '-q'])
@@ -1566,7 +1646,7 @@ else:
         legacy = Path('/var/lib/hybridinference')
         result['orphan_state'] = bool(networks or volumes or unexpected or (legacy.exists() and any(legacy.iterdir())))
         result['complete'] = True
-    except (subprocess.SubprocessError, ValueError):
+    except (subprocess.SubprocessError, ValueError, KeyError, TypeError):
         result['blocked_reasons'].append('host_inventory_unavailable')
 if result['retained_containers']:
     result['blocked_reasons'].append('retained_containers_present')

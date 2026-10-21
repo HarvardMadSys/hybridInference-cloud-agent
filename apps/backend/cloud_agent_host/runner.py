@@ -4423,6 +4423,7 @@ def run_forever(
     idle_wait = tick_s if tick_s is not None else idle_sleep_s
     work = _WorkWaiter(base_url=base_url, interval_s=idle_wait)
     immediate = False
+    rejected = False
     claims = 0
     try:
         while True:
@@ -4449,6 +4450,7 @@ def run_forever(
                     file=sys.stderr,
                     flush=True,
                 )
+                rejected = True
                 break
 
             # Whatever the last successful beat carried, including nothing:
@@ -4598,7 +4600,23 @@ def run_forever(
             turns.shutdown(immediate=immediate)
         finally:
             stop_all()
+    if rejected:
+        _stay_down()
     return 0
+
+
+def _stay_down() -> None:
+    """Wait, doing nothing, until this refused host's container is stopped.
+
+    Exiting would hand the container to its restart policy, and every start
+    qualifies the machine again on a new self-test sandbox: a removed host
+    being released would keep creating containers while its inventory is
+    read. A redeploy stops this container and starts a new one, which
+    enrolls with whatever credential it is then given.
+    """
+    with contextlib.suppress(KeyboardInterrupt):
+        while not _STOPPING.wait(timeout=60):
+            pass
 
 
 #: The fields of a record a run manifest is built from. The manifest is
