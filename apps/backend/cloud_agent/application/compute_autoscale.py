@@ -147,6 +147,9 @@ class CloudLabAutoscaler:
             expected_runtime_generation=int(runtime["generation"]),
         )
         runnable = max(0, int(observation.get("runnable_new_group_jobs") or 0))
+        # A turn in claim backoff is no demand for a new Host, since no claim
+        # hands it out yet, but the pool is not idle while it waits.
+        backoff = max(0, int(observation.get("backoff_new_group_jobs") or 0))
         free = max(0, int(observation.get("fresh_effective_free_slots") or 0))
         unmatched = observation.get("unmatched_new_group_jobs")
         pressure = (
@@ -166,10 +169,10 @@ class CloudLabAutoscaler:
         owned_idle = self._all_owned_capacity_idle(members, list(observation.get("hosts") or []))
         idle_since = (
             _moment(runtime.get("idle_since"))
-            if runnable == 0 and pressure == 0 and owned_idle
+            if runnable + backoff == 0 and pressure == 0 and owned_idle
             else None
         )
-        if runnable == 0 and pressure == 0 and owned_idle and idle_since is None:
+        if runnable + backoff == 0 and pressure == 0 and owned_idle and idle_since is None:
             idle_since = now
         cooldown_until = _moment(runtime.get("cooldown_until"))
 
@@ -309,7 +312,7 @@ class CloudLabAutoscaler:
         if (
             bool(policy.get("scale_down_enabled"))
             and len(capacity_members) > minimum
-            and runnable == 0
+            and runnable + backoff == 0
             and pressure == 0
             and not cooling_down
             and idle_since is not None
