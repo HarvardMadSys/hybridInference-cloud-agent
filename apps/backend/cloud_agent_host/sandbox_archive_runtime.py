@@ -33,6 +33,7 @@ from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveS3Uploader,
 )
 from cloud_agent_host.sandbox_archives import (
+    CaptureGate,
     SandboxArchiveService,
     SandboxInitialArchiveMarker,
     carried_by_checkpoint,
@@ -333,7 +334,7 @@ class SandboxArchiveController:
         # in-flight capture or failed final retry. They nevertheless share one
         # host-wide spool admission gate, so rapid policy changes cannot
         # multiply the service's documented aggregate scratch-space bound.
-        self._capture_slots = threading.BoundedSemaphore(1)
+        self._capture_slots = CaptureGate(1)
         self._condition = threading.Condition()
         self._policy: SandboxArchivePolicy | None = None
         self._current: _ServiceSlot | None = None

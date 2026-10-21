@@ -248,6 +248,69 @@ class SandboxInitialArchiveMarker:
         return marker
 
 
+class CaptureGate:
+    """The host's capture slots, handed first to work a person is waiting on.
+
+    A bounded semaphore otherwise: it caps how many captures spool at once,
+    and a wait for it ends at its timeout. But a first prompt or a cold start
+    must not queue behind a stopped chat's final archive or a checkpoint, so a
+    waiting ``urgent`` capture goes before any other; within each kind the
+    earliest goes first. A capture overtaken ``max_overtaken`` times goes next
+    regardless, so a stream of new chats cannot starve a stop's final archive.
+    """
+
+    def __init__(self, capacity: int = 1, *, max_overtaken: int = 2) -> None:
+        self._capacity = capacity
+        self._free = capacity
+        self._max_overtaken = max_overtaken
+        self._waiting: list[_CaptureWaiter] = []
+        self._changed = threading.Condition()
+
+    def acquire(
+        self, blocking: bool = True, timeout: float | None = None, *, urgent: bool = False
+    ) -> bool:
+        """Take a slot once this capture is next, or return False at the timeout."""
+        waiter = _CaptureWaiter(urgent=urgent)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._changed:
+            self._waiting.append(waiter)
+            try:
+                while self._free == 0 or self._next() is not waiter:
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if not blocking or (remaining is not None and remaining <= 0):
+                        return False
+                    self._changed.wait(remaining)
+                self._free -= 1
+                for earlier in self._waiting[: self._waiting.index(waiter)]:
+                    earlier.overtaken += 1
+                return True
+            finally:
+                self._waiting.remove(waiter)
+                self._changed.notify_all()
+
+    def release(self) -> None:
+        """Return a slot, as ``BoundedSemaphore`` does: never more than were taken."""
+        with self._changed:
+            if self._free >= self._capacity:
+                raise ValueError("capture gate released too many times")
+            self._free += 1
+            self._changed.notify_all()
+
+    def _next(self) -> _CaptureWaiter:
+        for waiter in self._waiting:
+            if waiter.overtaken >= self._max_overtaken:
+                return waiter
+        return next((waiter for waiter in self._waiting if waiter.urgent), self._waiting[0])
+
+
+@dataclass(eq=False)
+class _CaptureWaiter:
+    """One capture waiting for a slot. Identity, not value, tells two apart."""
+
+    urgent: bool
+    overtaken: int = 0
+
+
 class SandboxArchiveService:
     """Capture immutable points and synchronously persist stopped sandboxes.
 
@@ -266,7 +329,7 @@ class SandboxArchiveService:
         uploader: SandboxArchiveS3Uploader,
         config: SandboxArchiveS3Config,
         capture_capacity: int = 1,
-        capture_slots: threading.BoundedSemaphore | None = None,
+        capture_slots: CaptureGate | None = None,
         spool_budget_bytes: int = DEFAULT_ARCHIVE_SPOOL_BUDGET_BYTES,
         max_upload_attempts: int = 3,
         retry_delay_s: float = 1.0,
@@ -329,7 +392,7 @@ class SandboxArchiveService:
         self._uploader = uploader
         self._config = config
         self._policy = config.as_policy()
-        self._capture_slots = capture_slots or threading.BoundedSemaphore(capture_capacity)
+        self._capture_slots = capture_slots or CaptureGate(capture_capacity)
         self._max_upload_attempts = max_upload_attempts
         self._retry_delay_s = retry_delay_s
         self._sleep = sleep
@@ -421,7 +484,7 @@ class SandboxArchiveService:
         acquired = False
         uploaded = False
         try:
-            self._acquire_capture_slot(deadline)
+            self._acquire_capture_slot(deadline, urgent=True)
             acquired = True
             if backend.manager is not self._manager:
                 raise SandboxError("initial archive uses a different retained sandbox manager")
@@ -527,7 +590,7 @@ class SandboxArchiveService:
         acquired = False
         outcome: bool | None = False
         try:
-            self._acquire_capture_slot(deadline)
+            self._acquire_capture_slot(deadline, urgent=True)
             acquired = True
             if backend.manager is not self._manager:
                 raise SandboxError("initial archive probe uses a different retained manager")
@@ -737,7 +800,7 @@ class SandboxArchiveService:
         if capture is None:
             raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
         deadline = self._new_deadline()
-        self._acquire_capture_slot(deadline)
+        self._acquire_capture_slot(deadline, urgent=True)
         try:
             return capture.restore(
                 sandbox_id,
@@ -800,7 +863,7 @@ class SandboxArchiveService:
         if capture is None:
             raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
         deadline = self._new_deadline()
-        self._acquire_capture_slot(deadline)
+        self._acquire_capture_slot(deadline, urgent=True)
         try:
             return capture.load_environment(
                 snapshot,
@@ -858,10 +921,14 @@ class SandboxArchiveService:
             generation=spec.generation,
         )
 
-    def _acquire_capture_slot(self, deadline: float) -> None:
-        """Backpressure before Docker copy, then fence a concurrent close."""
+    def _acquire_capture_slot(self, deadline: float, *, urgent: bool = False) -> None:
+        """Backpressure before Docker copy, then fence a concurrent close.
+
+        ``urgent`` is a capture someone is waiting on: a first prompt or a cold
+        start. It takes the next free slot ahead of background work.
+        """
         self._require_accepting()
-        acquired = self._capture_slots.acquire(timeout=self._remaining(deadline))
+        acquired = self._capture_slots.acquire(timeout=self._remaining(deadline), urgent=urgent)
         if not acquired:
             raise SandboxError("sandbox archive operation timed out waiting for capture capacity")
         try:
