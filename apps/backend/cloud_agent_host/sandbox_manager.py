@@ -78,12 +78,6 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
     build_backend_from_env,
 )
-from cloud_agent_host.sandbox_archive import (
-    DEFAULT_ARCHIVE_STATE_DIR,
-    MAX_ARCHIVE_BYTES,
-    ArchiveIdentity,
-    SandboxArchiveService as SandboxDeletionArchiveService,
-)
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveConfigError
 from cloud_agent_host.sandbox_archives import safe_archive_error_type
@@ -93,6 +87,12 @@ from cloud_agent_host.sandbox_checkpoints import (
     SandboxCheckpointCapture,
     SandboxCheckpointError,
     SandboxCheckpointStore,
+)
+from cloud_agent_host.sandbox_deletion_backup import (
+    DEFAULT_ARCHIVE_STATE_DIR,
+    MAX_ARCHIVE_BYTES,
+    ArchiveIdentity,
+    SandboxDeletionBackupService,
 )
 from cloud_agent_host.sandbox_resources import SandboxResourceCollector
 from cloud_agent_host.session_lifecycle import (
@@ -2476,7 +2476,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
 
     app.state.terminal_manager = terminals
     app.state.sandbox_checkpoint_store = checkpoint_store
-    app.state.sandbox_deletion_archive_service = SandboxDeletionArchiveService(shared_supervisor)
+    app.state.sandbox_deletion_archive_service = SandboxDeletionBackupService(shared_supervisor)
     app.state.sandbox_resource_collector = None
 
     async def runtime_refused(_request: Request, exc: Exception) -> JSONResponse:
