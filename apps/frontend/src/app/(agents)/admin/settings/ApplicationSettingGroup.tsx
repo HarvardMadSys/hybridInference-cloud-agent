@@ -11,6 +11,7 @@ import type {
 } from '@/lib/api/adminSettings';
 
 import type { ApplicationSettingsState } from './ApplicationSettings';
+import { DefaultModelHints, fieldHints } from './DefaultModelHints';
 import { ARCHIVE_BUCKET, DEFAULT_MODEL, displayValue, parseValue } from './settingValues';
 import { useModelSuggestions } from './useModelSuggestions';
 
@@ -220,6 +221,17 @@ function ReviewChanges({
   );
 }
 
+function describedBy(id: string, note: string | null, error: string | undefined): string {
+  return [`${id}-help`, note && `${id}-note`, error && `${id}-error`].filter(Boolean).join(' ');
+}
+
+/** A model id is one token, so the free-text line toggle stays off it. */
+function offersMultiline(field: AdminSettingDefinition, showInput: boolean): boolean {
+  return (
+    showInput && field.kind === 'string' && !field.choices?.length && field.key !== DEFAULT_MODEL
+  );
+}
+
 export function ApplicationSettingGroup({
   title,
   fields,
@@ -394,28 +406,14 @@ export function ApplicationSettingGroup({
           const showInput = editable && (!field.secret || replacing[key]);
           const value = drafts[key] ?? incoming(field);
           const error = errors[key];
-          const models = key === DEFAULT_MODEL ? modelSuggestions : null;
-          // A model id is one token, so the free-text line toggle stays off it.
-          const multilineToggle =
-            showInput && field.kind === 'string' && !field.choices?.length && key !== DEFAULT_MODEL;
-          // What the saved or drafted default means for users. Only a hint: the
-          // catalog is per user, so a model this account lacks may still reach
-          // others, and nobody is stranded by one they lack.
-          const modelNote =
-            key !== DEFAULT_MODEL
-              ? null
-              : !value.trim()
-                ? 'Empty: every user without a model of their own picks one before their first task.'
-                : models && !models.includes(value.trim())
-                  ? 'Your account is not offered this model. Users who are not offered it either are asked to pick one.'
-                  : null;
+          const hints = fieldHints(key, id, value, modelSuggestions);
           const inputProps = {
             id,
             name: key,
             value,
             disabled: busy,
             'aria-invalid': !!error,
-            'aria-describedby': `${id}-help${modelNote ? ` ${id}-note` : ''}${error ? ` ${id}-error` : ''}`,
+            'aria-describedby': describedBy(id, hints.note, error),
             className: INPUT_CLASS,
             onChange: (
               event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>,
@@ -519,15 +517,8 @@ export function ApplicationSettingGroup({
                         min={field.minimum}
                         max={field.maximum}
                         placeholder={field.secret ? 'Enter new secret' : undefined}
-                        list={models ? `${id}-models` : undefined}
+                        list={hints.list}
                       />
-                    )}
-                    {showInput && models && (
-                      <datalist id={`${id}-models`}>
-                        {models.map((model) => (
-                          <option key={model} value={model} />
-                        ))}
-                      </datalist>
                     )}
                   </div>
                   {editable && (
@@ -576,7 +567,7 @@ export function ApplicationSettingGroup({
                     {configured ? 'Replace secret' : 'Set secret'}
                   </button>
                 )}
-                {multilineToggle && (
+                {offersMultiline(field, showInput) && (
                   <label className="mt-2 flex min-h-9 cursor-pointer items-center gap-2 text-xs text-muted">
                     <input
                       type="checkbox"
@@ -591,14 +582,12 @@ export function ApplicationSettingGroup({
                     Multiple lines
                   </label>
                 )}
-                {modelNote && (
-                  <p
-                    id={`${id}-note`}
-                    className={`mt-2 text-xs leading-5 ${value.trim() ? 'text-status-warning' : 'text-muted'}`}
-                  >
-                    {modelNote}
-                  </p>
-                )}
+                <DefaultModelHints
+                  id={id}
+                  hints={hints}
+                  showInput={showInput}
+                  warn={Boolean(value.trim())}
+                />
                 {error && (
                   <p id={`${id}-error`} role="alert" className="mt-2 text-sm text-status-error">
                     {error}
