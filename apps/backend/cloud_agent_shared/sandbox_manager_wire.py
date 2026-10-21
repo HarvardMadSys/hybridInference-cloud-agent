@@ -1,9 +1,12 @@
 """How a retained group is described to the Sandbox Manager, by either caller.
 
 The control plane and the runner both send a group's identity and its member
-manifest; the Sandbox Manager validates them against the bounds here. One
-definition means a member field is added in one place, and every sender
-projects exactly the fields the receiver accepts.
+manifest; the Sandbox Manager validates them against the bounds here. This is
+the one definition of those fields and their bounds, and ``member_manifest()``
+projects durable member records onto exactly those fields. A new member field
+also needs the SQL projections that read members for the senders, the worker
+API's ``WorkerSandboxMember``, and the supervisor's ``SharedMemberManifest``,
+which a test holds to ``MEMBER_FIELDS``.
 """
 
 from __future__ import annotations
