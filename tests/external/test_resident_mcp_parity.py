@@ -513,6 +513,7 @@ for directory in (".kilo", ".kilocode"):
                 live_argv,
                 prompt="Read issue 7 through exec/run",
                 model="test-model",
+                session_state_dir=context.session_state_dir,
                 resume_session_id=native_id,
             )
             process = spawn(argv, one_shot_env(env))

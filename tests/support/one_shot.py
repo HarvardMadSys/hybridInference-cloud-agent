@@ -17,9 +17,14 @@ def one_shot_argv(
     prompt: str,
     model: str,
     provides_isolation: bool = True,
+    session_state_dir: str | None = None,
     resume_session_id: str | None = None,
 ) -> list[str]:
-    """The headless invocation of ``runtime`` matching its resident ``live_argv``."""
+    """The headless invocation of ``runtime`` matching its resident ``live_argv``.
+
+    Pass the ``session_state_dir`` and ``resume_session_id`` the resident launch
+    was given.
+    """
     if runtime == "claude-code":
         argv = list(live_argv)
         input_at = argv.index("--input-format")
@@ -53,7 +58,11 @@ def one_shot_argv(
         argv[prompt_at:prompt_at] = ["-p", prompt]
         return argv
     if runtime in {"opencode", "kilo"}:
-        session = ["--session", resume_session_id] if resume_session_id else []
+        # Their sessions are kept under the state root, so only a launch given
+        # one names a session to continue.
+        session = (
+            ["--session", resume_session_id] if session_state_dir and resume_session_id else []
+        )
         return [
             f"{runtime}-freeinference",
             "run",
