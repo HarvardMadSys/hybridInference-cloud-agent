@@ -2446,7 +2446,15 @@ def create_app(
                 safe_cause = RuntimeError(f"{component} cleanup failed ({error_type})")
                 raise RuntimeError("sandbox manager shutdown cleanup failed") from safe_cause
 
-    app = FastAPI(title="Agent sandbox manager", docs_url=None, redoc_url=None, lifespan=lifespan)
+    # No schema or docs routes: they are served outside the routes' auth
+    # dependency, and nothing reads them.
+    app = FastAPI(
+        title="Agent sandbox manager",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import JSONResponse
 
