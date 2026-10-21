@@ -41,6 +41,7 @@ from cloud_agent.goals.models import (
 from cloud_agent.goals.report import GoalReportEnvelope
 from cloud_agent.goals.retry_policy import is_exhausted, wakeup_backoff
 from cloud_agent.storage._sql.goals import arm_finish_wakeup
+from cloud_agent.storage.repositories.goals import _arm
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -885,6 +886,44 @@ async def test_a_replayed_finish_makes_one_obligation(store, pool):
     await store.goal_wakeups.finish_wakeup(wakeup_id=first[0], processed=True, detail="done")
     again = await finish()
     assert len(again) == 1 and again != first
+
+
+async def test_arming_an_owner_event_twice_makes_one_obligation(store, pool):
+    """The INSERT a set, a resume and the recovery sweep arm through.
+
+    Arming an event whose wakeup is still pending finds that row and makes
+    nothing, which is what lets a recovery pass race a live consumer. A
+    *processed* row does not block a genuinely new event of the same name: the
+    unique index the conflict clause names covers ``pending`` rows only.
+    """
+    job = await _create_job(store)
+    obligation = {
+        "thread_id": job["thread_id"],
+        "goal_id": "goal-x",
+        "revision": 1,
+        "trigger": "owner",
+        "trigger_ref": "recovery:1",
+    }
+
+    async def states(conn) -> dict[str, str]:
+        rows = await conn.fetch(
+            "SELECT id, state FROM agent_goal_wakeups WHERE thread_id = $1", job["thread_id"]
+        )
+        return {row["id"]: row["state"] for row in rows}
+
+    async with pool.acquire() as conn:
+        first = await _arm(conn, **obligation)
+        assert first is not None
+        assert await _arm(conn, **obligation) is None
+        assert await states(conn) == {first: "pending"}
+
+        await store.goal_wakeups.finish_wakeup(
+            wakeup_id=first, processed=True, detail="done", conn=conn
+        )
+        again = await _arm(conn, **obligation)
+
+        assert again is not None and again != first
+        assert await states(conn) == {first: "processed", again: "pending"}
 
 
 async def test_a_claim_leases_a_wakeup_until_its_lease_expires(store, pool):
