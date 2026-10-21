@@ -13,6 +13,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 from typing import Any
 
 import pytest
@@ -1065,3 +1066,76 @@ def test_nothing_is_restored_once_the_written_targets_are_no_longer_known(ending
     assert guard.ssh_target_endpoints(bridge) == (
         {("93.184.216.34", 22)} if ending == "no_network" else set()
     )
+
+
+class _HeldHelper:
+    """The guard's runner, holding a helper run open until told to finish it."""
+
+    def __init__(self, nft: FakeNft) -> None:
+        self.nft = nft
+        self.hold = False
+        self.entered = threading.Event()
+        self.finish = threading.Event()
+
+    def __call__(self, argv: list[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+        if self.hold:
+            self.hold = False
+            self.entered.set()
+            assert self.finish.wait(5)
+        return self.nft(argv, stdin)
+
+
+def _finishes_within(seconds: float, call: Any) -> bool:
+    done = threading.Event()
+
+    def run() -> None:
+        call()
+        done.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    return done.wait(seconds)
+
+
+def test_a_fresh_check_does_not_wait_behind_another_bridges_helper() -> None:
+    """Every workspace request checks the rules; one stop's helper must not hold them all."""
+    nft, guard, bridge = _synced_guard()
+    other = guard.network.bridge_name("freeinference-chat-net-y")
+    helper = _HeldHelper(nft)
+    guard._run = helper
+    helper.hold = True
+    releasing = threading.Thread(target=guard.release_bridge, args=(other,), daemon=True)
+    releasing.start()
+    assert helper.entered.wait(5), "the other bridge's helper never started"
+    calls = len(nft.calls)
+
+    def fresh_checks() -> None:
+        assert guard.ensure() is None
+        guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
+        assert guard.written_relays(bridge) == frozenset({("10.240.0.3", 8080)})
+
+    try:
+        assert _finishes_within(1, fresh_checks), "a fresh check waited for the helper"
+    finally:
+        helper.finish.set()
+        releasing.join(5)
+    assert len(nft.calls) == calls + 1, "only the held helper ran"
+
+
+def test_a_check_during_a_reinstall_waits_for_its_verification() -> None:
+    """Nothing is trusted while the rules are being installed and read back."""
+    nft = FakeNft()
+    guard = _guard(nft)
+    helper = _HeldHelper(nft)
+    guard._run = helper
+    helper.hold = True
+    installing = threading.Thread(target=guard.ensure, daemon=True)
+    installing.start()
+    assert helper.entered.wait(5), "the install never started"
+    try:
+        assert not _finishes_within(0.2, guard.ensure), "a check trusted an unfinished install"
+    finally:
+        helper.finish.set()
+        installing.join(5)
+    calls = len(nft.calls)
+    assert guard.ensure() is None
+    assert len(nft.calls) == calls
