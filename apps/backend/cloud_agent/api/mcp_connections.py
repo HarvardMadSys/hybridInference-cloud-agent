@@ -46,11 +46,6 @@ from cloud_agent.api.mcp_connections_shared import (
     _not_found,
     _require_store,
 )
-from cloud_agent.api.mcp_connector_routes import (
-    CONNECTOR_RUNTIME_UNAVAILABLE,
-    _require_connector,
-    router as connector_router,
-)
 from cloud_agent.api.mcp_thread_bindings import (
     BindingRequest,
     BindingResponse,
@@ -584,20 +579,6 @@ async def list_catalog(
     return catalog.search(search, offset, limit, recommended=recommended)
 
 
-@router.get("/templates", response_model=list[dict[str, Any]])
-async def list_templates(
-    user: dict[str, Any] = Depends(require_agent_owner),
-) -> list[dict[str, Any]]:
-    """Presets that simplify adding a well-known server.
-
-    A preset fills in a URL and a note. It never decides whether a connection
-    is allowed, which is why this endpoint is a convenience rather than a
-    registry: adding a server with no template is the same code path.
-    """
-    del user
-    return _templates()
-
-
 @router.get("/connections", response_model=ConnectionsResponse)
 async def list_connections(
     user: dict[str, Any] = Depends(require_agent_owner),
@@ -631,9 +612,8 @@ async def create_connection(
         # nothing makes the provenance unreadable.
         raise _bad_request(f"unknown template: {template!r}")
     if body.connector_id is not None:
-        # The same ownership read the bind route makes. Without it the column
-        # could name another user's machine, and that user's revocation would
-        # then reach into this connection.
+        # A connection may name only its owner's connector: another user's
+        # answers 404, as a missing one does, and nothing is stored.
         await _require_connector(job_store, connector_id=body.connector_id, user_id=user["user_id"])
 
     if body.connector_id is not None:
@@ -911,21 +891,6 @@ async def test_connection(
     No business tool is called, and the result is recorded on the connection so
     the Integrations page can say what is wrong without the user pressing
     anything twice.
-    """
-    return await _diagnose(connection_id=connection_id, user=user, store=store, record=True)
-
-
-@router.post("/connections/{connection_id}/discover", response_model=TestResult)
-async def discover_connection(
-    connection_id: int,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-) -> TestResult:
-    """Alias for :func:`test_connection`, kept because the design names both.
-
-    They are the same operation: a discovery that does not handshake is not a
-    discovery, and a test that does not read the catalogue cannot tell a
-    working server from one that will fail at its first tool call.
     """
     return await _diagnose(connection_id=connection_id, user=user, store=store, record=True)
 
@@ -2235,6 +2200,23 @@ def _header_of(row: Mapping[str, Any]) -> str:
     return str(settings.get("header_name") or "Authorization")
 
 
+async def _require_connector(
+    store: _McpConnectionsStorage, *, connector_id: int, user_id: str
+) -> dict[str, Any]:
+    """Fetch one of this user's connectors, or refuse."""
+    row = next(
+        (
+            item
+            for item in await store.mcp.list_mcp_connectors(user_id=user_id)
+            if int(item["id"]) == connector_id
+        ),
+        None,
+    )
+    if row is None:
+        raise _not_found("no such connector")
+    return row
+
+
 def _no_encryption_key() -> HTTPException:
     """The deployment cannot hold a credential at all."""
     return HTTPException(
@@ -2249,7 +2231,6 @@ def _no_encryption_key() -> HTTPException:
 
 
 __all__ = [
-    "CONNECTOR_RUNTIME_UNAVAILABLE",
     "ENV_MCP_PUBLIC_BASE_URL",
     "BindingRequest",
     "BindingResponse",
@@ -2262,4 +2243,3 @@ __all__ = [
 # public router flat, so an application that includes it can bind dependency
 # overrides exactly as it did when every route lived here.
 router.routes.extend(thread_bindings_router.routes)
-router.routes.extend(connector_router.routes)

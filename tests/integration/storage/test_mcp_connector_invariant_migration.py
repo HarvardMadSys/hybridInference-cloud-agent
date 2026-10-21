@@ -10,6 +10,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from tests.integration.storage.test_agent_job_store import pool as pool
 from tests.integration.storage.test_schema_upgrade import _db_config
+from tests.support.mcp_connectors import insert_connector
 from tests.support.migrations import REPO, apply_migrations, downgrade_to
 
 from cloud_agent.storage.assembly import Storage
@@ -147,27 +148,10 @@ async def test_migration_repairs_routes_and_preserves_only_the_canonical_pair(po
     downgrade_to(config, _BEFORE)
     store = Storage(pool)
 
-    canonical = await store.mcp.create_mcp_connector(
-        user_id=_OWNER,
-        name="Canonical",
-        registration_hash="migration-canonical",
-    )
-    extra = await store.mcp.create_mcp_connector(
-        user_id=_OWNER,
-        name="Extra",
-        registration_hash="migration-extra",
-    )
-    wrong_owner = await store.mcp.create_mcp_connector(
-        user_id=_OTHER,
-        name="Other owner's",
-        registration_hash="migration-other-owner",
-    )
-    revoked = await store.mcp.create_mcp_connector(
-        user_id=_OWNER,
-        name="Revoked",
-        registration_hash="migration-revoked",
-    )
-    assert await store.mcp.revoke_mcp_connector(connector_id=int(revoked["id"]), user_id=_OWNER)
+    canonical = await insert_connector(pool, user_id=_OWNER, name="Canonical")
+    extra = await insert_connector(pool, user_id=_OWNER, name="Extra")
+    wrong_owner = await insert_connector(pool, user_id=_OTHER, name="Other owner's")
+    revoked = await insert_connector(pool, user_id=_OWNER, name="Revoked", revoked=True)
 
     valid = await _local_connection(
         store, label="Valid canonical", connector_id=int(canonical["id"])

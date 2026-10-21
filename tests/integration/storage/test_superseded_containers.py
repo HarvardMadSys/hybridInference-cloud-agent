@@ -31,7 +31,7 @@ from tests.integration.storage.test_sandbox_restore_store import (
     store as store,
 )
 from tests.support.follow_ups import append_follow_up
-from tests.unit.test_sandbox_archive import _Manager
+from tests.unit.test_sandbox_deletion_backup import _Manager
 
 from cloud_agent.ports.external.compute_provider import ProviderReceipt
 from cloud_agent.providers.compute.host_bootstrap import SshHostBootstrap
@@ -42,8 +42,8 @@ from cloud_agent.storage._sql.hosts import (
     superseded_removal_request_id,
 )
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
-from cloud_agent_host.sandbox_archive import ArchiveIdentity, SandboxArchiveService
 from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointReceipt, SandboxCheckpointStore
+from cloud_agent_host.sandbox_deletion_backup import ArchiveIdentity, SandboxDeletionBackupService
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
@@ -459,7 +459,7 @@ class _Machine:
         return output.getvalue()
 
 
-def _host_manager(group: dict, archives: Path) -> tuple[_Manager, SandboxArchiveService]:
+def _host_manager(group: dict, archives: Path) -> tuple[_Manager, SandboxDeletionBackupService]:
     """``runner-a``'s Sandbox Manager, still holding the group's stopped container."""
     spec = ChatSandboxSpec(
         thread_id=group["origin_thread_id"],
@@ -481,7 +481,7 @@ def _host_manager(group: dict, archives: Path) -> tuple[_Manager, SandboxArchive
         ],
         expected_container_id=group["container_id"],
     )
-    return manager, SandboxArchiveService(supervisor, state_dir=archives)
+    return manager, SandboxDeletionBackupService(supervisor, state_dir=archives)
 
 
 async def _recorded_receipt(pool) -> SandboxCheckpointReceipt:

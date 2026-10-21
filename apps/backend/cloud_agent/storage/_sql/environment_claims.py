@@ -20,6 +20,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.execution_profiles import shared_sandbox_claim_attested
+from cloud_agent.storage._sql import environment_runs
 from cloud_agent.storage._sql.compute_admission import (
     host_compute_admission,
     lock_compute_topology,
@@ -79,14 +80,13 @@ async def claim_environment_run(
         ):
             return None
         if await conn.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM agent_environment_runs WHERE host=$1 AND NOT cleanup_complete "
-            "AND (lease_expires_at<=NOW() OR started_at<=NOW()-INTERVAL '30 minutes'))",
+            f"SELECT EXISTS(SELECT 1 FROM agent_environment_runs WHERE host=$1 AND {environment_runs.env_run_blocks_host()})",
             host,
         ):
             return None
         tests = int(
             await conn.fetchval(
-                "SELECT COUNT(*) FROM agent_environment_runs WHERE host=$1 AND NOT cleanup_complete AND lease_expires_at>NOW() AND started_at>NOW()-INTERVAL '30 minutes'",
+                f"SELECT COUNT(*) FROM agent_environment_runs WHERE host=$1 AND {environment_runs.env_run_holds_slot()}",
                 host,
             )
         )

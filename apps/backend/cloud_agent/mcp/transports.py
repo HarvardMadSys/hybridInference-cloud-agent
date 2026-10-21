@@ -508,13 +508,15 @@ async def guard_target(
     """Validate a URL and every address it resolves to before anything dials it.
 
     Module level rather than a method because there is more than one place that
-    dials: the transports, and the per-connection relay that forwards a caller's
-    raw JSON-RPC. A rule enforced at one of them and not the other is not a
-    rule -- the path that skips it becomes the way in.
+    dials: a transport's requests, and the opening GET of a legacy SSE
+    connection, which happens before any transport request exists. A rule
+    enforced at one of them and not the other is not a rule -- the path that
+    skips it becomes the way in.
 
     ``origin`` binds the target to the one the credential belongs to. It is
-    optional because the relay validates a target the registry already chose,
-    and required by the transports, which follow URLs a server hands them.
+    optional because a connection's own endpoint is a target the registry
+    already chose, and required for the URLs a server hands back, which the
+    transports then follow.
     """
     try:
         endpoint = validate_endpoint(url, policy)

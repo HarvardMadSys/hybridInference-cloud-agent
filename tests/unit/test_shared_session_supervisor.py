@@ -23,8 +23,6 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent_host.chat_sandbox import (
-    FINAL_ARCHIVE_MARKER_NAME,
-    INITIAL_ARCHIVE_MARKER_ROOT,
     MEMBER_UID_BASE,
     ChatSandboxInspection,
     ChatSandboxManager,
@@ -33,6 +31,10 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatFailStopped,
     RetainedChatLost,
     claude_member_config_dir,
+)
+from cloud_agent_host.chat_sandbox_markers import (
+    FINAL_ARCHIVE_MARKER_NAME,
+    INITIAL_ARCHIVE_MARKER_ROOT,
 )
 from cloud_agent_host.drivers import DriverError, InputOutcome
 from cloud_agent_host.guest_observer import (

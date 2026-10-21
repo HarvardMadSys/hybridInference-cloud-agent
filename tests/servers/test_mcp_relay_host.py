@@ -1,15 +1,15 @@
 """The merged host endpoint: every connection of one job behind a single URL.
 
-The per-connection route forwards JSON-RPC and lets the CLI own the protocol.
-This one owns it: the platform answers ``initialize``, merges the catalogues,
-namespaces the tool names and routes a call back to the connection it came from.
+The platform owns the protocol here: it answers ``initialize``, merges the
+catalogues, namespaces the tool names and routes a call back to the connection
+it came from.
 
-Four properties carry the weight, and each is a way the merged surface could be
-worse than the per-connection one:
+Three properties carry the weight, and each is a way a merged surface could go
+wrong:
 
-- **The decision path is shared, not copied.** A held call here creates the same
-  pending invocation the other route does, so an approval granted on the
-  Integrations page is consumed by whichever surface the retry arrives on.
+- **A held call is the owner's to decide.** ``confirm`` records the same
+  pending invocation the Integrations page lists, so an approval granted there
+  is consumed by the retry that matches it.
 - **Routing is a catalogue lookup, not a string split.** An alias may itself
   contain the separator, so ``a__b`` plus tool ``c`` and alias ``a`` plus tool
   ``b__c`` present the same string; only the map built from the catalogue can
@@ -17,9 +17,6 @@ worse than the per-connection one:
 - **One broken connection does not empty the catalogue.** A server that is
   disconnected or needs re-authorization is skipped with a log, because losing
   every other tool is a far worse outcome than the failure that caused it.
-- **The bare prefix is unshadowable.** ``/{server_name}`` needs a non-empty
-  segment, so the merged endpoint cannot be reached as a connection named
-  ``host`` or anything else a user could pick.
 """
 
 from __future__ import annotations
@@ -39,6 +36,7 @@ from cloud_agent.api import mcp_relay as agent_mcp_router
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp import runtime as mcp_runtime
 from cloud_agent.mcp.host import ContentBlock, Session, ToolResult
+from cloud_agent.mcp.net_policy import EgressPolicy
 from cloud_agent.mcp.protocol import Handshake
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.ports.web_search import WebSearchAdmission
@@ -61,10 +59,6 @@ def _secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     """Provide the signing secret and the key connection credentials use."""
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "mcp-host-secret-value-32-bytes-xx")
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", _ENCRYPTION_KEY)
-    # The target above is loopback and plain HTTP, so the deployment has to
-    # admit both for the guard to let the per-connection route through.
-    monkeypatch.setenv("AGENT_MCP_ALLOW_PRIVATE_TARGETS", "1")
-    monkeypatch.setenv("AGENT_MCP_ALLOW_PLAIN_HTTP", "1")
     monkeypatch.setattr(agent_mcp_router.web_search, "configured", lambda: False)
     yield
 
@@ -544,6 +538,56 @@ class TestTheMergedCatalogue:
             response = await api.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
         assert _tool_names(response) == _catalogue("github__get_issue")
 
+    async def test_a_connection_that_no_longer_exists_is_skipped_and_the_rest_survive(
+        self, client: AsyncClient, store: FakeStore
+    ) -> None:
+        """The binding survived; the row it names did not: skipped, not a crash.
+
+        One binding whose connection is gone must not turn the whole listing
+        into a server error and take every other connection's tools with it.
+        """
+        del store.connections[7]
+
+        response = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
+
+        assert response.status_code == 200
+        assert _tool_names(response) == _catalogue("docs__search")
+
+    async def test_a_binding_owned_by_somebody_else_is_not_listed_or_reached(
+        self,
+        client: AsyncClient,
+        store: FakeStore,
+        host: StubHost,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A binding whose connection is another owner's is not this job's to use.
+
+        The owner is read from the fence rather than from the caller, so a
+        binding must name the job's owner before its connection is listed,
+        refreshed or dialled with that other owner's credential.
+        """
+        store.connections[7] = _connection(7, "GitHub", user_id="someone-else")
+        store.bindings[0]["owner_id"] = "someone-else"
+        refreshed: list[int] = []
+
+        async def refresh(repository, *, row, policy):
+            refreshed.append(row["id"])
+            return row
+
+        monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+        listed = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
+        called = await client.post(
+            _HOST_URL,
+            json=_rpc("tools/call", name="github__get_issue", arguments={}),
+            headers=_auth(),
+        )
+
+        assert _tool_names(listed) == _catalogue("docs__search")
+        assert "error" in called.json()
+        assert refreshed == []
+        assert host.opened == []
+        assert host.called == []
+
     async def test_an_alias_containing_the_separator_still_routes_by_lookup(
         self, client: AsyncClient, store: FakeStore, host: StubHost
     ) -> None:
@@ -599,6 +643,37 @@ class TestRoutingACall:
         # The connection's own credential, not the sandbox's job token.
         assert host.opened[-1]["secret"] == "Docs-secret"
 
+    async def test_a_refresh_runs_under_the_deployment_egress_policy(
+        self, client: AsyncClient, host: StubHost, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refresh before a call uses the policy authorization and Test use.
+
+        This deployment admits private plain-HTTP targets, as one with a
+        connector bridge on its own network does. A refresh that fell back to
+        the default policy would refuse that token endpoint only when a job
+        asked, and the connection would read as needing reconnection mid-job
+        while Test, which refreshes under the deployment's policy, kept
+        succeeding.
+        """
+        monkeypatch.setenv("AGENT_MCP_ALLOW_PRIVATE_TARGETS", "1")
+        monkeypatch.setenv("AGENT_MCP_ALLOW_PLAIN_HTTP", "1")
+        seen: list[EgressPolicy | None] = []
+
+        async def refresh(repository, *, row, policy=None):
+            seen.append(policy)
+            return row
+
+        monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+        response = await client.post(
+            _HOST_URL,
+            json=_rpc("tools/call", name="docs__search", arguments={"q": "nsi"}),
+            headers=_auth(),
+        )
+
+        assert "result" in response.json()
+        assert seen == [EgressPolicy(allow_private=True, allow_plain_http=True)]
+        assert host.called[-1]["name"] == "search"
+
     async def test_an_unknown_name_is_refused_without_dialling_anything(
         self, client: AsyncClient, host: StubHost
     ) -> None:
@@ -615,7 +690,7 @@ class TestRoutingACall:
     async def test_a_held_call_is_recorded_and_not_dispatched(
         self, store: FakeStore, host: StubHost
     ) -> None:
-        """``confirm`` holds on this surface exactly as it does on the other."""
+        """``confirm`` holds the call and records it for the owner to decide."""
         store.bindings = [
             _binding(7, "github", rules={"get_issue": {"policy": "confirm", "fingerprint": ""}})
         ]
@@ -633,6 +708,33 @@ class TestRoutingACall:
         assert host.called == []
         assert len(store.created_invocations) == 1
         assert store.created_invocations[0]["capability_name"] == "get_issue"
+
+    async def test_a_call_too_large_to_review_is_refused_rather_than_held(
+        self, client: AsyncClient, store: FakeStore, host: StubHost
+    ) -> None:
+        """A held call's arguments are stored for its owner, so they are bounded.
+
+        The body is well inside the relay's request bound, and still far more
+        than a person reviews before approving; storing it would only grow a
+        table every tenant shares.
+        """
+        store.bindings = [
+            _binding(7, "github", rules={"get_issue": {"policy": "confirm", "fingerprint": ""}})
+        ]
+        arguments = {"body": "x" * agent_mcp_router.MAX_HELD_ARGUMENTS_BYTES}
+
+        response = await client.post(
+            _HOST_URL,
+            json=_rpc("tools/call", name="github__get_issue", arguments=arguments),
+            headers=_auth(),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["error"]["code"] == -32602
+        assert "not held or sent" in response.json()["error"]["message"]
+        assert store.created_invocations == []
+        assert host.opened == []
+        assert host.called == []
 
     async def test_an_approved_retry_is_dispatched_once(
         self, host: StubHost, monkeypatch: pytest.MonkeyPatch
@@ -768,16 +870,15 @@ class TestTheHandshake:
 
 
 class TestTheBarePrefix:
-    """Why the merged endpoint cannot be shadowed."""
+    """The merged endpoint is the relay's only address."""
 
-    async def test_the_bare_prefix_reaches_the_host_not_a_connection(
-        self, client: AsyncClient, store: FakeStore, host: StubHost
+    async def test_an_alias_has_no_route_of_its_own(
+        self, client: AsyncClient, store: FakeStore
     ) -> None:
-        """``/{server_name}`` needs a non-empty segment, so there is no collision.
+        """A connection is reached through the catalogue, never at ``/<alias>``.
 
-        A connection literally named ``host`` would still be addressed at
-        ``/v1/agent/mcp/host``; the merged endpoint is reachable only at the
-        bare prefix, which no alias can produce.
+        A connection literally named ``host`` is listed like any other, and the
+        address its alias would name answers nothing.
         """
         store.bindings = [
             _binding(7, "host", rules={"get_issue": {"policy": "allow", "fingerprint": ""}})
@@ -785,13 +886,10 @@ class TestTheBarePrefix:
         merged = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
         assert _tool_names(merged) == _catalogue("host__get_issue")
 
-        # The per-connection route still answers for the alias itself.
-        per_connection = await client.post(
-            "/v1/agent/mcp/host",
-            json=_rpc("tools/list", 2),
-            headers=_auth(),
+        by_alias = await client.post(
+            f"{_HOST_URL}/host", json=_rpc("tools/list", 2), headers=_auth()
         )
-        assert per_connection.status_code in (200, 502)
+        assert by_alias.status_code == 404
 
     async def test_the_merged_endpoint_requires_an_mcp_scoped_token(
         self, client: AsyncClient
@@ -1218,7 +1316,7 @@ async def test_inactive_connection_never_refreshes_or_delays_healthy_tools(
     assert host.called[-1]["name"] == "search"
 
 
-@pytest.mark.parametrize("surface", ["tool", "resource", "prompt", "direct"])
+@pytest.mark.parametrize("surface", ["tool", "resource", "prompt"])
 async def test_legacy_duplicate_aliases_cannot_route_to_the_first_connection(
     client, store, host, surface
 ):
@@ -1227,15 +1325,10 @@ async def test_legacy_duplicate_aliases_cannot_route_to_the_first_connection(
         "tool": _rpc("tools/call", name="github__get_issue"),
         "resource": _rpc("resources/read", uri="mcp-resource://7/repo://notes"),
         "prompt": _rpc("prompts/get", name="github__summary"),
-        "direct": _rpc("tools/call", name="get_issue"),
     }[surface]
     listed = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
     assert _tool_names(listed) == _catalogue("docs__search")
-    response = await client.post(
-        f"{_HOST_URL}/github" if surface == "direct" else _HOST_URL,
-        json=request,
-        headers=_auth(),
-    )
+    response = await client.post(_HOST_URL, json=request, headers=_auth())
     assert response.status_code == 403 or "error" in response.json()
     assert host.opened == []
     assert host.called == []
