@@ -131,7 +131,6 @@ if TYPE_CHECKING:
 
     from _typeshed import SupportsWrite
 
-    from cloud_agent_shared.egress import SandboxNetwork
 #: A probe older than this was abandoned by a process killed mid-probe. Since
 #: discovery no longer stops it, the next probe in the namespace removes it.
 PROBE_ABANDONED_AFTER_S = 3600
@@ -551,10 +550,6 @@ class ChatSandboxManager:
     # routes and masquerades it; the host's rules decide what it reaches. The
     # only other endpoints on it are the two relays, copied from the relay
     # network, and the host holds an exact exception for each of them.
-
-    def _network(self) -> SandboxNetwork:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._network()
 
     def network_for(self, spec: ChatSandboxSpec) -> str:
         """Delegate to the group-network lifecycle owner."""
