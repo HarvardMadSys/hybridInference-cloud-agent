@@ -8472,3 +8472,182 @@ def test_a_group_found_after_a_restart_seals_its_last_checkpoint() -> None:
 
     _run_once(supervisor, start_seq=6)
     assert supervisor.start_seq_for("asbx_shared") == 6
+
+
+def _journal_sample_line(measurement_id: str, sample_seq: int) -> bytes:
+    """One complete window_sample census record, as the guest observer writes it."""
+    record = {
+        "version": 2,
+        "seq": sample_seq,
+        "kind": "window_sample",
+        "mono_ns": 1_000_000 * (sample_seq + 1),
+        "measurement_id": measurement_id,
+        "uid": 11001,
+        "window": {
+            "sample_seq": sample_seq,
+            "counters": 0x3F,
+            "tasks": 1,
+            "address_spaces": 1,
+            "pss_bytes": 4096,
+            "pss_failed": 0,
+            "cpu_ns": 5_000_000_000,
+            "read_bytes": 100,
+            "write_bytes": 20,
+            "task_detail": [
+                {
+                    "tid": 7,
+                    "tgid": 7,
+                    "uid": 11001,
+                    "starttime": 100,
+                    "cpu_ns": 5_000_000_000,
+                    "read_bytes": 100,
+                    "write_bytes": 20,
+                    "counters": 0x3F,
+                }
+            ],
+        },
+    }
+    return json.dumps(record).encode() + b"\n"
+
+
+class _RotatingJournalManager(_Manager):
+    """A manager with a simulated guest journal that tests can rotate.
+
+    The journal is a byte buffer with a device/inode identity, exactly what
+    ``member_window_journal_delta`` fences on: a read past the end of the
+    buffer raises the same "behind the read fence" error the real guest reader
+    raises when its file was rotated away.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.journal = bytearray()
+        self.journal_dev = 100
+        self.journal_ino = 200
+        self.begin_count = 0
+
+    def begin_guest_observation(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        user_uid: int,
+        measurement_id: str | None = None,
+    ) -> GuestObserverCursor:
+        self.events.append(("observe-begin", user_uid))
+        self.begin_count += 1
+        return GuestObserverCursor(
+            uid=user_uid,
+            offset=len(self.journal),
+            journal_dev=self.journal_dev,
+            journal_ino=self.journal_ino,
+            guest_boot_id="boot-1",
+            guest_mono_ns=1_000_000 * self.begin_count,
+            available=True,
+            measurement_id=measurement_id,
+        )
+
+    def member_window_journal_delta(
+        self,
+        spec: ChatSandboxSpec,
+        cursor: GuestObserverCursor,
+        *,
+        timeout_s: float = 10.0,
+    ) -> tuple[bytes, int]:
+        del spec, timeout_s
+        if len(self.journal) < cursor.offset:
+            raise SandboxError(
+                "member window journal read failed: observer journal is behind the read fence"
+            )
+        payload = bytes(self.journal[cursor.offset :])
+        return payload, cursor.offset + len(payload)
+
+    def rotate_journal(self, *, new_size: int = 0) -> None:
+        self.journal = bytearray(new_size)
+        self.journal_ino += 1
+
+    def append_journal(self, payload: bytes) -> None:
+        self.journal.extend(payload)
+
+
+def test_a_second_window_reads_the_journal_from_its_own_opening_cursor():
+    """Census must not leak across windows, nor be lost after a rotation.
+
+    ``window_journal_offset`` used to start at zero and survive across turns:
+    the first window read pre-window bytes, and once the journal rotated, a
+    later window's stale offset sat behind the new file's read fence, so the
+    suppressed read error silently emptied every later checkpoint.
+    """
+    manager = _RotatingJournalManager()
+    manager.backend.runtime = KATA_RUNTIME
+    reported: list[tuple[str, dict]] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        transport_factory=_TransportFactory(),
+        window_sample_interval_s=10.0,
+        checkpoint_interval_s=0.0,
+        window_checkpoint_hook=lambda thread_id, snapshot: reported.append((thread_id, snapshot)),
+    )
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    supervisor._stop.set()
+    if supervisor._sampler_thread is not None:
+        supervisor._sampler_thread.join(timeout=2)
+
+    # Pre-window bytes: a census written before this member's window opened.
+    pre_window = _journal_sample_line("0" * 32, 1)
+    manager.append_journal(pre_window)
+
+    turn = supervisor.start_turn(
+        "athr_source",
+        lease.token,
+        prompt="work",
+        model="glm-5.1",
+        reasoning_effort=None,
+    )
+    first_window = supervisor._groups["asbx_shared"].members["athr_source"].window
+    assert first_window is not None
+    measurement = first_window.measurement_id
+
+    # One in-window census. It is the only cycle this window may count.
+    manager.append_journal(_journal_sample_line(measurement, 2))
+    assert supervisor.sample_open_windows() == 1
+    checkpoint = reported[-1][1]
+    assert checkpoint["memory"]["valid_samples"] == 1
+
+    supervisor.complete_turn("athr_source", lease.token, turn)
+
+    # The journal rotates between the two windows: a new file replaces the
+    # old one, so every offset into the old file is behind the new fence.
+    manager.rotate_journal()
+
+    second_turn = supervisor.start_turn(
+        "athr_source",
+        lease.token,
+        prompt="work again",
+        model="glm-5.1",
+        reasoning_effort=None,
+    )
+    second_window = supervisor._groups["asbx_shared"].members["athr_source"].window
+    assert second_window is not None
+    second_measurement = second_window.measurement_id
+    assert second_measurement != measurement
+
+    manager.append_journal(_journal_sample_line(second_measurement, 3))
+    assert supervisor.sample_open_windows() == 1
+    checkpoint = reported[-1][1]
+    # The rotated journal was read from its own beginning: the cycle the
+    # second window wrote is in the checkpoint instead of being silently lost.
+    assert checkpoint["memory"]["valid_samples"] == 1
+
+    supervisor.complete_turn("athr_source", lease.token, second_turn)
