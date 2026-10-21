@@ -207,16 +207,16 @@
       }
     },
     {
-      "files": ["src/components/features/agents/RepositoryPicker.tsx"],
+      "files": [
+        "src/app/(agents)/admin/measurements/page.tsx",
+        "src/components/features/agents/RepositoryPicker.tsx"
+      ],
       "rules": {
         "complexity": ["error", 36]
       }
     },
     {
-      "files": [
-        "src/app/(agents)/admin/measurements/page.tsx",
-        "src/components/features/agents/agentLiveStatus.ts"
-      ],
+      "files": ["src/components/features/agents/agentLiveStatus.ts"],
       "rules": {
         "complexity": ["error", 37]
       }
@@ -304,10 +304,13 @@
       }
     },
     {
-      "files": [
-        "src/app/(agents)/admin/sandboxes/SandboxManagement.tsx",
-        "src/app/(agents)/admin/sandboxes/\\[sandboxId\\]/page.tsx"
-      ],
+      "files": ["src/app/(agents)/admin/sandboxes/\\[sandboxId\\]/page.tsx"],
+      "rules": {
+        "complexity": ["error", 70]
+      }
+    },
+    {
+      "files": ["src/app/(agents)/admin/sandboxes/SandboxManagement.tsx"],
       "rules": {
         "complexity": ["error", 71]
       }
@@ -382,7 +385,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1307
+            "max": 1286
           }
         ]
       }
@@ -393,7 +396,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1123
+            "max": 1115
           }
         ]
       }
