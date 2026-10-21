@@ -22,7 +22,8 @@ if TYPE_CHECKING:
 #: The payload is parsed once, and its usage projection is stored with it, so
 #: the reads that add a turn's usage up never open the payload again. The
 #: parameters are cast because an ``INSERT … SELECT`` does not type them from
-#: the target columns the way ``VALUES`` does.
+#: the target columns the way ``VALUES`` does. A ``client_seq`` the attempt
+#: already stored inserts nothing and returns no id.
 _INSERT_EVENT_SQL = f"""
     INSERT INTO agent_job_events
         (job_id, attempt_id, seq, event_type, payload, client_seq, usage_summary)
@@ -30,6 +31,7 @@ _INSERT_EVENT_SQL = f"""
            (SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_job_events WHERE attempt_id = $2::bigint),
            $3::text, event.payload, $5::bigint, {usage_summary_sql("event.payload")}
     FROM (SELECT $4::jsonb AS payload) AS event
+    ON CONFLICT (attempt_id, client_seq) WHERE client_seq IS NOT NULL DO NOTHING
     RETURNING id
 """
 
@@ -48,15 +50,9 @@ async def insert_event(
     A ``client_seq`` the attempt has already stored is a retry of a
     response that never arrived: answer with the stored row's id and do
     not run the thread-message mirror again — it ran when the row landed.
+    The insert finds that out itself, so a first delivery costs one
+    statement and only a retry pays for reading the stored id.
     """
-    if client_seq is not None:
-        existing = await conn.fetchval(
-            "SELECT id FROM agent_job_events WHERE attempt_id = $1 AND client_seq = $2",
-            attempt_id,
-            client_seq,
-        )
-        if existing is not None:
-            return int(existing)
     event_id = await conn.fetchval(
         _INSERT_EVENT_SQL,
         job_id,
@@ -65,6 +61,13 @@ async def insert_event(
         json.dumps(payload) if payload is not None else None,
         client_seq,
     )
+    if event_id is None:
+        existing = await conn.fetchval(
+            "SELECT id FROM agent_job_events WHERE attempt_id = $1 AND client_seq = $2",
+            attempt_id,
+            client_seq,
+        )
+        return int(existing)
     text = (payload or {}).get("text")
     is_subagent = subagent_owned(payload)
     if event_type == "message" and isinstance(text, str) and text.strip() and not is_subagent:

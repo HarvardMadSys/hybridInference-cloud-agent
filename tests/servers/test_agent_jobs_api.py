@@ -1398,11 +1398,14 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "goal": self.thread_goals.get(str(job["thread_id"])),
         }
 
-    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
+    async def job_stream_page(
+        self, *, job_id: str, user_id: str, after_id: int, limit: int
+    ) -> tuple[list[dict[str, Any]], JobStreamState] | None:
         job = self.jobs.get(job_id)
         if job is None or job["user_id"] != user_id:
             return None
-        return JobStreamState(job["state"], job.get("published_pr_url"))
+        events = await self.list_events_after(job_id=job_id, after_id=after_id, limit=limit)
+        return events, JobStreamState(job["state"], job.get("published_pr_url"))
 
     async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
         said = [

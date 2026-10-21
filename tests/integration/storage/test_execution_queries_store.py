@@ -31,6 +31,7 @@ from tests.integration.storage.test_agent_job_store import _claim, _create_job
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
+from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
 
@@ -107,6 +108,56 @@ async def _running_job(store: Storage, **overrides):
 
 
 # ── Thread and job event reads ────────────────────────────────────────
+
+
+async def test_a_stream_page_is_current_and_scoped_to_the_owner(
+    store: Storage, queries: PostgresExecutionQueries, db
+) -> None:
+    """A wake-up's read: the next events and how the owned job stands, or nothing."""
+    job, _ = await _running_job(store)
+
+    page = await queries.job_stream_page(job_id=job["id"], user_id=_OWNER, after_id=0, limit=500)
+    assert page is not None
+    events, state = page
+    assert [event["payload"] for event in events] == [
+        {"text": "first", "seq": 1},
+        {"text": "second", "seq": 2},
+    ]
+    assert state == JobStreamState("running", None)
+    first, second = events
+    page_of_one = await queries.job_stream_page(
+        job_id=job["id"], user_id=_OWNER, after_id=0, limit=1
+    )
+    assert page_of_one == ([first], state)
+    after_first = await queries.job_stream_page(
+        job_id=job["id"], user_id=_OWNER, after_id=first["id"], limit=500
+    )
+    assert after_first == ([second], state)
+    # Nothing new still says how the job stands; a stranger, or no job, gets nothing.
+    caught_up = await queries.job_stream_page(
+        job_id=job["id"], user_id=_OWNER, after_id=second["id"], limit=500
+    )
+    assert caught_up == ([], state)
+    assert (
+        await queries.job_stream_page(job_id=job["id"], user_id=_OTHER, after_id=0, limit=500)
+        is None
+    )
+    assert (
+        await queries.job_stream_page(job_id="ajob_missing", user_id=_OWNER, after_id=0, limit=500)
+        is None
+    )
+
+    finished = await _create_job(store, user_id=_OWNER)
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET state = 'succeeded', native_turn_no = 1, "
+            "published_pr_url = $2 WHERE id = $1",
+            finished["id"],
+            "https://example.test/pr/42",
+        )
+    assert await queries.job_stream_page(
+        job_id=finished["id"], user_id=_OWNER, after_id=0, limit=500
+    ) == ([], JobStreamState("succeeded", "https://example.test/pr/42"))
 
 
 async def test_the_thread_read_answers_nothing_for_a_stranger(

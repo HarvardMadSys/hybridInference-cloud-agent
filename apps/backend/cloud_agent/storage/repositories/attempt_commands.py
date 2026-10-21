@@ -95,23 +95,40 @@ class PostgresAttemptCommands:
         self._pool = pool
 
     @staticmethod
-    async def _lock_live_attempt(conn: Any, attempt_id: int, lease_generation: int | None) -> bool:
-        """Lock an attempt first, then test its lease against the post-wait wall clock."""
-        locked = await conn.fetchval(
-            "SELECT id FROM agent_attempts "
-            "WHERE id = $1 AND ($2::bigint IS NULL OR lease_generation = $2) AND status = 'running' "
-            "FOR UPDATE",
+    async def _live_attempt_job(
+        conn: Any, attempt_id: int, lease_generation: int | None
+    ) -> str | None:
+        """Lock an attempt, test its lease against the post-wait wall clock, and name its job.
+
+        One statement: the lock is taken in a subquery, and the outer query
+        compares the lease only with the rows the lock hands back, so the clock
+        is read after any wait for the lock. In the locking query's own select
+        list it would be read before the wait.
+        """
+        row = await conn.fetchrow(
+            """
+            WITH locked AS (
+                SELECT job_id, lease_expires_at
+                FROM agent_attempts
+                WHERE id = $1 AND ($2::bigint IS NULL OR lease_generation = $2)
+                  AND status = 'running'
+                FOR UPDATE
+            )
+            SELECT job_id, lease_expires_at > clock_timestamp() AS live FROM locked
+            """,
             attempt_id,
             lease_generation,
         )
-        if locked is None:
-            return False
-        return bool(
-            await conn.fetchval(
-                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
-                attempt_id,
-            )
-        )
+        if row is None or not row["live"]:
+            return None
+        return str(row["job_id"])
+
+    @classmethod
+    async def _lock_live_attempt(
+        cls, conn: Any, attempt_id: int, lease_generation: int | None
+    ) -> bool:
+        """Lock an attempt first, then test its lease against the post-wait wall clock."""
+        return await cls._live_attempt_job(conn, attempt_id, lease_generation) is not None
 
     async def sweep_queued_follow_ups(self) -> None:
         """Fail queued follow-ups whose earlier native context is unavailable.
@@ -1193,12 +1210,8 @@ class PostgresAttemptCommands:
     ) -> int | None:
         """Append one event in one transaction."""
         async with self._pool.acquire() as conn, conn.transaction():
-            if not await self._lock_live_attempt(conn, attempt_id, lease_generation):
-                return None
-            attempt = await conn.fetchrow(
-                "SELECT job_id FROM agent_attempts WHERE id = $1", attempt_id
-            )
-            if attempt is None:
+            job_id = await self._live_attempt_job(conn, attempt_id, lease_generation)
+            if job_id is None:
                 return None
             phase = (payload or {}).get("phase") if event_type == "lifecycle" else None
             if phase == "workspace_ready":
@@ -1213,7 +1226,7 @@ class PostgresAttemptCommands:
                 )
             event_id = await insert_event(
                 conn,
-                job_id=attempt["job_id"],
+                job_id=job_id,
                 attempt_id=attempt_id,
                 event_type=event_type,
                 payload=payload,

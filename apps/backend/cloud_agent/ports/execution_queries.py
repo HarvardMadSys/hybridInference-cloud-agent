@@ -9,7 +9,10 @@ operations it needs rather than on the whole persistence surface.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from cloud_agent.domain.execution import JobStreamState
 
 
 class ExecutionQueries(Protocol):
@@ -100,4 +103,15 @@ class ExecutionQueries(Protocol):
         self, *, job_id: str, after_id: int = 0, limit: int = 500
     ) -> list[dict[str, Any]]:
         """Return events for a job with a global id strictly greater than the cursor."""
+        ...
+
+    async def job_stream_page(
+        self, *, job_id: str, user_id: str, after_id: int, limit: int
+    ) -> tuple[list[dict[str, Any]], JobStreamState] | None:
+        """One wake-up of a job's event stream: its next events and its state.
+
+        The events are :meth:`list_events_after`'s, and the state is the owned
+        job's, read together so they come from one snapshot. ``None`` when the
+        job is not this owner's.
+        """
         ...

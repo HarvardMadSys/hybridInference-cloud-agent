@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.storage._sql.ledger import USAGE_EVENT_PAYLOAD_SQL, fetch_job_usage_inputs
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
@@ -320,15 +321,53 @@ class PostgresExecutionQueries:
                 after_id,
                 limit,
             )
-        return [
-            {
-                "id": row["id"],
-                "job_id": row["job_id"],
-                "attempt_id": row["attempt_id"],
-                "seq": row["seq"],
-                "event_type": row["event_type"],
-                "payload": load_json(row["payload"]),
-                "created_at": row["created_at"],
-            }
-            for row in rows
-        ]
+        return [_stream_event(row) for row in rows]
+
+    async def job_stream_page(
+        self, *, job_id: str, user_id: str, after_id: int, limit: int
+    ) -> tuple[list[dict[str, Any]], JobStreamState] | None:
+        """One wake-up of a job's event stream: its next events and its state.
+
+        A stream reads on every event its job stores, and reading the page and
+        the state apart cost two pool checkouts and two statements a wake-up.
+        One statement also gives both from the same snapshot. ``None`` when the
+        job is not this owner's.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT j.state, j.published_pr_url,
+                       e.id, e.job_id, e.attempt_id, e.seq, e.event_type, e.payload, e.created_at
+                FROM agent_jobs j
+                LEFT JOIN LATERAL (
+                    SELECT id, job_id, attempt_id, seq, event_type, payload, created_at
+                    FROM agent_job_events
+                    WHERE job_id = j.id AND id > $3
+                    ORDER BY id
+                    LIMIT $4
+                ) e ON TRUE
+                WHERE j.id = $1 AND j.user_id = $2
+                ORDER BY e.id
+                """,
+                job_id,
+                user_id,
+                after_id,
+                limit,
+            )
+        if not rows:
+            return None
+        state = JobStreamState(rows[0]["state"], rows[0]["published_pr_url"])
+        return [_stream_event(row) for row in rows if row["id"] is not None], state
+
+
+def _stream_event(row: Any) -> dict[str, Any]:
+    """One stored event as the job's event stream sends it."""
+    return {
+        "id": row["id"],
+        "job_id": row["job_id"],
+        "attempt_id": row["attempt_id"],
+        "seq": row["seq"],
+        "event_type": row["event_type"],
+        "payload": load_json(row["payload"]),
+        "created_at": row["created_at"],
+    }
