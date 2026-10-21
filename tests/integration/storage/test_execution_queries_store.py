@@ -149,6 +149,97 @@ async def test_the_thread_read_pages_by_event_id(
     assert [event["payload"]["text"] for event in after_first] == ["second"]
 
 
+async def test_the_thread_read_pages_identically_when_other_threads_interleave(
+    store: Storage, queries: PostgresExecutionQueries
+) -> None:
+    """Every page is the same rows in the same order as one unpaged read.
+
+    A stranger's thread is created between this thread's turns, so its events
+    interleave in the id range, and the thread's own events span turns
+    (jobs) -- exactly the shape the page-ids-first statement must not distort
+    (issue #810).
+    """
+    parent, parent_claim = await _running_job(store)
+    stranger_job, stranger_claim = await _running_job(store)
+    assert stranger_claim is not None and stranger_job["id"] == stranger_claim["id"]
+    turns = [parent]
+    # The parent's turn must go terminal before a follow-up can claim;
+    # "failed" is terminal without the native-context settlement "succeeded"
+    # requires, which this read never exercises.
+    await store.attempt_commands.transition(
+        job_id=parent["id"],
+        attempt_id=parent_claim["attempt_id"],
+        lease_generation=parent_claim["lease_generation"],
+        from_states=("running",),
+        to_state="failed",
+    )
+    for number in range(2, 5):
+        follow_up = await store.conversation_commands.create_follow_up(
+            parent_job_id=turns[-1]["id"], user_id=_OWNER, prompt=f"turn {number}"
+        )
+        assert follow_up is not None
+        claim = await _claim(
+            store,
+            worker_id=f"w{number}",
+            lease_ttl_seconds=60,
+            host="runner-a",
+        )
+        assert claim is not None and claim["id"] == follow_up["id"]
+        for seq in range(1, 4):
+            await store.attempt_commands.append_event(
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                event_type="message",
+                payload={"text": f"t{number}-{seq}", "seq": seq},
+            )
+        await store.attempt_commands.transition(
+            job_id=follow_up["id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            from_states=("running",),
+            to_state="failed",
+        )
+        turns.append(follow_up)
+    # Extra events on the stranger's job, interleaved after this thread's.
+    for seq in range(3, 8):
+        await store.attempt_commands.append_event(
+            attempt_id=stranger_claim["attempt_id"],
+            lease_generation=stranger_claim["lease_generation"],
+            event_type="message",
+            payload={"text": f"stranger-{seq}", "seq": seq},
+        )
+
+    pages: list[dict] = []
+    after = 0
+    while True:
+        page = await queries.list_thread_events_after(
+            job_id=parent["id"], user_id=_OWNER, after_id=after, limit=4
+        )
+        if page is None or not page:
+            break
+        pages.extend(page)
+        after = page[-1]["id"]
+    everything = await queries.list_thread_events_after(job_id=parent["id"], user_id=_OWNER)
+    assert everything is not None
+    # Paged reads reconstruct exactly the unpaged read: no missing, no
+    # duplicate, no stranger row, same order.
+    assert [event["id"] for event in pages] == [event["id"] for event in everything]
+    assert [event["payload"]["text"] for event in everything] == [
+        "first",
+        "second",
+        "t2-1",
+        "t2-2",
+        "t2-3",
+        "t3-1",
+        "t3-2",
+        "t3-3",
+        "t4-1",
+        "t4-2",
+        "t4-3",
+    ]
+    assert {event["job_id"] for event in everything} == {turn["id"] for turn in turns}
+
+
 async def test_the_per_job_read_returns_the_same_turn(
     store: Storage, queries: PostgresExecutionQueries
 ) -> None:
