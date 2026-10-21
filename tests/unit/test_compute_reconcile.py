@@ -852,6 +852,29 @@ async def test_a_runner_that_could_not_be_stopped_is_never_inventoried(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_release_records_that_it_stops_runners_before_the_first_stop(monkeypatch):
+    """A stop whose answer is lost still ends cancellation: the record comes first."""
+    h = harness(monkeypatch, kind="retire", identified=True)
+    order = Mock()
+    order.attach_mock(h.repository.checkpoint_operation, "checkpoint")
+    order.attach_mock(h.bootstrap.quiesce, "quiesce")
+    h.bootstrap.quiesce.side_effect = ProviderError(
+        "result_unknown", "The node's answer was lost", retryable=True
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    stopping = [
+        name
+        for name, _args, kwargs in order.mock_calls
+        if name == "quiesce" or (kwargs.get("result") or {}).get("runners_stopping")
+    ]
+    assert stopping[:2] == ["checkpoint", "quiesce"]
+    assert h.operation["result"]["runners_stopping"] is True
+    assert "cancel" not in public_operation(h.operation)["allowed_actions"]
+
+
+@pytest.mark.asyncio
 async def test_release_keeps_a_container_still_needed_and_stops_for_attention(monkeypatch):
     h = harness(monkeypatch, kind="retire", identified=True)
     _left_behind(h)

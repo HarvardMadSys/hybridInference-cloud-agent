@@ -23,6 +23,7 @@ from cloud_agent.domain.compute import (
     fingerprint as operation_fingerprint,
     move_out_window_seconds,
     provider_resource_absent,
+    retirement_cancellable,
 )
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
 from cloud_agent.storage._sql.hosts import (
@@ -3498,8 +3499,7 @@ class PostgresComputeResourceRepository:
     async def cancel_operation(self, operation_id: str) -> dict[str, Any]:  # noqa: C901, PLR0912 complexity baseline, #771
         """Cancel a safe pre-submit acquisition, retirement or rotation intent.
 
-        A rotation can be cancelled until the old node stops: its claim pause
-        is lifted and its replacement node, if any, is queued for release.
+        A retirement only until it stops its runners; a rotation until its old node stops.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn, exclusive=True)
@@ -3595,7 +3595,7 @@ class PostgresComputeResourceRepository:
                 return await self._cancel_rotation(conn, row)
             if (load_json(row["result"]) or {}).get("external_pending"):
                 raise ValueError("external_operation_unresolved")
-            if row["kind"] != "retire" or row["state"] not in ("pending", "waiting", "blocked"):
+            if not retirement_cancellable(row["kind"], row["state"], load_json(row["result"])):
                 raise ValueError("operation_not_cancellable")
             await conn.execute(
                 "DELETE FROM agent_host_admission_holds WHERE allocation_id=$1 AND purpose='retirement' AND source_id=$2",

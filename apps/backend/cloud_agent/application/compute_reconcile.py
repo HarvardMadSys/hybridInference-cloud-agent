@@ -19,7 +19,7 @@ from pydantic import SecretStr
 from cloud_agent.application.compute_rotation import ComputeRotation
 from cloud_agent.application.compute_setup import HostRelease, load_control_plane_host_release
 from cloud_agent.application.host_commands import HostCommands
-from cloud_agent.application.release_inventory import require_empty, scan_record
+from cloud_agent.application.release_inventory import quiesce_and_scan
 from cloud_agent.compute_config import current_observation_seconds, current_registration_url
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import (
@@ -47,7 +47,6 @@ from cloud_agent.ports.external.host_bootstrap import (
     BootstrapIntent,
     BootstrapResult,
     DeploymentProfile,
-    RecordedHostState,
 )
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
@@ -2078,21 +2077,17 @@ class ComputeReconciler:
                 and node["id"] not in bound
             ):
                 continue
-            intent = self._bootstrap_intent(operation, allocation, node)
-            # A runner left to its restart policy keeps starting and creating
-            # self-test sandboxes, which the inventory would count. Released
-            # nodes never serve again, so it stays stopped.
-            probes_removed = await self.bootstrap.quiesce(self._node(node), profile, intent)
-            # Only receipts of what the control plane recorded are not retained state.
-            receipts = RecordedHostState.model_validate(
-                await self.repository.recorded_host_state(host=intent.host)
+            await quiesce_and_scan(
+                self.bootstrap,
+                lambda host: self.repository.recorded_host_state(host=host),
+                lambda result: self._checkpoint(operation, operation["step"], result),
+                operation,
+                self._node(node),
+                node["id"],
+                profile,
+                self._bootstrap_intent(operation, allocation, node),
+                scans,
             )
-            proof = await self.bootstrap.inventory(self._node(node), profile, intent, receipts)
-            scans.append(scan_record(node["id"], probes_removed, proof))
-            # What each node showed is kept with the operation, so a refusal
-            # says which of them refused and why.
-            await self._checkpoint(operation, operation["step"], {"inventory": scans})
-            require_empty(proof)
         recorded = await self.repository.record_inventory(
             allocation_id=allocation["id"],
             hosts=[h["host"] for h in allocation.get("hosts", [])],

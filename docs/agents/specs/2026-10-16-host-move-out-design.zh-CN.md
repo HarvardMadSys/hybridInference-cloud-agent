@@ -257,10 +257,15 @@ Sandbox Manager 用的是控制面自己的令牌，不受 Host 凭证吊销影�
 
 ### 9.2 做法
 
-1. **扫描前停下 runner。** 释放走到 SSH 全机扫描时，先对每台要扫的机器执行 `quiesce`：核对部署身份，用 `docker stop` 停掉本部署 Compose 项目里的 runner。`docker stop` 停下的容器，重启策略不会再把它拉起来，除非重新部署。确认 runner 已经停下后，再删掉本部署留下的自检容器（runner 被停在自检中途时会留下）。识别自检容器要求三个条件同时满足：带自检专用标签、带沙箱标签且命名空间是本部署的、运行时标签是 `preflight`。自检容器不装任何用户数据，也不联网。Sandbox Manager 不停：释放要通过它删旧容器，扫描要是没通过，下一轮还得靠它删。用户的沙箱容器和不认识的容器一个不碰，照旧由扫描拦住释放。runner 停不下来，或者部署身份对不上，就不做扫描：前一种会等待并重试，后一种停下等管理员。释放是单向的（`desired_state = absent`，`retirement` 停止接活的限制不会撤销），这台机器不会再接活，所以 runner 停下以后不再恢复。
+1. **扫描前停下 runner。** 释放走到 SSH 全机扫描时，先对每台要扫的机器执行 `quiesce`：核对部署身份，用 `docker stop` 停掉本部署 Compose 项目里的 runner。`docker stop` 停下的容器，重启策略不会再把它拉起来，除非重新部署。确认 runner 已经停下后，再删掉本部署留下的自检容器（runner 被停在自检中途时会留下）。识别自检容器要求三个条件同时满足：带自检专用标签、带沙箱标签且命名空间是本部署的、运行时标签是 `preflight`。自检容器不装任何用户数据，也不联网。Sandbox Manager 不停：释放要通过它删旧容器，扫描要是没通过，下一轮还得靠它删。用户的沙箱容器和不认识的容器一个不碰，照旧由扫描拦住释放。runner 停不下来，或者部署身份对不上，就不做扫描：前一种会等待并重试，后一种停下等管理员。runner 停下以后不会再恢复，所以释放走到这一步就不能取消了，见第 5 点。
 2. **扫描一次列出全部容器和标签。** 改用一条 `docker ps -a --format`，直接拿到每个容器的沙箱标签和 Compose 项目标签，不再分 `ps` 和 `inspect` 两步，也就不会因为容器在两步之间消失而失败。读不出来时照旧算作 `host_inventory_unavailable`。
 3. **记下每台机器的扫描结果。** 每扫完一台，就把这台机器的结果写进操作结果的 `inventory`：节点、删掉的自检容器数、扫描是否完整、遗留容器数、未知容器数、有没有残留状态、具体原因。远端返回的原因只认自己的词表。只有"读不出来、别的都没发现"时才等待 30 秒后重扫，发现了东西就停下等管理员，跟原来一样。
 4. **凭证被拒后 runner 不再退出。** 心跳被拒时，runner 不再接活，等手上的任务结束、停掉心跳，然后原地待着，直到收到 `docker stop` 的 SIGTERM。这样重启策略不会再把它一遍遍拉起来，机器上也不会反复出现自检容器。重新部署时，部署脚本先停掉 runner，再用 `compose up` 启动新的，新的 runner 会用新凭证重新登记，所以不影响重新部署。`sandbox_host.sh` 里本来就写着"凭证被拒后 runner 会留着、只是不再接活"，现在代码和这句说明一致了。
+5. **停过 runner 的释放不能取消。** 释放在等待或被拦下（`pending`、`waiting`、`blocked`）时本来可以取消：取消会删掉 `retirement` 这条接活限制，把 `desired_state` 改回 `present`，Host 重新开始接活。可 runner 已经停了，没有任何东西会再把它启动，Host 就会接下没人执行的任务（Codex 复查发现）。现在工作流在停第一台机器的 runner **之前**，先把 `runners_stopping` 写进操作结果；先写再停，所以就算停 runner 的那次 SSH 回执丢了，这个标记也已经在了。之后：
+   - 操作视图不再提供"取消"，取消接口也拒绝（`operation_not_cancellable`）。两处用的是同一个判断 `retirement_cancellable`。
+   - 被拦下的释放只能由管理员清掉扫描发现的东西后重试；想让这台机器继续用，就重新部署，部署会启动新的 runner。
+   - 这和迁移的规则一样：迁移在旧机器开始停机以后也不能取消。
+6. **管理接口能看到扫描结果。** 操作视图原来只放出白名单里的结果字段，没有 `inventory`，所以数据库里记下的扫描结果管理员看不到（Codex 复查发现）。现在 `inventory` 逐台机器、逐个字段地放出：节点、删掉的自检容器数、是否完整、遗留和未知容器数、有没有残留状态，每个字段类型不对就丢掉；原因只放出由小写字母和下划线组成的原因码。机器回报里的其他内容一律不放出。
 
 ### 9.3 不做的
 
@@ -271,6 +276,9 @@ Sandbox Manager 用的是控制面自己的令牌，不受 Host 凭证吊销影�
 
 - 单元（`tests/unit/test_compute_host_bootstrap.py`）：`quiesce` 脚本只停 runner，删掉本部署的自检容器（包括已经停下的）；其他命名空间的自检容器、只带自检标签的普通沙箱、运行时标签是 `preflight` 但没有自检标签的沙箱、Sandbox Manager 都不碰；runner 停不下来时不删任何东西；部署身份不对时什么都不做。扫描从一次列出的结果里数遗留容器和未知容器，列出的内容读不出来时算 `host_inventory_unavailable`；远端返回的原因不在词表里就丢掉。
 - 单元（`tests/unit/test_compute_reconcile.py`）：先 `quiesce` 再扫描；扫描结果写进操作结果；发现遗留时停下，只是读不出来时等待重扫；runner 停不下来时不扫描。
+- 单元（`tests/unit/test_compute_reconcile.py`）：先写 `runners_stopping` 再停 runner，停 runner 的回执丢了，标记照样在，操作视图不再提供取消。
+- 接口（`tests/servers/test_admin_compute.py`）：停过 runner 的释放在操作视图里能看到扫描结果，只有允许的字段和原因码，多余的字段（比如地址）不会出现；取消返回 409。
+- PostgreSQL（`test_compute_resources.py`）：停过 runner 的释放调用取消会被拒绝，操作仍是 `blocked`，`desired_state` 仍是 `absent`，Host 仍然不能接活。
 - 单元（`tests/unit/test_runner_host_service.py`）：凭证被拒后 runner 停止心跳、不再接活，但不退出，收到停止信号后才结束。
 - PostgreSQL 完整流程（`test_superseded_containers.py`）：机器上有一个还在跑的 runner 和一个留下的自检容器，主动释放用正式的 `quiesce` 和扫描脚本一路跑到成功；runner 停下，自检容器删掉，Sandbox Manager 还在运行。
 - 真 Docker（`tests/external/test_host_release_real_docker.py`，CI 里跑）：每个测试起一台 Docker-in-Docker 节点，节点里有自己的空 Docker。正式的 `quiesce` 和扫描脚本在节点上跑，命令行和走 SSH 时完全一样。节点里的 runner 是 Compose 起的、带 `unless-stopped`，每次启动都建一个自检容器再退出，跟 staging 上那台一样一直被重启；自检容器的标签直接取自 runner 自己的自检代码。测试确认：
