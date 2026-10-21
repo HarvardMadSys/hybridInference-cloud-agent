@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0089_superseded_removals`. The supported deployment scripts run migrations
+`0090_targeted_work_wakes`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -25,6 +25,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0090_targeted_work_wakes` | Replaces the `agent_work_available` trigger function so that its notification names the one host that can take a retained conversation's turn, and only that host's waiting runner is woken. It changes no table or row. A control plane from the previous release ignores the name and wakes every host, as before. A downgrade restores the empty notification. |
 | `0089_superseded_removals` | Adds an empty table recording each authorization to remove a container that a moved sandbox group left behind on a Host being released, and when the Host confirmed the removal. It changes no existing rows. A downgrade drops the records; containers already removed stay removed. |
 | `0088_sandbox_retry_budget` | Adds the automatic deletion retry window and attempt count. Existing pending requests begin their 24-hour window at their request time; retries stop after eight claims with bounded backoff. An administrator resumes an archived terminal request under its existing request ID and verified receipt. A terminal prearchive request is atomically replaced through the authorized deletion path, giving the host a fresh archive identity after an acknowledged abort. |
 | `0087_sandbox_deletion_attempts` | Adds the admin-only, secret-free attempt history for sandbox deletion. |
