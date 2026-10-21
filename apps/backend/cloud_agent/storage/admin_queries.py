@@ -73,32 +73,6 @@ _RUN_COLUMNS = """
 # process does not belong in a single flat SELECT.
 _RESOURCE_DERIVED_FIELDS = frozenset({"tool_calls", "processes", "turn_summary"})
 
-_EVENT_COLUMNS = """
-    e.id, e.attempt_id, a.attempt_no, e.seq,
-    LEFT(e.event_type, 64) AS event_type, e.created_at,
-    CASE WHEN e.event_type = 'tool_use'
-              AND jsonb_typeof(e.payload->'id') = 'string'
-              AND LENGTH(e.payload->>'id') <= 256 THEN e.payload->>'id'
-         WHEN e.event_type = 'tool_result'
-              AND jsonb_typeof(e.payload->'tool_use_id') = 'string'
-              AND LENGTH(e.payload->>'tool_use_id') <= 256 THEN e.payload->>'tool_use_id'
-    END AS tool_use_id,
-    CASE WHEN e.event_type IN ('tool_use', 'tool_result')
-              AND jsonb_typeof(e.payload->'name') = 'string'
-         THEN LEFT(e.payload->>'name', 160) END AS tool_name,
-    CASE WHEN e.event_type = 'tool_result'
-              AND jsonb_typeof(e.payload->'is_error') = 'boolean'
-         THEN (e.payload->>'is_error')::boolean END AS is_error,
-    -- Content means something a reveal would actually return. An empty object
-    -- is not content, and neither is a payload reduced to the truncation
-    -- markers alone: advertising a reveal there leads to an empty payload.
-    (jsonb_typeof(e.payload) = 'object' AND EXISTS (
-        SELECT 1 FROM jsonb_each(e.payload) AS field(key, value)
-        WHERE value <> 'null'::jsonb
-          AND key NOT IN ('truncated', 'original_payload_bytes', 'truncation_notice')
-     )) AS has_content
-"""
-
 # Share exactly the spellings understood by the accounting implementation.
 # Values must also be numbers, so an arbitrary object hidden under a familiar
 # usage key cannot reach the application on a default metadata request.

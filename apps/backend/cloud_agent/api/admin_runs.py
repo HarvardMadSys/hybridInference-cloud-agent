@@ -32,7 +32,7 @@ from cloud_agent.session_statistics import summarize_session_statistics
 from cloud_agent_shared.turn_resources import summarize_turn_resources
 
 if TYPE_CHECKING:
-    from cloud_agent.ports import AuditRepository, LedgerRepository
+    from cloud_agent.ports import LedgerRepository
     from cloud_agent.storage.admin_queries import AdminRunQueries
 
 logger = get_logger(__name__)
@@ -42,7 +42,6 @@ class _AdminRunsStorage(Protocol):
     """The capabilities this module's handlers reach the storage layer for."""
 
     admin_runs: AdminRunQueries
-    audit: AuditRepository
     ledger: LedgerRepository
 
 
@@ -57,9 +56,8 @@ def _no_store(response: Response) -> None:
 
 # The guard is on the router, not only on each route: a route added to this
 # surface inherits it, so the next runs read cannot ship without one by
-# omission. Routes that audit keep their per-route ``admin`` parameter —
-# FastAPI runs a shared dependency once per request, so the two do not double-
-# ask the gateway.
+# omission. The routes that also name it as their ``_admin`` parameter do not
+# ask the gateway twice: FastAPI runs a shared dependency once per request.
 router = APIRouter(
     prefix="/admin/agent/runs",
     dependencies=[Depends(_no_store), Depends(verify_admin_access)],
