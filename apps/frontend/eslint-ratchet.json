@@ -313,6 +313,12 @@
       }
     },
     {
+      "files": ["src/components/features/agents/adapt.ts"],
+      "rules": {
+        "complexity": ["error", 72]
+      }
+    },
+    {
       "files": ["src/components/features/agents/SideChat.tsx"],
       "rules": {
         "complexity": ["error", 78]
@@ -322,12 +328,6 @@
       "files": ["src/app/(agents)/admin/hosts/CloudLabAutoscaling.tsx"],
       "rules": {
         "complexity": ["error", 79]
-      }
-    },
-    {
-      "files": ["src/components/features/agents/adapt.ts"],
-      "rules": {
-        "complexity": ["error", 80]
       }
     },
     {
@@ -351,7 +351,7 @@
     {
       "files": ["src/components/features/agents/trajectorySteps.ts"],
       "rules": {
-        "complexity": ["error", 117]
+        "complexity": ["error", 114]
       }
     },
     {
@@ -492,7 +492,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1541
+            "max": 1534
           }
         ]
       }
@@ -514,7 +514,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1007
+            "max": 984
           }
         ]
       }
