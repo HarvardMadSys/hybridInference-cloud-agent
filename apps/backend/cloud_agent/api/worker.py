@@ -1289,11 +1289,9 @@ async def worker_wait(
     """Hold an idle host's request until there may be work, then answer.
 
     A host whose claim found nothing asks here instead of sleeping out its poll
-    interval, and claims again when this answers: at once if the token it
-    passes is stale, when a job it may take is queued, requeued or ends, or
-    after ``timeout_seconds`` regardless. A turn pinned to another host does
-    not wake it. The answer is the token for its next wait and never a job; the
-    claim stays the only way to take one.
+    interval, and claims again when this answers: at once if its token is stale,
+    when a job it may take is queued, requeued or ends, or after ``timeout_seconds``.
+    The answer is the token for its next wait, never a job: only a claim takes one.
 
     Enrolled hosts only, like the claim it precedes. 404 where nothing listens
     for work, which is also what a control plane predating this answers, so a
@@ -1309,9 +1307,8 @@ async def worker_wait(
                 }
             },
         )
-    return WorkerWaitResponse(
-        token=await signal.wait(body.since, body.timeout_seconds, host=claiming_host["host"])
-    )
+    token = await signal.wait(body.since, body.timeout_seconds, host=claiming_host["host"])
+    return WorkerWaitResponse(token=token)
 
 
 @router.post("/worker/jobs/{job_id}/heartbeat", response_model=WorkerHeartbeatResponse)
