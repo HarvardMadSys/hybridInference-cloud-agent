@@ -354,6 +354,8 @@ async def test_autoscaling_demand_is_only_what_a_claim_would_hand_out(pool, stor
     """A turn waiting out its claim backoff, or a goal round in a deleted chat, is no demand.
 
     No claim hands either one out, so a new Host would only sit idle beside it.
+    The turn in backoff still waits for a Host and is counted apart; the round
+    in the deleted chat never runs, so it is counted nowhere.
     """
     backoff = await _create_job(store, execution_profile="trusted-v1")
     await pool.execute(
@@ -381,12 +383,14 @@ async def test_autoscaling_demand_is_only_what_a_claim_would_hand_out(pool, stor
         expected_deployment_sha="test-deployment"
     )
     assert snapshot["runnable_new_group_jobs"] == 0
+    assert snapshot["backoff_new_group_jobs"] == 1
 
     await pool.execute("UPDATE agent_jobs SET claim_retry_at = NULL WHERE id = $1", backoff["id"])
     snapshot = await store.host_pool.autoscaling_observation(
         expected_deployment_sha="test-deployment"
     )
     assert snapshot["runnable_new_group_jobs"] == 1
+    assert snapshot["backoff_new_group_jobs"] == 0
 
 
 async def test_autoscaling_does_not_treat_incompatible_manual_slots_as_capacity(store):

@@ -145,7 +145,7 @@ def first_unfinished_turn(job: str) -> str:
     )"""
 
 
-def runnable_queued_turn(job: str) -> str:
+def runnable_queued_turn(job: str, *, including_backoff: bool = False) -> str:
     """SQL: whether queued turn ``job`` may be handed to a Host, whichever asks.
 
     It is not cancelled, is out of claim backoff, and is the oldest unfinished
@@ -156,9 +156,16 @@ def runnable_queued_turn(job: str) -> str:
     objective and pay for it. The sweep in ``sweep_goal_scheduling`` cancels
     what this skips, so nothing waits forever. Each caller adds what it needs
     of the Host and of the turn's group.
+
+    ``including_backoff`` also admits a turn in claim backoff. No claim hands
+    it out until the backoff ends, but it is still waiting for a Host.
     """
-    return f"""{job}.state = 'queued' AND {job}.cancel_requested = FALSE
-      AND ({job}.claim_retry_at IS NULL OR {job}.claim_retry_at <= clock_timestamp())
+    backoff = (
+        ""
+        if including_backoff
+        else f" AND ({job}.claim_retry_at IS NULL OR {job}.claim_retry_at <= clock_timestamp())"
+    )
+    return f"""{job}.state = 'queued' AND {job}.cancel_requested = FALSE{backoff}
       AND {first_unfinished_turn(job)}
       AND (
             {job}.turn_source <> 'goal'

@@ -1287,21 +1287,18 @@ class PostgresHostPoolRepository:
         A retained turn is tied to its existing Host and therefore cannot be
         relieved by adding a CloudLab node. Only a turn a claim would hand out
         now (:func:`runnable_queued_turn`), of a thread with no sandbox
-        membership, is demand here. Capacity is the effective claim ceiling
-        (the lower of reported and desired slots), after liveness, placement,
-        release/rotation holds, deployment attestation, and archive-policy
-        gates have all been applied. Pressure
-        is an exact maximum compatibility matching, not queue depth minus an
-        interchangeable slot count. The shared topology lock stabilizes
-        bindings, but it deliberately remains compatible with claims; repeatable
-        read prevents a claim committed between the job and host queries from
-        combining pre-claim demand with post-claim capacity into a state that
-        never existed.
+        membership, is demand here. One in claim backoff is not, but it is
+        counted apart: the pool is not idle while it waits. Capacity is the
+        effective claim ceiling (the lower of reported and desired slots), after
+        liveness, placement, release/rotation holds, deployment attestation, and
+        archive-policy gates have all been applied. Pressure is an exact maximum
+        compatibility matching, not queue depth minus an interchangeable slot
+        count. The shared topology lock stabilizes bindings, but it deliberately
+        remains compatible with claims; repeatable read prevents a claim
+        committed between the job and host queries from combining pre-claim
+        demand with post-claim capacity into a state that never existed.
         """
-        async with (
-            self._pool.acquire() as conn,
-            conn.transaction(isolation="repeatable_read"),
-        ):
+        async with self._pool.acquire() as conn, conn.transaction(isolation="repeatable_read"):
             policy = await conn.fetchrow(
                 """
                 SELECT active_host, sandbox_archive_settings, sandbox_archive_revision
@@ -1313,10 +1310,11 @@ class PostgresHostPoolRepository:
             job_rows = await conn.fetch(
                 f"""
                 SELECT t.execution_profile,
-                       COALESCE(j.metadata->'requires', '[]'::jsonb) AS requires
+                       COALESCE(j.metadata->'requires', '[]'::jsonb) AS requires,
+                       {runnable_queued_turn("j")} AS claimable
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id=j.thread_id
-                WHERE {runnable_queued_turn("j")}
+                WHERE {runnable_queued_turn("j", including_backoff=True)}
                   AND NOT EXISTS (
                       SELECT 1 FROM agent_thread_sandbox_memberships m
                       WHERE m.thread_id=j.thread_id
@@ -1330,7 +1328,7 @@ class PostgresHostPoolRepository:
             )
             job_rows.extend(
                 await conn.fetch(
-                    "SELECT execution_profile, '[\"environment-v1\"]'::jsonb AS requires FROM agent_environment_runs WHERE state='queued'",
+                    "SELECT execution_profile, '[\"environment-v1\"]'::jsonb AS requires, TRUE AS claimable FROM agent_environment_runs WHERE state='queued'",
                 )
             )
             rows = await conn.fetch(
@@ -1362,7 +1360,8 @@ class PostgresHostPoolRepository:
                     and all(isinstance(value, str) for value in raw_requires)
                     else None
                 )
-                jobs.append((required, str(row["execution_profile"])))
+                if row["claimable"]:
+                    jobs.append((required, str(row["execution_profile"])))
 
             hosts: list[dict[str, Any]] = []
             matching_hosts: list[_HostCapacity] = []
@@ -1466,6 +1465,7 @@ class PostgresHostPoolRepository:
             "observed_at": observed_at,
             "active_host": None if policy is None else policy["active_host"],
             "runnable_new_group_jobs": len(jobs),
+            "backoff_new_group_jobs": len(job_rows) - len(jobs),
             "fresh_effective_free_slots": free_slots,
             "unmatched_new_group_jobs": len(matchable_jobs) - matched,
             "autoscaling_template_hosts": [host for host, _shape in templates],
