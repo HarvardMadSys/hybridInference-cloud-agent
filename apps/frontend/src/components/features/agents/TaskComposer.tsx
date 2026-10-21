@@ -40,7 +40,9 @@ import { useComposerMcp } from './mcp/useComposerMcp';
 import { useComposerSsh } from './ssh/useComposerSsh';
 import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
-import { readDraftPlugins, validPluginForRuntime } from '@/lib/pluginConfiguration';
+import { validPluginForRuntime } from '@/lib/pluginConfiguration';
+import { readNewTaskDraft } from './newTaskDraft';
+import { useComposerModel } from './useComposerModel';
 import { EnvironmentPicker, type EnvironmentSelection } from './environment/EnvironmentPicker';
 import { UserAvatar } from './UserAvatar';
 import { UserHomeInsights } from './UserHomeInsights';
@@ -76,38 +78,6 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   return (
     <TaskComposerContent key={userId ?? 'anonymous'} userId={userId} initialRepo={initialRepo} />
   );
-}
-
-interface NewTaskDraft {
-  task: string;
-  repo: string;
-  runtime: string;
-  /**
-   * The model the owner picked in this composer, or empty. Never the model
-   * shown: one the server filled in is resolved again on the next visit.
-   * Drafts written before this field have only `model`, which mixed the two
-   * and so is ignored.
-   */
-  chosenModel: string;
-  effort: string;
-  branch: string;
-  plugins: AgentPluginInputApi[];
-}
-
-function readNewTaskDraft(value: string): NewTaskDraft | null {
-  try {
-    const saved: unknown = JSON.parse(value);
-    if (!saved || typeof saved !== 'object') return null;
-    const record = saved as Record<string, unknown>;
-    const fields = ['task', 'repo', 'runtime', 'effort', 'branch'] as const;
-    if (!fields.every((field) => typeof record[field] === 'string')) return null;
-    const plugins = readDraftPlugins(record.plugins);
-    if (plugins === null) return null;
-    const chosenModel = typeof record.chosenModel === 'string' ? record.chosenModel : '';
-    return { ...(saved as NewTaskDraft), chosenModel, plugins };
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -163,9 +133,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // Drops whose folders are still being walked; their files are not attached yet.
   const [readingDrops, setReadingDrops] = useState(0);
   const taskBox = useRef<HTMLTextAreaElement>(null);
-  const modelTrigger = useRef<HTMLButtonElement | null>(null);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
-  const [models, setModels] = useState<string[]>([]);
   // Empty until the owner picks one. A task changes a real repository, so
   // where it runs is never a default — see RepositoryPicker. The one exception
   // is the temporary workspace (`TEMPORARY_WORKSPACE`), which changes no
@@ -203,18 +171,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const [branch, setBranch] = useState(draft?.branch ?? '');
   const [branchOptionsRepo, setBranchOptionsRepo] = useState<string | null>(null);
   const [runtime, setRuntime] = useState(draft?.runtime ?? '');
-  // Two values, never one: what the owner picked here, which a draft keeps,
-  // and what the server resolved for them, which is read again on every
-  // visit so a pin saved in Settings meanwhile takes effect. The control
-  // shows the pick while it is on offer, else the resolved model. A fallback
-  // is therefore never mistaken for a pick and never saved as one.
-  const [chosenModel, setChosenModel] = useState(draft?.chosenModel ?? '');
-  const [resolvedModel, setResolvedModel] = useState('');
-  const model = models.includes(chosenModel)
-    ? chosenModel
-    : models.includes(resolvedModel)
-      ? resolvedModel
-      : '';
+  const { models, model, chosenModel, chooseModel, adoptModels, missingModel, modelControl } =
+    useComposerModel(draft?.chosenModel);
   const [effort, setEffort] = useState(draft?.effort ?? '');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -254,41 +212,29 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const tRef = useRef(t);
   tRef.current = t;
 
-  const applyConfig = useCallback((cfg: AgentConfigApi) => {
-    // The config's model list is the create endpoint's own predicate;
-    // /v1/models answers for the browsing user and offered models whose
-    // first agent call then 404ed.
-    const modelIds = cfg.models ?? [];
-    setConfig(cfg);
-    setModels(modelIds);
-    // A re-read keeps every choice still on offer and drops only the ones that
-    // are not. A repository is never filled in: see the effect below. With no
-    // repository on offer — GitHub not connected, down, or giving the App none
-    // — the temporary workspace is the only place a task can run, and it
-    // changes no real repository, so it is chosen.
-    const repos = selectableRepos(cfg);
-    setRepo((current) =>
-      current === TEMPORARY_WORKSPACE || (current && repos.includes(current))
-        ? current
-        : repos.length === 0
-          ? TEMPORARY_WORKSPACE
-          : '',
-    );
-    setRuntime((current) =>
-      current && cfg.runtimes.includes(current) ? current : (cfg.runtimes[0] ?? ''),
-    );
-    // `default_model` is what the server resolved for *this owner*: their pin,
-    // else the model their last task used, else the deployment default. It is
-    // the only thing allowed to fill this control in.
-    //
-    // There is deliberately no "first model in the list" fallback. The model
-    // decides what runs the task — different models differ in cost, speed and
-    // what they can do — so picking one on the owner's behalf is the same
-    // mistake as picking a repository for them, which this composer already
-    // refuses to do. With nothing resolved the control stays empty and Run
-    // waits, exactly as it does for an unset repository.
-    setResolvedModel(cfg.default_model ?? '');
-  }, []);
+  const applyConfig = useCallback(
+    (cfg: AgentConfigApi) => {
+      setConfig(cfg);
+      adoptModels(cfg);
+      // A re-read keeps every choice still on offer and drops only the ones that
+      // are not. A repository is never filled in: see the effect below. With no
+      // repository on offer — GitHub not connected, down, or giving the App none
+      // — the temporary workspace is the only place a task can run, and it
+      // changes no real repository, so it is chosen.
+      const repos = selectableRepos(cfg);
+      setRepo((current) =>
+        current === TEMPORARY_WORKSPACE || (current && repos.includes(current))
+          ? current
+          : repos.length === 0
+            ? TEMPORARY_WORKSPACE
+            : '',
+      );
+      setRuntime((current) =>
+        current && cfg.runtimes.includes(current) ? current : (cfg.runtimes[0] ?? ''),
+      );
+    },
+    [adoptModels],
+  );
 
   // The one place a repository is chosen for the owner: they opened the page
   // from a project's "New task in …", which is them choosing it. Applied when
@@ -475,9 +421,6 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const busy =
     submitting || goalCommand.busy || rewriting || Boolean(repo && environmentStatus === 'loading');
   const missingRepository = config?.github_connected === true && !repo;
-  // Separate from the repository so the one missing step gets named, and so
-  // the Run button's title says which control to look at.
-  const missingModel = !model && models.length > 0;
   const canRun =
     !locked &&
     (temporary || (config?.github_connected === true && Boolean(repo))) &&
@@ -675,12 +618,10 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
 
   async function run(acknowledged = acknowledgement.acknowledged) {
     if (!canRun) {
-      // The one thing missing is where to run it: ask, rather than ignore the
-      // key. Nothing is sent until a repository has actually been chosen.
+      // Ask where to run, or point at the empty model, rather than ignore the
+      // key. Nothing is sent until both have actually been chosen.
       if (missingRepository && task.trim() && !busy) openRepositoryPicker(true);
-      // Same rule for the model. There is no sensible default to fall back on,
-      // so the key press is answered by pointing at the control that is empty.
-      if (missingModel && !busy) modelTrigger.current?.focus();
+      if (!busy) modelControl.pointIfMissing();
       return;
     }
     // The first temporary workspace waits for its owner to say they know its
@@ -935,13 +876,11 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
               label={t('composer.model')}
               value={model}
               options={models}
-              onChange={setChosenModel}
+              onChange={chooseModel}
               // Empty until something resolves for this owner. The model is
               // never filled in for them: see applyConfig.
               placeholder={t('composer.chooseModelPlaceholder')}
-              triggerRef={(element) => {
-                modelTrigger.current = element;
-              }}
+              triggerRef={modelControl.attach}
             />
             <Picker
               label={t('composer.reasoning')}
