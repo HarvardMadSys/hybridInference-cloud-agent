@@ -641,7 +641,7 @@ volume or resets its password automatically.
 ### Claude inference retry policy
 
 The runtime adapter sets `CLAUDE_CODE_MAX_RETRIES=15` and
-`CLAUDE_CODE_RETRY_WATCHDOG=0` for headless and resident Claude Code processes.
+`CLAUDE_CODE_RETRY_WATCHDOG=0` for each resident Claude Code process.
 These are fixed launch settings, supplied by the runner rather than host
 `.env` options. The pinned CLI retries transient inference requests with
 exponential backoff and jitter within the current native turn. Disabling the

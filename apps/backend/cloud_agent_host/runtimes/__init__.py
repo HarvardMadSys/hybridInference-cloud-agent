@@ -1,10 +1,11 @@
 """Agent CLI dialect adapters, exposed through a stable package API.
 
-Each CLI module builds its CLI's resident live process. Claude's and pi's
-also normalize the events their process writes; Codex, OpenCode and Kilo speak
-protocols their sessions in :mod:`cloud_agent_host.drivers` read. ``base``
-defines adapter and MCP contracts, ``http_bridge`` the OpenCode family's
-shared launch, ``events`` bounds normalized payloads, and ``preview`` batches
+The Claude, Codex and pi modules each build their CLI's resident live process;
+the OpenCode and Kilo modules name their CLI for the launch the two share in
+``http_bridge``. Claude's and pi's adapters also normalize the events their
+process writes; Codex, OpenCode and Kilo speak protocols their sessions in
+:mod:`cloud_agent_host.drivers` read. ``base`` defines adapter and MCP
+contracts, ``events`` bounds normalized payloads, and ``preview`` batches
 partial replies. ``registry`` creates one adapter per run. Shared discovery
 metadata lives in :mod:`cloud_agent_shared.runtime_catalog` so the control
 plane can advertise capabilities without loading host code.

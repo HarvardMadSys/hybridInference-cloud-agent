@@ -20,8 +20,8 @@ class KiloRuntime(HttpBridgeRuntime):
     and share links to app.kilo.ai, presence, LSP downloads. Each has a
     supported kill switch, and the wrapper sets them all: the sandbox reaches
     the public web, so a path left enabled would simply phone home.
-    Smoke-verified end to end against the pinned CLI: config injection, tool
-    calls through the gateway, and JSON events on stdout.
+    Smoke-verified end to end against the pinned CLI: config injection and
+    tool calls through the gateway.
     """
 
     name = KILO.name

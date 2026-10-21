@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-20 16:29+0000\n"
+"POT-Creation-Date: 2026-10-21 04:54+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -434,7 +434,7 @@ msgid "Partial-reply preview batching"
 msgstr "把部分回复攒成批次做预览"
 
 #: ../developer/code-structure.md
-msgid "`claude.py`, `codex.py`, `pi.py`, `opencode.py`, `kilo.py`"
+msgid "`claude.py`, `codex.py`, `pi.py`"
 msgstr ""
 
 #: ../developer/code-structure.md
@@ -450,6 +450,14 @@ msgid "The live launch OpenCode and Kilo share, behind the HTTP bridge"
 msgstr "OpenCode 和 Kilo 共用的常驻进程启动方式，经由 HTTP 桥接"
 
 #: ../developer/code-structure.md
+msgid "`opencode.py`, `kilo.py`"
+msgstr ""
+
+#: ../developer/code-structure.md
+msgid "One CLI's name, wrapper binary and catalog entry"
+msgstr "某一种 CLI 的名称、包装脚本名，以及它在运行时目录里的条目"
+
+#: ../developer/code-structure.md
 msgid "`registry.py`"
 msgstr ""
 
@@ -457,7 +465,7 @@ msgstr ""
 msgid "Adapter lookup and construction"
 msgstr "查找和创建适配器"
 
-#: ../developer/code-structure.md:140
+#: ../developer/code-structure.md:141
 msgid ""
 "Existing callers use `cloud_agent_host.runtimes`; the package explicitly "
 "exports its public API. Runtime discovery facts live in the immutable "
@@ -471,11 +479,11 @@ msgstr ""
 "ID、是否支持 MCP 和可选的推理强度。运行时的版本固定仍在 `cloud_agent_shared/shared_protocol.py` "
 "和镜像文件里。"
 
-#: ../developer/code-structure.md:146
+#: ../developer/code-structure.md:147
 msgid "Shared operation profiling"
 msgstr "共用的操作性能剖析"
 
-#: ../developer/code-structure.md:148
+#: ../developer/code-structure.md:149
 msgid ""
 "Producers continue to import `cloud_agent_shared.operation_profiling`. "
 "The implementation is organized under `cloud_agent_shared/profiling/` by "
@@ -488,7 +496,7 @@ msgstr ""
 "`cloud_agent_shared/profiling/` 下，按 "
 "schema、模型、运行解析、策略、测量采集、阶段观察器、进程上下文、导出和时钟访问分成几个模块。详见这个包的[职责与契约说明](../../apps/backend/cloud_agent_shared/profiling/README.md)。"
 
-#: ../developer/code-structure.md:154
+#: ../developer/code-structure.md:155
 msgid ""
 "The facade keeps the existing producer API and operational diagnostics. "
 "Clock access respects its replaceable `time` object, keeping "
@@ -498,11 +506,11 @@ msgstr ""
 "门面保留了原有的 API 和运维诊断功能。时钟访问会用它那个可替换的 `time` "
 "对象，所以测试结果仍然确定，默认关闭的路径也不受影响。新的剖析逻辑放进对应的模块里，不要往门面里堆。"
 
-#: ../developer/code-structure.md:159
+#: ../developer/code-structure.md:160
 msgid "Follow a browser action"
 msgstr "跟着一次浏览器操作走"
 
-#: ../developer/code-structure.md:161
+#: ../developer/code-structure.md:162
 msgid ""
 "Next.js route files live under `apps/frontend/src/app/`. Shared feature "
 "UI lives under `components/features/` (`agents` for tasks and "
@@ -517,7 +525,7 @@ msgstr ""
 "`teams`、`profile` 和 `auth`。可复用的展示组件在 `components/` 下，浏览器端的工具函数和 API 客户端在 "
 "`lib/` 下。只能在服务端运行的集成放在现有的服务端模块里；浏览器组件的导入链里绝不能带进服务端凭据。"
 
-#: ../developer/code-structure.md:169
+#: ../developer/code-structure.md:170
 msgid ""
 "`lib/api/agents.ts` is the explicit public API facade. It delegates to "
 "focused modules under `lib/api/agents/`: jobs, threads, sessions, goals, "
@@ -531,7 +539,7 @@ msgstr ""
 "下各管一摊的模块：任务、对话、会话、目标、配置、集成、资源和用量查询、工作区文件、终端和事件流。创建和 Fork "
 "共用的幂等响应处理只在这个包内部使用。端点路径、重试、凭据、游标处理和通知，都跟着它所属的那个操作放。"
 
-#: ../developer/code-structure.md:176
+#: ../developer/code-structure.md:177
 msgid ""
 "`components/features/agents/JobDetail.tsx` composes the job page. Its "
 "extracted implementation lives under `job-detail/`:"
@@ -603,7 +611,7 @@ msgstr ""
 msgid "Stop, Fork, and restore actions with request guards"
 msgstr "停止、Fork 和恢复操作，带防重复请求的保护"
 
-#: ../developer/code-structure.md:190
+#: ../developer/code-structure.md:191
 msgid ""
 "Keep state with the concern that owns it. Retained panels preserve "
 "terminals, file previews, and drafts while hidden; scope changes must "
@@ -613,47 +621,47 @@ msgstr ""
 "状态放在负责它的那一块里。保留的面板在隐藏时也会留住终端、文件预览和草稿；切换作用范围时，必须把相关状态重置掉。拆组件时，hook "
 "的依赖要写明，延迟加载也要保留。"
 
-#: ../developer/code-structure.md:195
+#: ../developer/code-structure.md:196
 msgid "Add a feature without losing the structure"
 msgstr "加功能时别把结构弄乱"
 
-#: ../developer/code-structure.md:197
+#: ../developer/code-structure.md:198
 msgid ""
 "Identify the service and concern that owns the behavior using the maps "
 "above."
 msgstr "对照上面的几张表，确定这项行为归哪个服务、哪一块负责。"
 
-#: ../developer/code-structure.md:198
+#: ../developer/code-structure.md:199
 msgid ""
 "Add or update its domain rule, wire model, and port only where the "
 "behavior requires them. Implement durable operations inside storage."
 msgstr "领域规则、传输模型和 port，确实需要时才新增或修改。持久化操作在 storage 里实现。"
 
-#: ../developer/code-structure.md:200
+#: ../developer/code-structure.md:201
 msgid ""
 "Put orchestration in an application flow or owning service, then call it "
 "from the HTTP adapter or worker. Wire new resources through bootstrap."
 msgstr "编排逻辑放在应用流程或负责它的服务里，再由 HTTP 适配器或 worker 去调用。新的资源通过 bootstrap 接入。"
 
-#: ../developer/code-structure.md:202
+#: ../developer/code-structure.md:203
 msgid ""
 "Add public facade exports deliberately. Import implementation modules "
 "directly within a package to keep its dependency graph clear."
 msgstr "门面的公开导出要想清楚再加。包内部直接导入实现模块，这样依赖关系一目了然。"
 
-#: ../developer/code-structure.md:204
+#: ../developer/code-structure.md:205
 msgid ""
 "Exercise observable behavior and affected boundaries. For structural "
 "refactors, compare contracts and reuse existing behavioral tests."
 msgstr "测试要覆盖外部可观察的行为和受影响的边界。做结构性重构时，比对前后的契约，并复用已有的行为测试。"
 
-#: ../developer/code-structure.md:206
+#: ../developer/code-structure.md:207
 msgid ""
 "Run the relevant complete gates and update the maintained guide for "
 "changed ownership, commands, or behavior."
 msgstr "跑完相关的完整检查；如果职责归属、命令或行为变了，就更新对应的维护中指南。"
 
-#: ../developer/code-structure.md:209
+#: ../developer/code-structure.md:210
 msgid ""
 "Backend architecture checks enforce service-image independence, API "
 "import direction, domain/port independence, and repository isolation. "
