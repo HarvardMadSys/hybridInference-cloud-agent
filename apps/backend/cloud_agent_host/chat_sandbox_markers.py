@@ -42,6 +42,9 @@ INITIAL_ARCHIVE_MARKER_MAX_BYTES = 4096
 #: the retained bridge, not marker presence alone, distinguishes pending from
 #: completed final archival after a sandbox manager restart.
 FINAL_ARCHIVE_MARKER_NAME = "final-archive-v1.json"
+#: The one path a stopped container's final marker is copied from, and so the
+#: only missing file an optional read of it treats as absence.
+FINAL_ARCHIVE_MARKER_PATH = f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
 # The canonical uploaded receipt can exceed 4 KiB at the accepted policy and
 # S3 VersionId field bounds. Keep the sandbox-manager-private record tightly bounded,
 # but leave enough room for every schema-valid marker.
@@ -476,11 +479,10 @@ def read_stopped_final(
         before="marker read",
         refusal="final archive recovery requires the exact stopped container",
     )
-    marker_path = f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
     with tempfile.TemporaryFile(prefix="freeinference-final-archive-marker-") as archive:
         manager.export_archive(
             spec,
-            marker_path,
+            FINAL_ARCHIVE_MARKER_PATH,
             archive,
             max_bytes=FINAL_ARCHIVE_MARKER_MAX_BYTES + 32 * 1024,
             expected_container_id=expected_container_id,

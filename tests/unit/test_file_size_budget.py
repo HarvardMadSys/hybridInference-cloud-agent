@@ -18,7 +18,7 @@ LIMIT = 1500
 BASELINE = {
     "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5645,
     "apps/backend/cloud_agent_host/runner.py": 5078,
-    "apps/backend/cloud_agent_host/chat_sandbox.py": 4597,
+    "apps/backend/cloud_agent_host/chat_sandbox.py": 4596,
     "apps/backend/cloud_agent_host/sandbox_manager.py": 4305,
     "apps/backend/cloud_agent/storage/repositories/compute_resources.py": 3858,
     "apps/backend/cloud_agent/storage/repositories/sandbox.py": 3514,

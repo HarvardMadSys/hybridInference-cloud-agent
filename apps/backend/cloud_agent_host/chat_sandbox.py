@@ -44,9 +44,9 @@ from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines
 from cloud_agent_host.chat_sandbox_markers import (
     FINAL_ARCHIVE_MARKER_MAX_BYTES,
     FINAL_ARCHIVE_MARKER_NAME,
+    FINAL_ARCHIVE_MARKER_PATH,
     INITIAL_ARCHIVE_MARKER_MAX_BYTES,
     INITIAL_ARCHIVE_MARKER_NAME,
-    INITIAL_ARCHIVE_MARKER_ROOT,
     SETUP_MARKER_MAX_BYTES,
 )
 from cloud_agent_host.chat_sandbox_models import (
@@ -3613,11 +3613,10 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                 expected_container_id=expected_container_id,
             )
         except FileNotFoundError as exc:
-            marker_path = f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
             # export_archive normalizes only Docker's exact missing source
             # for the inspected container. Host-side missing files and other
             # Docker failures must still prevent activation.
-            if exc.args != (marker_path,):
+            if exc.args != (FINAL_ARCHIVE_MARKER_PATH,):
                 raise
             return None
 
