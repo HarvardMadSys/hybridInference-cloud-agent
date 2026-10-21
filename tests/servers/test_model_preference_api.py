@@ -13,6 +13,7 @@ from cloud_agent import identity
 from cloud_agent.api import model_preferences
 from cloud_agent.api.deps import get_gateway_client, get_storage
 from cloud_agent.app import create_app, create_mcp_app, install_admin_no_store
+from cloud_agent.gateway import GatewayError
 from cloud_agent.model_preference import ModelPreferenceView
 
 PATH = "/v1/agent/model-preference"
@@ -142,6 +143,16 @@ async def test_a_catalog_outage_withholds_every_choice(app):
     assert read.json()["last_model"] == "qwen-next"
     # Nothing can be verified against an unreadable catalog, so nothing is pinned.
     assert write.status_code == 400
+
+
+async def test_an_unreadable_catalog_is_a_retryable_outage_not_a_refusal(app):
+    """Answered as task creation answers it, so Settings can say "try again"."""
+    app.state.gateway.model_catalog_with_aliases.side_effect = GatewayError("catalog down")
+    async with await client_for(app) as client:
+        response = await client.put(PATH, headers=headers(), json={"default_model": "glm-5.1"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"]["type"] == "model_catalog_unavailable"
+    app.state.repository.set_default_model.assert_not_awaited()
 
 
 async def test_one_owner_never_sees_or_sets_another_owners_choice(app):

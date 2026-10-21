@@ -2534,6 +2534,36 @@ describe('durable new-task drafts', () => {
     await waitFor(() => expect(screen.getByLabelText('Branch')).toHaveValue('main'));
   });
 
+  it('re-resolves a model it filled in, so a pin saved meanwhile takes effect', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-b'], default_model: 'model-a' }),
+    );
+    const first = render(<TaskComposer />);
+    await chooseRepository();
+    expect(screen.getByLabelText('Model')).toHaveValue('model-a');
+    first.unmount();
+    // Away in My Settings, the owner pins model-b.
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-b'], default_model: 'model-b' }),
+    );
+    render(<TaskComposer />);
+    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-b'));
+  });
+
+  it('keeps a model the owner chose here across a visit', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-b'], default_model: 'model-a' }),
+    );
+    const first = render(<TaskComposer />);
+    await chooseRepository();
+    fireEvent.click(screen.getByLabelText('Model'));
+    fireEvent.click(screen.getByRole('option', { name: 'model-b' }));
+    first.unmount();
+    render(<TaskComposer />);
+    await waitFor(() => expect(getAgentConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-b'));
+  });
+
   it('does not navigate another account after an earlier account submission resolves', async () => {
     let finish!: (job: AgentJobApi) => void;
     vi.mocked(createAgentJob).mockImplementation(

@@ -118,3 +118,25 @@ def test_the_deployment_default_is_an_admin_setting(monkeypatch):
     assert deployment_default_model() == "qwen-next"
     monkeypatch.setattr(settings, "_values", {"default_model": ""})
     assert deployment_default_model() is None
+
+
+@pytest.mark.parametrize(
+    ("environment", "imported"),
+    [(None, "deepseek-v4-flash"), ("", ""), (" glm-5.1 ", "glm-5.1")],
+)
+def test_an_empty_environment_value_imports_no_default(monkeypatch, environment, imported):
+    """``AGENT_DEFAULT_MODEL=""`` turns the default off, as documented.
+
+    Unset keeps the shipped default. Compose passes the variable with
+    ``${AGENT_DEFAULT_MODEL-…}``, so an operator's empty value reaches here.
+    """
+    from cloud_agent import settings
+
+    monkeypatch.delenv("AGENT_DEFAULT_MODEL", raising=False)
+    if environment is not None:
+        monkeypatch.setenv("AGENT_DEFAULT_MODEL", environment)
+    monkeypatch.setattr(settings, "_values", None)
+    stored = settings.initial_settings(keys={"default_model"})
+    assert stored["default_model"] == imported
+    # Before the first snapshot, the environment is read the same way.
+    assert deployment_default_model() == (imported or None)

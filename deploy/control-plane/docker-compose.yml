@@ -250,8 +250,9 @@ services:
       AGENT_MCP_ALLOW_PRIVATE_TARGETS: ${AGENT_MCP_ALLOW_PRIVATE_TARGETS:-}
       AGENT_MCP_ALLOW_PLAIN_HTTP: ${AGENT_MCP_ALLOW_PLAIN_HTTP:-}
       # Imported once, then owned by Admin Settings → Sandbox execution. The
-      # model a new task starts on when its owner has chosen nothing.
-      AGENT_DEFAULT_MODEL: ${AGENT_DEFAULT_MODEL:-}
+      # model a new task starts on when its owner has chosen nothing. Set
+      # empty for no default; `-`, not `:-`, keeps that empty value.
+      AGENT_DEFAULT_MODEL: ${AGENT_DEFAULT_MODEL-deepseek-v4-flash}
 
       # --- Workspaces -------------------------------------------------------
       # Authorizes this service to the hosts' sandbox managers. Per-host

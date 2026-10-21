@@ -21,13 +21,18 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_gateway_client, get_storage, require_store
+from cloud_agent.application.job_admission import model_catalog_unavailable
 from cloud_agent.model_preference import (
     ModelPreferenceView,
     UpdateModelPreference,
     deployment_default_model,
     resolve_model,
 )
-from cloud_agent.visible_models import agent_canonical_model, agent_visible_models
+from cloud_agent.visible_models import (
+    ModelCatalogUnavailable,
+    agent_canonical_model,
+    agent_visible_models,
+)
 
 if TYPE_CHECKING:
     from cloud_agent.ports.model_preferences import ModelPreferenceRepository
@@ -96,7 +101,12 @@ async def save_model_preference(
     if requested is not None:
         # Canonical ids only: the pin is applied to the composer's model picker,
         # whose options are canonical, and an alias would pre-select nothing.
-        canonical = await agent_canonical_model(requested, gateway, user_id=user["user_id"])
+        # An outage is no verdict on the model: answer it the way task
+        # creation does, as a 503 the Settings card can tell from a refusal.
+        try:
+            canonical = await agent_canonical_model(requested, gateway, user_id=user["user_id"])
+        except ModelCatalogUnavailable:
+            raise model_catalog_unavailable() from None
         if canonical is None:
             raise HTTPException(
                 status_code=400,

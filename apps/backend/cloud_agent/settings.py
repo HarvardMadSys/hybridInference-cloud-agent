@@ -73,6 +73,10 @@ class Setting:
     #: it: refusing it would stop the control plane before the settings page
     #: that replaces it could open. Every new value is held to the floor.
     minimum_bytes_new_values_only: bool = False
+    #: An empty environment value is imported as empty instead of meaning
+    #: "unset". Only for a text setting whose empty value is itself a choice;
+    #: its compose entry then defaults with ``${NAME-value}``, never ``:-``.
+    empty_env_imports: bool = False
 
     @property
     def storage_key(self) -> str:
@@ -1047,6 +1051,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Execution",
         "deepseek-v4-flash",
         env="AGENT_DEFAULT_MODEL",
+        empty_env_imports=True,
         description=(
             "The model a new task starts on when its owner has not chosen one. A user's "
             "pinned model beats their last used model, which beats this default. A model "
@@ -1284,7 +1289,14 @@ def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:
             continue
         value: Any = imported.get(setting.key, setting.default)
         raw = manager_env(setting.env, "") if setting.env else ""
-        if raw:
+        if (
+            raw == ""
+            and setting.env
+            and setting.empty_env_imports
+            and manager_env(setting.env) is not None
+        ):
+            value = ""
+        elif raw:
             try:
                 if setting.kind == "integer":
                     value = int(raw)
@@ -1475,6 +1487,8 @@ def get_setting(key: str, fallback: SettingValue | None = None) -> SettingValue:
             return _values[key]
     if setting.env:
         raw = manager_env(setting.env)
+        if raw == "" and setting.empty_env_imports:
+            return ""
         if raw:
             if setting.kind == "integer":
                 return int(raw)

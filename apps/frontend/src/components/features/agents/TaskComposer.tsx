@@ -197,6 +197,15 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const [branchOptionsRepo, setBranchOptionsRepo] = useState<string | null>(null);
   const [runtime, setRuntime] = useState(draft?.runtime ?? '');
   const [model, setModel] = useState(draft?.model ?? '');
+  // Only a model the owner picked here is worth keeping across a visit. One
+  // the server resolved for them is re-resolved on the next one, so a pin
+  // saved in Settings meanwhile takes effect instead of the stale answer.
+  const [modelChosen, setModelChosen] = useState(Boolean(draft?.model));
+  const chosenModel = modelChosen ? model : '';
+  const chooseModel = useCallback((value: string) => {
+    setModel(value);
+    setModelChosen(true);
+  }, []);
   const [effort, setEffort] = useState(draft?.effort ?? '');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -209,8 +218,18 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const savedBranch =
     branchOptionsRepo === repo ? branch : draft?.repo === repo ? draft.branch : '';
   useEffect(() => {
-    saveDraft(JSON.stringify({ task, repo, runtime, model, effort, branch: savedBranch, plugins }));
-  }, [saveDraft, task, repo, runtime, model, effort, savedBranch, plugins]);
+    saveDraft(
+      JSON.stringify({
+        task,
+        repo,
+        runtime,
+        model: chosenModel,
+        effort,
+        branch: savedBranch,
+        plugins,
+      }),
+    );
+  }, [saveDraft, task, repo, runtime, chosenModel, effort, savedBranch, plugins]);
   const goalCommand = useGoalCommand({
     value: task,
     setValue: setTask,
@@ -484,7 +503,15 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
       // Either trip is for a repository: come back to the picker, not to the
       // temporary workspace the owner is leaving to get one.
       saveDraft(
-        JSON.stringify({ task, repo: '', runtime, model, effort, branch: savedBranch, plugins }),
+        JSON.stringify({
+          task,
+          repo: '',
+          runtime,
+          model: chosenModel,
+          effort,
+          branch: savedBranch,
+          plugins,
+        }),
       );
     }
     rememberReturn(
@@ -497,7 +524,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         task,
         repo: temporary ? '' : repo,
         runtime,
-        model,
+        model: chosenModel,
       },
       userId,
     );
@@ -906,7 +933,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
               label={t('composer.model')}
               value={model}
               options={models}
-              onChange={setModel}
+              onChange={chooseModel}
               // Empty until something resolves for this owner. The model is
               // never filled in for them: see applyConfig.
               placeholder={t('composer.chooseModelPlaceholder')}
