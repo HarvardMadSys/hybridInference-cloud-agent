@@ -13,6 +13,7 @@ from tests.integration.storage.test_agent_job_store import (
 from tests.integration.storage.test_attempt_ledger import db as db, store as store
 from tests.integration.storage.test_sandbox_restore_store import _RESTORE_HOST, _host
 from tests.integration.storage.test_schema_upgrade import _db_config
+from tests.support.follow_ups import append_follow_up
 from tests.support.migrations import apply_migrations, downgrade_to
 from tests.unit.test_ledger_snapshots import START
 
@@ -1439,8 +1440,8 @@ async def settled_group(db, store):
 
 async def test_pending_deletion_fences_claim_fork_reserve_and_stale_running_heartbeat(db, store):
     job, sandbox = await settled_group(db, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id=job["user_id"], prompt="Wait during deletion"
+    follow_up = await append_follow_up(
+        db, parent_job_id=job["id"], user_id=job["user_id"], prompt="Wait during deletion"
     )
     assert follow_up is not None
     assert await request_delete(store, sandbox["sandbox_id"]) == "accepted"

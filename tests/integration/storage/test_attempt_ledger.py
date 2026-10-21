@@ -16,7 +16,9 @@ from tests.integration.storage.test_agent_job_store import (
     _reserve_shared_chat,
 )
 from tests.support.db import reset_agent_tables
+from tests.support.follow_ups import append_follow_up
 from tests.support.migrations import apply_migrations
+from tests.support.usage import conversation_rows, job_usage_inputs
 from tests.unit.test_ledger_snapshots import report_payload
 
 from cloud_agent.ledger import summarize_conversation, summarize_job_usage
@@ -188,13 +190,13 @@ async def test_conversation_usage_is_owner_scoped_and_does_not_include_other_thr
     # placed in this thread at all any more; owner scoping is still asserted
     # on the read below.
     first, first_attempt, first_ledger = await _seed_attempt(db, store)
-    second = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="second turn"
+    second = await append_follow_up(
+        db, parent_job_id=first["id"], user_id="user-1", prompt="second turn"
     )
     assert second is not None and second.get("error") is None
     _, second_attempt, second_ledger = await _seed_attempt(db, store, job=second)
-    queued = await store.conversation_commands.create_follow_up(
-        parent_job_id=second["id"], user_id="user-1", prompt="unstarted turn"
+    queued = await append_follow_up(
+        db, parent_job_id=second["id"], user_id="user-1", prompt="unstarted turn"
     )
     assert queued is not None and queued.get("error") is None
     other_thread, _, _ = await _seed_attempt(db, store)
@@ -205,7 +207,7 @@ async def test_conversation_usage_is_owner_scoped_and_does_not_include_other_thr
             [first_ledger, second_ledger],
             json.dumps(report_payload(grant_id="grant-one")),
         )
-    rows = await ledger.ledger_rows_for_conversation(job_id=first["id"], user_id="user-1")
+    rows = await conversation_rows(db, job_id=first["id"], user_id="user-1")
     assert {row["job_id"] for row in rows} == {first["id"], second["id"], queued["id"]}
     assert {row["attempt_id"] for row in rows} == {first_attempt, second_attempt, None}
     summary = summarize_conversation(rows)
@@ -214,10 +216,8 @@ async def test_conversation_usage_is_owner_scoped_and_does_not_include_other_thr
     assert summary.totals.spent_usd == "0.00024690"
     assert summary.incomplete is False
     assert other_thread["id"] not in {row["job_id"] for row in rows}
-    assert (
-        await ledger.ledger_rows_for_conversation(job_id=first["id"], user_id="another-user") == []
-    )
-    assert await ledger.ledger_rows_for_conversation(job_id="missing", user_id="user-1") == []
+    assert await conversation_rows(db, job_id=first["id"], user_id="another-user") == []
+    assert await conversation_rows(db, job_id="missing", user_id="user-1") == []
 
 
 async def test_a_turn_that_never_called_a_model_leaves_no_gap_in_its_conversation(
@@ -232,8 +232,8 @@ async def test_a_turn_that_never_called_a_model_leaves_no_gap_in_its_conversatio
     totals of every turn that did run.
     """
     first, _, _ = await _seed_attempt(db, store, grant_id=None, finished_at=datetime.now(UTC))
-    second = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="second turn"
+    second = await append_follow_up(
+        db, parent_job_id=first["id"], user_id="user-1", prompt="second turn"
     )
     assert second is not None and second.get("error") is None
     _, _, second_ledger = await _seed_attempt(db, store, job=second)
@@ -253,7 +253,7 @@ async def test_a_turn_that_never_called_a_model_leaves_no_gap_in_its_conversatio
     assert first_usage.ledger.attempts[0].reason == "no_model_calls"
 
     summary = summarize_conversation(
-        await ledger.ledger_rows_for_conversation(job_id=second["id"], user_id="user-1")
+        await conversation_rows(db, job_id=second["id"], user_id="user-1")
     )
     assert summary.turn_count == 2
     assert summary.totals.calls == 1
@@ -333,7 +333,7 @@ async def test_capture_actual_residency_grant_before_cli_and_preserve_rotations(
 
 
 async def test_hot_followup_captures_same_grant_for_its_own_attempt(
-    store, ledger: PostgresLedgerRepository
+    db, store, ledger: PostgresLedgerRepository
 ):
     """A retained CLI gets a durable reference when its next prompt is admitted."""
     job, claim, sandbox = await _reserve_shared_chat(store)
@@ -362,8 +362,8 @@ async def test_hot_followup_captures_same_grant_for_its_own_attempt(
         from_states=("running",),
         to_state="succeeded",
     )
-    followup = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id=job["user_id"], prompt="continue the retained turn"
+    followup = await append_follow_up(
+        db, parent_job_id=job["id"], user_id=job["user_id"], prompt="continue the retained turn"
     )
     following_claim = await _claim(
         store,
@@ -1007,8 +1007,8 @@ async def test_job_runtime_usage_includes_retries_but_excludes_other_turns(db, s
     _, retry, _ = await _seed_attempt(db, store, job=job, attempt_no=2, grant_id=None)
     # A real second turn of the same thread: the schema ties a job's messages
     # and parent to its thread, so a job cannot simply be re-pointed.
-    sibling = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id=job["user_id"], prompt="a sibling turn"
+    sibling = await append_follow_up(
+        db, parent_job_id=job["id"], user_id=job["user_id"], prompt="a sibling turn"
     )
     assert sibling is not None and sibling.get("error") is None
     _, sibling_attempt, _ = await _seed_attempt(db, store, job=sibling, grant_id=None)
@@ -1036,7 +1036,7 @@ async def test_job_runtime_usage_includes_retries_but_excludes_other_turns(db, s
                     }
                 ),
             )
-    inputs = await store.execution_queries.job_usage_inputs(job_id=job["id"])
+    inputs = await job_usage_inputs(db, job_id=job["id"])
     assert inputs["job_ids"] == [job["id"]]
     assert len(inputs["attempts"]) == 2
     assert [event["attempt_id"] for event in inputs["events"]] == [first, retry]

@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent.mcp import oauth, protocol
+from cloud_agent.mcp import oauth
 
 pytestmark = []
 
@@ -97,220 +97,15 @@ class TestClientAuthentication:
         assert "authorization" not in request.headers()
 
 
-class TestTheDecisionCoversEverySurface:
-    """The per-connection relay is a second door onto the same authorization."""
-
-    @pytest.mark.asyncio
-    async def test_a_resource_method_is_decided_rather_than_forwarded(self) -> None:
-        """A deny on the merged endpoint has to mean a deny on this one.
-
-        The bypass was structural: the decision function looked for
-        ``tools/call`` and returned "forward it" for everything else, so
-        ``resources/read`` reached the user's server with the user's credential
-        after the session had turned that resource off.
-        """
-        from cloud_agent.api import mcp_relay
-
-        decided: list[dict[str, Any]] = []
-
-        async def fake_decide(authorized: Any, store: Any, **kwargs: Any) -> Any:
-            decided.append(kwargs)
-            return {"jsonrpc": "2.0", "id": kwargs["request_id"], "error": {"code": -32601}}
-
-        original = mcp_relay._decide_call
-        mcp_relay._decide_call = fake_decide
-        try:
-            authorized = _authorized()
-            held = await mcp_relay._capability_decision(
-                authorized,
-                _Store(),
-                json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "resources/read",
-                        "params": {"uri": "repo://notes"},
-                    }
-                ).encode(),
-                attempt_id=1,
-                lease_generation=1,
-            )
-        finally:
-            mcp_relay._decide_call = original
-
-        assert held is not None, "a resource read was forwarded without a decision"
-        assert decided[0]["kind"].value == "resource"
-        assert decided[0]["name"] == "repo://notes"
-
-    @pytest.mark.asyncio
-    async def test_a_prompt_method_is_decided_too(self) -> None:
-        """Same surface, same rule; two cases because they key differently."""
-        from cloud_agent.api import mcp_relay
-
-        decided: list[dict[str, Any]] = []
-
-        async def fake_decide(authorized: Any, store: Any, **kwargs: Any) -> Any:
-            decided.append(kwargs)
-            return {"jsonrpc": "2.0", "id": kwargs["request_id"], "error": {"code": -32601}}
-
-        original = mcp_relay._decide_call
-        mcp_relay._decide_call = fake_decide
-        try:
-            held = await mcp_relay._capability_decision(
-                _authorized(),
-                _Store(),
-                json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": 2,
-                        "method": "prompts/get",
-                        "params": {"name": "summarize"},
-                    }
-                ).encode(),
-                attempt_id=1,
-                lease_generation=1,
-            )
-        finally:
-            mcp_relay._decide_call = original
-
-        assert held is not None
-        assert decided[0]["kind"].value == "prompt"
-
-    @pytest.mark.asyncio
-    async def test_a_method_with_no_authorization_story_is_refused(self) -> None:
-        """Forwarding it would proxy a capability this platform cannot reason
-        about, with a credential it is responsible for."""
-        from cloud_agent.api import mcp_relay
-
-        reply = await mcp_relay._capability_decision(
-            _authorized(),
-            _Store(),
-            json.dumps(
-                {"jsonrpc": "2.0", "id": 3, "method": "completion/complete", "params": {}}
-            ).encode(),
-            attempt_id=1,
-            lease_generation=1,
-        )
-        assert reply is not None
-        assert "does not proxy" in reply["error"]["message"]
-
-    @pytest.mark.asyncio
-    async def test_housekeeping_and_notifications_still_pass(self) -> None:
-        """Refusing these would break the protocol without protecting anything."""
-        from cloud_agent.api import mcp_relay
-
-        for method in (
-            protocol.INITIALIZE,
-            protocol.PING,
-            protocol.TOOLS_LIST,
-            "notifications/initialized",
-        ):
-            assert (
-                await mcp_relay._capability_decision(
-                    _authorized(),
-                    _Store(),
-                    json.dumps({"jsonrpc": "2.0", "id": 4, "method": method}).encode(),
-                    attempt_id=1,
-                    lease_generation=1,
-                )
-                is None
-            ), method
-
-
-def _authorized() -> Any:
-    """A binding with one allowed tool and one denied resource."""
-    from cloud_agent.api.mcp_relay import Authorized
-    from cloud_agent.mcp.models import (
-        Capability,
-        CapabilityKind,
-        CapabilitySnapshot,
-        ConnectionConfig,
-        ExecutionLocation,
-        McpConnection,
-        ThreadBinding,
-        ToolPolicy,
-        ToolRule,
-        Transport,
-    )
-
-    connection = McpConnection(
-        connection_id="7",
-        user_id="u1",
-        label="Docs",
-        config=ConnectionConfig(
-            transport=Transport.STREAMABLE_HTTP,
-            location=ExecutionLocation.REMOTE,
-            url="http://127.0.0.1:9/mcp",
-        ),
-    )
-    snapshot = CapabilitySnapshot(
-        connection_id="7",
-        config_revision=connection.config_revision,
-        capability_revision=connection.capability_revision,
-        protocol_version="2025-11-25",
-        tools=(Capability(kind=CapabilityKind.TOOL, name="get_issue"),),
-        resources=(Capability(kind=CapabilityKind.RESOURCE, name="repo://notes"),),
-        prompts=(Capability(kind=CapabilityKind.PROMPT, name="summarize"),),
-    )
-    binding = ThreadBinding(
-        thread_id="t1",
-        connection_id="7",
-        alias="docs",
-        config_revision=connection.config_revision,
-        authorization_epoch=connection.authorization_epoch,
-        capability_revision=connection.capability_revision,
-        rules={"get_issue": ToolRule(name="get_issue", policy=ToolPolicy.ALLOW)},
-        resource_rules={"repo://notes": ToolPolicy.DENY},
-        prompt_rules={"summarize": ToolPolicy.DENY},
-    )
-    from cloud_agent.mcp.registry import server_for
-
-    return Authorized(
-        job_id="ajob",
-        user_id="u1",
-        alias="docs",
-        thread_id="t1",
-        connection_id=7,
-        connection=connection,
-        binding=binding,
-        snapshot=snapshot,
-        secret="token",
-        # Built by the same function the relay uses, so the reachable sets the
-        # test asserts against are the ones production would have.
-        server=server_for(_resolved(connection, snapshot), binding),
-    )
-
-
-def _resolved(connection: Any, snapshot: Any) -> Any:
-    """The resolved connection the registry reads to build a reachable server."""
-    from cloud_agent.mcp.registry import ResolvedConnection
-
-    return ResolvedConnection(
-        connection=connection,
-        credential={"secret": "token", "kind": "static"},
-        snapshot=snapshot,
-    )
-
-
-class _Store:
-    """A store that refuses everything, so nothing is dispatched by accident."""
-
-    async def find_approved_mcp_invocation(self, **kwargs: Any) -> Any:
-        return None
-
-    async def create_mcp_invocation(self, **kwargs: Any) -> Any:
-        return {"id": 1, **kwargs}
-
-
 class TestTheRuntimeRelayEntry:
     """Which endpoint the adapters point a CLI at.
 
     Every adapter published one entry per connection, at the relay's
-    per-connection route. That route forwards one connection's protocol
-    untouched, so it can only serve a server that already speaks the shape the
-    CLI speaks: a legacy SSE server answers the CLI's POST with 405, and one
-    that replies to a call with ``InputRequiredResult`` is a protocol error the
-    CLI has no way to continue. The merged endpoint is where the platform speaks
+    since-retired per-connection route. That route forwarded one connection's
+    protocol untouched, so it could only serve a server that already speaks the
+    shape the CLI speaks: a legacy SSE server answers the CLI's POST with 405,
+    and one that replies to a call with ``InputRequiredResult`` is a protocol
+    error the CLI has no way to continue. The merged endpoint is where the platform speaks
     the protocol itself, opening each session in whichever era its server turned
     out to speak, and it answers for every connection of the job.
     """
@@ -326,9 +121,8 @@ class TestTheRuntimeRelayEntry:
         """The exact URL matters: an alias in it would put the protocol back in the CLI."""
         from cloud_agent_host.runtimes import MERGED_MCP_SERVER_NAME, ClaudeCodeRuntime
 
-        argv, _env = ClaudeCodeRuntime().prepare(
+        argv, _env = ClaudeCodeRuntime().prepare_live(
             workdir="/w",
-            task_prompt="do it",
             model="glm-5.1",
             gateway_base_url="http://backend:8080",
             credential="agr-credential",
@@ -350,9 +144,8 @@ class TestTheRuntimeRelayEntry:
         from cloud_agent_host import runtimes
 
         runtime = getattr(runtimes, runtime_name)()
-        _argv, env = runtime.prepare(
+        _argv, env = runtime.prepare_live(
             workdir="/w",
-            task_prompt="do it",
             model="glm-5.1",
             gateway_base_url="http://backend:8080",
             credential="agr-credential",
@@ -366,9 +159,8 @@ class TestTheRuntimeRelayEntry:
         """An endpoint a run must not use is an endpoint it should not be given."""
         from cloud_agent_host.runtimes import ClaudeCodeRuntime
 
-        argv, _env = ClaudeCodeRuntime().prepare(
+        argv, _env = ClaudeCodeRuntime().prepare_live(
             workdir="/w",
-            task_prompt="do it",
             model="glm-5.1",
             gateway_base_url="http://backend:8080",
             credential="agr-credential",

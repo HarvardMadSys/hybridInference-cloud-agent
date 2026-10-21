@@ -32,6 +32,15 @@ export interface AgentConfigApi {
    */
   model_reasoning_efforts?: Record<string, string[]>;
   /**
+   * What a new task should start on, by priority: this owner's pinned model,
+   * the one their newest turn used, then the deployment default an
+   * administrator saved. Always one of `models`, so a retired model is never
+   * pre-selected. Null means none of the three resolves (or the catalog was
+   * unreadable); the composer then leaves its model control empty and waits
+   * for the owner to choose, rather than picking the first model in the list.
+   */
+  default_model?: string | null;
+  /**
    * Whether this user has done what the deployment asks before choosing a
    * repository: connected GitHub where users can, or been given a repository by
    * the operator's allowlist where they cannot. `repos` may still be empty — a
