@@ -21,7 +21,7 @@ from cloud_agent.sandbox_archive import (
     SandboxArchiveUnavailable,
     SandboxArchiveVerificationError,
 )
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 from cloud_agent.sandbox_manager_routing import (
     sandbox_manager_configuration_error,
     sandbox_manager_for_host,
@@ -474,48 +474,15 @@ async def _archive_and_delete(
         sha256 = str(claim["deletion_sha256"])
         size_bytes = int(claim["deletion_size_bytes"])
     else:
-        await attempt.reach("stop_verification")
-        status = await sandbox_manager.shared_chat_sandbox_status(thread_id, timeout=10)
-        _verify_stopped_status(
-            status,
-            {
-                "thread_id": thread_id,
-                "sandbox_id": fence["sandbox_id"],
-                "generation": fence["generation"],
-                "container_id": fence["container_id"],
-            },
+        sha256, size_bytes = await _upload_archive(
+            attempt,
+            sandbox_manager,
+            archives,
+            thread_id=thread_id,
+            key=key,
+            payload=payload,
+            expected=expected,
         )
-        attempt.prepare_started = True
-        await attempt.reach("archive_prepare")
-        prepared = await sandbox_manager.prepare_sandbox_deletion(thread_id, payload)
-        _validate_receipt(prepared, expected)
-        sha256 = str(prepared.get("sha256") or "")
-        raw_size = prepared.get("size_bytes")
-        if not re.fullmatch(r"[0-9a-f]{64}", sha256):
-            raise ValueError("Sandbox archive omitted its SHA-256 checksum.")
-        if not isinstance(raw_size, int) or isinstance(raw_size, bool) or raw_size <= 0:
-            raise ValueError("Sandbox archive omitted its byte length.")
-        size_bytes = raw_size
-        await attempt.reach("upload_authorization")
-        upload = await archives.prepare_upload(
-            fence["sandbox_id"], fence["request_id"], sha256, size_bytes
-        )
-        if upload.key != key:
-            raise ValueError("Sandbox archive upload destination changed.")
-        await attempt.reach("archive_upload")
-        uploaded = await sandbox_manager.upload_sandbox_deletion_archive(
-            thread_id,
-            {
-                **payload,
-                "sha256": sha256,
-                "size_bytes": size_bytes,
-                "upload_url": upload.upload_url,
-                "upload_headers": upload.headers,
-            },
-        )
-        _validate_receipt(uploaded, {**expected, "sha256": sha256, "size_bytes": size_bytes})
-        if uploaded.get("uploaded") is not True:
-            raise ValueError("The host did not confirm the sandbox archive upload.")
     await attempt.reach("archive_verification")
     receipt = await archives.verify_archive(str(archive_location or key), sha256, size_bytes)
     attempt.archive_verified = True
@@ -543,6 +510,63 @@ async def _archive_and_delete(
     )
     if not completed:
         raise ValueError("Container deletion lost its durable request fence.")
+
+
+async def _upload_archive(
+    attempt: _Attempt,
+    sandbox_manager: SandboxManagerClient,
+    archives: S3SandboxArchiveStore,
+    *,
+    thread_id: str,
+    key: str,
+    payload: dict[str, Any],
+    expected: dict[str, Any],
+) -> tuple[str, int]:
+    """Have the host pack the stopped container and upload it; answer its SHA-256 and size."""
+    fence = attempt.fence
+    await attempt.reach("stop_verification")
+    status = await sandbox_manager.shared_chat_sandbox_status(thread_id, timeout=10)
+    _verify_stopped_status(
+        status,
+        {
+            "thread_id": thread_id,
+            "sandbox_id": fence["sandbox_id"],
+            "generation": fence["generation"],
+            "container_id": fence["container_id"],
+        },
+    )
+    attempt.prepare_started = True
+    await attempt.reach("archive_prepare")
+    prepared = await sandbox_manager.prepare_sandbox_deletion(thread_id, payload)
+    _validate_receipt(prepared, expected)
+    sha256 = str(prepared.get("sha256") or "")
+    raw_size = prepared.get("size_bytes")
+    if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise ValueError("Sandbox archive omitted its SHA-256 checksum.")
+    if not isinstance(raw_size, int) or isinstance(raw_size, bool) or raw_size <= 0:
+        raise ValueError("Sandbox archive omitted its byte length.")
+    size_bytes = raw_size
+    await attempt.reach("upload_authorization")
+    upload = await archives.prepare_upload(
+        fence["sandbox_id"], fence["request_id"], sha256, size_bytes
+    )
+    if upload.key != key:
+        raise ValueError("Sandbox archive upload destination changed.")
+    await attempt.reach("archive_upload")
+    uploaded = await sandbox_manager.upload_sandbox_deletion_archive(
+        thread_id,
+        {
+            **payload,
+            "sha256": sha256,
+            "size_bytes": size_bytes,
+            "upload_url": upload.upload_url,
+            "upload_headers": upload.headers,
+        },
+    )
+    _validate_receipt(uploaded, {**expected, "sha256": sha256, "size_bytes": size_bytes})
+    if uploaded.get("uploaded") is not True:
+        raise ValueError("The host did not confirm the sandbox archive upload.")
+    return sha256, size_bytes
 
 
 async def _record_failure(attempt: _Attempt, cause: BaseException) -> None:

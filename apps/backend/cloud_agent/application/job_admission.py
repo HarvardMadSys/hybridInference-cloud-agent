@@ -525,7 +525,7 @@ async def _admit_repository(
     return base_sha
 
 
-async def create_job_as(
+async def create_job_as(  # noqa: PLR0912 complexity baseline, #771
     body: AgentJobCreate,
     user: dict[str, Any],
     *,

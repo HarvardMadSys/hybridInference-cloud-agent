@@ -159,7 +159,7 @@ def _placement_rows(
     return placement
 
 
-async def shared_live_readiness(
+async def shared_live_readiness(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     store: HostPoolRepository,
     *,
     not_before: datetime,
