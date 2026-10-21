@@ -96,21 +96,6 @@ export function BookIcon({ className = BASE }: { className?: string }) {
   );
 }
 
-export function CloseIcon({ className = BASE }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      aria-hidden="true"
-    >
-      <path d="m6 6 12 12M18 6 6 18" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 export function HelpIcon({ className = BASE }: { className?: string }) {
   return (
     <svg

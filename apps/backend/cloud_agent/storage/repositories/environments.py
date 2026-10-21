@@ -669,7 +669,7 @@ class PostgresEnvironmentRepository:
         row = {**row, "revision": revision}
         return await self._environment_public(conn, row)
 
-    async def save_environment(
+    async def save_environment(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         user_id: str,
         *,
@@ -1939,13 +1939,15 @@ class PostgresEnvironmentRepository:
         ):
             return
         redactor = await self._environment_redactor(user_id, row["environment_binding_id"])
-        await self.save_environment_preparation(
-            row["sandbox_id"],
-            row["environment_binding_id"],
-            receipt["container_id"],
-            receipt["boot_id"],
-            redactor.payload(receipt.get("steps", [])),
-        )
+        async with self._pool.acquire() as conn:
+            await self._write_preparation(
+                conn,
+                row["sandbox_id"],
+                row["environment_binding_id"],
+                receipt["container_id"],
+                receipt["boot_id"],
+                redactor.payload(receipt.get("steps", [])),
+            )
 
     async def record_worker_environment_preparation(
         self, job_id: str, attempt_id: int, generation: int, receipt: dict[str, Any]
@@ -1980,20 +1982,6 @@ class PostgresEnvironmentRepository:
                 steps,
             )
             return True
-
-    async def save_environment_preparation(
-        self,
-        sandbox_id: str,
-        binding_id: str,
-        container_id: str,
-        boot_id: str,
-        steps: builtins.list[dict[str, Any]],
-    ) -> None:
-        """Keep preparation facts attributable to one fixed container binding."""
-        async with self._pool.acquire() as conn:
-            await self._write_preparation(
-                conn, sandbox_id, binding_id, container_id, boot_id, steps
-            )
 
     @staticmethod
     async def _write_preparation(

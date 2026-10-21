@@ -17,13 +17,11 @@ from tests.unit.test_live_sessions import _LiveProcess, _protocol_context, _turn
 from cloud_agent_host.drivers import (
     FLOOR_EVENT_TYPES,
     LINE,
-    CodexDriver,
     DeltaBatcher,
     DriverError,
     HarnessEvent,
-    KiloDriver,
-    OpenCodeDriver,
     TurnInput,
+    driver_for,
 )
 from cloud_agent_host.resident_transport import ResidentTurn
 from cloud_agent_host.runtimes import CodexRuntime, KiloRuntime, OpencodeRuntime
@@ -48,7 +46,7 @@ def _codex_turn(tmp_path: Path, clock: Callable[[], float] = _frozen) -> tuple[_
         {"id": "initialize-1", "result": {"userAgent": "codex"}},
         {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
     )
-    session = CodexDriver(CodexRuntime()).launch_live(context)
+    session = driver_for(CodexRuntime()).launch_live(context)
     session.ensure_started(model="gpt", reasoning_effort=None)
     process.feed = _turn_lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
     turn = session.start_turn(TurnInput(prompt="think", model="gpt"))
@@ -256,14 +254,12 @@ def test_a_subagents_merged_deltas_stay_the_subagents(tmp_path):
     assert merged == [("c1 ", owner), ("c2 c3", owner), ("own", {})]
 
 
-@pytest.mark.parametrize(
-    ("driver", "runtime"), [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
-)
-def test_http_reasoning_deltas_are_merged_and_the_answer_still_previewed(tmp_path, driver, runtime):
+@pytest.mark.parametrize("runtime", [OpencodeRuntime, KiloRuntime])
+def test_http_reasoning_deltas_are_merged_and_the_answer_still_previewed(tmp_path, runtime):
     process = _LiveProcess()
     context, _ = _protocol_context(process, tmp_path)
     process.feed = _turn_lines({"bridge": "ready", "session_id": "session-a"})
-    session = driver(runtime()).launch_live(context)
+    session = driver_for(runtime()).launch_live(context)
     session.ensure_started(model="deepseek-v4-flash", reasoning_effort=None)
     turn = session.start_turn(TurnInput(prompt="look", model="deepseek-v4-flash"))
     turn.deltas = DeltaBatcher(clock=_frozen)

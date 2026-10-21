@@ -539,29 +539,6 @@ export async function getMcpThreadBindings(threadId: string): Promise<McpBinding
   );
 }
 
-/**
- * Replace a conversation's selection wholesale.
- *
- * Wholesale rather than per-capability because the backend validates the
- * selection against the connections' current revisions as one write: a partial
- * update could leave a binding that already fails its own fence.
- */
-export async function replaceMcpThreadBindings(
-  threadId: string,
-  bindings: McpBindingRequest[],
-): Promise<McpBindingsApi> {
-  const resp = await fetchWithAuth(
-    API_BASE,
-    `/v1/agent/mcp/threads/${encodeURIComponent(threadId)}/bindings`,
-    {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bindings }),
-    },
-  );
-  return jsonOrThrow(resp);
-}
-
 /** Save one server's conversation override without changing other servers. */
 export async function updateMcpThreadBinding(
   threadId: string,

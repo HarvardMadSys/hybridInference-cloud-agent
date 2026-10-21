@@ -31,7 +31,7 @@ from tests.support.migrations import apply_migrations
 
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.grants import PostgresGrantRepository
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,

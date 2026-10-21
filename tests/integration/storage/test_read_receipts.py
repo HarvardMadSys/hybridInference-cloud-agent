@@ -8,6 +8,7 @@ from tests.integration.storage.test_agent_job_store import (
     pool as pool,
     store as store,
 )
+from tests.support.follow_ups import append_follow_up
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -66,8 +67,8 @@ async def test_old_devices_and_retries_cannot_regress_read_progress(pool, store)
     )
     page = await store.conversation_queries.list_read_receipts(user_id="user-1")
     assert page["receipts"][0]["attempt_id"] == retry["attempt_id"]
-    second = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="next turn"
+    second = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="user-1", prompt="next turn"
     )
     assert second is not None
     next_turn = await finish(pool, second)

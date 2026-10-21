@@ -954,7 +954,7 @@ async def _publish_claimed(
                 raise
 
 
-async def _publish_claimed_owned(
+async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     store: PublishStorage,
     job: dict[str, Any],
     *,

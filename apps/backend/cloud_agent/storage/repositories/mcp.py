@@ -1049,13 +1049,6 @@ class PostgresMcpConnectionRepository:
             )
         return int(revision)
 
-    async def delete_mcp_capabilities(self, *, connection_id: int) -> None:
-        """Drop a snapshot, used when discovery proves the target changed."""
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM agent_mcp_capabilities WHERE connection_id = $1", connection_id
-            )
-
     async def create_mcp_oauth_flow(
         self,
         *,
@@ -1181,16 +1174,6 @@ class PostgresMcpConnectionRepository:
         record = dict(row)
         record["scopes"] = list(record.get("scopes") or [])
         return record
-
-    async def delete_mcp_oauth_flows(self, *, connection_id: int) -> int:
-        """Drop every unconsumed flow for one connection."""
-        async with self._pool.acquire() as conn:
-            deleted = await conn.fetch(
-                "DELETE FROM agent_mcp_oauth_flows WHERE connection_id = $1 AND consumed_at IS NULL "
-                "RETURNING state_hash",
-                connection_id,
-            )
-        return len(deleted)
 
     async def list_mcp_bindings(self, *, thread_id: str) -> list[dict[str, Any]]:
         """Ensure default bindings for the owner's servers and return all overrides."""
@@ -1476,7 +1459,7 @@ class PostgresMcpConnectionRepository:
             await self._flush_remembered_approvals(row)
         return dict(row) if row is not None else None
 
-    async def claim_mcp_invocation(
+    async def claim_mcp_invocation(  # noqa: PLR0912 complexity baseline, #771
         self,
         *,
         invocation_id: int,
@@ -1968,32 +1951,6 @@ class PostgresMcpConnectionRepository:
             )
         return [dict(row) for row in rows]
 
-    async def list_mcp_transport_sessions(self, *, connection_id: int) -> list[dict[str, Any]]:
-        """Every recorded session for one connection, newest first."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT handle, member, job_id, attempt_id, owner_lease_generation,
-                       protocol_version, config_revision, authorization_epoch,
-                       created_at, last_used_at
-                FROM agent_mcp_transport_sessions
-                WHERE connection_id = $1
-                ORDER BY last_used_at DESC, handle
-                """,
-                connection_id,
-            )
-        return [dict(row) for row in rows]
-
-    async def touch_mcp_transport_session(self, *, handle: str) -> bool:
-        """Move a session's last-used timestamp, so a diagnosis can see it live."""
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
-                "UPDATE agent_mcp_transport_sessions SET last_used_at = NOW() "
-                "WHERE handle = $1 RETURNING handle",
-                handle,
-            )
-        return updated is not None
-
     async def create_mcp_connector(
         self, *, user_id: str, name: str, registration_hash: str
     ) -> dict[str, Any]:
@@ -2022,24 +1979,6 @@ class PostgresMcpConnectionRepository:
                 user_id,
             )
         return [dict(row) for row in rows]
-
-    async def set_mcp_connector_status(self, *, connector_id: int, status: str) -> bool:
-        """Record a non-terminal heartbeat status; revocation uses the atomic path."""
-        if status not in ("pending", "online", "offline"):
-            raise ValueError(f"invalid connector status: {status!r}")
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
-                """
-                UPDATE agent_mcp_connectors
-                SET status = $2,
-                    last_seen_at = CASE WHEN $2 = 'online' THEN NOW() ELSE last_seen_at END
-                WHERE id = $1 AND status <> 'revoked'
-                RETURNING id
-                """,
-                connector_id,
-                status,
-            )
-        return updated is not None
 
     async def update_mcp_connector(
         self,
@@ -2220,27 +2159,6 @@ class PostgresMcpConnectionRepository:
                 connector_id,
             )
         return [int(row["connection_id"]) for row in rows]
-
-    async def set_mcp_launch_spec(
-        self,
-        *,
-        connection_id: int,
-        expected_authorization_epoch: int,
-        launch_spec: dict[str, Any],
-    ) -> bool:
-        """Store encrypted launch secrets only while the connection identity is current."""
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
-                """
-                UPDATE agent_mcp_connections SET launch_spec = $3::jsonb, updated_at = NOW()
-                WHERE id = $1 AND authorization_epoch = $2 AND deleted_at IS NULL
-                RETURNING id
-                """,
-                connection_id,
-                expected_authorization_epoch,
-                json.dumps(launch_spec),
-            )
-        return updated is not None
 
     async def expire_mcp_invocation(self, *, invocation_id: int) -> bool:
         """Expire one undispatched call when its waiting client or authorization is gone."""

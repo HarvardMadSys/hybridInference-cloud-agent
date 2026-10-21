@@ -297,8 +297,6 @@ export const saveComputeConnection = (
 
 export const createComputeServer = (body: ServerRequest) =>
   write<{ operation: ComputeOperation }>('/servers', body);
-export const preflightComputeServer = (body: ServerRequest) =>
-  write<{ operation: ComputeOperation }>('/server-preflights', body);
 export const importComputeResource = (body: ServerRequest) =>
   write<{ operation: ComputeOperation }>('/compute-allocations/import', {
     request_id: body.request_id,

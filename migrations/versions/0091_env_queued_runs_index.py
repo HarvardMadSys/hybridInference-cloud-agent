@@ -1,7 +1,7 @@
 """Index the queued environment runs the host pool scans for every idle host.
 
-Revision ID: 0090_env_queued_runs_index
-Revises: 0089_superseded_removals
+Revision ID: 0091_env_queued_runs_index
+Revises: 0090_user_model_preferences
 
 Every idle environment-capable host claims at least every five seconds, and
 the maintenance pass repeats the scan for abandoned prebuilds every thirty.
@@ -24,8 +24,8 @@ is refused.
 
 from alembic import context, op
 
-revision = "0090_env_queued_runs_index"
-down_revision = "0089_superseded_removals"
+revision = "0091_env_queued_runs_index"
+down_revision = "0090_user_model_preferences"
 branch_labels = None
 depends_on = None
 

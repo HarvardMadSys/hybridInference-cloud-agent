@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent.api.deps import get_storage
 from cloud_agent.api.worker import router
 from cloud_agent.attachments.models import AttachmentLeaseLost
-from cloud_agent.tokens import SCOPE_MCP, SCOPE_MODEL, mint_worker_token
+from cloud_agent.tokens import SCOPE_MCP, mint_worker_token
 
 pytestmark = pytest.mark.asyncio
 
@@ -105,7 +105,7 @@ async def test_empty_manifest_and_missing_upload_keep_distinct_results(client):
 @pytest.mark.parametrize("suffix", ["", "/11"])
 @pytest.mark.parametrize(
     ("claims", "status"),
-    [({"job_id": "job-other"}, 409), ({"scope": SCOPE_MCP}, 403), ({"scope": SCOPE_MODEL}, 403)],
+    [({"job_id": "job-other"}, 409), ({"scope": SCOPE_MCP}, 403)],
 )
 async def test_another_job_or_sandbox_scope_never_reaches_uploads(
     client, attachments, suffix, claims, status

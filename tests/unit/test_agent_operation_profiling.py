@@ -11,7 +11,7 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -67,7 +67,7 @@ def clock(monkeypatch):
 
 def _expiry(minutes: int = 60) -> str:
     """Return an ISO-8601 expiry that is still in the future."""
-    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+    return (datetime.now(UTC) + timedelta(minutes=minutes)).isoformat()
 
 
 def _enable(monkeypatch, **overrides) -> dict:
@@ -1643,7 +1643,7 @@ def test_a_measurement_carries_the_configured_expiry_not_its_own_clock(monkeypat
     """
     # The descriptor states one instant; everything else about the run is
     # derived from it.
-    configured = datetime.now(timezone.utc) + timedelta(minutes=30)
+    configured = datetime.now(UTC) + timedelta(minutes=30)
     descriptor = {
         "run_id": "run-1",
         "operations": ["attempt.startup"],
@@ -1677,7 +1677,7 @@ def test_the_same_instant_written_two_ways_is_one_expiry():
     # Whole seconds, because one of the three spellings carries no fractional
     # part -- comparing a microsecond-truncated copy with the original would be
     # testing the spelling rather than the instant.
-    moment = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(microsecond=0)
+    moment = (datetime.now(UTC) + timedelta(hours=1)).replace(microsecond=0)
     beijing = timezone(timedelta(hours=8))
 
     def descriptor(expires_at: str) -> dict[str, object]:

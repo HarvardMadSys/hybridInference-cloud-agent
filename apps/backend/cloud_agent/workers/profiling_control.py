@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.logging_utils import get_logger
@@ -124,7 +124,7 @@ class ProfilingPolicyWorker:
 
     async def _refresh_once(self) -> float:
         """Read the control state once, publish it, and say when to read again."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         try:
             # The sweep first: it may end a lapsed experiment, and the snapshot
             # published below should describe the state after that rather than
@@ -198,7 +198,7 @@ class ProfilingPolicyWorker:
         """Sleep the interval, cut short by :meth:`wake`."""
         try:
             await asyncio.wait_for(self._wake.wait(), timeout=interval)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return
         self._wake.clear()
 
@@ -214,7 +214,7 @@ def _descriptor_for_run(run: Mapping[str, Any]) -> ProfilingRun | None:
     """
     expires_at = run.get("expires_at")
     if isinstance(expires_at, datetime):
-        expires_at_text = expires_at.astimezone(timezone.utc).isoformat()
+        expires_at_text = expires_at.astimezone(UTC).isoformat()
     else:
         expires_at_text = str(expires_at or "")
     descriptor: dict[str, Any] = {

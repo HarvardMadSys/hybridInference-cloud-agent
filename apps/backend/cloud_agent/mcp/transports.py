@@ -398,7 +398,7 @@ class _HttpCore:
             )
         return encode_result(message.raw_id, result)
 
-    async def _drain_sse(
+    async def _drain_sse(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         response: httpx.Response,
         *,
@@ -1147,7 +1147,7 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
         await self._inner.sleep(seconds)
 
 
-async def connect_streamable(
+async def connect_streamable(  # noqa: PLR0912 complexity baseline, #771
     config: RemoteTransportConfig,
     *,
     client: httpx.AsyncClient | None = None,

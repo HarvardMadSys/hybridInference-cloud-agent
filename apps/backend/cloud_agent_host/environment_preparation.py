@@ -70,7 +70,7 @@ class EnvironmentPreparation:
         self._inspections: dict[str, tuple[float, Any]] = {}
         self._inspection_lock = threading.Lock()
 
-    def prepare(
+    def prepare(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         backend: RetainedChatBackend,
         environment: BoundEnvironment,

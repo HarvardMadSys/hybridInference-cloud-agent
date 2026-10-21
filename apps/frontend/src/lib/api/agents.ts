@@ -2,7 +2,7 @@
 // Domain modules own their wire types and operations; internal modules import
 // those directly rather than depending on this facade.
 
-export type { AgentConfigApi, AgentMcpServerApi } from './agents/config';
+export type { AgentConfigApi } from './agents/config';
 
 export { getAgentConfig } from './agents/config';
 
@@ -144,12 +144,7 @@ export type {
   AgentGitWorkspaceApi,
 } from './agents/workspace';
 
-export {
-  getAgentJobFiles,
-  writeAgentJobFile,
-  getAgentJobGit,
-  downloadAgentWorkspace,
-} from './agents/workspace';
+export { getAgentJobFiles, getAgentJobGit, downloadAgentWorkspace } from './agents/workspace';
 
 export type {
   AgentTerminalApi,
