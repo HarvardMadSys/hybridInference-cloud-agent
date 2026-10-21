@@ -221,12 +221,7 @@ def archive_failure_http_detail(error: BaseException) -> str | None:
 
 @dataclass(frozen=True)
 class SharedMemberManifest:
-    """Durable fields needed to reconstruct one group membership.
-
-    The fields of the wire's
-    :class:`~cloud_agent_shared.sandbox_manager_wire.SharedMember`, which a
-    request's manifest is validated as before it becomes one of these.
-    """
+    """Durable fields needed to reconstruct one group membership: the wire's ``SharedMember``."""
 
     thread_id: str
     native_session_id: str | None = None

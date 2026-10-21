@@ -68,7 +68,7 @@ class _ForkMaterializationStorage(Protocol):
 SESSION_FORK_COORDINATOR_LEASE_S = SHARED_SESSION_FORK_TIMEOUT_S + 30.0
 
 
-async def materialize_session_fork(  # noqa: C901, PLR0915 complexity baseline, #771
+async def materialize_session_fork(
     operation: dict[str, Any],
     *,
     job_id: str,
