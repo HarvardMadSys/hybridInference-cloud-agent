@@ -532,7 +532,6 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 host_pool=storage.host_pool,
             )
             profiling_worker = ProfilingPolicyWorker(service=profiling_service)
-            app.state.profiling_control_service = profiling_service
             app.state.profiling_policy_worker = profiling_worker
             app.state.profiling_policy_task = asyncio.create_task(profiling_worker.run())
             _BACKGROUND_TASKS.add(app.state.profiling_policy_task)
@@ -569,7 +568,6 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         else:
             # The relay listener roots no file or terminal request, so it has no
             # configuration to apply and nothing to collect.
-            app.state.profiling_control_service = None
             app.state.profiling_policy_worker = None
             app.state.profiling_policy_task = None
             app.state.reaper_task = None

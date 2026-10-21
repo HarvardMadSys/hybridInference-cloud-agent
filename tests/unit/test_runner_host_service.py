@@ -1579,7 +1579,7 @@ def _run_descriptor(monkeypatch, **overrides: Any) -> dict[str, Any]:
 
 
 def test_the_host_hands_its_selection_to_the_child(monkeypatch):
-    """The deployed path measures startups, not only the single-process one.
+    """The deployed path measures startups.
 
     The host claims, then starts a child to run the turn -- so a selection made
     in the parent is worthless unless it crosses that boundary. Without this
@@ -1637,6 +1637,112 @@ def test_the_host_hands_its_selection_to_the_child(monkeypatch):
     assert context["inherited_spans"][0]["name"] == "claim"
     assert context["admission_instances"][0]["instance"] == operation_profiling.PRODUCER_INSTANCE_ID
     operation_profiling.reset_cache()
+
+
+def test_a_poll_with_no_job_does_not_spend_the_only_profiling_slot(service, monkeypatch):
+    """An empty claim must leave a one-operation experiment able to measure.
+
+    Regression: the budget was consumed when the measurement was created, so a
+    single empty claim -- the normal result of polling an idle queue -- used up
+    a ``max_operations: 1`` run before it measured anything.
+    """
+    from cloud_agent_shared import operation_profiling
+
+    _identity, backend, _released = service
+    _run_descriptor(monkeypatch, max_operations=1)
+    answers: list[dict | None] = [None, _delivered_job()]
+
+    def claim(**_kwargs: Any) -> dict | None:
+        if not answers:
+            runner_mod._STOPPING.set()
+            return None
+        return answers.pop(0)
+
+    monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    handed: list[dict] = []
+
+    def launch(payload: dict) -> LaunchResult:
+        handed.append(payload)
+        return LaunchResult(LAUNCH_STARTED, FakeHandle())
+
+    _serve(backend, launch=launch)
+
+    assert len(handed) == 1
+    assert "_profiling" in handed[0], "the claimed attempt was not measured"
+    operation_profiling.reset_cache()
+
+
+def test_profiling_off_hands_over_no_selection_and_writes_no_record(
+    service, monkeypatch, caplog, tmp_path
+):
+    """The default deployment must not pay for, or emit, any of this.
+
+    Both sides of the handover: the host hands its child no selection, and the
+    turn the child then runs is unmeasured and writes no record.
+    """
+    from cloud_agent_shared import operation_profiling
+
+    _identity, backend, _released = service
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_ENABLED, raising=False)
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_RUN, raising=False)
+    sink = tmp_path / "startup.jsonl"
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    operation_profiling.reset_cache()
+    caplog.set_level("INFO", logger=operation_profiling.__name__)
+    monkeypatch.setattr(runner_mod, "claim_payload", _queue([_delivered_job()]))
+    handed: list[dict] = []
+
+    def launch(payload: dict) -> LaunchResult:
+        handed.append(payload)
+        return LaunchResult(LAUNCH_STARTED, FakeHandle())
+
+    _serve(backend, launch=launch)
+
+    assert len(handed) == 1
+    assert "_profiling" not in handed[0]
+
+    # The child's side: the selection it attaches from that payload, and the
+    # turn it runs with it.
+    dispatched: list[dict] = []
+
+    class Control:
+        job_id = ""
+
+        def __getattr__(self, _name):
+            return lambda *_args, **_kwargs: None
+
+    class Heart:
+        lease_lost = False
+        cancel_requested = False
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_args, **_kwargs: Control())
+    monkeypatch.setattr(runner_mod, "Heartbeater", lambda *_args, **_kwargs: Heart())
+    monkeypatch.setattr(
+        runner_mod, "_run_shared_live_attempt", lambda **kwargs: dispatched.append(kwargs) or 0
+    )
+    measurement = operation_profiling.attach_selection(handed[0].get("_profiling"))
+    job = runner_mod.ClaimedJob.from_response(handed[0])
+    assert (
+        runner_mod.run_turn(
+            job,
+            base_url="http://control",
+            worker_id="runner-1",
+            backend=backend,
+            host="host-a",
+            measurement=measurement,
+        )
+        == 0
+    )
+
+    assert dispatched[0]["measurement"] is None
+    assert not sink.exists()
+    assert "agent_operation_profile" not in caplog.text
 
 
 def test_the_spawn_payload_keeps_only_the_profiling_handoff():
