@@ -49,7 +49,7 @@ from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories import pending_messages as pending_message_storage
 from cloud_agent.workers.attempts import reap_expired_attempts
 from cloud_agent.workers.recovery_maintenance import run_pending_message_maintenance
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,

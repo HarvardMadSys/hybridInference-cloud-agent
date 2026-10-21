@@ -11,17 +11,15 @@ import zlib
 
 import pytest
 
-from cloud_agent_host.patch_gate import (
-    MAX_CHANGED_FILES,
-    MAX_PATCH_BYTES,
-    branch_name_for,
-    validate_patch,
-)
 from cloud_agent_shared.git.patch_gate import (
     MAX_BLOB_BYTES,
     MAX_CHANGED_BLOB_BYTES,
+    MAX_CHANGED_FILES,
+    MAX_PATCH_BYTES,
+    branch_name_for,
     scan_blob_secrets,
     validate_change_set,
+    validate_patch,
 )
 
 _CLEAN_PATCH = """diff --git a/src/app.py b/src/app.py
