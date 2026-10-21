@@ -58,8 +58,21 @@ class PostgresExecutionQueries:
             )
             if thread_id is None:
                 return None
+            # The page's ids are chosen first, from the ``(job_id, id)`` index
+            # alone: events carry no thread id, so choosing them means reading
+            # every remaining event of every turn, and fetching each payload
+            # row only to sort it away would make every page cost the rest of
+            # the thread. Only the page's own rows are fetched.
             rows = await conn.fetch(
                 """
+                WITH page AS MATERIALIZED (
+                    SELECT e.id
+                    FROM agent_job_events e
+                    JOIN agent_jobs j ON j.id = e.job_id
+                    WHERE j.thread_id = $1 AND e.id > $2
+                    ORDER BY e.id
+                    LIMIT $3
+                )
                 SELECT e.id,
                        e.job_id,
                        j.turn_no,
@@ -68,11 +81,10 @@ class PostgresExecutionQueries:
                        e.event_type,
                        e.payload,
                        e.created_at
-                FROM agent_job_events e
+                FROM page
+                JOIN agent_job_events e ON e.id = page.id
                 JOIN agent_jobs j ON j.id = e.job_id
-                WHERE j.thread_id = $1 AND e.id > $2
                 ORDER BY e.id
-                LIMIT $3
                 """,
                 thread_id,
                 after_id,

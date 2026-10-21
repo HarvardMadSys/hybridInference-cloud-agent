@@ -149,6 +149,44 @@ async def test_the_thread_read_pages_by_event_id(
     assert [event["payload"]["text"] for event in after_first] == ["second"]
 
 
+async def test_a_thread_page_skips_the_events_other_threads_wrote_between_its_own(
+    store: Storage, queries: PostgresExecutionQueries
+) -> None:
+    """Paging one thread yields exactly its events, in id order, page after page."""
+    mine = await _create_job(store, user_id=_OWNER)
+    await _create_job(store, user_id=_OWNER, task_prompt="another conversation")
+    first = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    second = await _claim(store, worker_id="w2", lease_ttl_seconds=60)
+    assert first is not None and second is not None
+    own, other = (first, second) if first["id"] == mine["id"] else (second, first)
+    for seq in range(1, 6):
+        for claim, writes in ((own, 1), (other, 2)):
+            for _ in range(writes):
+                await store.attempt_commands.append_event(
+                    attempt_id=claim["attempt_id"],
+                    lease_generation=claim["lease_generation"],
+                    event_type="message",
+                    payload={"text": f"{claim['id']}:{seq}"},
+                )
+
+    pages: list[list[dict]] = []
+    cursor = 0
+    while page := await queries.list_thread_events_after(
+        job_id=mine["id"], user_id=_OWNER, after_id=cursor, limit=2
+    ):
+        pages.append(page)
+        cursor = page[-1]["id"]
+
+    assert [len(page) for page in pages] == [2, 2, 1]
+    events = [event for page in pages for event in page]
+    assert [event["id"] for event in events] == sorted(event["id"] for event in events)
+    assert {event["job_id"] for event in events} == {mine["id"]}
+    assert [event["payload"]["text"] for event in events] == [
+        f"{mine['id']}:{seq}" for seq in range(1, 6)
+    ]
+    assert all(event["turn_no"] == 1 for event in events)
+
+
 async def test_the_per_job_read_returns_the_same_turn(
     store: Storage, queries: PostgresExecutionQueries
 ) -> None:
