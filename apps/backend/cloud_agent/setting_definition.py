@@ -10,12 +10,15 @@ import ipaddress
 import math
 import re
 from dataclasses import dataclass
-from typing import Any, Literal
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import SplitResult, urlsplit
 
 from pydantic import AnyHttpUrl, ValidationError
 
 from cloud_agent_shared.sandbox_manager_compat import STORED_SETTING_KEYS
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 SettingValue = str | int | float | bool
 SettingKind = Literal["string", "boolean", "integer", "number"]
@@ -62,13 +65,31 @@ class Setting:
     #: "unset". Only for a text setting whose empty value is itself a choice;
     #: its compose entry then defaults with ``${NAME-value}``, never ``:-``.
     empty_env_imports: bool = False
+    #: A URL the code that uses it requires to be HTTPS, with no query.
+    https_only: bool = False
+    #: Where the control plane sends its gateway dispatch token, fetches the
+    #: keys that identity tokens are checked against, or sends a browser to
+    #: sign in. A new value must use HTTPS unless it names this machine or a
+    #: private name (see :func:`_private_host`). A value saved or imported
+    #: before this rule still loads, so an internal plain-HTTP gateway keeps
+    #: working.
+    https_unless_private: bool = False
+    #: Also takes ``mailto:`` and one address: a support address is as likely
+    #: as a support page. One plain address only: header fields would let the
+    #: link prefill a message the user did not write.
+    mailto: bool = False
+    #: This setting's own rule for its text, after its length, choices and URL
+    #: shape. It is given every such value, so it says whether empty is valid.
+    check: Callable[[str], bool] | None = None
+    #: What a valid value looks like, added to the message that refuses one.
+    hint: str = ""
 
     @property
     def storage_key(self) -> str:
         """Keep existing saved secrets readable across the service rename."""
         return STORED_SETTING_KEYS.get(self.key, self.key)
 
-    def validate(self, value: Any, *, saved: bool = False) -> SettingValue:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+    def validate(self, value: Any, *, saved: bool = False) -> SettingValue:
         """Return a checked value, raising a message that contains no supplied data.
 
         ``saved`` marks a value already stored or imported from the
@@ -92,98 +113,17 @@ class Setting:
                     self.maximum is None or value <= self.maximum
                 )
         else:
-            valid = isinstance(value, str) and "\x00" not in value
-            if valid:
-                valid = len(value) <= (131072 if self.secret else 4096)
-            if valid and self.key == "gateway_issuer" and value:
-                valid = value == value.strip() and not any(ord(char) < 32 for char in value)
-            if valid and self.choices:
-                valid = value in self.choices
-            if valid and self.key == "gateway_grant_base_path":
-                # Grant clients validate this during startup as well as live
-                # requests. Reject an unusable prefix before it can be saved.
-                valid = (
-                    value.rstrip("/").startswith("/")
-                    and not value.startswith("//")
-                    and not any(char in value for char in ("?", "#", "\\"))
-                    and not any(char.isspace() or ord(char) < 32 for char in value)
-                )
-            if valid and value and self.key == "sandbox_archive.bucket":
-                valid = bool(re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", value)) and (
-                    not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", value)
-                    and not any(part in value for part in ("..", ".-", "-."))
-                    and not value.startswith(("xn--", "sthree-", "amzn-s3-demo-"))
-                    and not value.endswith(("-s3alias", "--ol-s3", ".mrap", "--x-s3", "--table-s3"))
-                )
-            if valid and value and self.key == "sandbox_archive.region":
-                valid = bool(re.fullmatch(r"[a-z0-9-]{1,64}", value))
-            if valid and value and self.key == "sandbox_archive.prefix":
-                valid = (
-                    len(value.encode()) <= 512
-                    and bool(re.fullmatch(r"[a-zA-Z0-9_./-]+", value))
-                    and all(part and part not in {".", ".."} for part in value.split("/"))
-                )
-            if (
-                valid
-                and value
-                and self.key == "site.contact_url"
-                and value[:7].lower() == "mailto:"
-            ):
-                # A support address is as likely as a support page. One plain
-                # address only: header fields would let the link prefill a
-                # message the user did not write.
-                valid = bool(_CONTACT_MAILTO.fullmatch(value))
-            elif valid and self.url and value:
-                try:
-                    if any(
-                        char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159
-                        for char in value
-                    ):
-                        raise ValueError("A URL cannot contain whitespace or control characters")
-                    # The browser uses a WHATWG URL parser for saved appearance
-                    # links. urlsplit alone accepts malformed hosts (such as
-                    # percent signs or spaces) that would break the root layout.
-                    AnyHttpUrl(value)
-                    parsed = urlsplit(value)
-                    valid = (
-                        parsed.scheme in {"http", "https"}
-                        and bool(parsed.hostname)
-                        and not parsed.username
-                        and not parsed.password
-                        and not parsed.fragment
-                    )
-                    _ = parsed.port
-                    if self.key in {
-                        "compute.cloudlab_api_url",
-                        "compute.registration_url",
-                        "mcp_registry_url",
-                        "sandbox_archive.endpoint",
-                    }:
-                        valid = valid and parsed.scheme == "https" and not parsed.query
-                    if self.key in _GATEWAY_TRUST_URLS and not saved:
-                        valid = valid and (
-                            parsed.scheme == "https" or _private_host(parsed.hostname or "")
-                        )
-                    # The code that uses these refuses anything else, so the
-                    # editor asks it rather than keeping a second copy of the rule.
-                    if self.key == "github_app_install_url":
-                        from cloud_agent.source_control import github_install_url_is_usable
-
-                        valid = valid and github_install_url_is_usable(value)
-                    elif self.key == "gitlab_redirect_uri":
-                        from cloud_agent.source_control import gitlab_redirect_uri_is_usable
-
-                        valid = valid and gitlab_redirect_uri_is_usable(value)
-                except (ValueError, ValidationError):
-                    valid = False
+            valid = (
+                isinstance(value, str)
+                and "\x00" not in value
+                and len(value) <= (131072 if self.secret else 4096)
+                and (not self.choices or value in self.choices)
+                and (not self.url or not value or self._accepts_link(value, saved=saved))
+                and (self.check is None or self.check(value))
+            )
         if not valid:
-            if self.key == "sandbox_archive.bucket":
-                raise ValueError(
-                    f"Invalid value for {self.label} ({self.key}). "
-                    "Use a bucket name such as freeinference; set cloud-agent/sandbox "
-                    "in Sandbox archive S3 prefix."
-                )
-            raise ValueError(f"Invalid value for {self.label} ({self.key})")
+            hint = f". {self.hint}" if self.hint else ""
+            raise ValueError(f"Invalid value for {self.label} ({self.key}){hint}")
         # Last, and its own error: a stored key saved before its minimum
         # existed is still the key everything was signed or encrypted with.
         if (
@@ -197,6 +137,22 @@ class Setting:
                 f"use at least {self.minimum_bytes} bytes"
             )
         return value
+
+    def _accepts_link(self, value: str, *, saved: bool) -> bool:
+        """Whether a value that is set is a link this setting may hold."""
+        if self.mailto and value[:7].lower() == "mailto:":
+            return bool(_CONTACT_MAILTO.fullmatch(value))
+        parsed = _web_url(value)
+        return (
+            parsed is not None
+            and (not self.https_only or (parsed.scheme == "https" and not parsed.query))
+            and (
+                not self.https_unless_private
+                or saved
+                or parsed.scheme == "https"
+                or _private_host(parsed.hostname or "")
+            )
+        )
 
     def definition(self) -> dict[str, Any]:
         """The public editor definition, without environment or credential values."""
@@ -220,14 +176,6 @@ class Setting:
         return result
 
 
-#: Where the control plane sends its gateway dispatch token, fetches the keys
-#: that identity tokens are checked against, and sends a browser to sign in.
-#: A new value must use HTTPS unless it names this machine or a private name
-#: (see :func:`_private_host`). A value saved or imported before this rule
-#: still loads, so an internal plain-HTTP gateway keeps working.
-_GATEWAY_TRUST_URLS = frozenset({"gateway_base_url", "gateway_jwks_url", "gateway_authorize_url"})
-
-
 def _private_host(host: str) -> bool:
     """Whether plain HTTP to ``host`` stays on this machine or a private network.
 
@@ -241,6 +189,88 @@ def _private_host(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return bool(host) and "." not in host
+
+
+def _web_url(value: str) -> SplitResult | None:
+    """``value`` parsed, if it is an absolute HTTP(S) URL a browser can use as written."""
+    if any(char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159 for char in value):
+        return None
+    try:
+        # The browser uses a WHATWG URL parser for saved appearance links.
+        # urlsplit alone accepts malformed hosts (such as percent signs or
+        # spaces) that would break the root layout.
+        AnyHttpUrl(value)
+        parsed = urlsplit(value)
+        _ = parsed.port
+    except (ValueError, ValidationError):
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+    ):
+        return None
+    return parsed
+
+
+def _issuer(value: str) -> bool:
+    """Exactly what the Gateway signs: no surrounding space or control characters."""
+    return value == value.strip() and not any(ord(char) < 32 for char in value)
+
+
+def _grant_base_path(value: str) -> bool:
+    """A path prefix the grant clients accept.
+
+    They check it during startup as well as on live requests, so an unusable
+    prefix is refused before it can be saved.
+    """
+    return (
+        value.rstrip("/").startswith("/")
+        and not value.startswith("//")
+        and not any(char in value for char in ("?", "#", "\\"))
+        and not any(char.isspace() or ord(char) < 32 for char in value)
+    )
+
+
+def _s3_bucket(value: str) -> bool:
+    """Empty, or a name S3 accepts for a general purpose bucket."""
+    return not value or (
+        bool(re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", value))
+        and not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", value)
+        and not any(part in value for part in ("..", ".-", "-."))
+        and not value.startswith(("xn--", "sthree-", "amzn-s3-demo-"))
+        and not value.endswith(("-s3alias", "--ol-s3", ".mrap", "--x-s3", "--table-s3"))
+    )
+
+
+def _s3_region(value: str) -> bool:
+    """Empty, or the shape of an AWS region name."""
+    return not value or bool(re.fullmatch(r"[a-z0-9-]{1,64}", value))
+
+
+def _s3_prefix(value: str) -> bool:
+    """Empty, or an object key prefix of plain, non-relative path segments."""
+    return not value or (
+        len(value.encode()) <= 512
+        and bool(re.fullmatch(r"[a-zA-Z0-9_./-]+", value))
+        and all(part and part not in {".", ".."} for part in value.split("/"))
+    )
+
+
+# The code that uses these two refuses anything else, so the editor asks it
+# rather than keeping a second copy of the rule.
+def _github_install_url(value: str) -> bool:
+    from cloud_agent.source_control import github_install_url_is_usable
+
+    return not value or github_install_url_is_usable(value)
+
+
+def _gitlab_redirect_uri(value: str) -> bool:
+    from cloud_agent.source_control import gitlab_redirect_uri_is_usable
+
+    return not value or gitlab_redirect_uri_is_usable(value)
 
 
 def _numeric(

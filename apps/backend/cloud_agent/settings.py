@@ -20,7 +20,14 @@ from cloud_agent.setting_definition import (
     SettingsRevisionConflict as SettingsRevisionConflict,
     SettingTooShort,
     SettingValue,
+    _github_install_url,
+    _gitlab_redirect_uri,
+    _grant_base_path,
+    _issuer,
     _numeric,
+    _s3_bucket,
+    _s3_prefix,
+    _s3_region,
 )
 from cloud_agent_shared.sandbox_manager_compat import (
     manager_env,
@@ -135,6 +142,7 @@ SETTINGS: tuple[Setting, ...] = (
         "MCP",
         "https://registry.modelcontextprotocol.io",
         url=True,
+        https_only=True,
     ),
     _numeric(
         "mcp_catalog_sync_seconds",
@@ -257,6 +265,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_WEB_CONTACT_URL",
         url=True,
+        mailto=True,
         description=(
             "Where users reach the operators: a support page, or mailto: and one address. "
             "Linked as Contact us from the account menu's Help. Empty hides the link."
@@ -285,6 +294,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_CLOUDLAB_API_URL",
         url=True,
+        https_only=True,
         description=(
             "CloudLab's Portal API: https://boss.emulab.net:43794. The portal's web address, "
             "www.cloudlab.us, does not serve it. Empty disables CloudLab. Applies to "
@@ -298,6 +308,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_COMPUTE_REGISTRATION_URL",
         url=True,
+        https_only=True,
     ),
     _numeric(
         "compute.poll_seconds", "Compute scheduling interval (seconds)", "Compute", 30, 5, 300
@@ -310,7 +321,15 @@ SETTINGS: tuple[Setting, ...] = (
         30,
         300,
     ),
-    Setting("gateway_base_url", "Gateway API URL", "Gateway", "", env="GATEWAY_BASE_URL", url=True),
+    Setting(
+        "gateway_base_url",
+        "Gateway API URL",
+        "Gateway",
+        "",
+        env="GATEWAY_BASE_URL",
+        url=True,
+        https_unless_private=True,
+    ),
     Setting(
         "gateway_dispatch_token",
         "Gateway dispatch token",
@@ -328,6 +347,7 @@ SETTINGS: tuple[Setting, ...] = (
         "Gateway",
         "/internal/agent-grants",
         env="GATEWAY_GRANT_BASE_PATH",
+        check=_grant_base_path,
     ),
     Setting(
         "gateway_grant_binding_id",
@@ -343,6 +363,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="GATEWAY_AUTHORIZE_URL",
         url=True,
+        https_unless_private=True,
     ),
     Setting(
         "session_redirect_uri",
@@ -393,6 +414,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_GITHUB_APP_INSTALL_URL",
         url=True,
+        check=_github_install_url,
         description="An https://github.com URL, normally https://github.com/apps/<app-slug>/installations/new.",
     ),
     Setting(
@@ -425,6 +447,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_GITLAB_OAUTH_REDIRECT_URI",
         url=True,
+        check=_gitlab_redirect_uri,
         description="The exact callback registered with GitLab. HTTPS, except http://localhost for development.",
     ),
     Setting(
@@ -671,6 +694,11 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Sandbox archives",
         "",
         env="AGENT_SANDBOX_ARCHIVE_S3_BUCKET",
+        check=_s3_bucket,
+        hint=(
+            "Use a bucket name such as freeinference; set cloud-agent/sandbox "
+            "in Sandbox archive S3 prefix."
+        ),
         description="Enter a bucket name, or paste an S3 URI such as s3://freeinference/cloud-agent/sandbox to save the bucket and prefix together. Required for sandbox deletion; the completed archive is verified before removal. Empty disables deletion.",
     ),
     Setting(
@@ -679,6 +707,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Sandbox archives",
         "",
         env="AGENT_SANDBOX_ARCHIVE_S3_REGION",
+        check=_s3_region,
         description="Optional AWS region. Empty uses the control plane's standard AWS SDK configuration.",
     ),
     Setting(
@@ -688,6 +717,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_SANDBOX_ARCHIVE_S3_ENDPOINT",
         url=True,
+        https_only=True,
         description="Optional HTTPS S3-compatible endpoint supporting conditional PUT and full-object SHA-256 checksums. Empty uses AWS S3.",
     ),
     Setting(
@@ -696,6 +726,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Sandbox archives",
         "sandbox-archives",
         env="AGENT_SANDBOX_ARCHIVE_S3_PREFIX",
+        check=_s3_prefix,
         description="Object key prefix for new deletion requests. Each request has an immutable object; completed receipts retain their original bucket and key.",
     ),
     Setting(
@@ -722,6 +753,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Sign-in",
         "",
         env="GATEWAY_ISSUER",
+        check=_issuer,
         description="Exact issuer signed by the Gateway. Once this database is bound, it cannot be changed here.",
     ),
     Setting(
@@ -731,6 +763,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "",
         env="GATEWAY_JWKS_URL",
         url=True,
+        https_unless_private=True,
     ),
     Setting(
         "session_signing_secret",
