@@ -3740,11 +3740,11 @@ def _spawn_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     remains the backstop.
     """
     child = _child_turn_payload(payload)
-    verdict = qualification.verdict() if qualification is not None else None
-    if verdict is not None:
+    if qualification is not None:
         # Added after the claim's own underscore keys were stripped: only this
-        # host, which proved the runtime itself, can spare the child the probe.
-        child[VERDICT_KEY] = verdict
+        # host, which proved the runtime and the network rules, can spare the
+        # child its own proof of them (HostQualification.handover).
+        child.update(qualification.handover())
     try:
         encoded_child = encode_turn(child)
     except (TypeError, ValueError) as exc:
@@ -3928,13 +3928,13 @@ def _serve_turn(
         if payload is not None:
             measurement = operation_profiling.attach_selection(payload.get("_profiling"))
 
-    # Empty or undecodable input always exercises the full deployment canary.
-    # A real turn may carry the host's runtime verdict, so the child repeats
-    # only what can change between turns: the update marker and the network.
+    # Empty input runs the full deployment canary; a real turn adopts what its host proved.
     operation_profiling.mark(measurement, "preflight")
     try:
         with operation_profiling.span(measurement, "preflight"):
             backend = build_backend_from_env()
+            if payload is not None:
+                backend.adopt_rules_verification(payload)
             verdict = payload.get(VERDICT_KEY) if payload is not None else None
             if isinstance(backend, ContainerBackend) and adopt_verdict(backend, verdict):
                 backend.check_network()

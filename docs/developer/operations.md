@@ -3585,7 +3585,10 @@ rules, not the host's.
   difference stops the runner claiming and the sandbox manager starting. Group network
   work repeats the check and trusts a pass for 60 seconds. The sandbox manager's
   sweep renews that pass after 45 seconds, whether or not a group runs, so a
-  start or wake never waits for the install and read-back itself.
+  start or wake never waits for the install and read-back itself. The runner
+  renews its own pass when it hands a turn over and that pass is 45 seconds old.
+  The turn's process runs no helper of its own: it takes the runner's pass, and
+  declines the turn unless that pass is less than 60 seconds old.
 - **Scoped to this deployment.** The tables recognise traffic by the bridge
   interface prefix. They never flush or edit another deployment's rules, so
   several deployments can share a host.
