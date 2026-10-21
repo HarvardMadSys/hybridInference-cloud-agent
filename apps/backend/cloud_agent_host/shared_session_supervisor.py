@@ -4440,8 +4440,7 @@ class SharedChatSessionSupervisor:
             # Validation comes first: a malformed close request is retryable
             # and must not consume the reference that keeps this group awake.
             group.terminal_tokens.pop(token, None)
-            if self._is_quiescent(group) and group.inspection.running:
-                group.idle_deadline = activity_at + self._idle_timeout_s
+            self._arm_idle_if_quiescent(group, last_activity=activity_at)
             return None if member is None else self._descriptor(group, member)
 
     def operation_closed(self, thread_id: str, token: str) -> SharedSessionDescriptor | None:
@@ -5308,9 +5307,18 @@ class SharedChatSessionSupervisor:
         if pending:
             self._start_group(group)
 
-    def _arm_idle_if_quiescent(self, group: _Group, *, allow_lifecycle_check: bool = False) -> None:
-        # A lost group's last observation may still say running, but nothing
-        # stops it again: armed, the sweep would pick it on every pass.
+    def _arm_idle_if_quiescent(
+        self,
+        group: _Group,
+        *,
+        allow_lifecycle_check: bool = False,
+        last_activity: float | None = None,
+    ) -> None:
+        """Arm the idle deadline from ``last_activity``, or from now, if nothing holds it off.
+
+        A lost group's last observation may still say running, but nothing
+        stops it again: armed, the sweep would pick it on every pass.
+        """
         if (
             self._is_quiescent(group, allow_lifecycle_check=allow_lifecycle_check)
             and group.inspection.running
@@ -5320,7 +5328,8 @@ class SharedChatSessionSupervisor:
             and not group.orphan_finalization_pending
             and not group.start_archive_completion_pending
         ):
-            group.idle_deadline = self._clock() + self._idle_timeout_s
+            idle_from = self._clock() if last_activity is None else last_activity
+            group.idle_deadline = idle_from + self._idle_timeout_s
         else:
             group.idle_deadline = None
 
