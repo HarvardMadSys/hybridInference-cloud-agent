@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentJobEventApi } from '@/lib/api/agents';
-import { preview, toSessionLog, toTrajectory } from './trajectory';
+import { boundedLine, preview, toSessionLog, toTrajectory } from './trajectory';
 
 function event(over: Partial<AgentJobEventApi> & { id: number }): AgentJobEventApi {
   return {
@@ -134,5 +134,15 @@ describe('toSessionLog', () => {
 
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[1]).event_type).toBe('raw');
+  });
+});
+
+describe('boundedLine', () => {
+  it('says when the line was cut, after which appended text cannot change it', () => {
+    expect(boundedLine('  a   b  ', 160)).toEqual({ text: 'a b', full: false });
+    const long = 'x'.repeat(170);
+    expect(boundedLine(long, 160)).toEqual({ text: `${'x'.repeat(159)}…`, full: true });
+    expect(boundedLine(`${long}   more`, 160).text).toBe(boundedLine(long, 160).text);
+    expect(preview(long, 160)).toBe(boundedLine(long, 160).text);
   });
 });
