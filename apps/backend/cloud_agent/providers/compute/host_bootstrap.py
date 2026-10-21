@@ -1423,6 +1423,12 @@ def run(command):
         results.append(result)
 for command in cleanup:
     run(command)
+# The first job, alone: it creates the directories the parallel streams
+# write into. On an emptied target they do not exist yet, and a stream that
+# started first failed to create its destination (rsync makes only the last
+# path component). The job leaves out the large directories' contents, so
+# it is short.
+run(jobs.pop(0))
 pending = list(jobs)
 def worker():
     while True:

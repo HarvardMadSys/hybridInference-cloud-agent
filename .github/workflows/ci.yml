@@ -387,6 +387,21 @@ jobs:
             --junitxml="${RUNNER_TEMP}/shared-member-permissions.xml"
           uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/shared-member-permissions.xml"
 
+      # Moving a Host is systemd, sshd's forced command, rsync and Docker's
+      # on-disk state between two machines. Unit doubles replace all of them.
+      # Run the control plane's own steps over SSH between two systemd nodes.
+      - name: A Host moves between two nodes over SSH
+        if: matrix.shard == 1
+        timeout-minutes: 10
+        env:
+          AGENT_HOST_NODE_TEST_IMAGE: alpine:3.20
+        run: |
+          set -euo pipefail
+          docker pull "${AGENT_HOST_NODE_TEST_IMAGE}"
+          uv run pytest -q -m external tests/external/test_host_move_out_two_nodes.py \
+            --junitxml="${RUNNER_TEMP}/host-move-out.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/host-move-out.xml"
+
       # A checkpoint commits the container whole, the Sandbox Manager's own
       # markers included. Unit doubles never do, so a restore that every unit
       # test passed failed on staging. Commit, load and start one for real.

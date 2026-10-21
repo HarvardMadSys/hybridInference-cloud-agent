@@ -682,8 +682,10 @@ def test_final_copy_deletes_what_the_source_dropped_and_stays_on_the_data_disk(
     [rest] = [call for call in rsyncs if "/var/lib/docker" in call]
     chunks = [call for call in rsyncs if any(arg.startswith("--files-from=") for arg in call)]
     assert (len(cleanup), len(chunks), len(rsyncs)) == (2, 4, 7)
-    # Removed entries are reconciled before the parallel streams start.
-    assert rsyncs[:2] == cleanup
+    # Removed entries are reconciled before the parallel streams start, and
+    # the job that creates their directories runs alone after them. The race
+    # it prevents needs real rsync: tests/external/test_host_move_out_two_nodes.py.
+    assert rsyncs[:3] == [*cleanup, rest]
     for call in rsyncs:
         assert "-HAXSx" in call and "--numeric-ids" in call and "--delete" in call
         ssh = call[call.index("-e") + 1]
