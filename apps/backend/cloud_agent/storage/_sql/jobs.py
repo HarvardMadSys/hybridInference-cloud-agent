@@ -146,7 +146,7 @@ def first_unfinished_turn(job: str) -> str:
 
 
 def runnable_queued_turn(job: str, *, including_backoff: bool = False) -> str:
-    """SQL: whether queued turn ``job`` may be handed to a Host, whichever asks.
+    """SQL: whether queued turn ``job`` may be handed to a Host, whichever asks, in parentheses.
 
     It is not cancelled, is out of claim backoff, and is the oldest unfinished
     turn of its conversation (:func:`first_unfinished_turn`). An automatic
@@ -165,7 +165,7 @@ def runnable_queued_turn(job: str, *, including_backoff: bool = False) -> str:
         if including_backoff
         else f" AND ({job}.claim_retry_at IS NULL OR {job}.claim_retry_at <= clock_timestamp())"
     )
-    return f"""{job}.state = 'queued' AND {job}.cancel_requested = FALSE{backoff}
+    return f"""({job}.state = 'queued' AND {job}.cancel_requested = FALSE{backoff}
       AND {first_unfinished_turn(job)}
       AND (
             {job}.turn_source <> 'goal'
@@ -177,7 +177,8 @@ def runnable_queued_turn(job: str, *, including_backoff: bool = False) -> str:
                   AND goal_thread.goal_id = {job}.goal_id
                   AND goal_thread.goal_revision = {job}.goal_revision
             )
-      )"""
+      )
+    )"""
 
 
 async def fail_unrunnable_follow_ups(

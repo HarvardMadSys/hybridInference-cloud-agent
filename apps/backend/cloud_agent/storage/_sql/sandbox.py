@@ -236,13 +236,13 @@ def group_has_live_peer(group: str, *, excluding: str | None = None) -> str:
 
 
 def group_is_quiet(group: str, *, operations: int = 0) -> str:
-    """SQL: whether ``group`` has no operation open and no member turn running.
+    """SQL: whether ``group`` has no operation open and no member turn running, in parentheses.
 
     ``operations`` is the count of open operations that still counts as none:
     a statement that closes one in the same ``SET`` reads the count before it
     drops, so it passes ``1``.
     """
-    return f"{group}.active_operation_count = {operations} AND NOT {member_turn_running(group)}"
+    return f"({group}.active_operation_count = {operations} AND NOT {member_turn_running(group)})"
 
 
 def quiet_idle_deadline(group: str, timeout: str, *, operations: int = 0) -> str:

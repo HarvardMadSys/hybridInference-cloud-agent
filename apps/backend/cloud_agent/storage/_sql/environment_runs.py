@@ -19,13 +19,13 @@ def _columns(run: str) -> str:
 
 
 def env_run_live(run: str = "") -> str:
-    """SQL: whether environment run ``run`` has a current lease and is not too old.
+    """SQL: whether environment run ``run`` has a current lease and is not too old, in parentheses.
 
     ``run`` is the alias its columns are qualified with; by default they are
     not qualified.
     """
     c = _columns(run)
-    return f"{c}lease_expires_at>NOW() AND {c}started_at>NOW()-{ENV_RUN_MAX_AGE}"
+    return f"({c}lease_expires_at>NOW() AND {c}started_at>NOW()-{ENV_RUN_MAX_AGE})"
 
 
 def env_run_stale(run: str = "") -> str:
@@ -35,13 +35,13 @@ def env_run_stale(run: str = "") -> str:
 
 
 def env_run_holds_slot(run: str = "") -> str:
-    """SQL: whether environment run ``run`` reserves a slot on its Host."""
-    return f"NOT {_columns(run)}cleanup_complete AND {env_run_live(run)}"
+    """SQL: whether environment run ``run`` reserves a slot on its Host, in parentheses."""
+    return f"(NOT {_columns(run)}cleanup_complete AND {env_run_live(run)})"
 
 
 def env_run_blocks_host(run: str = "") -> str:
-    """SQL: whether environment run ``run`` keeps its Host from taking new work."""
-    return f"NOT {_columns(run)}cleanup_complete AND {env_run_stale(run)}"
+    """SQL: whether environment run ``run`` keeps its Host from taking new work, in parentheses."""
+    return f"(NOT {_columns(run)}cleanup_complete AND {env_run_stale(run)})"
 
 
 def env_runs_holding_slots(host: str) -> str:
