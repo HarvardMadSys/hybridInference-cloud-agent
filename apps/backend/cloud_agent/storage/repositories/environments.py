@@ -21,7 +21,7 @@ from cloud_agent.environments import (
     EnvironmentNotFound,
 )
 from cloud_agent.execution_profiles import default_execution_profile
-from cloud_agent.storage.repositories.environment_claims import (
+from cloud_agent.storage._sql.environment_claims import (
     claim_environment_run as claim_queued_run,
 )
 from cloud_agent_shared.environment import (
