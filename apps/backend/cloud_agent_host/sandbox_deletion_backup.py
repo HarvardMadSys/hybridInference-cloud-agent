@@ -361,7 +361,7 @@ class SandboxDeletionBackupService:
                 "aborted": True,
             }
 
-    def discard(self, identity: ArchiveIdentity, *, sandbox_id: str) -> dict[str, Any]:
+    def discard(self, identity: ArchiveIdentity, *, sandbox_id: str) -> dict[str, Any]:  # noqa: PLR0912 complexity baseline, #771
         """Remove the exact stopped container without exporting or uploading it.
 
         The authorization record is fsynced before Docker removal, so a lost
