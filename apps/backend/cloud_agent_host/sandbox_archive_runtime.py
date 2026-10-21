@@ -1119,17 +1119,6 @@ class SandboxArchiveController:
             slot.active += 1
             return slot
 
-    def _acquire_current(self) -> _ServiceSlot | None:
-        with self._condition:
-            if self._closed or not self._started:
-                raise SandboxError("sandbox archive controller is not running")
-            if self._policy is None:
-                raise SandboxError("sandbox archive policy has not been delivered")
-            slot = self._current
-            if slot is not None:
-                slot.active += 1
-            return slot
-
     def _acquire_initial_slot(
         self,
         backend: RetainedChatBackend,
