@@ -1,3 +1,5 @@
+import { modelSelectionEn } from './modelSelection';
+
 /**
  * The source dictionary.
  *
@@ -669,25 +671,7 @@ export const en = {
   'settings.projectMemory.projectsError': 'Could not load repositories.',
   'settings.projectMemory.noProjects': 'Repositories you work in appear here.',
   'settings.projectMemory.confirmTitle': 'Clear the memory of {repo}?',
-  'settings.model.title': 'Model',
-  'settings.model.description':
-    'The model a new task starts on. The picker in the composer can still change it for that task, and nothing is chosen for you when none of these apply.',
-  'settings.model.label': 'Default model',
-  'settings.model.followDescription': 'Follow my last model ({model})',
-  'settings.model.followDescriptionEmpty': 'Follow my last model',
-  'settings.model.followDeployment': 'Follow my last model ({model} until you have one)',
-  'settings.model.followRetired': 'Follow my last model ({last} is no longer available)',
-  'settings.model.followRetiredDeployment':
-    'Follow my last model ({model}, since {last} is no longer available)',
-  'settings.model.noneApplies':
-    'Nothing is chosen for new tasks yet. Pick a model here or in the composer.',
-  'settings.model.retired': '{model} (no longer available)',
-  'settings.model.effective': 'New tasks start on {model}.',
-  'settings.model.noModels': 'No model is available yet. A new task waits until one is offered.',
-  'settings.model.loading': 'Loading your default model…',
-  'settings.model.error': 'Could not load your default model.',
-  'settings.model.saveError': 'Could not save. Your previous choice is unchanged.',
-  'settings.model.retry': 'Try again',
+  ...modelSelectionEn,
   'settings.notifications.title': 'Notifications',
   'settings.notifications.description':
     'Get browser notifications when an agent asks a question or finishes a turn. Keep the app open to receive them.',
@@ -964,14 +948,8 @@ export const en = {
   'composer.repositoryUnavailable':
     '{repo} is not available to you. Choose another repository, or configure repository access.',
   'composer.chooseRepository': 'Choose a repository first',
-  'composer.chooseModel': 'Choose a model first',
-  'composer.chooseModelPlaceholder': 'Choose model',
   'composer.branch': 'Branch',
   'composer.agent': 'Agent',
-  'picker.search': 'Search…',
-  'picker.noResults': 'No matching options',
-  'composer.model': 'Model',
-  'composer.reasoning': 'Reasoning',
   'composer.run': 'Run',
   'composer.starting': 'Starting…',
   'composer.runTitle': 'Run — ⏎ to send, ⇧⏎ for a new line',

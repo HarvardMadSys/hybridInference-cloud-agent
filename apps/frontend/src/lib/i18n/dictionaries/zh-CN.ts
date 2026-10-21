@@ -1,3 +1,5 @@
+import { modelSelectionZhCN } from './modelSelection';
+
 import type { TranslationKey } from './en';
 
 /**
@@ -631,24 +633,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.projectMemory.projectsError': '无法加载仓库列表。',
   'settings.projectMemory.noProjects': '你在仓库中发起任务后，这里会出现该仓库。',
   'settings.projectMemory.confirmTitle': '清除 {repo} 的记忆？',
-  'settings.model.title': '模型',
-  'settings.model.description':
-    '新任务默认使用的模型。每次创建任务时仍可在输入框里临时更改；以上都没有时不会替你选一个。',
-  'settings.model.label': '默认模型',
-  'settings.model.followDescription': '跟随上次使用的模型（{model}）',
-  'settings.model.followDescriptionEmpty': '跟随上次使用的模型',
-  'settings.model.followDeployment': '跟随上次使用的模型（在你有记录之前使用 {model}）',
-  'settings.model.followRetired': '跟随上次使用的模型（{last} 已不可用）',
-  'settings.model.followRetiredDeployment': '跟随上次使用的模型（{last} 已不可用，暂用 {model}）',
-  'settings.model.noneApplies':
-    '新任务还没有默认模型。可以在这里选一个，也可以创建任务时在输入框里选。',
-  'settings.model.retired': '{model}（已不可用）',
-  'settings.model.effective': '新任务将使用 {model}。',
-  'settings.model.noModels': '暂时没有可用模型。在有可用模型之前，新任务无法开始。',
-  'settings.model.loading': '正在加载默认模型…',
-  'settings.model.error': '无法加载默认模型。',
-  'settings.model.saveError': '保存失败，之前的设置未改变。',
-  'settings.model.retry': '重试',
+  ...modelSelectionZhCN,
   'settings.notifications.title': '通知',
   'settings.notifications.description':
     'Agent 提问或完成一轮任务时接收浏览器通知。请保持应用打开以接收通知。',
@@ -920,14 +905,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'composer.repositoryUnavailable':
     '{repo} 当前不可用：你没有它的访问权限，或者还没把它授权给 GitHub App。请选择其他仓库，或者配置仓库权限。',
   'composer.chooseRepository': '先选择仓库',
-  'composer.chooseModel': '先选择模型',
-  'composer.chooseModelPlaceholder': '选择模型',
   'composer.branch': '分支',
   'composer.agent': 'Agent',
-  'picker.search': '搜索…',
-  'picker.noResults': '没有匹配的选项',
-  'composer.model': '模型',
-  'composer.reasoning': '推理强度',
   'composer.run': '运行',
   'composer.starting': '启动中…',
   'composer.runTitle': '运行 —— ⏎ 发送,⇧⏎ 换行',

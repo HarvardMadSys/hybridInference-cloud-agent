@@ -5,6 +5,19 @@ import { createPortal } from 'react-dom';
 import { useT } from '@/components/providers/LocaleProvider';
 import { usePickerLayout } from './usePickerLayout';
 
+function pickerClasses(variant: 'compact' | 'field', open: boolean, hasValue: boolean) {
+  const field = variant === 'field';
+  const button = field
+    ? `min-h-11 w-full gap-3 rounded-xl border bg-surface px-3.5 py-3 text-sm shadow-sm enabled:hover:border-accent/40 enabled:hover:bg-surface-hover ${open ? 'border-accent/50' : 'border-border'}`
+    : `min-h-8 shrink-0 gap-1.5 rounded-lg border px-2 py-1 text-xs hover:bg-surface-hover [@media(pointer:coarse)]:min-h-11 ${open ? 'border-border bg-surface-hover' : 'border-transparent'}`;
+  const empty = field ? 'text-muted' : 'italic text-muted';
+  return {
+    button: `ui-focus-ring inline-flex max-w-full items-center text-foreground transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${button}`,
+    value: `min-w-0 truncate text-left font-medium ${field ? 'flex-1' : 'max-w-[11rem]'} ${hasValue ? '' : empty}`,
+    chevron: `shrink-0 text-muted transition-transform ${field ? 'h-4 w-4' : 'h-3 w-3'} ${open ? 'rotate-180' : ''}`,
+  };
+}
+
 /** A compact composer control with a themed, keyboard-accessible option list. */
 export function Picker({
   label,
@@ -14,6 +27,9 @@ export function Picker({
   compact = false,
   placeholder,
   triggerRef,
+  variant = 'compact',
+  disabled = false,
+  optionLabels = {},
 }: {
   label: string;
   value: string;
@@ -32,6 +48,10 @@ export function Picker({
    * without the caller being able to reassign it.
    */
   triggerRef?: (element: HTMLButtonElement | null) => void;
+  /** A full-width form field, using the same menu and keyboard navigation. */
+  variant?: 'compact' | 'field';
+  disabled?: boolean;
+  optionLabels?: Record<string, string>;
 }) {
   const t = useT();
   const options = suppliedOptions.filter((option) => typeof option === 'string');
@@ -41,17 +61,20 @@ export function Picker({
   const search = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const typeahead = useRef({ text: '', at: 0 });
-  const shown = value || placeholder || '';
+  const shown = (value && (optionLabels[value] ?? value)) || placeholder || '';
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(value);
   const searchable = options.length > 7;
   const needle = query.trim().toLocaleLowerCase();
-  const matches = options.filter((option) => option.toLocaleLowerCase().includes(needle));
+  const matches = options.filter((option) =>
+    (optionLabels[option] ?? option).toLocaleLowerCase().includes(needle),
+  );
   const current = matches.includes(active) ? active : (matches[0] ?? '');
   const activeId = matches.length ? `${id}-option-${matches.indexOf(current)}` : undefined;
-  const visible = open && options.length > 0;
-  const style = usePickerLayout(visible, trigger, panel, searchable, options.length);
+  const visible = open && !disabled && options.length > 0;
+  const classes = pickerClasses(variant, visible, Boolean(value));
+  const style = usePickerLayout(visible, trigger, panel, searchable, options.length, variant);
 
   useLayoutEffect(() => {
     if (visible) (search.current ?? list.current)?.focus();
@@ -137,13 +160,13 @@ export function Picker({
       const text = (now - typeahead.current.at < 500 ? typeahead.current.text : '') + event.key;
       typeahead.current = { text, at: now };
       const match = options.find((option) =>
-        option.toLocaleLowerCase().startsWith(text.toLocaleLowerCase()),
+        (optionLabels[option] ?? option).toLocaleLowerCase().startsWith(text.toLocaleLowerCase()),
       );
       if (match) setActive(match);
     }
   }
 
-  if (!options.length) return null;
+  if (!options.length && variant !== 'field') return null;
 
   return (
     <>
@@ -153,6 +176,7 @@ export function Picker({
           if (typeof triggerRef === 'function') triggerRef(element);
         }}
         type="button"
+        disabled={disabled || !options.length}
         value={value}
         aria-label={label}
         aria-describedby={`${id}-value`}
@@ -167,13 +191,12 @@ export function Picker({
             show();
           }
         }}
-        className={`ui-focus-ring inline-flex min-h-8 max-w-full shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-xs text-foreground transition-colors hover:bg-surface-hover [@media(pointer:coarse)]:min-h-11 ${visible ? 'border-border bg-surface-hover' : 'border-transparent'}`}
+        className={classes.button}
       >
-        {!compact ? <span className="shrink-0 text-muted">{label}</span> : null}
-        <span
-          id={`${id}-value`}
-          className={`min-w-0 max-w-[11rem] truncate font-medium ${value ? '' : 'italic text-muted'}`}
-        >
+        {!compact && variant !== 'field' ? (
+          <span className="shrink-0 text-muted">{label}</span>
+        ) : null}
+        <span id={`${id}-value`} className={classes.value}>
           {shown}
         </span>
         <svg
@@ -182,7 +205,7 @@ export function Picker({
           fill="none"
           stroke="currentColor"
           strokeWidth={1.6}
-          className={`h-3 w-3 shrink-0 text-muted transition-transform ${visible ? 'rotate-180' : ''}`}
+          className={classes.chevron}
         >
           <path strokeLinecap="round" strokeLinejoin="round" d="m6 8 4 4 4-4" />
         </svg>
@@ -259,7 +282,9 @@ export function Picker({
                   onClick={() => choose(option)}
                   className={`flex min-h-9 cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2 text-[13px] transition-colors [@media(pointer:coarse)]:min-h-11 ${option === value ? 'bg-accent-subtle font-medium text-accent' : 'text-foreground'} ${option === current ? (option === value ? 'ring-1 ring-inset ring-accent/20' : 'bg-surface-hover') : ''}`}
                 >
-                  <span className="min-w-0 flex-1 break-words">{option}</span>
+                  <span className="min-w-0 flex-1 break-words">
+                    {optionLabels[option] ?? option}
+                  </span>
                   {option === value ? (
                     <svg
                       aria-hidden

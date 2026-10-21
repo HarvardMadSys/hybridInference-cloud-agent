@@ -1,31 +1,27 @@
 'use client';
 
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
+import { Picker } from '@/components/features/agents/Picker';
 import { getModelPreference, saveModelPreference } from '@/lib/api/modelPreference';
 import type { ModelPreference } from '@/lib/api/modelPreference';
 
-/**
- * The sentinel option that means "follow my last model".
- *
- * A native `<select>` cannot carry a null value, and the empty string is not a
- * model. Using a value no model can be avoids the two being confused — a model
- * genuinely named `__follow__` is refused by the gateway, not silently treated
- * as a request to clear the pin.
- */
-const FOLLOW_LAST = '__follow_last__';
+function modelStatusText(
+  t: ReturnType<typeof useT>,
+  status: 'loading' | 'ready' | 'error',
+  pending: boolean,
+  effective: string | null,
+  catalogRead: boolean,
+) {
+  if (status === 'loading') return t('settings.model.loading');
+  if (pending) return t('settings.model.saving');
+  if (effective) return t('settings.model.effective', { model: effective });
+  return t(catalogRead ? 'settings.model.noneApplies' : 'settings.model.noModels');
+}
 
-/**
- * Pick the model a new task starts on.
- *
- * Two controls, and they are not the same thing: the select pins a model (or
- * follows the last used one), and the card says what that currently resolves
- * to. Without the second sentence a retired pin looks like it is working while
- * every new task quietly starts somewhere else.
- */
+/** Choose a concrete default; resetting lets the server resolve it again. */
 export function ModelSettings() {
   const t = useT();
-  const selectId = useId();
   const [models, setModels] = useState<string[]>([]);
   const [preference, setPreference] = useState<ModelPreference | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
@@ -64,8 +60,7 @@ export function ModelSettings() {
     return () => controller.abort();
   }, [reload]);
 
-  const choose = useCallback(async (next: string) => {
-    const value = next === FOLLOW_LAST ? null : next;
+  const choose = useCallback(async (value: string | null) => {
     setPending(true);
     setSaveError(false);
     try {
@@ -82,92 +77,73 @@ export function ModelSettings() {
 
   const effective = preference?.effective_model ?? null;
   const pinned = preference?.default_model ?? null;
-  const selected = pinned ?? FOLLOW_LAST;
-  // An empty catalog is an unreadable one, not a deployment that retired
-  // everything: nothing is called unavailable on the strength of it.
+  const selected = pinned ?? effective ?? '';
+  // No pin is called retired on the strength of an unreadable catalog.
   const catalogRead = models.length > 0;
-  // A pin missing from the list would otherwise make the select silently show
-  // "follow my last model" while the owner's saved choice is something else
-  // entirely. It is kept as an option — labelled unavailable only when the
-  // catalog actually says so — so the control shows what is saved and the
-  // sentence below says what is actually applied.
-  const unlistedPin = pinned !== null && !models.includes(pinned) ? pinned : null;
-  const last = preference?.last_model ?? null;
-  const fallback = preference?.deployment_default ?? null;
-  // "Follow my last model" names where it currently lands, which is not always
-  // the last model: a retired one is skipped for the deployment default, and a
-  // user who has never created a task has no other way to learn what their
-  // first one will use.
-  const followDescription =
-    last && (models.includes(last) || !catalogRead)
-      ? t('settings.model.followDescription', { model: last })
-      : last && fallback
-        ? t('settings.model.followRetiredDeployment', { last, model: fallback })
-        : last
-          ? t('settings.model.followRetired', { last })
-          : fallback
-            ? t('settings.model.followDeployment', { model: fallback })
-            : t('settings.model.followDescriptionEmpty');
+  const unavailable = pinned !== null && catalogRead && !models.includes(pinned);
 
   return (
-    <section aria-labelledby="settings-model" className="ui-card mt-4 bg-surface p-3 sm:p-4">
-      <h2 id="settings-model" className="text-base font-semibold text-foreground">
-        {t('settings.model.title')}
-      </h2>
-      <p className="mt-2 text-sm leading-6 text-muted">{t('settings.model.description')}</p>
-
-      {status === 'error' ? (
-        <div role="alert" className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
-          <span className="text-status-error">{t('settings.model.error')}</span>
-          <button
-            type="button"
-            onClick={() => setReload((value) => value + 1)}
-            className="ui-button ui-button-secondary min-h-11"
-          >
-            {t('settings.model.retry')}
-          </button>
-        </div>
-      ) : (
-        <>
-          <label htmlFor={selectId} className="mt-3 block text-sm font-medium text-foreground">
-            {t('settings.model.label')}
-          </label>
-          <select
-            id={selectId}
-            value={selected}
-            onChange={(event) => void choose(event.target.value)}
-            disabled={status === 'loading' || pending}
-            className="ui-input mt-1 block min-h-11 w-full max-w-sm rounded-lg"
-          >
-            <option value={FOLLOW_LAST}>{followDescription}</option>
-            {unlistedPin ? (
-              <option value={unlistedPin}>
-                {catalogRead ? t('settings.model.retired', { model: unlistedPin }) : unlistedPin}
-              </option>
-            ) : null}
-            {models.map((model) => (
-              <option key={model} value={model}>
-                {model}
-              </option>
-            ))}
-          </select>
-
-          <p aria-live="polite" className="mt-2 text-sm text-muted">
-            {status === 'loading'
-              ? t('settings.model.loading')
-              : effective
-                ? t('settings.model.effective', { model: effective })
-                : catalogRead
-                  ? t('settings.model.noneApplies')
-                  : t('settings.model.noModels')}
+    <section aria-labelledby="settings-model" className="ui-card mt-4 bg-surface p-4 sm:p-5">
+      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,22rem)] lg:gap-8">
+        <div>
+          <h2 id="settings-model" className="text-base font-semibold text-foreground">
+            {t('settings.model.title')}
+          </h2>
+          <p className="mt-1.5 max-w-md text-sm leading-6 text-muted">
+            {t('settings.model.description')}
           </p>
-          {saveError ? (
-            <p role="alert" className="mt-2 text-sm text-status-error">
-              {t('settings.model.saveError')}
-            </p>
-          ) : null}
-        </>
-      )}
+        </div>
+
+        {status === 'error' ? (
+          <div role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
+            <span className="text-status-error">{t('settings.model.error')}</span>
+            <button
+              type="button"
+              onClick={() => setReload((value) => value + 1)}
+              className="ui-button ui-button-secondary min-h-11"
+            >
+              {t('settings.model.retry')}
+            </button>
+          </div>
+        ) : (
+          <div className="min-w-0">
+            <Picker
+              label={t('settings.model.label')}
+              value={selected}
+              options={models}
+              optionLabels={
+                unavailable
+                  ? { [pinned]: t('settings.model.retired', { model: pinned }) }
+                  : undefined
+              }
+              onChange={(model) => void choose(model)}
+              disabled={status === 'loading' || pending}
+              placeholder={t('settings.model.choose')}
+              variant="field"
+            />
+            <div className="mt-2 flex items-start justify-between gap-3">
+              <p aria-live="polite" className="min-w-0 text-xs leading-5 text-muted">
+                {modelStatusText(t, status, pending, effective, catalogRead)}
+              </p>
+              {pinned !== null ? (
+                <button
+                  type="button"
+                  onClick={() => void choose(null)}
+                  disabled={status === 'loading' || pending}
+                  className="ui-focus-ring -mr-1 -mt-1 shrink-0 rounded-md px-1 py-1 text-xs leading-5 text-muted underline-offset-4 enabled:hover:text-foreground enabled:hover:underline disabled:opacity-50"
+                >
+                  {t('settings.model.reset')}
+                </button>
+              ) : null}
+            </div>
+            {saveError ? (
+              <p role="alert" className="mt-2 text-sm text-status-error">
+                {t('settings.model.saveError')}
+              </p>
+            ) : null}
+          </div>
+        )}
+      </div>
     </section>
   );
 }
