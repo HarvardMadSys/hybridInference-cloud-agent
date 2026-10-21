@@ -383,7 +383,7 @@ class ResidentTransportFactory:
     def __init__(self, manager: ChatSandboxManager) -> None:
         self._manager = manager
 
-    def open(  # noqa: PLR0912 complexity baseline, #771
+    def open(
         self, spec: ChatSandboxSpec, launch: ResidentLaunch
     ) -> ResidentTransport[DialectRuntime]:
         """Start and probe a runtime's persistent transport."""
