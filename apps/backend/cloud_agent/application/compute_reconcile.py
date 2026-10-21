@@ -7,6 +7,7 @@ fixed resource identity and request parameters bound the external effects.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import secrets
 from contextlib import suppress
@@ -406,8 +407,20 @@ class ComputeReconciler:
         """Observe leases and submit renewals even while retirement is blocked."""
         now = _now()
         observation_seconds = current_observation_seconds(self.commands.configuration)
-        release = load_control_plane_host_release()
-        for row in await self.repository.list_allocations():
+        rows = await self.repository.list_allocations()
+        # The bundle is needed only for a managed allocation still being kept
+        # present; with none, the pass reads nothing from disk (issue #770).
+        # The first load of a pass runs in a thread: reading and validating the
+        # archive is tens of milliseconds of otherwise event-loop stall.
+        release = None
+        if any(
+            row.get("desired_state") == "present"
+            and not row.get("release_committed_at")
+            and row.get("observed_state") not in {"terminated", "absent"}
+            for row in rows
+        ):
+            release = await asyncio.to_thread(load_control_plane_host_release)
+        for row in rows:
             if row.get("observed_state") == "terminated":
                 await self._lose_reclaimed_groups(row)
             if row.get("release_committed_at") or row.get("observed_state") in {
