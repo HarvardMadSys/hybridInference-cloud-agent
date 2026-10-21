@@ -448,7 +448,7 @@
         "max-lines": [
           "error",
           {
-            "max": 943
+            "max": 925
           }
         ]
       }
@@ -459,7 +459,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1087
+            "max": 1066
           }
         ]
       }
@@ -493,17 +493,6 @@
           "error",
           {
             "max": 1541
-          }
-        ]
-      }
-    },
-    {
-      "files": ["src/components/features/agents/environment/EnvironmentDialog.tsx"],
-      "rules": {
-        "max-lines": [
-          "error",
-          {
-            "max": 958
           }
         ]
       }
