@@ -133,7 +133,7 @@ def setup(monkeypatch):
             ledger_rows_for_job=AsyncMock(return_value=[ledger_row()]),
             record_admin_action=AsyncMock(return_value=1),
             queue_job_ledger_refresh=AsyncMock(),
-            job_usage_inputs=AsyncMock(),
+            job_usage_reads=AsyncMock(),
         )
     )
     gateway = _AccessGateway(["agent.use", "agent.admin"])
@@ -189,7 +189,7 @@ async def test_admin_reads_another_owner_but_owner_routes_are_unchanged(setup):
     assert "private" not in admin.text
     assert "grant_id" not in admin.text
     assert "binding_id" not in admin.text
-    store.job_usage_inputs.assert_not_awaited()
+    store.job_usage_reads.assert_not_awaited()
     queries.event_content.assert_not_awaited()
     store.record_admin_action.assert_not_awaited()
     store.queue_job_ledger_refresh.assert_not_awaited()
@@ -252,7 +252,7 @@ async def test_session_statistics_reuses_safe_usage_inputs_without_additional_re
     queries.event_content.assert_not_awaited()
     queries.resources.assert_not_awaited()
     store.get_job.assert_not_awaited()
-    store.job_usage_inputs.assert_not_awaited()
+    store.job_usage_reads.assert_not_awaited()
     store.record_admin_action.assert_not_awaited()
     assert gateway.asked == []
 
