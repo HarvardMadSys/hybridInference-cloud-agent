@@ -273,6 +273,12 @@ Sandbox Manager 用的是控制面自己的令牌，不受 Host 凭证吊销影�
 - 单元（`tests/unit/test_compute_reconcile.py`）：先 `quiesce` 再扫描；扫描结果写进操作结果；发现遗留时停下，只是读不出来时等待重扫；runner 停不下来时不扫描。
 - 单元（`tests/unit/test_runner_host_service.py`）：凭证被拒后 runner 停止心跳、不再接活，但不退出，收到停止信号后才结束。
 - PostgreSQL 完整流程（`test_superseded_containers.py`）：机器上有一个还在跑的 runner 和一个留下的自检容器，主动释放用正式的 `quiesce` 和扫描脚本一路跑到成功；runner 停下，自检容器删掉，Sandbox Manager 还在运行。
+- 真 Docker（`tests/external/test_host_release_real_docker.py`，CI 里跑）：每个测试起一台 Docker-in-Docker 节点，节点里有自己的空 Docker。正式的 `quiesce` 和扫描脚本在节点上跑，命令行和走 SSH 时完全一样。节点里的 runner 是 Compose 起的、带 `unless-stopped`，每次启动都建一个自检容器再退出，跟 staging 上那台一样一直被重启；自检容器的标签直接取自 runner 自己的自检代码。测试确认：
+  - 释放后 runner 停住、5 秒内不再被拉起，自检容器全删，Sandbox Manager 还在跑，扫描干净；
+  - 用户沙箱、别的部署的自检容器、不认识的容器都不碰，扫描照样拦下；
+  - 一边不停地建、删容器，一边扫描 30 次，每次都读得完整。
+
+  反向验证：换回原来"先列出再 `inspect`"的扫描，第三条失败；去掉停 runner 那一步，第一条失败。假 Docker 测不出这两点，因为假对象里"停了就不会再起来"和"列出时不会和删除撞上"都是写死的前提。
 - 上面每个条件逐一去掉时，都有测试失败。
 - 真机：需要再做一轮"交出后不发消息、直接主动释放"，确认这次是主动释放本身成功，不靠到期收尾。
 
