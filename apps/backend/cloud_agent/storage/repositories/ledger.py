@@ -37,18 +37,6 @@ class PostgresLedgerRepository:
         async with self._pool.acquire() as conn:
             return await fetch_ledger_rows_for_job(conn, job_id)
 
-    async def ledger_rows_for_conversation(
-        self, *, job_id: str, user_id: str
-    ) -> list[dict[str, Any]]:
-        """Read only this owner's conversation snapshots, including unstarted turns.
-
-        Forks share a workspace but have distinct thread IDs and usage. Read
-        cached totals in one query; a drawer must not fan out to the Gateway
-        or load historical event payloads to calculate a conversation total.
-        """
-        async with self._pool.acquire() as conn:
-            return await fetch_ledger_rows_for_conversation(conn, job_id, user_id)
-
     async def job_usage_reads(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         """Everything an owner's read of a job's usage is made of, from one snapshot.
 

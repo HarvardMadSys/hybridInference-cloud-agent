@@ -544,7 +544,7 @@ class WorkerResourcesRequest(BaseModel):
     )
 
     @model_validator(mode="after")
-    def completeness_flags_match_their_evidence(self) -> WorkerResourcesRequest:
+    def completeness_flags_match_their_evidence(self) -> WorkerResourcesRequest:  # noqa: PLR0912 complexity baseline, #771
         """Refuse combinations that would make a gap render as certainty."""
         call_seqs = [call.call_seq for call in self.tool_calls]
         if len(call_seqs) != len(set(call_seqs)):

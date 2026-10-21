@@ -83,7 +83,7 @@ class _JobCreationStorage(Protocol):
     source_control: SourceControlPort
 
 
-def _model_catalog_unavailable() -> HTTPException:
+def model_catalog_unavailable() -> HTTPException:
     """503 while the gateway cannot say which models this owner may call.
 
     Not a 400: an outage is no verdict on the model or the effort, and a
@@ -124,7 +124,7 @@ async def _require_resolvable_model(
     try:
         canonical = await agent_canonical_model(model, gateway, user_id=user["user_id"])
     except ModelCatalogUnavailable:
-        raise _model_catalog_unavailable() from None
+        raise model_catalog_unavailable() from None
     if canonical is not None:
         return canonical
     visible = await agent_visible_models(gateway, user_id=user["user_id"])
@@ -372,7 +372,7 @@ async def _require_offered_effort(
     try:
         domains = await agent_model_reasoning_efforts(gateway, user_id=user["user_id"])
     except ModelCatalogUnavailable:
-        raise _model_catalog_unavailable() from None
+        raise model_catalog_unavailable() from None
     # The model's entry is read as a yes/no — does it take the parameter at
     # all — and not for its contents. Per-model domains were tried and
     # withdrawn: the providers' documented lists disagreed with what their
@@ -525,7 +525,7 @@ async def _admit_repository(
     return base_sha
 
 
-async def _create_job_as(
+async def _create_job_as(  # noqa: PLR0912 complexity baseline, #771
     body: AgentJobCreate,
     user: dict[str, Any],
     *,

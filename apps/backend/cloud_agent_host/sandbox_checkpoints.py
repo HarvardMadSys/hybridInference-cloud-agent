@@ -390,7 +390,7 @@ def read_base_layers(save_stream: IO[bytes]) -> frozenset[str]:
     return frozenset(layers)
 
 
-def export_checkpoint_archive(
+def export_checkpoint_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     save_stream: IO[bytes],
     output: BinaryIO,
     *,
@@ -664,7 +664,7 @@ def _image_metadata(
     return index_body, docker_manifest, b'{"imageLayoutVersion":"1.0.0"}'
 
 
-def prepare_restore_archive(
+def prepare_restore_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     source: IO[bytes],
     output: IO[bytes],
     *,
@@ -787,7 +787,7 @@ def _descriptor_of(raw: Any, what: str) -> dict[str, Any]:
     return raw
 
 
-def export_from_content_store(
+def export_from_content_store(  # noqa: PLR0915 complexity baseline, #771
     store: ContainerdContentStore,
     output: BinaryIO,
     *,

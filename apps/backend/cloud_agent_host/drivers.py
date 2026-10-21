@@ -50,9 +50,7 @@ from cloud_agent_host.runtimes import (
     AgentRuntime,
     ClaudeCodeRuntime,
     CodexRuntime,
-    KiloRuntime,
     NormalizedEvent,
-    OpencodeRuntime,
     PiRuntime,
     ReplyPreview,
     RuntimeMCPConfig,
@@ -612,7 +610,7 @@ class HarnessTurn(Generic[_RuntimeT]):
 class HarnessSession(Generic[_RuntimeT]):
     """Common state for a live Agent CLI session."""
 
-    def __init__(self, driver: HarnessDriver[_RuntimeT], context: LaunchContext) -> None:
+    def __init__(self, driver: LiveDriver[_RuntimeT], context: LaunchContext) -> None:
         self._driver = driver
         self._context = context
         self._closed = False
@@ -644,132 +642,79 @@ class HarnessSession(Generic[_RuntimeT]):
         """Return a resident process status when this session owns one."""
         return None
 
+    def ensure_started(self, *, model: str, reasoning_effort: str | None) -> None:
+        """Start the resident process and prove it is ready for a turn."""
+        raise NotImplementedError
 
-class HarnessDriver(Generic[_RuntimeT_co]):
-    """Base metadata for one registered live harness."""
+    def process_alive(self) -> bool:
+        """Whether the resident process still runs."""
+        raise NotImplementedError
 
-    def __init__(self, runtime: _RuntimeT_co) -> None:
+    def start_turn(self, turn_input: TurnInput) -> HarnessTurn[_RuntimeT]:
+        """Send one prompt to this already-open native session."""
+        raise NotImplementedError
+
+
+class _SessionType(Protocol):
+    """How :class:`LiveDriver` constructs the session class of its CLI."""
+
+    def __call__(
+        self,
+        driver: LiveDriver[Any],
+        context: LaunchContext,
+        *,
+        resume_session_id: str | None = None,
+    ) -> HarnessSession[Any]:
+        """Open a session, new or resuming ``resume_session_id``."""
+        ...
+
+
+class LiveDriver(Generic[_RuntimeT_co]):
+    """The live transport of one registered Agent CLI, owned by the host supervisor.
+
+    Every CLI holds one resident process per member: it resumes natively,
+    forks at an anchor, restarts on a model change, and runs beside its
+    siblings in one workspace. CLIs differ only in the session class that
+    speaks their protocol, and in whether a message reaches a running turn
+    (:meth:`HarnessTurn.inject`). :data:`_LIVE_SESSIONS` records both.
+    """
+
+    def __init__(
+        self, runtime: _RuntimeT_co, *, session_type: _SessionType, mid_turn: bool
+    ) -> None:
         self._runtime = runtime
+        self._session_type = session_type
+        self._mid_turn = mid_turn
 
     @property
     def runtime(self) -> _RuntimeT_co:
         """The dialect adapter this driver speaks through."""
         return self._runtime
 
-    @property
-    def id(self) -> str:
-        """The registry id this driver answers for."""
-        return self.runtime.name
-
     def capabilities(self) -> HarnessCapabilities:
         """The semantic capability row for this live harness."""
-        raise NotImplementedError
-
-
-class CodexDriver(HarnessDriver[CodexRuntime]):
-    """Codex app-server over its persisted rollout files."""
-
-    def capabilities(self) -> HarnessCapabilities:
-        """Advertise Codex app-server live, interrupt, and native-fork support."""
         return HarnessCapabilities(
             continuity="resume",
-            steering="mid_turn",
+            steering="mid_turn" if self._mid_turn else "none",
             fork="at_anchor",
             model_switch="restart",
             resident_transport="supervisor_live",
             concurrent_shared_workspace=True,
         )
 
-    def launch_live(self, context: LaunchContext) -> CodexAppServerSession:
-        """Start a new persistent Codex app-server thread."""
-        return CodexAppServerSession(self, context)
+    def launch_live(self, context: LaunchContext) -> HarnessSession[Any]:
+        """Open a new persistent session."""
+        return self._session_type(self, context)
 
     def launch_resident_live(
         self, context: LaunchContext, *, session_id: str
-    ) -> CodexAppServerSession:
-        """Resume one Codex thread through a persistent app-server transport."""
+    ) -> HarnessSession[Any]:
+        """Resume one native session through its persistent transport."""
         if context.state_dir is None:
-            raise SessionStateUnavailable("a resident Codex session needs native state")
-        return CodexAppServerSession(self, context, resume_session_id=session_id)
-
-
-class PiDriver(HarnessDriver[PiRuntime]):
-    """pi RPC over its persisted JSONL session tree."""
-
-    def capabilities(self) -> HarnessCapabilities:
-        """Advertise Pi RPC live, interrupt, and prompt-free fork support."""
-        return HarnessCapabilities(
-            continuity="resume",
-            steering="none",
-            fork="at_anchor",
-            model_switch="restart",
-            resident_transport="supervisor_live",
-            concurrent_shared_workspace=True,
-        )
-
-    def launch_live(self, context: LaunchContext) -> PiRpcSession:
-        """Start a new persistent Pi RPC session."""
-        return PiRpcSession(self, context)
-
-    def launch_resident_live(self, context: LaunchContext, *, session_id: str) -> PiRpcSession:
-        """Resume one Pi session through its persistent RPC transport."""
-        if context.state_dir is None:
-            raise SessionStateUnavailable("a resident pi session needs native state")
-        return PiRpcSession(self, context, resume_session_id=session_id)
-
-
-class OpenCodeDriver(HarnessDriver[OpencodeRuntime]):
-    """OpenCode serve over its XDG data store."""
-
-    def capabilities(self) -> HarnessCapabilities:
-        """Advertise OpenCode serve live, interrupt, and native-fork support."""
-        return HarnessCapabilities(
-            continuity="resume",
-            steering="none",
-            fork="at_anchor",
-            model_switch="restart",
-            resident_transport="supervisor_live",
-            concurrent_shared_workspace=True,
-        )
-
-    def launch_live(self, context: LaunchContext) -> HttpAgentLiveSession:
-        """Start a new authenticated OpenCode serve session."""
-        return HttpAgentLiveSession(self, context)
-
-    def launch_resident_live(
-        self, context: LaunchContext, *, session_id: str
-    ) -> HttpAgentLiveSession:
-        """Resume one OpenCode session through its authenticated bridge."""
-        if context.state_dir is None:
-            raise SessionStateUnavailable("a resident OpenCode session needs native state")
-        return HttpAgentLiveSession(self, context, resume_session_id=session_id)
-
-
-class KiloDriver(HarnessDriver[KiloRuntime]):
-    """Kilo serve over its XDG data store."""
-
-    def capabilities(self) -> HarnessCapabilities:
-        """Advertise Kilo serve live, interrupt, and native-fork support."""
-        return HarnessCapabilities(
-            continuity="resume",
-            steering="none",
-            fork="at_anchor",
-            model_switch="restart",
-            resident_transport="supervisor_live",
-            concurrent_shared_workspace=True,
-        )
-
-    def launch_live(self, context: LaunchContext) -> HttpAgentLiveSession:
-        """Start a new authenticated Kilo serve session."""
-        return HttpAgentLiveSession(self, context)
-
-    def launch_resident_live(
-        self, context: LaunchContext, *, session_id: str
-    ) -> HttpAgentLiveSession:
-        """Resume one Kilo session through its authenticated bridge."""
-        if context.state_dir is None:
-            raise SessionStateUnavailable("a resident Kilo session needs native state")
-        return HttpAgentLiveSession(self, context, resume_session_id=session_id)
+            raise SessionStateUnavailable(
+                f"resuming a {self.runtime.name} session needs its native session state"
+            )
+        return self._session_type(self, context, resume_session_id=session_id)
 
 
 class _ProtocolReply:
@@ -1150,7 +1095,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
 
     def __init__(
         self,
-        driver: HarnessDriver[_LiveRuntimeT],
+        driver: LiveDriver[_LiveRuntimeT],
         context: LaunchContext,
         *,
         resume_session_id: str | None = None,
@@ -1236,10 +1181,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
     def _prepare_live(
         self, *, model: str, reasoning_effort: str | None
     ) -> tuple[list[str], dict[str, str]]:
-        prepare_live = getattr(self.runtime, "prepare_live", None)
-        if prepare_live is None:
-            raise DriverError(f"runtime {self.runtime.name!r} has no live invocation")
-        return prepare_live(
+        return self.runtime.prepare_live(
             workdir=self._context.workdir,
             model=model,
             gateway_base_url=self._context.gateway_base_url,
@@ -1358,7 +1300,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
 
     def __init__(
         self,
-        driver: HarnessDriver[CodexRuntime],
+        driver: LiveDriver[CodexRuntime],
         context: LaunchContext,
         *,
         resume_session_id: str | None = None,
@@ -1531,7 +1473,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             lambda merged, merged_line: _codex_raw_row(merged, merged_line, owner),
         )
 
-    def event_for_protocol_line(
+    def event_for_protocol_line(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self, line: str, turn: _JsonResidentTurn[CodexRuntime]
     ) -> HarnessEvent:
         """Normalize one Codex app-server notification for the active turn."""
@@ -1847,34 +1789,6 @@ class PiRpcSession(_JsonResidentSession[PiRuntime]):
     turn, a fork, a clone, a resume, an abort and an automatic retry.
     """
 
-    def __init__(
-        self,
-        driver: HarnessDriver[PiRuntime],
-        context: LaunchContext,
-        *,
-        resume_session_id: str | None = None,
-    ) -> None:
-        super().__init__(driver, context, resume_session_id=resume_session_id)
-
-    def _prepare_live(
-        self, *, model: str, reasoning_effort: str | None
-    ) -> tuple[list[str], dict[str, str]]:
-        prepare_live = getattr(self.runtime, "prepare_live", None)
-        if prepare_live is None:
-            raise DriverError("pi has no live invocation")
-        return prepare_live(
-            workdir=self._context.workdir,
-            model=model,
-            gateway_base_url=self._context.gateway_base_url,
-            credential=self._context.credential,
-            provides_isolation=self._context.provides_isolation,
-            mcp_config=self._context.mcp_config,
-            reasoning_effort=reasoning_effort,
-            session_state_dir=self._context.session_state_dir,
-            resume_session_id=self._resume_session_id,
-            activation_dir=self._context.activation_dir,
-        )
-
     def _initialize_protocol(self) -> None:
         request_id = self._request_id("state")
         self._write_json({"id": request_id, "type": "get_state"})
@@ -2121,7 +2035,7 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
             value, ("event", "properties", "delta"), properties["delta"], line, _bridge_raw_row
         )
 
-    def event_for_protocol_line(
+    def event_for_protocol_line(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self, line: str, turn: _JsonResidentTurn[ResidentLiveRuntime]
     ) -> HarnessEvent:
         """Normalize one OpenCode/Kilo bridge event for the active turn."""
@@ -2408,41 +2322,6 @@ CLAUDE_STATE_CONFIG_DIR = f"{STATE_MOUNT_TARGET}/claude"
 #: the state mount makes it platform data rather than part of the repository,
 #: and lets resident turns share one append-only stream safely.
 CLAUDE_TOOL_MARKS = f"{STATE_MOUNT_TARGET}/{TOOL_MARK_FILE}"
-
-
-class ClaudeCodeDriver(HarnessDriver[ClaudeCodeRuntime]):
-    """Claude Code native live transport, resume, and immediate fork."""
-
-    def capabilities(self) -> HarnessCapabilities:
-        """Native resume plus the supervisor-owned stream-json pipe."""
-        return HarnessCapabilities(
-            continuity="resume",
-            steering="mid_turn",
-            fork="at_anchor",
-            model_switch="restart",
-            resident_transport="supervisor_live",
-            concurrent_shared_workspace=True,
-        )
-
-    def launch_live(self, context: LaunchContext) -> ClaudeCodeLiveSession:
-        """Start a fresh stdin-fed multi-turn native session."""
-        return ClaudeCodeLiveSession(self, context)
-
-    def launch_resident_live(
-        self, context: LaunchContext, *, session_id: str
-    ) -> ClaudeCodeLiveSession:
-        """The HOT transport resumed over the retained native-state directory.
-
-        The process stays alive after the turn settles and takes the next turn
-        on stdin. It is only correct with a residency-lifetime credential in
-        ``context.credential`` — the thread-attributed residency grant from the
-        retained-session design's §6, renewed by host beats — because the pinned
-        CLI runs its whole life on its launch key. That measured behavior is why
-        the grant's lifetime and attribution follow the member residency.
-        """
-        if context.state_dir is None:
-            raise SessionStateUnavailable("a resident turn needs native session state")
-        return ClaudeCodeLiveSession(self, context, resume_session_id=session_id)
 
 
 class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
@@ -2868,7 +2747,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
 
     def __init__(
         self,
-        driver: HarnessDriver[ClaudeCodeRuntime],
+        driver: LiveDriver[ClaudeCodeRuntime],
         context: LaunchContext,
         *,
         resume_session_id: str | None = None,
@@ -3147,28 +3026,27 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             self._process.wait()
 
 
-_DRIVER_TYPES: dict[str, type[HarnessDriver[DialectRuntime]]] = {
-    "claude-code": ClaudeCodeDriver,
-    "codex": CodexDriver,
-    "pi": PiDriver,
-    "opencode": OpenCodeDriver,
-    "kilo": KiloDriver,
+#: Each registered CLI: the session class that speaks its live protocol, and
+#: whether a message reaches its running turn.
+_LIVE_SESSIONS: dict[str, tuple[_SessionType, bool]] = {
+    "claude-code": (ClaudeCodeLiveSession, True),
+    "codex": (CodexAppServerSession, True),
+    "pi": (PiRpcSession, False),
+    "opencode": (HttpAgentLiveSession, False),
+    "kilo": (HttpAgentLiveSession, False),
 }
 
 
-def get_driver(runtime_id: str) -> HarnessDriver[DialectRuntime]:
+def get_driver(runtime_id: str) -> LiveDriver[DialectRuntime]:
     """Resolve a registry id to its driver. Raises ``KeyError`` like get_runtime."""
     return driver_for(get_runtime(runtime_id))
 
 
-def driver_for(runtime: AgentRuntime) -> HarnessDriver[DialectRuntime]:
+def driver_for(runtime: AgentRuntime) -> LiveDriver[DialectRuntime]:
     """The driver for an already-resolved dialect adapter.
 
-    Only the five live-session drivers are executable. A dialect adapter with
-    no registered live transport is rejected instead of silently falling back
-    to the removed one-shot harness.
+    A new one each time: the adapter carries one session's state. A dialect
+    adapter with no live session is refused with ``KeyError``.
     """
-    driver_type = _DRIVER_TYPES.get(getattr(runtime, "name", ""))
-    if driver_type is None:
-        raise KeyError(getattr(runtime, "name", ""))
-    return driver_type(runtime)
+    session_type, mid_turn = _LIVE_SESSIONS[runtime.name]
+    return LiveDriver(runtime, session_type=session_type, mid_turn=mid_turn)

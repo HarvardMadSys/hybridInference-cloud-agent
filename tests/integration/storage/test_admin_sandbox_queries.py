@@ -12,6 +12,7 @@ from tests.integration.storage.test_agent_job_store import (
     _shared_claim_attestation,
 )
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db, store as store
+from tests.support.follow_ups import append_follow_up
 from tests.unit.test_ledger_snapshots import END, START
 from tests.unit.test_sandbox_resource_protocol import sample
 
@@ -745,7 +746,8 @@ async def test_stop_fences_claims_until_confirmation_then_allows_native_resume(d
             "UPDATE agent_sandboxes SET snapshot_state='quiescent' WHERE id=$1",
             sandbox["sandbox_id"],
         )
-    follow_up = await store.conversation_commands.create_follow_up(
+    follow_up = await append_follow_up(
+        db,
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="Resume after the administrator stop",
@@ -900,8 +902,11 @@ async def test_follow_up_reservation_keeps_running_container_visible(db, store, 
                 "UPDATE agent_sandboxes SET state = 'stopped', idle_deadline = NULL WHERE id = $1",
                 sandbox["sandbox_id"],
             )
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id=job["user_id"], prompt="Continue in the retained container"
+    follow_up = await append_follow_up(
+        db,
+        parent_job_id=job["id"],
+        user_id=job["user_id"],
+        prompt="Continue in the retained container",
     )
     assert follow_up is not None and follow_up.get("error") is None
     activated = await _claim(

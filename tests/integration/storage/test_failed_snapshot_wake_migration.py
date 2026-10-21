@@ -43,7 +43,9 @@ async def test_a_failure_wakes_the_coordinator_for_the_snapshot_behind_it(store,
     earlier = await store.snapshot.claim_due_sandbox_snapshot()
     assert earlier is not None
     assert await _record(store, earlier, _REJECTED_PATCH) == "captured"
-    second = await _next_turn(store, parent=first, sandbox=sandbox, prompt="drop the workflow")
+    second = await _next_turn(
+        pool, store, parent=first, sandbox=sandbox, prompt="drop the workflow"
+    )
     await _legacy_turn_snapshot(pool, sandbox["sandbox_id"], second)
     publication = await store.snapshot.claim_for_publish()
     assert publication is not None and publication["snapshot_id"] == earlier["snapshot_id"]

@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from tests.external.test_agent_mcp_end_to_end import _decode, _free_port, _reply_json
 from tests.external.test_resident_mcp_parity import Gateway
 from tests.servers.test_mcp_relay_host import FakeStore, _binding, _connection, _snapshot, _token
+from tests.support.one_shot import one_shot_argv
 
 from cloud_agent.api import mcp_relay
 from cloud_agent.api.deps import get_storage
@@ -126,9 +127,8 @@ async def test_claude_receives_github_results_after_relay_and_owner_approval(
 
         runtime = ClaudeCodeRuntime()
         runtime.binary = binary
-        argv, env = runtime.prepare(
+        live_argv, env = runtime.prepare_live(
             workdir=str(tmp_path),
-            task_prompt="Call the supplied GitHub MCP tool once, then report its result.",
             model="test-model",
             gateway_base_url=f"http://127.0.0.1:{model_port}",
             credential="synthetic-model-key",
@@ -141,6 +141,12 @@ async def test_claude_receives_github_results_after_relay_and_owner_approval(
         )
         # Use print mode with the production launch options. No account tokens
         # or developer settings are inherited into the synthetic model request.
+        argv = one_shot_argv(
+            "claude-code",
+            live_argv,
+            prompt="Call the supplied GitHub MCP tool once, then report its result.",
+            model="test-model",
+        )
         env = {**env, "PATH": os.environ.get("PATH", ""), "ENABLE_TOOL_SEARCH": "false"}
         process = await asyncio.create_subprocess_exec(
             *argv,

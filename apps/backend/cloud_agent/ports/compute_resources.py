@@ -279,18 +279,6 @@ class ComputeResourceRepository(Protocol):
         """Save a fenced observation, preserving a known deadline when renewal is unknown."""
         ...
 
-    async def upsert_node(
-        self,
-        *,
-        allocation_id: str,
-        node: dict[str, Any],
-        operation_id: str | None = None,
-        generation: int | None = None,
-        worker_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Observe an immutable node identity without rebinding retained execution state."""
-        ...
-
     async def create_node_registration(
         self,
         *,
