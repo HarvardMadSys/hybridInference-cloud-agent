@@ -925,8 +925,6 @@ async def _host_catalogue(
     identity: dict[str, Any],
     store: _McpRelayStorage,
     kind: CapabilityKind = CapabilityKind.TOOL,
-    *,
-    named: str | None = None,
 ) -> dict[str, tuple[Authorized, Any]]:
     """Every capability of one kind this job may use, keyed by what it is called.
 
@@ -945,18 +943,11 @@ async def _host_catalogue(
     contain the separator, so splitting would send ``a__b__tool`` to the wrong
     server; the map is built from the catalogue, so a name that is not in it is
     genuinely not callable.
-
-    ``named`` routes one tool or prompt name. Only the bindings that could
-    present it are resolved (:func:`protocol.may_present`): the others cannot
-    put that key in the map, so the lookup finds what the whole catalogue would
-    have, without reading and decrypting every connection on every call.
     """
     catalogue: dict[str, tuple[Authorized, Any]] = {}
     for binding_row in identity.get("mcp_bindings") or []:
         alias = str(binding_row.get("alias") or "")
         if not alias:
-            continue
-        if named is not None and not protocol.may_present(alias, named):
             continue
         try:
             # Discovery snapshots are local. Listing or routing one connection
@@ -1436,7 +1427,7 @@ async def _host_fetch(  # noqa: PLR0912 complexity baseline, #771
         kind = capability.kind
     else:
         kind = CapabilityKind.PROMPT
-        catalogue = await _host_catalogue(identity, store, kind, named=key)
+        catalogue = await _host_catalogue(protocol.presenting(identity, key), store, kind)
         entry = catalogue.get(key)
         if entry is None:
             return _error_reply(
@@ -1701,7 +1692,7 @@ async def _host_call(
             authorization=authorization,
             stateless=stateless,
         )
-    catalogue = await _host_catalogue(identity, store, named=name)
+    catalogue = await _host_catalogue(protocol.presenting(identity, name), store)
     entry = catalogue.get(name)
     if entry is None:
         return _error_reply(

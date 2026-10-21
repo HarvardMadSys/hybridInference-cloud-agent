@@ -795,6 +795,18 @@ def may_present(alias: str, presented: str) -> bool:
     return head.startswith(expected) or expected.startswith(head)
 
 
+def presenting(identity: Mapping[str, Any], presented: str) -> dict[str, Any]:
+    """``identity`` with only the bindings whose alias :func:`may_present` ``presented``.
+
+    A catalogue built from it routes that one name exactly as the whole
+    catalogue would, since no other binding can put that key in it, without
+    reading and decrypting every bound connection on every call.
+    """
+    rows = identity.get("mcp_bindings") or []
+    narrowed = [row for row in rows if may_present(str(row.get("alias") or ""), presented)]
+    return {**identity, "mcp_bindings": narrowed}
+
+
 def build_namespace(
     alias: str,
     capabilities: Sequence[Capability],

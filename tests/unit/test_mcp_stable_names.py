@@ -54,6 +54,18 @@ def test_a_readable_name_rules_out_every_other_alias():
     assert not protocol.may_present("docs", "github__get_issue")
 
 
+def test_a_routed_identity_keeps_only_the_bindings_that_may_present_its_name():
+    """Everything else about the job is kept, and the identity itself is not changed."""
+    bindings = [{"alias": "github"}, {"alias": "docs", "connection_id": 8}, {"alias": ""}]
+    identity = {"job_id": "job-1", "user_id": "user-1", "mcp_bindings": bindings}
+
+    narrowed = protocol.presenting(identity, protocol.presented_name("docs", "search"))
+
+    assert narrowed == {**identity, "mcp_bindings": [{"alias": "docs", "connection_id": 8}]}
+    assert identity["mcp_bindings"] == bindings
+    assert protocol.presenting({"job_id": "job-1"}, "docs__search")["mcp_bindings"] == []
+
+
 def test_common_short_names_keep_their_readable_form():
     """Existing ordinary names remain stable too."""
     assert protocol.presented_name("github", "get_issue") == "github__get_issue"
