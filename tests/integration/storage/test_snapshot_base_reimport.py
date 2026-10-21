@@ -46,14 +46,14 @@ def _fence(capture: dict) -> dict:
     }
 
 
-async def _published_twice(store) -> tuple[dict, dict, dict]:
+async def _published_twice(pool, store) -> tuple[dict, dict, dict]:
     """Two publications of one shared chat, each imported; returns the turn, group and second."""
     first, sandbox = await _first_turn(store)
     published = []
     parent = first
     for patch, commit in ((_FIRST_PATCH, _FIRST_COMMIT), (_SECOND_PATCH, _SECOND_COMMIT)):
         if published:
-            parent = await _next_turn(store, parent=parent, sandbox=sandbox, prompt="more")
+            parent = await _next_turn(pool, store, parent=parent, sandbox=sandbox, prompt="more")
         assert (await _request(store, parent))["requested"] is True
         capture = await store.snapshot.claim_due_sandbox_snapshot()
         assert capture is not None
@@ -67,8 +67,8 @@ async def _published_twice(store) -> tuple[dict, dict, dict]:
 
 async def _capture_of_pruned_base(store, pool) -> tuple[dict, dict, dict, dict]:
     """The owner asks again after two publications; Git has pruned the second."""
-    last_turn, sandbox, second = await _published_twice(store)
-    turn = await _next_turn(store, parent=last_turn, sandbox=sandbox, prompt="after gc")
+    last_turn, sandbox, second = await _published_twice(pool, store)
+    turn = await _next_turn(pool, store, parent=last_turn, sandbox=sandbox, prompt="after gc")
     requested = await _request(store, turn)
     assert requested["requested"] is True
     capture = await store.snapshot.claim_due_sandbox_snapshot()

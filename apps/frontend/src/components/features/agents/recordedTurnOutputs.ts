@@ -245,29 +245,3 @@ export function createRecordedOutputsSelector(): RecordedOutputsSelector {
     },
   };
 }
-
-/**
- * Read only this turn's own output evidence. Native diffs are recorded
- * snapshots, not a promise that every workspace edit was captured. In
- * particular, never substitute AgentJob.diffFiles or /git for missing events.
- * Input attachments have no generated-artifact contract and are not results.
- */
-export function recordedTurnOutputs(
-  job: RecordedTurnJob,
-  events: readonly RecordedTurnEvent[],
-): RecordedTurnOutputs | null {
-  if (!hasSettledTurn(job.state)) return null;
-  const diffs = events.filter(
-    (event) =>
-      event.event_type === 'diff' &&
-      (!('job_id' in event) || event.job_id === job.id) &&
-      job.current_attempt_id !== null &&
-      event.attempt_id === job.current_attempt_id,
-  );
-  const latest = diffs.reduce<AgentJobEventApi | undefined>(
-    (previous, event) => (!previous || event.seq > previous.seq ? event : previous),
-    undefined,
-  );
-  const files = latest ? recordedFiles(latest.payload) : [];
-  return outputsWithFiles(job, files);
-}

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .clock import clock
@@ -550,7 +550,7 @@ def to_record(
             for name, offset in measurement.marks
         ],
         "stages": _stages(measurement),
-        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "observed_at": datetime.now(UTC).isoformat(),
         "facts": measurement.facts,
     }
     # Promoted from facts because it is identity, not an observation: a stored

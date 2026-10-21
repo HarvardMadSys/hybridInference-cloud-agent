@@ -141,7 +141,7 @@ make check
 | Command | Checks |
 |---|---|
 | `make format` | Ruff formatting and automatic lint fixes; changes files. |
-| `make lint` | Ruff format check, Ruff lint without fixes, and pydocstyle. |
+| `make lint` | Ruff format check, and Ruff lint without fixes, docstring rules included. |
 | `make typecheck` | Mypy over all three backend packages. |
 | `make test` | Pytest excluding `external` and `dbtest`, with four workers and each file kept on one worker. |
 | `make check` | `format`, `lint`, `typecheck`, then `test`. Review any automatic fixes before committing. |
@@ -174,8 +174,8 @@ invocation works from any directory:
 `./scripts/ci-local.sh [all|backend|database|frontend]` from the checkout, or
 its absolute path elsewhere. The default tier is `all`.
 
-Backend checks run Ruff formatting and lint checks, pydocstyle, mypy, and pytest
-with four workers and `--dist loadfile`, excluding `external` and `dbtest`.
+Backend checks run Ruff formatting and lint checks, mypy, and pytest with four
+workers and `--dist loadfile`, excluding `external` and `dbtest`.
 The database tier starts a fresh PostgreSQL 15 container on a random loopback
 port, creates separate databases for all four workers, and removes the container
 on exit or interruption. It rejects a database run with skipped tests or fewer
@@ -284,13 +284,9 @@ fixtures to skip rather than fail. Parallel workers need separate pre-created
 databases. See [ENVIRONMENT.md](../../ENVIRONMENT.md#database) for defaults and
 worker naming.
 
-Deployment tests read the sandbox CLI version settings. If your development
-tool exports a different `CODEX_VERSION`, remove that inherited value for the
-check:
-
-```bash
-env -u CODEX_VERSION make check
-```
+Every test process runs with CI's umask of `022` and without an inherited
+`CODEX_VERSION` (see `tests/conftest.py`), so your shell's settings do not
+change the result of `make check`.
 
 For a frontend change, run these checks from the repository root:
 

@@ -83,7 +83,7 @@ def _normalize_title(value: str) -> str | None:
     return f"[agent] {title}"
 
 
-async def generate_pr_title(
+async def generate_pr_title(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     job: dict[str, Any],
     changed_files: list[str],
     *,

@@ -40,7 +40,6 @@ import {
   streamAgentJob,
   unpinAgentJob,
   writeAgentTerminalInput,
-  writeAgentJobFile,
 } from '../agents';
 import * as client from '../client';
 import { contractErrors } from './contract';
@@ -503,20 +502,6 @@ describe('agents api', () => {
     expect(fetchWithAuth).toHaveBeenCalledWith(
       expect.any(String),
       '/v1/agent/jobs/job%2Fone/files?path=src%2Fa%20file.ts',
-    );
-  });
-
-  it('writes a live workspace file with an encoded path', async () => {
-    fetchWithAuth.mockResolvedValue(
-      jsonResponse({ path: 'src/a file.ts', kind: 'file', content: 'updated' }),
-    );
-
-    await writeAgentJobFile('job/one', 'src/a file.ts', 'updated');
-
-    expect(fetchWithAuth).toHaveBeenCalledWith(
-      expect.any(String),
-      '/v1/agent/jobs/job%2Fone/files?path=src%2Fa%20file.ts',
-      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ content: 'updated' }) }),
     );
   });
 

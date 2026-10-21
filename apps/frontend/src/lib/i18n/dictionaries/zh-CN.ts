@@ -1,3 +1,5 @@
+import { modelSelectionZhCN } from './modelSelection';
+
 import type { TranslationKey } from './en';
 
 /**
@@ -455,7 +457,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'sidebar.archived': '已归档',
   'sidebar.noJobs': '还没有任务。',
   'sidebar.resize': '调整任务列表宽度',
-  'sidebar.showMore': '显示另外 {count} 条',
   'sidebar.newTaskIn': '在 {project} 中新建任务',
   'sidebar.runningOrQueued': '{count} 个运行中或排队中',
   'sidebar.pin': '置顶 {title}',
@@ -516,7 +517,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.backToChats': '返回对话',
   'settings.collapseNavigation': '收起设置导航',
   'settings.expandNavigation': '展开设置导航',
-  'settings.personalDescription': '管理你的个人资料和通知。',
+  'settings.personalDescription': '管理你的个人资料、默认模型和通知。',
   'settings.plugins': '插件与 MCP',
   'settings.pluginsDescription': '连接 MCP 服务器，管理 Agent 可使用的技能。',
   'settings.integrations': '集成',
@@ -532,7 +533,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.helpEnvironment': '2. 配置仓库环境（可选）',
   'settings.helpChat': '3. 开始对话',
   'settings.title': '我的设置',
-  'settings.description': '管理你的个人资料、连接、技能、记忆、通知和键盘快捷键。',
   'settings.shortcuts.title': '键盘快捷键',
   'settings.shortcuts.description':
     '自定义导航快捷键。修改立即生效，并为当前账号保存在此浏览器中。',
@@ -601,7 +601,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.memory.addLabel': '新记忆',
   'settings.memory.addPlaceholder': '写一条以后都要遵守的规则，例如：回复用中文。',
   'settings.memory.add': '添加',
-  'settings.memory.adding': '正在添加…',
   'settings.memory.memories': '已保存的记忆',
   'settings.memory.count': '{count}/30',
   'settings.memory.empty': '还没有记忆。你让 Agent 记住某件事或纠正它时，它会自动记下。',
@@ -634,6 +633,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.projectMemory.projectsError': '无法加载仓库列表。',
   'settings.projectMemory.noProjects': '你在仓库中发起任务后，这里会出现该仓库。',
   'settings.projectMemory.confirmTitle': '清除 {repo} 的记忆？',
+  ...modelSelectionZhCN,
   'settings.notifications.title': '通知',
   'settings.notifications.description':
     'Agent 提问或完成一轮任务时接收浏览器通知。请保持应用打开以接收通知。',
@@ -743,13 +743,11 @@ export const zhCN: Record<TranslationKey, string> = {
   'sessionArchive.terminal': '恢复会话后可使用终端。Git 和文件仍可查看。',
 
   'settings.appearance.title': '外观',
-  'settings.appearance.theme': '主题',
   'settings.appearance.light': '浅色',
   'settings.appearance.dark': '深色',
   'settings.appearance.system': '跟随系统',
 
   'settings.language.title': '语言',
-  'settings.language.label': '界面语言',
 
   'settings.gettingStarted.about': '新手指引是什么',
   'settings.gettingStarted.help': '带你连上 GitHub，跑出第一个任务。',
@@ -909,10 +907,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'composer.chooseRepository': '先选择仓库',
   'composer.branch': '分支',
   'composer.agent': 'Agent',
-  'picker.search': '搜索…',
-  'picker.noResults': '没有匹配的选项',
-  'composer.model': '模型',
-  'composer.reasoning': '推理强度',
   'composer.run': '运行',
   'composer.starting': '启动中…',
   'composer.runTitle': '运行 —— ⏎ 发送,⇧⏎ 换行',

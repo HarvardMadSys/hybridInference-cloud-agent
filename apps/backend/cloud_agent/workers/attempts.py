@@ -442,7 +442,7 @@ async def _renew_live_grants(
             asyncio.gather(*(_renew_bounded(row) for row in renewable)),
             timeout=GRANT_RENEWAL_PASS_DEADLINE_S,
         )
-    except (TimeoutError, asyncio.TimeoutError):
+    except TimeoutError:
         # Loud, and with both numbers. A pass that keeps running out of time is
         # a page too large or a gateway too slow, and the failure it eventually
         # produces — a sandbox losing authorization mid-run — points nowhere
@@ -636,7 +636,7 @@ async def _cleanup_failed_session_fork(
                 await grants.revoke(grant_id)
 
 
-async def _run_attempt_reaper(
+async def _run_attempt_reaper(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     store: _Reaping,
     *,
     interval_seconds: float = REAP_INTERVAL_S,

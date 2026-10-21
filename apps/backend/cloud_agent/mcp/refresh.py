@@ -41,7 +41,7 @@ import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -129,10 +129,10 @@ def _expiry_is_near(row: Mapping[str, Any], *, margin_seconds: int) -> bool:
     if expires_at is None:
         return False
     if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
+        expires_at = expires_at.replace(tzinfo=UTC)
     from datetime import timedelta
 
-    return expires_at - timedelta(seconds=margin_seconds) <= datetime.now(timezone.utc)
+    return expires_at - timedelta(seconds=margin_seconds) <= datetime.now(UTC)
 
 
 def can_refresh(row: Mapping[str, Any]) -> bool:

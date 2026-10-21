@@ -1733,16 +1733,16 @@ def test_the_wrapper_declares_the_relay_and_references_the_token(
         prefix,
         model_var,
         config_var,
-        AGENT_MCP_SERVERS=_json.dumps({"github": "http://agent-mcp:8000/v1/agent/mcp/github"}),
+        AGENT_MCP_SERVERS=_json.dumps({"session": "http://agent-mcp:8000/v1/agent/mcp"}),
         AGENT_MCP_TOKEN="ajt.mcp.attempt.token",
     )
     assert result.returncode == 0, result.stderr
 
     config = _json.loads(_Path(seen["env"][config_var]).read_text())
     assert config["mcp"] == {
-        "github": {
+        "session": {
             "type": "remote",
-            "url": "http://agent-mcp:8000/v1/agent/mcp/github",
+            "url": "http://agent-mcp:8000/v1/agent/mcp",
             "enabled": True,
             "headers": {
                 "Authorization": "Bearer {env:AGENT_MCP_TOKEN}",
@@ -1802,7 +1802,7 @@ def test_the_wrapper_refuses_connections_it_cannot_authenticate(
         prefix,
         model_var,
         config_var,
-        AGENT_MCP_SERVERS=_json.dumps({"github": "http://agent-mcp:8000/v1/agent/mcp/github"}),
+        AGENT_MCP_SERVERS=_json.dumps({"session": "http://agent-mcp:8000/v1/agent/mcp"}),
         AGENT_MCP_TOKEN="",
     )
     assert result.returncode == 64

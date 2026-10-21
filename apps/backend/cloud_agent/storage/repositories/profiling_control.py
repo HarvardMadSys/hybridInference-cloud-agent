@@ -416,40 +416,6 @@ class PostgresProfilingControlRepository:
                 or 0
             )
 
-    async def mark_run_lifecycle(
-        self,
-        *,
-        run_id: str,
-        lifecycle: str,
-        now: datetime,
-        deployment: str,
-        source: str,
-        created_by: str | None,
-        control_revision: int,
-        stop_reason: str = "",
-    ) -> None:
-        """Attach lifecycle and provenance to a run the control plane created."""
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                UPDATE agent_operation_profiling_runs
-                SET lifecycle = $2,
-                    deployment = COALESCE(deployment, $3),
-                    source = COALESCE(source, $4),
-                    created_by = COALESCE(created_by, $5),
-                    control_revision = COALESCE(control_revision, $6),
-                    stop_reason = COALESCE(NULLIF($7, ''), stop_reason)
-                WHERE run_id = $1
-                """,
-                run_id,
-                lifecycle,
-                deployment,
-                source,
-                created_by,
-                int(control_revision),
-                stop_reason,
-            )
-
     async def get_run(self, *, run_id: str) -> dict[str, Any] | None:
         """Return one experiment manifest with its lifecycle, or ``None``."""
         async with self._pool.acquire() as conn:

@@ -12,7 +12,6 @@ has to move with it.
 
 from __future__ import annotations
 
-import contextlib
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
@@ -30,7 +29,6 @@ from cloud_agent.api._workspace_access import _sandbox_manager_for_job, _workspa
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
-    get_log_store,
     get_source_control,
     get_storage,
     require_store,
@@ -40,6 +38,7 @@ from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.goals.models import GoalConflict
+from cloud_agent.ledger import JobLedgerSummary, summarize_job_ledger
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
     AgentAttemptTelemetry,
@@ -71,6 +70,7 @@ if TYPE_CHECKING:
         ExecutionQueries,
         GoalRepository,
         HostPoolRepository,
+        LedgerRepository,
         McpConnectionRepository,
         PendingMessageRepository,
         SandboxRepository,
@@ -115,6 +115,7 @@ class _JobsStorage(Protocol):
     execution_queries: ExecutionQueries
     goals: GoalRepository
     host_pool: HostPoolRepository
+    ledger: LedgerRepository
     mcp: McpConnectionRepository
     pending_messages: PendingMessageRepository
     sandbox: SandboxRepository
@@ -128,26 +129,28 @@ def _require_store(store: _JobsStorage | None) -> _JobsStorage:
     return require_store(store)
 
 
-async def _job_usage(log_store: Any, job_id: str) -> dict[str, Any]:
-    """Read one job's spend and token totals from the billing ledger.
+def _job_usage_fields(summary: JobLedgerSummary) -> dict[str, Any]:
+    """Map one job's ledger summary onto the response's flat usage fields.
 
-    Deliberately the ledger and not the agent's own report: a run that
+    Deliberately the grant ledger and not the agent's own report: a run that
     misstates its usage — which is a thing models do — cannot change what the
-    owner is shown, and it is the same source the budget check already trusts.
-    Absent on a deployment with no log store, rather than a fabricated zero.
+    owner is shown. The same accounting the usage and admin surfaces use, so a
+    job means the same thing everywhere.
+
+    A snapshot that has not answered (``pending``, ``unavailable``) has no
+    totals, and the fields then stay ``None``: absent rather than a
+    fabricated zero that would read as "this job was free".
     """
-    usage: dict[str, Any] = {}
-    cost_getter = getattr(log_store, "get_agent_job_cost", None)
-    if cost_getter is not None:
-        with contextlib.suppress(Exception):
-            usage["spent_usd"] = await cost_getter(job_id)
-    usage_getter = getattr(log_store, "get_agent_job_usage", None)
-    if usage_getter is not None:
-        with contextlib.suppress(Exception):
-            totals = await usage_getter(job_id)
-            usage["tokens_in"] = int(totals.get("tokens_in", 0))
-            usage["tokens_out"] = int(totals.get("tokens_out", 0))
-            usage["model_calls"] = int(totals.get("calls", 0))
+    totals = summary.totals
+    if totals is None:
+        return {}
+    usage: dict[str, Any] = {
+        "tokens_in": totals.tokens_in,
+        "tokens_out": totals.tokens_out,
+        "model_calls": totals.calls,
+    }
+    if totals.spent_usd is not None:
+        usage["spent_usd"] = float(totals.spent_usd)
     return usage
 
 
@@ -207,7 +210,6 @@ async def get_agent_job(
     include_resources: bool = Query(True),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _JobsStorage | None = Depends(get_storage),
-    log_store: Any | None = Depends(get_log_store),
 ) -> AgentJobResponse:
     """Fetch one of the caller's agent jobs, with what it has spent so far."""
     job_store = _require_store(store)
@@ -226,9 +228,13 @@ async def get_agent_job(
         telemetry = await job_store.execution_queries.job_turn_telemetry(
             job_id=job_id, attempt_id=attempt_telemetry[-1]["attempt_id"]
         )
+    summary = summarize_job_ledger(
+        ledger_rows=await job_store.ledger.ledger_rows_for_job(job_id=job_id),
+        terminal=job.get("state") in TERMINAL_STATES,
+    )
     return _job_response(
         job,
-        await _job_usage(log_store, job_id),
+        _job_usage_fields(summary),
         telemetry,
         attempt_telemetry,
     )

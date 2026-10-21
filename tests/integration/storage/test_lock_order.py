@@ -40,6 +40,7 @@ from tests.integration.storage.test_sandbox_restore_store import (
     _covered,
     _state as _restore_state,
 )
+from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.storage._sql.sandbox import fence_sandbox_start
 from cloud_agent.storage.repositories import (
@@ -97,10 +98,10 @@ async def _run_turn(
     )
 
 
-async def _run_next_turn(store: Storage, parent: dict, sandbox: dict) -> dict:
+async def _run_next_turn(pool, store: Storage, parent: dict, sandbox: dict) -> dict:
     """Send a follow-up into the same workspace and run it to the end."""
-    follow = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id=parent["user_id"], prompt="and update the docs"
+    follow = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id=parent["user_id"], prompt="and update the docs"
     )
     assert follow is not None and follow.get("error") is None
     claim = await _claim(
@@ -232,7 +233,7 @@ async def test_a_capture_handed_back_folds_into_the_snapshot_a_turn_settled_mean
     capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None and capture["anchor_job_id"] == first["id"]
 
-    second = await _run_next_turn(store, first, sandbox)
+    second = await _run_next_turn(pool, store, first, sandbox)
     await _legacy_turn_snapshot(pool, sandbox["sandbox_id"], second)
     opened = [
         row
@@ -333,7 +334,7 @@ async def test_a_capture_handed_back_does_not_wait_for_a_turn_a_follow_up_holds(
     await _request(store, first)
     capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None
-    second = await _run_next_turn(store, first, sandbox)
+    second = await _run_next_turn(pool, store, first, sandbox)
     await _legacy_turn_snapshot(pool, sandbox["sandbox_id"], second)
     recover = None
     async with pool.acquire() as follow_up:
@@ -873,8 +874,8 @@ async def test_losing_an_activation_waits_for_a_deletion_that_holds_its_queued_t
     conversation after its attempt, where deletion starts.
     """
     job, claim, sandbox = await _reserve_shared_chat(store)
-    queued = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    queued = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
     )
     assert queued is not None and queued.get("error") is None
     abandon = None
@@ -927,8 +928,8 @@ async def test_a_claim_takes_its_turns_group_before_the_host_row(pool, store: St
     """
     job, claim, sandbox = await _reserve_shared_chat(store)
     await _run_turn(store, job, claim, sandbox)
-    follow = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    follow = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
     )
     assert follow is not None and follow.get("error") is None
     claiming = None
@@ -974,8 +975,8 @@ async def test_a_claim_counts_an_environment_run_started_while_it_waited(
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
     job, claim, sandbox = await _reserve_shared_chat(store)
     await _run_turn(store, job, claim, sandbox)
-    follow = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    follow = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
     )
     assert follow is not None and follow.get("error") is None
     environment = await _save_environment(store)
@@ -1163,8 +1164,8 @@ async def test_the_attempt_reaper_ends_a_turn_by_the_membership_it_wrote(pool, s
     context lost, though the membership said the context was intact.
     """
     job, claim, _sandbox = await _reserve_shared_chat(store)
-    queued = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    queued = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
     )
     assert queued is not None and queued.get("error") is None
     await _expire_attempt(pool, store, claim["attempt_id"])
@@ -1219,8 +1220,8 @@ async def test_releasing_an_activation_waits_for_the_reaper_holding_its_attempt(
     the attempt first now: it waits, and the reaper's answer stands alone.
     """
     job, claim, sandbox = await _reserve_shared_chat(store)
-    queued = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    queued = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
     )
     assert queued is not None and queued.get("error") is None
     await _expire_attempt(pool, store, claim["attempt_id"])

@@ -11,7 +11,7 @@ import struct
 import sys
 import time
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 EXPERIMENT = "f47eb2a4-a0ac-4656-80da-8a638d2d263c"
-NOW = datetime(2026, 10, 4, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 4, 12, tzinfo=UTC)
 TOKEN = "private-account-token-never-in-errors"
 CONFIG = {"credential_ref": "account-1", "project": "research", "external_id": EXPERIMENT}
 SSH = {
@@ -1624,7 +1624,7 @@ async def test_a_request_that_never_left_is_retryable_even_when_it_mutates(failu
 def tls_files(tmp_path_factory: pytest.TempPathFactory) -> SimpleNamespace:
     """A test CA, and a current and an expired certificate it signed for localhost."""
     directory = tmp_path_factory.mktemp("cloudlab-tls")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ca_key = ec.generate_private_key(ec.SECP256R1())
     ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test CA")])
     ca = (

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import asyncpg
 import pytest
@@ -10,6 +10,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from tests.integration.storage.test_agent_job_store import pool as pool
 from tests.integration.storage.test_schema_upgrade import _db_config
+from tests.support.mcp_connectors import insert_connector
 from tests.support.migrations import REPO, apply_migrations, downgrade_to
 
 from cloud_agent.storage.assembly import Storage
@@ -19,10 +20,10 @@ pytestmark = pytest.mark.dbtest
 _BEFORE = "0057_admin_sandbox_trajectory"
 _THIS = "0058_mcp_connector_invariant"
 _NEXT = "0059_counter_constraints"
-_HEAD = "0089_superseded_removals"
+_HEAD = "0090_user_model_preferences"
 _OWNER = "user-owner"
 _OTHER = "user-other"
-_PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
+_PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=UTC)
 
 
 def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
@@ -96,7 +97,10 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert script.get_revision("0088_sandbox_retry_budget").down_revision == (
         "0087_sandbox_deletion_attempts"
     )
-    assert script.get_revision(_HEAD).down_revision == "0088_sandbox_retry_budget"
+    assert (
+        script.get_revision("0089_superseded_removals").down_revision == "0088_sandbox_retry_budget"
+    )
+    assert script.get_revision(_HEAD).down_revision == "0089_superseded_removals"
 
 
 async def _local_connection(
@@ -140,27 +144,10 @@ async def test_migration_repairs_routes_and_preserves_only_the_canonical_pair(po
     downgrade_to(config, _BEFORE)
     store = Storage(pool)
 
-    canonical = await store.mcp.create_mcp_connector(
-        user_id=_OWNER,
-        name="Canonical",
-        registration_hash="migration-canonical",
-    )
-    extra = await store.mcp.create_mcp_connector(
-        user_id=_OWNER,
-        name="Extra",
-        registration_hash="migration-extra",
-    )
-    wrong_owner = await store.mcp.create_mcp_connector(
-        user_id=_OTHER,
-        name="Other owner's",
-        registration_hash="migration-other-owner",
-    )
-    revoked = await store.mcp.create_mcp_connector(
-        user_id=_OWNER,
-        name="Revoked",
-        registration_hash="migration-revoked",
-    )
-    assert await store.mcp.revoke_mcp_connector(connector_id=int(revoked["id"]), user_id=_OWNER)
+    canonical = await insert_connector(pool, user_id=_OWNER, name="Canonical")
+    extra = await insert_connector(pool, user_id=_OWNER, name="Extra")
+    wrong_owner = await insert_connector(pool, user_id=_OTHER, name="Other owner's")
+    revoked = await insert_connector(pool, user_id=_OWNER, name="Revoked", revoked=True)
 
     valid = await _local_connection(
         store, label="Valid canonical", connector_id=int(canonical["id"])

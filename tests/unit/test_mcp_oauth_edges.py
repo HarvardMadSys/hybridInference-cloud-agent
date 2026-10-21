@@ -19,7 +19,7 @@ the part under test and the HTTP call under it is already covered.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -558,7 +558,7 @@ class TestTokenResponses:
 
     def test_the_margin_is_what_decides_a_refresh_not_the_expiry(self) -> None:
         """A tool call can take minutes, so renewal is not left to the boundary."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         soon = oauth.TokenSet(access_token="a", expires_at=now + timedelta(seconds=30))
         assert soon.needs_refresh(now=now)
         comfortable = oauth.TokenSet(access_token="a", expires_at=now + timedelta(hours=1))
@@ -733,7 +733,7 @@ class TestScopesAndRevocation:
             ),
             resource=_RESOURCE,
             redirect_uri="https://agent.example.com/callback",
-            expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
         )
         assert flow.expired
 

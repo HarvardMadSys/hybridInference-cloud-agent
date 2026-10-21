@@ -105,6 +105,23 @@ entries it adds or marks fuzzy, and run `make docs-verify`.
 [Translating the docs](docs/developer/translations.md) has the workflow and
 terminology.
 
+Complexity and size only ratchet down (#771). New code stays within the limits:
+backend functions within McCabe 15, 12 branches and 50 statements, backend
+modules within 1,500 lines, frontend functions within complexity 15 and frontend
+files within 800 lines. The backend limits cover `apps/backend` only, not
+tests, scripts, `deploy/` or migrations; the frontend limits skip
+`*.test.ts(x)`, `__tests__/` and `e2e/`.
+
+- A backend function over a limit today carries a `noqa` naming #771. Never add
+  one to new code. Once the function is back under, `make check` deletes the
+  `noqa` (ruff's `RUF100` fix).
+- Oversized backend modules are listed in `tests/unit/test_file_size_budget.py`
+  and may not grow. Lower an entry when its module shrinks.
+- `apps/frontend/eslint-ratchet.json` lists the frontend files over a limit,
+  each at its current value. ESLint applies a listed value to every function in
+  that file, so it lets a new function there go past 15; keep new functions
+  within 15 anyway. Lower an entry when its file improves.
+
 If `apps/frontend/node_modules` is absent, install it before reporting checks
 as blocked. From `apps/frontend`, run `npm ci`, `npm run type-check`, and
 `npm test`; `vitest` and `tsc` come from the project's development dependencies.

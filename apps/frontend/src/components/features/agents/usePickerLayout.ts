@@ -9,6 +9,7 @@ export function usePickerLayout(
   panel: RefObject<HTMLDivElement>,
   searchable: boolean,
   count: number,
+  variant: 'compact' | 'field' = 'compact',
 ) {
   const [style, setStyle] = useState<CSSProperties>();
   useLayoutEffect(() => {
@@ -21,11 +22,15 @@ export function usePickerLayout(
       const right = left + (viewport?.width ?? window.innerWidth) - 16;
       const bottom = top + (viewport?.height ?? window.innerHeight) - 16;
       const bounds = trigger.current.getBoundingClientRect();
-      const width = Math.min(searchable ? 320 : 240, right - left);
+      const width = Math.min(
+        variant === 'field' ? Math.max(280, bounds.width) : searchable ? 320 : 240,
+        right - left,
+      );
       const above = bounds.top - top - 8;
       const below = bottom - bounds.bottom - 8;
       const desired = Math.min(384, 44 + (searchable ? 46 : 0) + count * 36);
-      const placeBelow = above < desired && below > above;
+      const placeBelow =
+        variant === 'field' ? below >= desired || below > above : above < desired && below > above;
       setStyle({
         width,
         left: Math.max(left, Math.min(bounds.left, right - width)),
@@ -52,6 +57,6 @@ export function usePickerLayout(
       window.visualViewport?.removeEventListener('resize', update);
       window.visualViewport?.removeEventListener('scroll', update);
     };
-  }, [open, trigger, panel, searchable, count]);
+  }, [open, trigger, panel, searchable, count, variant]);
   return style;
 }

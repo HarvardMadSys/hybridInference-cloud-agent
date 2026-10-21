@@ -10,7 +10,7 @@ actually opens.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -68,12 +68,12 @@ class FakeHostStore(AllCapabilities):
             "multipart_threshold_bytes": 8 * 1024**2,
             "multipart_part_bytes": 8 * 1024**2,
             "revision": 0,
-            "updated_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(UTC),
         }
         self.audit = _AuditTrail()
 
     def seed(self, host: str, *, active: bool = False, seen_minutes_ago: float = 0.0) -> None:
-        seen = datetime.now(timezone.utc) - timedelta(minutes=seen_minutes_ago)
+        seen = datetime.now(UTC) - timedelta(minutes=seen_minutes_ago)
         self.rows[host] = {
             "host": host,
             "last_worker_id": f"w-{host}",
@@ -97,7 +97,7 @@ class FakeHostStore(AllCapabilities):
             key=lambda row: row["last_seen_at"],
             reverse=True,
         )
-        return rows, self.active_host, dict(self.runtime_versions), datetime.now(timezone.utc)
+        return rows, self.active_host, dict(self.runtime_versions), datetime.now(UTC)
 
     async def set_runtime_version(self, *, runtime: str, version: str | None) -> bool:
         # Mirrors the store: a version no host offers is refused, never stored.
@@ -166,7 +166,7 @@ class FakeHostStore(AllCapabilities):
             **settings,
             "s3_uri": "s3://freeinference/cloud-agent/sandbox",
             "revision": expected_revision + 1,
-            "updated_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(UTC),
         }
         return {**self.archive_settings, "_changed": True}
 

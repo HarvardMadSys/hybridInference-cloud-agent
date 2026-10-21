@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { expectRequestsMatchContract } from './__tests__/contract';
 import {
-  drainAgentRunnerHost,
   forgetAgentRunnerHost,
   getAgentRunnerHostCapacityHistory,
   getAgentRunnerHosts,
@@ -42,7 +41,6 @@ describe('admin runner host API client', () => {
     await setAgentRuntimeVersion('claude-code', '2.1.300');
     await setAgentRuntimeVersion('claude-code', null);
     await forgetAgentRunnerHost('host/a');
-    await drainAgentRunnerHost('host/a');
     await undrainAgentRunnerHost('host/a');
     await setAgentRunnerHostSlots('host/a', 8);
     await setAgentRunnerHostSlots('host/a', null);
@@ -56,13 +54,11 @@ describe('admin runner host API client', () => {
   });
 
   it('names a host by its escaped enrollment name in every action', async () => {
-    await drainAgentRunnerHost('host/a');
+    await undrainAgentRunnerHost('host/a');
     expect(lastCall()).toMatchObject({
-      path: '/admin/agent/runner-hosts/host%2Fa/drain',
+      path: '/admin/agent/runner-hosts/host%2Fa/undrain',
       init: { method: 'POST' },
     });
-    await undrainAgentRunnerHost('host/a');
-    expect(lastCall().path).toBe('/admin/agent/runner-hosts/host%2Fa/undrain');
     await forgetAgentRunnerHost('host/a');
     expect(lastCall()).toMatchObject({
       path: '/admin/agent/runner-hosts/host%2Fa',

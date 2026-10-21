@@ -281,7 +281,7 @@ async def _finish_attempt(
         )
 
 
-async def delete_one_archived_sandbox(
+async def delete_one_archived_sandbox(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     store: _DeletionStorage,
     *,
     archive_factory: Callable[[], S3SandboxArchiveStore] = S3SandboxArchiveStore.from_settings,

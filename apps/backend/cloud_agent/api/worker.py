@@ -382,14 +382,13 @@ def _worker_claims(authorization: str | None) -> dict[str, Any]:
             detail={"error": {"type": "unauthorized", "message": f"Invalid worker token: {exc}"}},
         ) from exc
     if claims.get("scope") != SCOPE_FULL:
-        # Anything that is not the runner's full-scope control token. Two
-        # narrower scopes exist and neither belongs here: ``mcp``, which the
-        # sandbox carries to reach this service's MCP relay, and ``model``,
-        # which predates the gateway grant and is kept only for jobs started
-        # before the cutover.
+        # Anything that is not the runner's full-scope control token. The one
+        # narrower worker scope is ``mcp``, which the sandbox carries to reach
+        # this service's MCP relay. (The old ``model`` scope, which predated
+        # the gateway grant, no longer parses at all: #822.)
         #
-        # This is the structural refusal for both — and the reason the relay's
-        # own check is written positively rather than as "not full". A sandbox
+        # This is the structural refusal — and the reason the relay's own
+        # check is written positively rather than as "not full". A sandbox
         # credential arriving on the worker surface is what an escaped
         # credential looks like.
         raise HTTPException(
@@ -398,7 +397,7 @@ def _worker_claims(authorization: str | None) -> dict[str, Any]:
                 "error": {
                     "type": "insufficient_scope",
                     "message": (
-                        "This credential may only be used for model calls, not for "
+                        "This credential may only be used for MCP relay calls, not for "
                         "reporting job state."
                     ),
                 }
@@ -929,7 +928,7 @@ async def worker_claim(
         ) from exc
 
 
-async def _hand_over_claim(
+async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     job_store: _WorkerStorage,
     claim: dict[str, Any],
     *,

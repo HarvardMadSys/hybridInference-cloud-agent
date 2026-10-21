@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cloud_agent_host import sandbox_archive_runtime as archive_runtime
-from cloud_agent_host.chat_sandbox import FINAL_ARCHIVE_MARKER_MAX_BYTES
+from cloud_agent_host.chat_sandbox_markers import FINAL_ARCHIVE_MARKER_MAX_BYTES
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveReceipt

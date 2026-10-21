@@ -161,21 +161,6 @@ export function toTrajectory(events: (AgentJobEventApi | AgentThreadEventApi)[])
   });
 }
 
-/**
- * Filter rows by a free-text query.
- *
- * Matches the label, the preview and the event type, which is what a reader
- * can see on the row. Searching the full payload would find rows whose match
- * is invisible until they open one, which reads as a broken filter.
- */
-export function filterTrajectory(rows: TrajectoryRow[], query: string): TrajectoryRow[] {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return rows;
-  return rows.filter((row) =>
-    `${row.label} ${row.detail} ${row.eventType}`.toLowerCase().includes(needle),
-  );
-}
-
 /** Serialize the stored stream for download, exactly as the platform holds it. */
 export function toSessionLog(events: (AgentJobEventApi | AgentThreadEventApi)[]): string {
   return events.map((event) => JSON.stringify(event)).join('\n');

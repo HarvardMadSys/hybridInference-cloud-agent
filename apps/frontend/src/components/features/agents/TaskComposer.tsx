@@ -40,7 +40,9 @@ import { useComposerMcp } from './mcp/useComposerMcp';
 import { useComposerSsh } from './ssh/useComposerSsh';
 import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
-import { readDraftPlugins, validPluginForRuntime } from '@/lib/pluginConfiguration';
+import { validPluginForRuntime } from '@/lib/pluginConfiguration';
+import { readNewTaskDraft } from './newTaskDraft';
+import { useComposerModel } from './useComposerModel';
 import { EnvironmentPicker, type EnvironmentSelection } from './environment/EnvironmentPicker';
 import { UserAvatar } from './UserAvatar';
 import { UserHomeInsights } from './UserHomeInsights';
@@ -76,31 +78,6 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   return (
     <TaskComposerContent key={userId ?? 'anonymous'} userId={userId} initialRepo={initialRepo} />
   );
-}
-
-interface NewTaskDraft {
-  task: string;
-  repo: string;
-  runtime: string;
-  model: string;
-  effort: string;
-  branch: string;
-  plugins: AgentPluginInputApi[];
-}
-
-function readNewTaskDraft(value: string): NewTaskDraft | null {
-  try {
-    const saved: unknown = JSON.parse(value);
-    if (!saved || typeof saved !== 'object') return null;
-    const record = saved as Record<string, unknown>;
-    const fields = ['task', 'repo', 'runtime', 'model', 'effort', 'branch'] as const;
-    if (!fields.every((field) => typeof record[field] === 'string')) return null;
-    const plugins = readDraftPlugins(record.plugins);
-    if (plugins === null) return null;
-    return { ...(saved as NewTaskDraft), plugins };
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -157,7 +134,6 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const [readingDrops, setReadingDrops] = useState(0);
   const taskBox = useRef<HTMLTextAreaElement>(null);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
-  const [models, setModels] = useState<string[]>([]);
   // Empty until the owner picks one. A task changes a real repository, so
   // where it runs is never a default — see RepositoryPicker. The one exception
   // is the temporary workspace (`TEMPORARY_WORKSPACE`), which changes no
@@ -195,7 +171,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const [branch, setBranch] = useState(draft?.branch ?? '');
   const [branchOptionsRepo, setBranchOptionsRepo] = useState<string | null>(null);
   const [runtime, setRuntime] = useState(draft?.runtime ?? '');
-  const [model, setModel] = useState(draft?.model ?? '');
+  const { models, model, chosenModel, chooseModel, adoptModels, missingModel, modelControl } =
+    useComposerModel(draft?.chosenModel);
   const [effort, setEffort] = useState(draft?.effort ?? '');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -208,8 +185,18 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const savedBranch =
     branchOptionsRepo === repo ? branch : draft?.repo === repo ? draft.branch : '';
   useEffect(() => {
-    saveDraft(JSON.stringify({ task, repo, runtime, model, effort, branch: savedBranch, plugins }));
-  }, [saveDraft, task, repo, runtime, model, effort, savedBranch, plugins]);
+    saveDraft(
+      JSON.stringify({
+        task,
+        repo,
+        runtime,
+        chosenModel,
+        effort,
+        branch: savedBranch,
+        plugins,
+      }),
+    );
+  }, [saveDraft, task, repo, runtime, chosenModel, effort, savedBranch, plugins]);
   const goalCommand = useGoalCommand({
     value: task,
     setValue: setTask,
@@ -225,34 +212,29 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const tRef = useRef(t);
   tRef.current = t;
 
-  const applyConfig = useCallback((cfg: AgentConfigApi) => {
-    // The config's model list is the create endpoint's own predicate;
-    // /v1/models answers for the browsing user and offered models whose
-    // first agent call then 404ed.
-    const modelIds = cfg.models ?? [];
-    setConfig(cfg);
-    setModels(modelIds);
-    // A re-read keeps every choice still on offer and drops only the ones that
-    // are not. A repository is never filled in: see the effect below. With no
-    // repository on offer — GitHub not connected, down, or giving the App none
-    // — the temporary workspace is the only place a task can run, and it
-    // changes no real repository, so it is chosen.
-    const repos = selectableRepos(cfg);
-    setRepo((current) =>
-      current === TEMPORARY_WORKSPACE || (current && repos.includes(current))
-        ? current
-        : repos.length === 0
-          ? TEMPORARY_WORKSPACE
-          : '',
-    );
-    setRuntime((current) =>
-      current && cfg.runtimes.includes(current) ? current : (cfg.runtimes[0] ?? ''),
-    );
-    const defaultModel = modelIds.includes('deepseek-v4-flash')
-      ? 'deepseek-v4-flash'
-      : (modelIds[0] ?? '');
-    setModel((current) => (current && modelIds.includes(current) ? current : defaultModel));
-  }, []);
+  const applyConfig = useCallback(
+    (cfg: AgentConfigApi) => {
+      setConfig(cfg);
+      adoptModels(cfg);
+      // A re-read keeps every choice still on offer and drops only the ones that
+      // are not. A repository is never filled in: see the effect below. With no
+      // repository on offer — GitHub not connected, down, or giving the App none
+      // — the temporary workspace is the only place a task can run, and it
+      // changes no real repository, so it is chosen.
+      const repos = selectableRepos(cfg);
+      setRepo((current) =>
+        current === TEMPORARY_WORKSPACE || (current && repos.includes(current))
+          ? current
+          : repos.length === 0
+            ? TEMPORARY_WORKSPACE
+            : '',
+      );
+      setRuntime((current) =>
+        current && cfg.runtimes.includes(current) ? current : (cfg.runtimes[0] ?? ''),
+      );
+    },
+    [adoptModels],
+  );
 
   // The one place a repository is chosen for the owner: they opened the page
   // from a project's "New task in …", which is them choosing it. Applied when
@@ -283,7 +265,6 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     // opened the page, wherever they are still on offer.
     if (first && draft) {
       if (draft.runtime && config.runtimes.includes(draft.runtime)) setRuntime(draft.runtime);
-      if (draft.model && (config.models ?? []).includes(draft.model)) setModel(draft.model);
       if (
         (!initialRepo || draft.repo === initialRepo) &&
         draft.repo &&
@@ -467,7 +448,15 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
       // Either trip is for a repository: come back to the picker, not to the
       // temporary workspace the owner is leaving to get one.
       saveDraft(
-        JSON.stringify({ task, repo: '', runtime, model, effort, branch: savedBranch, plugins }),
+        JSON.stringify({
+          task,
+          repo: '',
+          runtime,
+          chosenModel,
+          effort,
+          branch: savedBranch,
+          plugins,
+        }),
       );
     }
     rememberReturn(
@@ -480,7 +469,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         task,
         repo: temporary ? '' : repo,
         runtime,
-        model,
+        chosenModel,
       },
       userId,
     );
@@ -629,9 +618,10 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
 
   async function run(acknowledged = acknowledgement.acknowledged) {
     if (!canRun) {
-      // The one thing missing is where to run it: ask, rather than ignore the
-      // key. Nothing is sent until a repository has actually been chosen.
+      // Ask where to run, or point at the empty model, rather than ignore the
+      // key. Nothing is sent until both have actually been chosen.
       if (missingRepository && task.trim() && !busy) openRepositoryPicker(true);
+      if (!busy) modelControl.pointIfMissing();
       return;
     }
     // The first temporary workspace waits for its owner to say they know its
@@ -886,7 +876,11 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
               label={t('composer.model')}
               value={model}
               options={models}
-              onChange={setModel}
+              onChange={chooseModel}
+              // Empty until something resolves for this owner. The model is
+              // never filled in for them: see applyConfig.
+              placeholder={t('composer.chooseModelPlaceholder')}
+              triggerRef={modelControl.attach}
             />
             <Picker
               label={t('composer.reasoning')}
@@ -900,7 +894,13 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
             type="button"
             disabled={!canRun}
             onClick={() => void run()}
-            title={missingRepository ? t('composer.chooseRepository') : t('composer.runTitle')}
+            title={
+              missingRepository
+                ? t('composer.chooseRepository')
+                : missingModel
+                  ? t('composer.chooseModel')
+                  : t('composer.runTitle')
+            }
             className="ui-button ui-button-primary ml-auto shrink-0 px-3 text-xs"
           >
             {submitting || goalCommand.busy ? t('composer.starting') : t('composer.run')}

@@ -26,12 +26,10 @@ MCP_SERVERS_ENV = "AGENT_MCP_SERVERS"
 
 # The name every runtime knows the platform's MCP surface by.
 #
-# **One entry, not one per connection.** The relay's bare prefix is a merged
+# **One entry, not one per connection.** The relay's one endpoint is a merged
 # host: it answers ``initialize`` itself and presents every connection of the
 # job as a single catalogue whose tool and prompt names carry the connection's
-# alias. A per-connection entry would therefore present that same catalogue once
-# per connection, and a client that fanned out over them would offer every tool
-# as many times as the conversation has servers.
+# alias.
 #
 # The name is a label the CLI prefixes onto tool names, not an alias the relay
 # resolves -- aliases stay in the control plane, where a per-conversation name
@@ -60,14 +58,10 @@ def merged_mcp_server(tool_name: object, *, separator: str) -> dict[str, str]:
 class RuntimeCapabilities:
     """What a runtime can do, so the platform does not assume.
 
-    Session continuity is deliberately not declared here: it belongs to
-    ``drivers.HarnessCapabilities.continuity``, the only value the runner
-    consults when picking a turn's continuity path.
+    How a session continues, forks and takes a message mid-turn is declared by
+    the driver (``drivers.HarnessCapabilities``), not here.
     """
 
-    cost_report: bool = False
-    normalized_events: bool = False
-    tier: int = 2
     #: The reasoning-effort levels this adapter can actually put on the wire,
     #: in the CLI's own vocabulary. Empty means "cannot express effort", which
     #: is what every runtime whose flag nobody has verified declares — the
@@ -98,7 +92,7 @@ class RuntimeMCPConfig:
     connections it may be offered; the relay resolves each alias against that
     job's own bindings when the catalogue is built. The endpoints themselves no
     longer depend on those names — see :meth:`AgentRuntime.relay_urls` — so a
-    runtime is never told a per-connection address it could reconstruct an
+    runtime is never told an address it could reconstruct an
     alias from.
 
     **A separate address and a separate credential from inference.** MCP is
@@ -138,31 +132,18 @@ class RuntimeEffortUnsupportedError(RuntimeError):
 
 
 class AgentRuntime:
-    """Base adapter. Subclasses override the three questions."""
+    """Base adapter for one Agent CLI.
+
+    Each adapter builds its CLI's resident live process (``prepare_live``,
+    whose arguments differ between dialects) and describes what the CLI can
+    do. ``reasoning_effort`` is ``None`` for "let the CLI and the model
+    decide", which is every turn that predates the control and every pair
+    that cannot offer it; any other value must be one the runtime declared
+    (:meth:`_check_effort`).
+    """
 
     name = "generic"
     binary = ""
-
-    def prepare(
-        self,
-        *,
-        workdir: str,
-        task_prompt: str,
-        model: str,
-        gateway_base_url: str,
-        credential: str,
-        provides_isolation: bool = False,
-        mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
-        reasoning_effort: str | None = None,
-    ) -> tuple[list[str], dict[str, str]]:
-        """Return ``(argv, extra_env)`` to run this task headlessly.
-
-        ``reasoning_effort`` is ``None`` for "let the CLI and the model decide",
-        which is every turn that predates the control and every pair that
-        cannot offer it. A non-``None`` value must be one this runtime
-        declared; see :meth:`effort_args`.
-        """
-        raise NotImplementedError
 
     def _check_effort(self, effort: str | None) -> str | None:
         """Refuse a level this runtime never declared; return it otherwise.
@@ -209,16 +190,13 @@ class AgentRuntime:
         sandbox use these servers without ever holding their credentials.
 
         **The merged host, which is what makes a connection generic.** The
-        relay's per-connection route forwards one connection's protocol
-        untouched, so it can only serve a server that already speaks the shape
-        the CLI speaks: a legacy SSE server, a stateless-era server, or one that
-        answers a call with ``InputRequiredResult`` is a 405 or a protocol error
-        there. The bare prefix is the platform speaking MCP itself -- it opens
-        the session in whichever era the server turned out to speak, merges
-        every connection of the job into one catalogue, and routes a call back
-        to its own server. Pointing a runtime at a per-connection alias would
-        put the protocol back in the CLI's hands, which is the whole design
-        decision this replaced.
+        relay is the platform speaking MCP itself -- it opens the session in
+        whichever era the server turned out to speak, merges every connection
+        of the job into one catalogue, and routes a call back to its own
+        server. Forwarding one connection's protocol to the CLI untouched would
+        serve only a server that already speaks the shape the CLI speaks: a
+        legacy SSE server, a stateless-era server, or one that answers a call
+        with ``InputRequiredResult`` would fail there.
 
         Empty when the run has asked for no servers, which is not a relay with
         nothing in it: a run told about an endpoint it must not use would call
@@ -334,6 +312,21 @@ class AgentRuntime:
         # only sometimes would leave the reference dangling on the turns where
         # it was absent, which is the shape a stale token hides in.
         env[MCP_TOKEN_ENV] = config.credential
+
+    @staticmethod
+    def _wrapper_env(gateway_base_url: str, credential: str) -> dict[str, str]:
+        """The gateway and credential an image-shipped wrapper configures its CLI from.
+
+        Both the OpenAI and the Anthropic spelling, and the MCP tool timeout.
+        """
+        base = gateway_base_url.rstrip("/").removesuffix("/v1")
+        return {
+            "OPENAI_BASE_URL": f"{base}/v1",
+            "OPENAI_API_KEY": credential,
+            "ANTHROPIC_BASE_URL": base,
+            "ANTHROPIC_API_KEY": credential,
+            "MCP_TOOL_TIMEOUT": "1560000",
+        }
 
     @staticmethod
     def _raw(line: str, reason: str) -> NormalizedEvent:

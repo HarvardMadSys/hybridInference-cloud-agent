@@ -33,6 +33,7 @@ vi.mock('@/lib/api/promptRewrite', () => ({ rewritePrompt: vi.fn() }));
 import { FirstRunProvider } from './firstRun';
 import { requestGitHubAccess } from './githubReturn';
 import { TaskComposer } from './TaskComposer';
+import { composerDraftStorageKey } from './useComposerDraft';
 
 const navigation = vi.hoisted(() => ({ push: vi.fn() }));
 const account = vi.hoisted(() => ({ id: undefined as string | undefined }));
@@ -124,6 +125,9 @@ function config(overrides: Partial<AgentConfigApi> = {}): AgentConfigApi {
     repos: ['owner/repository'],
     runtimes: ['claude-code'],
     models: ['model-a'],
+    // The server always resolves a starting model for an owner with a choice;
+    // an unset one is its own case, where the control stays empty.
+    default_model: 'model-a',
     github_connected: true,
     github_install_url: null,
     ...overrides,
@@ -1117,7 +1121,7 @@ describe('TaskComposer source-control onboarding', () => {
           task: 'Fix the flaky test',
           repo: 'owner/new',
           runtime: 'codex',
-          model: 'model-b',
+          chosenModel: 'model-b',
         },
         savedAt: Date.now(),
       }),
@@ -1336,6 +1340,121 @@ describe('TaskComposer source-control onboarding', () => {
       ),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
+  });
+
+  /** Choose a model through the composer's themed picker, not a native select. */
+  function chooseModel(value: string) {
+    fireEvent.click(screen.getByLabelText('Model'));
+    fireEvent.click(screen.getByRole('option', { name: value }));
+  }
+
+  it('starts on the model the owner last used, and lets them change it', async () => {
+    // The server answers with the owner's own choice — here the model their
+    // previous task ran on — already narrowed to what this deployment offers.
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-b'], default_model: 'model-b' }),
+    );
+    vi.mocked(listSkills).mockResolvedValue([]);
+    vi.mocked(listEnvironments).mockResolvedValue({
+      globals: {
+        id: null,
+        name: 'Global',
+        repo: null,
+        revision: 0,
+        variables: [],
+        setup_script: '',
+        start_script: '',
+        verify_script: '',
+        actions: [],
+      },
+      environments: [],
+    });
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+
+    render(<TaskComposer />);
+
+    await chooseRepository();
+    // Not the deployment's starting point, and not the first model in the list.
+    expect(screen.getByLabelText('Model')).toHaveValue('model-b');
+
+    chooseModel('model-a');
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Fix the flaky test' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
+    expect(vi.mocked(createAgentJob).mock.calls[0][0].model).toBe('model-a');
+  });
+
+  it('leaves the model empty rather than guessing when the resolved one is gone', async () => {
+    // `default_model` is narrowed server-side, but the composer must not trust
+    // that across a stale config. Nor may it fall back to the first model in
+    // the list: the model is the owner's choice, and picking one for them is
+    // the same mistake as picking a repository for them.
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-b'], default_model: 'retired-model' }),
+    );
+    vi.mocked(listSkills).mockResolvedValue([]);
+    vi.mocked(listEnvironments).mockResolvedValue({
+      globals: {
+        id: null,
+        name: 'Global',
+        repo: null,
+        revision: 0,
+        variables: [],
+        setup_script: '',
+        start_script: '',
+        verify_script: '',
+        actions: [],
+      },
+      environments: [],
+    });
+
+    render(<TaskComposer />);
+
+    await chooseRepository();
+    // An empty control, not a guess: it reads as the placeholder in italic.
+    expect(screen.getByLabelText('Model')).toHaveValue('');
+    expect(screen.getByLabelText('Model')).toHaveTextContent('Choose model');
+  });
+
+  it('waits for a model instead of choosing the first one in the list', async () => {
+    // Nothing resolved for this owner: no pin, no history, no deployment
+    // default. Run stays disabled and says which control is empty.
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-b'], default_model: null }),
+    );
+    vi.mocked(listSkills).mockResolvedValue([]);
+    vi.mocked(listEnvironments).mockResolvedValue({
+      globals: {
+        id: null,
+        name: 'Global',
+        repo: null,
+        revision: 0,
+        variables: [],
+        setup_script: '',
+        start_script: '',
+        verify_script: '',
+        actions: [],
+      },
+      environments: [],
+    });
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+
+    render(<TaskComposer />);
+    await chooseRepository();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Fix the flaky test' } });
+
+    const run = screen.getByRole('button', { name: /Run/ });
+    expect(run).toBeDisabled();
+    expect(run).toHaveAttribute('title', 'Choose a model first');
+    fireEvent.click(run);
+    expect(createAgentJob).not.toHaveBeenCalled();
+
+    chooseModel('model-b');
+    expect(run).toBeEnabled();
+    fireEvent.click(run);
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
+    expect(vi.mocked(createAgentJob).mock.calls[0][0].model).toBe('model-b');
   });
 
   it('submits default skills and lets the conversation explicitly clear them', async () => {
@@ -2416,6 +2535,87 @@ describe('durable new-task drafts', () => {
     await waitFor(() => expect(screen.getByLabelText('Branch')).toHaveValue('main'));
   });
 
+  it('re-resolves a model it filled in, so a pin saved meanwhile takes effect', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-b'], default_model: 'model-a' }),
+    );
+    const first = render(<TaskComposer />);
+    await chooseRepository();
+    expect(screen.getByLabelText('Model')).toHaveValue('model-a');
+    first.unmount();
+    // Away in My Settings, the owner pins model-b.
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-b'], default_model: 'model-b' }),
+    );
+    render(<TaskComposer />);
+    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-b'));
+  });
+
+  it('keeps a model the owner chose here across a visit', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-b'], default_model: 'model-a' }),
+    );
+    const first = render(<TaskComposer />);
+    await chooseRepository();
+    fireEvent.click(screen.getByLabelText('Model'));
+    fireEvent.click(screen.getByRole('option', { name: 'model-b' }));
+    first.unmount();
+    render(<TaskComposer />);
+    await waitFor(() => expect(getAgentConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-b'));
+  });
+
+  it('ignores the model in a draft written before picks were told apart', async () => {
+    // The previous composer saved whatever the control showed, the server's
+    // own fill-in included, so that model cannot be read as the owner's pick.
+    localStorage.setItem(
+      composerDraftStorageKey('alice', 'new-task'),
+      JSON.stringify({
+        version: 1,
+        revision: 1,
+        value: JSON.stringify({
+          task: 'Keep this text',
+          repo: '',
+          runtime: '',
+          model: 'model-a',
+          effort: '',
+          branch: '',
+          plugins: [],
+        }),
+      }),
+    );
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-b'], default_model: 'model-b' }),
+    );
+    render(<TaskComposer />);
+    expect(await screen.findByRole('textbox')).toHaveValue('Keep this text');
+    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-b'));
+  });
+
+  it('never saves the fallback for a retired pick as a pick of its own', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-b', 'model-c'], default_model: 'model-a' }),
+    );
+    const first = render(<TaskComposer />);
+    await chooseRepository();
+    fireEvent.click(screen.getByLabelText('Model'));
+    fireEvent.click(screen.getByRole('option', { name: 'model-b' }));
+    first.unmount();
+    // model-b is withdrawn: the control falls back to what the server resolved.
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-c'], default_model: 'model-a' }),
+    );
+    const second = render(<TaskComposer />);
+    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-a'));
+    second.unmount();
+    // The owner then pins model-c in Settings.
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-c'], default_model: 'model-c' }),
+    );
+    render(<TaskComposer />);
+    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-c'));
+  });
+
   it('does not navigate another account after an earlier account submission resolves', async () => {
     let finish!: (job: AgentJobApi) => void;
     vi.mocked(createAgentJob).mockImplementation(
@@ -2800,7 +3000,9 @@ describe('TaskComposer reasoning effort', () => {
   });
 
   it('sends nothing when the pair offers no control', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(config({ models: ['model-plain'] }));
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-plain'], default_model: 'model-plain' }),
+    );
 
     expect(await submit()).not.toHaveProperty('reasoning_effort');
   });

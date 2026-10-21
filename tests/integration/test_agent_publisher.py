@@ -849,7 +849,7 @@ def test_the_post_apply_gate_catches_what_the_parser_would_miss(origin, monkeypa
     which draft-PR review does not mitigate.
     """
     from cloud_agent import publisher
-    from cloud_agent_host.patch_gate import PatchGateResult
+    from cloud_agent_shared.git.patch_gate import PatchGateResult
 
     clone_url, base_sha = origin
     patch = (
@@ -906,7 +906,7 @@ def test_a_submodule_entry_never_reaches_the_remote(origin, tmp_path, monkeypatc
     `160000 commit <sha> vendor/lib`.
     """
     from cloud_agent import publisher
-    from cloud_agent_host.patch_gate import PatchGateResult
+    from cloud_agent_shared.git.patch_gate import PatchGateResult
 
     clone_url, base_sha = origin
     patch = _gitlink_patch(origin, tmp_path)
@@ -936,7 +936,7 @@ def test_the_post_apply_gate_refuses_a_name_with_a_newline(origin, monkeypatch):
     posts, and a line break is how a name would leave its code span there.
     """
     from cloud_agent import publisher
-    from cloud_agent_host.patch_gate import PatchGateResult
+    from cloud_agent_shared.git.patch_gate import PatchGateResult
 
     clone_url, base_sha = origin
     patch = (

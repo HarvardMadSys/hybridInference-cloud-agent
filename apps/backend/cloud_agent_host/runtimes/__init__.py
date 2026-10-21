@@ -1,14 +1,18 @@
 """Agent CLI dialect adapters, exposed through a stable package API.
 
-Each CLI module owns command construction and event normalization. ``base``
-defines adapter and MCP contracts, ``events`` bounds normalized payloads, and
-``preview`` batches partial replies. ``registry`` creates one adapter per run.
-Shared discovery metadata lives in :mod:`cloud_agent_shared.runtime_catalog`
-so the control plane can advertise capabilities without loading host code.
+The Claude, Codex and pi modules each build their CLI's resident live process;
+the OpenCode and Kilo modules name their CLI for the launch the two share in
+``http_bridge``. Claude's and pi's adapters also normalize the events their
+process writes; Codex, OpenCode and Kilo speak protocols their sessions in
+:mod:`cloud_agent_host.drivers` read. ``base`` defines adapter and MCP
+contracts, ``events`` bounds normalized payloads, and ``preview`` batches
+partial replies. ``registry`` creates one adapter per run. Shared discovery
+metadata lives in :mod:`cloud_agent_shared.runtime_catalog` so the control
+plane can advertise capabilities without loading host code.
 
-The five adapters preserve unrecognized output as ``raw`` events. Contract
-fixtures under ``tests/fixtures/agent_runtime_streams/`` pin their observed CLI
-formats; version pins and image wrappers live alongside ``deploy/sandbox/``.
+The adapters preserve unrecognized output as ``raw`` events. Contract fixtures
+under ``tests/fixtures/agent_runtime_streams/`` pin their observed CLI formats;
+version pins and image wrappers live alongside ``deploy/sandbox/``.
 """
 
 from .base import (
@@ -38,17 +42,11 @@ from .events import (
     USAGE,
     NormalizedEvent,
 )
-from .generic import GenericRuntime
 from .kilo import KiloRuntime
 from .opencode import OpencodeRuntime
 from .pi import PI_MCP_BRIDGE, PiRuntime
 from .preview import REPLY_PREVIEW, ReplyPreview
-from .registry import (
-    get_runtime,
-    registered_runtimes,
-    runtime_reasoning_efforts,
-    runtimes_supporting_mcp,
-)
+from .registry import get_runtime, registered_runtimes
 
 __all__ = [
     "DIFF",
@@ -70,7 +68,6 @@ __all__ = [
     "AgentRuntime",
     "ClaudeCodeRuntime",
     "CodexRuntime",
-    "GenericRuntime",
     "KiloRuntime",
     "NormalizedEvent",
     "OpencodeRuntime",
@@ -83,6 +80,4 @@ __all__ = [
     "get_runtime",
     "merged_mcp_server",
     "registered_runtimes",
-    "runtime_reasoning_efforts",
-    "runtimes_supporting_mcp",
 ]

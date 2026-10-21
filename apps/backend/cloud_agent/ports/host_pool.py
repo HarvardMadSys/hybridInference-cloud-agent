@@ -33,6 +33,10 @@ class HostPoolRepository(Protocol):
         requirements leave this projection. The result also carries raw host
         telemetry for conservative per-host slot sizing; callers must not
         treat a stale sample as evidence for an increase.
+
+        A turn in claim backoff is not in the queue count either: no claim
+        hands it out until the backoff ends. ``backoff_new_group_jobs`` counts
+        those apart, because the pool is not idle while one waits.
         """
         ...
 
@@ -212,6 +216,13 @@ class HostPoolRepository(Protocol):
             settings_applied: The runtime settings the host is applying now.
             settings_local: Legacy environment observations, imported once as
                 per-host overrides. Either ``None`` leaves the report in place.
+            sandbox_archive_settings_applied_revision: The archive-policy
+                revision the host's sandbox manager confirmed, ``None`` for none.
+            sandbox_archive_settings_revision_reported: Whether the heartbeat
+                carried that revision at all; when it did not, the stored one
+                stays.
+            runtime_downloads: This host's progress on each agent version it
+                was asked to hold, already validated. ``None`` leaves it.
 
         Returns:
             The updated host row, or ``None`` when the host no longer exists.

@@ -132,12 +132,6 @@ class GitLabAccountSession(Protocol):
 class SourceControlRepository(Protocol):
     """Port: repository authorization and the GitLab credentials behind it."""
 
-    async def record_repo_grant(
-        self, *, user_id: str, installation_id: int, account_login: str | None = None
-    ) -> None:
-        """Record that this user may use this installation."""
-        ...
-
     async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
         """Return the installations this user has connected."""
         ...
