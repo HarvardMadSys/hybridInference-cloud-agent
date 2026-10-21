@@ -481,6 +481,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     import asyncpg
 
     from cloud_agent.app import lifespan
+    from cloud_agent.bootstrap.lifespan import _SHUTDOWN_TASK_ATTRS
 
     key = tmp_path / "github-app.pem"
     key.write_text(private_pem)
@@ -593,11 +594,14 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     async with lifespan(relay, background=False):
         await asyncio.sleep(0)
         assert not started, f"the relay listener started {sorted(started)}"
+        # Its own three: settings, the MCP sessions this process holds, and the
+        # channel its held tool calls are decided on. Every other task is None.
+        running = {
+            name for name in _SHUTDOWN_TASK_ATTRS if getattr(relay.state, name, None) is not None
+        }
+        assert running == {"settings_task", "mcp_maintenance_task", "notification_listener_task"}
         assert relay.state.source_control is None
         assert relay.state.compute_commands is None
-        assert relay.state.compute_resource_task is None
-        assert relay.state.sandbox_deletion_task is None
-        assert relay.state.agent_memory_task is None
         compute_builder.assert_not_called()
         relay_runtime_builder.assert_not_called()
 
