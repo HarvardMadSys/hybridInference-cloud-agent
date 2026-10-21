@@ -39,8 +39,8 @@ logger = get_logger(__name__)
 def _log_control_failure(operation: str, job_id: str, exc: Exception) -> None:
     """Keep a diagnosable failure without logging tokens or arbitrary response bodies.
 
-    The same ``agent_control_failure`` record the runner writes for its own
-    control calls, for the retries this client makes itself.
+    One ``agent_control_failure`` record, for the runner's control calls and
+    for the retries this client makes itself.
     """
     status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
     logger.warning(

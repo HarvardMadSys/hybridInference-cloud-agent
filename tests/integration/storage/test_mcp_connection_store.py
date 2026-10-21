@@ -1278,26 +1278,6 @@ async def test_revoking_a_connector_detaches_what_routed_through_it(
     )
 
 
-async def test_revoked_connector_status_is_terminal(store: Storage) -> None:
-    """Heartbeat-style status changes cannot resurrect a revoked connector."""
-    connector = await store.mcp.create_mcp_connector(
-        user_id=_OWNER, name="My laptop", registration_hash="hash-terminal-revoke"
-    )
-    for status in ("online", "offline", "pending"):
-        assert await store.mcp.set_mcp_connector_status(connector_id=connector["id"], status=status)
-    with pytest.raises(ValueError, match="invalid connector status"):
-        await store.mcp.set_mcp_connector_status(connector_id=connector["id"], status="revoked")
-    assert await store.mcp.revoke_mcp_connector(connector_id=connector["id"], user_id=_OWNER)
-    for status in ("pending", "online", "offline"):
-        assert not await store.mcp.set_mcp_connector_status(
-            connector_id=connector["id"], status=status
-        )
-
-    rows = {row["id"]: row for row in await store.mcp.list_mcp_connectors(user_id=_OWNER)}
-    assert rows[connector["id"]]["status"] == "revoked"
-    assert rows[connector["id"]]["revoked_at"] is not None
-
-
 async def test_revocation_wins_against_a_late_connector_bind(pool, store: Storage) -> None:
     """A bind waiting behind revoke cannot restore its route or authorization."""
     connector = await store.mcp.create_mcp_connector(
@@ -2942,7 +2922,18 @@ async def test_capabilities_cannot_be_saved_for_a_disconnected_connection(
     assert revision == 0
 
 
-async def test_a_transport_session_records_who_owns_it(store: Storage) -> None:
+async def _transport_sessions(pool, connection_id: int) -> list[dict[str, Any]]:
+    """Every recorded session for one connection, newest first."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM agent_mcp_transport_sessions WHERE connection_id = $1 "
+            "ORDER BY last_used_at DESC, handle",
+            connection_id,
+        )
+    return [dict(row) for row in rows]
+
+
+async def test_a_transport_session_records_who_owns_it(store: Storage, pool) -> None:
     """The row names the versions a session was opened under.
 
     That is what lets a superseded owner's session be found from another
@@ -2962,7 +2953,7 @@ async def test_a_transport_session_records_who_owns_it(store: Storage) -> None:
         config_revision=int(connection["config_revision"]),
         authorization_epoch=int(connection["authorization_epoch"]),
     )
-    rows = await store.mcp.list_mcp_transport_sessions(connection_id=int(connection["id"]))
+    rows = await _transport_sessions(pool, int(connection["id"]))
     assert len(rows) == 1
     assert rows[0]["handle"] == "mcp1.abc"
     assert rows[0]["member"] == "ajob_1:5"
@@ -2982,14 +2973,14 @@ async def test_a_transport_session_records_who_owns_it(store: Storage) -> None:
         config_revision=int(connection["config_revision"]),
         authorization_epoch=int(connection["authorization_epoch"]),
     )
-    rows = await store.mcp.list_mcp_transport_sessions(connection_id=int(connection["id"]))
+    rows = await _transport_sessions(pool, int(connection["id"]))
     assert len(rows) == 1
     assert rows[0]["owner_lease_generation"] == 3
     assert await store.mcp.close_mcp_transport_session(handle="mcp1.abc")
     assert not await store.mcp.close_mcp_transport_session(handle="mcp1.abc")
 
 
-async def test_reaping_a_member_keeps_exactly_the_new_session(store: Storage) -> None:
+async def test_reaping_a_member_keeps_exactly_the_new_session(store: Storage, pool) -> None:
     """A takeover removes the old session and leaves the new one alone.
 
     Scoped by connection *and* member, so reaping one job's session cannot reach
@@ -3022,38 +3013,12 @@ async def test_reaping_a_member_keeps_exactly_the_new_session(store: Storage) ->
         connection_id=int(connection["id"]), member="ajob_1:5", keep_handle="mcp1.new"
     )
     assert [row["handle"] for row in reaped] == ["mcp1.old"]
-    remaining = {
-        row["handle"]
-        for row in await store.mcp.list_mcp_transport_sessions(connection_id=int(connection["id"]))
-    }
+    remaining = {row["handle"] for row in await _transport_sessions(pool, int(connection["id"]))}
     assert remaining == {"mcp1.new", "mcp1.other-job"}
     # The other connection's row for the same member is untouched.
-    assert [
-        row["handle"]
-        for row in await store.mcp.list_mcp_transport_sessions(connection_id=int(other["id"]))
-    ] == ["mcp1.other-conn"]
-
-
-async def test_touching_a_session_keeps_a_live_one_visible(store: Storage) -> None:
-    """``last_used_at`` is what tells a diagnosis which sessions are live."""
-    connection = await _connect(store, _OWNER)
-    await store.mcp.open_mcp_transport_session(
-        handle="mcp1.abc",
-        connection_id=int(connection["id"]),
-        member="ajob_1:5",
-        job_id="ajob_1",
-        attempt_id=5,
-        owner_lease_generation=1,
-        protocol_version="2025-11-25",
-        upstream_session_id=None,
-        config_revision=1,
-        authorization_epoch=1,
-    )
-    before = (await store.mcp.list_mcp_transport_sessions(connection_id=int(connection["id"])))[0]
-    assert await store.mcp.touch_mcp_transport_session(handle="mcp1.abc")
-    after = (await store.mcp.list_mcp_transport_sessions(connection_id=int(connection["id"])))[0]
-    assert after["last_used_at"] >= before["last_used_at"]
-    assert not await store.mcp.touch_mcp_transport_session(handle="mcp1.gone")
+    assert [row["handle"] for row in await _transport_sessions(pool, int(other["id"]))] == [
+        "mcp1.other-conn"
+    ]
 
 
 async def test_a_per_service_timeout_is_stored_without_moving_the_versions(

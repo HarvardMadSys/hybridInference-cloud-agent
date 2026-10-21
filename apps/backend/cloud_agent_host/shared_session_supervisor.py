@@ -1247,6 +1247,18 @@ class SharedChatSessionSupervisor:
         # releases the bridge and clears the fences.
         return self._persist_stopped_archive(group, current, members)
 
+    def _wait_while_locked(self, busy: Callable[[], str | None], *, deadline: float) -> None:
+        """Wait on the condition while ``busy`` names a transition still in progress.
+
+        Gives up with that name once ``deadline`` passes. The lock is released
+        while waiting, so the caller rechecks anything it read before.
+        """
+        while (reason := busy()) is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SessionBusy(reason)
+            self._condition.wait(timeout=min(remaining, 0.5))
+
     def _wait_for_start_locked(self, group: _Group, *, retry_failed: bool = False) -> None:
         """Wait for an in-flight bridge check without holding the metadata lock.
 
@@ -1254,12 +1266,10 @@ class SharedChatSessionSupervisor:
         Their temporary start fence must not reject an already leased member's
         prompt. Callers recheck membership and activation after this wait.
         """
-        deadline = time.monotonic() + 30.0
-        while group.starting:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise SessionBusy("shared workspace start is in progress")
-            self._condition.wait(timeout=min(remaining, 0.5))
+        self._wait_while_locked(
+            lambda: "shared workspace start is in progress" if group.starting else None,
+            deadline=time.monotonic() + 30.0,
+        )
         if group.container_lost:
             raise RetainedChatLost("shared sandbox container identity was lost")
         if group.start_failed and not retry_failed:
@@ -2306,17 +2316,18 @@ class SharedChatSessionSupervisor:
         )
         with self._lock:
             group, member = self._member(thread_id)
-            transition_deadline = time.monotonic() + 30.0
-            while group.snapshotting or group.starting or group.stopping:
-                remaining = transition_deadline - time.monotonic()
-                if remaining <= 0:
-                    transition = (
-                        "snapshot"
-                        if group.snapshotting
-                        else ("start" if group.starting else "stop")
-                    )
-                    raise SessionBusy(f"shared workspace {transition} is in progress")
-                self._condition.wait(timeout=min(remaining, 0.5))
+            self._wait_while_locked(
+                lambda: (
+                    "shared workspace snapshot is in progress"
+                    if group.snapshotting
+                    else "shared workspace start is in progress"
+                    if group.starting
+                    else "shared workspace stop is in progress"
+                    if group.stopping
+                    else None
+                ),
+                deadline=time.monotonic() + 30.0,
+            )
             if group.stop_archive_pending:
                 raise SessionBusy("shared workspace final archive retry is pending")
             if group.orphan_finalization_pending:
@@ -2369,8 +2380,6 @@ class SharedChatSessionSupervisor:
             ):
                 raise SessionLeaseLost("shared sandbox lifecycle changed during activation")
             self._require_mutation_admission(group)
-            if group.stop_archive_pending:
-                raise SessionBusy("shared workspace final archive retry is pending")
             if member.lease_token is not None:
                 if member.lease_owner == owner:
                     return self._lease(
@@ -3814,35 +3823,7 @@ class SharedChatSessionSupervisor:
 
         ``start_seq`` is the fence the control plane took for this request.
         """
-        with self._lock:
-            group, member = self._member(thread_id)
-        self._recover_start_archive_completion(group)
-        with self._lock:
-            # This request performs its own fresh verification below.
-            self._wait_for_start_locked(group, retry_failed=True)
-            current_group, current_member = self._member(thread_id)
-            if current_group is not group or current_member is not member:
-                raise SessionLeaseLost("shared membership changed before operation admission")
-            self._require_mutation_admission(group)
-            lifecycle_generation = group.lifecycle_generation
-        self._ensure_running(group, start_seq=start_seq)
-        with self._lock:
-            self._wait_for_start_locked(group)
-            current_group, current_member = self._member(thread_id)
-            if (
-                current_group is not group
-                or current_member is not member
-                or group.lifecycle_generation != lifecycle_generation
-            ):
-                raise SessionLeaseLost(
-                    "shared sandbox lifecycle changed during operation admission"
-                )
-            self._require_mutation_admission(group)
-            self._join_run_locked(group, start_seq)
-            token = secrets.token_urlsafe(24)
-            group.operation_tokens[token] = thread_id
-            group.idle_deadline = None
-            return token, self._descriptor(group, member)
+        return self._open_reference(thread_id, start_seq=start_seq, terminal=False)
 
     def prepare_environment(  # noqa: PLR0915 complexity baseline, #771
         self,
@@ -3981,12 +3962,6 @@ class SharedChatSessionSupervisor:
         with self._lock:
             group, _ = self._member(thread_id)
             self._require_mutation_admission(group)
-            if group.stopping:
-                raise SessionBusy("shared workspace stop is in progress")
-            if group.starting:
-                raise SessionBusy("shared workspace start is in progress")
-            if group.snapshotting:
-                raise SessionBusy("shared workspace snapshot capture is already in progress")
             if not self._is_quiescent(group):
                 raise SessionBusy("shared workspace still has active mutations")
             # The barrier goes up first, so Docker can be asked without the lock.
@@ -4097,10 +4072,6 @@ class SharedChatSessionSupervisor:
             expected_container_id
         ):
             raise RetainedChatLost("shared sandbox container identity changed")
-        if group.stopping:
-            raise SessionBusy("shared workspace stop is in progress")
-        if group.snapshotting and not own_barrier:
-            raise SessionBusy("shared workspace snapshot capture is already in progress")
         if group.container_lost:
             raise RetainedChatLost("shared sandbox container identity was lost")
         if member.current_turn is not None or member.transport is not None:
@@ -4141,15 +4112,16 @@ class SharedChatSessionSupervisor:
             # A workspace read revalidates the bridge under a temporary start
             # fence, and the chat page reads the workspace while a new chat
             # prepares. Wait for that check as a prompt does, not fail on it.
-            while group.starting or group.lifecycle_check is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise SessionBusy(
-                        "shared workspace start is in progress"
-                        if group.starting
-                        else "shared sandbox lifecycle check is in progress"
-                    )
-                self._condition.wait(timeout=min(remaining, 0.5))
+            self._wait_while_locked(
+                lambda: (
+                    "shared workspace start is in progress"
+                    if group.starting
+                    else "shared sandbox lifecycle check is in progress"
+                    if group.lifecycle_check is not None
+                    else None
+                ),
+                deadline=deadline,
+            )
             group, member = self._leased_member(thread_id, token)
             self._require_initial_archive_admission(
                 group,
@@ -4166,22 +4138,18 @@ class SharedChatSessionSupervisor:
                 # A request admitted before the barrier may still begin its
                 # bridge revalidation under it (``_start_group`` does not read
                 # the barrier), so its start fence is waited out here too.
-                while (
-                    group.operation_tokens
-                    or group.terminal_tokens
-                    or group.starting
-                    or group.lifecycle_check is not None
-                ):
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise SessionBusy(
-                            "shared workspace start is in progress"
-                            if group.starting
-                            else "shared sandbox lifecycle check is in progress"
-                            if group.lifecycle_check is not None
-                            else "shared workspace still has active mutations"
-                        )
-                    self._condition.wait(timeout=min(remaining, 0.5))
+                self._wait_while_locked(
+                    lambda: (
+                        "shared workspace start is in progress"
+                        if group.starting
+                        else "shared sandbox lifecycle check is in progress"
+                        if group.lifecycle_check is not None
+                        else "shared workspace still has active mutations"
+                        if group.operation_tokens or group.terminal_tokens
+                        else None
+                    ),
+                    deadline=deadline,
+                )
                 # The wait released the lock; the lease and group may have moved.
                 leased_group, leased_member = self._leased_member(thread_id, token)
                 if leased_group is not group or leased_member is not member:
@@ -4398,6 +4366,13 @@ class SharedChatSessionSupervisor:
 
         ``start_seq`` is the fence the control plane took for this request.
         """
+        return self._open_reference(thread_id, start_seq=start_seq, terminal=True)
+
+    def _open_reference(
+        self, thread_id: str, *, start_seq: int | None, terminal: bool
+    ) -> tuple[str, SharedSessionDescriptor]:
+        """Admit one terminal or workspace operation; its token keeps the group awake."""
+        kind = "terminal" if terminal else "operation"
         with self._lock:
             group, member = self._member(thread_id)
         self._recover_start_archive_completion(group)
@@ -4406,7 +4381,7 @@ class SharedChatSessionSupervisor:
             self._wait_for_start_locked(group, retry_failed=True)
             current_group, current_member = self._member(thread_id)
             if current_group is not group or current_member is not member:
-                raise SessionLeaseLost("shared membership changed before terminal admission")
+                raise SessionLeaseLost(f"shared membership changed before {kind} admission")
             self._require_mutation_admission(group)
             lifecycle_generation = group.lifecycle_generation
         self._ensure_running(group, start_seq=start_seq)
@@ -4418,11 +4393,12 @@ class SharedChatSessionSupervisor:
                 or current_member is not member
                 or group.lifecycle_generation != lifecycle_generation
             ):
-                raise SessionLeaseLost("shared sandbox lifecycle changed during terminal admission")
+                raise SessionLeaseLost(f"shared sandbox lifecycle changed during {kind} admission")
             self._require_mutation_admission(group)
             self._join_run_locked(group, start_seq)
             token = secrets.token_urlsafe(24)
-            group.terminal_tokens[token] = thread_id
+            tokens = group.terminal_tokens if terminal else group.operation_tokens
+            tokens[token] = thread_id
             group.idle_deadline = None
             return token, self._descriptor(group, member)
 

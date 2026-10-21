@@ -8,6 +8,7 @@ import json
 
 import pytest
 from tests.integration.storage.test_agent_job_store import pool, store  # noqa: F401
+from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.environments import EnvironmentConflict, EnvironmentNotFound
 from cloud_agent_shared.environment import EnvironmentScripts, EnvironmentVariable
@@ -713,8 +714,8 @@ async def test_start_skip_only_consumes_requesting_chat_next_turn(store, pool, m
     assert not (
         await store.environments.environment_for_claim("alice", binding, first["id"])
     ).skip_start
-    second = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="alice", prompt="continue"
+    second = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="alice", prompt="continue"
     )
     assert (
         await store.environments.environment_for_claim("alice", binding, second["id"])
@@ -724,8 +725,8 @@ async def test_start_skip_only_consumes_requesting_chat_next_turn(store, pool, m
     ).skip_start
     async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET state='failed' WHERE id=$1", second["id"])
-    third = await store.conversation_commands.create_follow_up(
-        parent_job_id=second["id"], user_id="alice", prompt="again"
+    third = await append_follow_up(
+        pool, parent_job_id=second["id"], user_id="alice", prompt="again"
     )
     assert not (
         await store.environments.environment_for_claim("alice", binding, third["id"])

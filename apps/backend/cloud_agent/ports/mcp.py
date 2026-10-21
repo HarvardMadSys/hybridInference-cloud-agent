@@ -301,10 +301,6 @@ class McpConnectionRepository(Protocol):
         """
         ...
 
-    async def delete_mcp_capabilities(self, *, connection_id: int) -> None:
-        """Drop a snapshot, used when discovery proves the target changed."""
-        ...
-
     async def create_mcp_oauth_flow(
         self,
         *,
@@ -353,10 +349,6 @@ class McpConnectionRepository(Protocol):
         The owner is part of the match: a flow presented by a browser signed in
         as another account matches nothing and is left for its owner.
         """
-        ...
-
-    async def delete_mcp_oauth_flows(self, *, connection_id: int) -> int:
-        """Drop every unconsumed flow for one connection."""
         ...
 
     async def list_mcp_bindings(self, *, thread_id: str) -> list[dict[str, Any]]:
@@ -558,14 +550,6 @@ class McpConnectionRepository(Protocol):
         """
         ...
 
-    async def list_mcp_transport_sessions(self, *, connection_id: int) -> list[dict[str, Any]]:
-        """Every recorded session for one connection, newest first."""
-        ...
-
-    async def touch_mcp_transport_session(self, *, handle: str) -> bool:
-        """Move a session's last-used timestamp, so a diagnosis can see it live."""
-        ...
-
     async def create_mcp_connector(
         self, *, user_id: str, name: str, registration_hash: str
     ) -> dict[str, Any]:
@@ -574,10 +558,6 @@ class McpConnectionRepository(Protocol):
 
     async def list_mcp_connectors(self, *, user_id: str) -> list[dict[str, Any]]:
         """Every connector this user registered."""
-        ...
-
-    async def set_mcp_connector_status(self, *, connector_id: int, status: str) -> bool:
-        """Record a heartbeat or a status change for one connector."""
         ...
 
     async def update_mcp_connector(
@@ -641,16 +621,6 @@ class McpConnectionRepository(Protocol):
 
     async def list_mcp_connector_connections(self, *, connector_id: int) -> list[int]:
         """The connection ids one connector may serve."""
-        ...
-
-    async def set_mcp_launch_spec(
-        self,
-        *,
-        connection_id: int,
-        expected_authorization_epoch: int,
-        launch_spec: dict[str, Any],
-    ) -> bool:
-        """Store encrypted launch secrets only while the connection identity is current."""
         ...
 
     async def expire_mcp_invocation(self, *, invocation_id: int) -> bool:

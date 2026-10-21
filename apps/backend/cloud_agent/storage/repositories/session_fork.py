@@ -763,7 +763,7 @@ class PostgresSessionForkRepository:
             if operation["state"] == "ready":
                 anchor_id = str(operation["target_anchor_job_id"] or "") or None
             elif operation["state"] == "materialized":
-                # Match create_follow_up's thread -> job -> membership lock
+                # Match insert_follow_up's thread -> job -> membership lock
                 # order. Locking the source job first here while a concurrent
                 # follow-up held the thread row produced a real PostgreSQL
                 # deadlock cycle (each transaction then waited for the other).

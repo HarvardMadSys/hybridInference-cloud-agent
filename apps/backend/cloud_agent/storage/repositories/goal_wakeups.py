@@ -25,7 +25,6 @@ from cloud_agent.settings import number_setting
 if TYPE_CHECKING:
     import asyncpg
 
-    from cloud_agent.goals.models import GoalWakeupTrigger
 
 #: The columns a consumer needs to decide, plus the lease it holds while it does.
 _WAKEUP_COLUMNS = (
@@ -33,41 +32,6 @@ _WAKEUP_COLUMNS = (
     "waiting_job_id, attempts, detail, lease_owner, lease_expires_at, "
     "not_before, created_at, updated_at"
 )
-
-#: One obligation, inserted once. The partial unique index is what makes a
-#: replayed finish or a retried owner write find the row it already made; a
-#: *processed* row does not block a genuinely new event with the same name,
-#: because the index only covers ``pending``.
-_ARM_SQL = """
-INSERT INTO agent_goal_wakeups
-    (id, thread_id, goal_id, revision, trigger, trigger_ref, waiting_job_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (thread_id, trigger, trigger_ref) WHERE state = 'pending'
-DO NOTHING
-RETURNING id
-"""
-
-
-async def _insert(
-    conn: Any,
-    thread_id: str,
-    goal_id: str | None,
-    revision: int,
-    trigger: str,
-    trigger_ref: str,
-    waiting_job_id: str | None,
-) -> str | None:
-    """The one INSERT, so the helper and the repository cannot drift."""
-    return await conn.fetchval(
-        _ARM_SQL,
-        uuid.uuid4().hex,
-        thread_id,
-        goal_id,
-        revision,
-        trigger,
-        trigger_ref,
-        waiting_job_id,
-    )
 
 
 async def _lock_live_wakeup(conn: Any, wakeup_id: str, lease_owner: str) -> bool:
@@ -110,36 +74,6 @@ class PostgresGoalWakeupRepository:
         """
         async with self._pool.acquire() as conn, conn.transaction():
             yield conn
-
-    async def arm_wakeup(
-        self,
-        *,
-        thread_id: str,
-        goal_id: str | None,
-        revision: int,
-        trigger: GoalWakeupTrigger,
-        trigger_ref: str,
-        waiting_job_id: str | None = None,
-        conn: Any | None = None,
-    ) -> str | None:
-        """Record the obligation, or return ``None`` if it already exists.
-
-        Idempotent on ``(thread, goal_id, revision, trigger, trigger_ref)``: a
-        replayed finish or a retried owner write finds the wakeup it already
-        made instead of making a second one. ``conn`` lets a caller that is
-        already inside the transaction that moved the goal arm the wakeup in
-        that same commit.
-        """
-        if conn is not None:
-            # The caller is already inside the transaction that moved the goal;
-            # the obligation has to commit with it or not at all.
-            return await _insert(
-                conn, thread_id, goal_id, revision, trigger, trigger_ref, waiting_job_id
-            )
-        async with self._pool.acquire() as acquired:
-            return await _insert(
-                acquired, thread_id, goal_id, revision, trigger, trigger_ref, waiting_job_id
-            )
 
     async def claim_wakeups(
         self, *, limit: int = 1, thread_id: str | None = None
@@ -278,19 +212,6 @@ class PostgresGoalWakeupRepository:
         the conversation lock and can predate the lease's expiry.
         """
         return await _lock_live_wakeup(conn, wakeup_id, lease_owner)
-
-    async def pending_wakeup(self, *, thread_id: str) -> dict[str, Any] | None:
-        """The newest unprocessed wakeup of a conversation, if any."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                SELECT {_WAKEUP_COLUMNS} FROM agent_goal_wakeups
-                WHERE thread_id = $1 AND state = 'pending'
-                ORDER BY created_at DESC LIMIT 1
-                """,
-                thread_id,
-            )
-        return None if row is None else dict(row)
 
 
 async def _release_on(

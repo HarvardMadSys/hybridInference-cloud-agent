@@ -1110,7 +1110,7 @@ other.
 ### Runtime boundaries
 
 Claude Code retries transient inference failures within the native request,
-including HTTP 429 and 5xx responses. Both headless and resident launches set
+including HTTP 429 and 5xx responses. The resident launch sets
 `CLAUDE_CODE_MAX_RETRIES=15` and `CLAUDE_CODE_RETRY_WATCHDOG=0`: up to fifteen
 retries after the initial request, with the pinned CLI's exponential delay
 starting at 500 ms, capped at 32 seconds, and adding up to 25% jitter. The CLI

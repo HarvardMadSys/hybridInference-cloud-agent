@@ -331,9 +331,6 @@ def _plain_group_network(monkeypatch):
     monkeypatch.setattr(ChatSandboxManager, "network_for", lambda _self, _spec: "agent-net")
     monkeypatch.setattr(ChatSandboxManager, "require_host_rules", lambda _self: None)
     monkeypatch.setattr(
-        ChatSandboxManager, "_ensure_group_network", lambda _self, _spec: "agent-net"
-    )
-    monkeypatch.setattr(
         ChatSandboxManager,
         "_require_group_network",
         lambda self, spec, _current, *_snapshot: self._require(spec),
@@ -3070,7 +3067,7 @@ def test_a_peer_that_vanished_mid_reconcile_is_simply_absent(monkeypatch):
         ),
     )
 
-    assert manager._relay_owners() == {"gw": ["agent-gateway"]}
+    assert manager._network_lifecycle._relay_owners() == {"gw": ["agent-gateway"]}
 
 
 class TestSandboxActionFacts:
