@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getAgentJob, getAgentJobThread, type AgentJobApi, type AgentThreadApi } from './agents';
+import {
+  getAgentJob,
+  getAgentJobThread,
+  type AgentJobApi,
+  type AgentJobUsageApi,
+  type AgentThreadApi,
+} from './agents';
 import { createAgentReadScope } from './agentReadScope';
 
 vi.mock('./agents', () => ({ getAgentJob: vi.fn(), getAgentJobThread: vi.fn() }));
@@ -87,5 +93,29 @@ describe('owner-scoped pending reads', () => {
     expect(getAgentJob).toHaveBeenCalledTimes(2);
     fresh.resolve(JOB);
     await second;
+  });
+});
+
+describe('owner-scoped usage snapshots', () => {
+  const USAGE = { ledger: { status: 'available' } } as AgentJobUsageApi;
+
+  it('keeps one snapshot per job and answers nothing before one is kept', () => {
+    const reads = createAgentReadScope();
+    expect(reads.getUsage('job-a')).toBeUndefined();
+    // A deployment without a ledger is an answer too, not a gap to re-read.
+    reads.setUsage('job-a', null);
+    expect(reads.getUsage('job-a')).toBeNull();
+    reads.setUsage('job-a', USAGE);
+    expect(reads.getUsage('job-a')).toBe(USAGE);
+    expect(reads.getUsage('job-b')).toBeUndefined();
+  });
+
+  it('never shares a snapshot across owner scopes', () => {
+    const alice = createAgentReadScope();
+    const bob = createAgentReadScope();
+    alice.setUsage('job-a', USAGE);
+    expect(bob.getUsage('job-a')).toBeUndefined();
+    bob.setUsage('job-a', null);
+    expect(alice.getUsage('job-a')).toBe(USAGE);
   });
 });

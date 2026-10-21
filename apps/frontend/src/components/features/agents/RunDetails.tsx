@@ -22,7 +22,9 @@ import {
   type AgentJobUsageApi,
   type AgentThreadEventApi,
 } from '@/lib/api/agents';
+import type { AgentReadScope } from '@/lib/api/agentReadScope';
 import type { StoredEvent } from './trajectorySteps';
+import { useAgentReads } from './AgentReadProvider';
 
 import {
   DetailRow,
@@ -72,25 +74,22 @@ const LEDGER_LABEL: Record<AgentJobUsageApi['ledger']['status'], string> = {
 };
 
 /**
- * One cached snapshot per job.
- *
- * The Chat transcript polls its own usage for the turn it is showing; the
- * inspector reads the same resource only when it has a reason to: the snapshot
- * is unknown, the reader asked for a refresh, or the ledger has work queued or
- * scheduled. A settled snapshot with nothing pending is reused, so opening the
- * panel repeatedly is free.
- */
-const usageCache = new Map<string, AgentJobUsageApi | null>();
-
-/**
  * Cache `next` for a job unless what is cached is newer, and return what is
  * kept. Every write goes through here: a read, a refresh's answer and a push
  * can arrive in any order, and their versions say which is newer.
+ *
+ * Snapshots live in the signed-in owner's read scope, so they are dropped when
+ * that scope is replaced by a sign-out or an account switch; the panel keeps
+ * no ledger across owners.
  */
-function rememberUsage(jobId: string, next: AgentJobUsageApi | null): AgentJobUsageApi | null {
-  const known = usageCache.get(jobId);
+function rememberUsage(
+  reads: AgentReadScope,
+  jobId: string,
+  next: AgentJobUsageApi | null,
+): AgentJobUsageApi | null {
+  const known = reads.getUsage(jobId);
   const kept = next && known && isOlderUsage(next, known) ? known : next;
-  usageCache.set(jobId, kept);
+  reads.setUsage(jobId, kept);
   return kept;
 }
 
@@ -154,7 +153,8 @@ function useJobUsage(jobId: string): {
   error: string | null;
   refresh: () => void;
 } {
-  const cached = usageCache.get(jobId);
+  const reads = useAgentReads();
+  const cached = reads.getUsage(jobId);
   const [usage, setUsage] = useState<AgentJobUsageApi | null>(cached ?? null);
   const [loaded, setLoaded] = useState(cached !== undefined);
   const [refreshing, setRefreshing] = useState(false);
@@ -164,10 +164,15 @@ function useJobUsage(jobId: string): {
   const retries = useRef(0);
   const waits = useRef(0);
   const currentJob = useRef(jobId);
+  // The scope this render joined; an answer that outlives it is dropped.
+  const readsRef = useRef(reads);
+  readsRef.current = reads;
   // Raised by each usage pushed for this job without a version: a read that
   // left before it is taken to be older, and is dropped.
   const pushes = useRef(0);
 
+  // A scope replaced by a sign-out or an account switch aborts this read and
+  // re-reads inside the owner's own scope.
   useEffect(() => {
     if (currentJob.current !== jobId) {
       currentJob.current = jobId;
@@ -175,7 +180,7 @@ function useJobUsage(jobId: string): {
       retries.current = 0;
       waits.current = 0;
     }
-    const known = usageCache.get(jobId);
+    const known = reads.getUsage(jobId);
     const mustRead =
       requested.current || known === undefined || ledgerNextRead(known, Date.now()) !== null;
     requested.current = false;
@@ -189,7 +194,7 @@ function useJobUsage(jobId: string): {
       .then((read) => {
         if (controller.signal.aborted || pushes.current !== pushesBefore) return;
         // A usage pushed while this read was on its way may be the newer one.
-        const result = rememberUsage(jobId, read);
+        const result = rememberUsage(reads, jobId, read);
         setUsage(result);
         setError(null);
         const next = ledgerNextRead(result, Date.now());
@@ -214,7 +219,7 @@ function useJobUsage(jobId: string): {
       controller.abort();
       if (timer) clearTimeout(timer);
     };
-  }, [jobId, read]);
+  }, [jobId, read, reads]);
 
   // A pushed change to this job's usage is shown as sent, or read at once when
   // it came without a value, outside the budget above: it is the server saying
@@ -226,7 +231,7 @@ function useJobUsage(jobId: string): {
         if (pushed && !change.resync) {
           if (!pushed.version) pushes.current += 1;
           // A read that left after this was computed may already show more.
-          setUsage(rememberUsage(jobId, pushed));
+          setUsage(rememberUsage(reads, jobId, pushed));
           setError(null);
           setLoaded(true);
         } else if (change.resync || change.usage.includes(jobId)) {
@@ -234,21 +239,28 @@ function useJobUsage(jobId: string): {
           setRead((value) => value + 1);
         }
       }),
-    [jobId],
+    [jobId, reads],
   );
 
   const refresh = useCallback(() => {
+    const scope = reads;
     setRefreshing(true);
     // A reader who asks for fresh accounting restarts the panel's own budget.
     retries.current = 0;
     waits.current = 0;
     refreshAgentJobUsage(jobId)
       .then((result) => {
+        // A sign-out or account switch replaced the scope while this answer
+        // was on its way: it belongs to the account that asked for it.
+        if (readsRef.current !== scope) return;
         // The answer is cached usage as it was; a push may already be newer.
-        const kept = rememberUsage(jobId, result);
+        const kept = rememberUsage(scope, jobId, result);
         if (currentJob.current === jobId) setUsage(kept);
       })
       .catch((cause: unknown) => {
+        // A stale account's failure text must not land on the new account's
+        // panel either.
+        if (readsRef.current !== scope) return;
         setError(cause instanceof Error ? cause.message : 'Could not refresh usage');
       })
       .finally(() => {
@@ -258,7 +270,7 @@ function useJobUsage(jobId: string): {
         requested.current = true;
         setRead((value) => value + 1);
       });
-  }, [jobId]);
+  }, [jobId, reads]);
 
   return { usage, loaded, refreshing, error, refresh };
 }
