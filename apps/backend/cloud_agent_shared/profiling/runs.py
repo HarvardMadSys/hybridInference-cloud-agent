@@ -54,7 +54,7 @@ def _parse_expiry(raw: str) -> float:
     return clock().monotonic() + (moment - datetime.now(UTC)).total_seconds()
 
 
-def parse_run(raw: str, *, allow_continuous: bool = False) -> ProfilingRun:
+def parse_run(raw: str, *, allow_continuous: bool = False) -> ProfilingRun:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     """Build a run descriptor from its JSON form.
 
     Raises:

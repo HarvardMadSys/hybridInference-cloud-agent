@@ -160,7 +160,7 @@ async def fail_unrunnable_follow_ups(
 #:
 #: Every terminal path that can pause a goal writes ``agent_threads`` while it
 #: already holds ``agent_jobs`` rows, and the writers on the other side --
-#: ``pause_goal``, ``clear_goal``, ``set_goal`` and ``_create_follow_up`` --
+#: ``pause_goal``, ``clear_goal``, ``set_goal`` and ``insert_follow_up`` --
 #: take the conversation first and then reach those same job rows. Two orders
 #: over the same two rows is a cycle, and it is not theoretical: cancelling a
 #: queued automatic round while its goal is being paused reproduces

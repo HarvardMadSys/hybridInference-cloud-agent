@@ -227,10 +227,7 @@ def _turn(box: _Container, runtime_id: str, version: str) -> ProbeResult:
 
     # Opened and started as the sandbox manager opens and starts a member
     # (``ResidentTransportFactory``), then given one turn.
-    opener = getattr(get_driver(runtime_id), "launch_live", None)
-    if opener is None:
-        return ProbeResult(False, f"{runtime_id} has no live session transport")
-    session = opener(_context(box, runtime_id, version))
+    session = get_driver(runtime_id).launch_live(_context(box, runtime_id, version))
     try:
         session.ensure_started(model=MODEL, reasoning_effort=None)
         if not session.process_alive():

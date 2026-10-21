@@ -53,6 +53,7 @@ from cloud_agent.gateway import GatewayError
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.model_preference import ModelPreferenceView
+from cloud_agent.storage.repositories.conversation_commands import _goal_round_metadata
 from cloud_agent.storage.repositories.goals import _pause_detail
 from cloud_agent.tokens import mint_worker_token, parse_residency_mcp_token
 
@@ -147,12 +148,6 @@ class FakeGoalWakeups:
         """Nothing is consumed here; the decision's own tests own that path."""
         return []
 
-    async def pending_wakeup(self, *, thread_id: str) -> dict[str, Any] | None:
-        for row in self.rows:
-            if row["thread_id"] == thread_id and row["state"] == "pending":
-                return dict(row)
-        return None
-
     def invalidate(self, thread_id: str, detail: str) -> None:
         """Pause, clear and resume void every obligation waiting on that goal."""
         for row in self.rows:
@@ -190,10 +185,6 @@ class FakeGoals:
     async def get_goal(self, *, thread_id: str) -> dict[str, Any] | None:
         goal = self._goal(thread_id)
         return None if goal is None else dict(goal)
-
-    async def get_goal_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        job = self._store.jobs.get(job_id)
-        return None if job is None else await self.get_goal(thread_id=str(job["thread_id"]))
 
     async def get_thread_goal_state(self, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
         """The goal and its control version, or ``None`` for a foreign thread.
@@ -392,6 +383,10 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         #: Which owner each conversation belongs to, the way
         #: ``agent_threads.user_id`` scopes every goal read and write.
         self.thread_owners: dict[str, str] = {}
+        #: How many messages a person has sent each conversation, as
+        #: ``agent_threads.user_input_seq`` counts them. Every turn is stamped
+        #: with it as it is written; only a person's turn moves it.
+        self.thread_input_seqs: dict[str, int] = {}
         self.goal_wakeups = FakeGoalWakeups(self)
         self.goals = FakeGoals(self)
         self.turn_telemetry: dict[str, dict[str, Any]] = {}
@@ -681,6 +676,10 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         if goal is not None:
             self.goals.create_with_job(thread_id, goal)
         job["goal"] = self.thread_goals.get(thread_id)
+        # As the store counts: the task of a conversation created with a goal is
+        # its first message, and the first turn is stamped with the count.
+        self.thread_input_seqs[thread_id] = 1 if goal is not None else 0
+        job["input_seq_at_create"] = self.thread_input_seqs[thread_id]
         self.jobs[job_id] = job
         self.messages.append(
             {
@@ -713,34 +712,32 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             return job
         return None
 
-    async def create_follow_up(
+    async def insert_follow_up(
         self,
         *,
         parent_job_id: str,
         user_id: str,
         prompt: str,
-        runtime: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         reset_reasoning_effort: bool = False,
         skills: list[dict[str, Any]] | None = None,
-        goal: Any | None = None,
         attachments: list[dict[str, Any]] | None = None,
-        turn_source: str = "human",
-        goal_round: int | None = None,
-        goal_round_kind: str | None = None,
-        goal_revision: int | None = None,
         yield_to_queued: bool = False,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
+        """A person's next turn, as the store's ``insert_follow_up`` appends it.
+
+        Not a storage method. The store calls that function inside the
+        transaction that decided to append the turn, the queue's settlement or
+        an idle-only message, and this fake's ``settle_queue`` and
+        ``submit_message`` call this the same way. The turn is a person's and
+        keeps the conversation's runtime; an automatic round is
+        :meth:`create_goal_round`'s.
+        """
         del attachments  # staged uploads have their own suite; this fake stages none
-        self.last_follow_up_request = (client_request_id, client_request_fingerprint)
         requested = self.jobs.get(parent_job_id)
-        if goal is not None and requested is not None:
-            await self.goals.set_goal(
-                thread_id=str(requested["thread_id"]), user_id=user_id, goal=goal
-            )
         if requested is None or requested["user_id"] != user_id:
             return None
         if requested["state"] == "cancelled":
@@ -770,6 +767,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             )
             + 1
         )
+        thread_id = str(parent["thread_id"])
+        self.thread_input_seqs[thread_id] = self.thread_input_seqs.get(thread_id, 0) + 1
         job = {
             **parent,
             "id": job_id,
@@ -778,7 +777,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "base_sha": parent.get("published_commit_sha") or parent.get("base_sha"),
             "task_prompt": prompt,
             "skills": skills if skills is not None else parent.get("skills"),
-            "runtime": runtime or parent["runtime"],
             "model": model or parent["model"],
             # Mirrors the store: inherit when omitted, and only the explicit
             # reset clears an effort the thread already carries.
@@ -794,15 +792,20 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "published_pr_url": None,
             "published_commit_sha": None,
             "detail": None,
-            "turn_source": turn_source,
-            "goal_round": goal_round,
-            "goal_round_kind": goal_round_kind,
-            "round_goal_revision": goal_revision,
+            # A person's turn, whatever its parent was: it carries the
+            # conversation's goal identity and no round of its own.
+            "turn_source": "human",
+            "goal_id": (self.thread_goals.get(thread_id) or {}).get("goal_id"),
+            "goal_round": None,
+            "goal_round_kind": None,
+            "round_goal_revision": None,
             # A fresh turn has its own report columns, whatever its parent
             # ended on.
             "goal_report_parse": None,
             "goal_report_outcome": None,
             "goal_report_detail": None,
+            # Stamped with the count this message moved the conversation to.
+            "input_seq_at_create": self.thread_input_seqs[thread_id],
             "created_at": None,
             "updated_at": None,
             "pinned_at": self.pinned_threads.get(parent["thread_id"]),
@@ -827,12 +830,85 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         )
         return job
 
+    async def create_goal_round(
+        self,
+        *,
+        thread_id: str,
+        goal_id: str,
+        revision: int,
+        kind: str,
+        round_number: int,
+        prompt: str,
+        client_request_id: str,
+        client_request_fingerprint: str,
+    ) -> dict[str, Any] | None:
+        """One automatic round, as the store's ``create_goal_round`` appends it.
+
+        The only write of a ``goal`` turn. Like the store's, it continues the
+        newest turn with that turn's runtime, model, effort and skills, adds the
+        goal report to what its metadata requires of a host, and is stamped with
+        the conversation's input count without moving it. A key the
+        conversation already used appends nothing, which is how a replayed
+        decision finds the round it made. The controller's ``conn`` and
+        ``wakeup_id`` are not modelled: nothing consumes this fake's wakeups.
+        """
+        turns = self._thread_turns(thread_id)
+        if not turns:
+            return None
+        if any(job.get("client_request_id") == client_request_id for job in turns):
+            return None
+        parent = turns[-1]
+        job_id = f"ajob_{self._next_job:04d}"
+        self._next_job += 1
+        job = {
+            **parent,
+            "id": job_id,
+            "parent_job_id": parent["id"],
+            "turn_no": parent["turn_no"] + 1,
+            "base_sha": parent.get("published_commit_sha") or parent.get("base_sha"),
+            "task_prompt": prompt,
+            "metadata": _goal_round_metadata(parent.get("metadata")),
+            "state": "queued",
+            "cancel_requested": False,
+            "terminal_resume_pending": False,
+            "current_attempt_id": None,
+            "published_pr_url": None,
+            "published_commit_sha": None,
+            "detail": None,
+            "turn_source": "goal",
+            "goal_id": goal_id,
+            "goal_round": round_number,
+            "goal_round_kind": kind,
+            "round_goal_revision": revision,
+            "goal_report_parse": None,
+            "goal_report_outcome": None,
+            "goal_report_detail": None,
+            "input_seq_at_create": self.thread_input_seqs.get(thread_id, 0),
+            "created_at": None,
+            "updated_at": None,
+            "pinned_at": self.pinned_threads.get(thread_id),
+            "goal": self.thread_goals.get(thread_id),
+            "client_request_id": client_request_id,
+            "client_request_fingerprint": client_request_fingerprint,
+        }
+        self.jobs[job_id] = job
+        self.messages.append(
+            {
+                "id": len(self.messages) + 1,
+                "thread_id": thread_id,
+                "job_id": job_id,
+                "role": "user",
+                "content": prompt,
+                "created_at": None,
+            }
+        )
+        return job
+
     # -- Pending messages --
     #
     # The queue the message route writes. A message that is sent becomes a turn
-    # through ``create_follow_up`` above, so it becomes exactly the turn a
-    # follow-up always made here, and the cases about a turn's fields keep
-    # asserting on the same fake.
+    # through ``insert_follow_up`` above, as the store's settlement sends one,
+    # so the cases about a turn's fields keep asserting on the same fake.
 
     def _thread_turns(self, thread_id: str) -> list[dict[str, Any]]:
         return sorted(
@@ -921,7 +997,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
                 or sandbox.get("workspace_publication_state") != "published"
             ):
                 return {"error": "conversation_changed"}
-            made = await self.create_follow_up(
+            made = await self.insert_follow_up(
                 parent_job_id=expected_latest_job_id,
                 user_id=user_id,
                 prompt=prompt,
@@ -1026,7 +1102,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         return {"queue_paused_reason": None}
 
     async def settle_queue(self, *, thread_id: str, prepared: Any = None) -> SettleOutcome:
-        """Mirrors the store's settlement, sending through ``create_follow_up``."""
+        """Mirrors the store's settlement, sending through ``insert_follow_up``."""
         turns = self._thread_turns(thread_id)
         if not turns or self._thread_live(thread_id):
             return SettleOutcome()
@@ -1052,7 +1128,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         if prepared.error is not None:
             head.update(state="held", last_error=prepared.error, revision=head["revision"] + 1)
             return SettleOutcome()
-        job = await self.create_follow_up(
+        job = await self.insert_follow_up(
             parent_job_id=latest["id"],
             user_id=head["user_id"],
             prompt=head["prompt"],
@@ -2838,16 +2914,16 @@ async def test_cancelled_middle_turn_does_not_release_a_later_queued_turn(
     """Every unfinished earlier turn blocks a claim, even across a cancellation.
 
     Two turns queued behind a live one cannot come from the message route any
-    more — it holds later messages in the queue — so they are appended through
-    the store, which automatic rounds still do.
+    more — it holds later messages in the queue — so they are appended directly,
+    the way ``insert_follow_up`` appends when it is not asked to yield.
     """
     parent_id = await _create_job(client)
-    middle = await store.create_follow_up(
+    middle = await store.insert_follow_up(
         parent_job_id=parent_id, user_id=_OWNER, prompt="skip this follow-up"
     )
     assert middle is not None
     middle_id = middle["id"]
-    latest = await store.create_follow_up(
+    latest = await store.insert_follow_up(
         parent_job_id=parent_id, user_id=_OWNER, prompt="run this after the first turn"
     )
     assert latest is not None
@@ -3369,10 +3445,10 @@ async def test_follow_up_handles_context_loss_during_admission_checks(
     job_id = await _create_job(client)
     store.jobs[job_id]["state"] = "succeeded"
 
-    async def _lost_during_create(**_kwargs):
+    async def _lost_during_insert(**_kwargs):
         return {"error": "sandbox_context_lost"}
 
-    monkeypatch.setattr(store, "create_follow_up", _lost_during_create)
+    monkeypatch.setattr(store, "insert_follow_up", _lost_during_insert)
     response = await _send(client, store, job_id, {"prompt": "race with a lost activation"})
 
     assert response.status_code == 201
@@ -9492,9 +9568,9 @@ async def test_an_idle_only_message_creates_its_turn_with_prepared_choices_witho
         ],
     )
     monkeypatch.setattr("cloud_agent.api.turns.prepare_follow_up", AsyncMock(return_value=prepared))
-    created = AsyncMock(wraps=store.create_follow_up)
+    created = AsyncMock(wraps=store.insert_follow_up)
     settlement = AsyncMock()
-    monkeypatch.setattr(store, "create_follow_up", created)
+    monkeypatch.setattr(store, "insert_follow_up", created)
     monkeypatch.setattr(store, "settle_queue", settlement)
 
     response = await _send(
@@ -9924,11 +10000,11 @@ async def test_follow_up_receipts_include_retained_membership_on_create_and_repl
         "origin_thread_id": "athread_main",
     }
     store.jobs[parent_id]["thread_sandbox"] = sandbox
-    create = store.create_follow_up
+    insert = store.insert_follow_up
     replay = store.replayed_submission
 
-    async def bare_create(**kwargs):
-        job = await create(**kwargs)
+    async def bare_insert(**kwargs):
+        job = await insert(**kwargs)
         store.jobs[job["id"]]["thread_sandbox"] = sandbox
         return {**job, "thread_sandbox": None}
 
@@ -9936,7 +10012,7 @@ async def test_follow_up_receipts_include_retained_membership_on_create_and_repl
         job = await replay(**kwargs)
         return {**job, "thread_sandbox": None} if job else None
 
-    monkeypatch.setattr(store, "create_follow_up", bare_create)
+    monkeypatch.setattr(store, "insert_follow_up", bare_insert)
     monkeypatch.setattr(store, "replayed_submission", bare_replay)
     first = await _send(
         client, store, parent_id, {"prompt": "side reply"}, headers={"Idempotency-Key": "side-send"}

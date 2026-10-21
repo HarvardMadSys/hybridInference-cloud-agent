@@ -9,6 +9,7 @@ from cloud_agent_shared.runtime_catalog import PI
 
 from .base import (
     EMPTY_RUNTIME_MCP_CONFIG,
+    AgentRuntime,
     RuntimeCapabilities,
     RuntimeMCPConfig,
     merged_mcp_server,
@@ -26,7 +27,6 @@ from .events import (
     _payload_text,
     _truncate,
 )
-from .generic import GenericRuntime
 from .preview import ReplyPreview
 
 if TYPE_CHECKING:
@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 PI_MCP_BRIDGE = "/usr/local/libexec/pi-mcp-bridge.ts"
 
 
-class PiRuntime(GenericRuntime):
+class PiRuntime(AgentRuntime):
     """Tier 1: the pi coding agent, ``--mode json`` normalized.
 
     pi ignores ``OPENAI_BASE_URL`` — its built-in ``openai`` provider goes
@@ -69,6 +69,7 @@ class PiRuntime(GenericRuntime):
     """
 
     name = PI.name
+    binary = "pi-freeinference"
 
     # pi streams a completed block twice: once as deltas, then whole. The
     # ``*_end`` sub-events are what is mapped — the recorded run's 300
@@ -100,20 +101,7 @@ class PiRuntime(GenericRuntime):
     )
 
     def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
-        """Fix the wrapper invocation and remember pi's native session id."""
-        super().__init__(
-            "pi-freeinference --provider freeinference --model {model} "
-            # pi has no native MCP client at the pinned version; MCP arrives
-            # through executable extensions, and a project-local one is as easy
-            # to commit as a file in the checkout. `--no-extensions` disables
-            # discovery entirely -- the project's `.pi/extensions/`, the global
-            # directory, and anything a settings file names -- leaving the
-            # explicit `-e` below as the only way in.
-            "--mode json --no-extensions "
-            f"-e {PI_MCP_BRIDGE} "
-            "-p {prompt}",
-            binary="pi-freeinference",
-        )
+        """Remember pi's native session id and this run's preview state."""
         # One adapter instance per job (see get_runtime), so the suppression
         # in _from_message_update is per-run and cannot leak across jobs.
         self._reported_subtypes: set[str] = set()
@@ -126,62 +114,6 @@ class PiRuntime(GenericRuntime):
         # The completed blocks of the assistant message in progress, waiting
         # for the ``message_end`` that names its response; see parse_events.
         self._held: list[NormalizedEvent] = []
-
-    def prepare(
-        self,
-        *,
-        workdir: str,
-        task_prompt: str,
-        model: str,
-        gateway_base_url: str,
-        credential: str,
-        provides_isolation: bool = False,
-        mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
-        reasoning_effort: str | None = None,
-        session_state_dir: str | None = None,
-        resume_session_id: str | None = None,
-        activation_dir: str | None = None,
-    ) -> tuple[list[str], dict[str, str]]:
-        """Add the model id the wrapper writes into pi's provider config."""
-        argv, env = super().prepare(
-            workdir=workdir,
-            task_prompt=task_prompt,
-            model=model,
-            gateway_base_url=gateway_base_url,
-            credential=credential,
-            provides_isolation=provides_isolation,
-            # The relay endpoints are published below rather than by the base
-            # class, because pi is the one runtime whose MCP client is not the
-            # CLI: the bridge extension reads them, and handing a server set to
-            # a CLI that cannot read it would be a silent no-op.
-            mcp_config=EMPTY_RUNTIME_MCP_CONFIG,
-            reasoning_effort=reasoning_effort,
-        )
-        self._accept_mcp(mcp_config, gateway_base_url=gateway_base_url, env=env)
-        # models.json wants the model listed under the provider; the wrapper
-        # cannot parse it back out of pi's argv without reimplementing pi's
-        # option handling, so hand it over explicitly.
-        env["PI_GATEWAY_MODEL"] = model
-        # Provider config contains the short-lived turn credential. Keep it in
-        # the activation tmpfs; only the session JSONL belongs in durable chat
-        # state. The wrapper creates this directory before exec.
-        env["PI_CODING_AGENT_DIR"] = activation_dir or "/run/agent-activation/pi"
-        if session_state_dir:
-            prompt_at = argv.index("-p")
-            native_args = ["--session-dir", session_state_dir]
-            if resume_session_id:
-                native_args += ["--session", resume_session_id]
-            argv[prompt_at:prompt_at] = native_args
-        if self._check_effort(reasoning_effort) is not None:
-            argv += ["--thinking", str(reasoning_effort)]
-            # `--thinking` alone is a no-op: verified against 0.73.1, pi emits
-            # no `reasoning_effort` at all unless the provider entry declares
-            # the model as a reasoning model. The wrapper writes that entry, so
-            # it has to be told — and only when an effort was asked for, since
-            # declaring it unconditionally makes pi send `medium` on every turn
-            # and Auto would stop meaning "as before".
-            env["PI_GATEWAY_REASONING"] = "1"
-        return argv, env
 
     def prepare_live(
         self,
@@ -197,24 +129,52 @@ class PiRuntime(GenericRuntime):
         resume_session_id: str | None = None,
         activation_dir: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
-        """Build pi 0.73.1's bidirectional JSONL RPC process."""
-        argv, env = self.prepare(
-            workdir=workdir,
-            task_prompt="",
-            model=model,
-            gateway_base_url=gateway_base_url,
-            credential=credential,
-            provides_isolation=provides_isolation,
-            mcp_config=mcp_config,
-            reasoning_effort=reasoning_effort,
-            session_state_dir=session_state_dir,
-            resume_session_id=resume_session_id,
-            activation_dir=activation_dir,
-        )
-        mode_at = argv.index("--mode") + 1
-        argv[mode_at] = "rpc"
-        prompt_at = argv.index("-p")
-        del argv[prompt_at : prompt_at + 2]
+        """Build pi's bidirectional JSONL RPC process."""
+        del workdir, provides_isolation
+        effort = self._check_effort(reasoning_effort)
+        env = self._wrapper_env(gateway_base_url, credential)
+        # The relay endpoints go to the bridge extension rather than the CLI:
+        # pi is the one runtime whose MCP client is not the CLI.
+        self._accept_mcp(mcp_config, gateway_base_url=gateway_base_url, env=env)
+        # models.json wants the model listed under the provider; the wrapper
+        # cannot parse it back out of pi's argv without reimplementing pi's
+        # option handling, so hand it over explicitly.
+        env["PI_GATEWAY_MODEL"] = model
+        # Provider config contains the short-lived turn credential. Keep it in
+        # the activation tmpfs; only the session JSONL belongs in durable chat
+        # state. The wrapper creates this directory before exec.
+        env["PI_CODING_AGENT_DIR"] = activation_dir or "/run/agent-activation/pi"
+        argv = [
+            self.binary,
+            "--provider",
+            "freeinference",
+            "--model",
+            model,
+            "--mode",
+            "rpc",
+            # pi has no native MCP client at the pinned version; MCP arrives
+            # through executable extensions, and a project-local one is as easy
+            # to commit as a file in the checkout. `--no-extensions` disables
+            # discovery entirely -- the project's `.pi/extensions/`, the global
+            # directory, and anything a settings file names -- leaving the
+            # explicit `-e` below as the only way in.
+            "--no-extensions",
+            "-e",
+            PI_MCP_BRIDGE,
+        ]
+        if session_state_dir:
+            argv += ["--session-dir", session_state_dir]
+            if resume_session_id:
+                argv += ["--session", resume_session_id]
+        if effort is not None:
+            argv += ["--thinking", effort]
+            # `--thinking` alone is a no-op: verified against 0.73.1, pi emits
+            # no `reasoning_effort` at all unless the provider entry declares
+            # the model as a reasoning model. The wrapper writes that entry, so
+            # it has to be told — and only when an effort was asked for, since
+            # declaring it unconditionally makes pi send `medium` on every turn
+            # and Auto would stop meaning "as before".
+            env["PI_GATEWAY_REASONING"] = "1"
         return argv, env
 
     def parse_event(self, line: str) -> NormalizedEvent | None:
@@ -489,7 +449,7 @@ class PiRuntime(GenericRuntime):
     EFFORT_LEVELS = PI.reasoning_efforts
 
     def effort_args(self, effort: str | None) -> list[str]:
-        """Rendered in :meth:`prepare`, because the flag is only half of it.
+        """Rendered in :meth:`prepare_live`, because the flag is only half of it.
 
         pi needs the provider entry to declare the model as a reasoning model
         as well, and that is the wrapper's file rather than this argv — so both
@@ -516,7 +476,7 @@ class PiRuntime(GenericRuntime):
     def capabilities(self) -> RuntimeCapabilities:
         """Take the platform's MCP relay, through the image's bridge, and an effort level.
 
-        Native resume is declared by :class:`drivers.PiDriver`, not here.
+        Native resume is declared by its :class:`drivers.LiveDriver`, not here.
         """
         return RuntimeCapabilities(
             mcp=PI.mcp,

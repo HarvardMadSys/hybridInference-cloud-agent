@@ -426,7 +426,7 @@ class SandboxArchiveController:
             self._final_receipts.clear()
         self._close_services([slot.service for slot in slots])
 
-    def apply(self, settings: Mapping[str, Any]) -> dict[str, object]:
+    def apply(self, settings: Mapping[str, Any]) -> dict[str, object]:  # noqa: PLR0912 complexity baseline, #771
         """Validate and atomically apply one complete DB policy revision."""
         policy = SandboxArchivePolicy.from_mapping(settings)
         # Heartbeats re-offer the complete current revision.  Resolve that
@@ -715,7 +715,7 @@ class SandboxArchiveController:
             },
         )
 
-    def _prepare_final_marker(
+    def _prepare_final_marker(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         inspection: ChatSandboxInspection,

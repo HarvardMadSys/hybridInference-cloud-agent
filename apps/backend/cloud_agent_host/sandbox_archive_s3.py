@@ -151,7 +151,7 @@ class SandboxArchiveS3Config:
     # a revision pinned, and marker comparisons keep matching it.
     checkpoints_enabled: bool = True
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: PLR0912 complexity baseline, #771
         """Reject unsafe direct construction as strictly as database policy parsing."""
         if self.uri != SANDBOX_ARCHIVE_S3_URI:
             raise SandboxArchiveConfigError(

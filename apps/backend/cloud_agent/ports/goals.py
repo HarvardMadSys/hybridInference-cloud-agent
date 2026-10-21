@@ -45,10 +45,6 @@ class GoalRepository(Protocol):
         """The id of the turn that is queued or running right now, if any."""
         ...
 
-    async def get_goal_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        """The goal of the conversation the job belongs to, or ``None``."""
-        ...
-
     async def get_thread_goal_state(self, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
         """A conversation's goal *and* its control version, owner-checked.
 

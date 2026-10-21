@@ -632,7 +632,7 @@ class PostgresComputeResourceRepository:
         async with self._pool.acquire() as conn:
             return await self._allocation(conn, allocation_id)
 
-    async def remove_allocation(self, *, allocation_id: str, expected_revision: int) -> None:
+    async def remove_allocation(self, *, allocation_id: str, expected_revision: int) -> None:  # noqa: PLR0912, PLR0915 complexity baseline, #771
         """Forget an unused server and its inventory after rechecking dependencies.
 
         This performs no provider or filesystem action. A releasable resource
@@ -1135,7 +1135,7 @@ class PostgresComputeResourceRepository:
             )
         return [row["deployment_profile"] for row in rows]
 
-    async def update_cloudlab_autoscaling(
+    async def update_cloudlab_autoscaling(  # noqa: PLR0912 complexity baseline, #771
         self,
         *,
         expected_revision: int,
@@ -2061,27 +2061,6 @@ class PostgresComputeResourceRepository:
         if hosts:
             await release_covered_sandboxes(conn, hosts)
 
-    async def upsert_node(
-        self,
-        *,
-        allocation_id: str,
-        node: dict[str, Any],
-        operation_id: str | None = None,
-        generation: int | None = None,
-        worker_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Observe an immutable node identity without rebinding retained execution state."""
-        async with self._pool.acquire() as conn, conn.transaction():
-            await lock_compute_entry(conn, exclusive=True)
-            await self._fence(conn, operation_id, generation, worker_id, allocation_id)
-            allocation = await conn.fetchrow(
-                "SELECT desired_state FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
-                allocation_id,
-            )
-            if allocation is None or allocation["desired_state"] != "present":
-                raise ValueError("resource_retiring")
-            return await self._upsert_node(conn, allocation_id, node)
-
     async def _upsert_node(
         self, conn: Any, allocation_id: str, node: dict[str, Any]
     ) -> dict[str, Any]:
@@ -2501,7 +2480,7 @@ class PostgresComputeResourceRepository:
             )
             return True
 
-    async def apply_cloudlab_autoscaling_slot_target(
+    async def apply_cloudlab_autoscaling_slot_target(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         *,
         expected_revision: int,
@@ -3516,7 +3495,7 @@ class PostgresComputeResourceRepository:
             )
             return {**impact, "release_committed": True}
 
-    async def cancel_operation(self, operation_id: str) -> dict[str, Any]:
+    async def cancel_operation(self, operation_id: str) -> dict[str, Any]:  # noqa: C901, PLR0912 complexity baseline, #771
         """Cancel a safe pre-submit acquisition, retirement or rotation intent.
 
         A rotation can be cancelled until the old node stops: its claim pause

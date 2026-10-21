@@ -211,7 +211,7 @@ def _remote_options(label: str, remote: dict[str, Any]) -> list[dict[str, str]]:
     return options
 
 
-def _package_option(label: str, package: dict[str, Any]) -> dict[str, str] | None:
+def _package_option(label: str, package: dict[str, Any]) -> dict[str, str] | None:  # noqa: C901, PLR0912 complexity baseline, #771
     """Prefill simple pinned npm/PyPI stdio installs; leave complex recipes explicit."""
     if (
         package.get("transport") != {"type": "stdio"}
@@ -309,7 +309,7 @@ def _icon_url(icons: Any) -> str | None:
     return str(candidates[0]["src"]) if candidates else None
 
 
-def catalog_entry(record: Mapping[str, Any]) -> dict[str, Any] | None:
+def catalog_entry(record: Mapping[str, Any]) -> dict[str, Any] | None:  # noqa: C901 complexity baseline, #771
     """Normalize one active latest record, preserving its publisher identifier."""
     metadata = record.get("_meta")
     if not isinstance(metadata, Mapping):
@@ -418,7 +418,7 @@ def _checkpoint_page(
         state.cursors.add(cursor)
 
 
-async def fetch_catalog(
+async def fetch_catalog(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     client: httpx.AsyncClient,
     *,
     checkpoint: _CatalogFetchCheckpoint | None = None,

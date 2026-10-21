@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db
+from tests.support.usage import job_usage_inputs
 
 from cloud_agent.admin_observability import (
     ActivityCursor,
@@ -421,7 +422,7 @@ async def test_numeric_projection_matches_owner_accounting_for_blocks_and_attemp
     )
     queries = store.admin_runs
     admin_inputs = await queries.usage_inputs(job["id"])
-    owner_inputs = await store.execution_queries.job_usage_inputs(job_id=job["id"])
+    owner_inputs = await job_usage_inputs(db, job_id=job["id"])
     admin = summarize_job_usage(
         ledger_rows=[], runtime_inputs=admin_inputs, runtime="claude-code", terminal=True
     )

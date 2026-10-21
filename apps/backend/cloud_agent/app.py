@@ -151,7 +151,7 @@ def _api_docs() -> dict[str, Any]:
     return {} if enabled else _NO_DOCS
 
 
-def create_app() -> FastAPI:
+def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     """Build the control plane application."""
     configure_process_logging()
 

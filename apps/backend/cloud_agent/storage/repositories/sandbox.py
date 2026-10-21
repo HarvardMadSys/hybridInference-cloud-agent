@@ -2870,7 +2870,7 @@ class PostgresSandboxRepository:
         result["group_members"] = load_json(result.get("group_members")) or []
         return result
 
-    async def _reserve_shared_thread_sandbox(
+    async def _reserve_shared_thread_sandbox(  # noqa: PLR0912 complexity baseline, #771
         self,
         conn: Any,
         *,
@@ -3105,7 +3105,7 @@ class PostgresSandboxRepository:
             attempt_id,
         )
 
-    async def _reconcile_shared_sandbox_observation(
+    async def _reconcile_shared_sandbox_observation(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         *,
         thread_id: str,

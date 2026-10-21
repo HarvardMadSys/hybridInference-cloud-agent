@@ -25,6 +25,8 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - pytest fixtures
     store,
 )
 
+from cloud_agent.goals.controller import client_request_id_for
+
 if TYPE_CHECKING:
     from httpx import AsyncClient
 
@@ -94,16 +96,30 @@ async def _set(
 
 
 async def _goal_round(store: FakeStorage, job_id: str, *, round_number: int = 1) -> dict:
-    """One automatic round of the conversation, queued the way the platform does."""
-    return await store.conversation_commands.create_follow_up(
-        parent_job_id=job_id,
-        user_id=_OWNER,
+    """One automatic work round of the conversation, queued the way the controller does.
+
+    Through ``create_goal_round``, the controller's write, for the identity and
+    revision of the goal the conversation has now.
+    """
+    thread_id = str(store.jobs[job_id]["thread_id"])
+    goal = store.thread_goals[thread_id]
+    created = await store.conversation_commands.create_goal_round(
+        thread_id=thread_id,
+        goal_id=str(goal["goal_id"]),
+        revision=int(goal["revision"]),
+        kind="work",
+        round_number=round_number,
         prompt=f'<goal_round kind="work" round="{round_number}">',
-        turn_source="goal",
-        goal_round=round_number,
-        goal_round_kind="work",
-        goal_revision=1,
+        client_request_id=client_request_id_for(
+            thread_id=thread_id,
+            goal_id=str(goal["goal_id"]),
+            kind="work",
+            trigger_ref=f"test:{round_number}",
+        ),
+        client_request_fingerprint=f"goal-round:work:{round_number}",
     )
+    assert created is not None
+    return created
 
 
 def _error_type(response) -> str:

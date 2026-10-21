@@ -15,6 +15,7 @@ from tests.integration.storage.test_agent_job_store import (
     pool as pool,
     store as store,
 )
+from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
 from cloud_agent_host.sandbox import KATA_RUNTIME
@@ -139,7 +140,8 @@ class _AutoscalingObservationBarrierPool:
 
 async def test_queue_health_ignores_new_jobs_and_blocked_followups(pool, store):
     parent = await _create_job(store)
-    await store.conversation_commands.create_follow_up(
+    await append_follow_up(
+        pool,
         parent_job_id=parent["id"],
         user_id=parent["user_id"],
         prompt="Later",

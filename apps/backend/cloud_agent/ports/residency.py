@@ -91,15 +91,6 @@ class ResidencyRepository(Protocol):
         """
         ...
 
-    async def resident_host(self, *, thread_id: str) -> dict[str, Any] | None:
-        """The live hot residency for a thread, or ``None``.
-
-        Live means unexpired: the reaper marks expiry on its own schedule,
-        and scheduling decisions between passes must not trust a lease the
-        clock has already taken away.
-        """
-        ...
-
     async def reap_expired_residencies(self) -> list[dict[str, Any]]:
         """Mark every hot residency whose lease lapsed as ``none``.
 
