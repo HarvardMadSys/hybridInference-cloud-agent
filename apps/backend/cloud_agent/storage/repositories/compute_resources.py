@@ -24,8 +24,8 @@ from cloud_agent.domain.compute import (
     move_out_window_seconds,
     provider_resource_absent,
 )
+from cloud_agent.storage._sql import environment_runs
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
-from cloud_agent.storage._sql.environment_runs import env_runs_holding_slots
 from cloud_agent.storage._sql.hosts import (
     GROUP_TURN_CLAIMED_SQL,
     HANDED_OVER_GROUP_SQL,
@@ -882,7 +882,7 @@ class PostgresComputeResourceRepository:
                 dict(r)
                 for r in await conn.fetch(
                     f"""SELECT h.host,h.status,h.compute_node_id,
-                (h.slots_used+{env_runs_holding_slots("h.host")}) AS slots_used,h.last_heartbeat_at,h.broker_url AS sandbox_manager_url,h.drain_fence_active,
+                (h.slots_used+{environment_runs.env_runs_holding_slots("h.host")}) AS slots_used,h.last_heartbeat_at,h.broker_url AS sandbox_manager_url,h.drain_fence_active,
                 (SELECT count(*) FROM agent_sandboxes g
                  WHERE g.host=h.host AND g.deletion_state<>'deleted') AS retained_groups
                 FROM agent_runner_hosts h JOIN agent_compute_nodes n ON n.id=h.compute_node_id
@@ -933,7 +933,7 @@ class PostgresComputeResourceRepository:
                 dict(r)
                 for r in await conn.fetch(f"""SELECT h.host,h.status,h.drain_fence_active,
                 (h.removal_requested_at IS NOT NULL) AS removal_pending,h.compute_node_id,
-                n.allocation_id,(h.slots_used+{env_runs_holding_slots("h.host")}) AS slots_used,h.slots_total,h.slots_desired,h.last_heartbeat_at,
+                n.allocation_id,(h.slots_used+{environment_runs.env_runs_holding_slots("h.host")}) AS slots_used,h.slots_total,h.slots_desired,h.last_heartbeat_at,
                 h.labels->>'physical_host' AS physical_host,h.broker_url AS sandbox_manager_url,
                 (SELECT count(*) FROM agent_sandboxes g
                  WHERE g.host=h.host AND g.deletion_state<>'deleted') AS retained_groups
@@ -1592,9 +1592,8 @@ class PostgresComputeResourceRepository:
             ):
                 raise ValueError("autoscaling_member_not_retirable")
             hosts = await conn.fetch(
-                f"""SELECT h.host,(h.slots_used+{env_runs_holding_slots("h.host")}) AS slots_used FROM agent_compute_nodes n
-                   JOIN agent_runner_hosts h ON h.compute_node_id=n.id
-                   WHERE n.allocation_id=$1 FOR UPDATE OF h""",
+                f"""SELECT h.host,(h.slots_used+{environment_runs.env_runs_holding_slots("h.host")}) AS slots_used
+                   FROM agent_compute_nodes n JOIN agent_runner_hosts h ON h.compute_node_id=n.id WHERE n.allocation_id=$1 FOR UPDATE OF h""",
                 allocation_id,
             )
             if len(hosts) != 1 or any(host["slots_used"] != 0 for host in hosts):
