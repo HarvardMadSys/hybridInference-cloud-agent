@@ -134,8 +134,28 @@ async def _owned_job(
     """
     job = await store.get_job(job_id)
     if job is None or job["user_id"] != user["user_id"] or job.get("deleted_at") is not None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-        )
+        raise _no_such_job(job_id)
     return job
+
+
+async def _require_owned_job(
+    store: ConversationQueries,
+    job_id: str,
+    user: dict[str, Any],
+) -> None:
+    """Refuse a job that is not the caller's, exactly as :func:`_owned_job` does.
+
+    For a route that reads nothing of the job but whether it may: two
+    primary-key probes instead of the full job read with its sandbox,
+    conversation-state and skills subqueries. The 404 is the same, so ids still
+    cannot be probed across accounts.
+    """
+    if not await store.owns_job(job_id=job_id, user_id=user["user_id"]):
+        raise _no_such_job(job_id)
+
+
+def _no_such_job(job_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
+    )

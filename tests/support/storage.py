@@ -44,6 +44,11 @@ class AllCapabilities:
         """Legacy fixtures have no chat that ever selected an SSH server."""
         return None
 
+    async def owns_job(self, *, job_id: str, user_id: str) -> bool:
+        """Ownership as a fake's full job read answers it, as the routes once asked it."""
+        job = await self.get_job(job_id)  # type: ignore[attr-defined]
+        return job is not None and job["user_id"] == user_id and job.get("deleted_at") is None
+
     def __getattr__(self, name: str) -> Any:
         """Resolve a capability name to this object; anything else is an error."""
         if name in CAPABILITIES:

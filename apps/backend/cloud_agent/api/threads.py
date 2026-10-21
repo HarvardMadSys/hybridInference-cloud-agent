@@ -27,7 +27,12 @@ from cloud_agent.api._job_views import (
     _job_response,
     _pending_response,
 )
-from cloud_agent.api._owner_auth import OWNER_STREAM_MAX_S, _owned_job, require_agent_owner
+from cloud_agent.api._owner_auth import (
+    OWNER_STREAM_MAX_S,
+    _owned_job,
+    _require_owned_job,
+    require_agent_owner,
+)
 from cloud_agent.api._stream_slots import STREAM_SLOTS
 from cloud_agent.api.deps import get_job_event_signal, get_storage, require_store
 from cloud_agent.domain.execution import TERMINAL_STATES
@@ -112,7 +117,7 @@ async def get_agent_thread(
 ) -> AgentThreadResponse:
     """Return the durable conversation containing one of the caller's jobs."""
     job_store = _require_store(store)
-    await _owned_job(job_store.conversation_queries, job_id, user)
+    await _require_owned_job(job_store.conversation_queries, job_id, user)
     thread = await job_store.conversation_queries.get_thread_for_job(
         job_id=job_id, user_id=user["user_id"]
     )
@@ -160,7 +165,7 @@ async def get_agent_thread_stats(
     thread's runtime does not report come back ``null`` rather than zero.
     """
     job_store = _require_store(store)
-    await _owned_job(job_store.conversation_queries, job_id, user)
+    await _require_owned_job(job_store.conversation_queries, job_id, user)
     inputs = await job_store.execution_queries.thread_stats_inputs(
         job_id=job_id, user_id=user["user_id"]
     )
@@ -187,7 +192,7 @@ async def list_agent_thread_events(
 ) -> AgentThreadEventsResponse:
     """Page every turn's event log, with payloads and turn labels intact."""
     job_store = _require_store(store)
-    await _owned_job(job_store.conversation_queries, job_id, user)
+    await _require_owned_job(job_store.conversation_queries, job_id, user)
     events = await job_store.execution_queries.list_thread_events_after(
         job_id=job_id, user_id=user["user_id"], after_id=after, limit=limit
     )
@@ -221,7 +226,7 @@ async def list_agent_job_events(
 ) -> AgentJobEventsResponse:
     """Page through a job's append-only event log (non-streaming)."""
     job_store = _require_store(store)
-    await _owned_job(job_store.conversation_queries, job_id, user)
+    await _require_owned_job(job_store.conversation_queries, job_id, user)
     events = await job_store.execution_queries.list_events_after(
         job_id=job_id, after_id=after, limit=limit
     )

@@ -36,6 +36,14 @@ class ConversationQueries(Protocol):
         """Fetch one job by id."""
         ...
 
+    async def owns_job(self, *, job_id: str, user_id: str) -> bool:
+        """Whether the job is this owner's and its conversation is not deleted.
+
+        The check a route makes with :meth:`get_job` when ownership is all it
+        needs, without reading the job's summary or its sandbox.
+        """
+        ...
+
     async def owner_changes(
         self, *, user_id: str, job_ids: list[str], thread_ids: list[str]
     ) -> dict[str, list[dict[str, Any]]]:

@@ -160,6 +160,29 @@ class PostgresConversationQueries:
             )
         return job_row_to_dict(row) if row else None
 
+    async def owns_job(self, *, job_id: str, user_id: str) -> bool:
+        """Whether the job is this owner's and its conversation is not deleted.
+
+        :meth:`get_job` answers the same question for a route that checks
+        ownership and then reads nothing of the job, at the price of the job's
+        summary columns, its skills, and every sandbox subquery. This is two
+        primary-key probes, under the same join and the same conditions.
+        """
+        async with self._pool.acquire() as conn:
+            owned = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM agent_jobs j
+                    LEFT JOIN agent_threads t ON t.id = j.thread_id
+                    WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL
+                )
+                """,
+                job_id,
+                user_id,
+            )
+        return bool(owned)
+
     async def owner_changes(
         self, *, user_id: str, job_ids: list[str], thread_ids: list[str]
     ) -> dict[str, list[dict[str, Any]]]:
