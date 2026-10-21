@@ -42,9 +42,9 @@ from cloud_agent.skills.models import SkillError
 from cloud_agent.skills.selection import resolve_skills
 from cloud_agent.visible_models import (
     ModelCatalogUnavailable,
-    agent_canonical_model,
+    agent_model_catalog_bundle,
     agent_model_reasoning_efforts,
-    agent_visible_models,
+    resolve_model_in_catalog,
 )
 from cloud_agent_shared.git.temporary_workspace import TEMPORARY_WORKSPACE_BASE_SHA
 from cloud_agent_shared.plugins import validate_sandbox_plugins
@@ -106,6 +106,7 @@ async def _require_resolvable_model(
     *,
     gateway: Any,
     user: dict[str, Any],
+    catalog: tuple[list[str], dict[str, str], dict[str, list[str]]] | None = None,
 ) -> str:
     """Resolve the requested model to its canonical id, or refuse the job.
 
@@ -120,14 +121,21 @@ async def _require_resolvable_model(
     `claude-3-opus-latest` produced a grant whose `allowed_models` matched
     nothing. The job was created, and died at its first inference call with a
     404 from a model that plainly exists.
+
+    ``catalog`` carries an already-read ``(models, aliases, efforts)`` bundle
+    (issue #781): the send path reads the catalog once and both admission
+    checks consume the same response. When omitted the catalog is read here,
+    which keeps direct callers working.
     """
-    try:
-        canonical = await agent_canonical_model(model, gateway, user_id=user["user_id"])
-    except ModelCatalogUnavailable:
-        raise _model_catalog_unavailable() from None
+    if catalog is None:
+        try:
+            catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
+        except ModelCatalogUnavailable:
+            raise _model_catalog_unavailable() from None
+    models, aliases, _efforts = catalog
+    canonical = resolve_model_in_catalog(model, models, aliases)
     if canonical is not None:
         return canonical
-    visible = await agent_visible_models(gateway, user_id=user["user_id"])
     raise HTTPException(
         status_code=400,
         detail={
@@ -135,7 +143,7 @@ async def _require_resolvable_model(
                 "type": "model_not_available",
                 "message": (
                     f"Model {model!r} is not available to agent jobs on this deployment. "
-                    f"Available: {', '.join(visible[:20]) or 'none'}."
+                    f"Available: {', '.join(models[:20]) or 'none'}."
                 ),
             }
         },
@@ -339,6 +347,7 @@ async def _require_offered_effort(
     model: str,
     gateway: Any,
     user: dict[str, Any],
+    efforts: dict[str, list[str]] | None = None,
 ) -> str | None:
     """400 unless ``effort`` is one this runtime *and* this model both accept.
 
@@ -354,6 +363,10 @@ async def _require_offered_effort(
         model: The canonical model id, already resolved.
         gateway: Client for the gateway's internal contracts.
         user: The authenticated owner.
+        efforts: An already-read ``{model_id: [values]}`` domain table
+            (issue #781): the send path reads the catalog once and both
+            admission checks consume the same response. When omitted the
+            catalog is read here, which keeps direct callers working.
 
     Returns:
         The value to store: ``None`` for Auto, else the validated level.
@@ -369,15 +382,16 @@ async def _require_offered_effort(
         # spellings are the same answer and neither is a 400.
         return None
     runtime_levels = runtime_reasoning_efforts().get(runtime, [])
-    try:
-        domains = await agent_model_reasoning_efforts(gateway, user_id=user["user_id"])
-    except ModelCatalogUnavailable:
-        raise _model_catalog_unavailable() from None
+    if efforts is None:
+        try:
+            efforts = await agent_model_reasoning_efforts(gateway, user_id=user["user_id"])
+        except ModelCatalogUnavailable:
+            raise _model_catalog_unavailable() from None
     # The model's entry is read as a yes/no — does it take the parameter at
     # all — and not for its contents. Per-model domains were tried and
     # withdrawn: the providers' documented lists disagreed with what their
     # APIs accept, so the levels are this platform's and the same everywhere.
-    takes_effort = bool(domains.get(model))
+    takes_effort = bool(efforts.get(model))
     offered = (
         [level for level in PLATFORM_REASONING_EFFORTS if level in runtime_levels]
         if takes_effort
@@ -597,11 +611,21 @@ async def _create_job_as(
     # Canonical from here on. The grant the gateway mints names canonical
     # ids, so a job that stored the alias would carry a scope matching
     # nothing — created successfully, dead at its first inference call.
-    model = await _require_resolvable_model(body.model, gateway=gateway, user=user)
+    # One catalog read serves both admission checks (issue #781).
+    try:
+        catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
+    except ModelCatalogUnavailable:
+        raise _model_catalog_unavailable() from None
+    model = await _require_resolvable_model(body.model, gateway=gateway, user=user, catalog=catalog)
     # Checked against the *resolved* model, not the requested spelling: the
     # domain belongs to the model the turn will actually call.
     reasoning_effort = await _require_offered_effort(
-        body.reasoning_effort, runtime=body.runtime, model=model, gateway=gateway, user=user
+        body.reasoning_effort,
+        runtime=body.runtime,
+        model=model,
+        gateway=gateway,
+        user=user,
+        efforts=catalog[2],
     )
     if body.repo is None:
         # A temporary workspace: there is no repository to be entitled to and no

@@ -2036,6 +2036,12 @@ class _FakeGateway:
         """
         return list(_TEST_MODELS), dict(self.aliases)
 
+    async def model_catalog_bundle(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+        """The one-read admission bundle (issue #781): names, aliases, efforts."""
+        return list(_TEST_MODELS), dict(self.aliases), await self.model_reasoning_efforts(user_id)
+
     async def model_reasoning_efforts(self, user_id: str) -> dict[str, list[str]]:
         """Which models take a reasoning effort, and which values.
 
@@ -2871,7 +2877,7 @@ async def test_create_fails_fast_on_a_model_this_deployment_cannot_serve(client:
 @pytest.mark.parametrize(
     ("read", "choices"),
     [
-        ("model_catalog_with_aliases", {}),
+        ("model_catalog_bundle", {}),
         ("model_reasoning_efforts", {"reasoning_effort": "high"}),
     ],
     ids=["model", "effort"],
