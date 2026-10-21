@@ -23,18 +23,13 @@ import math
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, BinaryIO, Final, Literal, Protocol, cast
 
 from cloud_agent_shared.environment_snapshots import snapshot_object_key
 from cloud_agent_shared.sandbox_archive_settings import (
-    DEFAULT_MAX_ARCHIVE_BYTES,
     DEFAULT_MULTIPART_PART_BYTES,
-    DEFAULT_MULTIPART_THRESHOLD_BYTES,
-    MAX_ARCHIVE_BYTES,
-    MAX_MULTIPART_PART_BYTES,
-    MAX_SINGLE_UPLOAD_BYTES,
-    MIN_MULTIPART_PART_BYTES,
+    MAX_MULTIPART_PARTS,
     SANDBOX_ARCHIVE_BUCKET,
     SANDBOX_ARCHIVE_PREFIX,
     SANDBOX_ARCHIVE_S3_URI,
@@ -44,13 +39,6 @@ from cloud_agent_shared.sandbox_archive_settings import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-TIB: Final = 1024 * 1024 * 1024 * 1024
-# Archive construction temporarily holds both the raw Docker tar streams and
-# the compressed outer object. Keep the default modest enough for an ordinary
-# host and cap operator tuning so one hostile workspace cannot consume an
-# unbounded amount of sandbox manager scratch space.
-MAX_S3_OBJECT_BYTES: Final = 5 * TIB
-MAX_MULTIPART_PARTS: Final = 10_000
 S3_CONNECT_TIMEOUT_S: Final = 5
 S3_READ_TIMEOUT_S: Final = 30
 S3_TOTAL_MAX_ATTEMPTS: Final = 2
@@ -66,15 +54,8 @@ _CHECKPOINT_KEY_RE: Final = re.compile(
 )
 _DOWNLOAD_CHUNK_BYTES: Final = 1024 * 1024
 CHECKPOINT_FORMAT: Final = "oci-layer-archive-v1"
-_ACCOUNT_ID_RE: Final = re.compile(r"[0-9]{12}")
-_ACCESS_KEY_ID_RE: Final = re.compile(r"[A-Z0-9]{20}")
-_SECRET_ACCESS_KEY_RE: Final = re.compile(r"[A-Za-z0-9/+=]{40}")
 _SHA256_RE: Final = re.compile(r"[0-9a-f]{64}")
 _MAX_IDENTITY_BYTES: Final = 1024
-_KMS_KEY_ARN_RE: Final = re.compile(
-    r"arn:(?P<partition>[^:]+):kms:(?P<region>[a-z0-9-]+):"
-    r"(?P<account>[0-9]{12}):key/(?P<key>[A-Za-z0-9-]+)"
-)
 
 
 class SandboxArchiveConfigError(ValueError):
@@ -135,107 +116,59 @@ class S3ArchiveClient(Protocol):
 
 @dataclass(frozen=True)
 class SandboxArchiveS3Config:
-    """Validated server-owned configuration for the one archive prefix."""
+    """An enabled archive policy, and the credentials its uploads use.
 
-    region: str
-    kms_key_arn: str
-    expected_bucket_owner: str
-    aws_access_key_id: str = field(default="", repr=False)
-    aws_secret_access_key: str = field(default="", repr=False)
-    uri: str = SANDBOX_ARCHIVE_S3_URI
-    max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES
-    multipart_threshold_bytes: int = DEFAULT_MULTIPART_THRESHOLD_BYTES
-    multipart_part_bytes: int = DEFAULT_MULTIPART_PART_BYTES
-    revision: int = 0
-    # Not an S3 setting: carried so ``as_policy`` reproduces the exact policy
-    # a revision pinned, and marker comparisons keep matching it.
-    checkpoints_enabled: bool = True
+    The policy was validated when it was parsed, so the only rule here is the
+    one the resolved credentials add: without an access key, uploads use the
+    host's workload identity, which needs the KMS key and the bucket owner.
+    ``policy`` is kept with those credentials, as markers record it.
+    """
+
+    policy: SandboxArchivePolicy
+    # A credential left as None is the policy's own.
+    aws_access_key_id: str | None = field(default=None, repr=False)
+    aws_secret_access_key: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        """Reject unsafe direct construction as strictly as database policy parsing."""
-        if self.uri != SANDBOX_ARCHIVE_S3_URI:
-            raise SandboxArchiveConfigError(
-                f"sandbox archive S3 URI must be exactly {SANDBOX_ARCHIVE_S3_URI}"
-            )
-        if not self.region or self.region.strip() != self.region:
-            raise SandboxArchiveConfigError("sandbox archive region must be non-empty")
-        if bool(self.aws_access_key_id) != bool(self.aws_secret_access_key):
-            raise SandboxArchiveConfigError(
-                "sandbox archive access key id and secret must both be set"
-            )
-        if self.aws_access_key_id and (_ACCESS_KEY_ID_RE.fullmatch(self.aws_access_key_id) is None):
-            raise SandboxArchiveConfigError(
-                "sandbox archive access key id must be a 20-character AWS access key id"
-            )
-        if self.aws_secret_access_key and (
-            _SECRET_ACCESS_KEY_RE.fullmatch(self.aws_secret_access_key) is None
-        ):
-            raise SandboxArchiveConfigError(
-                "sandbox archive secret access key must be a 40-character secret"
-            )
-        uses_access_key = bool(self.aws_access_key_id)
-        if self.expected_bucket_owner and not _ACCOUNT_ID_RE.fullmatch(self.expected_bucket_owner):
+        """Refuse a disabled policy, or workload identity without its KMS key and owner."""
+        if not isinstance(self.policy, SandboxArchivePolicy) or not self.policy.enabled:
+            raise SandboxArchiveConfigError("sandbox archive policy is disabled")
+        key_id = (
+            self.policy.aws_access_key_id
+            if self.aws_access_key_id is None
+            else self.aws_access_key_id
+        )
+        secret = (
+            self.policy.aws_secret_access_key
+            if self.aws_secret_access_key is None
+            else self.aws_secret_access_key
+        )
+        if not key_id and not self.policy.expected_bucket_owner:
             raise SandboxArchiveConfigError(
                 "sandbox archive expected bucket owner must be a 12-digit AWS account id"
             )
-        if not uses_access_key and not self.expected_bucket_owner:
-            raise SandboxArchiveConfigError(
-                "sandbox archive expected bucket owner must be a 12-digit AWS account id"
-            )
-        kms_match = _KMS_KEY_ARN_RE.fullmatch(self.kms_key_arn) if self.kms_key_arn else None
-        if self.kms_key_arn and kms_match is None:
+        if not key_id and not self.policy.kms_key_arn:
             raise SandboxArchiveConfigError(
                 "sandbox archive KMS key must be a key ARN, not an alias"
             )
-        if not uses_access_key and kms_match is None:
-            raise SandboxArchiveConfigError(
-                "sandbox archive KMS key must be a key ARN, not an alias"
-            )
-        if kms_match is not None and kms_match.group("region") != self.region:
-            raise SandboxArchiveConfigError("the KMS key ARN and archive region must match")
-        if (
-            kms_match is not None
-            and self.expected_bucket_owner
-            and kms_match.group("account") != self.expected_bucket_owner
-        ):
-            raise SandboxArchiveConfigError(
-                "the KMS key ARN account and expected bucket owner must match"
-            )
+        object.__setattr__(self, "aws_access_key_id", key_id)
+        object.__setattr__(self, "aws_secret_access_key", secret)
+        # Validated by the policy's own rules, and compared with the config.
+        object.__setattr__(
+            self,
+            "policy",
+            replace(
+                self.policy,
+                access_key_auth=False,
+                aws_access_key_id=key_id,
+                aws_secret_access_key=secret,
+            ),
+        )
 
-        _validate_bounded_int(
-            "sandbox archive max bytes",
-            self.max_archive_bytes,
-            minimum=1,
-            maximum=min(MAX_ARCHIVE_BYTES, MAX_S3_OBJECT_BYTES),
-        )
-        _validate_bounded_int(
-            "sandbox archive multipart threshold bytes",
-            self.multipart_threshold_bytes,
-            minimum=1,
-            maximum=min(self.max_archive_bytes, MAX_SINGLE_UPLOAD_BYTES),
-        )
-        _validate_bounded_int(
-            "sandbox archive multipart part bytes",
-            self.multipart_part_bytes,
-            minimum=MIN_MULTIPART_PART_BYTES,
-            maximum=MAX_MULTIPART_PART_BYTES,
-        )
-        maximum_parts = (
-            self.max_archive_bytes + self.multipart_part_bytes - 1
-        ) // self.multipart_part_bytes
-        if maximum_parts > MAX_MULTIPART_PARTS:
-            raise SandboxArchiveConfigError(
-                "archive max bytes and multipart part bytes could require more than "
-                f"{MAX_MULTIPART_PARTS} S3 parts"
-            )
-        if isinstance(self.revision, bool) or not isinstance(self.revision, int):
-            raise SandboxArchiveConfigError(
-                "sandbox archive policy revision must be a non-negative integer"
-            )
-        if self.revision < 0:
-            raise SandboxArchiveConfigError(
-                "sandbox archive policy revision must be a non-negative integer"
-            )
+    @property
+    def uri(self) -> str:
+        """Return the fixed destination; it is never caller-selected."""
+        return SANDBOX_ARCHIVE_S3_URI
 
     @property
     def bucket(self) -> str:
@@ -247,6 +180,41 @@ class SandboxArchiveS3Config:
         """Return the fixed object prefix; it is never caller-selected."""
         return SANDBOX_ARCHIVE_PREFIX
 
+    @property
+    def region(self) -> str:
+        """Return the archive bucket's region."""
+        return self.policy.region
+
+    @property
+    def kms_key_arn(self) -> str:
+        """Return the KMS key new objects are encrypted with, if any."""
+        return self.policy.kms_key_arn
+
+    @property
+    def expected_bucket_owner(self) -> str:
+        """Return the account every request requires to own the bucket, if any."""
+        return self.policy.expected_bucket_owner
+
+    @property
+    def max_archive_bytes(self) -> int:
+        """Return the largest object this policy stores."""
+        return self.policy.max_archive_bytes
+
+    @property
+    def multipart_threshold_bytes(self) -> int:
+        """Return the size above which an upload is multipart."""
+        return self.policy.multipart_threshold_bytes
+
+    @property
+    def multipart_part_bytes(self) -> int:
+        """Return the size of each multipart part."""
+        return self.policy.multipart_part_bytes
+
+    @property
+    def revision(self) -> int:
+        """Return the policy revision this config was built from."""
+        return self.policy.revision
+
     @classmethod
     def from_policy(
         cls,
@@ -255,44 +223,16 @@ class SandboxArchiveS3Config:
         aws_access_key_id: str | None = None,
         aws_secret_access_key: str | None = None,
     ) -> SandboxArchiveS3Config:
-        """Build the sandbox manager's S3 client configuration from one validated DB policy."""
-        if not policy.enabled:
-            raise SandboxArchiveConfigError("sandbox archive policy is disabled")
+        """Build the config for one enabled policy, with its own or the given credentials."""
         return cls(
-            uri=SANDBOX_ARCHIVE_S3_URI,
-            region=policy.region,
-            kms_key_arn=policy.kms_key_arn,
-            expected_bucket_owner=policy.expected_bucket_owner,
-            aws_access_key_id=(
-                policy.aws_access_key_id if aws_access_key_id is None else aws_access_key_id
-            ),
-            aws_secret_access_key=(
-                policy.aws_secret_access_key
-                if aws_secret_access_key is None
-                else aws_secret_access_key
-            ),
-            max_archive_bytes=policy.max_archive_bytes,
-            multipart_threshold_bytes=policy.multipart_threshold_bytes,
-            multipart_part_bytes=policy.multipart_part_bytes,
-            revision=policy.revision,
-            checkpoints_enabled=policy.checkpoints_enabled,
+            policy=policy,
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
         )
 
     def as_policy(self) -> SandboxArchivePolicy:
-        """Reconstruct the exact enabled policy carried by this immutable config."""
-        return SandboxArchivePolicy(
-            enabled=True,
-            region=self.region,
-            kms_key_arn=self.kms_key_arn,
-            expected_bucket_owner=self.expected_bucket_owner,
-            aws_access_key_id=self.aws_access_key_id,
-            aws_secret_access_key=self.aws_secret_access_key,
-            max_archive_bytes=self.max_archive_bytes,
-            multipart_threshold_bytes=self.multipart_threshold_bytes,
-            multipart_part_bytes=self.multipart_part_bytes,
-            revision=self.revision,
-            checkpoints_enabled=self.checkpoints_enabled,
-        )
+        """Return the policy with this config's credentials, as markers record it."""
+        return self.policy
 
 
 @dataclass(frozen=True)
@@ -370,9 +310,9 @@ class SandboxArchiveS3Uploader:
         sandbox_hash = _identity_hash("sandbox id", sandbox_id)
         _validate_generation(generation)
         _validate_upload_size(size, maximum=self.config.max_archive_bytes)
-        key = self._object_key(
-            namespace_hash=namespace_hash,
-            sandbox_hash=sandbox_hash,
+        key = lifecycle_object_key(
+            namespace_sha256=namespace_hash,
+            sandbox_sha256=sandbox_hash,
             generation=generation,
             phase=checked_phase,
         )
@@ -411,40 +351,14 @@ class SandboxArchiveS3Uploader:
             generation=generation,
             checkpoint_id=checkpoint_id,
         )
-        try:
-            return self._upload_object(
-                key=key,
-                phase="checkpoint",
-                body=body,
-                size=size,
-                sha256=digest,
-                deadline=deadline,
-            )
-        except SandboxArchiveAlreadyExists:
-            self._check_deadline(deadline)
-            existing = self._get_client().head_object(
-                Bucket=self.config.bucket,
-                Key=key,
-                **self._owner_arguments(),
-            )
-            self._check_deadline(deadline)
-            if not self._matching_initial_head(
-                existing, size=size, digest=digest, phase="checkpoint"
-            ):
-                raise SandboxArchiveUploadError(
-                    "existing sandbox checkpoint does not match this retry"
-                ) from None
-            return SandboxArchiveReceipt(
-                phase="checkpoint",
-                bucket=self.config.bucket,
-                key=key,
-                size=size,
-                sha256=digest,
-                etag=_required_response_string(existing, "ETag"),
-                version_id=_required_version_id(existing),
-                s3_checksum_sha256=_optional_response_string(existing, "ChecksumSHA256"),
-                multipart=False,
-            )
+        return self._put_once(
+            key=key,
+            body=body,
+            size=size,
+            sha256=digest,
+            deadline=deadline,
+            what="sandbox checkpoint",
+        )
 
     def download_checkpoint(
         self,
@@ -549,38 +463,14 @@ class SandboxArchiveS3Uploader:
             key = snapshot_object_key(owner, snapshot_id)
         except ValueError as exc:
             raise SandboxArchiveUploadError(str(exc)) from None
-        try:
-            return self._upload_object(
-                key=key,
-                phase="checkpoint",
-                body=body,
-                size=size,
-                sha256=digest,
-                deadline=deadline,
-            )
-        except SandboxArchiveAlreadyExists:
-            self._check_deadline(deadline)
-            existing = self._get_client().head_object(
-                Bucket=self.config.bucket, Key=key, **self._owner_arguments()
-            )
-            self._check_deadline(deadline)
-            if not self._matching_initial_head(
-                existing, size=size, digest=digest, phase="checkpoint"
-            ):
-                raise SandboxArchiveUploadError(
-                    "existing environment snapshot does not match this retry"
-                ) from None
-            return SandboxArchiveReceipt(
-                phase="checkpoint",
-                bucket=self.config.bucket,
-                key=key,
-                size=size,
-                sha256=digest,
-                etag=_required_response_string(existing, "ETag"),
-                version_id=_required_version_id(existing),
-                s3_checksum_sha256=_optional_response_string(existing, "ChecksumSHA256"),
-                multipart=False,
-            )
+        return self._put_once(
+            key=key,
+            body=body,
+            size=size,
+            sha256=digest,
+            deadline=deadline,
+            what="environment snapshot",
+        )
 
     def download_environment_snapshot(
         self,
@@ -625,6 +515,57 @@ class SandboxArchiveS3Uploader:
         if version_id:
             arguments["VersionId"] = version_id
         self._get_client().delete_object(**arguments, **self._owner_arguments())
+
+    def _put_once(
+        self,
+        *,
+        key: str,
+        body: BinaryIO,
+        size: int,
+        sha256: str,
+        deadline: float | None,
+        what: str,
+    ) -> SandboxArchiveReceipt:
+        """Write an object whose key names a fresh id, treating an identical retry as success.
+
+        An existing object under such a key can only be this capture's own
+        earlier write whose response was lost. Its bytes must match exactly;
+        the receipt then comes from that object's metadata.
+        """
+        try:
+            return self._upload_object(
+                key=key,
+                phase="checkpoint",
+                body=body,
+                size=size,
+                sha256=sha256,
+                deadline=deadline,
+            )
+        except SandboxArchiveAlreadyExists:
+            self._check_deadline(deadline)
+            existing = self._get_client().head_object(
+                Bucket=self.config.bucket,
+                Key=key,
+                **self._owner_arguments(),
+            )
+            self._check_deadline(deadline)
+            if not self._matching_initial_head(
+                existing, size=size, digest=sha256, phase="checkpoint"
+            ):
+                raise SandboxArchiveUploadError(
+                    f"existing {what} does not match this retry"
+                ) from None
+            return SandboxArchiveReceipt(
+                phase="checkpoint",
+                bucket=self.config.bucket,
+                key=key,
+                size=size,
+                sha256=sha256,
+                etag=_required_response_string(existing, "ETag"),
+                version_id=_required_version_id(existing),
+                s3_checksum_sha256=_optional_response_string(existing, "ChecksumSHA256"),
+                multipart=False,
+            )
 
     def _upload_object(
         self,
@@ -719,9 +660,9 @@ class SandboxArchiveS3Uploader:
         _validate_generation(generation)
         _validate_upload_size(size, maximum=self.config.max_archive_bytes)
         digest = _validate_sha256(sha256)
-        key = self._object_key(
-            namespace_hash=namespace_hash,
-            sandbox_hash=sandbox_hash,
+        key = lifecycle_object_key(
+            namespace_sha256=namespace_hash,
+            sandbox_sha256=sandbox_hash,
             generation=generation,
             phase="initial",
         )
@@ -744,19 +685,6 @@ class SandboxArchiveS3Uploader:
             )
         return True
 
-    @staticmethod
-    def _object_key(
-        *,
-        namespace_hash: str,
-        sandbox_hash: str,
-        generation: int,
-        phase: ArchivePhase,
-    ) -> str:
-        return (
-            f"{SANDBOX_ARCHIVE_PREFIX}/v1/{namespace_hash}/{sandbox_hash}/"
-            f"g{generation}/{phase}.tar.gz"
-        )
-
     def _check_deadline(self, deadline: float | None) -> None:
         _check_deadline(deadline, self._clock)
 
@@ -778,8 +706,8 @@ class SandboxArchiveS3Uploader:
             if self._client is None:
                 self._client = _default_s3_client(
                     self.config.region,
-                    aws_access_key_id=self.config.aws_access_key_id,
-                    aws_secret_access_key=self.config.aws_secret_access_key,
+                    aws_access_key_id=self.config.policy.aws_access_key_id,
+                    aws_secret_access_key=self.config.policy.aws_secret_access_key,
                 )
             return self._client
 
@@ -1113,13 +1041,6 @@ def _default_s3_client(
     return cast("S3ArchiveClient", boto3.client("s3", **client_kwargs))
 
 
-def _validate_bounded_int(name: str, value: int, *, minimum: int, maximum: int) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
-        raise SandboxArchiveConfigError(
-            f"{name} must be an integer between {minimum} and {maximum}"
-        )
-
-
 def _validate_phase(phase: str) -> ArchivePhase:
     if phase not in _ARCHIVE_PHASES:
         raise SandboxArchiveUploadError("sandbox archive phase must be 'initial' or 'final'")
@@ -1193,6 +1114,16 @@ def _object_format(phase: ArchivePhase) -> tuple[str, str]:
     if phase == "checkpoint":
         return "application/x-tar", CHECKPOINT_FORMAT
     return "application/gzip", "tar-gzip-v1"
+
+
+def lifecycle_object_key(
+    *, namespace_sha256: str, sandbox_sha256: str, generation: int, phase: str
+) -> str:
+    """Return the key of one lifecycle point's archive: a host's sandbox, at one generation."""
+    return (
+        f"{SANDBOX_ARCHIVE_PREFIX}/v1/{namespace_sha256}/{sandbox_sha256}/"
+        f"g{generation}/{phase}.tar.gz"
+    )
 
 
 def checkpoint_object_key(*, sandbox_id: str, generation: int, checkpoint_id: str) -> str:
@@ -1361,4 +1292,5 @@ __all__ = [
     "SandboxArchiveS3Uploader",
     "SandboxArchiveUploadError",
     "is_sandbox_archive_conditional_conflict",
+    "lifecycle_object_key",
 ]

@@ -23,6 +23,7 @@ from tests.integration.storage.test_agent_job_store import (
     pool as pool,
     store as store,
 )
+from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.storage.repositories.snapshot import PUBLISH_MAX_ATTEMPTS
 
@@ -86,10 +87,10 @@ async def _first_turn(store) -> tuple[dict, dict]:
     return job, sandbox
 
 
-async def _next_turn(store, *, parent: dict, sandbox: dict, prompt: str) -> dict:
+async def _next_turn(pool, store, *, parent: dict, sandbox: dict, prompt: str) -> dict:
     """A follow-up in the same chat, run through admission and settlement."""
-    job = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id=parent["user_id"], prompt=prompt
+    job = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id=parent["user_id"], prompt=prompt
     )
     assert job is not None and job["state"] == "queued"
     claim = await _claim(
@@ -248,7 +249,9 @@ async def test_the_owners_next_request_supersedes_a_failed_snapshot(store, pool,
 
     # The owner fixes the workspace in a later turn of the same chat. Settling
     # it publishes nothing: the group stays dirty until the owner asks.
-    second = await _next_turn(store, parent=first, sandbox=sandbox, prompt="drop the workflow")
+    second = await _next_turn(
+        pool, store, parent=first, sandbox=sandbox, prompt="drop the workflow"
+    )
     assert await _group_state(pool, sandbox["sandbox_id"]) == "dirty"
     assert await store.snapshot.claim_due_sandbox_snapshot() is None
     requested = await _request(store, second)
@@ -350,7 +353,7 @@ async def test_a_later_snapshot_still_carrying_the_change_fails_and_is_supersede
     parent = first
     for prompt in (None, "rename the variable"):
         if prompt is not None:
-            parent = await _next_turn(store, parent=parent, sandbox=sandbox, prompt=prompt)
+            parent = await _next_turn(pool, store, parent=parent, sandbox=sandbox, prompt=prompt)
         assert (await _request(store, parent))["requested"] is True
         capture = await store.snapshot.claim_due_sandbox_snapshot()
         assert capture is not None and capture["anchor_job_id"] == parent["id"]
@@ -358,7 +361,9 @@ async def test_a_later_snapshot_still_carrying_the_change_fails_and_is_supersede
         assert await _group_state(pool, sandbox["sandbox_id"]) == "dirty"
         rejected.append(capture)
 
-    third = await _next_turn(store, parent=parent, sandbox=sandbox, prompt="drop the workflow")
+    third = await _next_turn(
+        pool, store, parent=parent, sandbox=sandbox, prompt="drop the workflow"
+    )
     assert (await _request(store, third))["requested"] is True
     superseding = await store.snapshot.claim_due_sandbox_snapshot()
     assert superseding is not None and superseding["anchor_job_id"] == third["id"]
@@ -384,7 +389,9 @@ async def test_a_turn_that_settled_during_a_publication_waits_for_the_owner(stor
     earlier = await store.snapshot.claim_due_sandbox_snapshot()
     assert earlier is not None
     assert await _record(store, earlier, _REJECTED_PATCH) == "captured"
-    second = await _next_turn(store, parent=first, sandbox=sandbox, prompt="drop the workflow")
+    second = await _next_turn(
+        pool, store, parent=first, sandbox=sandbox, prompt="drop the workflow"
+    )
     assert await _group_state(pool, sandbox["sandbox_id"]) == "quiescent"
     in_flight = await _request(store, second)
     assert in_flight == {
@@ -424,7 +431,9 @@ async def test_an_older_epoch_never_publishes_after_a_newer_one(store, pool):
     earlier = await store.snapshot.claim_due_sandbox_snapshot()
     assert earlier is not None
     assert await _record(store, earlier, _REJECTED_PATCH) == "captured"
-    second = await _next_turn(store, parent=first, sandbox=sandbox, prompt="drop the workflow")
+    second = await _next_turn(
+        pool, store, parent=first, sandbox=sandbox, prompt="drop the workflow"
+    )
 
     # A deferred publication is still on its way, and still holds the next back.
     publication = await store.snapshot.claim_for_publish()

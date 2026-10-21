@@ -70,6 +70,7 @@ from cloud_agent_host.control_plane_client import (
     _EVENT_RETRY_MAX_DELAY_S,
     _HEARTBEAT_TIMEOUT_S,
     ControlPlane as ControlPlane,
+    _log_control_failure,
 )
 from cloud_agent_host.drivers import (
     LINE,
@@ -106,7 +107,6 @@ from cloud_agent_host.measurement_delivery import (
     DELIVERY_DRAIN_S,
     DELIVERY_HANDOFF_DRAIN_S,
     DELIVERY_QUEUE_MAX,
-    DELIVERY_TIMEOUT_S as DELIVERY_TIMEOUT_S,
     attempts_exhausted,
     classify_exception,
     classify_response,
@@ -175,6 +175,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
     SANDBOX_CHECKPOINT_CAPABILITY,
 )
+from cloud_agent_shared.sandbox_manager_wire import member_manifest
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import (
     RESTORE_FAILED_RELEASE_REASON,
@@ -248,18 +249,6 @@ _CLONE_WATCH_INTERVAL_S = 0.5
 STARTUP_OPERATION = "attempt.startup"
 
 logger = get_logger(__name__)
-
-
-def _log_control_failure(operation: str, job_id: str, exc: Exception) -> None:
-    """Keep a diagnosable failure without logging tokens or arbitrary response bodies."""
-    status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-    logger.warning(
-        "agent_control_failure operation=%s job_id=%s error_type=%s status_code=%s",
-        operation,
-        job_id,
-        type(exc).__name__,
-        status,
-    )
 
 
 def _owner_visible_error(exc: Exception) -> str:
@@ -494,29 +483,6 @@ class Heartbeater:
                 # under this lease, and one left to expire meanwhile makes the
                 # reaper mark the chat's context lost.
                 self.cancel_requested = True
-
-
-def claim(
-    *,
-    base_url: str,
-    host_credential: str,
-    worker_id: str,
-    lease_ttl: float,
-    attestation: dict[str, Any] | None = None,
-) -> ClaimedJob | None:
-    """Claim the next queued job with this enrolled host's credential.
-
-    The credential names the machine, so the body cannot claim as another
-    host. It remains in the trusted runner and never enters the agent process.
-    """
-    payload = claim_payload(
-        base_url=base_url,
-        host_credential=host_credential,
-        worker_id=worker_id,
-        lease_ttl=lease_ttl,
-        attestation=attestation,
-    )
-    return ClaimedJob.from_response(payload) if payload else None
 
 
 def claim_payload(
@@ -1231,7 +1197,7 @@ def _shared_live_ready_file() -> str:
     return (os.environ.get("AGENT_SHARED_LIVE_READY_FILE") or "").strip()
 
 
-def _shared_live_host_capabilities(
+def _shared_live_host_capabilities(  # noqa: C901, PLR0912 complexity baseline, #771
     backend: SandboxBackend,
     stamp: dict[str, Any],
 ) -> list[str]:
@@ -1983,20 +1949,7 @@ def _shared_group_manifest(reservation: dict[str, Any], *, thread_id: str) -> li
     members = [dict(item) for item in raw or [] if isinstance(item, dict)]
     if not members:
         members = [dict(reservation)]
-    allowed = {
-        "thread_id",
-        "native_session_id",
-        "context_status",
-        "activation_generation",
-        "process_generation",
-        "residency_generation",
-        "resident_state",
-        "resident_slot_id",
-        "last_settled_job_id",
-    }
-    projected = [
-        {key: value for key, value in member.items() if key in allowed} for member in members
-    ]
+    projected = member_manifest(members)
     if not any(member.get("thread_id") == thread_id for member in projected):
         raise SandboxError("shared sandbox manifest omitted the claimed chat")
     for member in projected:
@@ -2052,7 +2005,7 @@ def _reportable_turn_resources(payload: Any) -> dict[str, Any] | None:
     return payload
 
 
-def _stream_shared_agent_turn(
+def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
     supervisor: SessionSupervisorClient,
     job: ClaimedJob,
@@ -2277,7 +2230,7 @@ class _HandBack(Exception):
         self.reason = reason
 
 
-def _run_shared_live_attempt(
+def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
     runtime: AgentRuntime,
     job: ClaimedJob,
@@ -2308,10 +2261,6 @@ def _run_shared_live_attempt(
         return 2
     if not host or not job.thread_id:
         finish_attempt("failed", "shared live chats require an enrolled host and thread id")
-        return 2
-    driver = driver_for(runtime)
-    if getattr(driver, "launch_live", None) is None:
-        finish_attempt("failed", f"runtime {job.runtime!r} has no shared live transport")
         return 2
     mcp_url = _sandbox_mcp_url()
     if job.mcp_bindings and not mcp_url:
@@ -3295,87 +3244,6 @@ def _run_shared_live_attempt(
                 control.resume_terminals()
 
 
-def run_once(
-    *,
-    base_url: str,
-    gateway_url: str = "",
-    host_credential: str,
-    worker_id: str,
-    lease_ttl: float = DEFAULT_LEASE_TTL_S,
-    agent_timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
-    backend: SandboxBackend | None = None,
-    host: str | None = None,
-) -> int:
-    """Claim and deliver one turn through the shared retained-session protocol.
-
-    Claim and execution in one process. The deployed host service separates
-    them — it claims, and a child process of its own runs the turn — but a
-    single-turn path is what local tooling and the tests that exercise the
-    protocol end to end use, and it is the same execution either way.
-
-    A runner-created backend is preflighted before claim. The retained
-    container owns the only workspace, so there is deliberately no host
-    worktree argument or bind-mount fallback.
-    """
-    if backend is None:
-        backend = build_backend_from_env()
-        backend.preflight()
-
-    # Opt-in timing for the startup chain. `None` unless an experiment selects
-    # this operation, and every helper below is a no-op on `None`.
-    measurement = operation_profiling.start_operation(
-        operation=STARTUP_OPERATION,
-        host=host,
-        worker_id=worker_id,
-    )
-    try:
-        with operation_profiling.span(measurement, "claim"):
-            attestation = _claim_attestation(backend)
-            job = claim(
-                base_url=base_url,
-                host_credential=host_credential,
-                worker_id=worker_id,
-                lease_ttl=lease_ttl,
-                attestation=attestation,
-            )
-    except BaseException:
-        # A claim that never returned allocated no attempt, so there is nothing
-        # to report and the run must not spend a slot on a failed poll.
-        operation_profiling.discard(measurement)
-        raise
-    if job is None:
-        # Nothing was claimed, so there is no startup to measure.
-        operation_profiling.discard(measurement)
-        print("no queued agent job; nothing to do")
-        return 0
-    # Target filters on job/thread/sandbox can only be applied now. A
-    # measurement that falls out of scope emits nothing.
-    if measurement is not None and not operation_profiling.bind(
-        measurement,
-        attempt_id=job.attempt_id,
-        job_id=job.job_id,
-        thread_id=job.thread_id,
-        sandbox_id=str((job.thread_sandbox or {}).get("sandbox_id") or "") or None,
-        runtime_id=job.runtime,
-        runtime_version=job.runtime_version,
-        execution_profile=job.execution_profile,
-    ):
-        operation_profiling.discard(measurement)
-        measurement = None
-
-    return run_turn(
-        job,
-        base_url=base_url,
-        gateway_url=gateway_url,
-        worker_id=worker_id,
-        lease_ttl=lease_ttl,
-        agent_timeout_s=agent_timeout_s,
-        backend=backend,
-        host=host,
-        measurement=measurement,
-    )
-
-
 def run_turn(
     job: ClaimedJob,
     *,
@@ -3654,22 +3522,11 @@ def _run_turn(
     control.job_id = job.job_id
     heart = Heartbeater(control, ttl=lease_ttl, interval=HEARTBEAT_INTERVAL_S)
 
-    def finish_attempt(
-        state: str,
-        detail: str | None = None,
-        *,
-        base_sha: str | None = None,
-    ) -> None:
-        if base_sha is None:
-            control.finish(state, detail)
-        else:
-            control.finish(state, detail, base_sha=base_sha)
-
     try:
         runtime = get_runtime(job.runtime)
     except KeyError as exc:
         operation_profiling.finish(measurement, outcome="failed", failure_stage="runtime_lookup")
-        finish_attempt("failed", str(exc))
+        control.finish("failed", str(exc))
         control.close()
         return 2
 
@@ -3684,7 +3541,7 @@ def _run_turn(
             host=host,
             gateway_base_url=gateway_url,
             agent_timeout_s=agent_timeout_s,
-            finish_attempt=finish_attempt,
+            finish_attempt=control.finish,
             measurement=measurement,
             host_settings=host_settings,
         )
@@ -3698,7 +3555,7 @@ def _run_turn(
         # that will later be misreported as a lease failure.
         _log_control_failure("attempt_dispatch", job.job_id, exc)
         try:
-            finish_attempt("failed", f"attempt dispatch failed ({type(exc).__name__})")
+            control.finish("failed", f"attempt dispatch failed ({type(exc).__name__})")
         except Exception as finish_exc:
             _log_control_failure("finish", job.job_id, finish_exc)
         return 2
@@ -3856,7 +3713,7 @@ def _turn_host_settings(raw: Any) -> dict[str, float]:
     }
 
 
-def _spawn_turn(
+def _spawn_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     payload: dict[str, Any],
     *,
     base_url: str,
@@ -4132,18 +3989,17 @@ def _serve_turn(
     )
 
 
-def run_forever(
+def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
     base_url: str,
     gateway_url: str = "",
     worker_id: str,
     lease_ttl: float = DEFAULT_LEASE_TTL_S,
     agent_timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
-    idle_sleep_s: float = 5.0,
     backend: SandboxBackend | None = None,
     host: str | None = None,
     spawn_turn: Callable[[dict[str, Any]], LaunchResult] | None = None,
-    tick_s: float | None = None,
+    tick_s: float = 5.0,
 ) -> int:
     """Serve this host: claim turns up to its limit, and run each in its own child.
 
@@ -4420,8 +4276,7 @@ def run_forever(
         flush=True,
     )
 
-    idle_wait = tick_s if tick_s is not None else idle_sleep_s
-    work = _WorkWaiter(base_url=base_url, interval_s=idle_wait)
+    work = _WorkWaiter(base_url=base_url, interval_s=tick_s)
     immediate = False
     claims = 0
     try:
@@ -4480,13 +4335,13 @@ def run_forever(
                 pool.wake()
 
             if not pool.claimable:
-                time.sleep(idle_wait)
+                time.sleep(tick_s)
                 continue
             test_slots = int(environment_tests is not None and environment_tests.busy)
             if not turns.may_claim(max(0, limit - test_slots)):
                 # A freed local slot should be noticed promptly. This does
                 # not increase empty-queue polls or retry traffic to the API.
-                slot_wait = min(idle_wait, 1.0) if turns.running() >= limit else idle_wait
+                slot_wait = min(tick_s, 1.0) if turns.running() >= limit else tick_s
                 time.sleep(slot_wait)
                 continue
             if qualification is not None:
@@ -4502,7 +4357,7 @@ def run_forever(
                         qualification_error = error
                         logger.warning("agent_runtime_qualification_failed", exc_info=True)
                         pool.wake()
-                    time.sleep(idle_wait)
+                    time.sleep(tick_s)
                     continue
                 if qualification_error:
                     qualification_error = ""
@@ -4513,20 +4368,20 @@ def run_forever(
             # does not enforce this generation's exact-SHA attestation, so this
             # host stays idle until its own checks complete.
             if not _shared_live_deployment_ready(backend, stamp):
-                time.sleep(idle_wait)
+                time.sleep(tick_s)
                 continue
             # A host that restarted can claim before its first heartbeat answer
             # arrives, and a turn claimed then would run with this host's own
             # settings rather than an admin's. Wait for that answer, but only so
             # long: claiming must not come to depend on the heartbeat.
             if not runtime_settings.adopted and time.monotonic() < settings_deadline:
-                time.sleep(idle_wait)
+                time.sleep(tick_s)
                 continue
             # Archive policy is a stop-safety boundary. The sandbox manager must
             # explicitly confirm the complete DB revision, including an
             # explicit disabled policy, before this process creates work.
             if not archive_settings.ready:
-                time.sleep(idle_wait)
+                time.sleep(tick_s)
                 continue
 
             # A distinct lease owner per turn. Fencing never reads this
@@ -4535,8 +4390,8 @@ def run_forever(
             # exactly when it is worth asking.
             claims += 1
             turn_worker_id = f"{worker_id}-{claims}"
-            # Selected before the request, exactly as the single-process path
-            # does: the wait for a claim is part of the startup a user feels.
+            # Selected before the request: the wait for a claim is part of
+            # the startup a user feels.
             # The slot is claimed here and not in the child, so one attempt
             # costs one sample however the turn is actually executed.
             measurement = operation_profiling.start_operation(
@@ -4564,14 +4419,14 @@ def run_forever(
                     file=sys.stderr,
                     flush=True,
                 )
-                time.sleep(idle_wait)
+                time.sleep(tick_s)
                 continue
             except Exception as exc:
                 operation_profiling.discard(measurement)
                 print(
                     f"agent runner: claim failed unexpectedly: {exc}", file=sys.stderr, flush=True
                 )
-                time.sleep(idle_wait)
+                time.sleep(tick_s)
                 continue
 
             if payload is None:
@@ -5207,6 +5062,5 @@ __all__ = [
     "prepare_temporary_worktree",
     "prepare_worktree",
     "run_forever",
-    "run_once",
     "run_turn",
 ]

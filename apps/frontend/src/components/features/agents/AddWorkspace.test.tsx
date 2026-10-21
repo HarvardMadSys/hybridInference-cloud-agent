@@ -47,7 +47,9 @@ describe('add workspace picker', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Create repository' }));
     const name = await screen.findByRole('textbox', { name: 'Repository name' });
     const dialog = screen.getByRole('dialog', { name: 'Create repository' });
-    expect(name).toHaveFocus();
+    // The dialog focuses its field from an effect that can land after the
+    // field is first found, on a loaded runner (CI 2026-10-21).
+    await waitFor(() => expect(name).toHaveFocus());
     fireEvent.change(name, { target: { value: 'new-repo' } });
     fireEvent.submit(dialog.querySelector('form')!);
     await waitFor(() => expect(select).toHaveBeenCalledExactlyOnceWith('owner/new-repo'));

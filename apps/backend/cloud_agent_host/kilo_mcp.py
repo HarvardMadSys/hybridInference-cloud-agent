@@ -10,6 +10,10 @@ if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 
 KILO_MCP_PATCH_SHA256 = "1ea8a24628c39800cce5e592bd272cc8bb358f2b8ea07f92f2b96beef8bb2657"
+#: The one Kilo version whose MCP isolation patch was reviewed. A literal on
+#: purpose, not the shared pin: until the patch is reviewed against a new
+#: version, :func:`ensure_kilo_runtime` refuses it, and a pin bump fails
+#: ``tests/unit/test_kilo_mcp.py``.
 KILO_MCP_VERSION = "7.4.17"
 
 _ACTIVATE = r"""

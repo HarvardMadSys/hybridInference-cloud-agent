@@ -133,8 +133,9 @@ The runtime adapters are a package under `cloud_agent_host/runtimes/`:
 | `base.py` | Adapter contracts, capabilities, MCP configuration, and runtime errors |
 | `events.py` | Normalized event vocabulary and bounded payload helpers |
 | `preview.py` | Partial-reply preview batching |
-| `claude.py`, `codex.py`, `pi.py`, `opencode.py`, `kilo.py` | One CLI dialect's commands and event parsing |
-| `generic.py` | The generic line-oriented adapter |
+| `claude.py`, `codex.py`, `pi.py` | One CLI's live launch; Claude's and pi's event parsing |
+| `http_bridge.py` | The live launch OpenCode and Kilo share, behind the HTTP bridge |
+| `opencode.py`, `kilo.py` | One CLI's name, wrapper binary and catalog entry |
 | `registry.py` | Adapter lookup and construction |
 
 Existing callers use `cloud_agent_host.runtimes`; the package explicitly

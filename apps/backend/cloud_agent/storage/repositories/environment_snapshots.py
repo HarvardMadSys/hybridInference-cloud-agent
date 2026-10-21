@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
+from cloud_agent.storage._sql.environment_runs import env_run_holds_slot
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
-from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage._sql.rows import load_json, stored_archive_settings
 from cloud_agent.storage.repositories.environments import (
     lock_environment_snapshots,
     lock_team_environment_snapshots,
@@ -118,10 +119,8 @@ class PostgresEnvironmentSnapshotRepository:
         )
         if row is None:
             return False
-        raw = dict(load_json(row["sandbox_archive_settings"]) or {})
-        raw["revision"] = row["sandbox_archive_revision"]
         try:
-            policy = load_stored_archive_policy(raw)
+            policy = load_stored_archive_policy(stored_archive_settings(row))
         except ValueError:
             return False
         return bool(policy.enabled and policy.checkpoints_enabled)
@@ -332,8 +331,7 @@ class PostgresEnvironmentSnapshotRepository:
                 "SELECT s.* FROM agent_environment_snapshots s JOIN agent_environment_runs r ON r.id = s.run_id "
                 "WHERE s.id=$1 AND r.id=$2 AND r.host=$3 AND r.lease_generation=$4 AND s.state='building' "
                 "AND r.purpose='prebuild' AND r.state='running' AND NOT r.cancel_requested "
-                "AND NOT r.cleanup_complete AND r.lease_expires_at>NOW() "
-                "AND r.started_at>NOW()-INTERVAL '30 minutes' "
+                f"AND {env_run_holds_slot('r')} "
                 "FOR UPDATE OF s, r",
                 snapshot_id,
                 run_id,

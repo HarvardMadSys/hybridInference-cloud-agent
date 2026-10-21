@@ -13,13 +13,15 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent.domain.execution import CANCELLED, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.ids import new_job_id, new_session_fork_id, new_thread_id
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
-from cloud_agent.storage._sql.hosts import refuse_start_on_revoked_host
+from cloud_agent.storage._sql.hosts import DELETED_GROUP_STATES, refuse_start_on_revoked_host
 from cloud_agent.storage._sql.jobs import JOB_SELECT
+from cloud_agent.storage._sql.mcp_residency import mint_residency_sql
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import (
     FENCE_START_SQL,
     NATIVE_FORK_CAPABLE,
     THREAD_SANDBOX_SOURCE,
+    quiet_idle_deadline,
 )
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.repositories.goals import new_goal_id
@@ -43,7 +45,7 @@ class PostgresSessionForkRepository:
         self._pool = pool
         self._queries = PostgresConversationQueries(pool)
 
-    async def prepare_session_fork(
+    async def prepare_session_fork(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         *,
         source_job_id: str,
@@ -151,7 +153,7 @@ class PostgresSessionForkRepository:
             )
             if row is None:
                 return {"error": "not_shared_live"}
-            if row["deletion_state"] in {"pending", "archived", "deleted"}:
+            if row["deletion_state"] in DELETED_GROUP_STATES:
                 return {"error": "sandbox_not_ready"}
             # ``native_fork_capable`` read the host before the group's lock was
             # this fork's, and a revocation may have held that lock. Read again
@@ -490,15 +492,9 @@ class PostgresSessionForkRepository:
                     current["residency_grant_id"] or operation[f"previous_{role}_grant_id"]
                 )
                 created = await conn.fetchrow(
-                    """
+                    f"""
                     UPDATE agent_thread_sandbox_memberships m
-                    SET residency_generation = m.residency_generation + 1,
-                        residency_status = 'hot',
-                        residency_lease_expires_at = clock_timestamp() + make_interval(secs => $3),
-                        residency_grant_id = NULL,
-                        residency_binding_id = NULL,
-                        residency_established_at = NOW(),
-                        residency_last_active_at = NOW(),
+                    SET {mint_residency_sql("$3")},
                         updated_at = NOW()
                     FROM agent_sandboxes g
                     WHERE m.thread_id = $1 AND m.sandbox_id = $2
@@ -763,7 +759,7 @@ class PostgresSessionForkRepository:
             if operation["state"] == "ready":
                 anchor_id = str(operation["target_anchor_job_id"] or "") or None
             elif operation["state"] == "materialized":
-                # Match create_follow_up's thread -> job -> membership lock
+                # Match insert_follow_up's thread -> job -> membership lock
                 # order. Locking the source job first here while a concurrent
                 # follow-up held the thread row produced a real PostgreSQL
                 # deadlock cycle (each transaction then waited for the other).
@@ -934,20 +930,11 @@ class PostgresSessionForkRepository:
                     anchor_id,
                 )
                 await conn.execute(
-                    """
+                    f"""
                     UPDATE agent_sandboxes g
                     SET active_operation_count = GREATEST(active_operation_count - 1, 0),
                         last_activity_at = NOW(),
-                        idle_deadline = CASE
-                            WHEN active_operation_count = 1
-                             AND NOT EXISTS (
-                                SELECT 1 FROM agent_thread_sandbox_memberships m
-                                WHERE m.sandbox_id = g.id
-                                  AND m.active_attempt_id IS NOT NULL
-                             )
-                            THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
-                            ELSE NULL
-                        END,
+                        idle_deadline = {quiet_idle_deadline("g", "idle_timeout_seconds", operations=1)},
                         updated_at = NOW()
                     WHERE g.id = $1
                     """,
@@ -1035,19 +1022,10 @@ class PostgresSessionForkRepository:
                     changed["last_error"],
                 )
                 await conn.execute(
-                    """
+                    f"""
                     UPDATE agent_sandboxes g
                     SET active_operation_count = GREATEST(active_operation_count - 1, 0),
-                        idle_deadline = CASE
-                            WHEN active_operation_count = 1
-                             AND NOT EXISTS (
-                                SELECT 1 FROM agent_thread_sandbox_memberships m
-                                WHERE m.sandbox_id = g.id
-                                  AND m.active_attempt_id IS NOT NULL
-                             )
-                            THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
-                            ELSE NULL
-                        END,
+                        idle_deadline = {quiet_idle_deadline("g", "idle_timeout_seconds", operations=1)},
                         updated_at = NOW()
                     WHERE id = $1
                     """,

@@ -18,10 +18,6 @@ if TYPE_CHECKING:
 class SnapshotRepository(Protocol):
     """Port: sandbox snapshots -- capture, publication, and base import."""
 
-    async def snapshot_database_time(self) -> datetime:
-        """Read the same clock used to fence publication retry deadlines."""
-        ...
-
     async def request_snapshot_publication(self, *, thread_id: str, user_id: str) -> dict[str, Any]:
         """Open the next snapshot of a conversation's workspace for its owner.
 

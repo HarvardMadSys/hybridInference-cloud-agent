@@ -929,7 +929,7 @@ def run_bounded_command(
     )
 
 
-def _drain_child(
+def _drain_child(  # noqa: C901, PLR0912 complexity baseline, #771
     child: subprocess.Popen[bytes],
     *,
     timeout_s: float,
