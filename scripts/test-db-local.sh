@@ -238,7 +238,7 @@ fresh_databases() {
 # so a green pytest alone does not prove the tier ran. CI and
 # scripts/ci-local.sh read their reports with the same script, and a floor.
 check_tier_ran() {
-  ${UV_RUN} python scripts/ci_tests_ran.py "$1"
+  ${UV_RUN} python scripts/ci_tests_ran.py --running-skips-only "$1"
 }
 
 cmd="${1:-run}"

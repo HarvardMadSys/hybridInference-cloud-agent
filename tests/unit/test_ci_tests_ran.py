@@ -5,7 +5,8 @@ and pytest reports a run that only skipped as a success. The steps therefore
 keep a junit report, and `scripts/ci_tests_ran.py` reads it. The script is
 exercised here against reports real pytest writes, and the workflow is checked
 for an external run that writes no report or never has it read, and for a
-database tier whose report is read with a floor below 100, or none.
+database tier whose report is read with a floor below 100, or none, or counting
+a module skipped at collection.
 """
 
 from __future__ import annotations
@@ -24,10 +25,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CI = REPO_ROOT / ".github/workflows/ci.yml"
 
 
-def _report(tmp_path: Path, source: str) -> Path:
-    """The junit report real pytest writes for one test module, outside this repo's config."""
-    module = tmp_path / "test_sample.py"
-    module.write_text(textwrap.dedent(source))
+def _report(tmp_path: Path, *sources: str) -> Path:
+    """The junit report real pytest writes for these test modules, outside this repo's config."""
+    modules = [tmp_path / f"test_sample_{index}.py" for index in range(len(sources))]
+    for module, source in zip(modules, sources, strict=True):
+        module.write_text(textwrap.dedent(source))
     report = tmp_path / "report.xml"
     environment = {key: value for key, value in os.environ.items() if key != "PYTEST_ADDOPTS"}
     subprocess.run(
@@ -43,7 +45,7 @@ def _report(tmp_path: Path, source: str) -> Path:
             "--rootdir",
             str(tmp_path),
             f"--junitxml={report}",
-            str(module),
+            *(str(module) for module in modules),
         ],
         cwd=tmp_path,
         env=environment,
@@ -145,6 +147,49 @@ def test_a_report_below_its_floor_fails_the_step(tmp_path: Path) -> None:
     assert ci_tests_ran.main(["--min", "3", str(report)]) == 1
 
 
+def test_running_skips_only_lets_a_module_skipped_at_collection_pass(tmp_path: Path) -> None:
+    """The database tier selects by marker, so its run imports modules outside it too."""
+    report = _report(
+        tmp_path,
+        """
+        def test_reads_the_database():
+            pass
+        """,
+        """
+        import pytest
+
+        pytest.skip("needs a Docker daemon", allow_module_level=True)
+        """,
+    )
+    assert ci_tests_ran.main([str(report)]) == 1
+    assert ci_tests_ran.main(["--running-skips-only", str(report)]) == 0
+
+
+def test_running_skips_only_still_fails_a_test_that_skipped(tmp_path: Path) -> None:
+    """What every database test does when its fixture cannot reach PostgreSQL."""
+    report = _report(
+        tmp_path,
+        """
+        import pytest
+
+        @pytest.fixture
+        def database():
+            pytest.skip("PostgreSQL not available")
+
+        def test_reads_the_database(database):
+            pass
+
+        @pytest.mark.xfail(reason="known", strict=True)
+        def test_fails_as_expected():
+            raise AssertionError
+        """,
+    )
+    ran, skipped = ci_tests_ran.declined(report, running_only=True)
+    assert ran == 2
+    assert [name.rsplit("::", 1)[1] for name in skipped] == ["test_reads_the_database"]
+    assert ci_tests_ran.main(["--running-skips-only", str(report)]) == 1
+
+
 def _floor(command: str) -> int:
     """The `--min` a `scripts/ci_tests_ran.py` command reads its reports with, or 0."""
     found = re.search(r"scripts/ci_tests_ran\.py .*--min (\d+)", command)
@@ -155,6 +200,8 @@ def test_the_database_tier_is_read_with_a_floor() -> None:
     """The dbtest run keeps a report, and a later step of its job reads it with `--min`.
 
     At least 100: a floor much lower passes a run that selected almost nothing.
+    And with `--running-skips-only`: unsharded, the run imports every test
+    module, and one outside the tier may skip at import.
     """
     for job_name, job in yaml.safe_load(CI.read_text())["jobs"].items():
         runs = [str(step.get("run", "")).replace("\\\n", " ") for step in job.get("steps", [])]
@@ -166,9 +213,14 @@ def test_the_database_tier_is_read_with_a_floor() -> None:
             readers = [
                 later
                 for later in runs[index + 1 :]
-                if _floor(later) >= 100 and f'"{report.group(1)}"' in later
+                if _floor(later) >= 100
+                and "--running-skips-only" in later
+                and f'"{report.group(1)}"' in later
             ]
-            assert readers, f"{job_name}: the dbtest report is never read with a floor of 100"
+            assert readers, (
+                f"{job_name}: the dbtest report is never read with a floor of 100 "
+                "and --running-skips-only"
+            )
             return
     raise AssertionError("no job runs the dbtest tier")
 

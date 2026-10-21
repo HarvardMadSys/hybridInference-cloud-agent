@@ -14,11 +14,16 @@ ran.
 
 The database tier is read the same way, with a floor:
 
-    uv run python scripts/ci_tests_ran.py --min 100 "${RUNNER_TEMP}/dbtest.xml"
+    uv run python scripts/ci_tests_ran.py --min 100 --running-skips-only "${RUNNER_TEMP}/dbtest.xml"
 
 A `pytest -m` that stops selecting the tier exits 0 having run nothing, or
 almost nothing. The floor only has to be high enough that such a run cannot
 clear it, so adding tests never fails it.
+
+A run over the whole tree imports every test module to select the tier by
+marker, and one outside the tier that skips at import says nothing about the
+database. So the tier passes `--running-skips-only`, which counts only the skips
+junit gives a type, and a module skipped at collection has none.
 """
 
 from __future__ import annotations
@@ -29,14 +34,19 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
-def declined(report: Path) -> tuple[int, list[str]]:
-    """Count the report's test cases and name every one that skipped."""
+def declined(report: Path, *, running_only: bool = False) -> tuple[int, list[str]]:
+    """Count the report's test cases and name every one that skipped.
+
+    With ``running_only``, a module skipped at collection is not named: junit
+    gives that skip no type.
+    """
+    ignored = {"pytest.xfail", None} if running_only else {"pytest.xfail"}
     cases = list(ET.parse(report).getroot().iter("testcase"))
     skipped = [
         f"{case.get('classname', '')}::{case.get('name', '')}"
         for case in cases
         for skip in case.findall("skipped")
-        if skip.get("type") != "pytest.xfail"
+        if skip.get("type") not in ignored
     ]
     return len(cases), skipped
 
@@ -47,10 +57,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--min", type=int, default=1, metavar="N", help="fail a report with fewer than N tests"
     )
+    parser.add_argument(
+        "--running-skips-only",
+        action="store_true",
+        help="count only tests that skipped while running, not modules skipped at collection",
+    )
     args = parser.parse_args(argv)
     failed = False
     for report in args.reports:
-        ran, skipped = declined(report)
+        ran, skipped = declined(report, running_only=args.running_skips_only)
         print(f"{report}: {ran} collected, {len(skipped)} skipped")
         if not ran:
             print(f"{report}: no test ran", file=sys.stderr)
