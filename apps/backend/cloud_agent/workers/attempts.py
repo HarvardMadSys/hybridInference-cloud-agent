@@ -8,13 +8,12 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from cloud_agent.application.send_now import recover_handoffs
 from cloud_agent.gateway import GatewayError
-from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
+from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S, RenewalSchedule
 from cloud_agent.host_pool import HEARTBEAT_INTERVAL_S, MISSED_HEARTBEATS_BEFORE_OFFLINE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import integer_setting
 
 if TYPE_CHECKING:
-    from cloud_agent.grants import RenewalSchedule
     from cloud_agent.ports import (
         AttachmentRepository,
         AttemptCommands,
@@ -353,6 +352,9 @@ async def _renew_live_grants(
     """
     seen: set[str] = set()
     renewed: list[str] = []
+    # Without the shared schedule, one kept for this pass alone holds nothing
+    # back: each grant is asked about once a pass, before anything is recorded.
+    schedule = schedule if schedule is not None else RenewalSchedule()
     renewable = await store.grants.list_renewable_grants()
     if len(renewable) >= GRANT_RENEWAL_PAGE:
         # The pass was capped, so some live attempt was not renewed this time
@@ -373,7 +375,7 @@ async def _renew_live_grants(
             # would only repeat the refusal -- and, with a count started over,
             # the futile give-up -- for as long as the turn runs.
             return
-        if schedule is not None and not failures.get(grant_id) and not schedule.due(grant_id):
+        if not failures.get(grant_id) and not schedule.due(grant_id):
             # Its last renewal has plenty left. The next pass asks again, if
             # the store still lists it.
             return
@@ -426,8 +428,7 @@ async def _renew_live_grants(
         # is a gateway blip, and must not accumulate toward a give-up over the
         # hours a long job runs.
         failures.pop(grant_id, None)
-        if schedule is not None:
-            schedule.record(grant_id, renewal)
+        schedule.record(grant_id, renewal)
 
     # **Concurrently, because a pass must finish inside a grant's lifetime.**
     # Serially, one pass cost the sum of every renewal's round trip: at the
@@ -662,7 +663,7 @@ async def _cleanup_failed_session_fork(
                 await grants.revoke(grant_id)
 
 
-async def _run_attempt_reaper(
+async def _run_attempt_reaper(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     store: _Reaping,
     *,
     interval_seconds: float = REAP_INTERVAL_S,

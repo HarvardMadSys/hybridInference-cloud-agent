@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "0090_job_event_usage_summary"
-down_revision = "0089_superseded_removals"
+revision = "0091_job_event_usage_summary"
+down_revision = "0090_user_model_preferences"
 branch_labels = None
 depends_on = None
 

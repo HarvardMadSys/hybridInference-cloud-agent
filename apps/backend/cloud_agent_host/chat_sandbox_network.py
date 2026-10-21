@@ -976,7 +976,7 @@ class ChatSandboxNetwork:
                 f"{(network_name or network)!r}: " + disconnected.stderr.strip()[:300]
             )
 
-    def _release_owned_network(
+    def _release_owned_network(  # noqa: PLR0912 complexity baseline, #771
         self,
         network_name: str,
         spec: ChatSandboxSpec,
@@ -1336,7 +1336,7 @@ class ChatSandboxNetwork:
         # old same-name bridge was deleted and must be reconnected explicitly.
         return bool(current_id and recorded_id == current_id)
 
-    def _attach_to_group_network(
+    def _attach_to_group_network(  # noqa: PLR0912 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         current: ChatSandboxInspection,

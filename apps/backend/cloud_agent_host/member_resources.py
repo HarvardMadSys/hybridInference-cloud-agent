@@ -977,7 +977,7 @@ class ExitTracker:
             fresh.append(event)
         return fresh
 
-    def _observe(self, decoded: dict[str, Any]) -> None:
+    def _observe(self, decoded: dict[str, Any]) -> None:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         kind = decoded.get("kind")
         mono_ns = _int_or_none(decoded.get("mono_ns"))
         if kind == "window_sample":

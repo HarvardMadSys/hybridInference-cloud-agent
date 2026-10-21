@@ -4,27 +4,22 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from pydantic import AwareDatetime, ValidationError
 
 from cloud_agent.admin_observability import (
-    ActivityCursor,
-    AdminActivityPage,
     AdminAttempt,
-    AdminEventContent,
     AdminRun,
     AdminRunDetail,
     AdminRunList,
     RunCursor,
     RunFilters,
-    bounded_event_content,
     cursor_scope,
     decode_cursor,
     resolve_run_window,
 )
 from cloud_agent.api._job_views import _attempt_duration_ms, _attempt_resources
 from cloud_agent.api.deps import (
-    get_client_ip,
     get_storage,
     require_store,
     verify_admin_access,
@@ -37,7 +32,7 @@ from cloud_agent.session_statistics import summarize_session_statistics
 from cloud_agent_shared.turn_resources import summarize_turn_resources
 
 if TYPE_CHECKING:
-    from cloud_agent.ports import AuditRepository, LedgerRepository
+    from cloud_agent.ports import LedgerRepository
     from cloud_agent.storage.admin_queries import AdminRunQueries
 
 logger = get_logger(__name__)
@@ -47,7 +42,6 @@ class _AdminRunsStorage(Protocol):
     """The capabilities this module's handlers reach the storage layer for."""
 
     admin_runs: AdminRunQueries
-    audit: AuditRepository
     ledger: LedgerRepository
 
 
@@ -62,9 +56,8 @@ def _no_store(response: Response) -> None:
 
 # The guard is on the router, not only on each route: a route added to this
 # surface inherits it, so the next runs read cannot ship without one by
-# omission. Routes that audit keep their per-route ``admin`` parameter —
-# FastAPI runs a shared dependency once per request, so the two do not double-
-# ask the gateway.
+# omission. The routes that also name it as their ``_admin`` parameter do not
+# ask the gateway twice: FastAPI runs a shared dependency once per request.
 router = APIRouter(
     prefix="/admin/agent/runs",
     dependencies=[Depends(_no_store), Depends(verify_admin_access)],
@@ -170,24 +163,6 @@ async def get_admin_run(
     )
 
 
-@router.get("/{job_id}/activity", response_model=AdminActivityPage)
-async def get_admin_activity(
-    job_id: str = Path(max_length=256),
-    attempt_id: int | None = Query(None, ge=1, le=2**63 - 1),
-    cursor: str | None = Query(None, max_length=2048),
-    limit: int = Query(100, ge=1, le=200),
-    _admin: str = Depends(verify_admin_access),
-    queries: AdminRunQueries = Depends(get_admin_run_queries),
-) -> AdminActivityPage:
-    """Read runtime event envelopes, never treating messages as model requests."""
-    try:
-        parsed = decode_cursor(cursor, ActivityCursor, cursor_scope([job_id, attempt_id]))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from None
-    await _run(queries, job_id)
-    return await queries.activity(job_id, attempt_id=attempt_id, cursor=parsed, limit=limit)
-
-
 @router.get("/{job_id}/attempts/{attempt_id}/resources", response_model=AgentAttemptTelemetry)
 async def get_admin_resources(
     job_id: str = Path(max_length=256),
@@ -207,45 +182,3 @@ async def get_admin_resources(
         duration_ms=_attempt_duration_ms(telemetry),
         resources=_resources_with_turn_summary(telemetry),
     )
-
-
-@router.post("/{job_id}/events/{event_id}/content", response_model=AdminEventContent)
-async def reveal_admin_event_content(
-    request: Request,
-    job_id: str = Path(max_length=256),
-    event_id: int = Path(ge=1, le=2**63 - 1),
-    admin: str = Depends(verify_admin_access),
-    queries: AdminRunQueries = Depends(get_admin_run_queries),
-    store: _AdminRunsStorage | None = Depends(get_storage),
-) -> AdminEventContent:
-    """Reveal one bounded event only after its content access is durably audited."""
-    run = await _run(queries, job_id)
-    row = await queries.event_content(job_id, event_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Run event not found.")
-    content = bounded_event_content(row)
-    try:
-        # log_admin_action intentionally swallows failures for mutations that
-        # have already happened. Content disclosure needs the opposite policy.
-        audit_id = await _require_store(store).audit.record_admin_action(
-            action="agent.run.event_content.read",
-            actor_id=admin,
-            admin_ip=get_client_ip(request),
-            target_user_id=run["user_id"],
-            details={
-                "actor": admin,
-                "job_id": job_id,
-                "event_id": event_id,
-                "attempt_id": content.attempt_id,
-                "seq": content.seq,
-            },
-            success=True,
-        )
-        if not isinstance(audit_id, int) or audit_id <= 0:
-            raise RuntimeError("The audit insert returned no row identity.")
-    except Exception:
-        logger.warning("agent_admin_content_audit_failed")
-        raise HTTPException(
-            status_code=503, detail="Content access could not be recorded. Please try again."
-        ) from None
-    return content

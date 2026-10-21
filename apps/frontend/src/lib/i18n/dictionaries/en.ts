@@ -1,3 +1,5 @@
+import { modelSelectionEn } from './modelSelection';
+
 /**
  * The source dictionary.
  *
@@ -541,7 +543,7 @@ export const en = {
   'settings.backToChats': 'Back to chats',
   'settings.collapseNavigation': 'Collapse settings navigation',
   'settings.expandNavigation': 'Expand settings navigation',
-  'settings.personalDescription': 'Manage your profile and notifications.',
+  'settings.personalDescription': 'Manage your profile, default model, and notifications.',
   'settings.plugins': 'Plugins & MCPs',
   'settings.pluginsDescription':
     'Connect MCP servers and manage the skills available to your agents.',
@@ -669,6 +671,7 @@ export const en = {
   'settings.projectMemory.projectsError': 'Could not load repositories.',
   'settings.projectMemory.noProjects': 'Repositories you work in appear here.',
   'settings.projectMemory.confirmTitle': 'Clear the memory of {repo}?',
+  ...modelSelectionEn,
   'settings.notifications.title': 'Notifications',
   'settings.notifications.description':
     'Get browser notifications when an agent asks a question or finishes a turn. Keep the app open to receive them.',
@@ -947,10 +950,6 @@ export const en = {
   'composer.chooseRepository': 'Choose a repository first',
   'composer.branch': 'Branch',
   'composer.agent': 'Agent',
-  'picker.search': 'Search…',
-  'picker.noResults': 'No matching options',
-  'composer.model': 'Model',
-  'composer.reasoning': 'Reasoning',
   'composer.run': 'Run',
   'composer.starting': 'Starting…',
   'composer.runTitle': 'Run — ⏎ to send, ⇧⏎ for a new line',

@@ -127,11 +127,17 @@ LIVE_ATTEMPT_HOST = """EXISTS (
 HOST_RETAINED_GROUP = "g.deletion_state <> 'deleted' AND g.state <> 'cold'"
 
 
-#: Group ``g`` has no deletion in progress or done, as the claim reads it. A
+#: The deletion states of a group whose deletion is in progress or done. A
 #: deletion that failed before its archive (``failed``) kept the container,
 #: and the group serves its chats as one never asked to be deleted: it is
 #: counted, moved out, handed over and lost with its machine like any other.
-UNDELETED_GROUP_SQL = "g.deletion_state NOT IN ('pending', 'archived', 'deleted')"
+DELETED_GROUP_STATES = ("pending", "archived", "deleted")
+
+#: :data:`DELETED_GROUP_STATES` as an SQL list.
+DELETED_GROUP_STATES_SQL = "(" + ", ".join(f"'{state}'" for state in DELETED_GROUP_STATES) + ")"
+
+#: Group ``g`` has no deletion in progress or done, as the claim reads it.
+UNDELETED_GROUP_SQL = f"g.deletion_state NOT IN {DELETED_GROUP_STATES_SQL}"
 
 
 def host_claim_ceiling(slots_total: int | None, slots_desired: int | None) -> int | None:

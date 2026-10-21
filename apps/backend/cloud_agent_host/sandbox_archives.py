@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Final, cast
 
 from cloud_agent_host.sandbox_archive_bundle import (
     DEFAULT_ARCHIVE_COMPRESSION_LEVEL,
+    BoundedDigestWriter,
     spool_sandbox_archive,
 )
 from cloud_agent_host.sandbox_archive_s3 import (
@@ -109,60 +110,11 @@ def safe_archive_error_type(error: BaseException) -> str:
     return name if _ERROR_TYPE.fullmatch(name) else "Error"
 
 
-class _BoundedBundleWriter:
-    """Keep the compressed outer object inside the configured S3 ceiling."""
-
-    def __init__(
-        self,
-        stream: BinaryIO,
-        maximum: int,
-        *,
-        check_deadline: Callable[[], None],
-    ) -> None:
-        self._stream = stream
-        self._maximum = maximum
-        self._check_deadline = check_deadline
-        self._digest = hashlib.sha256()
-        self.size = 0
-
-    def write(self, chunk: bytes | bytearray | memoryview) -> int:
-        self._check_deadline()
-        projected = self.size + len(chunk)
-        if projected > self._maximum:
-            raise self._limit_error()
-        written = self._stream.write(chunk)
-        self._check_deadline()
-        if written != len(chunk):
-            raise OSError("short write while spooling a compressed sandbox archive")
-        self._digest.update(chunk)
-        self.size = projected
-        return written
-
-    def flush(self) -> None:
-        self._check_deadline()
-        self._stream.flush()
-        self._check_deadline()
-
-    def tell(self) -> int:
-        self._check_deadline()
-        return self._stream.tell()
-
-    @property
-    def sha256(self) -> str:
-        """Return the digest of every compressed byte written so far."""
-        return self._digest.hexdigest()
-
-    def _limit_error(self) -> Exception:
-        return SandboxError(
-            f"compressed sandbox archive exceeds the {self._maximum}-byte object limit"
-        )
-
-
 class _RebuildTooLarge(Exception):
     """A rebuild outgrew the object ceiling, so it is not the marked bundle."""
 
 
-class _RebuildWriter(_BoundedBundleWriter):
+class _RebuildWriter(BoundedDigestWriter):
     """Bound a probe's rebuild by the same object ceiling as a capture.
 
     The marked bundle fitted under that ceiling. A rebuild at a level the
@@ -170,8 +122,12 @@ class _RebuildWriter(_BoundedBundleWriter):
     level for, not an object-limit failure.
     """
 
-    def _limit_error(self) -> Exception:
-        return _RebuildTooLarge()
+    def write(self, chunk: bytes | bytearray | memoryview) -> int:
+        """Write and hash ``chunk``, unless the rebuild has outgrown a limit."""
+        for maximum, _message in self._limits:
+            if self.size + len(chunk) > maximum:
+                raise _RebuildTooLarge
+        return super().write(chunk)
 
 
 @dataclass
@@ -182,6 +138,67 @@ class _BuiltArchive:
 
     def close(self) -> None:
         self.stream.close()
+
+
+@dataclass
+class _Capture:
+    """One admitted operation: its deadline, and how it is counted when it ends.
+
+    ``outcome`` is True once stored and None when the operation stores
+    nothing; otherwise it counts as failed.
+    """
+
+    deadline: float
+    outcome: bool | None = False
+
+
+def encode_marker(payload: dict[str, object]) -> bytes:
+    """Return a marker's canonical bytes: sorted, compact ASCII JSON and a newline."""
+    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+
+
+def decode_marker(payload: bytes, *, keys: frozenset[str], what: str) -> dict[str, Any]:
+    """Parse a marker that has exactly ``keys``.
+
+    The caller builds the marker from the result and refuses it unless it
+    encodes back to ``payload``: a marker is accepted only in canonical form.
+    """
+    try:
+        value = json.loads(payload.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SandboxError(f"{what} is not canonical JSON") from exc
+    if not isinstance(value, dict) or set(value) != keys:
+        raise SandboxError(f"{what} has an invalid schema")
+    return value
+
+
+def check_marker_identity(
+    what: str, *, namespace_sha256: object, ids: dict[str, object], generation: object
+) -> None:
+    """Refuse a marker whose namespace hash, ids or generation are malformed."""
+    if not isinstance(namespace_sha256, str) or not _SHA256.fullmatch(namespace_sha256):
+        raise ValueError(f"{what} namespace identity is invalid")
+    for name, value in ids.items():
+        if not isinstance(value, str) or not value or "\x00" in value or len(value) > 256:
+            raise ValueError(f"{what} {name} is invalid")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        raise ValueError(f"{what} generation is invalid")
+
+
+_INITIAL_MARKER_KEYS: Final = frozenset(
+    {
+        "base_sha",
+        "bundle_sha256",
+        "bundle_size_bytes",
+        "container_id",
+        "format_version",
+        "generation",
+        "namespace_sha256",
+        "policy",
+        "preparation_id",
+        "sandbox_id",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -202,21 +219,16 @@ class SandboxInitialArchiveMarker:
     def __post_init__(self) -> None:
         if self.format_version != INITIAL_ARCHIVE_MARKER_FORMAT_VERSION:
             raise ValueError("initial archive marker format version is unsupported")
-        if not _SHA256.fullmatch(self.namespace_sha256):
-            raise ValueError("initial archive marker namespace identity is invalid")
-        for name, value, maximum in (
-            ("sandbox id", self.sandbox_id, 256),
-            ("container id", self.container_id, 256),
-            ("preparation id", self.preparation_id, 256),
-        ):
-            if not isinstance(value, str) or not value or "\x00" in value or len(value) > maximum:
-                raise ValueError(f"initial archive marker {name} is invalid")
-        if (
-            isinstance(self.generation, bool)
-            or not isinstance(self.generation, int)
-            or self.generation < 1
-        ):
-            raise ValueError("initial archive marker generation is invalid")
+        check_marker_identity(
+            "initial archive marker",
+            namespace_sha256=self.namespace_sha256,
+            ids={
+                "sandbox id": self.sandbox_id,
+                "container id": self.container_id,
+                "preparation id": self.preparation_id,
+            },
+            generation=self.generation,
+        )
         if not isinstance(self.base_sha, str) or not _GIT_OBJECT_ID.fullmatch(self.base_sha):
             raise ValueError("initial archive marker base SHA is invalid")
         if not isinstance(self.policy, SandboxArchivePolicy) or not self.policy.enabled:
@@ -233,41 +245,44 @@ class SandboxInitialArchiveMarker:
 
     def encode(self) -> bytes:
         """Encode this marker as bounded canonical JSON."""
-        payload = {
-            "base_sha": self.base_sha,
-            "bundle_sha256": self.bundle_sha256,
-            "bundle_size_bytes": self.bundle_size_bytes,
-            "container_id": self.container_id,
-            "format_version": self.format_version,
-            "generation": self.generation,
-            "namespace_sha256": self.namespace_sha256,
-            "policy": self.policy.as_dict(),
-            "preparation_id": self.preparation_id,
-            "sandbox_id": self.sandbox_id,
-        }
-        return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+        return encode_marker(
+            {
+                "base_sha": self.base_sha,
+                "bundle_sha256": self.bundle_sha256,
+                "bundle_size_bytes": self.bundle_size_bytes,
+                "container_id": self.container_id,
+                "format_version": self.format_version,
+                "generation": self.generation,
+                "namespace_sha256": self.namespace_sha256,
+                "policy": self.policy.as_dict(),
+                "preparation_id": self.preparation_id,
+                "sandbox_id": self.sandbox_id,
+            }
+        )
+
+    def matches(
+        self,
+        *,
+        namespace_sha256: str,
+        spec: ChatSandboxSpec,
+        container_id: str,
+        preparation_id: str,
+        policy: SandboxArchivePolicy,
+    ) -> bool:
+        """Whether this container prepared this marker, for this preparation, under ``policy``."""
+        return (
+            self.namespace_sha256 == namespace_sha256
+            and self.sandbox_id == spec.sandbox_id
+            and self.generation == spec.generation
+            and self.container_id == container_id
+            and self.preparation_id == preparation_id
+            and self.policy == policy
+        )
 
     @classmethod
     def decode(cls, payload: bytes) -> SandboxInitialArchiveMarker:
         """Decode and validate one canonical initial-archive marker."""
-        try:
-            decoded = payload.decode("ascii")
-            value = json.loads(decoded)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise SandboxError("initial archive marker is not canonical JSON") from exc
-        if not isinstance(value, dict) or set(value) != {
-            "base_sha",
-            "bundle_sha256",
-            "bundle_size_bytes",
-            "container_id",
-            "format_version",
-            "generation",
-            "namespace_sha256",
-            "policy",
-            "preparation_id",
-            "sandbox_id",
-        }:
-            raise SandboxError("initial archive marker has an invalid schema")
+        value = decode_marker(payload, keys=_INITIAL_MARKER_KEYS, what="initial archive marker")
         try:
             policy = value.pop("policy", None)
             if not isinstance(policy, dict):
@@ -290,7 +305,7 @@ class SandboxArchiveService:
     *before* Docker starts copying bytes.
     """
 
-    def __init__(
+    def __init__(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         manager: ChatSandboxManager,
         *,
@@ -358,6 +373,7 @@ class SandboxArchiveService:
             )
         self._manager = manager
         self._namespace = namespace
+        self._namespace_sha256 = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
         self._uploader = uploader
         self._config = config
         self._policy = config.as_policy()
@@ -422,6 +438,26 @@ class SandboxArchiveService:
                 "phases": phases,
             }
 
+    @contextmanager
+    def _capture(self, phase: str | None) -> Iterator[_Capture]:
+        """Admit one operation, hold a capture slot while it runs, then count it.
+
+        Restores and loads pass no phase: they take a slot but are not counted.
+        """
+        operation = _Capture(self._new_deadline())
+        if phase is not None:
+            self._admit_capture(phase)
+        acquired = False
+        try:
+            self._acquire_capture_slot(operation.deadline)
+            acquired = True
+            yield operation
+        finally:
+            if acquired:
+                self._capture_slots.release()
+            if phase is not None:
+                self._finish_capture(phase, uploaded=operation.outcome)
+
     def _admit_capture(self, phase: str) -> None:
         """Count an operation before it can wait for scarce capture capacity."""
         with self._lock:
@@ -448,13 +484,8 @@ class SandboxArchiveService:
     ) -> dict[str, object]:
         """Build and synchronously store the one pre-prompt workspace baseline."""
         _validate_preparation_id(preparation_id)
-        deadline = self._new_deadline()
-        self._admit_capture("initial")
-        acquired = False
-        uploaded = False
-        try:
-            self._acquire_capture_slot(deadline)
-            acquired = True
+        with self._capture("initial") as operation:
+            deadline = operation.deadline
             if backend.manager is not self._manager:
                 raise SandboxError("initial archive uses a different retained sandbox manager")
             inspection = self._exact_inspection(
@@ -484,14 +515,14 @@ class SandboxArchiveService:
                 existing = None
             if existing is not None:
                 if (
-                    existing.namespace_sha256
-                    != hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
-                    or existing.sandbox_id != backend.spec.sandbox_id
-                    or existing.generation != backend.spec.generation
-                    or existing.container_id != inspection.container_id
-                    or existing.preparation_id != preparation_id
+                    not existing.matches(
+                        namespace_sha256=self._namespace_sha256,
+                        spec=backend.spec,
+                        container_id=inspection.container_id,
+                        preparation_id=preparation_id,
+                        policy=self._policy,
+                    )
                     or existing.base_sha != base_sha
-                    or existing.policy != self._policy
                 ):
                     raise SandboxError(
                         "existing initial archive marker does not match this preparation"
@@ -508,7 +539,7 @@ class SandboxArchiveService:
             )
             try:
                 marker = SandboxInitialArchiveMarker(
-                    namespace_sha256=hashlib.sha256(self._namespace.encode("utf-8")).hexdigest(),
+                    namespace_sha256=self._namespace_sha256,
                     sandbox_id=backend.spec.sandbox_id,
                     generation=backend.spec.generation,
                     container_id=inspection.container_id,
@@ -530,14 +561,10 @@ class SandboxArchiveService:
                     archive=archive,
                     deadline=deadline,
                 )
-                uploaded = True
+                operation.outcome = True
                 return receipt
             finally:
                 archive.close()
-        finally:
-            if acquired:
-                self._capture_slots.release()
-            self._finish_capture("initial", uploaded=uploaded)
 
     def probe_initial(
         self,
@@ -555,13 +582,8 @@ class SandboxArchiveService:
         before the runner can reset the existing workspace.
         """
         _validate_preparation_id(preparation_id)
-        deadline = self._new_deadline()
-        self._admit_capture("initial")
-        acquired = False
-        outcome: bool | None = False
-        try:
-            self._acquire_capture_slot(deadline)
-            acquired = True
+        with self._capture("initial") as operation:
+            deadline = operation.deadline
             if backend.manager is not self._manager:
                 raise SandboxError("initial archive probe uses a different retained manager")
             inspection = self._exact_inspection(
@@ -576,7 +598,7 @@ class SandboxArchiveService:
             )
             self._check_deadline(deadline)
             if payload is None:
-                outcome = None
+                operation.outcome = None
                 return {
                     "enabled": True,
                     "prepared": False,
@@ -585,20 +607,20 @@ class SandboxArchiveService:
             marker = SandboxInitialArchiveMarker.decode(payload)
             if self._carried_by_checkpoint(marker, backend.spec):
                 # The earlier generation's baseline, not one this container prepared.
-                outcome = None
+                operation.outcome = None
                 return {
                     "enabled": True,
                     "prepared": False,
                     "stored": False,
                 }
-            expected_namespace = hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
             if (
-                marker.namespace_sha256 != expected_namespace
-                or marker.sandbox_id != backend.spec.sandbox_id
-                or marker.generation != backend.spec.generation
-                or marker.container_id != inspection.container_id
-                or marker.preparation_id != preparation_id
-                or marker.policy != self._policy
+                not marker.matches(
+                    namespace_sha256=self._namespace_sha256,
+                    spec=backend.spec,
+                    container_id=inspection.container_id,
+                    preparation_id=preparation_id,
+                    policy=self._policy,
+                )
                 or marker.bundle_size_bytes > self._config.max_archive_bytes
             ):
                 raise SandboxError("initial archive marker does not match this preparation")
@@ -621,7 +643,7 @@ class SandboxArchiveService:
                     raise SandboxError("initial sandbox archive probe timed out") from exc
                 raise SandboxError("initial sandbox archive status could not be verified") from exc
             if stored:
-                outcome = None
+                operation.outcome = None
                 return {
                     "enabled": True,
                     "prepared": True,
@@ -650,7 +672,7 @@ class SandboxArchiveService:
                     archive=archive,
                     deadline=deadline,
                 )
-                outcome = True
+                operation.outcome = True
                 return {
                     **receipt,
                     "prepared": True,
@@ -661,10 +683,6 @@ class SandboxArchiveService:
                 }
             finally:
                 archive.close()
-        finally:
-            if acquired:
-                self._capture_slots.release()
-            self._finish_capture("initial", uploaded=outcome)
 
     def queue_final(
         self,
@@ -673,19 +691,12 @@ class SandboxArchiveService:
         members: tuple[SharedMemberManifest, ...],
     ) -> SandboxArchiveReceipt:
         """Spool and store a stopped container before its clean stop succeeds."""
-        deadline = self._new_deadline()
-        self._admit_capture("final")
-        acquired = False
-        uploaded = False
-        archive: _BuiltArchive | None = None
-        try:
-            self._acquire_capture_slot(deadline)
-            acquired = True
+        with self._capture("final") as operation:
             exact = self._exact_inspection(
                 spec,
                 expected_container_id=inspection.container_id,
                 running=False,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
             # A final bundle is uploaded once and never rebuilt to match a
             # digest, so its gzip level decides only how long the stop takes.
@@ -696,22 +707,19 @@ class SandboxArchiveService:
                 members=members,
                 base_sha=None,
                 compression_level=DEFAULT_ARCHIVE_COMPRESSION_LEVEL,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
-            receipt = self._upload_final(
-                sandbox_id=spec.sandbox_id,
-                generation=spec.generation,
-                archive=archive,
-                deadline=deadline,
-            )
-            uploaded = True
-            return receipt
-        finally:
-            if archive is not None:
+            try:
+                receipt = self._upload_final(
+                    sandbox_id=spec.sandbox_id,
+                    generation=spec.generation,
+                    archive=archive,
+                    deadline=operation.deadline,
+                )
+                operation.outcome = True
+                return receipt
+            finally:
                 archive.close()
-            if acquired:
-                self._capture_slots.release()
-            self._finish_capture("final", uploaded=uploaded)
 
     def capture_checkpoint(
         self,
@@ -727,18 +735,12 @@ class SandboxArchiveService:
         capture = self._checkpoint_capture
         if capture is None:
             raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
-        deadline = self._new_deadline()
-        self._admit_capture("checkpoint")
-        acquired = False
-        uploaded = False
-        try:
-            self._acquire_capture_slot(deadline)
-            acquired = True
+        with self._capture("checkpoint") as operation:
             exact = self._exact_inspection(
                 spec,
                 expected_container_id=inspection.container_id,
                 running=False,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
             receipt = capture.capture(
                 spec,
@@ -746,14 +748,10 @@ class SandboxArchiveService:
                 members,
                 upload=self._uploader.upload_checkpoint,
                 max_bytes=self._config.max_archive_bytes,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
-            uploaded = True
+            operation.outcome = True
             return receipt
-        finally:
-            if acquired:
-                self._capture_slots.release()
-            self._finish_capture("checkpoint", uploaded=uploaded)
 
     def restore_checkpoint(self, sandbox_id: str, restore: CheckpointRestore) -> str:
         """Load the image a moved group is recreated from, under the capture budget.
@@ -764,18 +762,14 @@ class SandboxArchiveService:
         capture = self._checkpoint_capture
         if capture is None:
             raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
-        deadline = self._new_deadline()
-        self._acquire_capture_slot(deadline)
-        try:
+        with self._capture(None) as operation:
             return capture.restore(
                 sandbox_id,
                 restore,
                 download=self._uploader.download_checkpoint,
                 max_bytes=self._config.max_archive_bytes,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
-        finally:
-            self._capture_slots.release()
 
     def capture_environment_snapshot(
         self,
@@ -793,18 +787,12 @@ class SandboxArchiveService:
         capture = self._checkpoint_capture
         if capture is None:
             raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
-        deadline = self._new_deadline()
-        self._admit_capture("checkpoint")
-        acquired = False
-        uploaded = False
-        try:
-            self._acquire_capture_slot(deadline)
-            acquired = True
+        with self._capture("checkpoint") as operation:
             exact = self._exact_inspection(
                 spec,
                 expected_container_id=inspection.container_id,
                 running=False,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
             receipt = capture.capture_environment(
                 spec,
@@ -813,31 +801,23 @@ class SandboxArchiveService:
                 snapshot_id=snapshot_id,
                 upload=self._uploader.upload_environment_snapshot,
                 max_bytes=self._config.max_archive_bytes,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
-            uploaded = True
+            operation.outcome = True
             return receipt
-        finally:
-            if acquired:
-                self._capture_slots.release()
-            self._finish_capture("checkpoint", uploaded=uploaded)
 
     def load_environment_snapshot(self, snapshot: EnvironmentSnapshotRef) -> str:
         """Load an installation snapshot's image under the capture budget."""
         capture = self._checkpoint_capture
         if capture is None:
             raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
-        deadline = self._new_deadline()
-        self._acquire_capture_slot(deadline)
-        try:
+        with self._capture(None) as operation:
             return capture.load_environment(
                 snapshot,
                 download=self._uploader.download_environment_snapshot,
                 max_bytes=self._config.max_archive_bytes,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
-        finally:
-            self._capture_slots.release()
 
     def delete_environment_snapshot(
         self, *, owner: str, snapshot_id: str, key: str, version_id: str | None
@@ -1073,11 +1053,16 @@ class SandboxArchiveService:
                 prefix=f"sandbox-{phase}-archive-"
             ),
         )
-        writer = _RebuildWriter if rebuild else _BoundedBundleWriter
+        maximum = self._config.max_archive_bytes
+        writer = _RebuildWriter if rebuild else BoundedDigestWriter
         bounded = writer(
             stream,
-            self._config.max_archive_bytes,
-            check_deadline=lambda: self._check_deadline(deadline),
+            limits=(
+                (maximum, f"compressed sandbox archive exceeds the {maximum}-byte object limit"),
+            ),
+            what="a compressed sandbox archive",
+            source="sandbox archive bundle builder",
+            check=lambda: self._check_deadline(deadline),
         )
         try:
             spooled.write(cast("BinaryIO", bounded), compression_level=compression_level)
@@ -1256,4 +1241,7 @@ __all__ = [
     "DEFAULT_ARCHIVE_OPERATION_TIMEOUT_S",
     "SandboxArchiveService",
     "SandboxInitialArchiveMarker",
+    "check_marker_identity",
+    "decode_marker",
+    "encode_marker",
 ]

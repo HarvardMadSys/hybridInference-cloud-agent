@@ -66,11 +66,10 @@ class ClaudeCodeRuntime(AgentRuntime):
         self._message_id: str | None = None
         self._text_block: str | None = None
 
-    def prepare(
+    def prepare_live(
         self,
         *,
         workdir: str,
-        task_prompt: str,
         model: str,
         gateway_base_url: str,
         credential: str,
@@ -80,18 +79,26 @@ class ClaudeCodeRuntime(AgentRuntime):
         config_dir: str | None = None,
         resume_session_id: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
-        """Build the headless invocation and its environment.
+        """The resident invocation (HOT): prompts arrive on stdin, not argv.
+
+        ``--input-format stream-json`` keeps the process alive between turns,
+        reading user messages from stdin — the terminal-never-closed shape the
+        design's HOT tier is. ``--replay-user-messages`` echoes each one back
+        on stdout at the moment the CLI reads it into the conversation, which
+        is how a message sent into a running turn is known to have landed in
+        it.
 
         ``config_dir`` relocates the CLI's config/session storage inside the
         retained container's writable layer; ``resume_session_id`` continues
-        an earlier native session with only the new prompt after the resident
-        process was replaced. Both are Claude-specific and passed only by the
-        Claude driver; the generic session never sets them.
+        an earlier native session after the resident process was replaced.
         """
+        del workdir, provides_isolation
         argv = [
             self.binary,
             "-p",
-            task_prompt,
+            "--input-format",
+            "stream-json",
+            "--replay-user-messages",
         ]
         if resume_session_id:
             argv += ["--resume", resume_session_id]
@@ -140,6 +147,12 @@ class ClaudeCodeRuntime(AgentRuntime):
             json.dumps(
                 {"mcpServers": self._mcp_endpoints(mcp_config, gateway_base_url=gateway_base_url)}
             ),
+            # AskUserQuestion and ExitPlanMode require owner interaction even in
+            # bypassPermissions. The pinned CLI sends its can_use_tool request
+            # over this control channel, and the live turn answers it with the
+            # owner's choices.
+            "--permission-prompt-tool",
+            "stdio",
         ]
         env = {
             "ANTHROPIC_BASE_URL": gateway_base_url.rstrip("/").removesuffix("/v1"),
@@ -180,51 +193,6 @@ class ClaudeCodeRuntime(AgentRuntime):
             env["CLAUDE_CONFIG_DIR"] = config_dir
         return argv, env
 
-    def prepare_live(
-        self,
-        *,
-        workdir: str,
-        model: str,
-        gateway_base_url: str,
-        credential: str,
-        provides_isolation: bool = False,
-        mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
-        reasoning_effort: str | None = None,
-        config_dir: str | None = None,
-        resume_session_id: str | None = None,
-    ) -> tuple[list[str], dict[str, str]]:
-        """The resident invocation (HOT): prompts arrive on stdin, not argv.
-
-        ``--input-format stream-json`` keeps the process alive between turns,
-        reading user messages from stdin — the terminal-never-closed shape the
-        design's HOT tier is. ``--replay-user-messages`` echoes each one back
-        on stdout at the moment the CLI reads it into the conversation, which
-        is how a message sent into a running turn is known to have landed in
-        it. The common argv/env builder stays shared with runtime conformance
-        tests so auth, model, and MCP flags cannot drift.
-        """
-        argv, env = self.prepare(
-            workdir=workdir,
-            task_prompt="",
-            model=model,
-            gateway_base_url=gateway_base_url,
-            credential=credential,
-            provides_isolation=provides_isolation,
-            mcp_config=mcp_config,
-            reasoning_effort=reasoning_effort,
-            config_dir=config_dir,
-            resume_session_id=resume_session_id,
-        )
-        # Drop the empty positional prompt (`-p ""`), add the input format.
-        prompt_at = argv.index("-p")
-        del argv[prompt_at : prompt_at + 2]
-        argv[1:1] = ["-p", "--input-format", "stream-json", "--replay-user-messages"]
-        # AskUserQuestion and ExitPlanMode require owner interaction even in bypassPermissions.
-        # The pinned CLI sends its can_use_tool request over this control
-        # channel, and the live turn answers it with the owner's choices.
-        argv += ["--permission-prompt-tool", "stdio"]
-        return argv, env
-
     @staticmethod
     def user_message_line(text: str) -> str:
         """One stdin line carrying one user turn, in the CLI's wire shape."""
@@ -244,7 +212,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             return False
         return isinstance(event, dict) and event.get("type") == "result"
 
-    def parse_event(self, line: str) -> NormalizedEvent | None:
+    def parse_event(self, line: str) -> NormalizedEvent | None:  # noqa: C901, PLR0912 complexity baseline, #771
         """Normalize one stream-json line."""
         line = line.strip()
         if not line:

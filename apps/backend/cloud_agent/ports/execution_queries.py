@@ -52,15 +52,6 @@ class ExecutionQueries(Protocol):
         """
         ...
 
-    async def job_usage_inputs(self, *, job_id: str) -> dict[str, Any]:
-        """Read runtime usage for this job's attempts, excluding sibling turns.
-
-        Keep the same compact payload projection as thread_stats_inputs so
-        output-presence detection and retry deduplication have identical
-        semantics when compared with this job's Gateway snapshots.
-        """
-        ...
-
     async def job_attempts_telemetry(self, *, job_id: str) -> list[dict[str, Any]]:
         """Read lightweight attempt summaries without tool or process rows."""
         ...

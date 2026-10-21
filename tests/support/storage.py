@@ -107,7 +107,3 @@ class EmptyAttachments:
     async def count_thread_attachments(self, *, thread_id: str) -> int:
         """No conversation in these scenarios carries an upload."""
         return 0
-
-    async def list_thread_attachments(self, *, thread_id: str) -> list[dict[str, Any]]:
-        """Nothing to rebuild ``/uploads`` from."""
-        return []

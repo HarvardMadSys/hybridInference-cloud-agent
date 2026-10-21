@@ -33,6 +33,10 @@ class HostPoolRepository(Protocol):
         requirements leave this projection. The result also carries raw host
         telemetry for conservative per-host slot sizing; callers must not
         treat a stale sample as evidence for an increase.
+
+        A turn in claim backoff is not in the queue count either: no claim
+        hands it out until the backoff ends. ``backoff_new_group_jobs`` counts
+        those apart, because the pool is not idle while one waits.
         """
         ...
 

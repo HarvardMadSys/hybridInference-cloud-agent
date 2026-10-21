@@ -269,7 +269,7 @@ def _status(
     return "available"
 
 
-def summarize_ledger(rows: list[dict[str, Any]]) -> JobLedgerSummary:
+def summarize_ledger(rows: list[dict[str, Any]]) -> JobLedgerSummary:  # noqa: PLR0912, PLR0915 complexity baseline, #771
     """Sum snapshots without turning missing attempts or metrics into zeroes."""
     grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:

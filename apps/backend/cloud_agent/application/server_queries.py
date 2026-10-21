@@ -38,7 +38,7 @@ class ServerQueries:
         inventory["allocations"] = [self.allocation_view(row) for row in inventory["allocations"]]
         return inventory
 
-    def allocation_view(self, row: dict[str, Any]) -> dict[str, Any]:
+    def allocation_view(self, row: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0912 complexity baseline, #771
         """Project supported actions and distinguish current resource observations."""
         entry = self.registry.entries.get(row["provider_id"])
         caps = entry.provider.capabilities() if entry else None

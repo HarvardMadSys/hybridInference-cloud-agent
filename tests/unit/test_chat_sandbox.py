@@ -31,8 +31,6 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_THREAD_LABEL,
     CHAT_WORKDIR,
-    FINAL_ARCHIVE_MARKER_NAME,
-    INITIAL_ARCHIVE_MARKER_ROOT,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
     TURN_NETWORK_PROOF_S,
@@ -45,6 +43,10 @@ from cloud_agent_host.chat_sandbox import (
     SandboxActionFacts,
     _RetainedTerminalProcess,
     claude_member_config_dir,
+)
+from cloud_agent_host.chat_sandbox_markers import (
+    FINAL_ARCHIVE_MARKER_NAME,
+    INITIAL_ARCHIVE_MARKER_ROOT,
 )
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
@@ -330,9 +332,6 @@ def _plain_group_network(monkeypatch):
     """
     monkeypatch.setattr(ChatSandboxManager, "network_for", lambda _self, _spec: "agent-net")
     monkeypatch.setattr(ChatSandboxManager, "require_host_rules", lambda _self: None)
-    monkeypatch.setattr(
-        ChatSandboxManager, "_ensure_group_network", lambda _self, _spec: "agent-net"
-    )
     monkeypatch.setattr(
         ChatSandboxManager,
         "_require_group_network",
@@ -3072,7 +3071,7 @@ def test_a_peer_that_vanished_mid_reconcile_is_simply_absent(monkeypatch):
         ),
     )
 
-    assert manager._relay_owners() == {"gw": ["agent-gateway"]}
+    assert manager._network_lifecycle._relay_owners() == {"gw": ["agent-gateway"]}
 
 
 class TestSandboxActionFacts:

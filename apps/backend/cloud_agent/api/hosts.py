@@ -276,7 +276,7 @@ async def register_host(
 
 
 @router.post("/heartbeat", response_model=HostHeartbeatResponse)
-async def heartbeat_host(
+async def heartbeat_host(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     body: HostHeartbeatRequest,
     background_tasks: BackgroundTasks,
     host: dict[str, Any] = Depends(authenticate_host),

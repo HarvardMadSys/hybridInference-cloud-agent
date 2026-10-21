@@ -22,6 +22,7 @@ from cloud_agent.environments import (
     EnvironmentNotFound,
 )
 from cloud_agent.execution_profiles import default_execution_profile, shared_sandbox_claim_attested
+from cloud_agent.storage._sql import environment_runs
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent_shared.environment import (
     MAX_VARIABLES,
@@ -669,7 +670,7 @@ class PostgresEnvironmentRepository:
         row = {**row, "revision": revision}
         return await self._environment_public(conn, row)
 
-    async def save_environment(
+    async def save_environment(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         user_id: str,
         *,
@@ -1683,7 +1684,7 @@ class PostgresEnvironmentRepository:
         """Expire execution leases and collect only unreferenced archived values."""
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE agent_environment_runs SET state='failed',detail='Environment test host lease expired',finished_at=NOW(),updated_at=NOW() WHERE state='running' AND (lease_expires_at<NOW() OR started_at<NOW()-INTERVAL '30 minutes')"
+                f"UPDATE agent_environment_runs SET state='failed',detail='Environment test host lease expired',finished_at=NOW(),updated_at=NOW() WHERE state='running' AND {environment_runs.env_run_stale()}"
             )
             if time.monotonic() < self._next_gc:
                 return
@@ -1750,14 +1751,13 @@ class PostgresEnvironmentRepository:
             ):
                 return None
             if await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM agent_environment_runs WHERE host=$1 AND NOT cleanup_complete "
-                "AND (lease_expires_at<=NOW() OR started_at<=NOW()-INTERVAL '30 minutes'))",
+                f"SELECT EXISTS(SELECT 1 FROM agent_environment_runs WHERE host=$1 AND {environment_runs.env_run_blocks_host()})",
                 host,
             ):
                 return None
             tests = int(
                 await conn.fetchval(
-                    "SELECT COUNT(*) FROM agent_environment_runs WHERE host=$1 AND NOT cleanup_complete AND lease_expires_at>NOW() AND started_at>NOW()-INTERVAL '30 minutes'",
+                    f"SELECT COUNT(*) FROM agent_environment_runs WHERE host=$1 AND {environment_runs.env_run_holds_slot()}",
                     host,
                 )
             )
@@ -1831,7 +1831,7 @@ class PostgresEnvironmentRepository:
                 "lease_expires_at=NOW()+INTERVAL '120 seconds',updated_at=NOW(),cleanup_complete=$8,"
                 "finished_at=CASE WHEN $5='running' THEN NULL ELSE NOW() END "
                 "WHERE id=$1 AND host=$2 AND lease_generation=$3 AND NOT cleanup_complete "
-                "AND (($8 AND $5 IN ('failed','cancelled')) OR (state='running' AND NOT cancel_requested AND lease_expires_at>NOW() AND started_at>NOW()-INTERVAL '30 minutes'))",
+                f"AND (($8 AND $5 IN ('failed','cancelled')) OR (state='running' AND NOT cancel_requested AND {environment_runs.env_run_live()}))",
                 run_id,
                 host,
                 generation,
@@ -1930,13 +1930,15 @@ class PostgresEnvironmentRepository:
         ):
             return
         redactor = await self._environment_redactor(user_id, row["environment_binding_id"])
-        await self.save_environment_preparation(
-            row["sandbox_id"],
-            row["environment_binding_id"],
-            receipt["container_id"],
-            receipt["boot_id"],
-            redactor.payload(receipt.get("steps", [])),
-        )
+        async with self._pool.acquire() as conn:
+            await self._write_preparation(
+                conn,
+                row["sandbox_id"],
+                row["environment_binding_id"],
+                receipt["container_id"],
+                receipt["boot_id"],
+                redactor.payload(receipt.get("steps", [])),
+            )
 
     async def record_worker_environment_preparation(
         self, job_id: str, attempt_id: int, generation: int, receipt: dict[str, Any]
@@ -1971,20 +1973,6 @@ class PostgresEnvironmentRepository:
                 steps,
             )
             return True
-
-    async def save_environment_preparation(
-        self,
-        sandbox_id: str,
-        binding_id: str,
-        container_id: str,
-        boot_id: str,
-        steps: builtins.list[dict[str, Any]],
-    ) -> None:
-        """Keep preparation facts attributable to one fixed container binding."""
-        async with self._pool.acquire() as conn:
-            await self._write_preparation(
-                conn, sandbox_id, binding_id, container_id, boot_id, steps
-            )
 
     @staticmethod
     async def _write_preparation(

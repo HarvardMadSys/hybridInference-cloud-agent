@@ -37,6 +37,7 @@ from cloud_agent_host.sandbox_archives import (
 )
 from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
 from cloud_agent_shared.errors import SandboxError
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -51,10 +52,13 @@ _PREPARATION_ID = "ajob_initial"
 
 
 def _config() -> SandboxArchiveS3Config:
-    return SandboxArchiveS3Config(
-        region=_REGION,
-        kms_key_arn=_KMS_KEY,
-        expected_bucket_owner=_ACCOUNT,
+    return SandboxArchiveS3Config.from_policy(
+        SandboxArchivePolicy(
+            enabled=True,
+            region=_REGION,
+            kms_key_arn=_KMS_KEY,
+            expected_bucket_owner=_ACCOUNT,
+        )
     )
 
 
@@ -464,6 +468,38 @@ def test_initial_upload_failure_logs_safe_type_and_discards_the_spool(
     assert record.error_type == "RuntimeError"  # type: ignore[attr-defined]
     assert record.exc_info is None
     assert unsafe not in caplog.text
+
+
+def test_a_non_bytes_write_to_the_compressed_bundle_names_the_bundle_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compressed bundle's writer names what writes to it, not the per-path callback."""
+
+    def writes_text(self: SpooledSandboxArchive, out, **_kwargs: object) -> dict[str, object]:
+        out.write("not bytes")
+        return {}
+
+    monkeypatch.setattr(SpooledSandboxArchive, "write", writes_text)
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(_config())
+    service = _service(manager, uploader)
+    service.start()
+    try:
+        with pytest.raises(
+            SandboxError, match=r"^sandbox archive bundle builder wrote non-bytes data$"
+        ):
+            service.capture_initial(
+                RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+                expected_container_id=_CONTAINER_ID,
+                preparation_id=_PREPARATION_ID,
+                base_sha=_BASE_SHA,
+                members=(),
+            )
+    finally:
+        service.close()
+
+    assert uploader.calls == []
 
 
 def test_initial_conditional_conflict_has_exactly_three_total_put_attempts(
@@ -948,7 +984,9 @@ def test_a_rebuild_too_large_at_one_level_still_tries_the_next(
 ) -> None:
     """A level the marker never used can outgrow a ceiling its own bundle fitted under."""
     ceiling = 64 * 1024
-    config = replace(_config(), max_archive_bytes=ceiling, multipart_threshold_bytes=ceiling)
+    config = SandboxArchiveS3Config.from_policy(
+        replace(_config().policy, max_archive_bytes=ceiling, multipart_threshold_bytes=ceiling)
+    )
     spec = _spec()
     manager = _Manager(spec, running=True)
     uploader = _Uploader(
@@ -1026,7 +1064,9 @@ def test_a_capture_over_the_object_ceiling_still_fails_as_a_sandbox_error(
 ) -> None:
     """Archive failure diagnostics name the exception class, so it must not change."""
     ceiling = 64 * 1024
-    config = replace(_config(), max_archive_bytes=ceiling, multipart_threshold_bytes=ceiling)
+    config = SandboxArchiveS3Config.from_policy(
+        replace(_config().policy, max_archive_bytes=ceiling, multipart_threshold_bytes=ceiling)
+    )
     spec = _spec()
     manager = _Manager(spec, running=True)
     uploader = _Uploader(config)
