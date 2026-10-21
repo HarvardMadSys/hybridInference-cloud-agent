@@ -820,7 +820,7 @@ async def _decide_call(
     )
 
 
-async def _wait_for_approval(
+async def _wait_for_approval(  # noqa: PLR0912 complexity baseline, #771
     authorized: Authorized,
     store: _McpRelayStorage,
     *,
@@ -1879,7 +1879,7 @@ async def _host_listing(
     )
 
 
-async def _host_fetch(
+async def _host_fetch(  # noqa: PLR0912 complexity baseline, #771
     payload: dict[str, Any],
     *,
     method: str,

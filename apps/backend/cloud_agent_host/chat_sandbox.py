@@ -126,13 +126,11 @@ from cloud_agent_shared.operation_profiling import StageObserver, substage
 
 if TYPE_CHECKING:
     import builtins
-    import ipaddress
     from collections.abc import Callable, Iterator, Sequence
     from typing import BinaryIO
 
     from _typeshed import SupportsWrite
 
-    from cloud_agent_shared.egress import SandboxNetwork
 #: A probe older than this was abandoned by a process killed mid-probe. Since
 #: discovery no longer stops it, the next probe in the namespace removes it.
 PROBE_ABANDONED_AFTER_S = 3600
@@ -553,71 +551,13 @@ class ChatSandboxManager:
     # only other endpoints on it are the two relays, copied from the relay
     # network, and the host holds an exact exception for each of them.
 
-    def _network(self) -> SandboxNetwork:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._network()
-
     def network_for(self, spec: ChatSandboxSpec) -> str:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle.network_for(spec)
 
-    def _relay_aliases(self) -> tuple[str, ...]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._relay_aliases()
-
-    def _network_labels(self, spec: ChatSandboxSpec) -> dict[str, str]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._network_labels(spec)
-
-    def _inspect_network(self, network: str) -> dict[str, Any] | None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._inspect_network(network)
-
-    def _verify_group_network(self, network: dict[str, Any], spec: ChatSandboxSpec) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._verify_group_network(network, spec)
-
-    def _network_uses_chat_pool(self, network: dict[str, Any]) -> bool:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._network_uses_chat_pool(network)
-
-    def _inspect_containers(self, container_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._inspect_containers(container_ids)
-
-    @staticmethod
-    def _endpoint_aliases(raw: dict[str, Any], network: str) -> set[str] | None:
-        """Delegate to the group-network lifecycle owner."""
-        return ChatSandboxNetwork._endpoint_aliases(raw, network)
-
-    def _network_aliases_for(
-        self, container_ids: Sequence[str], network: str
-    ) -> dict[str, set[str]]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._network_aliases_for(container_ids, network)
-
-    def _discover_relays(self) -> tuple[dict[str, list[str]], dict[str, dict[str, Any]]]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._discover_relays()
-
-    def _relay_owners(self) -> dict[str, list[str]]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._relay_owners()
-
-    def _container_network_aliases(self, container_id: str, network: str) -> set[str] | None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._container_network_aliases(container_id, network)
-
     def relay_addresses(self, network: str) -> dict[str, str]:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle.relay_addresses(network)
-
-    @staticmethod
-    def _relay_addresses_from(
-        owners: dict[str, list[str]], raw: dict[str, Any] | None
-    ) -> dict[str, str]:
-        """Delegate to the group-network lifecycle owner."""
-        return ChatSandboxNetwork._relay_addresses_from(owners, raw)
 
     def _sync_kata_guest_network(
         self,
@@ -627,87 +567,6 @@ class ChatSandboxManager:
     ) -> None:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle._sync_kata_guest_network(spec, current, addresses)
-
-    def _relay_endpoint(self, container_id: str, network: str) -> tuple[set[str], int] | None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._relay_endpoint(container_id, network)
-
-    @classmethod
-    def _relay_endpoint_from(
-        cls, raw: dict[str, Any] | None, network: str
-    ) -> tuple[set[str], int] | None:
-        """Delegate to the group-network lifecycle owner."""
-        return ChatSandboxNetwork._relay_endpoint_from(raw, network)
-
-    def _ensure_service_connection(
-        self,
-        *,
-        network: str,
-        container_id: str,
-        aliases: builtins.list[str],
-        inspected: dict[str, Any] | None = None,
-    ) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._ensure_service_connection(
-            network=network, container_id=container_id, aliases=aliases, inspected=inspected
-        )
-
-    def _reconcile_group_members(
-        self,
-        *,
-        network: str,
-        spec: ChatSandboxSpec,
-        service_ids: set[str],
-        service_aliases: tuple[str, ...],
-        sandbox: ChatSandboxInspection | None = None,
-    ) -> dict[str, Any]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._reconcile_group_members(
-            network=network,
-            spec=spec,
-            service_ids=service_ids,
-            service_aliases=service_aliases,
-            sandbox=sandbox,
-        )
-
-    def _candidate_chat_subnets(self, network_name: str) -> Iterator[ipaddress.IPv4Network]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._candidate_chat_subnets(network_name)
-
-    @staticmethod
-    def _is_subnet_allocation_conflict(stderr: str) -> bool:
-        """Delegate to the group-network lifecycle owner."""
-        return ChatSandboxNetwork._is_subnet_allocation_conflict(stderr)
-
-    def _create_group_network(self, expected: str, spec: ChatSandboxSpec) -> dict[str, Any]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._create_group_network(expected, spec)
-
-    def _attach_relays(
-        self,
-        network: str,
-        discovery: tuple[dict[str, list[str]], dict[str, dict[str, Any]]] | None = None,
-    ) -> set[str]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._attach_relays(network, discovery)
-
-    def _sync_relay_exceptions(self, network: str, addresses: dict[str, str] | None = None) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._sync_relay_exceptions(network, addresses)
-
-    def _drop_relay_exceptions(self, network_name: str) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._drop_relay_exceptions(network_name)
-
-    def _ensure_group_services(
-        self,
-        network: str,
-        spec: ChatSandboxSpec,
-        *,
-        sandbox: ChatSandboxInspection | None = None,
-    ) -> _GroupNetworkSnapshot:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._ensure_group_services(network, spec, sandbox=sandbox)
 
     def sync_ssh_targets(self, spec: ChatSandboxSpec, endpoints: set[tuple[str, int]]) -> None:
         """Delegate to the group-network lifecycle owner."""
@@ -720,34 +579,6 @@ class ChatSandboxManager:
     def renew_host_rules(self) -> None:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle.renew_host_rules()
-
-    def _ensure_group_network(
-        self,
-        spec: ChatSandboxSpec,
-        *,
-        current: ChatSandboxInspection | None = None,
-        snapshot: _GroupNetworkSnapshot | None = None,
-    ) -> str:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._ensure_group_network(
-            spec, current=current, snapshot=snapshot
-        )
-
-    def _owned_network_matches(self, network_name: str, spec: ChatSandboxSpec) -> bool:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._owned_network_matches(network_name, spec)
-
-    def _disconnect_endpoint(
-        self,
-        network: str,
-        container_id: str,
-        *,
-        network_name: str | None = None,
-    ) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._disconnect_endpoint(
-            network, container_id, network_name=network_name
-        )
 
     def _release_owned_network(
         self,
@@ -767,10 +598,6 @@ class ChatSandboxManager:
             expected_container_id=expected_container_id,
         )
 
-    def _release_orphan_network(self, network: dict[str, Any]) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._release_orphan_network(network)
-
     def _release_sandbox_networks(
         self,
         spec: ChatSandboxSpec,
@@ -783,41 +610,9 @@ class ChatSandboxManager:
             spec, current, expected_container_id=expected_container_id
         )
 
-    @staticmethod
-    def _network_is_stale_for_prune(network: dict[str, Any]) -> bool:
-        """Delegate to the group-network lifecycle owner."""
-        return ChatSandboxNetwork._network_is_stale_for_prune(network)
-
     def prune_orphan_networks(self, specs: builtins.list[ChatSandboxSpec]) -> None:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle.prune_orphan_networks(specs)
-
-    def _endpoint_is_current(
-        self,
-        current: ChatSandboxInspection,
-        network_name: str,
-        network: dict[str, Any] | None = None,
-    ) -> bool:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._endpoint_is_current(current, network_name, network)
-
-    def _attach_to_group_network(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        snapshot: _GroupNetworkSnapshot | None = None,
-    ) -> ChatSandboxInspection:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._attach_to_group_network(spec, current, snapshot)
-
-    def _verify_group_snapshot(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        observed: _GroupNetworkSnapshot,
-    ) -> ChatSandboxInspection | None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._verify_group_snapshot(spec, current, observed)
 
     def _require_group_network(
         self,
@@ -876,7 +671,7 @@ class ChatSandboxManager:
             )
         return actual
 
-    def build_create_command(
+    def build_create_command(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         *,
@@ -3239,7 +3034,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                 continue
             self._run([self.backend.docker_binary, "rm", "--force", container_id], timeout=30)
 
-    def _probe_guest_observer_once(self) -> str:
+    def _probe_guest_observer_once(self) -> str:  # noqa: PLR0912 complexity baseline, #771
         """One probe, on a sandbox of its own that is removed however it ends."""
         self._remove_abandoned_probes()
         token = secrets.token_hex(12)
@@ -4521,7 +4316,7 @@ finally:
                 + result.stderr.decode("utf-8", "replace")[:300]
             )
 
-    def export_archive(
+    def export_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         path: str,

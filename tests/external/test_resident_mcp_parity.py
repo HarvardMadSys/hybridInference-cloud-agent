@@ -38,6 +38,7 @@ from tests.external.test_agent_mcp_end_to_end import (
 )
 from tests.support.claude_cli import sse
 from tests.support.migrations import apply_migrations
+from tests.support.one_shot import one_shot_argv, one_shot_env
 
 from cloud_agent.mcp.protocol import presented_name
 from cloud_agent.settings import initialize_settings
@@ -46,7 +47,7 @@ from cloud_agent.tokens import SCOPE_MCP, mint_worker_token, parse_worker_token
 from cloud_agent_host.chat_sandbox import ChatSandboxManager
 from cloud_agent_host.codex_mcp import INSTALL_POLICY
 from cloud_agent_host.drivers import LaunchContext, TurnInput, get_driver
-from cloud_agent_host.kilo_mcp import ensure_kilo_runtime
+from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION, ensure_kilo_runtime
 from cloud_agent_host.mcp_helpers import install_mcp_helpers
 from cloud_agent_host.runtimes import RuntimeMCPConfig, get_runtime
 from cloud_agent_host.sandbox import _PopenProcess
@@ -493,9 +494,11 @@ for directory in (".kilo", ".kilocode"):
             answers.append(result.final_output)
             session.close()
         if runtime in {"codex", "kilo"}:
-            argv, env = get_runtime(runtime).prepare(
+            # The platform launches only resident processes, but a headless
+            # `codex exec` or `kilo run` in the same container is held to the
+            # same MCP policy, so the test starts one itself.
+            live_argv, env = get_runtime(runtime).prepare_live(
                 workdir=context.workdir,
-                task_prompt="Read issue 7 through exec/run",
                 model="test-model",
                 gateway_base_url=context.gateway_base_url,
                 credential=context.credential,
@@ -505,7 +508,15 @@ for directory in (".kilo", ".kilocode"):
                 activation_dir=context.activation_dir,
                 resume_session_id=native_id,
             )
-            process = spawn(argv, env)
+            argv = one_shot_argv(
+                runtime,
+                live_argv,
+                prompt="Read issue 7 through exec/run",
+                model="test-model",
+                session_state_dir=context.session_state_dir,
+                resume_session_id=native_id,
+            )
+            process = spawn(argv, one_shot_env(env))
             process.close_stdin()
             output = "".join(process.lines())
             assert process.wait() == 0, process.stderr_text()
@@ -697,9 +708,9 @@ async def test_resident_mcp_call_followup_resume_and_fork(
                 "0:0",
                 container,
                 "rm",
-                "/opt/runtimes/kilo/7.4.17/mcp-isolation-patch.sha256",
+                f"/opt/runtimes/kilo/{KILO_MCP_VERSION}/mcp-isolation-patch.sha256",
             )
-            await asyncio.to_thread(ensure_kilo_runtime, manager, None, "7.4.17")
+            await asyncio.to_thread(ensure_kilo_runtime, manager, None, KILO_MCP_VERSION)
         answers = await asyncio.wait_for(
             asyncio.to_thread(
                 _resident_turns,

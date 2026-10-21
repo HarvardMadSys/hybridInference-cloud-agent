@@ -154,7 +154,6 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
         list_allocations=AsyncMock(return_value=[allocation]),
         list_operations=AsyncMock(return_value=[]),
         observe_allocation=AsyncMock(side_effect=save_observation),
-        upsert_node=AsyncMock(return_value=allocation["nodes"][0]),
         checkpoint_operation=AsyncMock(return_value=True),
         finish_operation=AsyncMock(side_effect=save_finish),
         assert_autoscale_acquire_connections_verified=AsyncMock(),

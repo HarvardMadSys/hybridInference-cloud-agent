@@ -60,9 +60,8 @@ def merged_mcp_server(tool_name: object, *, separator: str) -> dict[str, str]:
 class RuntimeCapabilities:
     """What a runtime can do, so the platform does not assume.
 
-    Session continuity is deliberately not declared here: it belongs to
-    ``drivers.HarnessCapabilities.continuity``, the only value the runner
-    consults when picking a turn's continuity path.
+    How a session continues, forks and takes a message mid-turn is declared by
+    the driver (``drivers.HarnessCapabilities``), not here.
     """
 
     #: The reasoning-effort levels this adapter can actually put on the wire,
@@ -135,31 +134,18 @@ class RuntimeEffortUnsupportedError(RuntimeError):
 
 
 class AgentRuntime:
-    """Base adapter. Subclasses override the three questions."""
+    """Base adapter for one Agent CLI.
+
+    Each adapter builds its CLI's resident live process (``prepare_live``,
+    whose arguments differ between dialects) and describes what the CLI can
+    do. ``reasoning_effort`` is ``None`` for "let the CLI and the model
+    decide", which is every turn that predates the control and every pair
+    that cannot offer it; any other value must be one the runtime declared
+    (:meth:`_check_effort`).
+    """
 
     name = "generic"
     binary = ""
-
-    def prepare(
-        self,
-        *,
-        workdir: str,
-        task_prompt: str,
-        model: str,
-        gateway_base_url: str,
-        credential: str,
-        provides_isolation: bool = False,
-        mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
-        reasoning_effort: str | None = None,
-    ) -> tuple[list[str], dict[str, str]]:
-        """Return ``(argv, extra_env)`` to run this task headlessly.
-
-        ``reasoning_effort`` is ``None`` for "let the CLI and the model decide",
-        which is every turn that predates the control and every pair that
-        cannot offer it. A non-``None`` value must be one this runtime
-        declared; see :meth:`effort_args`.
-        """
-        raise NotImplementedError
 
     def _check_effort(self, effort: str | None) -> str | None:
         """Refuse a level this runtime never declared; return it otherwise.
@@ -331,6 +317,21 @@ class AgentRuntime:
         # only sometimes would leave the reference dangling on the turns where
         # it was absent, which is the shape a stale token hides in.
         env[MCP_TOKEN_ENV] = config.credential
+
+    @staticmethod
+    def _wrapper_env(gateway_base_url: str, credential: str) -> dict[str, str]:
+        """The gateway and credential an image-shipped wrapper configures its CLI from.
+
+        Both the OpenAI and the Anthropic spelling, and the MCP tool timeout.
+        """
+        base = gateway_base_url.rstrip("/").removesuffix("/v1")
+        return {
+            "OPENAI_BASE_URL": f"{base}/v1",
+            "OPENAI_API_KEY": credential,
+            "ANTHROPIC_BASE_URL": base,
+            "ANTHROPIC_API_KEY": credential,
+            "MCP_TOOL_TIMEOUT": "1560000",
+        }
 
     @staticmethod
     def _raw(line: str, reason: str) -> NormalizedEvent:

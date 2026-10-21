@@ -1074,7 +1074,7 @@ def _capability_payload(capability: Any) -> dict[str, Any]:
 
 
 @router.post("/connections/{connection_id}/authorize", response_model=AuthorizeResponse)
-async def authorize_connection(
+async def authorize_connection(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     connection_id: int,
     body: AuthorizeRequest | None = None,
     user: dict[str, Any] = Depends(require_agent_owner),
@@ -1419,7 +1419,7 @@ _CALLBACK_NEEDS_SESSION = (
 
 
 @router.get("/oauth/callback/{provider}", response_model=None)
-async def oauth_callback(
+async def oauth_callback(  # noqa: PLR0912 complexity baseline, #771
     provider: str,
     request: Request,
     state: str = Query(""),

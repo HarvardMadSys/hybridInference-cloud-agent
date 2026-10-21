@@ -5,7 +5,13 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-from tests.integration.storage.test_compute_resources import fence, operation, resource
+from tests.integration.storage.test_compute_resources import (
+    _identity,
+    fence,
+    observe_nodes,
+    operation,
+    resource,
+)
 from tests.integration.storage.test_host_pool_store import (
     db as db,
     hosts as hosts,
@@ -158,23 +164,11 @@ async def test_a_pinned_host_key_survives_later_provider_observations(store):
         "username": "agent",
         "credential_ref": "ssh-1",
     }
-    await repo.upsert_node(
-        allocation_id=allocation_id,
-        node={
-            **{k: node[k] for k in ("provider_node_id", "instance_identity", "name")},
-            "connection": connection,
-        },
-    )
+    await observe_nodes(repo, allocation_id, {**_identity(node), "connection": connection})
     op = await operation(repo, allocation_id, kind="acquire")
     await repo.record_host_key(node_id=node["id"], host_key=KEY_A[0], **fence(op))
     # The provider's next observation of the same instance carries no key.
-    await repo.upsert_node(
-        allocation_id=allocation_id,
-        node={
-            **{k: node[k] for k in ("provider_node_id", "instance_identity", "name")},
-            "connection": connection,
-        },
-    )
+    await observe_nodes(repo, allocation_id, {**_identity(node), "connection": connection})
     stored = (await repo.get_allocation(allocation_id))["nodes"][0]["connection"]
     assert stored == {**connection, "host_key": KEY_A[0]}
 
@@ -188,9 +182,9 @@ async def test_a_pinned_host_key_survives_an_observation_serialized_with_its_emp
     ).model_dump(mode="json")
     assert observed["host_key"] is None
     identity = {k: node[k] for k in ("provider_node_id", "instance_identity", "name")}
-    await repo.upsert_node(allocation_id=allocation_id, node={**identity, "connection": observed})
+    await observe_nodes(repo, allocation_id, {**identity, "connection": observed})
     op = await operation(repo, allocation_id, kind="acquire")
     await repo.record_host_key(node_id=node["id"], host_key=KEY_A[0], **fence(op))
-    await repo.upsert_node(allocation_id=allocation_id, node={**identity, "connection": observed})
+    await observe_nodes(repo, allocation_id, {**identity, "connection": observed})
     stored = (await repo.get_allocation(allocation_id))["nodes"][0]["connection"]
     assert stored == {**observed, "host_key": KEY_A[0]}

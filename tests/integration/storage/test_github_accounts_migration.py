@@ -18,10 +18,16 @@ async def _grants(conn) -> list[dict]:
 
 
 async def test_the_revision_adds_the_account_table_and_leaves_grants_as_they_were(store):
-    await store.source_control.record_repo_grant(
-        user_id="user-owner", installation_id=7, account_login="acme"
-    )
     config = _db_config()
+    conn = await asyncpg.connect(**config)
+    try:
+        # A grant from before this revision: no account row to go with it.
+        await conn.execute(
+            "INSERT INTO agent_repo_grants (user_id, installation_id, account_login) "
+            "VALUES ('user-owner', 7, 'acme')"
+        )
+    finally:
+        await conn.close()
     downgrade_to(config, _BEFORE)
     conn = await asyncpg.connect(**config)
     try:

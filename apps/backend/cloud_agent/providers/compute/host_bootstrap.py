@@ -856,7 +856,7 @@ class SshHostBootstrap:
             "identity": identity,
         }
 
-    async def _archive(
+    async def _archive(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         profile: DeploymentProfile,
         intent: BootstrapIntent,

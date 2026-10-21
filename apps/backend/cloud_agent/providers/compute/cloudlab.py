@@ -196,7 +196,7 @@ def _operation_name(method: str, path: str) -> str:
     return "provider.request"
 
 
-def _error_reason_code(response: httpx.Response) -> str:
+def _error_reason_code(response: httpx.Response) -> str:  # noqa: C901, PLR0912 complexity baseline, #771
     """Map bounded provider text to a stable reason code; never return that text."""
     status = response.status_code
     if status in {401, 403}:
@@ -772,7 +772,7 @@ class CloudLabProvider(ComputeProvider):
             ),
         )
 
-    async def acquire(self, request: AcquireRequest, intent: OperationIntent) -> ProviderReceipt:
+    async def acquire(self, request: AcquireRequest, intent: OperationIntent) -> ProviderReceipt:  # noqa: PLR0912 complexity baseline, #771
         """Execute the persisted acquisition intent and return its acknowledgement."""
         validated = self.validate_config(request.mode, request.config)
         config = CloudLabConfig.model_validate(validated)
@@ -1018,7 +1018,7 @@ class CloudLabProvider(ComputeProvider):
             provider_request_id=response.headers.get("x-request-id"),
         )
 
-    async def _nodes(
+    async def _nodes(  # noqa: C901, PLR0912 complexity baseline, #771
         self, ref: ResourceRef, config: CloudLabConfig, data: dict[str, Any], ready: bool
     ) -> tuple[list[NodeObservation], bool]:
         aggregates = data.get("aggregates")

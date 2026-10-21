@@ -125,7 +125,7 @@ class CloudLabAutoscaler:
             else expected_deployment_sha
         ).strip()
 
-    async def reconcile(self) -> None:
+    async def reconcile(self) -> None:  # noqa: PLR0912, PLR0915 complexity baseline, #771
         """Persist timers/status, size ready hosts, and queue at most one action."""
         state = await self.repository.get_cloudlab_autoscaling()
         policy = state["policy"]
@@ -323,7 +323,7 @@ class CloudLabAutoscaler:
                     allocation_id=str(candidate["allocation_id"]),
                 )
 
-    async def _size_owned_hosts(
+    async def _size_owned_hosts(  # noqa: PLR0912 complexity baseline, #771
         self,
         *,
         members: list[dict[str, Any]],

@@ -326,9 +326,8 @@ class TestTheRuntimeRelayEntry:
         """The exact URL matters: an alias in it would put the protocol back in the CLI."""
         from cloud_agent_host.runtimes import MERGED_MCP_SERVER_NAME, ClaudeCodeRuntime
 
-        argv, _env = ClaudeCodeRuntime().prepare(
+        argv, _env = ClaudeCodeRuntime().prepare_live(
             workdir="/w",
-            task_prompt="do it",
             model="glm-5.1",
             gateway_base_url="http://backend:8080",
             credential="agr-credential",
@@ -350,9 +349,8 @@ class TestTheRuntimeRelayEntry:
         from cloud_agent_host import runtimes
 
         runtime = getattr(runtimes, runtime_name)()
-        _argv, env = runtime.prepare(
+        _argv, env = runtime.prepare_live(
             workdir="/w",
-            task_prompt="do it",
             model="glm-5.1",
             gateway_base_url="http://backend:8080",
             credential="agr-credential",
@@ -366,9 +364,8 @@ class TestTheRuntimeRelayEntry:
         """An endpoint a run must not use is an endpoint it should not be given."""
         from cloud_agent_host.runtimes import ClaudeCodeRuntime
 
-        argv, _env = ClaudeCodeRuntime().prepare(
+        argv, _env = ClaudeCodeRuntime().prepare_live(
             workdir="/w",
-            task_prompt="do it",
             model="glm-5.1",
             gateway_base_url="http://backend:8080",
             credential="agr-credential",

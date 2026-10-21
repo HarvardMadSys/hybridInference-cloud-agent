@@ -30,6 +30,7 @@ from tests.integration.storage.test_sandbox_restore_store import (
     pool as pool,
     store as store,
 )
+from tests.support.follow_ups import append_follow_up
 from tests.support.host_docker import Docker, probe, service as host_service
 from tests.unit.test_sandbox_archive import _Manager
 
@@ -82,8 +83,8 @@ async def _authorize(store: Storage, host: str, *held: dict) -> list[dict]:
 async def _handed_over(pool, store: Storage) -> tuple[dict, dict]:
     """A covered group whose host was removed, and the turn that will restore it."""
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"

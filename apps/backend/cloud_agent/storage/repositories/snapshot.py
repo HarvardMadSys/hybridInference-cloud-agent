@@ -108,11 +108,6 @@ class PostgresSnapshotRepository:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
 
-    async def snapshot_database_time(self) -> datetime:
-        """Use the database clock for deadlines written by database transactions."""
-        async with self._pool.acquire() as conn:
-            return await conn.fetchval("SELECT clock_timestamp()")
-
     async def request_snapshot_publication(self, *, thread_id: str, user_id: str) -> dict[str, Any]:
         """Open the next snapshot of a conversation's workspace for its owner.
 

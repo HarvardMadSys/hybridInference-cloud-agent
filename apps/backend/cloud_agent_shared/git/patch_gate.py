@@ -151,7 +151,7 @@ def _delta_sizes(payload: bytes) -> tuple[int, int]:
     return sizes[0], sizes[1]
 
 
-def _binary_expansion_violations(
+def _binary_expansion_violations(  # noqa: C901, PLR0912 complexity baseline, #771
     patch: str, *, max_blob_bytes: int, max_decoded_bytes: int
 ) -> list[str]:
     """Bound binary literals and delta results before Git allocates them.

@@ -235,7 +235,7 @@ async def _terminal_owner_workspace(
 
 
 @router.get("/jobs/{job_id}/files", response_model=AgentWorkspaceResponse)
-async def get_agent_job_workspace_file(
+async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity baseline, #771
     job_id: str,
     request: Request,
     path: str = Query("", max_length=4096),
