@@ -37,7 +37,6 @@ import termios
 import threading
 import time
 import tty
-import weakref
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host import chat_sandbox_markers as markers
@@ -112,6 +111,7 @@ from cloud_agent_host.guest_observer import (
     GuestObserverRuntimeError,
     GuestObserverSnapshot,
 )
+from cloud_agent_host.install_locks import install_lock
 from cloud_agent_host.network_guard import GUARD_RECHECK_S
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
@@ -393,13 +393,6 @@ class ChatSandboxManager:
     def __init__(self, backend: ContainerBackend) -> None:
         self.backend = backend
         self._network_lifecycle = ChatSandboxNetwork(self)
-        # Installing a helper or a runtime into a container must not interleave
-        # with another install into the same one, and need not wait for any
-        # other: a runtime copy into one chat can take minutes.
-        self._member_files_guard = threading.Lock()
-        self._member_files_locks: weakref.WeakValueDictionary[str, threading.Lock] = (
-            weakref.WeakValueDictionary()
-        )
         # Multiple fork siblings may admit turns concurrently. Singleton
         # observer startup/rotation and its live cursors therefore need one
         # sandbox-manager-wide critical section per manager.
@@ -1579,18 +1572,9 @@ class ChatSandboxManager:
             )
         return path
 
-    def _member_files_lock(self, spec: ChatSandboxSpec) -> threading.Lock:
-        """The lock for installing into this one container."""
-        with self._member_files_guard:
-            lock = self._member_files_locks.get(spec.container_name)
-            if lock is None:
-                lock = threading.Lock()
-                self._member_files_locks[spec.container_name] = lock
-            return lock
-
     def ensure_member_process_reaper(self, spec: ChatSandboxSpec) -> None:
         """Install the immutable helper into retained pre-upgrade containers."""
-        with self._member_files_lock(spec):
+        with install_lock(spec.container_name):
             probe = self.exec_capture(
                 spec,
                 [
@@ -1681,21 +1665,21 @@ class ChatSandboxManager:
         """Bring retained Kilo members onto the deployment's isolated runtime."""
         from cloud_agent_host.kilo_mcp import ensure_kilo_runtime
 
-        with self._member_files_lock(spec):
+        with install_lock(spec.container_name):
             ensure_kilo_runtime(self, spec, version)
 
     def ensure_downloaded_runtime(self, spec: ChatSandboxSpec, runtime: str, version: str) -> None:
         """Copy a version downloaded after the image was built into this chat."""
         from cloud_agent_host.runtime_install import ensure_downloaded_runtime
 
-        with self._member_files_lock(spec):
+        with install_lock(spec.container_name):
             ensure_downloaded_runtime(self, spec, runtime, version)
 
     def ensure_mcp_helpers(self, spec: ChatSandboxSpec, runtime: str) -> None:
         """Keep existing conversations on the same adapters as new conversations."""
         from cloud_agent_host.mcp_helpers import install_mcp_helpers
 
-        with self._member_files_lock(spec):
+        with install_lock(spec.container_name):
             install_mcp_helpers(self, spec, runtime)
 
     def reap_member_processes(
