@@ -148,7 +148,10 @@ def load_control_plane_host_release(directory: Path | None = None) -> HostReleas
     re-hash, and re-validate the whole archive each pass. Both files are
     still stat'ed on every call, so a bundle that changes on disk (a new
     deployment) reloads and re-validates from scratch; a failed load is
-    memoized the same way and retried as soon as the files change.
+    memoized the same way and retried as soon as the files change. The
+    None result covers only unreadable or invalid *content*: an OSError
+    while stat'ing returns None unmemoized, and one raised mid-read
+    propagates exactly as before the memo existed.
     """
     directory = directory or Path("/app/compute-host-release")
     if not directory.is_dir():
