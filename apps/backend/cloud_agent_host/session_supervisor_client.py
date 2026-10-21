@@ -629,10 +629,6 @@ class SessionSupervisorClient:
             payload={"token": token, "lost": lost},
         )
 
-    def shared_status(self, thread_id: str) -> dict[str, Any]:
-        """Read one member plus its shared Docker group state."""
-        return self._shared_request("GET", thread_id)
-
     def stop_shared_idle(
         self,
         thread_id: str,

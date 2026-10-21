@@ -750,7 +750,7 @@ async def _seed_workspace_rows(storage: Any) -> dict[str, Any]:
     sandbox capability, a claimed job, a reserved retained group, and the
     lifecycle event that publishes ``workspace_ready``.
     """
-    from cloud_agent_host.shared_protocol import (
+    from cloud_agent_shared.shared_protocol import (
         NATIVE_FORK_AT_ANCHOR_CAPABILITY,
         SHARED_SANDBOX_CAPABILITY,
         SHARED_SANDBOX_HELPER_PINS,

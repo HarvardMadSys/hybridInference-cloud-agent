@@ -43,7 +43,7 @@ class PostgresSessionForkRepository:
         self._pool = pool
         self._queries = PostgresConversationQueries(pool)
 
-    async def prepare_session_fork(
+    async def prepare_session_fork(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         *,
         source_job_id: str,
@@ -763,7 +763,7 @@ class PostgresSessionForkRepository:
             if operation["state"] == "ready":
                 anchor_id = str(operation["target_anchor_job_id"] or "") or None
             elif operation["state"] == "materialized":
-                # Match create_follow_up's thread -> job -> membership lock
+                # Match insert_follow_up's thread -> job -> membership lock
                 # order. Locking the source job first here while a concurrent
                 # follow-up held the thread row produced a real PostgreSQL
                 # deadlock cycle (each transaction then waited for the other).

@@ -28,6 +28,25 @@ from cloud_agent.storage._sql.compute_admission import (
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
+def _identity(node: dict) -> dict:
+    """A stored node as the provider reports it again."""
+    return {key: node[key] for key in ("provider_node_id", "instance_identity", "name")}
+
+
+async def observe_nodes(repo, allocation_id: str, *nodes: dict) -> None:
+    """A later observation of a ready machine reporting ``nodes``, as reconciliation saves it."""
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={
+            "observed_state": "ready",
+            "expiration_known": True,
+            "expires_at": datetime.now(UTC) + timedelta(hours=4),
+            "scope_complete": True,
+            "nodes": list(nodes),
+        },
+    )
+
+
 async def resource(store, hosts=None, *, name="machine", provision=False):
     """Create one observed resource; optionally bind an enrolled ready Host."""
     repo = store.compute_resources
@@ -50,10 +69,6 @@ async def resource(store, hosts=None, *, name="machine", provision=False):
     allocation_id = op["allocation_id"]
     claimed = await repo.claim_operation(worker_id="fixture")
     assert claimed["id"] == op["id"]
-    node = await repo.upsert_node(
-        allocation_id=allocation_id,
-        node={"provider_node_id": "node-1", "instance_identity": request, "name": name},
-    )
     await repo.observe_allocation(
         allocation_id=allocation_id,
         observation={
@@ -62,8 +77,10 @@ async def resource(store, hosts=None, *, name="machine", provision=False):
             "expiration_known": True,
             "expires_at": datetime.now(UTC) + timedelta(hours=4),
             "scope_complete": True,
+            "nodes": [{"provider_node_id": "node-1", "instance_identity": request, "name": name}],
         },
     )
+    (node,) = (await repo.get_allocation(allocation_id))["nodes"]
     if hosts:
         await repo.prepare_bootstrap_binding(node_id=node["id"], host=name, operation_id=op["id"])
         await hosts.register_host(
@@ -365,9 +382,11 @@ async def test_bootstrap_binding_requires_a_current_complete_ready_allocation(db
 async def test_bootstrap_binding_requires_exactly_one_observed_node(db, store):
     repo = store.compute_resources
     allocation_id, node, op = await resource(store)
-    await repo.upsert_node(
-        allocation_id=allocation_id,
-        node={"provider_node_id": "node-2", "instance_identity": "second", "name": "second"},
+    await observe_nodes(
+        repo,
+        allocation_id,
+        _identity(node),
+        {"provider_node_id": "node-2", "instance_identity": "second", "name": "second"},
     )
 
     with pytest.raises(ValueError, match="resource_observation_not_ready"):
@@ -437,13 +456,10 @@ async def test_bootstrap_and_drain_are_independent_and_node_identity_cannot_chan
     )
     assert (await hosts.get_host(host="machine"))["status"] == "draining"
     with pytest.raises(ValueError, match="resource_identity_changed"):
-        await repo.upsert_node(
-            allocation_id=allocation_id,
-            node={
-                "provider_node_id": "node-1",
-                "instance_identity": "replacement",
-                "name": "machine",
-            },
+        await observe_nodes(
+            repo,
+            allocation_id,
+            {"provider_node_id": "node-1", "instance_identity": "replacement", "name": "machine"},
         )
     assert await hosts.forget_runner_host(host="machine") == "resource_bound"
 
@@ -3388,19 +3404,27 @@ async def _ready_allocation(repo, name: str, profile: dict, *, state: str = "rea
     )
     claimed = await repo.claim_operation(worker_id="fixture")
     assert claimed is not None and claimed["id"] == created["id"]
-    await repo.upsert_node(
-        allocation_id=created["allocation_id"],
-        node={"provider_node_id": name, "instance_identity": request, "name": name},
-    )
+    # A machine is observed ready, with its node, before anything else.
     await repo.observe_allocation(
         allocation_id=created["allocation_id"],
         observation={
             "external_id": request,
-            "observed_state": state,
+            "observed_state": "ready",
             "expiration_known": False,
             "scope_complete": True,
+            "nodes": [{"provider_node_id": name, "instance_identity": request, "name": name}],
         },
     )
+    if state != "ready":
+        await repo.observe_allocation(
+            allocation_id=created["allocation_id"],
+            observation={
+                "external_id": request,
+                "observed_state": state,
+                "expiration_known": False,
+                "scope_complete": True,
+            },
+        )
     assert await repo.finish_operation(
         operation_id=created["id"],
         generation=claimed["generation"],

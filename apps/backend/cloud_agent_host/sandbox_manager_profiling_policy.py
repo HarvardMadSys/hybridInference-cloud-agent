@@ -50,7 +50,7 @@ import json
 import logging
 import threading
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
@@ -66,13 +66,8 @@ from cloud_agent_shared.operation_profiling import (
     parse_run,
     policy_store,
 )
-from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER
 
 logger = logging.getLogger(__name__)
-
-#: Producer name the sandbox manager reports under. Declared here because the policy
-#: endpoint is where the sandbox manager learns which experiment it may collect for.
-PRODUCER = SANDBOX_MANAGER_PRODUCER
 
 #: Bounds on an incoming policy message. It crosses a container boundary.
 MAX_OPERATIONS = 32
@@ -176,7 +171,7 @@ def apply_received_policy(payload: dict[str, Any]) -> dict[str, Any]:
             {
                 "revision": revision,
                 "run_id": run.run_id if run is not None else None,
-                "applied_at": datetime.now(timezone.utc).isoformat(),
+                "applied_at": datetime.now(UTC).isoformat(),
             }
         )
     return {**applied_state(), "accepted": True, "changed": True}
@@ -236,7 +231,7 @@ def _parse_run_payload(value: Any) -> ProfilingRun | None:
             target[name] = str(item)[:MAX_DETAIL_CHARS]
     expires_at = value.get("expires_at")
     if isinstance(expires_at, datetime):
-        expires_at_text = expires_at.astimezone(timezone.utc).isoformat()
+        expires_at_text = expires_at.astimezone(UTC).isoformat()
     else:
         expires_at_text = str(expires_at or "")
     descriptor = {
@@ -272,7 +267,6 @@ __all__ = [
     "MAX_ID_CHARS",
     "MAX_OPERATIONS",
     "MAX_TARGET_FIELDS",
-    "PRODUCER",
     "applied_state",
     "apply_received_policy",
     "install_policy_provider",

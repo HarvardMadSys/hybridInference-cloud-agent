@@ -28,7 +28,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from cloud_agent_shared.operation_profiling import (
@@ -417,7 +417,7 @@ def _timestamp(record: Mapping[str, Any], key: str) -> datetime:
         raise MeasurementRejected(f"{key} is not an ISO-8601 timestamp") from exc
     if moment.tzinfo is None:
         raise MeasurementRejected(f"{key} has no timezone")
-    return moment.astimezone(timezone.utc)
+    return moment.astimezone(UTC)
 
 
 def sanitize_facts(facts: Any) -> dict[str, Any]:
@@ -559,7 +559,7 @@ def _contains_truncated(items: Any) -> bool:
     return False
 
 
-def _validate_completeness(
+def _validate_completeness(  # noqa: C901, PLR0912 complexity baseline, #771
     record: Mapping[str, Any],
     *,
     outcome: str,
@@ -612,7 +612,7 @@ def _validate_completeness(
         raise MeasurementRejected("collection_complete contradicts " + ", ".join(contradictory))
 
 
-def validate_measurement(
+def validate_measurement(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     record: Mapping[str, Any], *, owner: Owner | None = None
 ) -> StoredMeasurement:
     """Validate one producer record and return the row it becomes.
@@ -821,7 +821,7 @@ def require_record_matches_its_experiment(
         )
 
 
-def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:
+def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:  # noqa: C901, PLR0912 complexity baseline, #771
     """Validate an experiment manifest, and return what the catalogue stores.
 
     The boundaries are the collector's: a manifest this service would not have

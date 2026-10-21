@@ -84,7 +84,7 @@ class SandboxArchivePolicy:
     # always mean no checkpoints.
     checkpoints_enabled: bool = True
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: C901, PLR0912 complexity baseline, #771
         if not isinstance(self.enabled, bool):
             raise SandboxArchivePolicyError("enabled must be a boolean")
         if not isinstance(self.checkpoints_enabled, bool):

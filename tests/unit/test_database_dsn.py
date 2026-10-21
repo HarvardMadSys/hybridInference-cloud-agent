@@ -18,10 +18,10 @@ overrides a driver somebody chose on purpose.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
 
 from cloud_agent.storage.dsn import SYNC_DRIVER, sync_sqlalchemy_url
 

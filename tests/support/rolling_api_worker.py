@@ -40,6 +40,7 @@ else:  # pragma: no cover - a checkout with no control plane is not a release
     raise SystemExit(f"no cloud_agent package under {_old_tree}")
 
 from cloud_agent.storage.assembly import Storage
+from cloud_agent.storage.repositories.conversation_commands import insert_follow_up
 from cloud_agent_shared import shared_protocol
 
 # The same fall-through as above, for the vocabulary a runner attests with: a
@@ -231,11 +232,13 @@ async def main() -> None:
             job_id=parent["id"], user_id=owner
         )
         assert await store.mcp.list_mcp_connections(user_id=owner) == []
-        followup = await store.conversation_commands.create_follow_up(
-            parent_job_id=parent["id"],
-            user_id=owner,
-            prompt="Continue",
-        )
+        # A follow-up the way the old API writes one: ``insert_follow_up`` in a
+        # transaction of its own. These arguments are its required ones both
+        # in releases that still have ``create_follow_up`` and in later ones.
+        async with pool.acquire() as conn, conn.transaction():
+            followup = await insert_follow_up(
+                conn, parent_job_id=parent["id"], user_id=owner, prompt="Continue"
+            )
         assert followup["state"] == "queued"
         # A new chat's first turn and a retained chat's next one both run to
         # the end, so both paths through the worker routes meet this schema.

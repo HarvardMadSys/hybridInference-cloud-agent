@@ -66,8 +66,6 @@ export interface AgentJobApi {
   /** The same counter for the conversation's row: title, pin, archive. */
   thread_revision?: number;
   metadata: Record<string, unknown> | null;
-  /** Names only; optional so a pre-MCP deployment stays readable. */
-  mcp_servers?: string[];
   created_at: string | null;
   updated_at: string | null;
   pinned_at?: string | null;

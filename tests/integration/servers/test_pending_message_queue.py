@@ -31,6 +31,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
+from tests.support.uploads import thread_uploads
 
 from cloud_agent.api import routes, uploads, worker
 from cloud_agent.api._owner_auth import authenticate_agent_owner
@@ -38,7 +39,6 @@ from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
     get_grant_client,
-    get_log_store,
     get_storage,
 )
 from cloud_agent.api.worker import verify_claiming_host
@@ -49,7 +49,7 @@ from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories import pending_messages as pending_message_storage
 from cloud_agent.workers.attempts import reap_expired_attempts
 from cloud_agent.workers.recovery_maintenance import run_pending_message_maintenance
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
@@ -413,7 +413,6 @@ async def api(pool, monkeypatch):
     app.dependency_overrides[get_gateway_client] = lambda: gateway
     app.dependency_overrides[get_grant_client] = _Grants
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
-    app.dependency_overrides[get_log_store] = lambda: None
     app.dependency_overrides[authenticate_agent_owner] = lambda: {
         "user_id": _OWNER,
         "role": "free",
@@ -2019,7 +2018,7 @@ async def test_a_message_attaching_a_file_again_is_sent_and_replaces_it(api: Api
 
     turns = await api.turns(thread_id)
     assert [turn["task_prompt"] for turn in turns] == ["fix it", "use the new report"]
-    rows = await api.store.attachments.list_thread_attachments(thread_id=thread_id)
+    rows = await thread_uploads(api.pool, thread_id=thread_id)
     assert [row["id"] for row in rows] == [second["id"]]
 
 

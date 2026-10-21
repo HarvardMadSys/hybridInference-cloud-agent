@@ -66,24 +66,6 @@ export async function getAgentJobFiles(jobId: string, path = ''): Promise<AgentJ
   return jsonOrThrow<AgentJobFilesApi>(resp);
 }
 
-/** Save one UTF-8 file in the live workspace. */
-export async function writeAgentJobFile(
-  jobId: string,
-  path: string,
-  content: string,
-): Promise<AgentJobFileApi> {
-  const resp = await fetchWithAuth(
-    API_BASE,
-    `/v1/agent/jobs/${encodeURIComponent(jobId)}/files?path=${encodeURIComponent(path)}`,
-    {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
-    },
-  );
-  return jsonOrThrow<AgentJobFileApi>(resp);
-}
-
 export interface AgentGitWorkspaceApi {
   available: boolean;
   branch: string;

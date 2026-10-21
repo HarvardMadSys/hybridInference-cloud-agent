@@ -83,7 +83,7 @@ class _JobCreationStorage(Protocol):
     source_control: SourceControlPort
 
 
-def _model_catalog_unavailable() -> HTTPException:
+def model_catalog_unavailable() -> HTTPException:
     """503 while the gateway cannot say which models this owner may call.
 
     Not a 400: an outage is no verdict on the model or the effort, and a
@@ -131,7 +131,7 @@ async def _require_resolvable_model(
         try:
             catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
         except ModelCatalogUnavailable:
-            raise _model_catalog_unavailable() from None
+            raise model_catalog_unavailable() from None
     models, aliases, _efforts = catalog
     canonical = resolve_model_in_catalog(model, models, aliases)
     if canonical is not None:
@@ -386,7 +386,7 @@ async def _require_offered_effort(
         try:
             efforts = await agent_model_reasoning_efforts(gateway, user_id=user["user_id"])
         except ModelCatalogUnavailable:
-            raise _model_catalog_unavailable() from None
+            raise model_catalog_unavailable() from None
     # The model's entry is read as a yes/no — does it take the parameter at
     # all — and not for its contents. Per-model domains were tried and
     # withdrawn: the providers' documented lists disagreed with what their
@@ -539,7 +539,7 @@ async def _admit_repository(
     return base_sha
 
 
-async def _create_job_as(
+async def _create_job_as(  # noqa: PLR0912 complexity baseline, #771
     body: AgentJobCreate,
     user: dict[str, Any],
     *,
@@ -615,7 +615,7 @@ async def _create_job_as(
     try:
         catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
     except ModelCatalogUnavailable:
-        raise _model_catalog_unavailable() from None
+        raise model_catalog_unavailable() from None
     model = await _require_resolvable_model(body.model, gateway=gateway, user=user, catalog=catalog)
     # Checked against the *resolved* model, not the requested spelling: the
     # domain belongs to the model the turn will actually call.

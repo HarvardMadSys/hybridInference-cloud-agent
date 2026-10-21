@@ -26,7 +26,7 @@ import json
 import re
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
@@ -158,7 +158,7 @@ def _enable(monkeypatch, **overrides: Any) -> dict[str, Any]:
     run: dict[str, Any] = {
         "run_id": "cp-run-1",
         "operations": ["files.list", "files.open", "terminal.open"],
-        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=30)).isoformat(),
         "max_operations": 10,
     }
     run.update(overrides)
@@ -178,7 +178,7 @@ def _enable_admin(monkeypatch, **overrides: Any) -> tuple[dict[str, Any], Any]:
     run: dict[str, Any] = {
         "run_id": "cp-run-1",
         "operations": ["files.list", "files.open", "terminal.open"],
-        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=30)).isoformat(),
         "max_operations": 10,
     }
     run.update(overrides)
@@ -756,7 +756,7 @@ async def test_an_expired_run_collects_nothing_further(
     _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
-    run["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    run["expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_RUN, json.dumps(run))
     operation_profiling.reset_cache()
 

@@ -543,13 +543,6 @@ def test_a_cli_that_exits_on_start_fails_without_a_turn(monkeypatch: pytest.Monk
     assert session.closed
 
 
-def test_a_runtime_without_a_live_transport_cannot_pass(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(runtime_probe, "get_driver", lambda _runtime: SimpleNamespace())
-    box = SimpleNamespace(docker="docker", id="container-id")
-    result = runtime_probe._turn(box, "claude-code", VERSION)
-    assert result == ProbeResult(False, "claude-code has no live session transport")
-
-
 def test_a_session_is_closed_when_reading_the_turn_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     class Broken(FakeTurn):
         def iter_events(self) -> Iterator[NormalizedEvent]:

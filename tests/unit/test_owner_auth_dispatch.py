@@ -59,11 +59,11 @@ async def client():
 
 
 def _worker_token() -> str:
-    from cloud_agent.tokens import SCOPE_MODEL, mint_worker_token
+    from cloud_agent.tokens import SCOPE_MCP, mint_worker_token
 
-    return mint_worker_token(
-        job_id="ajob_0001", attempt_id=1, lease_generation=1, scope=SCOPE_MODEL
-    )
+    # The sandbox's own credential — the one an escape would put on an owner
+    # route. It was ``SCOPE_MODEL`` before the cutover retired that scope.
+    return mint_worker_token(job_id="ajob_0001", attempt_id=1, lease_generation=1, scope=SCOPE_MCP)
 
 
 async def test_the_session_cookie_authenticates_the_owner(client: AsyncClient) -> None:

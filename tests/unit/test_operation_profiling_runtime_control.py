@@ -25,7 +25,7 @@ import logging
 import os
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -97,7 +97,7 @@ def _clean_profiling_state(monkeypatch):
 
 def _expiry(minutes: int = 60) -> str:
     """Return an ISO-8601 expiry that is still in the future."""
-    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+    return (datetime.now(UTC) + timedelta(minutes=minutes)).isoformat()
 
 
 def _run(
@@ -610,7 +610,7 @@ def _sync_with_sandbox_manager(monkeypatch, sandbox_manager) -> Any:
             "config_version": 1,
             "max_operations": 10,
         },
-        "server_time": datetime.now(timezone.utc).isoformat(),
+        "server_time": datetime.now(UTC).isoformat(),
     }
     monkeypatch.setenv(profiling.ENV_PROFILING_MODE, profiling.MODE_ADMIN)
     profiling.reset_cache()
@@ -803,7 +803,7 @@ def _retime(context: dict[str, Any], *, run_expires_in: float, transport_expires
     """
     retimed = json.loads(json.dumps(context))
     retimed["run"]["expires_at"] = (
-        datetime.now(timezone.utc) + timedelta(seconds=run_expires_in)
+        datetime.now(UTC) + timedelta(seconds=run_expires_in)
     ).isoformat()
     retimed["expires_at"] = time.time() + transport_expires_in
     return retimed

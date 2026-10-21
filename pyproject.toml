@@ -72,14 +72,9 @@ markers = [
   "dbtest: tests that require a running PostgreSQL test database",
 ]
 
-# Ruff config is inherited from HybridInference so that moved files pass
-# unchanged (migration rule: imports/paths only, never reformatting). That
-# includes target-version: py310 keeps the same rule set the source repo
-# checks these files with (py312 would enable e.g. UP042 against them).
-# Raise it after the migration completes, as its own PR.
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 # Where the first-party packages live, for import classification: the three
 # of them moved under apps/backend, and `src = ["."]` no longer finds them, so
 # every `cloud_agent*` import would be sorted as if it came from a dependency.
@@ -91,7 +86,9 @@ exclude = [
 ]
 
 [tool.ruff.lint]
-extend-select = [
+# Explicit, rather than added to ruff's defaults: a ruff release that turns more
+# rules on by default then changes nothing here by itself.
+select = [
   "E",   # pycodestyle errors
   "W",   # pycodestyle warnings
   "F",   # pyflakes
@@ -99,7 +96,11 @@ extend-select = [
   "UP",  # pyupgrade
   "B",   # bugbear
   "C4",  # flake8-comprehensions
+  "C90", # mccabe: function complexity (#771)
+  "D",   # pydocstyle, for the three service packages (per-file-ignores below)
   "SIM", # flake8-simplify
+  "PLR0912", # too many branches (#771)
+  "PLR0915", # too many statements (#771)
   "TCH", # flake8-type-checking
   "RUF", # Ruff-specific rules
 ]
@@ -108,11 +109,35 @@ ignore = [
   "E501",  # line too long (handled by formatter)
   "E402",  # module import not at top of file (for now)
   "B008",  # FastAPI Depends pattern is OK
+  "D104",  # missing docstring in public package
+  "D105",  # magic method docstring not required
+  "D107",  # __init__ docstring not required
+  # PEP 695 type parameters. Converting a class or function means re-checking its
+  # TypeVar's bound and variance by hand, so it happens when that code changes.
+  "UP046",
+  "UP047",
 ]
 fixable = ["ALL"]
 unfixable = []
 
+[tool.ruff.lint.per-file-ignores]
+# Docstrings and the complexity ratchet apply to the service packages only.
+"!apps/backend/**" = ["D", "C901", "PLR0912", "PLR0915"]
+
+# The complexity ratchet (#771). A function over a limit today carries a
+# `noqa` naming the issue, and RUF100 reports that `noqa` once the function is
+# back under the limit, so the list only shrinks.
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.pylint]
+max-branches = 12
+max-statements = 50
+
 [tool.ruff.format]
+# Design records keep the code they were written with: ruff formats Python
+# blocks inside Markdown, and rewriting a dated spec's examples serves no one.
+exclude = ["docs/**"]
 quote-style = "double"
 indent-style = "space"
 line-ending = "lf"
@@ -124,16 +149,6 @@ force-single-line = false
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
-
-[tool.pydocstyle]
-convention = "google"
-add-ignore = [
-  "D104",  # missing docstring in public package
-  "D105",  # magic method docstring not required
-  "D107",  # __init__ docstring not required
-]
-match = ".+\\.py"
-match-dir = "(?!tests|\\.venv|node_modules|frontend|migrations|docs).*"
 
 # Type checking all three packages, and blocking. `follow_imports = "silent"`
 # still gives a file checked from outside them (the ports gate's negative
@@ -171,7 +186,6 @@ dev = [
   # dependency of a dependency breaks the day that one changes.
   "jsonschema>=4.21",
   "mypy>=1.20.2",
-  "pydocstyle>=6.3.0",
   "pytest>=8.0.0",
   "pytest-asyncio>=0.23.0",
   # Validates gateway_contracts/*.yaml. A dev dependency and not a runtime one: nothing
@@ -180,12 +194,9 @@ dev = [
   "openapi-spec-validator>=0.7.1",
   "pytest-timeout>=2.3.0",
   "pytest-xdist>=3.6.0",
-  # Pinned, deliberately — the source repo's CI checks the files we migrate
-  # with this exact version, and "moved files pass unchanged" is only a
-  # meaningful acceptance criterion against a fixed formatter. Bump it as its
-  # own PR, never as a side effect of a migration task. (0.16 default-enables
-  # ISC004, which the migrated sandbox.py trips.)
-  "ruff==0.15.12",
+  # Pinned: a formatter release can reformat code no one touched, so it is
+  # bumped on purpose, in its own change.
+  "ruff==0.16.10",
   # Build the developer documentation in docs/developer/ (`make docs`). The
   # site is plain MyST Markdown, so these are the only packages it needs.
   # jieba is the word segmenter Sphinx's Chinese search index uses; without it

@@ -112,11 +112,3 @@ export function agentLiveStatus(
 
   return status;
 }
-
-/** Keep the text-only projection available for callers that do not need timing. */
-export function agentLiveNote(
-  job: Pick<AgentJobApi, 'id' | 'state' | 'current_attempt_id'>,
-  events: AgentJobEventApi[],
-): string | undefined {
-  return agentLiveStatus(job, events)?.note;
-}

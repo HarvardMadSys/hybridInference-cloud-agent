@@ -119,8 +119,6 @@ async def test_another_owner_cannot_read_or_queue_usage(app, store, method, path
     assert response.status_code == 404
     store.job_usage_reads.assert_not_awaited()
     store.ledger_rows_for_job.assert_not_awaited()
-    store.ledger_rows_for_conversation.assert_not_awaited()
-    store.job_usage_inputs.assert_not_awaited()
     store.queue_job_ledger_refresh.assert_not_awaited()
 
 

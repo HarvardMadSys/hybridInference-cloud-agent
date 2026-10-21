@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 from dataclasses import asdict, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -3646,6 +3646,204 @@ def test_snapshot_is_a_short_group_barrier_and_always_thaws_writers():
     assert manager.events[1] == "capture"
     assert manager.events[2][0] == "thaw"
     assert supervisor.status("athr_source").snapshotting is False
+
+
+def _waits_without_sleeping(monkeypatch, supervisor) -> list[float]:
+    """Advance the clock by each wait instead of sleeping; answer the waits made."""
+    now = [1000.0]
+    waits: list[float] = []
+
+    def wait(timeout: float | None = None) -> bool:
+        assert timeout is not None
+        waits.append(timeout)
+        now[0] += timeout
+        return False
+
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(supervisor._condition, "wait", wait)
+    return waits
+
+
+@pytest.mark.parametrize(
+    ("transitions", "message"),
+    [
+        (("snapshotting",), "shared workspace snapshot is in progress"),
+        (("starting",), "shared workspace start is in progress"),
+        (("stopping",), "shared workspace stop is in progress"),
+        (("stopping", "starting", "snapshotting"), "shared workspace snapshot is in progress"),
+        (("stopping", "starting"), "shared workspace start is in progress"),
+    ],
+)
+def test_a_prompt_waits_out_a_group_transition_and_names_it_at_the_deadline(
+    monkeypatch, transitions, message
+):
+    """A prompt waits up to 30 s, in half-second slices, for the group to settle."""
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    register = supervisor.register_manifest
+
+    def register_then_transition(*args, **kwargs):
+        registered = register(*args, **kwargs)
+        group = supervisor._groups[_spec().sandbox_id]
+        for transition in transitions:
+            setattr(group, transition, True)
+        return registered
+
+    monkeypatch.setattr(supervisor, "register_manifest", register_then_transition)
+    waits = _waits_without_sleeping(monkeypatch, supervisor)
+
+    with pytest.raises(SessionBusy, match=rf"^{message}$"):
+        supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:1",
+            activation_generation=1,
+            has_settled_context=True,
+            manifest=_members(),
+        )
+
+    assert waits == [0.5] * 60
+
+
+@pytest.mark.parametrize(
+    ("opener", "kind"), [("operation_opened", "operation"), ("terminal_opened", "terminal")]
+)
+def test_a_reference_names_its_kind_when_membership_changes_before_admission(
+    monkeypatch, opener, kind
+):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+
+    def rejoin(group):
+        group.members["athr_peer"] = replace(group.members["athr_peer"])
+
+    monkeypatch.setattr(supervisor, "_recover_start_archive_completion", rejoin)
+
+    with pytest.raises(
+        SessionLeaseLost, match=rf"^shared membership changed before {kind} admission$"
+    ):
+        getattr(supervisor, opener)("athr_peer")
+
+
+@pytest.mark.parametrize(
+    ("opener", "kind"), [("operation_opened", "operation"), ("terminal_opened", "terminal")]
+)
+def test_a_reference_names_its_kind_when_the_lifecycle_changes_during_admission(
+    monkeypatch, opener, kind
+):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    ensure_running = supervisor._ensure_running
+
+    def ensure_running_then_restart(group, **kwargs):
+        ensure_running(group, **kwargs)
+        group.lifecycle_generation += 1
+
+    monkeypatch.setattr(supervisor, "_ensure_running", ensure_running_then_restart)
+
+    with pytest.raises(
+        SessionLeaseLost, match=rf"^shared sandbox lifecycle changed during {kind} admission$"
+    ):
+        getattr(supervisor, opener)("athr_peer")
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_opening_a_reference_keeps_the_group_awake_under_its_own_token(terminal):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    group = supervisor._groups[_spec().sandbox_id]
+    group.idle_deadline = 123.0
+
+    opener = supervisor.terminal_opened if terminal else supervisor.operation_opened
+    token, _descriptor = opener("athr_peer")
+
+    assert group.idle_deadline is None
+    tokens, others = (
+        (group.terminal_tokens, group.operation_tokens)
+        if terminal
+        else (group.operation_tokens, group.terminal_tokens)
+    )
+    assert tokens == {token: "athr_peer"}
+    assert token not in others
+
+
+def test_the_initial_archive_waits_out_a_lifecycle_check_and_names_it_at_the_deadline(
+    monkeypatch,
+):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=_TransportFactory())
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=_members(),
+    )
+    supervisor._groups[_spec().sandbox_id].lifecycle_check = object()
+    supervisor.initial_archive_wait_s = 2.0
+    waits = _waits_without_sleeping(monkeypatch, supervisor)
+
+    with pytest.raises(SessionBusy, match=r"^shared sandbox lifecycle check is in progress$"):
+        supervisor.capture_initial_archive("athr_source", lease.token, capture=lambda *_args: {})
+
+    assert waits == [0.5] * 4
+
+
+def test_the_initial_archive_waits_out_a_lifecycle_check_begun_under_its_barrier(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=_TransportFactory())
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=_members(),
+    )
+    group = supervisor._groups[_spec().sandbox_id]
+    admit = supervisor._require_initial_archive_admission
+
+    def admit_then_begin_a_check(*args, **kwargs):
+        admit(*args, **kwargs)
+        group.lifecycle_check = object()
+
+    monkeypatch.setattr(supervisor, "_require_initial_archive_admission", admit_then_begin_a_check)
+    supervisor.initial_archive_wait_s = 2.0
+    waits = _waits_without_sleeping(monkeypatch, supervisor)
+
+    with pytest.raises(SessionBusy, match=r"^shared sandbox lifecycle check is in progress$"):
+        supervisor.capture_initial_archive("athr_source", lease.token, capture=lambda *_args: {})
+
+    assert waits == [0.5] * 4
+    assert group.snapshotting is False
+
+
+def test_the_initial_archive_waits_for_open_terminals_behind_its_barrier(monkeypatch):
+    """A terminal admitted before the barrier is given the same bounded time to close."""
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=_TransportFactory())
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=_members(),
+    )
+    group = supervisor._groups[_spec().sandbox_id]
+    group.terminal_tokens["terminal-before-barrier"] = "athr_peer"
+    supervisor.initial_archive_wait_s = 2.0
+    waits = _waits_without_sleeping(monkeypatch, supervisor)
+
+    with pytest.raises(SessionBusy, match=r"^shared workspace still has active mutations$"):
+        supervisor.capture_initial_archive("athr_source", lease.token, capture=lambda *_args: {})
+
+    assert waits == [0.5] * 4
+    assert group.snapshotting is False
 
 
 def test_snapshot_refuses_active_mutations_instead_of_serializing_normal_work():
@@ -7559,7 +7757,7 @@ def test_sandbox_manager_sub_stages_are_reported_when_this_process_is_profiling(
             {
                 "run_id": "sandbox-manager-stages-1",
                 "operations": ["attempt.startup"],
-                "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
+                "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
                 "max_operations": 10,
             }
         ),
@@ -7605,7 +7803,7 @@ def _enable_sandbox_manager_profiling(monkeypatch) -> None:
             {
                 "run_id": "sandbox-manager-context-1",
                 "operations": ["attempt.startup"],
-                "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
+                "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
                 "max_operations": 10,
             }
         ),

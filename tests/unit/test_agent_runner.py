@@ -8,7 +8,7 @@ import socket
 import threading
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -460,11 +460,31 @@ def test_first_turn_requires_a_native_session_locator():
         )
 
 
-def test_run_once_dispatches_only_to_shared_live(monkeypatch):
+def test_a_claim_attests_the_shared_live_capabilities(monkeypatch):
     _configure_host(monkeypatch)
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
-    claim_calls: list[dict] = []
+
+    assert runner_mod._claim_attestation(backend)["runner_capabilities"] == [
+        "shared-sandbox-v1",
+        "native-fork-at-anchor-v1",
+        "goal_report_v1",
+        "mid-turn-input-v1:claude-code",
+        "mid-turn-input-v1:codex",
+        "sandbox-archive-settings-v1",
+        "sandbox-checkpoints-v1",
+        "sandbox-restore-v1",
+        "environment-v1",
+        "environment-inference-v1",
+        "environment-snapshot-v1",
+        "ssh-access-v1",
+    ]
+
+
+def test_a_claimed_turn_dispatches_only_to_shared_live(monkeypatch):
+    _configure_host(monkeypatch)
+    backend = ContainerBackend(image="img")
+    monkeypatch.setattr(backend, "version_stamp", _stamp)
     dispatched: list[dict] = []
 
     class Control:
@@ -486,11 +506,6 @@ def test_run_once_dispatches_only_to_shared_live(monkeypatch):
         def stop(self):
             pass
 
-    def claim(**kwargs):
-        claim_calls.append(kwargs)
-        return _JOB
-
-    monkeypatch.setattr(runner_mod, "claim", claim)
     monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_args, **_kwargs: Control())
     monkeypatch.setattr(runner_mod, "Heartbeater", Heart)
     monkeypatch.setattr(
@@ -500,48 +515,18 @@ def test_run_once_dispatches_only_to_shared_live(monkeypatch):
     )
 
     assert (
-        runner_mod.run_once(
+        runner_mod.run_turn(
+            _JOB,
             base_url="http://control",
             gateway_url="http://gateway",
-            host_credential="host-credential",
             worker_id="runner-1",
             backend=backend,
             host="host-a",
         )
         == 0
     )
-    assert claim_calls[0]["attestation"]["runner_capabilities"] == [
-        "shared-sandbox-v1",
-        "native-fork-at-anchor-v1",
-        "goal_report_v1",
-        "mid-turn-input-v1:claude-code",
-        "mid-turn-input-v1:codex",
-        "sandbox-archive-settings-v1",
-        "sandbox-checkpoints-v1",
-        "sandbox-restore-v1",
-        "environment-v1",
-        "environment-inference-v1",
-        "environment-snapshot-v1",
-        "ssh-access-v1",
-    ]
     assert dispatched[0]["job"] is _JOB
     assert dispatched[0]["gateway_base_url"] == "http://gateway"
-
-
-def test_run_once_empty_queue_is_clean(monkeypatch):
-    backend = ContainerBackend(image="img")
-    monkeypatch.setattr(backend, "version_stamp", _stamp)
-    monkeypatch.setattr(runner_mod, "claim", lambda **_kwargs: None)
-    assert (
-        runner_mod.run_once(
-            base_url="http://control",
-            host_credential="host-credential",
-            worker_id="runner-1",
-            backend=backend,
-            host="host-a",
-        )
-        == 0
-    )
 
 
 @pytest.mark.parametrize(
@@ -554,9 +539,7 @@ def test_preparation_error_outside_shared_handler_finishes_before_stopping_heart
     """Post-claim setup errors must not leave a running lease with no heartbeater."""
     _configure_host(monkeypatch)
     backend = ContainerBackend(image="img")
-    # The first inspection builds claim attestation; the second is post-claim.
-    monkeypatch.setattr(backend, "version_stamp", Mock(side_effect=[_stamp(), error]))
-    monkeypatch.setattr(runner_mod, "claim", Mock(return_value=_JOB))
+    monkeypatch.setattr(backend, "version_stamp", Mock(side_effect=error))
     control = Mock()
     heart = Mock()
     order = []
@@ -571,9 +554,9 @@ def test_preparation_error_outside_shared_handler_finishes_before_stopping_heart
     monkeypatch.setattr(runner_mod, "ControlPlane", Mock(return_value=control))
     monkeypatch.setattr(runner_mod, "Heartbeater", Mock(return_value=heart))
 
-    code = runner_mod.run_once(
+    code = runner_mod.run_turn(
+        _JOB,
         base_url="http://control",
-        host_credential="host-credential",
         worker_id="runner-1",
         backend=backend,
         host="host-a",
@@ -595,19 +578,16 @@ def test_preparation_lease_rejection_does_not_attempt_terminal_write(monkeypatch
     """An already fenced preparation path cannot overwrite a newer owner."""
     _configure_host(monkeypatch)
     backend = ContainerBackend(image="img")
-    monkeypatch.setattr(
-        backend, "version_stamp", Mock(side_effect=[_stamp(), LeaseLost("expired")])
-    )
-    monkeypatch.setattr(runner_mod, "claim", Mock(return_value=_JOB))
+    monkeypatch.setattr(backend, "version_stamp", Mock(side_effect=LeaseLost("expired")))
     control = Mock()
     heart = Mock()
     monkeypatch.setattr(runner_mod, "ControlPlane", Mock(return_value=control))
     monkeypatch.setattr(runner_mod, "Heartbeater", Mock(return_value=heart))
 
     assert (
-        runner_mod.run_once(
+        runner_mod.run_turn(
+            _JOB,
             base_url="http://control",
-            host_credential="host-credential",
             worker_id="runner-1",
             backend=backend,
             host="host-a",
@@ -2073,7 +2053,7 @@ def _enable_profiling(monkeypatch, **overrides):
     run = {
         "run_id": "runner-stages-1",
         "operations": [runner_mod.STARTUP_OPERATION],
-        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=30)).isoformat(),
         "max_operations": 5,
     }
     run.update(overrides)
@@ -2441,120 +2421,6 @@ def test_a_failed_prompt_handoff_is_a_failure_stage_with_a_duration(monkeypatch,
     assert record["stages"][-1]["stage"] == "prompt_dispatch"
     assert record["stages"][-1]["duration_us"] >= 0
     assert record["measurement_complete"] is True
-
-
-def test_a_poll_with_no_job_does_not_spend_the_only_profiling_slot(monkeypatch, tmp_path):
-    """An empty claim must leave a one-operation experiment able to measure.
-
-    Regression: the budget was consumed when the measurement was created, so a
-    single empty claim -- the normal result of polling an idle queue -- used up
-    a `max_operations: 1` run before it measured anything.
-    """
-    _configure_host(monkeypatch)
-    sink = tmp_path / "startup.jsonl"
-    _enable_profiling(monkeypatch, max_operations=1)
-    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
-
-    class Control:
-        job_id = ""
-
-        def __getattr__(self, _name):
-            return lambda *_args, **_kwargs: None
-
-    class Heart:
-        lease_lost = False
-        cancel_requested = False
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-    backend = ContainerBackend(image="img")
-    monkeypatch.setattr(backend, "version_stamp", _stamp)
-    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_args, **_kwargs: Control())
-    monkeypatch.setattr(runner_mod, "Heartbeater", lambda *_args, **_kwargs: Heart())
-    monkeypatch.setattr(
-        runner_mod,
-        "_run_shared_live_attempt",
-        lambda **kwargs: 0 if kwargs["measurement"] is not None else 7,
-    )
-    monkeypatch.setattr(runner_mod, "claim", lambda **_kwargs: None)
-
-    assert (
-        runner_mod.run_once(
-            base_url="http://control",
-            host_credential="host-credential",
-            worker_id="runner-1",
-            backend=backend,
-            host="host-a",
-        )
-        == 0
-    )
-
-    # The queue is empty, so the run still has its only slot for a real attempt.
-    monkeypatch.setattr(runner_mod, "claim", lambda **_kwargs: _JOB)
-    assert (
-        runner_mod.run_once(
-            base_url="http://control",
-            host_credential="host-credential",
-            worker_id="runner-1",
-            backend=backend,
-            host="host-a",
-        )
-        == 0
-    ), "the claimed attempt was not measured"
-
-
-def test_profiling_off_adds_no_record_and_no_measurement(monkeypatch, caplog, tmp_path):
-    """The default deployment must not pay for, or emit, any of this."""
-    _configure_host(monkeypatch)
-    sink = tmp_path / "startup.jsonl"
-    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
-    operation_profiling.reset_cache()
-    caplog.set_level(logging.INFO, logger=operation_profiling.__name__)
-    dispatched: list[dict] = []
-
-    class Control:
-        job_id = ""
-
-        def __getattr__(self, _name):
-            return lambda *_args, **_kwargs: None
-
-    class Heart:
-        lease_lost = False
-        cancel_requested = False
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-    monkeypatch.setattr(runner_mod, "claim", lambda **_kwargs: _JOB)
-    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_args, **_kwargs: Control())
-    monkeypatch.setattr(runner_mod, "Heartbeater", lambda *_args, **_kwargs: Heart())
-    monkeypatch.setattr(
-        runner_mod, "_run_shared_live_attempt", lambda **kwargs: dispatched.append(kwargs) or 0
-    )
-
-    backend = ContainerBackend(image="img")
-    monkeypatch.setattr(backend, "version_stamp", _stamp)
-    assert (
-        runner_mod.run_once(
-            base_url="http://control",
-            host_credential="host-credential",
-            worker_id="runner-1",
-            backend=backend,
-            host="host-a",
-        )
-        == 0
-    )
-
-    assert dispatched[0]["measurement"] is None
-    assert not sink.exists()
-    assert "agent_operation_profile" not in caplog.text
 
 
 def test_the_runner_hands_its_selection_to_the_sandbox_manager(monkeypatch, tmp_path):

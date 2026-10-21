@@ -29,6 +29,7 @@ from tests.integration.storage.test_agent_job_store import (
 from tests.integration.storage.test_mcp_connection_store import _connect, _invocation
 from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.migrations import apply_migrations, downgrade_to
+from tests.support.usage import conversation_rows, job_usage_inputs
 
 from cloud_agent.workers.background_wake import CHANNEL as BACKGROUND
 from cloud_agent.workers.mcp_decision_signal import CHANNEL as DECISIONS
@@ -241,10 +242,10 @@ async def test_an_owners_usage_is_read_from_one_snapshot_whose_version_orders_it
     assert _without_window_end(first["ledger_rows"]) == _without_window_end(
         await store.ledger.ledger_rows_for_job(job_id=job["id"])
     )
-    assert first["conversation_rows"] == await store.ledger.ledger_rows_for_conversation(
-        job_id=job["id"], user_id=job["user_id"]
+    assert first["conversation_rows"] == await conversation_rows(
+        pool, job_id=job["id"], user_id=job["user_id"]
     )
-    assert first["inputs"] == await store.execution_queries.job_usage_inputs(job_id=job["id"])
+    assert first["inputs"] == await job_usage_inputs(pool, job_id=job["id"])
     assert await store.ledger.job_usage_reads(job_id=job["id"], user_id="someone-else") is None
 
     # A usage event and a stored reading land while the read is under way,

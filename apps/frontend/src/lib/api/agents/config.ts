@@ -16,8 +16,6 @@ export interface AgentConfigApi {
   runtimes: string[];
   /** Models an agent job can actually call — the create endpoint's own list. */
   models: string[];
-  /** MCP servers this deployment offers. Never carries a URL or a credential. */
-  mcp_servers?: AgentMcpServerApi[];
   /** Runtimes that can be given MCP servers; others refuse such a job. */
   mcp_runtimes?: string[];
   /** Runtimes that install task-selected plugins when a sandbox is initialized. */
@@ -34,6 +32,15 @@ export interface AgentConfigApi {
    */
   model_reasoning_efforts?: Record<string, string[]>;
   /**
+   * What a new task should start on, by priority: this owner's pinned model,
+   * the one their newest turn used, then the deployment default an
+   * administrator saved. Always one of `models`, so a retired model is never
+   * pre-selected. Null means none of the three resolves (or the catalog was
+   * unreadable); the composer then leaves its model control empty and waits
+   * for the owner to choose, rather than picking the first model in the list.
+   */
+  default_model?: string | null;
+  /**
    * Whether this user has done what the deployment asks before choosing a
    * repository: connected GitHub where users can, or been given a repository by
    * the operator's allowlist where they cannot. `repos` may still be empty — a
@@ -47,15 +54,6 @@ export interface AgentConfigApi {
    * Absent on a control plane that predates it, which then reads as before.
    */
   github_load_status?: SourceControlLoadStatus;
-}
-
-export interface AgentMcpServerApi {
-  name: string;
-  description: string;
-  /** Tools exposed. Empty means every tool the server offers. */
-  tools: string[];
-  /** Applied when a job does not choose its servers explicitly. */
-  default: boolean;
 }
 
 /**

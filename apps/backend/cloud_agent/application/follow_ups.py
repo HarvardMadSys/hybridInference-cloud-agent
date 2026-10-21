@@ -21,12 +21,12 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import HTTPException
 
 from cloud_agent.application.job_admission import (
-    _model_catalog_unavailable,
     _require_offered_effort,
     _require_registered_runtime,
     _require_resolvable_model,
     _resolve_attachment_selection,
     _resolve_skill_selection,
+    model_catalog_unavailable,
 )
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.schemas import RESET_REASONING_EFFORT
@@ -155,7 +155,7 @@ async def prepare_follow_up(
         try:
             catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
         except ModelCatalogUnavailable:
-            raise _model_catalog_unavailable() from None
+            raise model_catalog_unavailable() from None
         canonical = await _require_resolvable_model(
             model, gateway=gateway, user=user, catalog=catalog
         )

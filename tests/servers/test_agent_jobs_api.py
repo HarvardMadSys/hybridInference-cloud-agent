@@ -30,7 +30,7 @@ import base64
 import hashlib
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, call
@@ -52,6 +52,8 @@ from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.gateway import GatewayError
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.model_preference import ModelPreferenceView
+from cloud_agent.storage.repositories.conversation_commands import _goal_round_metadata
 from cloud_agent.storage.repositories.goals import _pause_detail
 from cloud_agent.tokens import mint_worker_token, parse_residency_mcp_token
 
@@ -146,12 +148,6 @@ class FakeGoalWakeups:
         """Nothing is consumed here; the decision's own tests own that path."""
         return []
 
-    async def pending_wakeup(self, *, thread_id: str) -> dict[str, Any] | None:
-        for row in self.rows:
-            if row["thread_id"] == thread_id and row["state"] == "pending":
-                return dict(row)
-        return None
-
     def invalidate(self, thread_id: str, detail: str) -> None:
         """Pause, clear and resume void every obligation waiting on that goal."""
         for row in self.rows:
@@ -189,10 +185,6 @@ class FakeGoals:
     async def get_goal(self, *, thread_id: str) -> dict[str, Any] | None:
         goal = self._goal(thread_id)
         return None if goal is None else dict(goal)
-
-    async def get_goal_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        job = self._store.jobs.get(job_id)
-        return None if job is None else await self.get_goal(thread_id=str(job["thread_id"]))
 
     async def get_thread_goal_state(self, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
         """The goal and its control version, or ``None`` for a foreign thread.
@@ -374,6 +366,10 @@ class FakeGoals:
 class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
     """In-memory stand-in exposing the storage surface the router uses."""
 
+    async def ledger_rows_for_job(self, *, job_id: str) -> list[dict[str, Any]]:
+        """The stored snapshots for one job, empty before the first collection."""
+        return [row for row in self.ledger_rows if row["job_id"] == job_id]
+
     def __init__(self) -> None:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
@@ -387,6 +383,10 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         #: Which owner each conversation belongs to, the way
         #: ``agent_threads.user_id`` scopes every goal read and write.
         self.thread_owners: dict[str, str] = {}
+        #: How many messages a person has sent each conversation, as
+        #: ``agent_threads.user_input_seq`` counts them. Every turn is stamped
+        #: with it as it is written; only a person's turn moves it.
+        self.thread_input_seqs: dict[str, int] = {}
         self.goal_wakeups = FakeGoalWakeups(self)
         self.goals = FakeGoals(self)
         self.turn_telemetry: dict[str, dict[str, Any]] = {}
@@ -398,6 +398,9 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self.terminal_readiness: dict[int, bool] = {}
         self.thread_workspace_readiness: dict[str, bool] = {}
         self.workspace_start_fences: list[str] = []
+        #: Grant-ledger rows a single-job read sums into the usage fields.
+        #: Empty by default: no snapshot stored yet, so the fields stay None.
+        self.ledger_rows: list[dict[str, Any]] = []
         self.sandbox_processes: list[dict[str, Any]] = []
         self.sandbox_admissions: list[dict[str, Any]] = []
         self.sandbox_settlements: list[dict[str, Any]] = []
@@ -407,6 +410,10 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self.mcp_connections: dict[int, dict[str, Any]] = {}
         self.mcp_capabilities: dict[int, dict[str, Any]] = {}
         self.mcp_bindings: dict[str, list[dict[str, Any]]] = {}
+        #: The owner's pinned default model, keyed by owner. There is no
+        #: last-used half here: it is derived from ``self.jobs``, exactly as the
+        #: repository derives it from the newest turn.
+        self.default_models: dict[str, str | None] = {}
         self.session_forks: dict[str, dict[str, Any]] = {}
         #: The owner's waiting messages, and each thread's two queue facts, the
         #: way ``agent_pending_messages`` and ``agent_threads`` hold them.
@@ -417,6 +424,18 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self._next_connection = 1
         self._next_event_id = 1
         self._next_job = 1
+
+    async def get_model_preference(self, user_id: str) -> ModelPreferenceView:
+        return ModelPreferenceView.of(self.default_models.get(user_id), self._last_model(user_id))
+
+    async def set_default_model(self, user_id: str, model: str | None) -> ModelPreferenceView:
+        self.default_models[user_id] = model
+        return await self.get_model_preference(user_id)
+
+    def _last_model(self, user_id: str) -> str | None:
+        """The newest owned turn's model, as the repository derives it."""
+        jobs = [job for job in self.jobs.values() if job.get("user_id") == user_id]
+        return max(jobs, key=lambda job: job["id"])["model"] if jobs else None
 
     # -- MCP connections --
     #
@@ -457,7 +476,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         if row is None or row["deleted_at"] is not None:
             return False
         row.update(
-            deleted_at=datetime.now(timezone.utc),
+            deleted_at=datetime.now(UTC),
             status="disabled",
             access_token_ciphertext=None,
             refresh_token_ciphertext=None,
@@ -657,6 +676,10 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         if goal is not None:
             self.goals.create_with_job(thread_id, goal)
         job["goal"] = self.thread_goals.get(thread_id)
+        # As the store counts: the task of a conversation created with a goal is
+        # its first message, and the first turn is stamped with the count.
+        self.thread_input_seqs[thread_id] = 1 if goal is not None else 0
+        job["input_seq_at_create"] = self.thread_input_seqs[thread_id]
         self.jobs[job_id] = job
         self.messages.append(
             {
@@ -689,34 +712,32 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             return job
         return None
 
-    async def create_follow_up(
+    async def insert_follow_up(
         self,
         *,
         parent_job_id: str,
         user_id: str,
         prompt: str,
-        runtime: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         reset_reasoning_effort: bool = False,
         skills: list[dict[str, Any]] | None = None,
-        goal: Any | None = None,
         attachments: list[dict[str, Any]] | None = None,
-        turn_source: str = "human",
-        goal_round: int | None = None,
-        goal_round_kind: str | None = None,
-        goal_revision: int | None = None,
         yield_to_queued: bool = False,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
+        """A person's next turn, as the store's ``insert_follow_up`` appends it.
+
+        Not a storage method. The store calls that function inside the
+        transaction that decided to append the turn, the queue's settlement or
+        an idle-only message, and this fake's ``settle_queue`` and
+        ``submit_message`` call this the same way. The turn is a person's and
+        keeps the conversation's runtime; an automatic round is
+        :meth:`create_goal_round`'s.
+        """
         del attachments  # staged uploads have their own suite; this fake stages none
-        self.last_follow_up_request = (client_request_id, client_request_fingerprint)
         requested = self.jobs.get(parent_job_id)
-        if goal is not None and requested is not None:
-            await self.goals.set_goal(
-                thread_id=str(requested["thread_id"]), user_id=user_id, goal=goal
-            )
         if requested is None or requested["user_id"] != user_id:
             return None
         if requested["state"] == "cancelled":
@@ -746,6 +767,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             )
             + 1
         )
+        thread_id = str(parent["thread_id"])
+        self.thread_input_seqs[thread_id] = self.thread_input_seqs.get(thread_id, 0) + 1
         job = {
             **parent,
             "id": job_id,
@@ -754,7 +777,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "base_sha": parent.get("published_commit_sha") or parent.get("base_sha"),
             "task_prompt": prompt,
             "skills": skills if skills is not None else parent.get("skills"),
-            "runtime": runtime or parent["runtime"],
             "model": model or parent["model"],
             # Mirrors the store: inherit when omitted, and only the explicit
             # reset clears an effort the thread already carries.
@@ -770,15 +792,20 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "published_pr_url": None,
             "published_commit_sha": None,
             "detail": None,
-            "turn_source": turn_source,
-            "goal_round": goal_round,
-            "goal_round_kind": goal_round_kind,
-            "round_goal_revision": goal_revision,
+            # A person's turn, whatever its parent was: it carries the
+            # conversation's goal identity and no round of its own.
+            "turn_source": "human",
+            "goal_id": (self.thread_goals.get(thread_id) or {}).get("goal_id"),
+            "goal_round": None,
+            "goal_round_kind": None,
+            "round_goal_revision": None,
             # A fresh turn has its own report columns, whatever its parent
             # ended on.
             "goal_report_parse": None,
             "goal_report_outcome": None,
             "goal_report_detail": None,
+            # Stamped with the count this message moved the conversation to.
+            "input_seq_at_create": self.thread_input_seqs[thread_id],
             "created_at": None,
             "updated_at": None,
             "pinned_at": self.pinned_threads.get(parent["thread_id"]),
@@ -803,12 +830,85 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         )
         return job
 
+    async def create_goal_round(
+        self,
+        *,
+        thread_id: str,
+        goal_id: str,
+        revision: int,
+        kind: str,
+        round_number: int,
+        prompt: str,
+        client_request_id: str,
+        client_request_fingerprint: str,
+    ) -> dict[str, Any] | None:
+        """One automatic round, as the store's ``create_goal_round`` appends it.
+
+        The only write of a ``goal`` turn. Like the store's, it continues the
+        newest turn with that turn's runtime, model, effort and skills, adds the
+        goal report to what its metadata requires of a host, and is stamped with
+        the conversation's input count without moving it. A key the
+        conversation already used appends nothing, which is how a replayed
+        decision finds the round it made. The controller's ``conn`` and
+        ``wakeup_id`` are not modelled: nothing consumes this fake's wakeups.
+        """
+        turns = self._thread_turns(thread_id)
+        if not turns:
+            return None
+        if any(job.get("client_request_id") == client_request_id for job in turns):
+            return None
+        parent = turns[-1]
+        job_id = f"ajob_{self._next_job:04d}"
+        self._next_job += 1
+        job = {
+            **parent,
+            "id": job_id,
+            "parent_job_id": parent["id"],
+            "turn_no": parent["turn_no"] + 1,
+            "base_sha": parent.get("published_commit_sha") or parent.get("base_sha"),
+            "task_prompt": prompt,
+            "metadata": _goal_round_metadata(parent.get("metadata")),
+            "state": "queued",
+            "cancel_requested": False,
+            "terminal_resume_pending": False,
+            "current_attempt_id": None,
+            "published_pr_url": None,
+            "published_commit_sha": None,
+            "detail": None,
+            "turn_source": "goal",
+            "goal_id": goal_id,
+            "goal_round": round_number,
+            "goal_round_kind": kind,
+            "round_goal_revision": revision,
+            "goal_report_parse": None,
+            "goal_report_outcome": None,
+            "goal_report_detail": None,
+            "input_seq_at_create": self.thread_input_seqs.get(thread_id, 0),
+            "created_at": None,
+            "updated_at": None,
+            "pinned_at": self.pinned_threads.get(thread_id),
+            "goal": self.thread_goals.get(thread_id),
+            "client_request_id": client_request_id,
+            "client_request_fingerprint": client_request_fingerprint,
+        }
+        self.jobs[job_id] = job
+        self.messages.append(
+            {
+                "id": len(self.messages) + 1,
+                "thread_id": thread_id,
+                "job_id": job_id,
+                "role": "user",
+                "content": prompt,
+                "created_at": None,
+            }
+        )
+        return job
+
     # -- Pending messages --
     #
     # The queue the message route writes. A message that is sent becomes a turn
-    # through ``create_follow_up`` above, so it becomes exactly the turn a
-    # follow-up always made here, and the cases about a turn's fields keep
-    # asserting on the same fake.
+    # through ``insert_follow_up`` above, as the store's settlement sends one,
+    # so the cases about a turn's fields keep asserting on the same fake.
 
     def _thread_turns(self, thread_id: str) -> list[dict[str, Any]]:
         return sorted(
@@ -897,7 +997,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
                 or sandbox.get("workspace_publication_state") != "published"
             ):
                 return {"error": "conversation_changed"}
-            made = await self.create_follow_up(
+            made = await self.insert_follow_up(
                 parent_job_id=expected_latest_job_id,
                 user_id=user_id,
                 prompt=prompt,
@@ -1002,7 +1102,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         return {"queue_paused_reason": None}
 
     async def settle_queue(self, *, thread_id: str, prepared: Any = None) -> SettleOutcome:
-        """Mirrors the store's settlement, sending through ``create_follow_up``."""
+        """Mirrors the store's settlement, sending through ``insert_follow_up``."""
         turns = self._thread_turns(thread_id)
         if not turns or self._thread_live(thread_id):
             return SettleOutcome()
@@ -1028,7 +1128,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         if prepared.error is not None:
             head.update(state="held", last_error=prepared.error, revision=head["revision"] + 1)
             return SettleOutcome()
-        job = await self.create_follow_up(
+        job = await self.insert_follow_up(
             parent_job_id=latest["id"],
             user_id=head["user_id"],
             prompt=head["prompt"],
@@ -1571,7 +1671,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             and (repo is None or job["repo"] == repo)
             and (not temporary or job["repo"] is None)
         ]
-        minimum = datetime.min.replace(tzinfo=timezone.utc)
+        minimum = datetime.min.replace(tzinfo=UTC)
         jobs.sort(
             key=lambda job: (
                 job["pinned_at"] is not None,
@@ -1620,7 +1720,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         for project in projects.values():
             project.pop("_threads")
             project.pop("_pinned_threads")
-        minimum = datetime.min.replace(tzinfo=timezone.utc)
+        minimum = datetime.min.replace(tzinfo=UTC)
         return sorted(
             projects.values(),
             key=lambda project: (
@@ -1639,7 +1739,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             return None
         thread_id = job["thread_id"]
         if archived:
-            archived_at = self.archived_threads.setdefault(thread_id, datetime.now(timezone.utc))
+            archived_at = self.archived_threads.setdefault(thread_id, datetime.now(UTC))
             self._pause(thread_id, "archived")
         else:
             self.archived_threads.pop(thread_id, None)
@@ -1665,7 +1765,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             return None
         thread_id = job["thread_id"]
         if pinned:
-            pinned_at = self.pinned_threads.setdefault(thread_id, datetime.now(timezone.utc))
+            pinned_at = self.pinned_threads.setdefault(thread_id, datetime.now(UTC))
         else:
             self.pinned_threads.pop(thread_id, None)
             pinned_at = None
@@ -2097,7 +2197,6 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
         get_agent_app_credentials,
         get_gateway_client,
         get_grant_client,
-        get_log_store,
     )
 
     app = FastAPI()
@@ -2112,9 +2211,6 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     # No GitHub App by default — the configuration most deployments start in,
     # and the one where a public repository still clones fine.
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
-    # No log store: spend and usage are then absent from the response rather
-    # than reported as a fabricated zero.
-    app.dependency_overrides[get_log_store] = lambda: None
     identity = {"user_id": _OWNER, "role": role, "authenticated": True}
     # Override identity only; every request still exercises Gateway admission.
     app.dependency_overrides[authenticate_agent_owner] = lambda: identity
@@ -2144,7 +2240,7 @@ def _browser_session(*, expires_delta=None) -> str:
     import os
 
     claims = jwt.decode(token, options={"verify_signature": False})
-    claims["exp"] = int((datetime.now(timezone.utc) + expires_delta).timestamp())
+    claims["exp"] = int((datetime.now(UTC) + expires_delta).timestamp())
     return jwt.encode(claims, os.environ["AGENT_SESSION_SECRET"], algorithm="HS256")
 
 
@@ -2326,7 +2422,7 @@ async def test_conversation_search_forwards_owner_filters_and_shapes_latest_job(
     """Search returns the canonical title separately from the latest prompt."""
     job_id = await _create_job(client)
     job = store.jobs[job_id]
-    job["updated_at"] = datetime(2026, 9, 10, tzinfo=timezone.utc)
+    job["updated_at"] = datetime(2026, 9, 10, tzinfo=UTC)
     search = AsyncMock(
         return_value={
             "conversations": [
@@ -2648,7 +2744,7 @@ async def test_rename_hides_foreign_missing_and_deleted_jobs(
     foreign_id = await _create_job(client)
     store.jobs[foreign_id]["user_id"] = _OTHER
     deleted_id = await _create_job(client)
-    store.jobs[deleted_id]["deleted_at"] = datetime.now(timezone.utc)
+    store.jobs[deleted_id]["deleted_at"] = datetime.now(UTC)
     for job_id in (foreign_id, deleted_id, "ajob_missing"):
         response = await client.patch(f"/v1/agent/jobs/{job_id}/title", json={"title": "New title"})
         assert response.status_code == 404
@@ -2671,9 +2767,9 @@ async def test_pin_and_unpin_are_thread_scoped_idempotent_and_reorder_lists(
         model="glm-5.1",
     )
     newer_id = newer["id"]
-    store.jobs[parent_id]["created_at"] = datetime(2026, 7, 1, tzinfo=timezone.utc)
-    store.jobs[child_id]["created_at"] = datetime(2026, 7, 2, tzinfo=timezone.utc)
-    store.jobs[newer_id]["created_at"] = datetime(2026, 7, 3, tzinfo=timezone.utc)
+    store.jobs[parent_id]["created_at"] = datetime(2026, 7, 1, tzinfo=UTC)
+    store.jobs[child_id]["created_at"] = datetime(2026, 7, 2, tzinfo=UTC)
+    store.jobs[newer_id]["created_at"] = datetime(2026, 7, 3, tzinfo=UTC)
     store.jobs[parent_id]["state"] = "running"
 
     pinned = await client.post(f"/v1/agent/jobs/{child_id}/pin")
@@ -2824,16 +2920,16 @@ async def test_cancelled_middle_turn_does_not_release_a_later_queued_turn(
     """Every unfinished earlier turn blocks a claim, even across a cancellation.
 
     Two turns queued behind a live one cannot come from the message route any
-    more — it holds later messages in the queue — so they are appended through
-    the store, which automatic rounds still do.
+    more — it holds later messages in the queue — so they are appended directly,
+    the way ``insert_follow_up`` appends when it is not asked to yield.
     """
     parent_id = await _create_job(client)
-    middle = await store.create_follow_up(
+    middle = await store.insert_follow_up(
         parent_job_id=parent_id, user_id=_OWNER, prompt="skip this follow-up"
     )
     assert middle is not None
     middle_id = middle["id"]
-    latest = await store.create_follow_up(
+    latest = await store.insert_follow_up(
         parent_job_id=parent_id, user_id=_OWNER, prompt="run this after the first turn"
     )
     assert latest is not None
@@ -3113,6 +3209,109 @@ async def test_config_catalog_failure_offers_no_models_or_efforts(
     assert response.json()["runtimes"]
 
 
+def _with_deployment_default(monkeypatch, value: str) -> None:
+    """Set the administrator's default model without disturbing anything else.
+
+    Two readers share this state and must keep working: the repository
+    allowlist (read through ``setting_env``, and falling back to the
+    environment while no snapshot exists) and the new default model. Building a
+    snapshot of pure defaults would close the allowlist and refuse every job,
+    so an absent snapshot is left absent and the environment default is used
+    for the setting under test instead.
+    """
+    from cloud_agent import settings
+
+    if settings._values is None:
+        monkeypatch.setenv("AGENT_DEFAULT_MODEL", value)
+        return
+    monkeypatch.setattr(settings, "_values", {**settings._values, "default_model": value})
+
+
+async def test_config_reports_the_model_a_new_task_should_start_on(
+    client: AsyncClient, store: FakeStorage
+):
+    """The composer's starting model comes from the owner, narrowed to the catalog.
+
+    Three readings of one field: no choice yet, a remembered last-used model,
+    and a pin. The pin has to be narrowed like everything else — a model the
+    gateway has retired must not be pre-selected, or the picker would describe
+    a job the create endpoint refuses.
+    """
+    first = await client.get("/v1/agent/config")
+    # This catalog has no deepseek-v4-flash, so the shipped default is skipped
+    # exactly like any other unavailable layer.
+    assert "deepseek-v4-flash" not in first.json()["models"]
+    assert first.json()["default_model"] is None
+
+    await _create_job(client, model="qwen-next")
+    remembered = await client.get("/v1/agent/config")
+    assert remembered.json()["default_model"] == "qwen-next"
+
+    store.default_models[_OWNER] = "glm-5.1"
+    pinned = await client.get("/v1/agent/config")
+    assert pinned.json()["default_model"] == "glm-5.1"
+
+    # A retired pin falls back to the last used model rather than being offered.
+    store.default_models[_OWNER] = "retired-model"
+    retired = await client.get("/v1/agent/config")
+    assert retired.json()["default_model"] == "qwen-next"
+
+
+async def test_config_falls_back_to_the_deployment_default_only_without_history(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """The administrator's default reaches new users, never existing ones.
+
+    This is the ordering that matters: a saved deployment default must not move
+    a user who already has a model of their own. Otherwise changing one admin
+    setting silently switches every existing user's next task onto a different
+    model.
+    """
+    _with_deployment_default(monkeypatch, "glm-5.1")
+
+    # No history, no pin: the deployment default is the starting point.
+    assert (await client.get("/v1/agent/config")).json()["default_model"] == "glm-5.1"
+
+    # A user with history keeps their own model.
+    await _create_job(client, model="qwen-next")
+    assert (await client.get("/v1/agent/config")).json()["default_model"] == "qwen-next"
+
+    # And an explicit pin still outranks both. Written straight to the fake:
+    # this app mounts the jobs surface only, and the pin's own route has its
+    # tests in test_model_preference_api.py.
+    store.default_models[_OWNER] = "glm-5.1"
+    assert (await client.get("/v1/agent/config")).json()["default_model"] == "glm-5.1"
+
+
+async def test_config_ignores_a_deployment_default_this_user_cannot_call(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """A deployment default outside the catalog is skipped, never forced."""
+    _with_deployment_default(monkeypatch, "retired-model")
+    config = (await client.get("/v1/agent/config")).json()
+
+    # Not offered: the composer leaves its control empty and asks.
+    assert config["default_model"] is None
+    assert "retired-model" not in config["models"]
+
+
+async def test_config_never_substitutes_the_first_offered_model(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """No layer resolved means no default — not the head of the catalog.
+
+    The composer used to fall back to `deepseek-v4-flash`, then to the first
+    model in the list. Both run the owner's task on a model they never picked,
+    which matters because models differ in cost, speed and capability.
+    """
+    _with_deployment_default(monkeypatch, "")
+    config = (await client.get("/v1/agent/config")).json()
+
+    # The catalog is not empty, so this is the "nothing chosen yet" case.
+    assert config["models"] == list(_TEST_MODELS)
+    assert config["default_model"] is None
+
+
 async def test_config_reads_independent_sources_concurrently(
     client: AsyncClient, store: FakeStorage, monkeypatch
 ):
@@ -3127,7 +3326,9 @@ async def test_config_reads_independent_sources_concurrently(
 
     async def wait_for_sources(name):
         started.add(name)
-        if len(started) == 3:
+        # Repository entitlement, the model catalog, MCP connections, and the
+        # owner's model preference: every independent source this read fans out.
+        if len(started) == 4:
             all_started.set()
         await release.wait()
 
@@ -3155,9 +3356,15 @@ async def test_config_reads_independent_sources_concurrently(
         account_reads += 1
         return None
 
+    async def preference(user_id):
+        assert user_id == _OWNER
+        await wait_for_sources("preference")
+        return ModelPreferenceView.of(None, "glm-5.1")
+
     monkeypatch.setattr(config_api, "repos_for_user", repositories)
     monkeypatch.setattr(_FakeGateway, "model_catalog_with_reasoning_efforts", model_options)
     monkeypatch.setattr(store, "list_mcp_connections", connections)
+    monkeypatch.setattr(store, "get_model_preference", preference)
     monkeypatch.setattr(store, "get_github_account", account)
     request = asyncio.create_task(client.get("/v1/agent/config"))
     try:
@@ -3244,10 +3451,10 @@ async def test_follow_up_handles_context_loss_during_admission_checks(
     job_id = await _create_job(client)
     store.jobs[job_id]["state"] = "succeeded"
 
-    async def _lost_during_create(**_kwargs):
+    async def _lost_during_insert(**_kwargs):
         return {"error": "sandbox_context_lost"}
 
-    monkeypatch.setattr(store, "create_follow_up", _lost_during_create)
+    monkeypatch.setattr(store, "insert_follow_up", _lost_during_insert)
     response = await _send(client, store, job_id, {"prompt": "race with a lost activation"})
 
     assert response.status_code == 201
@@ -3740,7 +3947,7 @@ async def test_expired_browser_jwt_is_not_reinterpreted_as_api_key(store: FakeSt
 
 async def test_sandbox_token_stays_out_of_owner_routes(store: FakeStorage):
     """A structured Agent token must not be mistaken for a browser JWT."""
-    from cloud_agent.tokens import SCOPE_MODEL
+    from cloud_agent.tokens import SCOPE_MCP
 
     app = _build_app(store)
     app.dependency_overrides.pop(authenticate_agent_owner)
@@ -3748,7 +3955,7 @@ async def test_sandbox_token_stays_out_of_owner_routes(store: FakeStorage):
         job_id="ajob_0001",
         attempt_id=1,
         lease_generation=1,
-        scope=SCOPE_MODEL,
+        scope=SCOPE_MCP,
     )
 
     transport = ASGITransport(app=app)
@@ -5947,43 +6154,65 @@ async def test_a_definitively_unentitled_oldest_job_does_not_block_the_next_job(
     assert accepted.json()["job_id"] == ready["id"]
 
 
-async def test_spend_and_usage_come_from_the_ledger_not_the_agent(store: FakeStorage):
+async def test_spend_and_usage_come_from_the_grant_ledger_not_the_agent(store: FakeStorage):
     """A job's numbers must not depend on what the agent says about itself.
 
     Models do misreport their own usage — this session watched one claim it had
-    edited a file it never touched — so the owner-facing totals read the same
-    billing ledger the budget check already trusts.
+    edited a file it never touched — so the owner-facing totals read the grant
+    ledger, the same accounting the usage and admin surfaces use (#823).
     """
-    from cloud_agent.api.deps import get_log_store
+    from datetime import timedelta
 
-    class Ledger:
-        async def get_agent_job_cost(self, job_id: str) -> float:
-            return 0.0075
-
-        async def get_agent_job_usage(self, job_id: str) -> dict[str, float]:
-            return {"tokens_in": 74000, "tokens_out": 523, "calls": 3}
+    from tests.unit.test_ledger_snapshots import END, ledger_row
 
     app = _build_app(store)
-    app.dependency_overrides[get_log_store] = lambda: Ledger()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        job_id = await _create_job(client)
+        await client.post(f"/v1/agent/jobs/{job_id}/cancel")
+        # One attempt's snapshot with known totals; a second, newer one for
+        # the retry that superseded it — summed, not replaced.
+        store.ledger_rows = [
+            {**ledger_row(), "job_id": job_id},
+            {
+                **ledger_row(
+                    id=2,
+                    attempt_id=11,
+                    attempt_no=2,
+                    queried_at=END + timedelta(seconds=30),
+                ),
+                "job_id": job_id,
+            },
+        ]
+        got = await client.get(f"/v1/agent/jobs/{job_id}")
+
+    body = got.json()
+    assert body["tokens_in"] == 240
+    assert body["tokens_out"] == 40
+    assert body["model_calls"] == 2
+    assert body["spent_usd"] == float("0.00024690")
+
+
+async def test_a_job_with_no_ledger_snapshot_reports_absent_not_zero(store: FakeStorage):
+    """A snapshot that has not answered must not look like a job that spent nothing.
+
+    The ledger rows exist only once the usage collector has stored a snapshot
+    for the job's grants. Before that, ``summarize_job_ledger`` has no totals,
+    and the response's fields stay ``None`` — the same absent-not-zero rule
+    the old log-store path kept, now against the real source.
+    """
+    store.ledger_rows = []
+    app = _build_app(store)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         job_id = await _create_job(client)
         got = await client.get(f"/v1/agent/jobs/{job_id}")
 
     body = got.json()
-    assert body["spent_usd"] == 0.0075
-    assert body["tokens_in"] == 74000
-    assert body["model_calls"] == 3
-
-
-async def test_a_deployment_without_a_ledger_reports_absent_not_zero(client: AsyncClient):
-    """A missing source must not look like a job that spent nothing."""
-    job_id = await _create_job(client)
-
-    body = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
-
     assert body["spent_usd"] is None
     assert body["tokens_in"] is None
+    assert body["tokens_out"] is None
+    assert body["model_calls"] is None
 
 
 async def test_a_job_reports_no_network_mode(client: AsyncClient):
@@ -6063,9 +6292,9 @@ class _FakeGitHubApp:
         self.exchanged.append(code)
         return UserTokens(
             access_token=f"user-token-for-{code}",
-            access_expires_at=datetime.now(timezone.utc) + timedelta(hours=8),
+            access_expires_at=datetime.now(UTC) + timedelta(hours=8),
             refresh_token=f"refresh-for-{code}",
-            refresh_expires_at=datetime.now(timezone.utc) + timedelta(days=180),
+            refresh_expires_at=datetime.now(UTC) + timedelta(days=180),
         )
 
     async def user_profile(self, user_token: str) -> dict[str, Any]:
@@ -7679,7 +7908,7 @@ async def test_a_connection_that_cannot_be_used_says_why_instead_of_vanishing(
     row = store.connect_mcp(
         user_id=_OWNER,
         label="GitHub",
-        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
     )
 
     config = (await client.get("/v1/agent/config")).json()
@@ -8492,7 +8721,7 @@ async def test_job_timing_does_not_invent_a_missing_attempt_finish(
 ):
     """A job update or terminal state cannot supply an unrecorded end time."""
     job_id = await _create_job(client)
-    started = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
+    started = datetime(2026, 9, 3, 10, 0, tzinfo=UTC)
     store.jobs[job_id].update(
         state=state,
         created_at=started - timedelta(minutes=1),
@@ -8521,7 +8750,7 @@ async def test_job_list_and_thread_do_not_substitute_job_dates_for_execution_tim
 ):
     """Paths without a telemetry read leave the execution window unknown."""
     job_id = await _create_job(client)
-    started = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
+    started = datetime(2026, 9, 3, 10, 0, tzinfo=UTC)
     store.jobs[job_id].update(
         state="succeeded",
         created_at=started - timedelta(minutes=1),
@@ -8550,7 +8779,7 @@ async def test_job_detail_keeps_each_retry_s_telemetry_on_its_attempt(
 ):
     """Selecting an old transcript must never show the retry's measurements."""
     job_id = await _create_job(client)
-    started = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
+    started = datetime(2026, 9, 3, 10, 0, tzinfo=UTC)
     newest_started = started + timedelta(seconds=5)
     store.attempt_telemetry = {
         job_id: [
@@ -9345,9 +9574,9 @@ async def test_an_idle_only_message_creates_its_turn_with_prepared_choices_witho
         ],
     )
     monkeypatch.setattr("cloud_agent.api.turns.prepare_follow_up", AsyncMock(return_value=prepared))
-    created = AsyncMock(wraps=store.create_follow_up)
+    created = AsyncMock(wraps=store.insert_follow_up)
     settlement = AsyncMock()
-    monkeypatch.setattr(store, "create_follow_up", created)
+    monkeypatch.setattr(store, "insert_follow_up", created)
     monkeypatch.setattr(store, "settle_queue", settlement)
 
     response = await _send(
@@ -9388,7 +9617,7 @@ async def test_deleted_history_cannot_be_read_resumed_forked_or_used_as_workspac
 ):
     job_id = await _create_job(client)
     thread_id = _thread_of(store, job_id)
-    store.jobs[job_id]["deleted_at"] = datetime.now(timezone.utc)
+    store.jobs[job_id]["deleted_at"] = datetime.now(UTC)
     for suffix in (
         "",
         "/thread",
@@ -9777,11 +10006,11 @@ async def test_follow_up_receipts_include_retained_membership_on_create_and_repl
         "origin_thread_id": "athread_main",
     }
     store.jobs[parent_id]["thread_sandbox"] = sandbox
-    create = store.create_follow_up
+    insert = store.insert_follow_up
     replay = store.replayed_submission
 
-    async def bare_create(**kwargs):
-        job = await create(**kwargs)
+    async def bare_insert(**kwargs):
+        job = await insert(**kwargs)
         store.jobs[job["id"]]["thread_sandbox"] = sandbox
         return {**job, "thread_sandbox": None}
 
@@ -9789,7 +10018,7 @@ async def test_follow_up_receipts_include_retained_membership_on_create_and_repl
         job = await replay(**kwargs)
         return {**job, "thread_sandbox": None} if job else None
 
-    monkeypatch.setattr(store, "create_follow_up", bare_create)
+    monkeypatch.setattr(store, "insert_follow_up", bare_insert)
     monkeypatch.setattr(store, "replayed_submission", bare_replay)
     first = await _send(
         client, store, parent_id, {"prompt": "side reply"}, headers={"Idempotency-Key": "side-send"}
@@ -9816,7 +10045,7 @@ async def test_claim_loads_current_default_servers_and_skips_unavailable_ones(
     expired = store.connect_mcp(
         user_id=_OWNER,
         label="Expired",
-        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
     )
     paused = store.connect_mcp(user_id=_OWNER, label="Paused")
     store.mcp_connections[paused["id"]]["enabled"] = False

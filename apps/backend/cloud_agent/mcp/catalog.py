@@ -13,7 +13,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -211,7 +211,7 @@ def _remote_options(label: str, remote: dict[str, Any]) -> list[dict[str, str]]:
     return options
 
 
-def _package_option(label: str, package: dict[str, Any]) -> dict[str, str] | None:
+def _package_option(label: str, package: dict[str, Any]) -> dict[str, str] | None:  # noqa: C901, PLR0912 complexity baseline, #771
     """Prefill simple pinned npm/PyPI stdio installs; leave complex recipes explicit."""
     if (
         package.get("transport") != {"type": "stdio"}
@@ -309,7 +309,7 @@ def _icon_url(icons: Any) -> str | None:
     return str(candidates[0]["src"]) if candidates else None
 
 
-def catalog_entry(record: Mapping[str, Any]) -> dict[str, Any] | None:
+def catalog_entry(record: Mapping[str, Any]) -> dict[str, Any] | None:  # noqa: C901 complexity baseline, #771
     """Normalize one active latest record, preserving its publisher identifier."""
     metadata = record.get("_meta")
     if not isinstance(metadata, Mapping):
@@ -418,7 +418,7 @@ def _checkpoint_page(
         state.cursors.add(cursor)
 
 
-async def fetch_catalog(
+async def fetch_catalog(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     client: httpx.AsyncClient,
     *,
     checkpoint: _CatalogFetchCheckpoint | None = None,
@@ -539,7 +539,7 @@ class McpCatalog:
         if (
             stored is not None
             and stored.get("registry_url") == registry_url
-            and (datetime.now(timezone.utc) - stored["synced_at"]).total_seconds()
+            and (datetime.now(UTC) - stored["synced_at"]).total_seconds()
             < number_setting("mcp_catalog_sync_seconds", SYNC_INTERVAL)
         ):
             self._fetch_checkpoint = None
@@ -593,7 +593,7 @@ class McpCatalog:
             try:
                 await self.refresh()
                 age = (
-                    (datetime.now(timezone.utc) - self.snapshot["synced_at"]).total_seconds()
+                    (datetime.now(UTC) - self.snapshot["synced_at"]).total_seconds()
                     if self.snapshot
                     else 0
                 )
@@ -629,6 +629,6 @@ class McpCatalog:
             "next_offset": offset + limit if offset + limit < len(matches) else None,
             "synced_at": synced_at.isoformat() if synced_at else None,
             "stale": not synced_at
-            or (datetime.now(timezone.utc) - synced_at).total_seconds()
+            or (datetime.now(UTC) - synced_at).total_seconds()
             > 2 * number_setting("mcp_catalog_sync_seconds", SYNC_INTERVAL),
         }

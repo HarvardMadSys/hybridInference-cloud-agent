@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
     from cloud_agent.ports.host_pool import HostPoolRepository
 
-NOW = datetime(2026, 10, 11, 16, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 11, 16, 0, tzinfo=UTC)
 GIB = 1024**3
 
 
