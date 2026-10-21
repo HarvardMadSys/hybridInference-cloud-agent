@@ -22,6 +22,7 @@ import { changesSidebarRows, SIDEBAR_ACTIVITY_REFRESH_MS } from './sidebarRecord
 import { GettingStarted } from './GettingStarted';
 import { PaneResizer } from './PaneResizer';
 import { useAgentProjects } from './useAgentJobs';
+import { useSidebarBackgroundRefresh } from './useSidebarBackgroundRefresh';
 import { announcePaneResize, useResizablePane } from './useResizablePane';
 import { useSidebarPreferences, manualOrder, moveBefore } from './sidebarPreferences';
 import { SidebarViewMenu } from './SidebarViewMenu';
@@ -94,36 +95,11 @@ export function AgentsSidebar({
     error: projectsError,
     reload: reloadProjects,
   } = useAgentProjects(false, active);
-  const backgroundRefreshPending = useRef(false);
-  const refreshInBackground = useCallback(() => {
-    if (!active || document.visibilityState === 'hidden') {
-      backgroundRefreshPending.current = true;
-      return;
-    }
-    backgroundRefreshPending.current = false;
-    reload();
-    reloadProjects();
-  }, [active, reload, reloadProjects]);
-  // Only activity moved: rows can only rise to the top, so the lists read their
-  // first page instead of every loaded one.
-  const [activityMoved, setActivityMoved] = useState(0);
-  const reorderInBackground = useCallback(() => {
-    if (!active || document.visibilityState === 'hidden') {
-      backgroundRefreshPending.current = true;
-      return;
-    }
-    setActivityMoved((value) => value + 1);
-    reloadProjects();
-  }, [active, reloadProjects]);
-
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState !== 'hidden' && backgroundRefreshPending.current)
-        refreshInBackground();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [refreshInBackground]);
+  const { refreshInBackground, reorderInBackground, activityMoved } = useSidebarBackgroundRefresh(
+    active,
+    reload,
+    reloadProjects,
+  );
 
   const [selected, setSelected] = useState<{
     path: string;

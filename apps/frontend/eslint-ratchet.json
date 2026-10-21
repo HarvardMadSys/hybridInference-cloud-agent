@@ -83,7 +83,6 @@
     {
       "files": [
         "src/components/features/agents/environment/EnvironmentManager.tsx",
-        "src/components/features/agents/useConversationList.ts",
         "src/components/features/agents/useNativeQuestions.ts",
         "src/components/features/settings/UsageSettings.tsx"
       ],
@@ -426,7 +425,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1014
+            "max": 1004
           }
         ]
       }

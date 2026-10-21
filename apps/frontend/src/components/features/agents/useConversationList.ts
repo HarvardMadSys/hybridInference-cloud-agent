@@ -49,6 +49,52 @@ export function reorderedRows(
   return [...page, ...loaded.slice(at + 1).filter((row) => !shown.has(row.key))];
 }
 
+type ConversationQuery = { q: string; repo?: string; includeArchived: boolean; pinned?: boolean };
+type ReadRows = { rows: SidebarConversation[]; cursor: string | null };
+
+/** The list after one read of its first page; `null` when it has to be read in full. */
+async function readReordered(
+  query: ConversationQuery,
+  loaded: ReadRows,
+  signal: AbortSignal,
+): Promise<ReadRows | null> {
+  const result = await listAgentConversations(
+    { ...query, cursor: undefined, limit: REORDER_PAGE },
+    signal,
+  );
+  const page = result.conversations.map(conversationRow);
+  const rows = reorderedRows(loaded.rows, page, result.next_cursor);
+  return rows && { rows, cursor: result.next_cursor === null ? null : loaded.cursor };
+}
+
+/**
+ * Every loaded row read again in batches, or the page after `next` merged
+ * below them; `null` once `current` says the read no longer matters.
+ */
+async function readRows(
+  query: ConversationQuery,
+  next: string | undefined,
+  loaded: SidebarConversation[],
+  signal: AbortSignal,
+  current: () => boolean,
+): Promise<ReadRows | null> {
+  const targetCount = next ? 0 : loaded.length;
+  const merged = new Map((next ? loaded : []).map((row) => [row.key, row]));
+  let cursor = next;
+  let following: string | null = null;
+  do {
+    // Each request recomputes conversation activity. Use the API's larger
+    // batch size when refreshing history instead of repeating 50-row scans.
+    const limit = next ? 50 : Math.min(200, Math.max(50, targetCount - merged.size));
+    const result = await listAgentConversations({ ...query, cursor, limit }, signal);
+    if (!current()) return null;
+    result.conversations.map(conversationRow).forEach((row) => merged.set(row.key, row));
+    following = result.next_cursor;
+    cursor = following ?? undefined;
+  } while (!next && following && merged.size < targetCount);
+  return { rows: [...merged.values()], cursor: following };
+}
+
 /**
  * Refresh loaded rows in batches; polling must not discard earlier pages.
  *
@@ -166,65 +212,22 @@ export function useConversationList({
           : 'foreground',
       );
       setError(null);
+      const query = { q, repo, includeArchived, pinned };
+      const current = () => !controller.signal.aborted && generation.current === version;
       try {
         if (mode === 'reorder') {
-          const result = await listAgentConversations(
-            { q, repo, includeArchived, pinned, cursor: undefined, limit: REORDER_PAGE },
-            controller.signal,
-          );
-          if (controller.signal.aborted || generation.current !== version) return;
-          const rows = reorderedRows(
-            previous.rows,
-            result.conversations.map(conversationRow),
-            result.next_cursor,
-          );
-          if (rows) {
-            setData({
-              identity,
-              rows,
-              cursor: result.next_cursor === null ? null : previous.cursor,
-              loadedRefresh: previous.loadedRefresh,
-            });
+          const reordered = await readReordered(query, previous, controller.signal);
+          if (!current()) return;
+          if (reordered) {
+            setData({ identity, ...reordered, loadedRefresh: previous.loadedRefresh });
             return;
           }
         }
-        const targetCount = !next && previous.identity === identity ? previous.rows.length : 0;
-        const merged = new Map(
-          (next && previous.identity === identity ? previous.rows : []).map((row) => [
-            row.key,
-            row,
-          ]),
-        );
-        let cursor = next;
-        let following: string | null = null;
-        do {
-          // Each request recomputes conversation activity. Use the API's larger
-          // batch size when refreshing history instead of repeating 50-row scans.
-          const limit = next ? 50 : Math.min(200, Math.max(50, targetCount - merged.size));
-          const result = await listAgentConversations(
-            {
-              q,
-              repo,
-              includeArchived,
-              pinned,
-              cursor,
-              limit,
-            },
-            controller.signal,
-          );
-          if (controller.signal.aborted || generation.current !== version) return;
-          result.conversations.map(conversationRow).forEach((row) => merged.set(row.key, row));
-          following = result.next_cursor;
-          cursor = following ?? undefined;
-        } while (!next && following && merged.size < targetCount);
-        setData({
-          identity,
-          rows: [...merged.values()],
-          cursor: following,
-          loadedRefresh: refresh,
-        });
+        const loaded = previous.identity === identity ? previous.rows : [];
+        const read = await readRows(query, next, loaded, controller.signal, current);
+        if (read) setData({ identity, ...read, loadedRefresh: refresh });
       } catch (cause) {
-        if (!controller.signal.aborted && generation.current === version)
+        if (current())
           setError(cause instanceof Error ? cause.message : 'Could not load conversations');
       } finally {
         if (activeRequest.current === controller) activeRequest.current = null;
