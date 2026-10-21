@@ -318,7 +318,7 @@ def split_by_page(behind: list[PageProblem]) -> tuple[list[str], list[str]]:
     return problems, warnings
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("build_dir", type=Path, help="root of the built site (English at its top)")
     parser.add_argument("locale_dir", type=Path, help="docs/developer/locale")
@@ -329,7 +329,7 @@ def main() -> int:
         "staleness check is skipped, and an English edit that was never merged "
         "into the catalogs goes unreported.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not args.build_dir.is_dir():
         print(f"error: {args.build_dir} does not exist -- run `make docs` first", file=sys.stderr)
@@ -387,7 +387,10 @@ def main() -> int:
         return 1
 
     scope = "" if args.gettext_dir else " (staleness unchecked)"
-    print(f"Translations OK: {', '.join(languages)} match the English build{scope}.")
+    behind_note = (
+        f"; {len(warnings)} string(s) on other pages are behind, listed above" if warnings else ""
+    )
+    print(f"Translations OK: {', '.join(languages)} match the English build{scope}{behind_note}.")
     return 0
 
 
