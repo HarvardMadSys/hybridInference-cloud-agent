@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
 import { toDisplayJob } from './adapt';
-import { agentLiveNote, agentLiveStatus } from './agentLiveStatus';
+import { agentLiveStatus } from './agentLiveStatus';
 
 const job = { id: 'job', state: 'running', current_attempt_id: 2 } as AgentJobApi;
+const liveNote = (...args: Parameters<typeof agentLiveStatus>) => agentLiveStatus(...args)?.note;
 function event(
   id: number,
   event_type: string,
@@ -34,20 +35,20 @@ describe('live agent status', () => {
       event(2, 'lifecycle', { phase: 'workspace_preparing' }),
       event(3, 'lifecycle', { phase: 'checked_out' }),
     ];
-    expect(agentLiveNote(job, events)).toBeUndefined();
+    expect(liveNote(job, events)).toBeUndefined();
     events.push(event(4, 'lifecycle', { phase: 'turn_started' }));
-    expect(agentLiveNote(job, events)).toBe('Waiting for LLM response');
+    expect(liveNote(job, events)).toBe('Waiting for LLM response');
   });
 
   it('switches between tool activity and model waiting, even after a tool error', () => {
     const events = [event(1, 'lifecycle', { phase: 'init' })];
-    expect(agentLiveNote(job, events)).toBe('Waiting for LLM response');
+    expect(liveNote(job, events)).toBe('Waiting for LLM response');
     events.push(event(2, 'tool_use', { id: 'a', name: 'Bash' }));
-    expect(agentLiveNote(job, events)).toBe('Running tool call');
+    expect(liveNote(job, events)).toBe('Running tool call');
     events.push(event(3, 'tool_result', { tool_use_id: 'a', content: '', is_error: true }));
-    expect(agentLiveNote(job, events)).toBe('Waiting for LLM response');
+    expect(liveNote(job, events)).toBe('Waiting for LLM response');
     events.push(event(4, 'tool_use', { id: 'b', name: 'Read' }));
-    expect(agentLiveNote(job, events)).toBe('Running tool call');
+    expect(liveNote(job, events)).toBe('Running tool call');
   });
 
   it('keeps parallel calls active until every matching result arrives', () => {
@@ -57,9 +58,9 @@ describe('live agent status', () => {
       event(3, 'tool_result', { tool_use_id: 'a', content: 'done' }),
       event(4, 'usage', { output_tokens: 10 }),
     ];
-    expect(agentLiveNote(job, events)).toBe('Running tool call');
+    expect(liveNote(job, events)).toBe('Running tool call');
     events.push(event(5, 'tool_result', { tool_use_id: 'b', content: 'failed', is_error: true }));
-    expect(agentLiveNote(job, events)).toBe('Waiting for LLM response');
+    expect(liveNote(job, events)).toBe('Waiting for LLM response');
   });
 
   it('does not settle a call from an unrelated result ID', () => {
@@ -67,23 +68,23 @@ describe('live agent status', () => {
       event(1, 'tool_use', { id: 'a' }),
       event(2, 'tool_result', { tool_use_id: 'other' }),
     ];
-    expect(agentLiveNote(job, events)).toBe('Running tool call');
+    expect(liveNote(job, events)).toBe('Running tool call');
   });
 
   it('settles an id-less result only when one call is pending', () => {
     const events = [event(1, 'tool_use'), event(2, 'tool_result')];
-    expect(agentLiveNote(job, events)).toBe('Waiting for LLM response');
+    expect(liveNote(job, events)).toBe('Waiting for LLM response');
     expect(
-      agentLiveNote(job, [event(1, 'tool_use'), event(2, 'tool_use'), event(3, 'tool_result')]),
+      liveNote(job, [event(1, 'tool_use'), event(2, 'tool_use'), event(3, 'tool_result')]),
     ).toBe('Running tool call');
   });
 
   it('recognizes a tool whose completion was recorded inline', () => {
-    expect(agentLiveNote(job, [event(1, 'tool_use', { id: 'a', output: '', exit_code: 0 })])).toBe(
+    expect(liveNote(job, [event(1, 'tool_use', { id: 'a', output: '', exit_code: 0 })])).toBe(
       'Waiting for LLM response',
     );
     expect(
-      agentLiveNote(job, [
+      liveNote(job, [
         event(1, 'tool_use', { id: 'a' }),
         event(2, 'tool_use', { id: 'a', status: 'failed' }),
       ]),
@@ -98,8 +99,8 @@ describe('live agent status', () => {
         params: { turnId: 'turn', plan: [{ step: 'Inspect the parser', status: 'inProgress' }] },
       },
     });
-    expect(agentLiveNote(job, [plan])).toBe('Waiting for LLM response');
-    expect(agentLiveNote(job, [event(1, 'tool_use', { id: 'shell', name: 'Bash' }), plan])).toBe(
+    expect(liveNote(job, [plan])).toBe('Waiting for LLM response');
+    expect(liveNote(job, [event(1, 'tool_use', { id: 'shell', name: 'Bash' }), plan])).toBe(
       'Running tool call',
     );
   });
@@ -108,7 +109,7 @@ describe('live agent status', () => {
     'recognizes a completion-only native subagent call with status %s',
     (status) => {
       expect(
-        agentLiveNote(job, [
+        liveNote(job, [
           event(1, 'raw', {
             protocol: 'codex-app-server',
             notification: {
@@ -134,7 +135,7 @@ describe('live agent status', () => {
     const events = [
       event(1, 'raw', { protocol: 'reply-preview', preview_id: 'reply', delta: 'Hello' }),
     ];
-    expect(agentLiveNote(job, events)).toBe('Receiving LLM response');
+    expect(liveNote(job, events)).toBe('Receiving LLM response');
     events.push(
       event(2, 'raw', {
         protocol: 'reply-preview',
@@ -143,14 +144,14 @@ describe('live agent status', () => {
         reset: true,
       }),
     );
-    expect(agentLiveNote(job, events)).toBe('Receiving LLM response');
+    expect(liveNote(job, events)).toBe('Receiving LLM response');
     events.push(event(3, 'message', { preview_id: 'reply', text: 'Revised reply' }));
-    expect(agentLiveNote(job, events)).toBe('Waiting for LLM response');
+    expect(liveNote(job, events)).toBe('Waiting for LLM response');
   });
 
   it('keeps a parallel tool active while an assistant streams', () => {
     expect(
-      agentLiveNote(job, [
+      liveNote(job, [
         event(1, 'tool_use', { id: 'a' }),
         event(2, 'raw', { protocol: 'reply-preview', preview_id: 'reply', delta: 'Progress' }),
       ]),
@@ -161,16 +162,16 @@ describe('live agent status', () => {
     const events = [
       event(1, 'raw', { protocol: 'reply-preview', preview_id: 'reply', delta: 'Partial reply' }),
     ];
-    expect(agentLiveNote(job, events)).toBe('Receiving LLM response');
+    expect(liveNote(job, events)).toBe('Receiving LLM response');
     events.push(event(2, 'lifecycle', { phase: 'api_retry', retry_delay_ms: 5000 }));
-    expect(agentLiveNote(job, events)).toBe('Waiting for LLM response');
-    expect(agentLiveNote(job, [event(0, 'tool_use', { id: 'parallel' }), ...events])).toBe(
+    expect(liveNote(job, events)).toBe('Waiting for LLM response');
+    expect(liveNote(job, [event(0, 'tool_use', { id: 'parallel' }), ...events])).toBe(
       'Running tool call',
     );
     events.push(
       event(3, 'raw', { protocol: 'reply-preview', preview_id: 'reply', delta: 'Resumed' }),
     );
-    expect(agentLiveNote(job, events)).toBe('Receiving LLM response');
+    expect(liveNote(job, events)).toBe('Receiving LLM response');
   });
 
   it('reads Codex turn and response notifications without showing raw content', () => {
@@ -179,13 +180,13 @@ describe('live agent status', () => {
       notification: { method, params },
     });
     const events = [event(1, 'raw', notification('turn/started'))];
-    expect(agentLiveNote(job, events)).toBe('Waiting for LLM response');
+    expect(liveNote(job, events)).toBe('Waiting for LLM response');
     events.push(
       event(2, 'raw', notification('item/agentMessage/delta', { itemId: 'r', delta: 'Hello' })),
     );
-    expect(agentLiveNote(job, events)).toBe('Receiving LLM response');
+    expect(liveNote(job, events)).toBe('Receiving LLM response');
     events.push(event(3, 'raw', notification('turn/completed')));
-    expect(agentLiveNote(job, events)).toBeUndefined();
+    expect(liveNote(job, events)).toBeUndefined();
   });
 
   it('ignores a superseded attempt, even when its tool ID is reused', () => {
@@ -195,15 +196,15 @@ describe('live agent status', () => {
       event(3, 'tool_use', { id: 'a' }),
       event(4, 'tool_result', { tool_use_id: 'a' }, 1),
     ];
-    expect(agentLiveNote(job, events)).toBe('Running tool call');
+    expect(liveNote(job, events)).toBe('Running tool call');
     events.push(event(5, 'tool_result', { tool_use_id: 'a' }));
-    expect(agentLiveNote(job, events)).toBe('Waiting for LLM response');
-    expect(agentLiveNote({ ...job, current_attempt_id: 3 }, events)).toBeUndefined();
+    expect(liveNote(job, events)).toBe('Waiting for LLM response');
+    expect(liveNote({ ...job, current_attempt_id: 3 }, events)).toBeUndefined();
   });
 
   it('ignores another turn when given a thread event stream', () => {
     expect(
-      agentLiveNote(job, [
+      liveNote(job, [
         { ...event(1, 'tool_use', { id: 'a' }), job_id: 'other' } as AgentJobEventApi,
         event(2, 'lifecycle', { phase: 'turn_started' }),
       ]),
@@ -213,13 +214,13 @@ describe('live agent status', () => {
   it.each(['queued', 'succeeded', 'publishing', 'failed', 'cancelled'] as const)(
     'clears status for a %s job',
     (state) => {
-      expect(agentLiveNote({ ...job, state }, [event(1, 'tool_use', { id: 'a' })])).toBeUndefined();
+      expect(liveNote({ ...job, state }, [event(1, 'tool_use', { id: 'a' })])).toBeUndefined();
     },
   );
 
   it('clears activity when there is no active attempt', () => {
     expect(
-      agentLiveNote({ ...job, current_attempt_id: null }, [event(1, 'tool_use', { id: 'a' })]),
+      liveNote({ ...job, current_attempt_id: null }, [event(1, 'tool_use', { id: 'a' })]),
     ).toBeUndefined();
   });
 
@@ -227,7 +228,7 @@ describe('live agent status', () => {
     'clears pending activity at %s before the job row catches up',
     (phase) => {
       expect(
-        agentLiveNote(job, [
+        liveNote(job, [
           event(1, 'tool_use', { id: 'a' }),
           event(2, 'lifecycle', { phase }),
           event(3, 'tool_result', { tool_use_id: 'a' }),
@@ -239,7 +240,7 @@ describe('live agent status', () => {
 
   it.each(['attempt_superseded', 'error'])('clears activity on %s', (event_type) => {
     expect(
-      agentLiveNote(job, [event(1, 'tool_use', { id: 'a' }), event(2, event_type)]),
+      liveNote(job, [event(1, 'tool_use', { id: 'a' }), event(2, event_type)]),
     ).toBeUndefined();
   });
 

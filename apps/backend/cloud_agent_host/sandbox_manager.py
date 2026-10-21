@@ -1376,7 +1376,7 @@ class _TerminalManager:
                 if holders > 1:
                     self._workspace_locks[workspace_id] = (lock, holders - 1)
 
-    def create(
+    def create(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         workspace_id: str,
         workdir: Path | str,
@@ -2179,7 +2179,7 @@ def _terminal_attached_frame(last_seq: int) -> str:
     return f"event: attached\ndata: {data}\n\n"
 
 
-def create_app(
+def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
     backend: SandboxBackend | None = None,
     token: str | None = None,
@@ -2359,7 +2359,7 @@ def create_app(
             supervisor_ready.set()
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915 complexity baseline, #771
         # Docker owns every chat workspace and provider state. The sandbox manager keeps
         # only an in-memory index reconstructed from container labels/PID files.
         sandbox.preflight()
@@ -2475,9 +2475,6 @@ def create_app(
         )
 
     app.state.terminal_manager = terminals
-    app.state.shared_session_supervisor = shared_supervisor
-    app.state.sandbox_archive_service = archive_boundary
-    app.state.sandbox_archive_controller = archive_controller
     app.state.sandbox_checkpoint_store = checkpoint_store
     app.state.sandbox_deletion_archive_service = SandboxDeletionArchiveService(shared_supervisor)
     app.state.sandbox_resource_collector = None
@@ -3108,7 +3105,7 @@ def create_app(
         return asdict(descriptor)
 
     @app.post("/shared-sandboxes/{thread_id}/turn")
-    async def run_shared_turn(
+    async def run_shared_turn(  # noqa: C901, PLR0915 complexity baseline, #771
         thread_id: str,
         body: SharedTurnRequest,
         _: None = Depends(authenticate),
@@ -3148,7 +3145,7 @@ def create_app(
 
         turn_boundary_closed = False
 
-        def frames() -> Generator[str, None, None]:
+        def frames() -> Generator[str, None, None]:  # noqa: PLR0915 complexity baseline, #771
             nonlocal turn_boundary_closed
             tool_windows = ToolWindowTracker()
             resources: dict[str, Any] | None = None

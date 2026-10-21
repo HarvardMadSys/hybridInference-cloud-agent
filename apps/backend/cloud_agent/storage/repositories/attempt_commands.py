@@ -125,7 +125,7 @@ class PostgresAttemptCommands:
         async with self._pool.acquire() as conn, conn.transaction():
             await fail_discontinuous_follow_ups(conn)
 
-    async def claim_job(
+    async def claim_job(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         *,
         worker_id: str,
@@ -1711,7 +1711,7 @@ class PostgresAttemptCommands:
                     actions.append(action)
         return actions
 
-    async def _reap_attempt(
+    async def _reap_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self, conn: Any, *, attempt_id: int, max_attempts: int
     ) -> dict[str, Any] | None:
         """Reap one expired attempt inside the caller's transaction.

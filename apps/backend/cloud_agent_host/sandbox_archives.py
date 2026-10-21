@@ -258,7 +258,7 @@ class SandboxArchiveService:
     *before* Docker starts copying bytes.
     """
 
-    def __init__(
+    def __init__(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         manager: ChatSandboxManager,
         *,

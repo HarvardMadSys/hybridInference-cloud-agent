@@ -34,16 +34,6 @@ class AttachmentRepository(Protocol):
         """How many uploads a conversation holds, for the claim's cheap signal."""
         ...
 
-    async def list_thread_attachments(self, *, thread_id: str) -> list[dict[str, Any]]:
-        """What a conversation's ``/uploads`` holds: the newest upload at each path."""
-        ...
-
-    async def read_attachment_content(
-        self, *, thread_id: str, attachment_id: int
-    ) -> tuple[bytes, str] | None:
-        """Read one claimed upload's bytes for a trusted thread-scoped caller."""
-        ...
-
     async def list_worker_attachments(
         self, *, job_id: str, attempt_id: int, lease_generation: int
     ) -> list[dict[str, Any]]:

@@ -270,31 +270,6 @@ class PostgresResidencyRepository:
                 process_generation,
             )
 
-    async def resident_host(self, *, thread_id: str) -> dict[str, Any] | None:
-        """The live hot residency for a thread, or ``None``.
-
-        Live means unexpired: the reaper marks expiry on its own schedule,
-        and scheduling decisions between passes must not trust a lease the
-        clock has already taken away.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT m.thread_id, m.sandbox_id, g.host, g.runtime_id, g.runtime_version,
-                       m.residency_generation AS generation,
-                       m.residency_status AS status,
-                       m.residency_lease_expires_at AS lease_expires_at,
-                       m.residency_grant_id AS grant_id,
-                       m.residency_binding_id AS ledger_binding_id
-                FROM agent_thread_sandbox_memberships m
-                JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                WHERE m.thread_id = $1 AND m.residency_status = 'hot'
-                  AND m.residency_lease_expires_at > clock_timestamp()
-                """,
-                thread_id,
-            )
-        return None if row is None else dict(row)
-
     async def reap_expired_residencies(self) -> list[dict[str, Any]]:
         """Mark every hot residency whose lease lapsed as ``none``.
 

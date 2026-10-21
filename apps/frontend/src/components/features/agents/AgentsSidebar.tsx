@@ -15,7 +15,6 @@ import { archiveAgentJob, deleteAgentSessions, pinAgentJob, unpinAgentJob } from
 import { APIError } from '@/lib/utils/errors';
 import { useAgentReads } from './AgentReadProvider';
 import { ArchiveDeleteDialog, SESSION_ERROR_KEYS } from './ArchiveControls';
-import { CONVERSATION_RESTORED_EVENT, type ConversationRestoredDetail } from './conversationEvents';
 import { latestJob } from './conversationJob';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from './agentPush';
@@ -214,24 +213,6 @@ export function AgentsSidebar({
       }),
     [knownRows, pinUpdates, reload],
   );
-  useEffect(() => {
-    const restored = (event: Event) => {
-      const detail = (event as CustomEvent<ConversationRestoredDetail>).detail;
-      if (!detail || detail.userId !== userId || typeof detail.threadId !== 'string') return;
-      setHiddenThreads((old) => {
-        const next = new Set(old);
-        next.delete(detail.threadId);
-        return next;
-      });
-      setSelected((old) =>
-        old?.row.key === detail.threadId ? { ...old, row: { ...old.row, archived: false } } : old,
-      );
-      reload();
-      reloadProjects();
-    };
-    window.addEventListener(CONVERSATION_RESTORED_EVENT, restored);
-    return () => window.removeEventListener(CONVERSATION_RESTORED_EVENT, restored);
-  }, [userId, reload, reloadProjects]);
   useEffect(() => {
     let cancelled = false;
     const detailRefresh = refreshRef.current;

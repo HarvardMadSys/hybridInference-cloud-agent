@@ -12,7 +12,7 @@ import re
 import socket
 import ssl
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlencode, urlsplit
 from uuid import UUID
@@ -196,7 +196,7 @@ def _operation_name(method: str, path: str) -> str:
     return "provider.request"
 
 
-def _error_reason_code(response: httpx.Response) -> str:
+def _error_reason_code(response: httpx.Response) -> str:  # noqa: C901, PLR0912 complexity baseline, #771
     """Map bounded provider text to a stable reason code; never return that text."""
     status = response.status_code
     if status in {401, 403}:
@@ -772,7 +772,7 @@ class CloudLabProvider(ComputeProvider):
             ),
         )
 
-    async def acquire(self, request: AcquireRequest, intent: OperationIntent) -> ProviderReceipt:
+    async def acquire(self, request: AcquireRequest, intent: OperationIntent) -> ProviderReceipt:  # noqa: PLR0912 complexity baseline, #771
         """Execute the persisted acquisition intent and return its acknowledgement."""
         validated = self.validate_config(request.mode, request.config)
         config = CloudLabConfig.model_validate(validated)
@@ -1009,7 +1009,7 @@ class CloudLabProvider(ComputeProvider):
             ref=ref,
             state=state,
             raw_state=raw[:128],
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
             expires_at=expires,
             lease_known=expires is not None,
             nodes=tuple(nodes),
@@ -1018,7 +1018,7 @@ class CloudLabProvider(ComputeProvider):
             provider_request_id=response.headers.get("x-request-id"),
         )
 
-    async def _nodes(
+    async def _nodes(  # noqa: C901, PLR0912 complexity baseline, #771
         self, ref: ResourceRef, config: CloudLabConfig, data: dict[str, Any], ready: bool
     ) -> tuple[list[NodeObservation], bool]:
         aggregates = data.get("aggregates")
@@ -1155,7 +1155,7 @@ class CloudLabProvider(ComputeProvider):
                 config.credential_ref,
                 diagnostic_context=diagnostic_context,
                 payload={
-                    "expires_at": request.target_expires_at.astimezone(timezone.utc).isoformat(),
+                    "expires_at": request.target_expires_at.astimezone(UTC).isoformat(),
                     "reason": request.reason,
                 },
             )
@@ -1248,7 +1248,7 @@ class CloudLabProvider(ComputeProvider):
                 ref=ref,
                 state="terminated",
                 raw_state="delete_acknowledged",
-                observed_at=datetime.now(timezone.utc),
+                observed_at=datetime.now(UTC),
                 lease_known=True,
                 scope_complete=True,
             ),

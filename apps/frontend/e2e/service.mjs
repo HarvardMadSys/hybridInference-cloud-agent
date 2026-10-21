@@ -151,6 +151,7 @@ export function createFixture() {
         repos: ['fixture/repository'],
         runtimes: ['codex'],
         models: ['fixture-model'],
+        default_model: 'fixture-model',
         github_connected: true,
         github_install_url: null,
       });

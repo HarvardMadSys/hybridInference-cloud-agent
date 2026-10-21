@@ -8,14 +8,14 @@ would read as a fact.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from cloud_agent.session_statistics import summarize_session_statistics
 from cloud_agent.thread_stats import summarize_thread
 
-_T0 = datetime(2026, 8, 19, 12, 0, 0, tzinfo=timezone.utc)
+_T0 = datetime(2026, 8, 19, 12, 0, 0, tzinfo=UTC)
 
 
 def _event(

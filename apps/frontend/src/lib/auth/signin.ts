@@ -1,10 +1,10 @@
 // Starting the gateway sign-in round trip.
 //
-// **This module hands the browser to the control plane and stops.** Every
-// security decision — the PKCE pair, the CSRF `state`, the redirect URI the
-// gateway matches, the code exchange — belongs to the server side of this
-// service (`cloud_agent/api/session.py`), and the browser is deliberately not
-// trusted with any of it.
+// **This module builds the URL that hands the browser to the control plane,
+// and stops.** Every security decision — the PKCE pair, the CSRF `state`, the
+// redirect URI the gateway matches, the code exchange — belongs to the server
+// side of this service (`cloud_agent/api/session.py`), and the browser is
+// deliberately not trusted with any of it.
 //
 // It used to be. An earlier revision minted the verifier here, parked it in
 // `localStorage`, and let the callback page redeem the code for the gateway's
@@ -67,11 +67,4 @@ export function signInUrl(returnTo: string, options: SignInOptions = {}): string
  */
 export function switchAccountUrl(returnTo: string, loginHint?: string): string {
   return signInUrl(returnTo, { prompt: 'select_account', loginHint });
-}
-
-/** Send the browser to the control plane, which sends it on to the gateway. */
-export async function beginSignIn(returnTo: string): Promise<void> {
-  // A full navigation, not a router push: the destination is a server route,
-  // and the redirect chain that follows leaves this origin.
-  window.location.assign(signInUrl(returnTo));
 }

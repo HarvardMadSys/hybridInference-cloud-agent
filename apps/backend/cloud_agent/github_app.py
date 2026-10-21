@@ -26,7 +26,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
 
@@ -172,7 +172,7 @@ class UserTokens:
 
 def _user_tokens(body: dict[str, Any]) -> UserTokens:
     """Read GitHub's token response, with its relative expiries made absolute."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     def at(seconds: Any) -> datetime | None:
         return now + timedelta(seconds=int(seconds)) if isinstance(seconds, int) else None

@@ -7,7 +7,7 @@ import logging
 import math
 import uuid
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .clock import clock
@@ -195,7 +195,7 @@ def _restore_handoff_marks(value: Any) -> list[tuple[str, int]] | None:
     return restored
 
 
-def _inherited_manifest(context: Mapping[str, Any]) -> dict[str, Any] | None:
+def _inherited_manifest(context: Mapping[str, Any]) -> dict[str, Any] | None:  # noqa: PLR0912 complexity baseline, #771
     """Return the immutable experiment a context states, if it states one.
 
     Bounded and validated like every other value that crosses a process
@@ -302,7 +302,7 @@ def _manifest_deadline(manifest: Mapping[str, Any]) -> float | None:
         return math.inf
     if not isinstance(expires_at, datetime):
         return None
-    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    remaining = (expires_at - datetime.now(UTC)).total_seconds()
     if remaining <= 0:
         return None
     return clock().monotonic() + remaining
@@ -319,8 +319,8 @@ def _parse_context_instant(value: Any) -> datetime | None:
     except ValueError:
         return None
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
 
 
 def _context_control_revision(context: Mapping[str, Any]) -> int:
@@ -355,11 +355,11 @@ def _context_expiry(context: Mapping[str, Any]) -> datetime | None:
     except ValueError:
         return None
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
 
 
-def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measurement | None:
+def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measurement | None:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     """Continue measuring a selection another process already made.
 
     This is for the one case where a root operation outlives the process that

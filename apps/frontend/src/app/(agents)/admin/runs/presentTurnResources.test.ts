@@ -11,7 +11,6 @@ import {
   averageCpuUsage,
   attemptCoverageNote,
   collectingSentence,
-  completenessSentence,
   cpuCell,
   formatCpuSeconds,
   formatMemoryBytes,
@@ -402,20 +401,6 @@ describe('not collected', () => {
     expect(cells.state.text).not.toBe('0');
     expect(cells.completeness).toBe('unavailable');
     expect(runResourceCells(undefined).state.text).toBe('Not collected');
-  });
-
-  it('states each metric completeness on its own line of the sentence', () => {
-    const sentence = completenessSentence({
-      cpu: AVAILABLE,
-      memory: brief('partial', ['pss_unreadable']),
-      storage_io: brief('unavailable', ['not_a_kata_guest']),
-    });
-    expect(sentence).toBe(
-      `CPU complete. memory sampling partial. ${reasonSentence('pss_unreadable')} ` +
-        `I/O unavailable. ${reasonSentence('not_a_kata_guest')}`,
-    );
-    // A complete metric is not downgraded by an unmeasured one beside it.
-    expect(sentence).toContain('CPU complete.');
   });
 });
 

@@ -1,0 +1,48 @@
+export const modelSelectionEn = {
+  'settings.model.title': 'Default model',
+  'settings.model.description':
+    'Choose a model for new tasks. You can change it for any individual task.',
+  'settings.model.label': 'Default model',
+  'settings.model.choose': 'Choose a model',
+  'settings.model.reset': 'Reset to default',
+  'settings.model.saving': 'Saving…',
+  'settings.model.noneApplies':
+    'Nothing is chosen for new tasks yet. Pick a model here or in the composer.',
+  'settings.model.retired': '{model} (no longer available)',
+  'settings.model.effective': 'New tasks start on {model}.',
+  'settings.model.noModels': 'No model is available yet. A new task waits until one is offered.',
+  'settings.model.loading': 'Loading your default model…',
+  'settings.model.error': 'Could not load your default model.',
+  'settings.model.saveError': 'Could not save. Your previous choice is unchanged.',
+  'settings.model.retry': 'Try again',
+  'composer.chooseModel': 'Choose a model first',
+  'composer.chooseModelPlaceholder': 'Choose model',
+  'picker.search': 'Search…',
+  'picker.noResults': 'No matching options',
+  'composer.model': 'Model',
+  'composer.reasoning': 'Reasoning',
+} as const;
+
+export const modelSelectionZhCN = {
+  'settings.model.title': '默认模型',
+  'settings.model.description': '设置新任务使用的模型，创建任务时仍可更改。',
+  'settings.model.label': '默认模型',
+  'settings.model.choose': '选择模型',
+  'settings.model.reset': '恢复默认',
+  'settings.model.saving': '正在保存…',
+  'settings.model.noneApplies':
+    '新任务还没有默认模型。可以在这里选一个，也可以创建任务时在输入框里选。',
+  'settings.model.retired': '{model}（已不可用）',
+  'settings.model.effective': '新任务将使用 {model}。',
+  'settings.model.noModels': '暂时没有可用模型。在有可用模型之前，新任务无法开始。',
+  'settings.model.loading': '正在加载默认模型…',
+  'settings.model.error': '无法加载默认模型。',
+  'settings.model.saveError': '保存失败，之前的设置未改变。',
+  'settings.model.retry': '重试',
+  'composer.chooseModel': '先选择模型',
+  'composer.chooseModelPlaceholder': '选择模型',
+  'picker.search': '搜索…',
+  'picker.noResults': '没有匹配的选项',
+  'composer.model': '模型',
+  'composer.reasoning': '推理强度',
+} as const;

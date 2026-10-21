@@ -269,7 +269,7 @@ def default_version(runtime: str, hosts: list[dict[str, Any]]) -> str | None:
     return versions.pop() if len(versions) == 1 else None
 
 
-def upgrade_state(
+def upgrade_state(  # noqa: PLR0912 complexity baseline, #771
     runtime: str, target: dict[str, Any] | None, hosts: list[dict[str, Any]]
 ) -> UpgradeState | None:
     """Reduce every host's report on ``target`` to one state and one number.

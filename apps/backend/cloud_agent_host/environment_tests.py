@@ -93,7 +93,7 @@ def claim_and_execute(
         return True
 
 
-def execute_test(
+def execute_test(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *, client: Any, run: dict[str, Any], backend: Any, stop: threading.Event | None = None
 ) -> None:
     """Prepare exact source, install/start/verify, then remove the ephemeral group."""

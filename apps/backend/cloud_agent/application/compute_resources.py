@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -610,7 +610,7 @@ class ComputeCommands:
             return existing
         row = await self._allocation(allocation_id)
         self._require_managed(row, "extend")
-        if request.target_expires_at <= datetime.now(timezone.utc):
+        if request.target_expires_at <= datetime.now(UTC):
             raise ComputeRefusal(
                 "invalid_expiration", "The requested expiration must be in the future.", status=422
             )
