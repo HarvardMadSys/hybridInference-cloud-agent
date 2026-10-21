@@ -23,6 +23,11 @@ from cloud_agent.entitlement import repos_for_user
 from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.registry import resolve_connection
+from cloud_agent.model_preference import (
+    ModelPreferenceView,
+    deployment_default_model,
+    resolve_model,
+)
 from cloud_agent.schemas import AgentConfigResponse, McpConnectionSummary
 from cloud_agent.source_control import github_connect_configured
 from cloud_agent.source_control_runtime import GitHubAppState  # noqa: TC001 — FastAPI resolves it.
@@ -38,6 +43,7 @@ if TYPE_CHECKING:
         ConversationCommands,
         ConversationQueries,
         McpConnectionRepository,
+        ModelPreferenceRepository,
         SourceControlRepository as SourceControlPort,
     )
 
@@ -51,11 +57,12 @@ logger = get_logger("cloud_agent.api.routes")
 
 
 class _ConfigStorage(Protocol):
-    """The two capabilities the config endpoint reaches for."""
+    """The capabilities the config endpoint reaches for."""
 
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
     mcp: McpConnectionRepository
+    model_preferences: ModelPreferenceRepository
     source_control: SourceControlPort
 
 
@@ -87,10 +94,16 @@ async def get_agent_config(
         github.credentials.forget_user(user["user_id"])
     # Independent sources can be read together. The model fields come from
     # one current Gateway response, without caching the owner's admission.
-    (repos, github_account), (models, model_efforts), mcp_connections = await asyncio.gather(
+    (
+        (repos, github_account),
+        (models, model_efforts),
+        mcp_connections,
+        preference,
+    ) = await asyncio.gather(
         _repositories_and_account(store, github, user["user_id"]),
         _model_configuration_for_user(gateway, user["user_id"]),
         _mcp_connections_for_user(store, user["user_id"]),
+        _model_preference_for_user(store, user["user_id"]),
     )
     if github.load_status == "unavailable":
         # The create endpoint answers 503 until the App is back, so a form that
@@ -132,6 +145,11 @@ async def get_agent_config(
         # has nowhere to put a URL or a credential, which is how it stays that
         # way.
         mcp_connections=[McpConnectionSummary(**entry) for entry in mcp_connections],
+        # The picker's starting point, narrowed to what the create endpoint will
+        # accept. Read in the same request as `models` because it is only
+        # meaningful against that list: a stored choice the catalog no longer
+        # offers must not pre-select anything.
+        default_model=resolve_model(models, preference, deployment_default_model()),
         mcp_runtimes=runtimes_supporting_mcp(),
         github_connected=github_connected,
         # OAuth must start on the authenticated integrations page so the
@@ -174,6 +192,22 @@ async def _model_configuration_for_user(
             extra={"event": "agent_model_catalog_unavailable", "user_id": user_id},
         )
         return [], {}
+
+
+async def _model_preference_for_user(
+    store: _ConfigStorage | None, user_id: str
+) -> ModelPreferenceView:
+    """The owner's pinned model and the one their newest turn used.
+
+    A missing store answers an empty preference rather than failing the whole
+    config read: a composer with no starting model is still a usable composer,
+    and this is a preference, not an authorization. Every other read here
+    already needs the store, so an ordinary database failure still surfaces as
+    it always did.
+    """
+    if store is None:
+        return ModelPreferenceView()
+    return await store.model_preferences.get_model_preference(user_id)
 
 
 async def _mcp_connections_for_user(

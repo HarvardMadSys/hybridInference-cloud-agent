@@ -72,62 +72,6 @@ class ConversationCommands(Protocol):
         """
         ...
 
-    async def create_follow_up(
-        self,
-        *,
-        parent_job_id: str,
-        user_id: str,
-        prompt: str,
-        runtime: str | None = None,
-        model: str | None = None,
-        reasoning_effort: str | None = None,
-        reset_reasoning_effort: bool = False,
-        skills: list[dict[str, Any]] | None = None,
-        attachments: list[dict[str, Any]] | None = None,
-        goal: GoalInput | None = None,
-        turn_source: str = "human",
-        goal_round: int | None = None,
-        goal_round_kind: str | None = None,
-        goal_revision: int | None = None,
-        yield_to_queued: bool = False,
-        client_request_id: str | None = None,
-        client_request_fingerprint: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Append a user turn and create the run that will answer it.
-
-        ``yield_to_queued`` refuses to append while another turn of this
-        conversation is already queued or running, answering
-        ``{"error": "yielded"}``. It is asked inside this transaction's thread
-        lock, which is the only place the answer cannot go stale.
-
-        ``goal`` sets or replaces the conversation's completion condition in the
-        same transaction that appends this turn.
-
-        ``turn_source``, ``goal_round``, ``goal_round_kind`` and
-        ``goal_revision`` describe an automatic round the platform is running
-        toward the conversation's goal. They are written by the continuation
-        path only; a person's message never sets them, and there is deliberately
-        no parameter here that could change the objective — an automatic round
-        cannot edit the goal it is running for.
-
-        ``reasoning_effort`` overrides the inherited depth; omitting it keeps
-        the parent's, as an omitted model does. ``reset_reasoning_effort``
-        clears it back to Auto — the one thing a null override cannot express,
-        since null is what "inherit" already sends.
-
-        Every follow-up is ``queued`` until all earlier turns have finished.
-        The thread row is locked before selecting the latest turn, so
-        concurrent submissions form one linear chain instead of siblings that
-        could later mutate the same branch at once. A request made from an old
-        turn also appends to the current tip, matching chat semantics.
-
-        ``client_request_id`` and ``client_request_fingerprint`` work as for
-        :meth:`create_job`: a resend returns the turn the first send made,
-        the same key under different content returns
-        ``{"error": "client_request_conflict"}``.
-        """
-        ...
-
     async def create_goal_round(
         self,
         *,
@@ -145,10 +89,11 @@ class ConversationCommands(Protocol):
         """Append one automatic round inside the caller's transaction.
 
         The scheduling obligation and the turn it produced commit together —
-        that pair is the whole reason this is not a second call to
-        :meth:`create_follow_up`. ``conn`` is already holding the conversation's
-        lock, taken by the controller before it read the state this decision was
-        made from, so nothing can be appended between the read and this write.
+        that pair is the whole reason this appends on the caller's transaction
+        rather than one of its own. ``conn`` is already holding the
+        conversation's lock, taken by the controller before it read the state
+        this decision was made from, so nothing can be appended between the read
+        and this write.
 
         Returns ``None`` when this event already produced a round. That is not
         an error: a replayed wakeup is supposed to find the work it already did
@@ -221,8 +166,9 @@ class ConversationCommands(Protocol):
         entitlement, tool-server connections, whether the session is still
         open. A resend must reach the job the first send made whatever has
         happened since; only a key that has never been used runs those checks.
-        :meth:`create_job` and :meth:`create_follow_up` still ask it
-        themselves, so a race that slips past the route is still resolved by
-        the unique index rather than by a second task.
+        :meth:`create_job` still asks it itself, and the message queue asks
+        its own under the conversation's lock, so a race that slips past the
+        route is still resolved by the unique index rather than by a second
+        task.
         """
         ...

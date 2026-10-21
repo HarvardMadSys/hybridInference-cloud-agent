@@ -23,6 +23,7 @@ import shlex
 import subprocess
 
 import pytest
+from tests.support.one_shot import one_shot_argv, one_shot_env
 
 from cloud_agent_host.runtimes import get_runtime
 from cloud_agent_shared.environment import inference_handoff
@@ -56,14 +57,17 @@ def _image() -> str:
 
 def _turn(runtime: str, owner: dict[str, str]) -> tuple[list[dict], dict[str, str]]:
     """Run one turn; return the gateway log and what the shell command saw."""
-    argv, cli_env = get_runtime(runtime).prepare(
+    live_argv, live_env = get_runtime(runtime).prepare_live(
         workdir="/tmp/work",
-        task_prompt="Run the probe command.",
         model="test-model",
         gateway_base_url="http://127.0.0.1:8900",
         credential=_PLATFORM,
         provides_isolation=True,
     )
+    # One prompt and an exit: the CLI's headless form, with the resident
+    # launch's own environment.
+    argv = one_shot_argv(runtime, live_argv, prompt="Run the probe command.", model="test-model")
+    cli_env = one_shot_env(live_env)
     rest, script = inference_handoff(owner)
     env = {"HOME": "/tmp/home", **rest, **cli_env, "BASH_ENV": _BASH_ENV}
     setup = (

@@ -13,11 +13,8 @@ import pytest
 from tests.unit.test_live_sessions import _live, _LiveProcess, _turn_lines
 
 from cloud_agent_host.drivers import (
-    ClaudeCodeDriver,
-    CodexDriver,
-    KiloDriver,
-    OpenCodeDriver,
     TurnInput,
+    driver_for,
 )
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, CodexRuntime, KiloRuntime, OpencodeRuntime
 from cloud_agent_shared.shared_protocol import INPUT_REFUSED, INPUT_TURN_ENDED
@@ -36,13 +33,13 @@ def _turn(tmp_path, runtime, kind="question"):
     process = _LiveProcess()
     context, spawned = _live(process, tmp_path)
     if runtime == "claude":
-        session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+        session = driver_for(ClaudeCodeRuntime()).launch_live(context)
     else:
         process.feed = _turn_lines(
             {"id": "initialize-1", "result": {}},
             {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
         )
-        session = CodexDriver(CodexRuntime()).launch_live(context)
+        session = driver_for(CodexRuntime()).launch_live(context)
         session.ensure_started(model="m", reasoning_effort=None)
         process.feed = _turn_lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
     turn = session.start_turn(TurnInput(prompt="choose", model="m"))
@@ -173,10 +170,10 @@ def test_terminal_native_boundary_clears_question_before_yielding(tmp_path, runt
     assert turn.answer_question(pending["request_id"], {}, reject=True).reason == INPUT_TURN_ENDED
 
 
-def _http_turn(tmp_path, driver=OpenCodeDriver, runtime=OpencodeRuntime):
+def _http_turn(tmp_path, runtime=OpencodeRuntime):
     process = _LiveProcess()
     process.feed = _turn_lines({"bridge": "ready", "session_id": "session-a"})
-    session = driver(runtime()).launch_live(_live(process, tmp_path)[0])
+    session = driver_for(runtime()).launch_live(_live(process, tmp_path)[0])
     session.ensure_started(model="m", reasoning_effort=None)
     turn = session.start_turn(TurnInput(prompt="choose", model="m"))
     request = {
@@ -205,11 +202,9 @@ def _http_turn(tmp_path, driver=OpenCodeDriver, runtime=OpencodeRuntime):
     return process, turn, request
 
 
-@pytest.mark.parametrize(
-    "driver,runtime", [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
-)
-def test_http_questions_preserve_order_and_restore_failed_posts(tmp_path, driver, runtime):
-    process, turn, _request = _http_turn(tmp_path, driver, runtime)
+@pytest.mark.parametrize("runtime", [OpencodeRuntime, KiloRuntime])
+def test_http_questions_preserve_order_and_restore_failed_posts(tmp_path, runtime):
+    process, turn, _request = _http_turn(tmp_path, runtime)
     (pending,) = turn.pending_questions()
     assert turn.answer_question(pending["request_id"], {"0": ["A", "B"]}).accepted
     command = json.loads(process.sent[-1])

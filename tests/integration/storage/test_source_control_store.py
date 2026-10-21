@@ -537,8 +537,8 @@ async def test_a_repo_grant_is_only_read_by_its_owner(
     store: PostgresSourceControlRepository,
 ) -> None:
     """Two users, the same installation id: the query must not blur them."""
-    await store.record_repo_grant(user_id=_OWNER, installation_id=7, account_login="mine")
-    await store.record_repo_grant(user_id=_OTHER, installation_id=7, account_login="theirs")
+    await _connect_github(store, installations=((7, "mine"),))
+    await _connect_github(store, user_id=_OTHER, installations=((7, "theirs"),))
 
     assert await store.list_repo_grants(user_id=_OWNER) == [
         {"installation_id": 7, "account_login": "mine"}
@@ -549,12 +549,12 @@ async def test_a_repo_grant_is_only_read_by_its_owner(
     assert await store.list_repo_grants(user_id="nobody") == []
 
 
-async def test_recording_the_same_installation_replaces_rather_than_duplicates(
+async def test_reconnecting_the_same_installation_replaces_rather_than_duplicates(
     store: PostgresSourceControlRepository,
 ) -> None:
     """The uniqueness is the constraint's, so a reconnect cannot accumulate."""
-    await store.record_repo_grant(user_id=_OWNER, installation_id=7, account_login="old")
-    await store.record_repo_grant(user_id=_OWNER, installation_id=7, account_login="new")
+    await _connect_github(store, installations=((7, "old"),))
+    await _connect_github(store, installations=((7, "new"),))
 
     assert await store.list_repo_grants(user_id=_OWNER) == [
         {"installation_id": 7, "account_login": "new"}
@@ -563,7 +563,7 @@ async def test_recording_the_same_installation_replaces_rather_than_duplicates(
 
 async def test_a_grant_may_name_no_account(store: PostgresSourceControlRepository) -> None:
     """An installation whose account could not be read is still a grant."""
-    await store.record_repo_grant(user_id=_OWNER, installation_id=9)
+    await _connect_github(store, installations=((9, None),))
 
     assert await store.list_repo_grants(user_id=_OWNER) == [
         {"installation_id": 9, "account_login": None}
@@ -574,7 +574,7 @@ async def test_revoking_reports_whether_it_removed_anything(
     store: PostgresSourceControlRepository,
 ) -> None:
     """Uninstalling twice is not an error, but it is not a removal either."""
-    await store.record_repo_grant(user_id=_OWNER, installation_id=7)
+    await _connect_github(store, installations=((7, None),))
 
     assert await store.revoke_repo_grant(user_id=_OWNER, installation_id=7) is True
     assert await store.revoke_repo_grant(user_id=_OWNER, installation_id=7) is False
@@ -585,8 +585,8 @@ async def test_revoking_leaves_another_users_grant_alone(
     store: PostgresSourceControlRepository,
 ) -> None:
     """The delete is scoped by user, which is what stops cross-tenant revocation."""
-    await store.record_repo_grant(user_id=_OWNER, installation_id=7)
-    await store.record_repo_grant(user_id=_OTHER, installation_id=7)
+    await _connect_github(store, installations=((7, None),))
+    await _connect_github(store, user_id=_OTHER, installations=((7, None),))
 
     assert await store.revoke_repo_grant(user_id=_OWNER, installation_id=7) is True
     assert await store.list_repo_grants(user_id=_OTHER) == [

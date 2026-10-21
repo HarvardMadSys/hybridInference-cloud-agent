@@ -19,7 +19,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxStatus,
 )
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError
-from cloud_agent_host.sandbox_archive import ArchiveIdentity, SandboxArchiveService
+from cloud_agent_host.sandbox_deletion_backup import ArchiveIdentity, SandboxDeletionBackupService
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.shared_session_supervisor import (
@@ -101,7 +101,7 @@ def archive_setup(tmp_path):
     identity = ArchiveIdentity(
         "thread-origin", "delete-1", 2, "container-1", "archives/delete-1.tar"
     )
-    service = SandboxArchiveService(supervisor, state_dir=tmp_path)
+    service = SandboxDeletionBackupService(supervisor, state_dir=tmp_path)
     return manager, supervisor, service, identity, spec, members
 
 
@@ -228,7 +228,7 @@ def test_deletion_retry_checks_absence_after_status_marks_container_lost(
 def test_discard_completes_stale_membership_after_proving_container_absent(archive_setup):
     manager, _supervisor, service, identity, spec, _members = archive_setup
     manager.current = None
-    restarted = SandboxArchiveService(
+    restarted = SandboxDeletionBackupService(
         SharedChatSessionSupervisor(manager), state_dir=service._state_dir
     )
     discard = replace(identity, request_id="discard-absent", archive_key="")
@@ -258,7 +258,7 @@ def test_discard_completes_stale_membership_after_proving_container_absent(archi
 @pytest.mark.parametrize("replacement", [False, True])
 def test_discard_does_not_mistake_an_unregistered_container_for_absence(archive_setup, replacement):
     manager, _supervisor, service, identity, spec, _members = archive_setup
-    restarted = SandboxArchiveService(
+    restarted = SandboxDeletionBackupService(
         SharedChatSessionSupervisor(manager), state_dir=service._state_dir
     )
     discard = replace(identity, request_id="discard-unregistered", archive_key="")
@@ -459,7 +459,7 @@ def test_durable_commit_receipt_recovers_crash_after_container_removal(archive_s
         service.commit(identity, sha256=receipt["sha256"], size_bytes=receipt["size_bytes"])
     assert manager.current is None
     assert (service._directory(identity) / "commit.json").exists()
-    restarted = SandboxArchiveService(
+    restarted = SandboxDeletionBackupService(
         SharedChatSessionSupervisor(manager), state_dir=service._state_dir
     )
     result = restarted.commit(identity, sha256=receipt["sha256"], size_bytes=receipt["size_bytes"])

@@ -693,7 +693,7 @@ def _contains_secret(value: Any, secret: str) -> bool:
     return False
 
 
-async def search(
+async def search(  # noqa: C901, PLR0915 complexity baseline, #771
     arguments: Mapping[str, Any], *, client: httpx.AsyncClient | None = None
 ) -> dict[str, Any]:
     """Call one selected provider and return a bounded, provider-neutral result."""
@@ -711,7 +711,7 @@ async def search(
         headers["Api-Version"] = _BRAVE_API_VERSION
         headers["Cache-Control"] = "no-cache"
 
-    async def send(http: httpx.AsyncClient) -> bytes:
+    async def send(http: httpx.AsyncClient) -> bytes:  # noqa: PLR0912 complexity baseline, #771
         try:
             async with asyncio.timeout(_REQUEST_TIMEOUT_S):
                 async with http.stream(

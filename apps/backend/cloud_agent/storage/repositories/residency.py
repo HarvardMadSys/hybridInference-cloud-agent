@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
+from cloud_agent.storage._sql.mcp_residency import mint_residency_sql
 
 if TYPE_CHECKING:
     import asyncpg
@@ -113,13 +114,7 @@ class PostgresResidencyRepository:
             row = await conn.fetchrow(
                 f"""
                 UPDATE agent_thread_sandbox_memberships AS m
-                SET residency_generation = residency_generation + 1,
-                    residency_status = 'hot',
-                    residency_lease_expires_at = clock_timestamp() + make_interval(secs => $2),
-                    residency_grant_id = NULL,
-                    residency_binding_id = NULL,
-                    residency_established_at = NOW(),
-                    residency_last_active_at = NOW(),
+                SET {mint_residency_sql("$2")},
                     updated_at = NOW()
                 FROM agent_jobs j, agent_attempts a, agent_sandboxes g, agent_threads t
                 WHERE m.thread_id = $1 AND m.active_attempt_id = $3
@@ -269,31 +264,6 @@ class PostgresResidencyRepository:
                 sandbox_id,
                 process_generation,
             )
-
-    async def resident_host(self, *, thread_id: str) -> dict[str, Any] | None:
-        """The live hot residency for a thread, or ``None``.
-
-        Live means unexpired: the reaper marks expiry on its own schedule,
-        and scheduling decisions between passes must not trust a lease the
-        clock has already taken away.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT m.thread_id, m.sandbox_id, g.host, g.runtime_id, g.runtime_version,
-                       m.residency_generation AS generation,
-                       m.residency_status AS status,
-                       m.residency_lease_expires_at AS lease_expires_at,
-                       m.residency_grant_id AS grant_id,
-                       m.residency_binding_id AS ledger_binding_id
-                FROM agent_thread_sandbox_memberships m
-                JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                WHERE m.thread_id = $1 AND m.residency_status = 'hot'
-                  AND m.residency_lease_expires_at > clock_timestamp()
-                """,
-                thread_id,
-            )
-        return None if row is None else dict(row)
 
     async def reap_expired_residencies(self) -> list[dict[str, Any]]:
         """Mark every hot residency whose lease lapsed as ``none``.

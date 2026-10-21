@@ -199,7 +199,7 @@ def _job(version: str | None) -> ClaimedJob:
 
 
 def test_the_reason_is_reportable_before_the_agent_starts() -> None:
-    """``run_once`` fails the attempt with this rather than letting it time out."""
+    """``run_turn`` fails the attempt with this rather than letting it time out."""
     assert runtime_version_unavailable(_job("9.9.9"), _Backend(_MENU)) is not None
     assert runtime_version_unavailable(_job("2.1.235"), _Backend(_MENU)) is None
 

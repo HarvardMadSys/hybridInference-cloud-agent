@@ -28,7 +28,7 @@ export type {
 const RUNS = '/admin/agent/runs';
 const STEPS = '/admin/agent/steps';
 
-/** Metadata only. User-authored content is retrieved through the audited endpoint. */
+/** Metadata only: never the turn's prompt, result or raw error. */
 export interface AdminRun {
   id: string;
   title: string | null;

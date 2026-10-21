@@ -23,7 +23,6 @@ from cloud_agent.schemas import (
 from cloud_agent.session_statistics import (
     SessionStatistics,  # noqa: TC001 — Pydantic resolves this at runtime.
 )
-from cloud_agent_shared.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 
 
 class AdminRun(BaseModel):
@@ -99,66 +98,6 @@ class AdminRunDetail(BaseModel):
     capabilities: AdminCapabilities = Field(default_factory=AdminCapabilities)
 
 
-class AdminActivity(BaseModel):
-    """An allowlisted event envelope; created_at is the receipt timestamp."""
-
-    id: int
-    attempt_id: int
-    attempt_no: int
-    seq: int
-    event_type: str
-    created_at: datetime
-    tool_use_id: str | None = None
-    tool_name: str | None = None
-    is_error: bool | None = None
-    has_content: bool = False
-
-
-class AdminActivityPage(BaseModel):
-    """Events ordered within attempts, from a fixed upper event ID."""
-
-    events: list[AdminActivity]
-    next_cursor: str | None = None
-
-
-class AdminEventContent(BaseModel):
-    """One explicitly requested, audited and byte-bounded event payload."""
-
-    id: int
-    attempt_id: int
-    seq: int
-    event_type: str
-    created_at: datetime
-    payload: dict[str, Any]
-    truncated: bool = False
-
-
-def bounded_event_content(row: dict[str, Any]) -> AdminEventContent:
-    """Cap the complete response, including JSON escapes, envelope and notice."""
-    content = AdminEventContent.model_validate(row)
-    if len(content.model_dump_json().encode("utf-8")) <= MAX_EVENT_PAYLOAD_BYTES:
-        return content
-    original = json.dumps(content.payload, ensure_ascii=False)
-    original_bytes = len(original.encode("utf-8"))
-    content.truncated = True
-    content.payload = {
-        "preview": "",
-        "truncated": True,
-        "original_payload_bytes": original_bytes,
-        "truncation_notice": "Event exceeds the 256 KiB response limit; showing a preview.",
-    }
-    low, high = 0, min(len(original), MAX_EVENT_PAYLOAD_BYTES)
-    while low < high:
-        middle = (low + high + 1) // 2
-        content.payload["preview"] = original[:middle]
-        if len(content.model_dump_json().encode("utf-8")) <= MAX_EVENT_PAYLOAD_BYTES:
-            low = middle
-        else:
-            high = middle - 1
-    content.payload["preview"] = original[:low]
-    return content
-
-
 class RunFilters(BaseModel):
     """Exact-match selectors; none of them searches event or prompt content."""
 
@@ -181,19 +120,6 @@ class RunCursor(BaseModel):
     until: AwareDatetime
     created_at: AwareDatetime
     job_id: str = Field(min_length=1, max_length=256)
-
-
-class ActivityCursor(BaseModel):
-    """Do not reuse an attempt-local sequence as a job-wide cursor."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    version: Literal[1] = 1
-    scope: str
-    snapshot_id: int = Field(ge=0, le=2**63 - 1)
-    attempt_no: int = Field(ge=1, le=2**31 - 1)
-    attempt_id: int = Field(ge=1, le=2**63 - 1)
-    seq: int = Field(ge=0, le=2**31 - 1)
 
 
 _Cursor = TypeVar("_Cursor", bound=BaseModel)

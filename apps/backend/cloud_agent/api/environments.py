@@ -50,11 +50,11 @@ from cloud_agent_shared.storable_text import storable_json
 class CredentialSafeRoute(APIRoute):
     """Keep submitted secrets out of validation errors and generic failures."""
 
-    def get_route_handler(self) -> Any:
+    def get_route_handler(self) -> Any:  # noqa: C901 complexity baseline, #771
         """Wrap environment inputs in safe, non-cacheable error responses."""
         original = super().get_route_handler()
 
-        async def safe(request: Request) -> Response:
+        async def safe(request: Request) -> Response:  # noqa: C901, PLR0912 complexity baseline, #771
             try:
                 response = await original(request)
             except RequestValidationError as exc:
