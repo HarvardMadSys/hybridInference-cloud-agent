@@ -907,6 +907,7 @@ class SandboxArchiveService:
                 (maximum, f"compressed sandbox archive exceeds the {maximum}-byte object limit"),
             ),
             what="a compressed sandbox archive",
+            source="sandbox archive bundle builder",
             check=lambda: self._check_deadline(deadline),
         )
         metadata: dict[str, object] = {

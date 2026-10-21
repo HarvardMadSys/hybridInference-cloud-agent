@@ -91,6 +91,8 @@ class BoundedDigestWriter:
     ``limits`` pairs a byte ceiling with the message a write past it is
     refused with; they are checked in order. ``check`` runs around every
     call, so an elapsed deadline stops a long copy between writes.
+    ``source`` names what writes to the sink and ``what`` what it spools,
+    for the errors a non-bytes or a short write raises.
     """
 
     def __init__(
@@ -99,11 +101,13 @@ class BoundedDigestWriter:
         *,
         limits: Sequence[tuple[int, str]],
         what: str,
+        source: str,
         check: Callable[[], None] = _no_check,
     ) -> None:
         self._stream = stream
         self._limits = tuple(limits)
         self._what = what
+        self._source = source
         self._check = check
         self._digest = hashlib.sha256()
         self.size = 0
@@ -112,7 +116,7 @@ class BoundedDigestWriter:
         """Write and hash ``chunk``, unless it would take the total past a limit."""
         self._check()
         if not isinstance(chunk, (bytes, bytearray, memoryview)):
-            raise SandboxError("sandbox archive fetch callback wrote non-bytes data")
+            raise SandboxError(f"{self._source} wrote non-bytes data")
         projected = self.size + len(chunk)
         for maximum, message in self._limits:
             if projected > maximum:
@@ -165,6 +169,7 @@ def _fetch_archive(
             ),
         ),
         what="a sandbox path archive",
+        source="sandbox archive fetch callback",
     )
     try:
         reported_size = fetch_archive(

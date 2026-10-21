@@ -464,6 +464,40 @@ def test_initial_upload_failure_logs_safe_type_and_discards_the_spool(
     assert unsafe not in caplog.text
 
 
+def test_a_non_bytes_write_to_the_compressed_bundle_names_the_bundle_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compressed bundle's writer names what writes to it, not the per-path callback."""
+
+    def writes_text(out, **_kwargs: object) -> dict[str, object]:
+        out.write("not bytes")
+        return {}
+
+    monkeypatch.setattr(
+        "cloud_agent_host.sandbox_archives.build_sandbox_archive_bundle", writes_text
+    )
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(_config())
+    service = _service(manager, uploader)
+    service.start()
+    try:
+        with pytest.raises(
+            SandboxError, match=r"^sandbox archive bundle builder wrote non-bytes data$"
+        ):
+            service.capture_initial(
+                RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+                expected_container_id=_CONTAINER_ID,
+                preparation_id=_PREPARATION_ID,
+                base_sha=_BASE_SHA,
+                members=(),
+            )
+    finally:
+        service.close()
+
+    assert uploader.calls == []
+
+
 def test_initial_conditional_conflict_has_exactly_three_total_put_attempts(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
