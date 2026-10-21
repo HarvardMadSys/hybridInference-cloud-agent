@@ -179,7 +179,7 @@ class PostgresPendingMessageRepository:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
 
-    async def submit_message(
+    async def submit_message(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         *,
         thread_id: str,
@@ -1018,7 +1018,7 @@ class PostgresPendingMessageRepository:
                 )
             return await read_pending_message(conn, message_id)
 
-    async def settle_queue(
+    async def settle_queue(  # noqa: PLR0912 complexity baseline, #771
         self, *, thread_id: str, prepared: PreparedHead | None = None
     ) -> SettleOutcome:
         """Act on the newest turn's ending, and send the first message if it may go.

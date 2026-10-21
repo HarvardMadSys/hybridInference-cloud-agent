@@ -1459,7 +1459,7 @@ class PostgresMcpConnectionRepository:
             await self._flush_remembered_approvals(row)
         return dict(row) if row is not None else None
 
-    async def claim_mcp_invocation(
+    async def claim_mcp_invocation(  # noqa: PLR0912 complexity baseline, #771
         self,
         *,
         invocation_id: int,
@@ -1951,23 +1951,6 @@ class PostgresMcpConnectionRepository:
             )
         return [dict(row) for row in rows]
 
-    async def create_mcp_connector(
-        self, *, user_id: str, name: str, registration_hash: str
-    ) -> dict[str, Any]:
-        """Register a user-run connector in the pending state."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO agent_mcp_connectors (user_id, name, registration_hash)
-                VALUES ($1, $2, $3)
-                RETURNING id, user_id, name, status, mounts, created_at, last_seen_at
-                """,
-                user_id,
-                name,
-                registration_hash,
-            )
-        return dict(row)
-
     async def list_mcp_connectors(self, *, user_id: str) -> list[dict[str, Any]]:
         """Every connector this user registered."""
         async with self._pool.acquire() as conn:
@@ -1979,186 +1962,6 @@ class PostgresMcpConnectionRepository:
                 user_id,
             )
         return [dict(row) for row in rows]
-
-    async def update_mcp_connector(
-        self,
-        *,
-        connector_id: int,
-        user_id: str,
-        name: str | None = None,
-        mounts: list[str] | None = None,
-    ) -> dict[str, Any] | None:
-        """Rename a connector or change the resources it may reach.
-
-        Neither edit moves the connections' versions on its own: ``mounts`` is
-        what the connector is allowed to see on the user's machine, and widening
-        it is a decision the connector makes locally, while the platform's
-        record of it is advisory. Binding a *connection* to the connector is the
-        security-relevant edit, and that is where the versions move.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                UPDATE agent_mcp_connectors
-                SET name = COALESCE($3, name),
-                    mounts = COALESCE($4, mounts)
-                WHERE id = $1 AND user_id = $2 AND status <> 'revoked'
-                RETURNING id, user_id, name, status, mounts, created_at, last_seen_at, revoked_at
-                """,
-                connector_id,
-                user_id,
-                name,
-                list(mounts) if mounts is not None else None,
-            )
-        return dict(row) if row is not None else None
-
-    async def bind_mcp_connection_connector(
-        self,
-        *,
-        connection_id: int,
-        user_id: str,
-        connector_id: int,
-    ) -> dict[str, Any] | None:
-        """Route one connection through one connector, moving both versions.
-
-        ``connector`` is on the design's list of security-relevant configuration:
-        it decides *where* a local process runs, so choosing it is as much a
-        change of target as editing the command. Both revisions move, which
-        invalidates every session binding approved against the previous answer,
-        and the connector's authorized set is written in the same transaction so
-        the two cannot disagree about what it may serve. Every previous
-        authorization row for the connection is removed in that transaction
-        before the new pair is inserted.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            owned_connector = await conn.fetchval(
-                """
-                SELECT id FROM agent_mcp_connectors
-                WHERE id = $1 AND user_id = $2 AND status <> 'revoked'
-                FOR SHARE
-                """,
-                connector_id,
-                user_id,
-            )
-            if owned_connector is None:
-                return None
-            row = await conn.fetchrow(
-                f"""
-                UPDATE agent_mcp_connections c
-                SET connector_id = $3,
-                    config_revision = c.config_revision + 1,
-                    authorization_epoch = c.authorization_epoch + 1,
-                    updated_at = NOW()
-                WHERE c.id = $1 AND c.user_id = $2 AND c.deleted_at IS NULL
-                  AND c.location = 'user-connector'
-                RETURNING {self._MCP_CONNECTION_COLUMNS}
-                """,
-                connection_id,
-                user_id,
-                connector_id,
-            )
-            if row is None:
-                return None
-            await conn.execute(
-                "DELETE FROM agent_mcp_connector_connections WHERE connection_id = $1",
-                connection_id,
-            )
-            await conn.execute(
-                """
-                INSERT INTO agent_mcp_connector_connections (connector_id, connection_id)
-                VALUES ($1, $2) ON CONFLICT DO NOTHING
-                """,
-                connector_id,
-                connection_id,
-            )
-        return self._mcp_connection(row)
-
-    async def unbind_mcp_connection_connector(
-        self, *, connection_id: int, user_id: str, connector_id: int
-    ) -> dict[str, Any] | None:
-        """Stop routing one connection through the connector the caller named.
-
-        ``connector_id`` is matched in the same statement that clears the
-        route. A request that names connector A must not detach a connection
-        currently bound to B, and only that pair's authorization row is removed.
-        The same version movement as binding applies when the pair matches: a
-        connection that has moved back to "nowhere to run" is not the one a
-        session was approved against.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            row = await conn.fetchrow(
-                f"""
-                UPDATE agent_mcp_connections c
-                SET connector_id = NULL,
-                    config_revision = c.config_revision + 1,
-                    authorization_epoch = c.authorization_epoch + 1,
-                    updated_at = NOW()
-                WHERE c.id = $1 AND c.user_id = $2 AND c.connector_id = $3
-                RETURNING {self._MCP_CONNECTION_COLUMNS}
-                """,
-                connection_id,
-                user_id,
-                connector_id,
-            )
-            if row is None:
-                return None
-            await conn.execute(
-                """
-                DELETE FROM agent_mcp_connector_connections
-                WHERE connector_id = $1 AND connection_id = $2
-                """,
-                connector_id,
-                connection_id,
-            )
-        return self._mcp_connection(row)
-
-    async def revoke_mcp_connector(self, *, connector_id: int, user_id: str) -> bool:
-        """Revoke a connector and detach everything that routed through it.
-
-        One transaction, because the two halves are the same decision: a
-        connector marked revoked while its connections still name it would leave
-        jobs resolving to a target the owner has withdrawn, and each detached
-        connection has its versions moved so the sessions approved against it
-        stop working rather than quietly pointing somewhere else.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            revoked = await conn.fetchval(
-                """
-                UPDATE agent_mcp_connectors
-                SET status = 'revoked', revoked_at = NOW()
-                WHERE id = $1 AND user_id = $2 AND status <> 'revoked'
-                RETURNING id
-                """,
-                connector_id,
-                user_id,
-            )
-            if revoked is None:
-                return False
-            await conn.execute(
-                """
-                UPDATE agent_mcp_connections
-                SET connector_id = NULL,
-                    config_revision = config_revision + 1,
-                    authorization_epoch = authorization_epoch + 1,
-                    updated_at = NOW()
-                WHERE connector_id = $1
-                """,
-                connector_id,
-            )
-            await conn.execute(
-                "DELETE FROM agent_mcp_connector_connections WHERE connector_id = $1",
-                connector_id,
-            )
-        return True
-
-    async def list_mcp_connector_connections(self, *, connector_id: int) -> list[int]:
-        """The connection ids one connector may serve."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT connection_id FROM agent_mcp_connector_connections WHERE connector_id = $1",
-                connector_id,
-            )
-        return [int(row["connection_id"]) for row in rows]
 
     async def expire_mcp_invocation(self, *, invocation_id: int) -> bool:
         """Expire one undispatched call when its waiting client or authorization is gone."""

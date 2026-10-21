@@ -322,7 +322,7 @@ def _can_refresh(row: Mapping[str, Any]) -> bool:
     )
 
 
-async def resolve_connection(
+async def resolve_connection(  # noqa: PLR0912 complexity baseline, #771
     store: McpConnectionRepository,
     *,
     row: Mapping[str, Any],

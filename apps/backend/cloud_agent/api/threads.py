@@ -236,7 +236,7 @@ async def list_agent_job_events(
 
 
 @router.get("/jobs/{job_id}/stream")
-async def stream_agent_job_events(
+async def stream_agent_job_events(  # noqa: C901 complexity baseline, #771
     job_id: str,
     request: Request,
     last_event_id: str | None = Header(None, alias="Last-Event-ID"),
@@ -265,7 +265,7 @@ async def stream_agent_job_events(
         with contextlib.suppress(ValueError):
             cursor = int(last_event_id)
 
-    async def event_source() -> AsyncIterator[Any]:
+    async def event_source() -> AsyncIterator[Any]:  # noqa: PLR0912 complexity baseline, #771
         nonlocal cursor
         clock = asyncio.get_running_loop().time
         last_frame = clock()

@@ -24,6 +24,7 @@ from cloud_agent_shared.operation_profiling import (
     PROFILING_CONTEXT_HEADER,
     answer_from_headers,
 )
+from cloud_agent_shared.sandbox_manager_wire import member_manifest
 from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER
 from cloud_agent_shared.storable_text import storable_json
 
@@ -36,10 +37,10 @@ SHARED_SESSION_FORK_TIMEOUT_S = 180.0
 SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S = 960.0
 
 #: The most this process buffers from one sandbox manager reply that carries workspace
-#: content: a file or listing, a one-shot command, Git inspection or a shared
-#: snapshot. The sandbox manager's own bounds, which a misbehaving host does not have to
-#: keep, stop those at 2 MiB of command or Git output plus 2 MiB of stderr, a
-#: 512 KiB preview or 5,000 directory entries. JSON escapes a control byte as
+#: content: a file or listing, Git inspection or a shared snapshot. The sandbox
+#: manager's own bounds, which a misbehaving host does not have to keep, stop
+#: those at 2 MiB of Git output plus 2 MiB of stderr, a 512 KiB preview or 5,000
+#: directory entries. JSON escapes a control byte as
 #: six bytes, the widest any character grows, so no honest reply passes 24 MiB.
 MAX_SANDBOX_MANAGER_CONTENT_BYTES = 32 * 1024 * 1024
 #: The same for every other reply: lifecycle answers, terminal bookkeeping,
@@ -47,7 +48,7 @@ MAX_SANDBOX_MANAGER_CONTENT_BYTES = 32 * 1024 * 1024
 #: cut from protocol records of at most 8 MiB.
 MAX_SANDBOX_MANAGER_CONTROL_BYTES = 16 * 1024 * 1024
 #: The route suffixes whose replies are workspace content.
-_CONTENT_ROUTES = frozenset({"files", "terminal", "git", "snapshot"})
+_CONTENT_ROUTES = frozenset({"files", "git", "snapshot"})
 
 
 async def _read_capped(response: httpx.Response, limit: int) -> bytes | None:
@@ -75,6 +76,32 @@ def _json_object(body: bytes) -> dict[str, Any] | None:
     except ValueError:
         return None
     return value if isinstance(value, dict) else None
+
+
+def identity_from_row(row: Mapping[str, Any], *, members: list[dict[str, Any]]) -> dict[str, Any]:
+    """The wire identity of the group a durable sandbox row describes.
+
+    The row's container is the one the request expects, and its start fence
+    was read after the request's own was taken: the request may start the
+    container. ``members`` is the manifest the request carries
+    (:func:`~cloud_agent_shared.sandbox_manager_wire.member_manifest`).
+    """
+    return {
+        "sandbox_id": row["sandbox_id"],
+        "generation": row["generation"],
+        "origin_thread_id": row["origin_thread_id"],
+        "runtime_id": row["runtime_id"],
+        "runtime_version": row.get("runtime_version"),
+        "sandbox_image_digest": row.get("sandbox_image_digest"),
+        "expected_container_id": row.get("container_id"),
+        "resident_slot_capacity": row["resident_slot_capacity"],
+        "memory_limit": row["memory_limit"],
+        "cpu_limit": row["cpu_limit"],
+        "disk_limit_mib": row.get("disk_limit_mib", 0),
+        "stop_timeout_s": row["stop_timeout_seconds"],
+        "members": members,
+        "start_seq": row.get("start_seq"),
+    }
 
 
 @dataclass
@@ -479,39 +506,6 @@ class SandboxManagerClient:
             "PUT", workspace_id, "files", params={"path": path}, json={"content": content}
         )
 
-    async def terminal(
-        self,
-        workspace_id: str,
-        *,
-        command: str,
-        cwd: str,
-        timeout_seconds: float,
-        environment: Any = None,
-    ) -> dict[str, Any]:
-        """Execute one bounded command in an isolated workspace sandbox."""
-        if environment is not None and environment.required:
-            await self.require_environment_capability(environment)
-        else:
-            environment = None
-        return await self._request(
-            "POST",
-            workspace_id,
-            "terminal",
-            json={
-                "command": command,
-                "cwd": cwd,
-                "timeout_seconds": timeout_seconds,
-                # A terminal needs no snapshot fields, which an older
-                # broker would refuse.
-                **(
-                    {"environment": environment_payload(environment, ())}
-                    if environment is not None
-                    else {}
-                ),
-            },
-            timeout=timeout_seconds + 10,
-        )
-
     async def create_terminal(
         self,
         workspace_id: str,
@@ -777,23 +771,9 @@ class SandboxManagerClient:
         back to the owning supervisor without starting or cloning a container.
         """
         origin_thread_id = str(sandbox.get("origin_thread_id") or "")
-        members = []
-        allowed_member_fields = {
-            "thread_id",
-            "native_session_id",
-            "context_status",
-            "activation_generation",
-            "process_generation",
-            "residency_generation",
-            "resident_state",
-            "resident_slot_id",
-            "last_settled_job_id",
-        }
-        for raw in sandbox.get("group_members") or []:
-            if isinstance(raw, dict):
-                members.append(
-                    {key: value for key, value in raw.items() if key in allowed_member_fields}
-                )
+        members = member_manifest(
+            raw for raw in sandbox.get("group_members") or [] if isinstance(raw, dict)
+        )
         if not origin_thread_id or not members:
             raise SandboxManagerError(502, "The shared sandbox manifest is incomplete.")
         return await self._shared_sandbox_request(
@@ -801,20 +781,8 @@ class SandboxManagerClient:
             origin_thread_id,
             "register",
             json={
-                "sandbox_id": sandbox["sandbox_id"],
-                "generation": sandbox["generation"],
+                **identity_from_row(sandbox, members=members),
                 "origin_thread_id": origin_thread_id,
-                "runtime_id": sandbox["runtime_id"],
-                "runtime_version": sandbox.get("runtime_version"),
-                "sandbox_image_digest": sandbox.get("sandbox_image_digest"),
-                "expected_container_id": sandbox.get("container_id"),
-                "start_seq": sandbox.get("start_seq"),
-                "resident_slot_capacity": sandbox["resident_slot_capacity"],
-                "memory_limit": sandbox["memory_limit"],
-                "cpu_limit": sandbox["cpu_limit"],
-                "disk_limit_mib": sandbox.get("disk_limit_mib", 0),
-                "stop_timeout_s": sandbox["stop_timeout_seconds"],
-                "members": members,
             },
         )
 
@@ -880,19 +848,7 @@ class SandboxManagerClient:
         self,
         source_thread_id: str,
         *,
-        sandbox_id: str,
-        generation: int,
-        origin_thread_id: str,
-        runtime_id: str,
-        runtime_version: str | None,
-        sandbox_image_digest: str | None,
-        expected_container_id: str,
-        resident_slot_capacity: int,
-        memory_limit: str,
-        cpu_limit: str,
-        disk_limit_mib: int,
-        stop_timeout_s: int,
-        members: list[dict[str, Any]],
+        identity: dict[str, Any],
         operation_id: str,
         source_native_session_id: str,
         source_native_turn_no: int,
@@ -900,30 +856,18 @@ class SandboxManagerClient:
         target_slot_id: int,
         source_launch: dict[str, Any],
         target_launch: dict[str, Any],
-        start_seq: int | None = None,
     ) -> dict[str, Any]:
         """Materialize a prompt-free native child in the same sandbox.
 
-        ``start_seq`` is the fence the Fork took, as it may start the source.
+        ``identity`` is the group's (:func:`identity_from_row`); its start
+        fence is the one the Fork took, as it may start the source.
         """
         return await self._shared_sandbox_request(
             "POST",
             source_thread_id,
             "fork",
             json={
-                "sandbox_id": sandbox_id,
-                "generation": generation,
-                "origin_thread_id": origin_thread_id,
-                "runtime_id": runtime_id,
-                "runtime_version": runtime_version,
-                "sandbox_image_digest": sandbox_image_digest,
-                "expected_container_id": expected_container_id,
-                "resident_slot_capacity": resident_slot_capacity,
-                "memory_limit": memory_limit,
-                "cpu_limit": cpu_limit,
-                "disk_limit_mib": disk_limit_mib,
-                "stop_timeout_s": stop_timeout_s,
-                "members": members,
+                **identity,
                 "operation_id": operation_id,
                 "source_native_session_id": source_native_session_id,
                 "source_native_turn_no": source_native_turn_no,
@@ -931,7 +875,6 @@ class SandboxManagerClient:
                 "target_slot_id": target_slot_id,
                 "source_launch": source_launch,
                 "target_launch": target_launch,
-                "start_seq": start_seq,
             },
             timeout=(
                 SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S
@@ -940,34 +883,10 @@ class SandboxManagerClient:
             ),
         )
 
-    @staticmethod
-    def _shared_identity(snapshot: dict[str, Any]) -> dict[str, Any]:
-        """Copy only the reviewed immutable group/member manifest fields.
-
-        With them goes the group's start fence, read after the request's own
-        was taken: both requests may start the container.
-        """
-        return {
-            "sandbox_id": snapshot["sandbox_id"],
-            "generation": snapshot["generation"],
-            "origin_thread_id": snapshot["origin_thread_id"],
-            "runtime_id": snapshot["runtime_id"],
-            "runtime_version": snapshot.get("runtime_version"),
-            "sandbox_image_digest": snapshot.get("sandbox_image_digest"),
-            "expected_container_id": snapshot.get("container_id"),
-            "resident_slot_capacity": snapshot["resident_slot_capacity"],
-            "memory_limit": snapshot["memory_limit"],
-            "cpu_limit": snapshot["cpu_limit"],
-            "disk_limit_mib": snapshot.get("disk_limit_mib", 0),
-            "stop_timeout_s": snapshot["stop_timeout_seconds"],
-            "members": snapshot["members"],
-            "start_seq": snapshot.get("start_seq"),
-        }
-
     async def capture_shared_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         """Ask the owning host for one bounded, generation-fenced Git diff."""
         payload = {
-            **self._shared_identity(snapshot),
+            **identity_from_row(snapshot, members=snapshot["members"]),
             "snapshot_id": snapshot["snapshot_id"],
             "workspace_epoch": snapshot["workspace_epoch"],
             "base_sha": snapshot["base_sha"],
@@ -992,7 +911,7 @@ class SandboxManagerClient:
     ) -> dict[str, Any]:
         """Import trusted commit objects without changing workspace state."""
         payload = {
-            **self._shared_identity(snapshot),
+            **identity_from_row(snapshot, members=snapshot["members"]),
             "snapshot_id": snapshot["snapshot_id"],
             "commit_sha": commit_sha,
             "bundle_b64": base64.b64encode(bundle).decode("ascii"),

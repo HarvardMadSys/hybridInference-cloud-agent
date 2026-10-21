@@ -882,7 +882,7 @@ class ResidentTransportFactory:
             ),
         )
 
-    def fork_native(
+    def fork_native(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         source: ResidentTransport[DialectRuntime],

@@ -212,7 +212,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             return False
         return isinstance(event, dict) and event.get("type") == "result"
 
-    def parse_event(self, line: str) -> NormalizedEvent | None:
+    def parse_event(self, line: str) -> NormalizedEvent | None:  # noqa: C901, PLR0912 complexity baseline, #771
         """Normalize one stream-json line."""
         line = line.strip()
         if not line:

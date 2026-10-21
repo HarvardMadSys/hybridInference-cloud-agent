@@ -52,6 +52,7 @@ from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.gateway import GatewayError
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.model_preference import ModelPreferenceView
 from cloud_agent.storage.repositories.conversation_commands import _goal_round_metadata
 from cloud_agent.storage.repositories.goals import _pause_detail
 from cloud_agent.tokens import mint_worker_token, parse_residency_mcp_token
@@ -409,6 +410,10 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self.mcp_connections: dict[int, dict[str, Any]] = {}
         self.mcp_capabilities: dict[int, dict[str, Any]] = {}
         self.mcp_bindings: dict[str, list[dict[str, Any]]] = {}
+        #: The owner's pinned default model, keyed by owner. There is no
+        #: last-used half here: it is derived from ``self.jobs``, exactly as the
+        #: repository derives it from the newest turn.
+        self.default_models: dict[str, str | None] = {}
         self.session_forks: dict[str, dict[str, Any]] = {}
         #: The owner's waiting messages, and each thread's two queue facts, the
         #: way ``agent_pending_messages`` and ``agent_threads`` hold them.
@@ -419,6 +424,18 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self._next_connection = 1
         self._next_event_id = 1
         self._next_job = 1
+
+    async def get_model_preference(self, user_id: str) -> ModelPreferenceView:
+        return ModelPreferenceView.of(self.default_models.get(user_id), self._last_model(user_id))
+
+    async def set_default_model(self, user_id: str, model: str | None) -> ModelPreferenceView:
+        self.default_models[user_id] = model
+        return await self.get_model_preference(user_id)
+
+    def _last_model(self, user_id: str) -> str | None:
+        """The newest owned turn's model, as the repository derives it."""
+        jobs = [job for job in self.jobs.values() if job.get("user_id") == user_id]
+        return max(jobs, key=lambda job: job["id"])["model"] if jobs else None
 
     # -- MCP connections --
     #
@@ -3222,6 +3239,109 @@ async def test_config_catalog_failure_offers_no_models_or_efforts(
     assert response.json()["runtimes"]
 
 
+def _with_deployment_default(monkeypatch, value: str) -> None:
+    """Set the administrator's default model without disturbing anything else.
+
+    Two readers share this state and must keep working: the repository
+    allowlist (read through ``setting_env``, and falling back to the
+    environment while no snapshot exists) and the new default model. Building a
+    snapshot of pure defaults would close the allowlist and refuse every job,
+    so an absent snapshot is left absent and the environment default is used
+    for the setting under test instead.
+    """
+    from cloud_agent import settings
+
+    if settings._values is None:
+        monkeypatch.setenv("AGENT_DEFAULT_MODEL", value)
+        return
+    monkeypatch.setattr(settings, "_values", {**settings._values, "default_model": value})
+
+
+async def test_config_reports_the_model_a_new_task_should_start_on(
+    client: AsyncClient, store: FakeStorage
+):
+    """The composer's starting model comes from the owner, narrowed to the catalog.
+
+    Three readings of one field: no choice yet, a remembered last-used model,
+    and a pin. The pin has to be narrowed like everything else — a model the
+    gateway has retired must not be pre-selected, or the picker would describe
+    a job the create endpoint refuses.
+    """
+    first = await client.get("/v1/agent/config")
+    # This catalog has no deepseek-v4-flash, so the shipped default is skipped
+    # exactly like any other unavailable layer.
+    assert "deepseek-v4-flash" not in first.json()["models"]
+    assert first.json()["default_model"] is None
+
+    await _create_job(client, model="qwen-next")
+    remembered = await client.get("/v1/agent/config")
+    assert remembered.json()["default_model"] == "qwen-next"
+
+    store.default_models[_OWNER] = "glm-5.1"
+    pinned = await client.get("/v1/agent/config")
+    assert pinned.json()["default_model"] == "glm-5.1"
+
+    # A retired pin falls back to the last used model rather than being offered.
+    store.default_models[_OWNER] = "retired-model"
+    retired = await client.get("/v1/agent/config")
+    assert retired.json()["default_model"] == "qwen-next"
+
+
+async def test_config_falls_back_to_the_deployment_default_only_without_history(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """The administrator's default reaches new users, never existing ones.
+
+    This is the ordering that matters: a saved deployment default must not move
+    a user who already has a model of their own. Otherwise changing one admin
+    setting silently switches every existing user's next task onto a different
+    model.
+    """
+    _with_deployment_default(monkeypatch, "glm-5.1")
+
+    # No history, no pin: the deployment default is the starting point.
+    assert (await client.get("/v1/agent/config")).json()["default_model"] == "glm-5.1"
+
+    # A user with history keeps their own model.
+    await _create_job(client, model="qwen-next")
+    assert (await client.get("/v1/agent/config")).json()["default_model"] == "qwen-next"
+
+    # And an explicit pin still outranks both. Written straight to the fake:
+    # this app mounts the jobs surface only, and the pin's own route has its
+    # tests in test_model_preference_api.py.
+    store.default_models[_OWNER] = "glm-5.1"
+    assert (await client.get("/v1/agent/config")).json()["default_model"] == "glm-5.1"
+
+
+async def test_config_ignores_a_deployment_default_this_user_cannot_call(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """A deployment default outside the catalog is skipped, never forced."""
+    _with_deployment_default(monkeypatch, "retired-model")
+    config = (await client.get("/v1/agent/config")).json()
+
+    # Not offered: the composer leaves its control empty and asks.
+    assert config["default_model"] is None
+    assert "retired-model" not in config["models"]
+
+
+async def test_config_never_substitutes_the_first_offered_model(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """No layer resolved means no default — not the head of the catalog.
+
+    The composer used to fall back to `deepseek-v4-flash`, then to the first
+    model in the list. Both run the owner's task on a model they never picked,
+    which matters because models differ in cost, speed and capability.
+    """
+    _with_deployment_default(monkeypatch, "")
+    config = (await client.get("/v1/agent/config")).json()
+
+    # The catalog is not empty, so this is the "nothing chosen yet" case.
+    assert config["models"] == list(_TEST_MODELS)
+    assert config["default_model"] is None
+
+
 async def test_config_reads_independent_sources_concurrently(
     client: AsyncClient, store: FakeStorage, monkeypatch
 ):
@@ -3236,7 +3356,9 @@ async def test_config_reads_independent_sources_concurrently(
 
     async def wait_for_sources(name):
         started.add(name)
-        if len(started) == 3:
+        # Repository entitlement, the model catalog, MCP connections, and the
+        # owner's model preference: every independent source this read fans out.
+        if len(started) == 4:
             all_started.set()
         await release.wait()
 
@@ -3264,9 +3386,15 @@ async def test_config_reads_independent_sources_concurrently(
         account_reads += 1
         return None
 
+    async def preference(user_id):
+        assert user_id == _OWNER
+        await wait_for_sources("preference")
+        return ModelPreferenceView.of(None, "glm-5.1")
+
     monkeypatch.setattr(config_api, "repos_for_user", repositories)
     monkeypatch.setattr(_FakeGateway, "model_catalog_with_reasoning_efforts", model_options)
     monkeypatch.setattr(store, "list_mcp_connections", connections)
+    monkeypatch.setattr(store, "get_model_preference", preference)
     monkeypatch.setattr(store, "get_github_account", account)
     request = asyncio.create_task(client.get("/v1/agent/config"))
     try:
@@ -3517,9 +3645,9 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
 
         async def fork_shared_session(self, source_thread_id: str, **kwargs: Any):
             self.calls.append((source_thread_id, kwargs))
-            assert kwargs["expected_container_id"] == "container-shared"
-            assert kwargs["disk_limit_mib"] == 16384
-            assert kwargs["origin_thread_id"] == source_thread_id
+            assert kwargs["identity"]["expected_container_id"] == "container-shared"
+            assert kwargs["identity"]["disk_limit_mib"] == 16384
+            assert kwargs["identity"]["origin_thread_id"] == source_thread_id
             assert kwargs["source_native_session_id"] == "native-session-source"
             assert kwargs["source_native_turn_no"] == 1
             assert kwargs["target_thread_id"] != source_thread_id
@@ -3527,11 +3655,11 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
             assert kwargs["target_launch"]["plugins"] == plugins
             return {
                 "operation_id": kwargs["operation_id"],
-                "sandbox_id": kwargs["sandbox_id"],
-                "sandbox_generation": kwargs["generation"],
-                "container_id": kwargs["expected_container_id"],
-                "runtime_id": kwargs["runtime_id"],
-                "runtime_version": kwargs["runtime_version"],
+                "sandbox_id": kwargs["identity"]["sandbox_id"],
+                "sandbox_generation": kwargs["identity"]["generation"],
+                "container_id": kwargs["identity"]["expected_container_id"],
+                "runtime_id": kwargs["identity"]["runtime_id"],
+                "runtime_version": kwargs["identity"]["runtime_version"],
                 "source_thread_id": source_thread_id,
                 "source_native_session_id": kwargs["source_native_session_id"],
                 "target_thread_id": kwargs["target_thread_id"],
@@ -3603,11 +3731,11 @@ async def test_shared_chat_can_fork_from_a_specific_historical_turn(
             self.native_turns.append(kwargs["source_native_turn_no"])
             return {
                 "operation_id": kwargs["operation_id"],
-                "sandbox_id": kwargs["sandbox_id"],
-                "sandbox_generation": kwargs["generation"],
-                "container_id": kwargs["expected_container_id"],
-                "runtime_id": kwargs["runtime_id"],
-                "runtime_version": kwargs["runtime_version"],
+                "sandbox_id": kwargs["identity"]["sandbox_id"],
+                "sandbox_generation": kwargs["identity"]["generation"],
+                "container_id": kwargs["identity"]["expected_container_id"],
+                "runtime_id": kwargs["identity"]["runtime_id"],
+                "runtime_version": kwargs["identity"]["runtime_version"],
                 "source_thread_id": source_thread_id,
                 "source_native_session_id": kwargs["source_native_session_id"],
                 "target_thread_id": kwargs["target_thread_id"],
@@ -3681,11 +3809,11 @@ async def test_same_native_fork_request_has_one_external_coordinator(
             await finish.wait()
             return {
                 "operation_id": kwargs["operation_id"],
-                "sandbox_id": kwargs["sandbox_id"],
-                "sandbox_generation": kwargs["generation"],
-                "container_id": kwargs["expected_container_id"],
-                "runtime_id": kwargs["runtime_id"],
-                "runtime_version": kwargs["runtime_version"],
+                "sandbox_id": kwargs["identity"]["sandbox_id"],
+                "sandbox_generation": kwargs["identity"]["generation"],
+                "container_id": kwargs["identity"]["expected_container_id"],
+                "runtime_id": kwargs["identity"]["runtime_id"],
+                "runtime_version": kwargs["identity"]["runtime_version"],
                 "source_thread_id": source_thread_id,
                 "source_native_session_id": kwargs["source_native_session_id"],
                 "target_thread_id": kwargs["target_thread_id"],
@@ -3742,11 +3870,11 @@ async def test_ready_native_fork_retry_does_not_need_the_host(store: FakeStorage
             self.calls += 1
             return {
                 "operation_id": kwargs["operation_id"],
-                "sandbox_id": kwargs["sandbox_id"],
-                "sandbox_generation": kwargs["generation"],
-                "container_id": kwargs["expected_container_id"],
-                "runtime_id": kwargs["runtime_id"],
-                "runtime_version": kwargs["runtime_version"],
+                "sandbox_id": kwargs["identity"]["sandbox_id"],
+                "sandbox_generation": kwargs["identity"]["generation"],
+                "container_id": kwargs["identity"]["expected_container_id"],
+                "runtime_id": kwargs["identity"]["runtime_id"],
+                "runtime_version": kwargs["identity"]["runtime_version"],
                 "source_thread_id": source_thread_id,
                 "source_native_session_id": kwargs["source_native_session_id"],
                 "target_thread_id": kwargs["target_thread_id"],
@@ -3904,10 +4032,6 @@ async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: Fake
         params={"path": "README.md"},
         json={"content": "forbidden"},
     )
-    terminal = await client.post(
-        f"/v1/agent/jobs/{foreign['id']}/terminal",
-        json={"command": "pwd", "cwd": "/workspace"},
-    )
     terminal_session_requests = [
         await client.post(
             f"/v1/agent/jobs/{foreign['id']}/terminals",
@@ -3926,7 +4050,6 @@ async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: Fake
         await client.delete(f"/v1/agent/jobs/{foreign['id']}/terminals/term_1"),
     ]
     assert write.status_code == 404
-    assert terminal.status_code == 404
     assert all(response.status_code == 404 for response in terminal_session_requests)
     cancel = await client.post(f"/v1/agent/jobs/{foreign['id']}/cancel")
     assert cancel.status_code == 404
@@ -3942,7 +4065,7 @@ async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: Fake
 
 
 async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStorage, monkeypatch):
-    """Files, terminal and Git address the same retained chat workspace."""
+    """Files and Git address the same retained chat workspace."""
 
     class SandboxManager:
         def __init__(self) -> None:
@@ -3975,10 +4098,6 @@ async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStor
                 "source": "workspace",
             }
 
-        async def terminal(self, workspace_id: str, **kwargs):
-            self.calls.append(("terminal", workspace_id, kwargs["command"], kwargs["cwd"]))
-            return {"output": "ok\n", "stderr": "", "exit_code": 0, "cwd": "/workspace"}
-
         async def git(self, workspace_id: str, base_sha: str | None = None):
             self.calls.append(("git", workspace_id, base_sha))
             return {
@@ -4002,26 +4121,20 @@ async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStor
             params={"path": "README.md"},
             json={"content": "updated"},
         )
-        terminal = await local_client.post(
-            f"/v1/agent/jobs/{job_id}/terminal",
-            json={"command": "pwd", "cwd": "/workspace"},
-        )
         git = await local_client.get(f"/v1/agent/jobs/{job_id}/git")
 
     assert listing.status_code == 200
     assert listing.json()["writable"] is True
     assert listing.json()["source"] == "workspace"
     assert saved.status_code == 200
-    assert terminal.json()["output"] == "ok\n"
     assert git.json()["branch"] == "agent/thread"
     assert sandbox_manager.calls == [
         ("files", workspace_id, ""),
         ("write", workspace_id, "README.md", "updated"),
-        ("terminal", workspace_id, "pwd", "/workspace"),
         ("git", workspace_id, store.jobs[job_id].get("base_sha")),
     ]
     # Each request may start the stopped container, so each fences it first.
-    assert store.workspace_start_fences == [workspace_id] * 4
+    assert store.workspace_start_fences == [workspace_id] * 3
 
 
 async def test_binary_workspace_payload_preserves_owner_and_path_checks(
@@ -4135,10 +4248,6 @@ async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn
             self.calls.append(("write", workspace_id, path, content))
             raise AssertionError("durably fenced write reached the sandbox manager")
 
-        async def terminal(self, workspace_id: str, **kwargs):
-            self.calls.append(("terminal", workspace_id, kwargs["command"]))
-            raise AssertionError("durably fenced command reached the sandbox manager")
-
         async def terminal_input(self, workspace_id: str, terminal_id: str, *, data: str):
             self.calls.append(("input", workspace_id, terminal_id, data))
             raise AssertionError("durably fenced input reached the sandbox manager")
@@ -4167,10 +4276,6 @@ async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn
             f"/v1/agent/jobs/{job_id}/files?path=README.md",
             json={"content": "blocked"},
         )
-        command = await client.post(
-            f"/v1/agent/jobs/{job_id}/terminal",
-            json={"command": "touch blocked", "cwd": "/workspace"},
-        )
         wrote = await client.post(
             f"/v1/agent/jobs/{job_id}/terminals/term_1/input",
             json={"data": "eA=="},
@@ -4181,8 +4286,8 @@ async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn
         )
         killed = await client.delete(f"/v1/agent/jobs/{job_id}/terminals/term_1")
 
-    assert {saved.status_code, command.status_code, wrote.status_code, resized.status_code} == {409}
-    for response in (saved, command, wrote, resized):
+    assert {saved.status_code, wrote.status_code, resized.status_code} == {409}
+    for response in (saved, wrote, resized):
         assert response.json()["detail"]["error"]["type"] == "workspace_not_ready"
     assert killed.status_code == 200
     assert sandbox_manager.calls == [("delete", job["thread_id"], "term_1")]

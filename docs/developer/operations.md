@@ -820,44 +820,21 @@ not a bill, as the Gateway dashboard does.
 ## Reading a task's recorded events
 
 The admin console shows tool-call measurements in Resources and model records
-in LLM requests. To inspect raw runtime events for support or abuse
-investigations, use the two admin routes below. See the amendment in
-[the admin observability spec](../agents/specs/2026-09-10-admin-observability-v1.md).
+in LLM requests. It has no route to a task's raw runtime events: owners read
+their own through the session routes.
 
-**Metadata.** `GET /admin/agent/runs/{job_id}/activity` returns event
-envelopes ordered by execution: `event_type`, `created_at`, `is_error`,
-`has_content`, and — for `tool_use` and `tool_result` only — `tool_name` and
-`tool_use_id`. It accepts `attempt_id`, `cursor` and `limit` (1-200, default
-100). Timestamps are when the event reached the control plane, so they do not
-measure model latency, and one `message` is not one model request. Nothing in
-this response is content: lifecycle `phase` is deliberately not an allowlisted
-column, so a run's opening events all read as indistinguishable `lifecycle`
-rows here.
-
-**Content.** `POST /admin/agent/runs/{job_id}/events/{event_id}/content`
-returns one event's stored payload — prompt text, tool arguments, tool output
-or raw error text. It is audited before it is returned: the audit store records
-`agent.run.event_content.read` with the acting administrator, their IP, the
-task owner, and the job, event, attempt and sequence identity. **If the audit
-write fails the route answers 503 and discloses nothing.** Responses are capped
-at 256 KiB and set `truncated` when an oversized old record had to be
-previewed.
-
-Both routes require admin authorization. Owners read their own events through
-the session routes, which do not require an admin content-read audit.
-
-**Do not read `agent_job_events.payload` directly.** A `psql` query returns the
-same content with no audit record, no size bound and no column allowlist, which
-is the situation the content route exists to prevent. If reading events one at
-a time through the API is too awkward for a real investigation, that is a
-reason to improve the tooling, not a reason to go around the audit.
+**Do not read `agent_job_events.payload` directly.** A `psql` query returns
+prompt text, tool arguments and tool output with no audit record, no size bound
+and no column allowlist. If an investigation needs a task's raw events, that is
+a reason to build an audited route, not a reason to go around the audit.
 
 **Reading the trail.** _Admin → Audit log_ (`GET /admin/agent/audit-log`)
 lists what administrators did, newest first: settings and agent-version
 changes, server actions (pause, remove, placement, adding or releasing a
-server), measurement runs, and the content reads above. It filters by
-`category` (`settings`, `servers`, `measurements`, `content`) and pages with
-`before`, the oldest `id` of the previous page. The Servers page's polling
+server) and measurement runs. It filters by `category` (`settings`,
+`servers`, `measurements`, `content`; `content` holds the event-content reads a
+since-retired admin route recorded) and pages with `before`, the oldest `id` of
+the previous page. The Servers page's polling
 reads are not recorded; rows they left before that changed stay in
 `agent_admin_audit_log` and are never listed. The page names an administrator
 by user id only, because identity tokens carry no display name.
@@ -958,9 +935,9 @@ protocol capabilities are described below and in the
 
 The relay enforces these rules:
 
-- **Nothing is reachable by name.** A URL path segment is a _binding alias_ —
-  a name one conversation gave one connection — and a token names a job, so the
-  relay resolves the alias against that job's own bindings. A connection
+- **Nothing is reachable by name.** A tool name's prefix is a _binding alias_
+  — a name one conversation gave one connection — and a token names a job, so
+  the relay resolves the alias against that job's own bindings. A connection
   somebody else added cannot be named into existence.
 - **A session means exactly what it says.** Each capability carries a policy:
   `deny`, `confirm` or `allow`. An omitted capability is denied, including one
@@ -980,27 +957,13 @@ The relay enforces these rules:
 - **A connection is not a job.** Bindings are read fresh on every tool call
   rather than copied onto a job, so narrowing a session takes effect on its
   next call instead of at its next turn.
-- **A stream is checked while it runs.** The server-to-client stream that
-  `GET /v1/agent/mcp/<alias>` opens is one request lasting as long as the
-  server keeps it open. Every 5 seconds, whether or not the server is sending,
-  the relay checks it again as it checks a held call before dispatch: the
-  turn's fence, then the binding and connection, which must be the ones it was
-  opened under. The first check that fails ends the stream and closes the
-  upstream socket, so a stopped turn, a disconnected or retargeted connection,
-  or a binding turned off stops it within that interval.
-- **Two endpoints share one authorization function.**
-  `/v1/agent/mcp/<alias>` passes one connection's protocol through to the CLI.
-  `/v1/agent/mcp` is the merged host: it answers `initialize`, lists the job's
-  connections as one catalogue, and routes each invocation to its connection.
-  All five adapters receive only this merged endpoint, in one entry named
-  `session`. A fixed name and identity fit runtime allowlists; adding one entry
-  per connection would duplicate the merged catalogue. The per-connection route
-  remains available to clients needing unmodified protocol passthrough. A legacy
-  SSE server cannot initialize through a pipe, so the adapters use the merged
-  host instead, and the per-connection route answers a `GET` for one with 405
-  rather than relaying its stream: that stream opens by announcing the upstream
-  session its messages go to, which many such servers accept without the
-  credential, so the sandbox could use it past the relay.
+- **One endpoint.** `/v1/agent/mcp` is the merged host: it answers
+  `initialize`, lists the job's connections as one catalogue, and routes each
+  invocation to its connection. All five adapters receive it in one entry named
+  `session`, because a fixed name and identity fit runtime allowlists. It
+  answers requests only and opens no server-initiated stream. A legacy SSE
+  server is spoken to by the relay itself, so its stream never reaches the
+  sandbox.
 
 Tools and prompts use `<alias>__<name>` on the merged surface. Routing looks up
 that name in the catalogue; it never splits on `__`, because aliases can contain
@@ -1009,12 +972,10 @@ Resources use `mcp-resource://<connection-id>/<original-uri>` so equal upstream
 URIs remain distinct. Reading strips only that prefix and preserves the original
 URI and its percent encoding. Resources and prompts have their own permission
 scopes and pass through the same `decide` function as tools. An approval in the
-Tools panel releases the held invocation under the same policy on either
-endpoint.
+Tools panel releases the held invocation under the same policy.
 
 An unresolved connection is logged and skipped in merged listings so other
-connections remain usable. Its per-connection route still refuses the broken
-connection explicitly.
+connections remain usable.
 
 The merged host also serves the platform's own tools, which no connection
 provides. `web_search` is listed when a search provider is configured; the
@@ -1050,16 +1011,12 @@ or bridge; it crosses seams the per-layer suites do not.
 
 ### Connector configuration
 
-`/v1/agent/mcp/connectors` registers a user's machine, returns its registration
-secret once, and supports rename and revocation. The secret is hashed at rest.
-It also binds or unbinds a `user-connector` connection. Remote connections cannot
-be bound because the platform reaches those servers directly.
-
-Binding changes the execution target and both authorization versions. Revoking
-a connector detaches all its connections in the same transaction. No connector
-runtime ships yet: views report `runtime: "unavailable"`, and a bound connection
-is refused at use. Managed-worker connections likewise require an available
-worker. Configuration support does not establish execution support.
+No connector runtime ships, and the routes that registered, bound and revoked a
+user's machine are retired. A `user-connector` connection can still name a
+connector registered before then, and is refused at use. Deleting the
+connection removes its link to that connector, and the connector's authorization
+for it, in the same transaction. Managed-worker connections likewise require an
+available worker. Configuration support does not establish execution support.
 
 ### Deployment and rollback
 
@@ -3958,7 +3915,7 @@ API and runtime adapter. After changing that path, run at least:
 
 ```bash
 uv run pytest tests/unit/test_mcp_connection_config.py \
-  tests/unit/test_mcp_protocol_and_authorization.py tests/unit/test_mcp_proxy.py \
+  tests/unit/test_mcp_protocol_and_authorization.py \
   tests/servers/test_mcp_relay.py tests/servers/test_agent_jobs_api.py \
   tests/unit/test_agent_runtimes.py
 ```

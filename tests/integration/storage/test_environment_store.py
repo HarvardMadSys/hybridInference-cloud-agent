@@ -5,12 +5,16 @@ from __future__ import annotations
 # ruff: noqa: F811 -- imported pytest fixtures remain parameters
 import asyncio
 import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 from tests.integration.storage.test_agent_job_store import pool, store  # noqa: F401
 from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.environments import EnvironmentConflict, EnvironmentNotFound
+from cloud_agent.storage._sql.environment_runs import env_run_holds_slot
+from cloud_agent.storage.assembly import Storage
 from cloud_agent_shared.environment import EnvironmentScripts, EnvironmentVariable
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -605,6 +609,46 @@ async def test_expired_reservation_releases_capacity_but_fences_returning_host(
             "environment-host", "credential", _shared_claim_attestation()
         )
     )["id"] == next_run["id"]
+
+
+async def test_the_reaper_fails_a_run_at_the_instant_its_lease_ends(store, pool, monkeypatch):
+    """At the instant its lease ends a run holds no slot, and the reaper fails it.
+
+    One transaction keeps NOW() at that instant. A reaper that failed only the
+    leases that ended before it left the run running there, though it no longer
+    held a slot.
+    """
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    env = await _save(store)
+    run = await store.environments.create_environment_run(
+        "alice",
+        repo="org/repo",
+        base_sha="a" * 40,
+        selection={"environment_id": env["id"], "environment_id_provided": True},
+        key="boundary",
+    )
+    async with pool.acquire() as conn, conn.transaction():
+
+        @asynccontextmanager
+        async def borrow_connection():
+            yield conn
+
+        await conn.execute(
+            "UPDATE agent_environment_runs SET state='running',host='runner',lease_generation=1,"
+            "started_at=NOW(),lease_expires_at=NOW() WHERE id=$1",
+            run["id"],
+        )
+        reaper = Storage(SimpleNamespace(acquire=borrow_connection)).environments
+        await reaper.maintain_environments()
+        state = await conn.fetchval(
+            "SELECT state FROM agent_environment_runs WHERE id=$1", run["id"]
+        )
+        holding = await conn.fetchval(
+            f"SELECT COUNT(*) FROM agent_environment_runs WHERE id=$1 AND {env_run_holds_slot()}",
+            run["id"],
+        )
+    assert state == "failed"
+    assert holding == 0
 
 
 async def test_preflight_failure_releases_claim_without_decrypting_again(store, pool, monkeypatch):

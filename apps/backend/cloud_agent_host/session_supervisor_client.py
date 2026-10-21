@@ -119,6 +119,34 @@ def _error_detail(response: httpx.Response, refused: str) -> str:
     return f"{reason} ({problems})" if problems else reason
 
 
+def _group_identity(
+    spec: ChatSandboxSpec,
+    *,
+    members: builtins.list[dict[str, Any]],
+    expected_container_id: str | None,
+) -> dict[str, Any]:
+    """The wire identity of the group ``spec`` describes, with its member manifest.
+
+    The Sandbox Manager validates it as a
+    :class:`~cloud_agent_shared.sandbox_manager_wire.SharedGroupIdentity`.
+    """
+    return {
+        "sandbox_id": spec.sandbox_id,
+        "generation": spec.generation,
+        "origin_thread_id": spec.thread_id,
+        "runtime_id": spec.runtime_id,
+        "runtime_version": spec.runtime_version,
+        "sandbox_image_digest": spec.sandbox_image_digest,
+        "expected_container_id": expected_container_id,
+        "resident_slot_capacity": spec.resident_slot_capacity,
+        "memory_limit": spec.memory_limit,
+        "cpu_limit": spec.cpu_limit,
+        "disk_limit_mib": spec.disk_limit_mib,
+        "stop_timeout_s": spec.stop_timeout_s,
+        "members": members,
+    }
+
+
 class SessionSupervisorClient:
     """Use the sandbox manager credential without ever exposing it to a chat container."""
 
@@ -361,19 +389,9 @@ class SessionSupervisorClient:
             thread_id,
             "acquire",
             payload={
-                "sandbox_id": spec.sandbox_id,
-                "generation": spec.generation,
-                "origin_thread_id": spec.thread_id,
-                "runtime_id": spec.runtime_id,
-                "runtime_version": spec.runtime_version,
-                "sandbox_image_digest": spec.sandbox_image_digest,
-                "expected_container_id": expected_container_id,
-                "resident_slot_capacity": spec.resident_slot_capacity,
-                "memory_limit": spec.memory_limit,
-                "cpu_limit": spec.cpu_limit,
-                "disk_limit_mib": spec.disk_limit_mib,
-                "stop_timeout_s": spec.stop_timeout_s,
-                "members": members,
+                **_group_identity(
+                    spec, members=members, expected_container_id=expected_container_id
+                ),
                 "owner": owner,
                 "activation_generation": activation_generation,
                 "has_settled_context": has_settled_context,
@@ -492,19 +510,9 @@ class SessionSupervisorClient:
             "archive-initial",
             timeout=900.0,
             payload={
-                "sandbox_id": spec.sandbox_id,
-                "generation": spec.generation,
-                "origin_thread_id": spec.thread_id,
-                "runtime_id": spec.runtime_id,
-                "runtime_version": spec.runtime_version,
-                "sandbox_image_digest": spec.sandbox_image_digest,
-                "expected_container_id": expected_container_id,
-                "resident_slot_capacity": spec.resident_slot_capacity,
-                "memory_limit": spec.memory_limit,
-                "cpu_limit": spec.cpu_limit,
-                "disk_limit_mib": spec.disk_limit_mib,
-                "stop_timeout_s": spec.stop_timeout_s,
-                "members": members,
+                **_group_identity(
+                    spec, members=members, expected_container_id=expected_container_id
+                ),
                 "token": token,
                 "preparation_id": preparation_id,
                 "base_sha": base_sha,
@@ -528,19 +536,9 @@ class SessionSupervisorClient:
             "archive-initial/status",
             timeout=900.0,
             payload={
-                "sandbox_id": spec.sandbox_id,
-                "generation": spec.generation,
-                "origin_thread_id": spec.thread_id,
-                "runtime_id": spec.runtime_id,
-                "runtime_version": spec.runtime_version,
-                "sandbox_image_digest": spec.sandbox_image_digest,
-                "expected_container_id": expected_container_id,
-                "resident_slot_capacity": spec.resident_slot_capacity,
-                "memory_limit": spec.memory_limit,
-                "cpu_limit": spec.cpu_limit,
-                "disk_limit_mib": spec.disk_limit_mib,
-                "stop_timeout_s": spec.stop_timeout_s,
-                "members": members,
+                **_group_identity(
+                    spec, members=members, expected_container_id=expected_container_id
+                ),
                 "token": token,
                 "preparation_id": preparation_id,
             },

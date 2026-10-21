@@ -33,7 +33,7 @@ class SetupResult:
     detail: str = ""
 
 
-def run_setup(
+def run_setup(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
     script: str,
     workdir: str,

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import json
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -17,26 +15,21 @@ from tests.unit.test_ledger_snapshots import END, START, ledger_row
 
 from cloud_agent import identity
 from cloud_agent.admin_observability import (
-    AdminActivityPage,
     AdminRun,
     AdminRunList,
-    cursor_scope,
 )
 from cloud_agent.api import admin_runs, usage
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_gateway_client, get_storage
 from cloud_agent.app import create_app, create_mcp_app
 from cloud_agent.schemas import ResourceMetricBrief, RunResourceSummary
-from cloud_agent_shared.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 
 ADMIN = {"Authorization": "Bearer admin-observations-test"}
 PREFIX = "/admin/agent/runs"
 PATHS = [
     ("GET", PREFIX),
     ("GET", PREFIX + "/ajob_other"),
-    ("GET", PREFIX + "/ajob_other/activity"),
     ("GET", PREFIX + "/ajob_other/attempts/10/resources"),
-    ("POST", PREFIX + "/ajob_other/events/20/content"),
 ]
 
 
@@ -70,14 +63,6 @@ def setup(monkeypatch):
     monkeypatch.setenv(identity.ENV_SESSION_SECRET, "admin-observations-session-test-long-secret")
     monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
     run = _admin_run_row()
-    event = {
-        "id": 20,
-        "attempt_id": 10,
-        "seq": 1,
-        "event_type": "tool_use",
-        "created_at": START,
-        "payload": {"input": {"command": "private command"}},
-    }
     events = [
         {
             "job_id": run["id"],
@@ -105,7 +90,6 @@ def setup(monkeypatch):
         usage_inputs=AsyncMock(
             return_value={"job_ids": [run["id"]], "attempts": [], "events": events}
         ),
-        activity=AsyncMock(return_value=AdminActivityPage(events=[])),
         resources=AsyncMock(
             return_value={
                 "attempt_id": 10,
@@ -125,7 +109,6 @@ def setup(monkeypatch):
                 ],
             }
         ),
-        event_content=AsyncMock(return_value=event),
     )
 
     async def job_usage_reads(*, job_id: str, user_id: str) -> dict | None:
@@ -166,7 +149,7 @@ def setup(monkeypatch):
 
 @pytest.mark.parametrize("method,path", PATHS)
 @pytest.mark.parametrize("auth", ["missing", "invalid", "revoked"])
-async def test_every_read_and_reveal_requires_current_admin_permission(setup, method, path, auth):
+async def test_every_read_requires_current_admin_permission(setup, method, path, auth):
     app, queries, store, gateway = setup
     gateway.permissions = ["agent.use"]
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -187,7 +170,7 @@ async def test_every_read_and_reveal_requires_current_admin_permission(setup, me
 
 
 async def test_admin_reads_another_owner_but_owner_routes_are_unchanged(setup):
-    app, queries, store, _ = setup
+    app, _queries, store, _ = setup
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         admin = await client.get(PREFIX + "/ajob_other", headers=ADMIN)
         owner = await client.get("/v1/agent/jobs/ajob_other/usage")
@@ -209,7 +192,6 @@ async def test_admin_reads_another_owner_but_owner_routes_are_unchanged(setup):
     # The owner route reached the snapshot read and was refused in it; the
     # admin read above it must never come through this owner-scoped path.
     store.job_usage_reads.assert_awaited_once_with(job_id="ajob_other", user_id="admin-person")
-    queries.event_content.assert_not_awaited()
     store.record_admin_action.assert_not_awaited()
     store.queue_job_ledger_refresh.assert_not_awaited()
 
@@ -268,7 +250,6 @@ async def test_session_statistics_reuses_safe_usage_inputs_without_additional_re
     }
     assert "hashed-identity" not in response.text
     queries.usage_inputs.assert_awaited_once_with("ajob_other")
-    queries.event_content.assert_not_awaited()
     queries.resources.assert_not_awaited()
     store.get_job.assert_not_awaited()
     store.job_usage_reads.assert_not_awaited()
@@ -287,7 +268,6 @@ async def test_resource_read_keeps_message_timing_and_unavailable_whole_turn(set
     assert resource["tool_calls"][0]["timing_source"] == "message"
     assert resource["tool_calls"][0]["duration_ms"] == 25
     queries.resources.assert_awaited_once_with("ajob_other", 10)
-    queries.event_content.assert_not_awaited()
     store.get_job.assert_not_awaited()
 
 
@@ -416,74 +396,12 @@ async def test_the_runs_list_carries_the_compact_resource_summary(setup):
     assert listed["attempts_total"] == 3
 
 
-@pytest.mark.parametrize("browser", [False, True])
-async def test_explicit_reveal_records_actor_owner_and_event_before_return(setup, browser):
-    app, queries, store, gateway = setup
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        if browser:
-            client.cookies.set(
-                identity.SESSION_COOKIE,
-                identity.mint_session(user_id="admin-person"),
-            )
-        response = await client.post(
-            PREFIX + "/ajob_other/events/20/content", headers={} if browser else ADMIN
-        )
-    assert response.status_code == 200
-    assert response.headers["cache-control"] == "no-store"
-    assert response.json()["payload"]["input"]["command"] == "private command"
-    record = store.record_admin_action.await_args.kwargs
-    assert record["target_user_id"] == "other-owner"
-    assert record["details"] == {
-        "actor": "admin:admin-person" if browser else "admin-token",
-        "job_id": "ajob_other",
-        "event_id": 20,
-        "attempt_id": 10,
-        "seq": 1,
-    }
-    assert record["action"] == "agent.run.event_content.read"
-    assert "private command" not in str(record)
-    assert gateway.asked == (["admin-person"] if browser else [])
-    queries.event_content.assert_awaited_once_with("ajob_other", 20)
-
-
-async def test_audit_failure_never_returns_content(setup):
-    app, _, store, _ = setup
-    store.record_admin_action.side_effect = RuntimeError("private database diagnostic")
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(PREFIX + "/ajob_other/events/20/content", headers=ADMIN)
-    assert response.status_code == 503
-    assert "private" not in response.text
-
-
-async def test_missing_audit_receipt_never_returns_content(setup):
-    app, _, store, _ = setup
-    store.record_admin_action.return_value = None
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(PREFIX + "/ajob_other/events/20/content", headers=ADMIN)
-    assert response.status_code == 503
-    assert "private command" not in response.text
-
-
-@pytest.mark.parametrize("text", ["a" * MAX_EVENT_PAYLOAD_BYTES, '😀\n"' * 100_000])
-async def test_reveal_bounds_the_actual_response_including_envelope_and_escaping(setup, text):
-    app, queries, _, _ = setup
-    queries.event_content.return_value["payload"] = {"text": text}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(PREFIX + "/ajob_other/events/20/content", headers=ADMIN)
-    assert response.status_code == 200
-    assert len(response.content) <= MAX_EVENT_PAYLOAD_BYTES
-    assert response.json()["truncated"] is True
-    assert response.json()["payload"]["truncation_notice"]
-
-
-async def test_event_and_attempt_ids_are_scoped_to_the_requested_job(setup):
+async def test_attempt_ids_are_scoped_to_the_requested_job(setup):
     app, queries, store, _ = setup
-    queries.event_content.return_value = None
     queries.resources.return_value = None
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        event = await client.post(PREFIX + "/ajob_other/events/21/content", headers=ADMIN)
         resources = await client.get(PREFIX + "/ajob_other/attempts/11/resources", headers=ADMIN)
-    assert event.status_code == resources.status_code == 404
+    assert resources.status_code == 404
     store.record_admin_action.assert_not_awaited()
 
 
@@ -519,34 +437,10 @@ async def test_invalid_or_unbounded_queries_are_rejected_before_store_reads(setu
     queries.list_runs.assert_not_awaited()
 
 
-@pytest.mark.parametrize("field", ["snapshot_id", "attempt_id", "attempt_no", "seq"])
-async def test_cursor_integer_overflow_is_rejected_before_sql(setup, field):
-    app, queries, _, _ = setup
-    raw = {
-        "version": 1,
-        "scope": cursor_scope(["ajob_other", None]),
-        "snapshot_id": 100,
-        "attempt_id": 10,
-        "attempt_no": 1,
-        "seq": 1,
-    }
-    raw[field] = 10**100
-    cursor = base64.urlsafe_b64encode(json.dumps(raw).encode()).decode()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(
-            PREFIX + "/ajob_other/activity", params={"cursor": cursor}, headers=ADMIN
-        )
-    assert response.status_code == 422
-    queries.get_run.assert_not_awaited()
-    queries.activity.assert_not_awaited()
-
-
 @pytest.mark.parametrize(
     "method,path",
     [
-        ("GET", f"/ajob_other/activity?attempt_id={2**63}"),
         ("GET", f"/ajob_other/attempts/{2**63}/resources"),
-        ("POST", f"/ajob_other/events/{2**63}/content"),
     ],
 )
 async def test_path_and_query_identity_overflow_never_reaches_sql(setup, method, path):
@@ -562,7 +456,7 @@ def test_admin_observation_routes_are_registered_only_on_the_control_plane():
     control = create_app().openapi()["paths"]
     relay = create_mcp_app().openapi()["paths"]
     paths = {path for path in control if path.startswith(PREFIX)}
-    assert len(paths) == 7
+    assert len(paths) == 5
     assert not paths.intersection(relay)
 
 

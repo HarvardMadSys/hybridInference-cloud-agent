@@ -175,6 +175,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
     SANDBOX_CHECKPOINT_CAPABILITY,
 )
+from cloud_agent_shared.sandbox_manager_wire import member_manifest
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import (
     RESTORE_FAILED_RELEASE_REASON,
@@ -1196,7 +1197,7 @@ def _shared_live_ready_file() -> str:
     return (os.environ.get("AGENT_SHARED_LIVE_READY_FILE") or "").strip()
 
 
-def _shared_live_host_capabilities(
+def _shared_live_host_capabilities(  # noqa: C901, PLR0912 complexity baseline, #771
     backend: SandboxBackend,
     stamp: dict[str, Any],
 ) -> list[str]:
@@ -1948,20 +1949,7 @@ def _shared_group_manifest(reservation: dict[str, Any], *, thread_id: str) -> li
     members = [dict(item) for item in raw or [] if isinstance(item, dict)]
     if not members:
         members = [dict(reservation)]
-    allowed = {
-        "thread_id",
-        "native_session_id",
-        "context_status",
-        "activation_generation",
-        "process_generation",
-        "residency_generation",
-        "resident_state",
-        "resident_slot_id",
-        "last_settled_job_id",
-    }
-    projected = [
-        {key: value for key, value in member.items() if key in allowed} for member in members
-    ]
+    projected = member_manifest(members)
     if not any(member.get("thread_id") == thread_id for member in projected):
         raise SandboxError("shared sandbox manifest omitted the claimed chat")
     for member in projected:
@@ -2017,7 +2005,7 @@ def _reportable_turn_resources(payload: Any) -> dict[str, Any] | None:
     return payload
 
 
-def _stream_shared_agent_turn(
+def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
     supervisor: SessionSupervisorClient,
     job: ClaimedJob,
@@ -2242,7 +2230,7 @@ class _HandBack(Exception):
         self.reason = reason
 
 
-def _run_shared_live_attempt(
+def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
     runtime: AgentRuntime,
     job: ClaimedJob,
@@ -3725,7 +3713,7 @@ def _turn_host_settings(raw: Any) -> dict[str, float]:
     }
 
 
-def _spawn_turn(
+def _spawn_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     payload: dict[str, Any],
     *,
     base_url: str,
@@ -4001,7 +3989,7 @@ def _serve_turn(
     )
 
 
-def run_forever(
+def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
     base_url: str,
     gateway_url: str = "",
