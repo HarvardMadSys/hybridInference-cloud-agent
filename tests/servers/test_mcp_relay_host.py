@@ -36,6 +36,7 @@ from cloud_agent.api import mcp_relay as agent_mcp_router
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp import runtime as mcp_runtime
 from cloud_agent.mcp.host import ContentBlock, Session, ToolResult
+from cloud_agent.mcp.net_policy import EgressPolicy
 from cloud_agent.mcp.protocol import Handshake
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.ports.web_search import WebSearchAdmission
@@ -537,6 +538,56 @@ class TestTheMergedCatalogue:
             response = await api.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
         assert _tool_names(response) == _catalogue("github__get_issue")
 
+    async def test_a_connection_that_no_longer_exists_is_skipped_and_the_rest_survive(
+        self, client: AsyncClient, store: FakeStore
+    ) -> None:
+        """The binding survived; the row it names did not: skipped, not a crash.
+
+        One binding whose connection is gone must not turn the whole listing
+        into a server error and take every other connection's tools with it.
+        """
+        del store.connections[7]
+
+        response = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
+
+        assert response.status_code == 200
+        assert _tool_names(response) == _catalogue("docs__search")
+
+    async def test_a_binding_owned_by_somebody_else_is_not_listed_or_reached(
+        self,
+        client: AsyncClient,
+        store: FakeStore,
+        host: StubHost,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A binding whose connection is another owner's is not this job's to use.
+
+        The owner is read from the fence rather than from the caller, so a
+        binding must name the job's owner before its connection is listed,
+        refreshed or dialled with that other owner's credential.
+        """
+        store.connections[7] = _connection(7, "GitHub", user_id="someone-else")
+        store.bindings[0]["owner_id"] = "someone-else"
+        refreshed: list[int] = []
+
+        async def refresh(repository, *, row, policy):
+            refreshed.append(row["id"])
+            return row
+
+        monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+        listed = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
+        called = await client.post(
+            _HOST_URL,
+            json=_rpc("tools/call", name="github__get_issue", arguments={}),
+            headers=_auth(),
+        )
+
+        assert _tool_names(listed) == _catalogue("docs__search")
+        assert "error" in called.json()
+        assert refreshed == []
+        assert host.opened == []
+        assert host.called == []
+
     async def test_an_alias_containing_the_separator_still_routes_by_lookup(
         self, client: AsyncClient, store: FakeStore, host: StubHost
     ) -> None:
@@ -592,6 +643,37 @@ class TestRoutingACall:
         # The connection's own credential, not the sandbox's job token.
         assert host.opened[-1]["secret"] == "Docs-secret"
 
+    async def test_a_refresh_runs_under_the_deployment_egress_policy(
+        self, client: AsyncClient, host: StubHost, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refresh before a call uses the policy authorization and Test use.
+
+        This deployment admits private plain-HTTP targets, as one with a
+        connector bridge on its own network does. A refresh that fell back to
+        the default policy would refuse that token endpoint only when a job
+        asked, and the connection would read as needing reconnection mid-job
+        while Test, which refreshes under the deployment's policy, kept
+        succeeding.
+        """
+        monkeypatch.setenv("AGENT_MCP_ALLOW_PRIVATE_TARGETS", "1")
+        monkeypatch.setenv("AGENT_MCP_ALLOW_PLAIN_HTTP", "1")
+        seen: list[EgressPolicy | None] = []
+
+        async def refresh(repository, *, row, policy=None):
+            seen.append(policy)
+            return row
+
+        monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+        response = await client.post(
+            _HOST_URL,
+            json=_rpc("tools/call", name="docs__search", arguments={"q": "nsi"}),
+            headers=_auth(),
+        )
+
+        assert "result" in response.json()
+        assert seen == [EgressPolicy(allow_private=True, allow_plain_http=True)]
+        assert host.called[-1]["name"] == "search"
+
     async def test_an_unknown_name_is_refused_without_dialling_anything(
         self, client: AsyncClient, host: StubHost
     ) -> None:
@@ -626,6 +708,33 @@ class TestRoutingACall:
         assert host.called == []
         assert len(store.created_invocations) == 1
         assert store.created_invocations[0]["capability_name"] == "get_issue"
+
+    async def test_a_call_too_large_to_review_is_refused_rather_than_held(
+        self, client: AsyncClient, store: FakeStore, host: StubHost
+    ) -> None:
+        """A held call's arguments are stored for its owner, so they are bounded.
+
+        The body is well inside the relay's request bound, and still far more
+        than a person reviews before approving; storing it would only grow a
+        table every tenant shares.
+        """
+        store.bindings = [
+            _binding(7, "github", rules={"get_issue": {"policy": "confirm", "fingerprint": ""}})
+        ]
+        arguments = {"body": "x" * agent_mcp_router.MAX_HELD_ARGUMENTS_BYTES}
+
+        response = await client.post(
+            _HOST_URL,
+            json=_rpc("tools/call", name="github__get_issue", arguments=arguments),
+            headers=_auth(),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["error"]["code"] == -32602
+        assert "not held or sent" in response.json()["error"]["message"]
+        assert store.created_invocations == []
+        assert host.opened == []
+        assert host.called == []
 
     async def test_an_approved_retry_is_dispatched_once(
         self, host: StubHost, monkeypatch: pytest.MonkeyPatch
