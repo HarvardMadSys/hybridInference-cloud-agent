@@ -374,6 +374,10 @@ class FakeGoals:
 class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
     """In-memory stand-in exposing the storage surface the router uses."""
 
+    async def ledger_rows_for_job(self, *, job_id: str) -> list[dict[str, Any]]:
+        """The stored snapshots for one job, empty before the first collection."""
+        return [row for row in self.ledger_rows if row["job_id"] == job_id]
+
     def __init__(self) -> None:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
@@ -398,6 +402,9 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self.terminal_readiness: dict[int, bool] = {}
         self.thread_workspace_readiness: dict[str, bool] = {}
         self.workspace_start_fences: list[str] = []
+        #: Grant-ledger rows a single-job read sums into the usage fields.
+        #: Empty by default: no snapshot stored yet, so the fields stay None.
+        self.ledger_rows: list[dict[str, Any]] = []
         self.sandbox_processes: list[dict[str, Any]] = []
         self.sandbox_admissions: list[dict[str, Any]] = []
         self.sandbox_settlements: list[dict[str, Any]] = []
@@ -2091,7 +2098,6 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
         get_agent_app_credentials,
         get_gateway_client,
         get_grant_client,
-        get_log_store,
     )
 
     app = FastAPI()
@@ -2106,9 +2112,6 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     # No GitHub App by default — the configuration most deployments start in,
     # and the one where a public repository still clones fine.
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
-    # No log store: spend and usage are then absent from the response rather
-    # than reported as a fabricated zero.
-    app.dependency_overrides[get_log_store] = lambda: None
     identity = {"user_id": _OWNER, "role": role, "authenticated": True}
     # Override identity only; every request still exercises Gateway admission.
     app.dependency_overrides[authenticate_agent_owner] = lambda: identity
@@ -5941,43 +5944,65 @@ async def test_a_definitively_unentitled_oldest_job_does_not_block_the_next_job(
     assert accepted.json()["job_id"] == ready["id"]
 
 
-async def test_spend_and_usage_come_from_the_ledger_not_the_agent(store: FakeStorage):
+async def test_spend_and_usage_come_from_the_grant_ledger_not_the_agent(store: FakeStorage):
     """A job's numbers must not depend on what the agent says about itself.
 
     Models do misreport their own usage — this session watched one claim it had
-    edited a file it never touched — so the owner-facing totals read the same
-    billing ledger the budget check already trusts.
+    edited a file it never touched — so the owner-facing totals read the grant
+    ledger, the same accounting the usage and admin surfaces use (#823).
     """
-    from cloud_agent.api.deps import get_log_store
+    from datetime import timedelta
 
-    class Ledger:
-        async def get_agent_job_cost(self, job_id: str) -> float:
-            return 0.0075
-
-        async def get_agent_job_usage(self, job_id: str) -> dict[str, float]:
-            return {"tokens_in": 74000, "tokens_out": 523, "calls": 3}
+    from tests.unit.test_ledger_snapshots import END, ledger_row
 
     app = _build_app(store)
-    app.dependency_overrides[get_log_store] = lambda: Ledger()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        job_id = await _create_job(client)
+        await client.post(f"/v1/agent/jobs/{job_id}/cancel")
+        # One attempt's snapshot with known totals; a second, newer one for
+        # the retry that superseded it — summed, not replaced.
+        store.ledger_rows = [
+            {**ledger_row(), "job_id": job_id},
+            {
+                **ledger_row(
+                    id=2,
+                    attempt_id=11,
+                    attempt_no=2,
+                    queried_at=END + timedelta(seconds=30),
+                ),
+                "job_id": job_id,
+            },
+        ]
+        got = await client.get(f"/v1/agent/jobs/{job_id}")
+
+    body = got.json()
+    assert body["tokens_in"] == 240
+    assert body["tokens_out"] == 40
+    assert body["model_calls"] == 2
+    assert body["spent_usd"] == float("0.00024690")
+
+
+async def test_a_job_with_no_ledger_snapshot_reports_absent_not_zero(store: FakeStorage):
+    """A snapshot that has not answered must not look like a job that spent nothing.
+
+    The ledger rows exist only once the usage collector has stored a snapshot
+    for the job's grants. Before that, ``summarize_job_ledger`` has no totals,
+    and the response's fields stay ``None`` — the same absent-not-zero rule
+    the old log-store path kept, now against the real source.
+    """
+    store.ledger_rows = []
+    app = _build_app(store)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         job_id = await _create_job(client)
         got = await client.get(f"/v1/agent/jobs/{job_id}")
 
     body = got.json()
-    assert body["spent_usd"] == 0.0075
-    assert body["tokens_in"] == 74000
-    assert body["model_calls"] == 3
-
-
-async def test_a_deployment_without_a_ledger_reports_absent_not_zero(client: AsyncClient):
-    """A missing source must not look like a job that spent nothing."""
-    job_id = await _create_job(client)
-
-    body = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
-
     assert body["spent_usd"] is None
     assert body["tokens_in"] is None
+    assert body["tokens_out"] is None
+    assert body["model_calls"] is None
 
 
 async def test_a_job_reports_no_network_mode(client: AsyncClient):

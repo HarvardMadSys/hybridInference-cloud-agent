@@ -33,7 +33,6 @@ from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
     get_grant_client,
-    get_log_store,
     get_storage,
 )
 from cloud_agent.api.worker import verify_claiming_host
@@ -76,7 +75,6 @@ async def http(pool, monkeypatch):
     app.dependency_overrides[get_gateway_client] = _Gateway
     app.dependency_overrides[get_grant_client] = _Grants
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
-    app.dependency_overrides[get_log_store] = lambda: None
     app.dependency_overrides[authenticate_agent_owner] = lambda: {
         "user_id": _OWNER,
         "role": "free",
