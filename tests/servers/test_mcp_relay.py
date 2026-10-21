@@ -33,7 +33,7 @@ from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp.net_policy import EgressPolicy
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.mcp_proxy import canonical_request
-from cloud_agent.tokens import SCOPE_FULL, SCOPE_MCP, SCOPE_MODEL, mint_worker_token
+from cloud_agent.tokens import SCOPE_FULL, SCOPE_MCP, mint_worker_token
 
 pytestmark = pytest.mark.asyncio
 
@@ -596,7 +596,7 @@ async def test_an_ordinary_api_key_is_not_a_job_token(client, upstream):
     assert upstream.requests == []
 
 
-@pytest.mark.parametrize("scope", [SCOPE_FULL, SCOPE_MODEL])
+@pytest.mark.parametrize("scope", [SCOPE_FULL])
 async def test_only_an_mcp_scoped_token_reaches_the_relay(client, scope):
     """**Positive, not "not full".**
 
@@ -618,6 +618,38 @@ async def test_only_an_mcp_scoped_token_reaches_the_relay(client, scope):
     # as it actually is rather than as the other service does it, so a reader
     # is not told a shape the wire does not carry.
     assert response.json()["detail"]["error"]["type"] == "insufficient_scope"
+
+
+async def test_a_retired_model_scoped_token_never_reaches_the_relay(client):
+    """The pre-grant ``model`` scope no longer parses at all (#822).
+
+    Before the H4 cutover this relay's negative case was a minted
+    ``SCOPE_MODEL`` token refused with 403. The scope is gone from the parser
+    now, so the same correctly-signed legacy token is a 401: an escaped
+    pre-cutover credential cannot even name itself here.
+    """
+    import hashlib
+    import hmac as _hmac
+    import json as _json
+
+    from cloud_agent.tokens import _TOKEN_PREFIX, _b64encode, _signing_key
+
+    payload = _json.dumps(
+        {"j": "ajob_0001", "a": 1, "g": 1, "s": "model"},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    # Signed correctly on purpose: the refusal below must be the parser's scope
+    # check, not a signature failure.
+    signature = _hmac.new(_signing_key(), payload, hashlib.sha256).digest()
+    legacy = f"{_TOKEN_PREFIX}.{_b64encode(payload)}.{_b64encode(signature)}"
+
+    response = await client.post(
+        f"/v1/agent/mcp/{_ALIAS}",
+        json=_rpc("tools/list"),
+        headers={"Authorization": f"Bearer {legacy}"},
+    )
+    assert response.status_code == 401
 
 
 async def test_a_gateway_inference_grant_is_not_accepted_here(client):
