@@ -68,6 +68,19 @@ class _ForkMaterializationStorage(Protocol):
 SESSION_FORK_COORDINATOR_LEASE_S = SHARED_SESSION_FORK_TIMEOUT_S + 30.0
 
 
+def _recorded_group(operation: dict[str, Any]) -> dict[str, Any]:
+    """The group as this Fork recorded it, not whatever the group holds now.
+
+    The operation's own ``generation`` counts the Fork's row; the group's is
+    ``sandbox_generation``. Its container is required: the host reads a null
+    expected container as no expectation, and would skip its check or create
+    a container.
+    """
+    if not operation.get("container_id"):
+        raise KeyError("container_id")
+    return {**operation, "generation": operation["sandbox_generation"]}
+
+
 async def materialize_session_fork(
     operation: dict[str, Any],
     *,
@@ -227,11 +240,7 @@ async def materialize_session_fork(
     try:
         receipt = await sandbox_manager.fork_shared_session(
             source_thread_id,
-            # The Fork runs against the generation and container it recorded,
-            # not whatever the group holds now.
-            identity=identity_from_row(
-                {**operation, "generation": operation["sandbox_generation"]}, members=members
-            ),
+            identity=identity_from_row(_recorded_group(operation), members=members),
             operation_id=operation_id,
             source_native_session_id=str(operation["source_native_session_id"]),
             source_native_turn_no=int(operation["source_native_turn_no"]),

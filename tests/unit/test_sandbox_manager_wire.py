@@ -198,3 +198,20 @@ async def test_the_fork_sends_the_group_generation_and_container_it_recorded(for
     request = SharedForkRequest.model_validate(body)
     assert request.generation == 5
     assert request.expected_container_id == "container-recorded"
+
+
+#: The same Fork with no container on record.
+_NO_CONTAINER = {key: value for key, value in _FORK_OPERATION.items() if key != "container_id"}
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [_NO_CONTAINER, {**_NO_CONTAINER, "container_id": None}, {**_NO_CONTAINER, "container_id": ""}],
+    ids=["absent", "null", "empty"],
+)
+async def test_a_fork_without_its_recorded_container_is_never_sent(fork_bodies, operation):
+    """The host reads a null expected container as no expectation, and would not check it."""
+    with pytest.raises(KeyError, match="container_id"):
+        await _materialize(operation)
+
+    assert not fork_bodies
