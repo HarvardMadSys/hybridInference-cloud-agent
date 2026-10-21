@@ -5,7 +5,7 @@ and pytest reports a run that only skipped as a success. The steps therefore
 keep a junit report, and `scripts/ci_tests_ran.py` reads it. The script is
 exercised here against reports real pytest writes, and the workflow is checked
 for an external run that writes no report or never has it read, and for a
-database tier whose report is read without a floor.
+database tier whose report is read with a floor below 100, or none.
 """
 
 from __future__ import annotations
@@ -145,8 +145,17 @@ def test_a_report_below_its_floor_fails_the_step(tmp_path: Path) -> None:
     assert ci_tests_ran.main(["--min", "3", str(report)]) == 1
 
 
+def _floor(command: str) -> int:
+    """The `--min` a `scripts/ci_tests_ran.py` command reads its reports with, or 0."""
+    found = re.search(r"scripts/ci_tests_ran\.py .*--min (\d+)", command)
+    return int(found.group(1)) if found else 0
+
+
 def test_the_database_tier_is_read_with_a_floor() -> None:
-    """The dbtest run keeps a report, and a later step of its job reads it with `--min`."""
+    """The dbtest run keeps a report, and a later step of its job reads it with `--min`.
+
+    At least 100: a floor much lower passes a run that selected almost nothing.
+    """
     for job_name, job in yaml.safe_load(CI.read_text())["jobs"].items():
         runs = [str(step.get("run", "")).replace("\\\n", " ") for step in job.get("steps", [])]
         for index, run in enumerate(runs):
@@ -157,9 +166,9 @@ def test_the_database_tier_is_read_with_a_floor() -> None:
             readers = [
                 later
                 for later in runs[index + 1 :]
-                if "scripts/ci_tests_ran.py --min" in later and f'"{report.group(1)}"' in later
+                if _floor(later) >= 100 and f'"{report.group(1)}"' in later
             ]
-            assert readers, f"{job_name}: the dbtest report is never read with a floor"
+            assert readers, f"{job_name}: the dbtest report is never read with a floor of 100"
             return
     raise AssertionError("no job runs the dbtest tier")
 
