@@ -671,7 +671,7 @@ class ChatSandboxManager:
             )
         return actual
 
-    def build_create_command(
+    def build_create_command(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         *,
@@ -3034,7 +3034,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                 continue
             self._run([self.backend.docker_binary, "rm", "--force", container_id], timeout=30)
 
-    def _probe_guest_observer_once(self) -> str:
+    def _probe_guest_observer_once(self) -> str:  # noqa: PLR0912 complexity baseline, #771
         """One probe, on a sandbox of its own that is removed however it ends."""
         self._remove_abandoned_probes()
         token = secrets.token_hex(12)
@@ -4316,7 +4316,7 @@ finally:
                 + result.stderr.decode("utf-8", "replace")[:300]
             )
 
-    def export_archive(
+    def export_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         path: str,

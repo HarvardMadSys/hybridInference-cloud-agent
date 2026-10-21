@@ -636,7 +636,7 @@ async def _cleanup_failed_session_fork(
                 await grants.revoke(grant_id)
 
 
-async def _run_attempt_reaper(
+async def _run_attempt_reaper(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     store: _Reaping,
     *,
     interval_seconds: float = REAP_INTERVAL_S,

@@ -1459,7 +1459,7 @@ class PostgresMcpConnectionRepository:
             await self._flush_remembered_approvals(row)
         return dict(row) if row is not None else None
 
-    async def claim_mcp_invocation(
+    async def claim_mcp_invocation(  # noqa: PLR0912 complexity baseline, #771
         self,
         *,
         invocation_id: int,

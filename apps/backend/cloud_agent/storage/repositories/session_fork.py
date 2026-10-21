@@ -43,7 +43,7 @@ class PostgresSessionForkRepository:
         self._pool = pool
         self._queries = PostgresConversationQueries(pool)
 
-    async def prepare_session_fork(
+    async def prepare_session_fork(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         *,
         source_job_id: str,

@@ -1275,7 +1275,7 @@ class SharedChatSessionSupervisor:
         if group.start_failed and not retry_failed:
             raise SandboxError("shared workspace start verification failed")
 
-    def _start_group(
+    def _start_group(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         group: _Group,
         *,
@@ -1413,7 +1413,7 @@ class SharedChatSessionSupervisor:
                 group.starting = False
                 self._condition.notify_all()
 
-    def reconcile(self) -> builtins.list[SharedSessionDescriptor]:
+    def reconcile(self) -> builtins.list[SharedSessionDescriptor]:  # noqa: PLR0912, PLR0915 complexity baseline, #771
         """Discover containers, fencing each group's slow recovery independently."""
         with self._lock:
             before = {
@@ -1530,7 +1530,7 @@ class SharedChatSessionSupervisor:
         self._manager.prune_orphan_networks(specs)
         return found
 
-    def _reconcile_checked_group(
+    def _reconcile_checked_group(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         check: _LifecycleCheck,
         inspection: ChatSandboxInspection,
@@ -1874,7 +1874,7 @@ class SharedChatSessionSupervisor:
             found.extend(self._descriptors(group))
         return found
 
-    def register_manifest(
+    def register_manifest(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         members: builtins.list[SharedMemberManifest],
@@ -2139,7 +2139,7 @@ class SharedChatSessionSupervisor:
                 return None
             return group.start_seq
 
-    def _install_manifest_locked(
+    def _install_manifest_locked(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         group: _Group,
         spec: ChatSandboxSpec,
@@ -2282,7 +2282,7 @@ class SharedChatSessionSupervisor:
                 or sandbox_id in self._creating
             )
 
-    def acquire(
+    def acquire(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         *,
@@ -2452,7 +2452,7 @@ class SharedChatSessionSupervisor:
                 truncated=recorder is not None and recorder.stopped_early(),
             )
 
-    def start_turn(
+    def start_turn(  # noqa: PLR0912, PLR0915 complexity baseline, #771
         self,
         thread_id: str,
         token: str,
@@ -2640,7 +2640,7 @@ class SharedChatSessionSupervisor:
             if held.owner == owner and now - held.held_at < HELD_INPUT_TTL_S
         ]
 
-    def complete_turn(
+    def complete_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         thread_id: str,
         token: str,
@@ -3303,7 +3303,7 @@ class SharedChatSessionSupervisor:
             return None
         return receipt[1]
 
-    def settle(
+    def settle(  # noqa: PLR0912, PLR0915 complexity baseline, #771
         self,
         thread_id: str,
         token: str,
@@ -3629,7 +3629,7 @@ class SharedChatSessionSupervisor:
                     group.operation_tokens.pop(activity_token, None)
                     self._arm_idle_if_quiescent(group)
 
-    def _fork_native_locked_source(
+    def _fork_native_locked_source(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         group: _Group,
         source: _Member,
@@ -3825,7 +3825,7 @@ class SharedChatSessionSupervisor:
         """
         return self._open_reference(thread_id, start_seq=start_seq, terminal=False)
 
-    def prepare_environment(
+    def prepare_environment(  # noqa: PLR0915 complexity baseline, #771
         self,
         thread_id: str,
         environment: Any,
@@ -3940,7 +3940,7 @@ class SharedChatSessionSupervisor:
             if group.environment_owner == activation_owner and group.environment_cancel:
                 group.environment_cancel.set()
 
-    def capture_snapshot(
+    def capture_snapshot(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         thread_id: str,
         *,
@@ -4082,7 +4082,7 @@ class SharedChatSessionSupervisor:
         ):
             raise SessionBusy("a sibling member is active during initial archive capture")
 
-    def capture_initial_archive(
+    def capture_initial_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         thread_id: str,
         token: str,
@@ -4628,7 +4628,7 @@ class SharedChatSessionSupervisor:
         with self._lock:
             return replace(result, group_busy=not self._is_quiescent(group))
 
-    def _stop_checked_group(
+    def _stop_checked_group(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         check: _LifecycleCheck,
         requested: _Member,
@@ -5007,7 +5007,7 @@ class SharedChatSessionSupervisor:
                 self._arm_idle_if_quiescent(group)
                 self._condition.notify_all()
 
-    def commit_archive(self, spec: ChatSandboxSpec, *, request_id: str, container_id: str) -> None:
+    def commit_archive(self, spec: ChatSandboxSpec, *, request_id: str, container_id: str) -> None:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         """Remove an exact stopped group after durable archive authorization.
 
         The caller persists its verified commit receipt before invoking this
@@ -5167,7 +5167,7 @@ class SharedChatSessionSupervisor:
                 )
         return stopped
 
-    def _ensure_transport(
+    def _ensure_transport(  # noqa: PLR0912, PLR0915 complexity baseline, #771
         self,
         group: _Group,
         member: _Member,

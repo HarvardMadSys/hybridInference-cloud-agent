@@ -502,7 +502,7 @@ class GuestObserverController:
             measurement_id=measurement_id,
         )
 
-    def finish(self, cursor: GuestObserverCursor | None) -> GuestObservation:
+    def finish(self, cursor: GuestObserverCursor | None) -> GuestObservation:  # noqa: PLR0912 complexity baseline, #771
         """Drain and read exactly one cursor's bounded event slice."""
         if cursor is None:
             return GuestObservation.unavailable("turn had no guest observer cursor")
@@ -844,7 +844,7 @@ def _finish_process(item: _MutableProcess, cursor: GuestObserverCursor) -> Guest
     )
 
 
-def parse_events(
+def parse_events(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     payload: bytes,
     *,
     cursor: GuestObserverCursor,

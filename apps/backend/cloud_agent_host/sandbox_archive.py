@@ -361,7 +361,7 @@ class SandboxArchiveService:
                 "aborted": True,
             }
 
-    def discard(
+    def discard(  # noqa: PLR0912 complexity baseline, #771
         self, identity: ArchiveIdentity, *, sandbox_id: str | None = None
     ) -> dict[str, Any]:
         """Remove the exact stopped container without exporting or uploading it.
