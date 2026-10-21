@@ -1269,14 +1269,15 @@ class SharedChatSessionSupervisor:
         start_seq: int | _SameRun | None = _SAME_RUN,
         facts: SandboxActionFacts | None = None,
         observer: StageRecorder | None = None,
-    ) -> ChatSandboxInspection:
+    ) -> tuple[ChatSandboxInspection, bool]:
         """Start a group and archive a guest-network fail-stop exactly once.
 
         ``start_seq`` is the fence of the request the start is for. When the
         container is found stopped, the run this starts is labelled with it,
         and a fence already sealed is refused (:meth:`_begin_run_locked`).
         A running container is reused as it is: the request joins its run
-        once it is admitted (:meth:`_join_run_locked`).
+        once it is admitted (:meth:`_join_run_locked`). The flag says whether
+        ``start`` proved the network here; a retried archive completion did not.
         """
         with self._lock:
             self._wait_for_start_locked(group, retry_failed=True)
@@ -1335,7 +1336,7 @@ class SharedChatSessionSupervisor:
                         self._accept_inspection_locked(group, current)
                         group.start_archive_completion_pending = False
                     start_completed = True
-                    return current
+                    return current, False
             inspection = self._manager.start(
                 group.spec,
                 facts=facts,
@@ -1392,7 +1393,7 @@ class SharedChatSessionSupervisor:
                 if start_fence_prepared or completion_pending:
                     group.start_archive_completion_pending = False
             start_completed = True
-            return inspection
+            return inspection, True
         finally:
             with self._lock:
                 if not refused:
@@ -2349,7 +2350,7 @@ class SharedChatSessionSupervisor:
                 raise RetainedChatLost("shared sandbox container is missing")
             raise RetainedChatLost("shared sandbox container identity changed")
 
-        inspection = self._start_group(
+        inspection = self._start_and_prove(
             group,
             start_seq=start_seq,
             facts=facts,
@@ -3959,7 +3960,7 @@ class SharedChatSessionSupervisor:
         result: dict[str, Any] | None = None
         try:
             if not current.running:
-                started = self._start_group(group, start_seq=start_seq)
+                started, _proved = self._start_group(group, start_seq=start_seq)
                 with self._lock:
                     if group.stopping or group.lifecycle_generation != lifecycle_generation:
                         raise SessionLeaseLost(
@@ -4339,13 +4340,16 @@ class SharedChatSessionSupervisor:
     def _open_reference(
         self, thread_id: str, *, start_seq: int | None, terminal: bool
     ) -> tuple[str, SharedSessionDescriptor]:
-        """Admit one terminal or workspace operation; its token keeps the group awake."""
+        """Admit one terminal or workspace operation; its token keeps the group awake.
+
+        Admission proves the group network (:meth:`_start_and_prove`), so the
+        caller runs the operation without another proof.
+        """
         kind = "terminal" if terminal else "operation"
         with self._lock:
             group, member = self._member(thread_id)
         self._recover_start_archive_completion(group)
         with self._lock:
-            # This request performs its own fresh verification below.
             self._wait_for_start_locked(group, retry_failed=True)
             current_group, current_member = self._member(thread_id)
             if current_group is not group or current_member is not member:
@@ -4430,11 +4434,15 @@ class SharedChatSessionSupervisor:
                 return candidate, None
         raise SandboxError(f"chat {thread_id!r} has no shared sandbox membership")
 
-    def backend(self, thread_id: str) -> RetainedChatBackend:
-        """Return the one container backend shared by this member's group."""
+    def backend(
+        self, thread_id: str, *, network_proved_at: float | None = None
+    ) -> RetainedChatBackend:
+        """Return the group's one backend; its commands may stand on an admission's proof."""
         with self._lock:
             group, _ = self._member(thread_id)
-            return RetainedChatBackend(self._manager, group.spec)
+            return RetainedChatBackend(
+                self._manager, group.spec, network_proved_at=network_proved_at
+            )
 
     def status(self, thread_id: str) -> SharedSessionDescriptor:
         """Return fresh Docker and member process state.
@@ -5243,6 +5251,26 @@ class SharedChatSessionSupervisor:
         # process returned above.
         return "resume" if launch.native_session_id else "new"
 
+    def _start_and_prove(
+        self,
+        group: _Group,
+        *,
+        start_seq: int | _SameRun | None = _SAME_RUN,
+        facts: SandboxActionFacts | None = None,
+        observer: StageRecorder | None = None,
+    ) -> ChatSandboxInspection:
+        """Start the group if it is stopped, and prove its network once for one request.
+
+        A start proves it; a retried archive completion starts nothing, so the
+        running container it reused is proved here instead.
+        """
+        inspection, proved = self._start_group(
+            group, start_seq=start_seq, facts=facts, observer=observer
+        )
+        if not proved:
+            self._manager.require_network(group.spec, observer=observer)
+        return inspection
+
     def _ensure_running(
         self, group: _Group, *, start_seq: int | _SameRun | None = _SAME_RUN
     ) -> None:
@@ -5253,7 +5281,7 @@ class SharedChatSessionSupervisor:
             raise SessionBusy("shared workspace final archive retry is pending")
         if group.orphan_finalization_pending:
             raise SessionBusy("shared workspace orphan finalization is pending")
-        group.inspection = self._start_group(group, start_seq=start_seq)
+        group.inspection = self._start_and_prove(group, start_seq=start_seq)
 
     def _recover_start_archive_completion(self, group: _Group) -> None:
         """Retry an idempotent post-start marker completion before admission."""

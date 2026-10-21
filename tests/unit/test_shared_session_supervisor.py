@@ -84,6 +84,8 @@ class _Manager:
         self.items: dict[str, ChatSandboxInspection] = {}
         self.events: list[object] = []
         self.starts: list[str] = []
+        # Network proofs made without a start; each start makes its own.
+        self.network_proofs: list[str] = []
         self.stop_count = 0
         # The host-rule check: how many of the next checks fail, and how many ran.
         self.host_rule_failures = 0
@@ -206,6 +208,10 @@ class _Manager:
             with operation_profiling.substage(observer, "service_hosts_sync"):
                 facts.note("reuse")
         return current
+
+    def require_network(self, spec: ChatSandboxSpec, *, observer: Any = None) -> None:
+        del observer
+        self.network_proofs.append(spec.container_name)
 
     def stop(
         self,
@@ -6017,6 +6023,73 @@ def test_failed_start_marker_completion_is_retried_by_same_mutation_entrypoint(
         supervisor.operation_closed("athr_source", token)
     else:
         supervisor.terminal_closed("athr_source", token)
+
+
+@pytest.mark.parametrize("entrypoint", ["acquire", "environment", "operation", "terminal"])
+def test_a_request_after_a_failed_start_completion_is_proved_exactly_once(entrypoint: str) -> None:
+    """Every admitted request gets one fresh network proof before it runs.
+
+    A start that proved the network and then failed to complete its archive
+    marker leaves the group running. A request that only retries that
+    completion starts nothing, so the running container is proved as a start
+    proves one; a request that starts it afterwards is proved by that start.
+    """
+    manager = _Manager()
+    completions = 0
+
+    def complete(_spec, inspection) -> None:
+        nonlocal completions
+        assert inspection.running is True
+        completions += 1
+        if completions == 1:
+            raise RuntimeError("marker clear failed")
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        starting_archive_prepare_hook=lambda *_args: None,
+        started_archive_hook=complete,
+    )
+    supervisor.register_manifest(_spec(), _members())
+    manager.stop(_spec(), release_networks=False)
+    with pytest.raises(RuntimeError, match="marker clear failed"):
+        supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:1",
+            activation_generation=1,
+            has_settled_context=True,
+            manifest=_members(),
+            expected_container_id="container-shared",
+        )
+    assert manager.items[_spec().container_name].running is True
+    manager.starts.clear()
+
+    if entrypoint == "acquire":
+        lease = supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:2",
+            activation_generation=2,
+            has_settled_context=True,
+            manifest=_members(),
+            expected_container_id="container-shared",
+        )
+        assert lease.network_verified is True, "the runner's commands stand on this proof"
+    elif entrypoint == "environment":
+        preparer = SimpleNamespace(status=lambda _backend, _binding_id: {"ready": True})
+        supervisor.prepare_environment(
+            "athr_source", SimpleNamespace(binding_id="binding"), preparer
+        )
+    else:
+        token, _ = getattr(supervisor, f"{entrypoint}_opened")("athr_source")
+        getattr(supervisor, f"{entrypoint}_closed")("athr_source", token)
+
+    assert completions == 2
+    assert len(manager.starts) + len(manager.network_proofs) == 1
+    if entrypoint in {"acquire", "environment"}:
+        # Their admission only retried the completion and started nothing, so
+        # the running container was proved on its own.
+        assert manager.network_proofs == [_spec().container_name]
 
 
 def test_pending_final_archive_retries_after_external_bridge_removal() -> None:

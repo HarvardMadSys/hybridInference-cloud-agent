@@ -671,8 +671,8 @@ class ChatSandboxNetwork:
                         "stale relay could not leave the group network: "
                         + disconnected.stderr.strip()[:300]
                     )
-
-        refreshed = self._inspect_network(network)
+        # Only a detach changed the bridge since it was read; an activation still rereads it.
+        refreshed = self._inspect_network(network) if unexpected else inspected
         if refreshed is None:
             raise SandboxError("group network disappeared during reconciliation")
         self._verify_group_network(refreshed, spec)

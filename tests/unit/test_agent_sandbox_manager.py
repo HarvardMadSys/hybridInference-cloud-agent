@@ -335,6 +335,8 @@ class _SharedSupervisor:
     def __init__(self, *, events: list[str] | None = None) -> None:
         self.workspace_backend = _WorkspaceBackend()
         self.calls: list[tuple] = []
+        # The proof time the last backend was handed, from its admission.
+        self.network_proved_at: float | None = None
         self.start_seqs: list[int | None] = []
         self.restores: list[object] = []
         self.imports = self.workspace_backend.imports
@@ -471,9 +473,10 @@ class _SharedSupervisor:
         self.calls.append(("terminal_closed", thread_id, token, kwargs))
         return _descriptor(thread_id)
 
-    def backend(self, thread_id: str):
+    def backend(self, thread_id: str, *, network_proved_at: float | None = None):
         assert self.owns(thread_id)
         self.calls.append(("backend", thread_id))
+        self.network_proved_at = network_proved_at
         return self.workspace_backend
 
     def capture_snapshot(self, thread_id: str, *, capture, start_seq: int | None = None):
@@ -2052,6 +2055,58 @@ async def test_file_routes_use_the_shared_container_not_a_host_directory(monkeyp
     assert all(item[0] is supervisor.workspace_backend for item in reads)
     assert writes == [(supervisor.workspace_backend, "README.md", "after\n")]
     assert ("operation_opened", "athr_source") in supervisor.calls
+
+
+@pytest.mark.asyncio
+async def test_workspace_routes_leave_the_network_proof_to_admission(monkeypatch):
+    """The admission that opens a read, a terminal or a preparation proves the network.
+
+    No route proves it a second time, and a command an operation spawns
+    stands on its admission's proof rather than making another.
+    """
+    supervisor = _SharedSupervisor()
+    proofs: list[object] = []
+    supervisor.workspace_backend.manager.require_network = lambda spec, **_kwargs: proofs.append(
+        spec
+    )
+    prepared: list[str] = []
+
+    def prepare_environment(thread_id, _environment, _preparer, **_kwargs):
+        prepared.append(thread_id)
+        return {"ready": True}
+
+    supervisor.prepare_environment = prepare_environment  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        "cloud_agent_host.sandbox_manager.read_retained_file",
+        lambda *_args, **_kwargs: {"path": "", "kind": "directory", "entries": []},
+    )
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    before = time.monotonic()
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        listed = await client.get("/workspaces/athr_source/files?path=", headers=headers)
+        proved_from = supervisor.network_proved_at
+        created = await client.post(
+            "/workspaces/athr_source/terminals", headers=headers, json={"rows": 30, "cols": 100}
+        )
+        environment = await client.post(
+            "/workspaces/athr_source/environment/prepare",
+            headers=headers,
+            json={"environment": {"binding_id": "binding"}},
+        )
+        deleted = await client.delete(
+            f"/workspaces/athr_source/terminals/{created.json()['id']}", headers=headers
+        )
+
+    assert listed.status_code == created.status_code == environment.status_code == 200
+    assert deleted.status_code == 200
+    assert proofs == []
+    assert ("operation_opened", "athr_source") in supervisor.calls
+    assert ("terminal_opened", "athr_source") in supervisor.calls
+    assert prepared == ["athr_source"]
+    assert proved_from is not None and before <= proved_from <= time.monotonic()
 
 
 @pytest.mark.asyncio

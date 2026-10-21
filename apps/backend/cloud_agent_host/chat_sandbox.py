@@ -1361,8 +1361,10 @@ class ChatSandboxManager:
     ) -> None:
         """Prove this container is on exactly its guarded group bridge.
 
-        Called before every terminal and sandbox manager workspace operation, and by a
-        turn's commands once its last proof is a minute old, so it is cheap: the
+        The same proof :meth:`start` makes of a running container, for work
+        that does not go through a start: an SSH-access change, a request
+        whose admission only retried an archive completion, and a command
+        whose backend holds no proof under a minute old. So it is cheap: the
         guard's last verification is reused for a minute, and the relays and
         their host exceptions are reconciled against what Docker reports now.
         A guest whose in-guest check never passed is refused until
@@ -4432,8 +4434,8 @@ class RetainedChatBackend(SandboxBackend):
         self.spec = spec
         self.image = spec.sandbox_image_digest or manager.backend.image
         self.runtime = manager.backend.runtime
-        # Monotonic time the group bridge was last proved, for a turn's backend
-        # only; ``None`` checks before every command.
+        # Monotonic time the group bridge was last proved, for a turn's or a
+        # workspace operation's backend; ``None`` checks before every command.
         self._network_proved_at = network_proved_at
 
     @property
@@ -4493,8 +4495,9 @@ class RetainedChatBackend(SandboxBackend):
         """Prove the container is on its guarded group bridge before running anything.
 
         A turn's backend starts from the proof its activation made: the sandbox manager
-        checked exactly this when it acquired the turn, moments before. That
-        proof, and each one this backend makes itself, stands for
+        checked exactly this when it acquired the turn, moments before. A
+        workspace operation's backend starts from its admission's proof the
+        same way. That proof, and each one this backend makes itself, stands for
         :data:`TURN_NETWORK_PROOF_S`; a command after that, such as one after a
         long setup script or at the end of a long turn, checks again. A backend
         built without a proof checks before every command.

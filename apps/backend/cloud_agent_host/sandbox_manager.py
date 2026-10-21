@@ -2234,21 +2234,23 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         """Open a workspace, run one operation, and answer its measurement call.
 
         ``call`` is this request's measurement fragment, if the inherited
-        selection named one. It gates nothing: the workspace is admitted, its
-        network phase is verified, and the operation runs exactly as before.
-        Only the timings are conditional, and the answer is merged into the
-        body so a caller can tell a producer that collected nothing from one
-        that never reported at all.
+        selection named one. It gates nothing: the workspace is admitted, which
+        proves its network, and the operation runs exactly as before. Only the
+        timings are conditional, and the answer is merged into the body so a
+        caller can tell a producer that collected nothing from one that never
+        reported at all.
         """
         active = call if call is not None else closed()
         owner = retained_owner(workspace_id)
         token: str | None = None
         try:
+            # Admission proves the group network once for this operation, and
+            # a command the operation spawns stands on that proof rather than
+            # making another; the clock starts before it, as for a turn's.
+            admitted_from = time.monotonic()
             with active.stage("admission"):
                 token, _ = owner.operation_opened(workspace_id, start_seq=start_seq)
-            retained = owner.backend(workspace_id)
-            with active.stage("network"):
-                retained.manager.require_network(retained.spec)
+            retained = owner.backend(workspace_id, network_proved_at=admitted_from)
             return active.answer(operation(retained, active))
         except RetainedWorkspaceError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
@@ -3427,10 +3429,9 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         body: EnvironmentPrepareRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        # The supervisor's lock and the network check stay off the event loop.
+        # The supervisor's lock stays off the event loop. Its preparation
+        # starts the group, which proves the network for it.
         owner = await endpoint_calls.run(retained_owner, workspace_id)
-        retained = await endpoint_calls.run(owner.backend, workspace_id)
-        await endpoint_calls.run(retained.manager.require_network, retained.spec)
         return await endpoint_calls.run(
             owner.prepare_environment,
             workspace_id,
@@ -3495,14 +3496,13 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                     environment_preparation,
                     start_seq=start_seq,
                 )
+            # Admission proves the group network for this PTY.
             with call.stage("admission"):
                 token, descriptor = await endpoint_calls.run(
                     owner.terminal_opened, workspace_id, start_seq=start_seq
                 )
             terminal_token = token
             retained = await endpoint_calls.run(owner.backend, workspace_id)
-            with call.stage("network"):
-                await endpoint_calls.run(retained.manager.require_network, retained.spec)
 
             def on_terminal_closed(last_activity: float) -> None:
                 owner.terminal_closed(

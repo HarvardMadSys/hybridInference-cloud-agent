@@ -22,6 +22,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from cloud_agent_host.chat_sandbox import (
     _GUEST_NETWORK_CHECK,
@@ -48,10 +50,15 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatFailStopped,
     RetainedChatLost,
 )
+from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.environment_tests import environment_run_spec
 from cloud_agent_host.network_guard import HostNetworkGuard
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, ProcessBackend, SandboxError
+from cloud_agent_host.sandbox_manager import create_app
+from cloud_agent_host.shared_session_supervisor import (
+    SharedChatSessionSupervisor,
+    SharedMemberManifest,
+)
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 
 _NAMESPACE = "this-stack"
@@ -619,6 +626,35 @@ def test_a_relay_rollout_swaps_the_endpoint_and_the_host_exception(monkeypatch):
     assert (old_ip, 8080) not in guard.relays[bridge] or old_ip == new_ip
 
 
+def test_reconciliation_reads_the_bridge_again_only_after_detaching_a_stale_relay(
+    monkeypatch,
+):
+    """A detach changes the bridge, so its result is read back; no detach, no second read."""
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    name = manager._network_lifecycle._ensure_group_network(spec)
+
+    def bridge_reads() -> int:
+        return sum(argv[1:] == ["network", "inspect", name] for argv in docker.calls)
+
+    docker.calls.clear()
+    manager._network_lifecycle._ensure_group_network(spec)
+    assert bridge_reads() == 2, "its shape, then its members: nothing to detach"
+
+    # Compose replaced the gateway relay; the old one is still on the bridge.
+    relays = docker.network("agent-relays")
+    relays["endpoints"].pop("relay-gateway")
+    docker.containers["relay-gateway"]["running"] = False
+    docker.add_container("relay-gateway-2", running=True)
+    docker.connect(relays["Id"], "relay-gateway-2", ["agent-gateway"])
+    docker.calls.clear()
+    manager._network_lifecycle._ensure_group_network(spec)
+
+    assert ["docker", "network", "disconnect", name, "relay-gateway"] in docker.calls
+    assert bridge_reads() == 3, "the membership is checked on a reading taken after the detach"
+    assert set(docker.network(name)["endpoints"]) == {"relay-gateway-2", "relay-mcp"}
+
+
 def test_one_relay_serving_both_services_gets_an_exception_for_each_port(monkeypatch):
     """The configuration accepts one relay name for both services; so must the rules.
 
@@ -1029,9 +1065,11 @@ def test_hot_network_reconciliation_reuses_only_its_own_inspections(monkeypatch,
             if argv[1:3] in (["network", "inspect"], ["container", "inspect"])
         ]
         # Previously 19 inspections per call, before the guest helper's own
-        # identity check. Reusing data inside one call must not become a cache
-        # across commands: the second call gathers the same fresh evidence.
-        assert len(inspections) == 10
+        # identity check, and 10 while reconciliation read the bridge a second
+        # time after detaching nothing. Reusing data inside one call must not
+        # become a cache across commands: the second call gathers the same
+        # fresh evidence.
+        assert len(inspections) == 9
         assert ["docker", "container", "inspect", "relay-gateway"] not in inspections
         assert ["docker", "container", "inspect", "relay-mcp"] not in inspections
         assert not any(
@@ -1274,6 +1312,155 @@ def test_guest_network_snapshot_still_checks_files_and_skips_unchanged_writes(
     hosts.symlink_to(resolv)
     with pytest.raises(SandboxError, match="network sync failed"):
         manager._sync_kata_guest_network(spec, current, addresses)
+
+
+# ── one proof per workspace request ──────────────────────────────────
+
+
+class _KataExecDocker(FakeDocker):
+    """The model with its sandbox under Kata, answering every exec it is sent."""
+
+    def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[1] == "exec":
+            self.calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return super().__call__(argv, **kwargs)
+
+    def _container_json(self, container: dict[str, Any]) -> dict[str, Any]:
+        raw = super()._container_json(container)
+        if container["Id"] == "sandbox-container":
+            raw["HostConfig"]["Runtime"] = KATA_RUNTIME
+        return raw
+
+
+def _hot_kata_workspace(monkeypatch):
+    """A running Kata group on its bridge, behind the real supervisor and endpoints.
+
+    ``docker.calls`` records every Docker CLI process a request starts: the
+    lifecycle's own calls, and the execs that go through subprocess, which
+    run a short local process in their place. ``proofs`` records each group
+    network proof, the one a start makes of a running container included.
+    """
+    config = _config()
+    backend = ContainerBackend(
+        image="img", runtime=KATA_RUNTIME, sandbox_network=config, sandbox_namespace=_NAMESPACE
+    )
+    backend._network_guard = FakeGuard()  # type: ignore[assignment]
+    manager = ChatSandboxManager(backend)
+    docker = _KataExecDocker(config)
+    monkeypatch.setattr(manager, "_run", docker)
+    run, popen = subprocess.run, subprocess.Popen
+
+    def exec_run(argv, **kwargs):
+        if argv[:2] != ["docker", "exec"]:
+            return run(argv, **kwargs)
+        docker.calls.append(list(argv))
+        # The guest check passes, and a workspace read finds an empty directory.
+        answer = [] if _GUEST_NETWORK_CHECK in argv else {"kind": "directory", "entries": []}
+        return subprocess.CompletedProcess(argv, 0, json.dumps(answer).encode(), b"")
+
+    def exec_popen(argv, **kwargs):
+        if argv[:2] != ["docker", "exec"]:
+            return popen(argv, **kwargs)
+        docker.calls.append(list(argv))
+        # A Git view reads its own markers back over a clean workspace.
+        tags = {kind: tag for tag, kind in re.findall(r"(__HYI_\w+?_([A-Z]+)__)", argv[-1])}
+        output = "".join(f"\n{tags[kind]}\n" for kind in ("DIFF", "COMMITS")) if tags else ""
+        output += f"\n{tags['STATUS']}0\n" if tags else ""
+        return popen(["/bin/sh", "-c", 'sleep 0.05; printf "%s" "$1"', "sh", output], **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", exec_run)
+    monkeypatch.setattr(subprocess, "Popen", exec_popen)
+    monkeypatch.setattr(EnvironmentPreparation, "status", lambda *_args: {"ready": True})
+
+    spec = ChatSandboxSpec(
+        thread_id="athr_01",
+        sandbox_id="asbx_01",
+        generation=3,
+        runtime_id="claude-code",
+        sandbox_image_digest="sha256:image-pinned",
+        shared_live=True,
+        resident_slot_capacity=2,
+    )
+    docker.add_sandbox(spec, running=True)
+    name = manager._network_lifecycle._ensure_group_network(spec)
+    network = docker.network(name)
+    network["Created"] = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    docker.connect(network["Id"], "sandbox-container", [])
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(
+        spec,
+        [
+            SharedMemberManifest(
+                thread_id=spec.thread_id,
+                native_session_id="native-01",
+                context_status="live",
+                resident_slot_id=0,
+                last_settled_job_id="ajob_01",
+            )
+        ],
+        expected_container_id="sandbox-container",
+    )
+    proofs: list[ChatSandboxSpec] = []
+    prove = manager._require_group_network
+
+    def counted_proof(proved: ChatSandboxSpec, *args: Any, **kwargs: Any):
+        proofs.append(proved)
+        return prove(proved, *args, **kwargs)
+
+    monkeypatch.setattr(manager, "_require_group_network", counted_proof)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="secret",
+        shared_session_supervisor=supervisor,
+    )
+    docker.calls.clear()
+    return app, docker, proofs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "processes"),
+    [("files", 14), ("git", 14), ("terminal", 14), ("environment", 13)],
+)
+async def test_a_workspace_request_proves_a_hot_group_network_once(monkeypatch, kind, processes):
+    """Admission proves the bridge, and nothing on the way to the work proves it again.
+
+    A request used to prove it two or three times: the start its admission
+    makes, the endpoint's own check, and a spawned command's check. On a hot
+    Kata group that was 27 Docker CLI processes for a file read, 39 for a Git
+    view, 27 for a terminal and 26 for a ready environment.
+    """
+    app, docker, proofs = _hot_kata_workspace(monkeypatch)
+    headers = {"X-Agent-Workspace-Token": "secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox-manager"
+    ) as client:
+        if kind == "files":
+            response = await client.get("/workspaces/athr_01/files?path=", headers=headers)
+        elif kind == "git":
+            response = await client.get("/workspaces/athr_01/git", headers=headers)
+        elif kind == "terminal":
+            response = await client.post(
+                "/workspaces/athr_01/terminals", headers=headers, json={"rows": 24, "cols": 80}
+            )
+        else:
+            response = await client.post(
+                "/workspaces/athr_01/environment/prepare",
+                headers=headers,
+                json={"environment": {"binding_id": "binding"}},
+            )
+        measured = list(docker.calls)
+        if kind == "terminal":
+            await client.delete(
+                f"/workspaces/athr_01/terminals/{response.json()['id']}", headers=headers
+            )
+
+    assert response.status_code == 200, response.text
+    assert len(proofs) == 1
+    guest_syncs = [argv for argv in measured if argv[1] == "exec" and "--privileged" in argv]
+    assert len(guest_syncs) == 1, "the guest's relay names are written once"
+    assert len(measured) == processes
 
 
 # ── a table the sweep reinstalls ──────────────────────────────────────
