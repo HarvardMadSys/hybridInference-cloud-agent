@@ -74,6 +74,7 @@
         "src/app/(agents)/admin/settings/settingValues.ts",
         "src/components/features/agents/recordedTurnOutputs.ts",
         "src/components/features/agents/useConversationReadState.ts",
+        "src/components/features/agents/useNativeQuestions.ts",
         "src/components/features/teams/JoinTeamView.tsx"
       ],
       "rules": {
@@ -84,7 +85,6 @@
       "files": [
         "src/components/features/agents/environment/EnvironmentManager.tsx",
         "src/components/features/agents/useConversationList.ts",
-        "src/components/features/agents/useNativeQuestions.ts",
         "src/components/features/settings/UsageSettings.tsx"
       ],
       "rules": {
