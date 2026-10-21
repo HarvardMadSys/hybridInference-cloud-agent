@@ -77,7 +77,7 @@ def ensure_kilo_runtime(manager: ChatSandboxManager, spec: ChatSandboxSpec, vers
     with staged_tree(
         manager,
         spec,
-        image=manager.backend.image,
+        image=lambda: manager.backend.image,
         source=prefix,
         stage=stage,
         what="the deployment's Kilo runtime",

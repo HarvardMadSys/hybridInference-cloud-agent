@@ -1043,6 +1043,8 @@ class FakeManager:
         return SimpleNamespace(returncode=0, stderr=b"")
 
     def _require(self, _spec):
+        # The real one is a ``docker container inspect``: recorded with Docker's other calls.
+        subprocess.run(["docker", "container", "inspect", "chat"], check=False)
         return SimpleNamespace(container_id="chat-container")
 
     def _run(self, argv, *, timeout):
@@ -1140,6 +1142,19 @@ def test_a_cleanup_that_fails_still_removes_the_source_and_hides_no_failure(down
 def test_a_version_this_host_never_downloaded_says_how_to_fix_it(downloaded):
     with pytest.raises(SandboxError, match="update the agent again"):
         runtime_install.ensure_downloaded_runtime(FakeManager(), None, "claude-code", "2.1.301")
+
+
+def test_a_chat_gone_mid_call_says_so_before_any_image_is_looked_up(downloaded):
+    """Even for a version this host never downloaded: the chat is what went missing."""
+
+    class Gone(FakeManager):
+        def _require(self, spec):
+            super()._require(spec)
+            raise SandboxError("chat sandbox is missing")
+
+    with pytest.raises(SandboxError, match="chat sandbox is missing"):
+        runtime_install.ensure_downloaded_runtime(Gone(), None, "claude-code", "2.1.301")
+    assert downloaded.calls == [["container", "inspect", "chat"]]
 
 
 def test_a_runner_restarting_mid_copy_leaves_the_copy_alone(downloaded):

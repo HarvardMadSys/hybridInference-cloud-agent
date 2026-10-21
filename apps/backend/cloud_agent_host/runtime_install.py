@@ -111,7 +111,7 @@ def ensure_downloaded_runtime(
     with staged_tree(
         manager,
         spec,
-        image=_source_image(manager, runtime_id, version),
+        image=lambda: _source_image(manager, runtime_id, version),
         source=prefix,
         stage=stage,
         what=f"{runtime_id} {version}",

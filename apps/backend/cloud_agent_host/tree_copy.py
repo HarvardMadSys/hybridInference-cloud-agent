@@ -17,7 +17,7 @@ from cloud_agent_host.runtime_images import SOURCE_LABEL, WORK_LABEL
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 
@@ -49,18 +49,19 @@ def staged_tree(
     manager: ChatSandboxManager,
     spec: ChatSandboxSpec,
     *,
-    image: str,
+    image: Callable[[], str],
     source: str,
     stage: str,
     what: str,
     copy_timeout_s: float,
 ) -> Iterator[None]:
-    """Copy ``source`` out of ``image`` into the new directory ``stage`` in the chat.
+    """Copy ``source`` out of ``image()`` into the new directory ``stage`` in the chat.
 
-    Run the activation inside the block. ``stage`` and the source container
-    are removed when it ends, whether or not anything failed, and a removal
-    that fails never hides a failure before it. ``what`` names the tree in
-    errors.
+    ``image`` is called only after the chat is found, so a chat that has gone
+    is reported as gone, not as a failure to find the image. Run the
+    activation inside the block. ``stage`` and the source container are
+    removed when it ends, whether or not anything failed, and a removal that
+    fails never hides a failure before it. ``what`` names the tree in errors.
     """
     docker = manager.backend.docker_binary
     current = manager._require(spec)
@@ -82,7 +83,7 @@ def staged_tree(
             f"{SOURCE_LABEL}={manager.backend.sandbox_namespace}",
             "--entrypoint",
             "/bin/true",
-            image,
+            image(),
         ],
         timeout=60,
     )
