@@ -100,9 +100,11 @@ Chinese. When a change edits a page under `docs/developer/` or a root guide the
 site includes (`ENVIRONMENT.md`, `CONTRIBUTING.md`, `SECURITY.md`,
 `deploy/local/README.md`, `deploy/release/README.md`,
 `gateway_contracts/README.md`), run `make docs-translate`, translate the
-entries it adds or marks fuzzy, and run `make docs-verify`. CI fails while a
-string on a stable page (the home page, Development, Code structure, Security,
-Contributing) lacks a current translation, and warns for the other pages.
+entries it adds or marks fuzzy, and run `make docs-verify`. On the stable
+pages (the home page, the developer guide, the code structure page, and the
+`SECURITY.md` and `CONTRIBUTING.md` the site includes), CI fails while a string
+has no catalog entry or a fuzzy one; on the other pages it warns. No page
+catches an entry left empty, which renders in English.
 [Translating the docs](docs/developer/translations.md) has the workflow and
 terminology.
 
