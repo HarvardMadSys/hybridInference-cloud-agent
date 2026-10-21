@@ -33,6 +33,7 @@ vi.mock('@/lib/api/promptRewrite', () => ({ rewritePrompt: vi.fn() }));
 import { FirstRunProvider } from './firstRun';
 import { requestGitHubAccess } from './githubReturn';
 import { TaskComposer } from './TaskComposer';
+import { composerDraftStorageKey } from './useComposerDraft';
 
 const navigation = vi.hoisted(() => ({ push: vi.fn() }));
 const account = vi.hoisted(() => ({ id: undefined as string | undefined }));
@@ -1120,7 +1121,7 @@ describe('TaskComposer source-control onboarding', () => {
           task: 'Fix the flaky test',
           repo: 'owner/new',
           runtime: 'codex',
-          model: 'model-b',
+          chosenModel: 'model-b',
         },
         savedAt: Date.now(),
       }),
@@ -2562,6 +2563,57 @@ describe('durable new-task drafts', () => {
     render(<TaskComposer />);
     await waitFor(() => expect(getAgentConfig).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-b'));
+  });
+
+  it('ignores the model in a draft written before picks were told apart', async () => {
+    // The previous composer saved whatever the control showed, the server's
+    // own fill-in included, so that model cannot be read as the owner's pick.
+    localStorage.setItem(
+      composerDraftStorageKey('alice', 'new-task'),
+      JSON.stringify({
+        version: 1,
+        revision: 1,
+        value: JSON.stringify({
+          task: 'Keep this text',
+          repo: '',
+          runtime: '',
+          model: 'model-a',
+          effort: '',
+          branch: '',
+          plugins: [],
+        }),
+      }),
+    );
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-b'], default_model: 'model-b' }),
+    );
+    render(<TaskComposer />);
+    expect(await screen.findByRole('textbox')).toHaveValue('Keep this text');
+    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-b'));
+  });
+
+  it('never saves the fallback for a retired pick as a pick of its own', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-b', 'model-c'], default_model: 'model-a' }),
+    );
+    const first = render(<TaskComposer />);
+    await chooseRepository();
+    fireEvent.click(screen.getByLabelText('Model'));
+    fireEvent.click(screen.getByRole('option', { name: 'model-b' }));
+    first.unmount();
+    // model-b is withdrawn: the control falls back to what the server resolved.
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-c'], default_model: 'model-a' }),
+    );
+    const second = render(<TaskComposer />);
+    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-a'));
+    second.unmount();
+    // The owner then pins model-c in Settings.
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ models: ['model-a', 'model-c'], default_model: 'model-c' }),
+    );
+    render(<TaskComposer />);
+    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-c'));
   });
 
   it('does not navigate another account after an earlier account submission resolves', async () => {

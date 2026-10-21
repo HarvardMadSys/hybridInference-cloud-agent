@@ -82,7 +82,13 @@ interface NewTaskDraft {
   task: string;
   repo: string;
   runtime: string;
-  model: string;
+  /**
+   * The model the owner picked in this composer, or empty. Never the model
+   * shown: one the server filled in is resolved again on the next visit.
+   * Drafts written before this field have only `model`, which mixed the two
+   * and so is ignored.
+   */
+  chosenModel: string;
   effort: string;
   branch: string;
   plugins: AgentPluginInputApi[];
@@ -93,11 +99,12 @@ function readNewTaskDraft(value: string): NewTaskDraft | null {
     const saved: unknown = JSON.parse(value);
     if (!saved || typeof saved !== 'object') return null;
     const record = saved as Record<string, unknown>;
-    const fields = ['task', 'repo', 'runtime', 'model', 'effort', 'branch'] as const;
+    const fields = ['task', 'repo', 'runtime', 'effort', 'branch'] as const;
     if (!fields.every((field) => typeof record[field] === 'string')) return null;
     const plugins = readDraftPlugins(record.plugins);
     if (plugins === null) return null;
-    return { ...(saved as NewTaskDraft), plugins };
+    const chosenModel = typeof record.chosenModel === 'string' ? record.chosenModel : '';
+    return { ...(saved as NewTaskDraft), chosenModel, plugins };
   } catch {
     return null;
   }
@@ -196,16 +203,18 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const [branch, setBranch] = useState(draft?.branch ?? '');
   const [branchOptionsRepo, setBranchOptionsRepo] = useState<string | null>(null);
   const [runtime, setRuntime] = useState(draft?.runtime ?? '');
-  const [model, setModel] = useState(draft?.model ?? '');
-  // Only a model the owner picked here is worth keeping across a visit. One
-  // the server resolved for them is re-resolved on the next one, so a pin
-  // saved in Settings meanwhile takes effect instead of the stale answer.
-  const [modelChosen, setModelChosen] = useState(Boolean(draft?.model));
-  const chosenModel = modelChosen ? model : '';
-  const chooseModel = useCallback((value: string) => {
-    setModel(value);
-    setModelChosen(true);
-  }, []);
+  // Two values, never one: what the owner picked here, which a draft keeps,
+  // and what the server resolved for them, which is read again on every
+  // visit so a pin saved in Settings meanwhile takes effect. The control
+  // shows the pick while it is on offer, else the resolved model. A fallback
+  // is therefore never mistaken for a pick and never saved as one.
+  const [chosenModel, setChosenModel] = useState(draft?.chosenModel ?? '');
+  const [resolvedModel, setResolvedModel] = useState('');
+  const model = models.includes(chosenModel)
+    ? chosenModel
+    : models.includes(resolvedModel)
+      ? resolvedModel
+      : '';
   const [effort, setEffort] = useState(draft?.effort ?? '');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -223,7 +232,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         task,
         repo,
         runtime,
-        model: chosenModel,
+        chosenModel,
         effort,
         branch: savedBranch,
         plugins,
@@ -278,13 +287,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     // mistake as picking a repository for them, which this composer already
     // refuses to do. With nothing resolved the control stays empty and Run
     // waits, exactly as it does for an unset repository.
-    setModel((current) =>
-      current && modelIds.includes(current)
-        ? current
-        : cfg.default_model && modelIds.includes(cfg.default_model)
-          ? cfg.default_model
-          : '',
-    );
+    setResolvedModel(cfg.default_model ?? '');
   }, []);
 
   // The one place a repository is chosen for the owner: they opened the page
@@ -316,7 +319,6 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     // opened the page, wherever they are still on offer.
     if (first && draft) {
       if (draft.runtime && config.runtimes.includes(draft.runtime)) setRuntime(draft.runtime);
-      if (draft.model && (config.models ?? []).includes(draft.model)) setModel(draft.model);
       if (
         (!initialRepo || draft.repo === initialRepo) &&
         draft.repo &&
@@ -507,7 +509,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           task,
           repo: '',
           runtime,
-          model: chosenModel,
+          chosenModel,
           effort,
           branch: savedBranch,
           plugins,
@@ -524,7 +526,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         task,
         repo: temporary ? '' : repo,
         runtime,
-        model: chosenModel,
+        chosenModel,
       },
       userId,
     );
@@ -933,7 +935,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
               label={t('composer.model')}
               value={model}
               options={models}
-              onChange={chooseModel}
+              onChange={setChosenModel}
               // Empty until something resolves for this owner. The model is
               // never filled in for them: see applyConfig.
               placeholder={t('composer.chooseModelPlaceholder')}
