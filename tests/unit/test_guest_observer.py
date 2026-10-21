@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
+import threading
+import time
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 
+from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 from cloud_agent_host.guest_observer import (
+    GUEST_BOOT_ID_PATH,
+    GUEST_OBSERVER_BINARY,
+    GUEST_OBSERVER_EVENTS,
     GUEST_OBSERVER_ROTATE_BYTES,
     GUEST_OBSERVER_SOURCE,
+    GUEST_OBSERVER_STATUS,
     GUEST_OBSERVER_VERSION,
     MAX_OBSERVED_TOOL_MARKS,
     GuestObserverController,
@@ -21,10 +34,16 @@ from cloud_agent_host.guest_observer import (
     add_process_resources,
     attribute_processes,
     finish_observation,
+    parse_drain,
     parse_snapshot,
     parse_status,
 )
+from cloud_agent_host.guest_observer_locks import GuestObserverLocks
+from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend
 from cloud_agent_host.tool_windows import TOOL_MARK_HELPER, ToolMark, ToolWindow
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def _cursor(**overrides) -> GuestObserverCursor:
@@ -75,6 +94,139 @@ def _event(seq: int, kind: str, mono_ns: int, **overrides) -> bytes:
     }
     value.update(overrides)
     return (json.dumps(value, separators=(",", ":")) + "\n").encode()
+
+
+def _publication(snapshot: GuestObserverSnapshot) -> dict[str, object]:
+    """One status publication, as the fixed guest scripts print it."""
+    status = snapshot.status
+    return {
+        "status": {
+            "version": GUEST_OBSERVER_VERSION,
+            "ready": True,
+            "pid": status.pid,
+            "poll_seq": status.poll_seq,
+            "event_seq": status.event_seq,
+            "lost": status.lost,
+            "journal_dropped": status.journal_dropped,
+            "journal_bytes": status.journal_bytes,
+            "journal_dev": status.journal_dev,
+            "journal_ino": status.journal_ino,
+        },
+        "journal_size": snapshot.journal_size,
+        "guest_mono_ns": snapshot.guest_mono_ns,
+    }
+
+
+def _drained(
+    closing: GuestObserverSnapshot,
+    flushed: GuestObserverSnapshot,
+    payload: bytes = b"",
+) -> SimpleNamespace:
+    """The drain script's output: both publications on one line, then the slice."""
+    header = json.dumps(
+        {"closing": _publication(closing), "flushed": _publication(flushed)},
+        separators=(",", ":"),
+    )
+    return SimpleNamespace(returncode=0, stdout=header.encode() + b"\n" + payload, stderr=b"")
+
+
+class _LocalObserver:
+    """The trusted helper's published state, kept on this machine.
+
+    The fixed guest scripts run unmodified against it, with only the three
+    paths they are given rewritten: a sleeping interpreter stands in for the
+    helper process, so ``/proc/<pid>/exe`` is the binary they are told to
+    trust, and a thread republishes the status every 10 ms, the way the
+    helper does after each poll.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.status_path = root / "status.json"
+        self.events_path = root / "events.jsonl"
+        self.events_path.write_bytes(b"")
+        self.trusted_binary = sys.executable
+        self.process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+        self.poll_seq = 1
+        self.event_seq = 0
+        #: Clear it and the helper stops publishing, as if its poll stalled.
+        self.polling = threading.Event()
+        self.polling.set()
+        self.execs: list[list[str]] = []
+        self.outputs: list[bytes] = []
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._publish()
+        self._thread = threading.Thread(target=self._poll, daemon=True)
+        self._thread.start()
+
+    @property
+    def pid(self) -> int:
+        return self.process.pid
+
+    def append(self, *records: bytes) -> None:
+        """Journal records now; the helper's next poll publishes them."""
+        with self._lock, self.events_path.open("ab") as handle:
+            handle.write(b"".join(records))
+            self.event_seq += len(records)
+
+    def _publish(self) -> None:
+        with self._lock:
+            journal = self.events_path.stat()
+            status = {
+                "version": GUEST_OBSERVER_VERSION,
+                "ready": True,
+                "pid": self.pid,
+                "poll_seq": self.poll_seq,
+                "event_seq": self.event_seq,
+                "lost": 0,
+                "journal_dropped": 0,
+                "journal_bytes": journal.st_size,
+                "journal_dev": journal.st_dev,
+                "journal_ino": journal.st_ino,
+            }
+            temporary = self.status_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(status), encoding="utf-8")
+            os.replace(temporary, self.status_path)
+
+    def _poll(self) -> None:
+        while not self._stop.wait(0.01):
+            if self.polling.is_set():
+                self.poll_seq += 1
+                self._publish()
+
+    def capture(self, argv: list[str], timeout_s: float) -> subprocess.CompletedProcess[bytes]:
+        """The exec seam: run the fixed script here, against this state."""
+        self.execs.append(list(argv))
+        paths = {
+            GUEST_OBSERVER_STATUS: str(self.status_path),
+            GUEST_OBSERVER_EVENTS: str(self.events_path),
+            GUEST_OBSERVER_BINARY: self.trusted_binary,
+        }
+        command = [paths.get(item, item) for item in argv]
+        if command[0] == "python3":
+            command[0] = sys.executable
+        result = subprocess.run(command, capture_output=True, timeout=timeout_s, check=False)
+        self.outputs.append(result.stdout)
+        return result
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+        self.process.kill()
+        self.process.wait(timeout=5)
+
+
+@pytest.fixture
+def local_observer(tmp_path: Path) -> Iterator[_LocalObserver]:
+    observer = _LocalObserver(tmp_path)
+    try:
+        yield observer
+    finally:
+        observer.close()
+
+
+def _never_restarted(*_args: object, **_kwargs: object) -> None:
+    pytest.fail("a live observer must not be restarted")
 
 
 def test_snapshot_contract_requires_ready_versioned_monotonic_state():
@@ -147,13 +299,7 @@ def test_idle_rotation_failure_never_rejects_the_next_turn(monkeypatch):
     assert controller.rotate_if_needed() is False
 
 
-def test_a_replaced_journal_cannot_look_like_the_same_observer_after_pid_reuse(
-    monkeypatch,
-):
-    controller = GuestObserverController(
-        capture=lambda *_args: None,
-        privileged=lambda *_args: None,
-    )
+def test_a_replaced_journal_cannot_look_like_the_same_observer_after_pid_reuse():
     cursor = _cursor(observer_pid=91, journal_dev=7, journal_ino=19)
     replaced = _snapshot(
         status=GuestObserverStatus(
@@ -167,7 +313,10 @@ def test_a_replaced_journal_cannot_look_like_the_same_observer_after_pid_reuse(
             journal_ino=20,
         )
     )
-    monkeypatch.setattr(controller, "snapshot", lambda **_kwargs: replaced)
+    controller = GuestObserverController(
+        capture=lambda *_args: _drained(replaced, replaced),
+        privileged=lambda *_args: None,
+    )
 
     observation = controller.finish(cursor)
 
@@ -175,11 +324,7 @@ def test_a_replaced_journal_cannot_look_like_the_same_observer_after_pid_reuse(
     assert "journal changed" in (observation.detail or "")
 
 
-def test_regressed_loss_counters_cannot_look_like_a_complete_observation(monkeypatch):
-    controller = GuestObserverController(
-        capture=lambda *_args: pytest.fail("a reset fence must be rejected before journal read"),
-        privileged=lambda *_args: None,
-    )
+def test_regressed_loss_counters_cannot_look_like_a_complete_observation():
     regressed = _snapshot(
         status=GuestObserverStatus(
             pid=91,
@@ -192,54 +337,33 @@ def test_regressed_loss_counters_cannot_look_like_a_complete_observation(monkeyp
             journal_ino=19,
         )
     )
-    monkeypatch.setattr(controller, "snapshot", lambda **_kwargs: regressed)
+    flushed = replace(regressed, status=replace(regressed.status, poll_seq=13))
+    # The slice is read in the same exec as the fence, so it arrives with it.
+    read_alongside = _event(10, "fork", 1_001_000_000) + _event(11, "exit", 1_002_000_000)
+    controller = GuestObserverController(
+        capture=lambda *_args: _drained(regressed, flushed, read_alongside),
+        privileged=lambda *_args: None,
+    )
 
     observation = controller.finish(_cursor(observer_pid=91, journal_dev=7, journal_ino=19))
 
     assert observation.complete is False
     assert "loss counters reset" in (observation.detail or "")
+    # A reset fence is rejected before a byte read with it is parsed.
+    assert observation.processes == ()
+    assert observation.journal_payload == b""
 
 
-def test_a_journal_replaced_after_the_final_snapshot_is_refused(tmp_path, monkeypatch):
+def test_a_journal_replaced_after_the_final_snapshot_is_refused(local_observer):
     """The fd opened for the read must still be the cursor's exact journal."""
-    replacement = tmp_path / "events.jsonl"
-    replacement.write_bytes(_event(1, "fork", 1_001_000_000))
-    expected_size = replacement.stat().st_size
-    expected_dev, expected_ino = 7, 19
-    snapshot = _snapshot(
-        status=GuestObserverStatus(
-            pid=91,
-            poll_seq=11,
-            event_seq=9,
-            lost=4,
-            journal_dropped=2,
-            journal_bytes=expected_size,
-            journal_dev=expected_dev,
-            journal_ino=expected_ino,
-        ),
-        journal_size=expected_size,
-    )
-
-    def capture(argv, timeout_s):
-        command = list(argv)
-        command[3] = str(replacement)
-        return subprocess.run(
-            command,
-            capture_output=True,
-            timeout=timeout_s,
-            check=False,
-        )
-
+    local_observer.append(_event(1, "fork", 1_001_000_000))
     controller = GuestObserverController(
-        capture=capture,
-        privileged=lambda *_args: None,
+        capture=local_observer.capture,
+        privileged=_never_restarted,
     )
-    monkeypatch.setattr(controller, "snapshot", lambda **_kwargs: snapshot)
-    cursor = _cursor(
-        observer_pid=91,
-        journal_dev=expected_dev,
-        journal_ino=expected_ino,
-    )
+    # The helper publishes the journal at its path; the cursor was fenced on
+    # another file, the one this read must find there.
+    cursor = _cursor(observer_pid=local_observer.pid, journal_dev=7, journal_ino=19)
 
     observation = controller.finish(cursor)
 
@@ -300,6 +424,208 @@ def test_active_shared_observations_never_restart_on_a_new_snapshot_failure(monk
 
     assert cursor.available is False
     assert "transient docker exec failure" in (cursor.detail or "")
+
+
+def test_a_warm_begin_is_one_opening_read_and_one_bracketed_fence(local_observer):
+    """Liveness, trusted binary, journal size, opening fence and boot: one read."""
+    controller = GuestObserverController(
+        capture=local_observer.capture,
+        privileged=_never_restarted,
+    )
+
+    cursor = controller.begin(user_uid=11003, rotate_threshold=GUEST_OBSERVER_ROTATE_BYTES)
+
+    assert cursor.available, cursor.detail
+    assert len(local_observer.execs) == 2
+    opening = parse_snapshot(local_observer.outputs[0])
+    assert opening.guest_boot_id == Path(GUEST_BOOT_ID_PATH).read_text().strip()
+    assert cursor.guest_boot_id == opening.guest_boot_id
+    # The fence still crosses a whole poll after the opening read, and only
+    # that read is bracketed by the host clock: it reads nothing else.
+    assert cursor.poll_seq > opening.status.poll_seq + 1
+    assert local_observer.execs[1][-3:] == [
+        GUEST_OBSERVER_BINARY,
+        str(opening.status.poll_seq + 1),
+        "3.0",
+    ]
+
+
+def test_finish_drains_a_full_poll_and_reads_the_slice_in_one_exec(local_observer):
+    controller = GuestObserverController(
+        capture=local_observer.capture,
+        privileged=_never_restarted,
+    )
+    cursor = controller.begin(user_uid=11003)
+    assert cursor.available, cursor.detail
+    started = time.monotonic_ns()
+    local_observer.append(
+        _event(1, "fork", started + 1),
+        _event(2, "exit", started + 2, counters=16, group_dead=True),
+    )
+    local_observer.execs.clear()
+    local_observer.outputs.clear()
+
+    observation = controller.finish(cursor)
+
+    assert len(local_observer.execs) == 1
+    assert observation.complete is True, observation.detail
+    assert [process.pid for process in observation.processes] == [42]
+    closing, flushed, journal = parse_drain(local_observer.outputs[0])
+    # Two publications after the closing one: the first may already have been
+    # in flight when it was read; the second closes that tail.
+    assert flushed.status.poll_seq > closing.status.poll_seq + 1
+    assert journal == observation.journal_payload
+
+
+def test_the_drain_never_reads_before_a_full_poll_is_published(local_observer):
+    controller = GuestObserverController(
+        capture=local_observer.capture,
+        privileged=_never_restarted,
+    )
+    cursor = controller.begin(user_uid=11003)
+    assert cursor.available, cursor.detail
+    local_observer.polling.clear()
+
+    observation = controller.finish(cursor, wait_s=0.3)
+
+    assert observation.complete is False
+    assert "did not advance" in (observation.detail or "")
+
+
+def test_every_observer_read_requires_the_trusted_binary(local_observer, tmp_path):
+    controller = GuestObserverController(
+        capture=local_observer.capture,
+        privileged=_never_restarted,
+    )
+    cursor = controller.begin(user_uid=11003)
+    assert cursor.available, cursor.detail
+    impostor = tmp_path / "freeinference-guest-observer"
+    impostor.write_bytes(b"")
+    local_observer.trusted_binary = str(impostor)
+
+    refused_begin = controller.begin(user_uid=11004, restart_if_missing=False)
+    refused_finish = controller.finish(cursor)
+
+    assert refused_begin.available is False
+    assert refused_finish.complete is False
+    for detail in (refused_begin.detail, refused_finish.detail):
+        assert "does not name the trusted binary" in (detail or "")
+
+
+def test_an_idle_rotation_is_decided_on_the_opening_read(monkeypatch):
+    full = _snapshot(
+        status=GuestObserverStatus(91, 20, 8, 4, 2, GUEST_OBSERVER_ROTATE_BYTES, 7, 19),
+        journal_size=GUEST_OBSERVER_ROTATE_BYTES,
+    )
+    replacement = _snapshot(status=GuestObserverStatus(92, 1, 0, 0, 0, 0, 7, 20), journal_size=0)
+    flushed = _snapshot(status=GuestObserverStatus(92, 3, 0, 0, 0, 0, 7, 20), journal_size=0)
+    reads: list[tuple[int | None, bool]] = []
+    starts: list[str] = []
+    controller = GuestObserverController(
+        capture=lambda *_args: None,
+        privileged=lambda *_args: None,
+    )
+
+    def snapshot(*, after_poll_seq=None, wait_s=3.0, boot_id=False):
+        reads.append((after_poll_seq, boot_id))
+        if after_poll_seq is not None:
+            return flushed
+        return replacement if starts else full
+
+    monkeypatch.setattr(controller, "snapshot", snapshot)
+    monkeypatch.setattr(controller, "start", lambda: starts.append("start"))
+
+    cursor = controller.begin(user_uid=11003, rotate_threshold=GUEST_OBSERVER_ROTATE_BYTES)
+
+    assert starts == ["start"]
+    # The opening read decided it, without a size read of its own; the fence
+    # is then read again from the replacement before crossing its next poll.
+    assert reads == [(None, True), (None, True), (2, False)]
+    assert (cursor.observer_pid, cursor.journal_ino) == (92, 20)
+
+
+def test_an_open_cursor_forbids_rotation_even_past_the_threshold(monkeypatch):
+    full = _snapshot(
+        status=GuestObserverStatus(91, 20, 8, 4, 2, GUEST_OBSERVER_ROTATE_BYTES, 7, 19),
+        journal_size=GUEST_OBSERVER_ROTATE_BYTES,
+    )
+    flushed = _snapshot(
+        status=GuestObserverStatus(91, 22, 8, 4, 2, GUEST_OBSERVER_ROTATE_BYTES, 7, 19),
+        journal_size=GUEST_OBSERVER_ROTATE_BYTES,
+    )
+    controller = GuestObserverController(
+        capture=lambda *_args: None,
+        privileged=_never_restarted,
+    )
+    monkeypatch.setattr(
+        controller,
+        "snapshot",
+        lambda *, after_poll_seq=None, **_kwargs: full if after_poll_seq is None else flushed,
+    )
+    monkeypatch.setattr(controller, "start", lambda: pytest.fail("a sibling's cursor is open"))
+
+    cursor = controller.begin(
+        user_uid=11004,
+        restart_if_missing=False,
+        rotate_threshold=GUEST_OBSERVER_ROTATE_BYTES,
+    )
+
+    assert cursor.available is True
+    assert cursor.observer_pid == 91
+
+
+def test_a_kata_turn_execs_into_the_guest_three_times(local_observer, monkeypatch):
+    """Two execs before the prompt is written, one after the turn, no others."""
+    manager = ChatSandboxManager(ContainerBackend(image="registry/agent:1", runtime=KATA_RUNTIME))
+    monkeypatch.setattr(
+        manager,
+        "exec_capture",
+        lambda _spec, argv, **kwargs: local_observer.capture(argv, kwargs["timeout_s"]),
+    )
+    monkeypatch.setattr(manager, "_observer_privileged_exec", _never_restarted)
+    spec = ChatSandboxSpec(
+        thread_id="athr_turns",
+        sandbox_id="asbx_turns",
+        generation=1,
+        runtime_id="claude-code",
+    )
+
+    for turn in range(2):
+        local_observer.execs.clear()
+        cursor = manager.begin_guest_observation(
+            spec, user_uid=11003, measurement_id=f"window-{turn}"
+        )
+        before_prompt = len(local_observer.execs)
+        started = time.monotonic_ns()
+        seq = local_observer.event_seq
+        local_observer.append(
+            _event(seq + 1, "fork", started + 1),
+            _event(seq + 2, "exit", started + 2, counters=16, group_dead=True),
+        )
+        observation = manager.finish_guest_observation(spec, cursor)
+
+        assert (before_prompt, len(local_observer.execs) - before_prompt) == (2, 1)
+        assert observation.complete is True, observation.detail
+        assert [process.pid for process in observation.processes] == [42]
+        assert cursor.guest_boot_id
+
+
+def test_a_containers_observer_lock_is_kept_only_while_it_is_needed():
+    locks = GuestObserverLocks()
+    cursor = GuestObserverCursor(uid=11003, observer_pid=91, available=True)
+
+    with locks.container("chat-a") as opened:
+        opened.admit(cursor)
+        opened.admit(GuestObserverCursor.unavailable(11004, "observer unavailable"))
+    with locks.container("chat-a") as reused, locks.container("chat-b") as other:
+        # An open cursor keeps its container's lock and bookkeeping; another
+        # container has a lock of its own.
+        assert reused is opened
+        assert reused.active == {id(cursor): 91}
+        assert other.lock is not reused.lock
+        reused.release(cursor)
+    with locks.container("chat-a") as fresh:
+        assert fresh is not opened
 
 
 def test_late_journal_delivery_cannot_charge_a_pre_turn_process():

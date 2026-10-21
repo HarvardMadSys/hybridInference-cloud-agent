@@ -111,6 +111,7 @@ from cloud_agent_host.guest_observer import (
     GuestObserverRuntimeError,
     GuestObserverSnapshot,
 )
+from cloud_agent_host.guest_observer_locks import GuestObserverLocks
 from cloud_agent_host.network_guard import GUARD_RECHECK_S
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
@@ -405,9 +406,8 @@ class ChatSandboxManager:
         self._member_reaper_lock = threading.Lock()
         # Multiple fork siblings may admit turns concurrently. Singleton
         # observer startup/rotation and its live cursors therefore need one
-        # sandbox-manager-wide critical section per manager.
-        self._guest_observer_lock = threading.RLock()
-        self._guest_observer_active: dict[str, dict[int, int]] = {}
+        # critical section per container; other containers do not wait on it.
+        self._guest_observers = GuestObserverLocks()
         # Containers this manager ran ``docker start`` on that have not since
         # passed the in-guest network check. A start that fails in between
         # stops its guest; if even that fails, the next activation finds the
@@ -3170,8 +3170,9 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         """This guest's boot identifier, or an empty string when unreadable.
 
         A task's identity is only unique within one boot, so every instance key
-        carries it. The observer controller caches the read, so asking once per
-        window costs one guest exec rather than one per census.
+        carries it. A window normally takes it from its cursor, whose opening
+        read already carried it; this costs one guest exec, once per window,
+        only for a cursor without one.
         """
         if self.backend.runtime != KATA_RUNTIME:
             return ""
@@ -3206,8 +3207,17 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             user_gid=0,
         )
 
-    def _guest_observer_controller(self, spec: ChatSandboxSpec) -> GuestObserverController:
-        """Bind the shared observer contract to this label-verified container."""
+    def _guest_observer_controller(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        lock: threading.RLock | None = None,
+    ) -> GuestObserverController:
+        """Bind the shared observer contract to this label-verified container.
+
+        ``lock`` is that container's observer lock, for a controller that may
+        start or rotate the helper.
+        """
 
         def capture(
             argv: builtins.list[str], timeout_s: float
@@ -3234,7 +3244,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         return GuestObserverController(
             capture=capture,
             privileged=privileged,
-            lock=self._guest_observer_lock,
+            lock=lock,
         )
 
     def begin_guest_observation(
@@ -3253,33 +3263,21 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         """
         if self.backend.runtime != KATA_RUNTIME:
             return GuestObserverCursor.unavailable(user_uid, "sandbox is not a Kata guest")
-        controller = self._guest_observer_controller(spec)
-        key = spec.container_name
-        with self._guest_observer_lock:
-            active = self._guest_observer_active.setdefault(key, {})
-            if not active:
-                controller.rotate_if_needed(threshold=GUEST_OBSERVER_ROTATE_BYTES)
+        with self._guest_observers.container(spec.container_name) as observers:
+            controller = self._guest_observer_controller(spec, lock=observers.lock)
+            idle = not observers.active
             cursor = controller.begin(
                 user_uid=user_uid,
                 # Never sacrifice concurrent member observations to admit one
                 # more turn. If the singleton is temporarily unreadable, this
                 # cursor is explicitly unavailable; cleanup of existing owners
                 # makes a later idle begin eligible to restart it.
-                restart_if_missing=not active,
+                restart_if_missing=idle,
+                # Rotation restarts the helper too: never under an open cursor.
+                rotate_threshold=GUEST_OBSERVER_ROTATE_BYTES if idle else None,
                 measurement_id=measurement_id,
             )
-            if cursor.available:
-                # A restart invalidates every old-pid cursor already; do not
-                # let abandoned bookkeeping suppress future safe rotations.
-                active = {
-                    token: observer_pid
-                    for token, observer_pid in active.items()
-                    if observer_pid == cursor.observer_pid
-                }
-                active[id(cursor)] = cursor.observer_pid
-                self._guest_observer_active[key] = active
-            elif not active:
-                self._guest_observer_active.pop(key, None)
+            observers.admit(cursor)
             return cursor
 
     def finish_guest_observation(
@@ -3292,13 +3290,8 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             return self._guest_observer_controller(spec).finish(cursor)
         finally:
             if cursor is not None:
-                key = spec.container_name
-                with self._guest_observer_lock:
-                    active = self._guest_observer_active.get(key)
-                    if active is not None:
-                        active.pop(id(cursor), None)
-                        if not active:
-                            self._guest_observer_active.pop(key, None)
+                with self._guest_observers.container(spec.container_name) as observers:
+                    observers.release(cursor)
 
     def tool_mark_reader(self, spec: ChatSandboxSpec) -> ToolMarkReader:
         """Return a bounded reader for hook marks inside one retained container."""

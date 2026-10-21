@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -53,6 +54,7 @@ from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_ROOT,
     GUEST_OBSERVER_ROTATE_BYTES,
     GUEST_OBSERVER_VERSION,
+    MAX_OBSERVATION_BYTES,
     GuestObservation,
     GuestObserverController,
     GuestObserverCursor,
@@ -375,6 +377,19 @@ def _observer_snapshot_payload(snapshot: GuestObserverSnapshot) -> bytes:
     ).encode()
 
 
+def _observer_drain_payload(
+    closing: GuestObserverSnapshot,
+    flushed: GuestObserverSnapshot,
+    payload: bytes = b"",
+) -> bytes:
+    """The drain script's output: both publications on one line, then the slice."""
+    header = {
+        "closing": json.loads(_observer_snapshot_payload(closing)),
+        "flushed": json.loads(_observer_snapshot_payload(flushed)),
+    }
+    return json.dumps(header, separators=(",", ":")).encode() + b"\n" + payload
+
+
 def _inspect_payload(
     spec: ChatSandboxSpec,
     *,
@@ -521,19 +536,16 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
         journal_size=0,
         guest_mono_ns=2_050_000_000,
     )
-    waits: list[int | None] = []
+    drains: list[list[str]] = []
+    published = [flushed]
 
     def capture(argv, _timeout_s):
-        if GUEST_OBSERVER_BINARY in argv:
-            wanted = int(argv[-2])
-            waits.append(None if wanted < 0 else wanted)
-            snapshot = closing if wanted < 0 else flushed
-            return SimpleNamespace(
-                returncode=0,
-                stdout=_observer_snapshot_payload(snapshot),
-                stderr=b"",
-            )
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        drains.append(list(argv))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_observer_drain_payload(closing, published[-1]),
+            stderr=b"",
+        )
 
     controller = GuestObserverController(
         capture=capture,
@@ -556,8 +568,14 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
     assert observation.complete is True
     # The first post-turn publication can have completed its poll before the
     # closing status was read.  Crossing the following publication proves a
-    # full drain happened after that read.
-    assert waits == [None, 21]
+    # full drain happened after that read: the one guest exec, fenced on this
+    # cursor's journal, waits for it, and a drain reporting less is refused.
+    assert len(drains) == 1
+    assert drains[0][-5:] == ["0", "7", "19", str(MAX_OBSERVATION_BYTES), "3.0"]
+    published.append(replace(flushed, status=replace(flushed.status, poll_seq=21)))
+    refused = controller.finish(cursor)
+    assert refused.complete is False
+    assert "full poll" in (refused.detail or "")
 
 
 def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary():
@@ -635,9 +653,10 @@ def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
         journal_size=10,
         guest_mono_ns=2_050_000_000,
     )
+    closing = replace(snapshot, status=replace(snapshot.status, poll_seq=19))
 
-    def capture(argv, _timeout_s):
-        stdout = _observer_snapshot_payload(snapshot) if GUEST_OBSERVER_BINARY in argv else b"short"
+    def capture(_argv, _timeout_s):
+        stdout = _observer_drain_payload(closing, snapshot, b"short")
         return SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
 
     controller = GuestObserverController(
@@ -690,8 +709,18 @@ def test_retained_guest_journal_rotates_only_without_active_turns(monkeypatch):
             self.start()
             return True
 
-        def begin(self, *, user_uid, restart_if_missing=True, measurement_id=None):
+        def begin(
+            self,
+            *,
+            user_uid,
+            restart_if_missing=True,
+            rotate_threshold=None,
+            measurement_id=None,
+        ):
             self.restart_choices.append(restart_if_missing)
+            # The real controller decides rotation on its opening read.
+            if rotate_threshold is not None:
+                self.rotate_if_needed(threshold=rotate_threshold)
             return GuestObserverCursor(
                 uid=user_uid,
                 observer_pid=self.pid,
@@ -709,7 +738,7 @@ def test_retained_guest_journal_rotates_only_without_active_turns(monkeypatch):
             )
 
     controller = Controller()
-    monkeypatch.setattr(manager, "_guest_observer_controller", lambda _spec: controller)
+    monkeypatch.setattr(manager, "_guest_observer_controller", lambda _spec, **_kwargs: controller)
 
     first = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE)
     controller.size = GUEST_OBSERVER_ROTATE_BYTES
@@ -723,6 +752,92 @@ def test_retained_guest_journal_rotates_only_without_active_turns(monkeypatch):
     assert controller.starts == 1
     assert controller.restart_choices == [True, False, True]
     assert third.observer_pid == 92
+
+
+def test_one_containers_observer_begin_never_waits_for_anothers(monkeypatch):
+    """Each guest's observer lifecycle is serialized, and only that guest's."""
+    manager = ChatSandboxManager(ContainerBackend(image="registry/agent:1", runtime=KATA_RUNTIME))
+    held = replace(_spec(), thread_id="athr_held", sandbox_id="asbx_held")
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    held_inside = threading.Event()
+    sibling_calling = threading.Event()
+    other_done = threading.Event()
+    release = threading.Event()
+    guard = threading.Lock()
+    inside: dict[str, int] = {}
+    most: dict[str, int] = {}
+
+    class Controller:
+        def __init__(self, spec):
+            self.name = spec.container_name
+
+        def begin(
+            self,
+            *,
+            user_uid,
+            restart_if_missing=True,
+            rotate_threshold=None,
+            measurement_id=None,
+        ):
+            with guard:
+                inside[self.name] = inside.get(self.name, 0) + 1
+                most[self.name] = max(most.get(self.name, 0), inside[self.name])
+            try:
+                if self.name == held.container_name:
+                    held_inside.set()
+                    release.wait(timeout=10)
+                return GuestObserverCursor(uid=user_uid, observer_pid=91, available=True)
+            finally:
+                with guard:
+                    inside[self.name] -= 1
+
+        def finish(self, _cursor):
+            return GuestObservation(
+                source="kata-guest-ebpf-v1",
+                complete=True,
+                lost_events=0,
+                truncated=False,
+            )
+
+    monkeypatch.setattr(
+        manager, "_guest_observer_controller", lambda spec, **_kwargs: Controller(spec)
+    )
+
+    def other_turn():
+        cursor = manager.begin_guest_observation(other, user_uid=MEMBER_UID_BASE)
+        manager.finish_guest_observation(other, cursor)
+        other_done.set()
+
+    def sibling_turn():
+        sibling_calling.set()
+        manager.begin_guest_observation(held, user_uid=MEMBER_UID_BASE + 1)
+
+    threads = [
+        threading.Thread(
+            target=manager.begin_guest_observation,
+            args=(held,),
+            kwargs={"user_uid": MEMBER_UID_BASE},
+        ),
+        threading.Thread(target=other_turn),
+        threading.Thread(target=sibling_turn),
+    ]
+    try:
+        threads[0].start()
+        assert held_inside.wait(timeout=5)
+        threads[1].start()
+        # Another guest's turn opens and closes while this begin holds its own.
+        assert other_done.wait(timeout=5), "another container's begin waited for this one"
+        threads[2].start()
+        assert sibling_calling.wait(timeout=5)
+        time.sleep(0.1)
+    finally:
+        release.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(timeout=5)
+
+    # A fork sibling on the held guest waited for it: one lifecycle per guest.
+    assert most == {held.container_name: 1, other.container_name: 1}
 
 
 def test_retained_tool_marks_are_read_as_the_shared_state_owner(monkeypatch):

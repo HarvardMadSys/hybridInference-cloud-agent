@@ -54,6 +54,7 @@ from cloud_agent_host.member_resources import (
     WindowAccumulator,
     reduce_window,
 )
+from cloud_agent_host.member_window_census import take_censuses
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
     ResidentTransport,
@@ -83,21 +84,9 @@ from cloud_agent_shared.turn_resources import parse_cpu_capacity
 if TYPE_CHECKING:
     import builtins
 
+    from cloud_agent_host.member_window_census import DueCensus
     from cloud_agent_host.tool_windows import ToolMark, ToolMarkReader
     from cloud_agent_shared.sandbox_manager_wire import ContextStatus, ResidentState
-
-#: One window the census loop is about to sample, as it leaves the lock: the
-#: handle, its sampler, the census number, and the cursor and accumulator the
-#: journal read needs. Named because the hand-off is what lets the guest exec
-#: happen outside the lock, and a reader has to be able to see that the handle
-#: and the sampler are already known to be present while the other two are not.
-DueCensus = tuple[
-    MemberWindowHandle,
-    MemberWindowSampler,
-    int,
-    GuestObserverCursor | None,
-    WindowAccumulator | None,
-]
 
 logger = logging.getLogger(__name__)
 
@@ -454,7 +443,7 @@ class _Member:
     window_pending_checkpoint: dict[str, Any] | None = None
     #: How far the window's journal has been read. Only the offset is kept:
     #: the accumulator carries identity between slices, so retaining every byte
-    #: read would grow without bound and re-parse it all on each tick.
+    #: read would grow without bound and re-parse it all on each checkpoint.
     window_journal_offset: int = 0
     turn_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -2896,58 +2885,35 @@ class SharedChatSessionSupervisor:
         Returns how many windows were sampled. A census that fails is not
         retried here: the next tick is a second away and a late census no
         longer describes the moment it was asked about.
+
+        A census only writes its cycle into the guest journal. Nothing reads
+        that journal between checkpoints, so it is folded when a checkpoint is
+        built rather than after every census, which would cost each running
+        member a second guest exec every second.
         """
-        sampled = 0
         now = time.monotonic()
         with self._lock:
-            members = [
-                member
-                for group in self._groups.values()
-                for member in group.members.values()
-                if member.window is not None
-                and member.window_sampler is not None
-                and member.window.baseline_taken
-            ]
-            due: builtins.list[DueCensus] = []
-            for member in members:
-                window = member.window
-                sampler = member.window_sampler
-                # The comprehension above already dropped a member without
-                # both. Re-reading them into locals is what carries that fact
-                # into the hand-off, so the census loop below works on a
-                # handle and a sampler rather than on two values a reader has
-                # to go back and prove are there.
-                if window is None or sampler is None:
-                    continue
-                if now < member.window_next_sample_mono:
-                    continue
-                member.window_next_sample_mono = now + sampler.interval_s
-                member.window_sequence += 1
-                due.append(
-                    (
-                        window,
-                        sampler,
-                        member.window_sequence,
-                        member.observer_cursor,
-                        member.window_accumulator,
-                    )
-                )
-        for window, sampler, sequence, cursor, accumulator in due:
-            with contextlib.suppress(Exception):
-                sampler.sample(window, sequence)
-            # Fold in whatever the census just wrote, so the running state and
-            # any checkpoint built from it describe real cycles rather than an
-            # empty reducer.
-            if accumulator is not None and cursor is not None:
-                with contextlib.suppress(Exception):
-                    self._consume_window_journal(accumulator, cursor)
-            sampled += 1
+            due: dict[str, builtins.list[DueCensus]] = {}
+            for sandbox_id, group in self._groups.items():
+                for member in group.members.values():
+                    window = member.window
+                    sampler = member.window_sampler
+                    if window is None or sampler is None or not window.baseline_taken:
+                        continue
+                    if now < member.window_next_sample_mono:
+                        continue
+                    member.window_next_sample_mono = now + sampler.interval_s
+                    member.window_sequence += 1
+                    due.setdefault(sandbox_id, []).append((window, sampler, member.window_sequence))
+        # One container's censuses in order, separate containers at once.
+        take_censuses(list(due.values()))
         # Reporting runs on the same clock as the census rather than on the
         # turn's event stream. A turn that spends a minute inside one silent
         # tool call emits nothing for that minute, and an upload that waits for
-        # an event would leave nothing behind if the host died in it.
+        # an event would leave nothing behind if the host died in it. It runs
+        # after every census of this tick, so a checkpoint folds them in.
         self._report_due_checkpoints()
-        return sampled
+        return sum(len(censuses) for censuses in due.values())
 
     def take_reported_checkpoint(self, thread_id: str) -> dict[str, Any] | None:
         """The newest checkpoint not yet handed to a caller, or None.
@@ -3008,14 +2974,17 @@ class SharedChatSessionSupervisor:
     ) -> int:
         """Fold this window's journal, read so far, into its accumulator.
 
-        The slice read is the new tail only -- reading the whole journal once a
-        second for the length of a turn would be wasteful -- but it is handed
-        on top of what was read before, because identity has to be derived from
-        the whole history rather than from whichever slice a record landed in.
+        The slice read is the new tail only -- re-reading the whole journal at
+        every checkpoint for the length of a turn would be wasteful -- but it is
+        handed on top of what was read before, because identity has to be
+        derived from the whole history rather than from whichever slice a
+        record landed in.
 
         Read errors are swallowed by the caller: a census the host could not
-        read back is a gap in the checkpoint, and the next tick tries again
-        from the same offset rather than skipping the bytes it never saw.
+        read back is a gap in the checkpoint, and the next checkpoint tries
+        again from the same offset rather than skipping the bytes it never saw.
+        They are still there: the window's own cursor keeps the journal from
+        rotating while the window is open.
         """
         read = getattr(self._manager, "member_window_journal_delta", None)
         if read is None:
@@ -3078,8 +3047,9 @@ class SharedChatSessionSupervisor:
         the member has no open window. The schedule owns the cadence: a caller
         may invoke this on any poll and only the fifteenth second produces a
         report. The censuses themselves are taken by
-        :meth:`sample_open_windows` on their own clock, so this only decides
-        when to upload.
+        :meth:`sample_open_windows` on their own clock, so this decides when to
+        upload, and folds in the cycles they journaled since the last report:
+        while the turn runs, nothing else reads the window's journal.
 
         The snapshot carries the counters this window has been credited with
         so far. It is built from the member's running reducer rather than a
