@@ -19,8 +19,43 @@ export function conversationRow(row: AgentConversationApi): SidebarConversation 
   };
 }
 const EMPTY_ROWS: SidebarConversation[] = [];
+const REORDER_PAGE = 50;
 
-/** Refresh loaded rows in batches; polling must not discard earlier pages. */
+/**
+ * The loaded list after one read of its first page, when only activity moved;
+ * `null` when that read cannot say.
+ *
+ * Pinned rows come first, ordered by when they were pinned. Unpinned rows follow
+ * by activity, which only moves forward, so an unpinned conversation that
+ * changed since the list was read now sorts above every unpinned one that did
+ * not. When the page's last row is an unpinned one that did not, every changed
+ * row is on the page, and the loaded rows below that one are still exactly the
+ * rows that follow it. A page that ends among pinned rows cannot say what
+ * moved below it.
+ */
+export function reorderedRows(
+  loaded: SidebarConversation[],
+  page: SidebarConversation[],
+  nextCursor: string | null,
+): SidebarConversation[] | null {
+  if (nextCursor === null) return page;
+  const last = page[page.length - 1];
+  const at = last && !last.job.pinnedAt ? loaded.findIndex((row) => row.key === last.key) : -1;
+  if (at < 0) return null;
+  const before = loaded[at];
+  if (before.lastActivityAt !== last.lastActivityAt || before.job.pinnedAt !== last.job.pinnedAt)
+    return null;
+  const shown = new Set(page.map((row) => row.key));
+  return [...page, ...loaded.slice(at + 1).filter((row) => !shown.has(row.key))];
+}
+
+/**
+ * Refresh loaded rows in batches; polling must not discard earlier pages.
+ *
+ * `refresh` reads every loaded row again. `reorder` says only activity moved,
+ * which can only lift rows to the top: it reads the first page and keeps the
+ * rows below it when that page shows nothing else moved.
+ */
 export function useConversationList({
   q = '',
   repo,
@@ -29,6 +64,7 @@ export function useConversationList({
   enabled = true,
   userId,
   refresh = 0,
+  reorder = 0,
 }: {
   q?: string;
   repo?: string;
@@ -37,6 +73,7 @@ export function useConversationList({
   enabled?: boolean;
   userId?: string;
   refresh?: number;
+  reorder?: number;
 } = {}) {
   const identity = JSON.stringify([q, repo, includeArchived, pinned, userId]);
   const [data, setData] = useState<{
@@ -115,7 +152,7 @@ export function useConversationList({
     [],
   );
   const fetchPage = useCallback(
-    async (next?: string, version = generation.current) => {
+    async (next?: string, version = generation.current, mode: 'full' | 'reorder' = 'full') => {
       activeRequest.current?.abort();
       const controller = new AbortController();
       activeRequest.current = controller;
@@ -130,6 +167,27 @@ export function useConversationList({
       );
       setError(null);
       try {
+        if (mode === 'reorder') {
+          const result = await listAgentConversations(
+            { q, repo, includeArchived, pinned, cursor: undefined, limit: REORDER_PAGE },
+            controller.signal,
+          );
+          if (controller.signal.aborted || generation.current !== version) return;
+          const rows = reorderedRows(
+            previous.rows,
+            result.conversations.map(conversationRow),
+            result.next_cursor,
+          );
+          if (rows) {
+            setData({
+              identity,
+              rows,
+              cursor: result.next_cursor === null ? null : previous.cursor,
+              loadedRefresh: previous.loadedRefresh,
+            });
+            return;
+          }
+        }
         const targetCount = !next && previous.identity === identity ? previous.rows.length : 0;
         const merged = new Map(
           (next && previous.identity === identity ? previous.rows : []).map((row) => [
@@ -190,6 +248,16 @@ export function useConversationList({
       activeRequest.current = null;
     };
   }, [fetchPage, enabled, refresh, tick]);
+  const appliedReorder = useRef(reorder);
+  useEffect(() => {
+    if (reorder === appliedReorder.current) return;
+    appliedReorder.current = reorder;
+    const loaded = dataRef.current;
+    // A full read under way, or none finished yet, already covers the move.
+    if (!enabled || busy.current || loaded.identity !== identity || loaded.loadedRefresh === null)
+      return;
+    void fetchPage(undefined, generation.current, 'reorder');
+  }, [reorder, enabled, identity, fetchPage]);
   const rows = data.identity === identity ? data.rows : EMPTY_ROWS;
   const cursor = data.identity === identity ? data.cursor : null;
   const loadedRefresh = data.identity === identity ? data.loadedRefresh : null;

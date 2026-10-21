@@ -5,7 +5,12 @@ import type { AgentConversationApi, AgentJobApi } from '@/lib/api/agents';
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 const api = vi.hoisted(() => ({ list: vi.fn() }));
 vi.mock('@/lib/api/agents', () => ({ listAgentConversations: api.list }));
-import { useConversationList } from './useConversationList';
+import {
+  conversationRow,
+  reorderedRows,
+  type SidebarConversation,
+  useConversationList,
+} from './useConversationList';
 function row(id: string, title = id): AgentConversationApi {
   return {
     job: {
@@ -338,5 +343,121 @@ describe('conversation navigation queries', () => {
     act(() => result.current.loadMore());
     await waitFor(() => expect(result.current.rows).toHaveLength(2));
     expect(result.current.error).toBeNull();
+  });
+});
+
+function active(id: string, secondsAgo: number): AgentConversationApi {
+  return {
+    ...row(id),
+    last_activity_at: new Date(Date.UTC(2026, 8, 1, 12) - secondsAgo * 1000).toISOString(),
+  };
+}
+
+function pagedServer(initial: AgentConversationApi[]) {
+  const server = { all: initial };
+  api.list.mockImplementation(async ({ cursor, limit }: { cursor?: string; limit: number }) => {
+    const start = Number(cursor ?? 0);
+    return {
+      conversations: server.all.slice(start, start + limit),
+      next_cursor: start + limit < server.all.length ? String(start + limit) : null,
+    };
+  });
+  return server;
+}
+
+describe('reordering after activity moved', () => {
+  const loaded = Array.from({ length: 6 }, (_, index) =>
+    conversationRow(active(String(index), index)),
+  );
+
+  it('keeps the loaded rows below a first page whose last row did not move', () => {
+    const moved = conversationRow(active('4', -1));
+    const page = [moved, loaded[0], loaded[1]];
+    expect(reorderedRows(loaded, page, 'more')?.map((item) => item.key)).toEqual([
+      '4',
+      '0',
+      '1',
+      '2',
+      '3',
+      '5',
+    ]);
+    expect(reorderedRows(loaded, page.slice(0, 1), null)).toEqual([moved]);
+  });
+
+  it('cannot say when the first page ends on a row that moved or that it never loaded', () => {
+    expect(reorderedRows(loaded, [conversationRow(active('1', -1))], 'more')).toBeNull();
+    expect(reorderedRows(loaded, [conversationRow(active('new', -1))], 'more')).toBeNull();
+    expect(reorderedRows(loaded, [], 'more')).toBeNull();
+  });
+
+  it('cannot say when the first page ends among pinned rows, which keep their place', () => {
+    const pin = (item: SidebarConversation): SidebarConversation => ({
+      ...item,
+      job: { ...item.job, pinnedAt: '2026-08-01T00:00:00Z' },
+    });
+    const mixed = [...loaded.slice(0, 3).map(pin), ...loaded.slice(3)];
+    // Had '5' moved, it would lead the unpinned rows: still below this page.
+    expect(reorderedRows(mixed, mixed.slice(0, 3), 'more')).toBeNull();
+  });
+
+  it('reads only the first page when only activity moved, keeping the rest and its cursor', async () => {
+    const server = pagedServer(
+      Array.from({ length: 260 }, (_, index) => active(String(index), index)),
+    );
+    const { result, rerender } = renderHook(
+      ({ refresh, reorder }) => useConversationList({ refresh, reorder }),
+      { initialProps: { refresh: 0, reorder: 0 } },
+    );
+    await waitFor(() => expect(result.current.rows).toHaveLength(50));
+    for (const count of [100, 150, 200]) {
+      act(() => result.current.loadMore());
+      await waitFor(() => expect(result.current.rows).toHaveLength(count));
+    }
+    const moved = active('120', -1);
+    server.all = [moved, ...server.all.filter((item) => item.job.id !== '120')];
+    api.list.mockClear();
+
+    rerender({ refresh: 0, reorder: 1 });
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(api.list).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 50, cursor: undefined }),
+      expect.any(AbortSignal),
+    );
+    expect(result.current.rows.map((item) => item.key)).toEqual(
+      server.all.slice(0, 200).map((item) => item.job.id),
+    );
+    expect(result.current.rows[0].lastActivityAt).toBe(moved.last_activity_at);
+    expect(result.current.cursor).toBe('200');
+    expect(result.current.loadedRefresh).toBe(0);
+  });
+
+  it('reads every loaded page again when more moved than one page shows', async () => {
+    const server = pagedServer(
+      Array.from({ length: 120 }, (_, index) => active(String(index), index)),
+    );
+    const { result, rerender } = renderHook(
+      ({ refresh, reorder }) => useConversationList({ refresh, reorder }),
+      { initialProps: { refresh: 0, reorder: 0 } },
+    );
+    await waitFor(() => expect(result.current.rows).toHaveLength(50));
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(result.current.rows).toHaveLength(100));
+    const moved = server.all.slice(50, 100).map((item, index) => active(item.job.id, -1 - index));
+    server.all = [...moved, ...server.all.slice(0, 50), ...server.all.slice(100)];
+    api.list.mockClear();
+
+    rerender({ refresh: 0, reorder: 1 });
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(api.list.mock.calls.map(([options]) => [options.limit, options.cursor])).toEqual([
+      [50, undefined],
+      [100, undefined],
+    ]);
+    expect(result.current.rows.map((item) => item.key)).toEqual(
+      server.all.slice(0, 100).map((item) => item.job.id),
+    );
   });
 });
