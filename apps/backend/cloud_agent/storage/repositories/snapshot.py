@@ -16,9 +16,19 @@ import asyncpg
 
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.events import insert_event
-from cloud_agent.storage._sql.hosts import REVOKED_HOST_SQL, refuse_start_on_revoked_host
+from cloud_agent.storage._sql.hosts import (
+    DELETED_GROUP_STATES,
+    REVOKED_HOST_SQL,
+    UNDELETED_GROUP_SQL,
+    refuse_start_on_revoked_host,
+)
 from cloud_agent.storage._sql.rows import load_json
-from cloud_agent.storage._sql.sandbox import FENCE_START_SQL, fence_sandbox_start
+from cloud_agent.storage._sql.sandbox import (
+    FENCE_START_SQL,
+    fence_sandbox_start,
+    group_is_quiet,
+    quiet_idle_deadline,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -107,11 +117,6 @@ class PostgresSnapshotRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
-
-    async def snapshot_database_time(self) -> datetime:
-        """Use the database clock for deadlines written by database transactions."""
-        async with self._pool.acquire() as conn:
-            return await conn.fetchval("SELECT clock_timestamp()")
 
     async def request_snapshot_publication(self, *, thread_id: str, user_id: str) -> dict[str, Any]:
         """Open the next snapshot of a conversation's workspace for its owner.
@@ -207,7 +212,7 @@ class PostgresSnapshotRepository:
             ):
                 return {"error": "turn_running"}
             if (
-                group["deletion_state"] in ("pending", "archived", "deleted")
+                group["deletion_state"] in DELETED_GROUP_STATES
                 or group["state"] not in ("running", "stopped")
                 or not group["published_base_sha"]
             ):
@@ -378,18 +383,13 @@ class PostgresSnapshotRepository:
                   AND (s.retry_at IS NULL OR s.retry_at <= NOW())
                   AND g.state IN ('running', 'stopped')
                   AND g.stop_requested_at IS NULL
-                  AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
+                  AND {UNDELETED_GROUP_SQL}
                   AND NOT {REVOKED_HOST_SQL.format(host="g.host")}
                   -- A group's one pending snapshot is its newest epoch, so in a
                   -- dirty group it is the later capture that supersedes the
                   -- failure that dirtied it.
                   AND g.snapshot_state IN ('pending', 'dirty')
-                  AND g.active_operation_count = 0
-                  AND NOT EXISTS (
-                      SELECT 1 FROM agent_thread_sandbox_memberships active
-                      WHERE active.sandbox_id = g.id
-                        AND active.active_attempt_id IS NOT NULL
-                  )
+                  AND {group_is_quiet("g")}
                   AND NOT EXISTS (
                       SELECT 1
                       FROM agent_snapshot_jobs included
@@ -523,7 +523,7 @@ class PostgresSnapshotRepository:
             if row is None:
                 return None
             await conn.execute(
-                """
+                f"""
                 UPDATE agent_sandboxes g
                 SET state = 'running',
                     snapshot_state = CASE
@@ -531,15 +531,7 @@ class PostgresSnapshotRepository:
                             SELECT 1 FROM agent_sandbox_snapshots pending
                             WHERE pending.sandbox_id = g.id AND pending.state = 'pending'
                         ) THEN 'pending' ELSE 'quiescent' END,
-                    idle_deadline = CASE
-                        WHEN g.active_operation_count = 0
-                         AND NOT EXISTS (
-                            SELECT 1 FROM agent_thread_sandbox_memberships active
-                            WHERE active.sandbox_id = g.id
-                              AND active.active_attempt_id IS NOT NULL
-                         )
-                        THEN clock_timestamp() + make_interval(secs => g.idle_timeout_seconds)
-                        ELSE NULL END,
+                    idle_deadline = {quiet_idle_deadline("g", "g.idle_timeout_seconds")},
                     updated_at = NOW()
                 WHERE g.id = $1 AND g.generation = $2 AND g.container_id = $3
                   AND g.snapshot_state = 'snapshotting'
@@ -631,17 +623,10 @@ class PostgresSnapshotRepository:
                 CAPTURE_RETRY_S,
             )
             await conn.execute(
-                """
+                f"""
                 UPDATE agent_sandboxes
                 SET snapshot_state = $2,
-                    idle_deadline = CASE WHEN active_operation_count = 0
-                         AND NOT EXISTS (
-                            SELECT 1 FROM agent_thread_sandbox_memberships active
-                            WHERE active.sandbox_id = agent_sandboxes.id
-                              AND active.active_attempt_id IS NOT NULL
-                         )
-                        THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
-                        ELSE NULL END,
+                    idle_deadline = {quiet_idle_deadline("agent_sandboxes", "idle_timeout_seconds")},
                     last_error = CASE WHEN $2 = 'dirty' THEN $3 ELSE last_error END,
                     updated_at = NOW()
                 WHERE id = $1 AND generation = $4 AND container_id = $5
@@ -850,18 +835,10 @@ class PostgresSnapshotRepository:
             retried,
         )
         await conn.execute(
-            """
+            f"""
             UPDATE agent_sandboxes
             SET snapshot_state = 'pending',
-                idle_deadline = CASE
-                    WHEN active_operation_count = 0
-                     AND NOT EXISTS (
-                        SELECT 1 FROM agent_thread_sandbox_memberships active
-                        WHERE active.sandbox_id = agent_sandboxes.id
-                          AND active.active_attempt_id IS NOT NULL
-                     )
-                    THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
-                    ELSE NULL END,
+                idle_deadline = {quiet_idle_deadline("agent_sandboxes", "idle_timeout_seconds")},
                 updated_at = NOW()
             WHERE id = $1 AND snapshot_state = 'snapshotting'
             """,
@@ -1188,18 +1165,10 @@ class PostgresSnapshotRepository:
             if row["state"] != "failed":
                 return True
             await conn.execute(
-                """
+                f"""
                 UPDATE agent_sandboxes
                 SET snapshot_state = 'dirty', last_error = $2,
-                    idle_deadline = CASE
-                        WHEN active_operation_count = 0
-                         AND NOT EXISTS (
-                            SELECT 1 FROM agent_thread_sandbox_memberships active
-                            WHERE active.sandbox_id = agent_sandboxes.id
-                              AND active.active_attempt_id IS NOT NULL
-                         )
-                        THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
-                        ELSE NULL END,
+                    idle_deadline = {quiet_idle_deadline("agent_sandboxes", "idle_timeout_seconds")},
                     updated_at = NOW()
                 WHERE id = $1
                 """,
@@ -1388,18 +1357,10 @@ class PostgresSnapshotRepository:
             if row is None:
                 return
             await conn.execute(
-                """
+                f"""
                 UPDATE agent_sandboxes
                 SET snapshot_state = 'dirty', last_error = $2,
-                    idle_deadline = CASE
-                        WHEN active_operation_count = 0
-                         AND NOT EXISTS (
-                            SELECT 1 FROM agent_thread_sandbox_memberships active
-                            WHERE active.sandbox_id = agent_sandboxes.id
-                              AND active.active_attempt_id IS NOT NULL
-                         )
-                        THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
-                        ELSE NULL END,
+                    idle_deadline = {quiet_idle_deadline("agent_sandboxes", "idle_timeout_seconds")},
                     updated_at = NOW()
                 WHERE id = $1
                 """,
@@ -1487,7 +1448,7 @@ class PostgresSnapshotRepository:
                   AND g.state NOT IN ('cold', 'restoring')
                   AND NOT {REVOKED_HOST_SQL.format(host="g.host")}
                   AND g.stop_requested_at IS NULL
-                  AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
+                  AND {UNDELETED_GROUP_SQL}
                   AND (latest.retry_at IS NULL OR latest.retry_at <= NOW())
                 ORDER BY g.updated_at
                 LIMIT 1
@@ -1541,7 +1502,7 @@ class PostgresSnapshotRepository:
             if sandbox_id is None:
                 return False
             updated = await conn.fetchval(
-                """
+                f"""
                 UPDATE agent_sandboxes g
                 SET state = 'running',
                     snapshot_state = CASE
@@ -1550,15 +1511,7 @@ class PostgresSnapshotRepository:
                             WHERE pending.sandbox_id = g.id AND pending.state = 'pending'
                         ) THEN 'pending' ELSE 'quiescent' END,
                     last_error = NULL,
-                    idle_deadline = CASE
-                        WHEN g.active_operation_count = 0
-                         AND NOT EXISTS (
-                            SELECT 1 FROM agent_thread_sandbox_memberships active
-                            WHERE active.sandbox_id = g.id
-                              AND active.active_attempt_id IS NOT NULL
-                         )
-                        THEN clock_timestamp() + make_interval(secs => g.idle_timeout_seconds)
-                        ELSE NULL END,
+                    idle_deadline = {quiet_idle_deadline("g", "g.idle_timeout_seconds")},
                     updated_at = NOW()
                 WHERE g.id = $1 AND g.snapshot_state = 'importing'
                   AND g.published_base_sha = $2
@@ -1657,18 +1610,10 @@ class PostgresSnapshotRepository:
                 reason,
             )
             await conn.execute(
-                """
+                f"""
                 UPDATE agent_sandboxes
                 SET snapshot_state = 'dirty', last_error = $2,
-                    idle_deadline = CASE
-                        WHEN active_operation_count = 0
-                         AND NOT EXISTS (
-                            SELECT 1 FROM agent_thread_sandbox_memberships active
-                            WHERE active.sandbox_id = agent_sandboxes.id
-                              AND active.active_attempt_id IS NOT NULL
-                         )
-                        THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
-                        ELSE NULL END,
+                    idle_deadline = {quiet_idle_deadline("agent_sandboxes", "idle_timeout_seconds")},
                     updated_at = NOW()
                 WHERE id = $1
                 """,

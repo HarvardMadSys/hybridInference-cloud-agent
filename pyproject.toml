@@ -96,8 +96,11 @@ select = [
   "UP",  # pyupgrade
   "B",   # bugbear
   "C4",  # flake8-comprehensions
+  "C90", # mccabe: function complexity (#771)
   "D",   # pydocstyle, for the three service packages (per-file-ignores below)
   "SIM", # flake8-simplify
+  "PLR0912", # too many branches (#771)
+  "PLR0915", # too many statements (#771)
   "TCH", # flake8-type-checking
   "RUF", # Ruff-specific rules
 ]
@@ -118,8 +121,18 @@ fixable = ["ALL"]
 unfixable = []
 
 [tool.ruff.lint.per-file-ignores]
-# Docstrings are required of the service packages only.
-"!apps/backend/**" = ["D"]
+# Docstrings and the complexity ratchet apply to the service packages only.
+"!apps/backend/**" = ["D", "C901", "PLR0912", "PLR0915"]
+
+# The complexity ratchet (#771). A function over a limit today carries a
+# `noqa` naming the issue, and RUF100 reports that `noqa` once the function is
+# back under the limit, so the list only shrinks.
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.pylint]
+max-branches = 12
+max-statements = 50
 
 [tool.ruff.format]
 # Design records keep the code they were written with: ruff formats Python

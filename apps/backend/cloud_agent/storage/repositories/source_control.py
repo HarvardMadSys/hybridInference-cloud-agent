@@ -85,23 +85,6 @@ class PostgresSourceControlRepository:
             finally:
                 await self._finish_lock_cleanup(conn, lock_key)
 
-    async def record_repo_grant(
-        self, *, user_id: str, installation_id: int, account_login: str | None = None
-    ) -> None:
-        """Record that this user may use this installation."""
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO agent_repo_grants (user_id, installation_id, account_login)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (user_id, installation_id)
-                DO UPDATE SET account_login = EXCLUDED.account_login
-                """,
-                user_id,
-                installation_id,
-                account_login,
-            )
-
     async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
         """Return the installations this user has connected."""
         async with self._pool.acquire() as conn:

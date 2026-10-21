@@ -207,7 +207,7 @@ _SAFE_PROVIDER_REASONS = {
 }
 
 
-def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:
+def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:  # noqa: PLR0912 complexity baseline, #771
     """Validate provider diagnostic values as well as their field names."""
     details: dict[str, str | int | bool] = {}
     operation = source.get("provider_operation")
@@ -565,7 +565,7 @@ class ComputeReconciler:
             reason=f"{remaining} groups not moved",
         )
 
-    async def execute(self, operation: dict[str, Any]) -> None:
+    async def execute(self, operation: dict[str, Any]) -> None:  # noqa: C901, PLR0912 complexity baseline, #771
         """Execute one claimed operation; public diagnostics contain no remote output."""
         try:
             kind = operation["kind"]
@@ -765,7 +765,7 @@ class ComputeReconciler:
             },
         )
 
-    async def _acquire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
+    async def _acquire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         provider = self.commands.registry.get(allocation["provider_id"]).provider
         observation: ResourceObservation | None
         if allocation.get("external_id"):
@@ -1154,7 +1154,7 @@ class ComputeReconciler:
             for op in operations
         )
 
-    async def _upgrade(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
+    async def _upgrade(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:  # noqa: PLR0912 complexity baseline, #771
         """Deploy this control plane's host bundle and record that release.
 
         The host recipe builds the replacement before it drains runners, and it
@@ -1735,7 +1735,7 @@ class ComputeReconciler:
             result={"external_pending": False, "blocked_reasons": []},
         )
 
-    async def _retire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
+    async def _retire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:  # noqa: PLR0912 complexity baseline, #771
         if not allocation.get("release_committed_at"):
             if allocation.get("desired_state") == "absent" and allocation.get("observed_state") in {
                 "terminated",

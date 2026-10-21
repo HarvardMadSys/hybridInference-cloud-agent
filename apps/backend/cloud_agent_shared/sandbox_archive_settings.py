@@ -30,6 +30,10 @@ SANDBOX_ARCHIVE_PREFIX: Final = "cloud-agent/sandbox"
 MIB: Final = 1024 * 1024
 GIB: Final = 1024 * MIB
 DEFAULT_MAX_ARCHIVE_BYTES: Final = 2 * GIB
+# Archive construction temporarily holds both the raw Docker tar streams and
+# the compressed outer object. Keep the default modest enough for an ordinary
+# host and cap operator tuning so one hostile workspace cannot consume an
+# unbounded amount of sandbox manager scratch space.
 MAX_ARCHIVE_BYTES: Final = 4 * GIB
 DEFAULT_MULTIPART_THRESHOLD_BYTES: Final = 8 * MIB
 DEFAULT_MULTIPART_PART_BYTES: Final = 8 * MIB
@@ -84,7 +88,7 @@ class SandboxArchivePolicy:
     # always mean no checkpoints.
     checkpoints_enabled: bool = True
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: C901, PLR0912 complexity baseline, #771
         if not isinstance(self.enabled, bool):
             raise SandboxArchivePolicyError("enabled must be a boolean")
         if not isinstance(self.checkpoints_enabled, bool):
@@ -304,6 +308,7 @@ __all__ = [
     "DEFAULT_MULTIPART_PART_BYTES",
     "DEFAULT_MULTIPART_THRESHOLD_BYTES",
     "MAX_ARCHIVE_BYTES",
+    "MAX_MULTIPART_PARTS",
     "MAX_MULTIPART_PART_BYTES",
     "MAX_SINGLE_UPLOAD_BYTES",
     "MIN_MULTIPART_PART_BYTES",

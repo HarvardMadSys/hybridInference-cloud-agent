@@ -195,7 +195,7 @@ def _restore_handoff_marks(value: Any) -> list[tuple[str, int]] | None:
     return restored
 
 
-def _inherited_manifest(context: Mapping[str, Any]) -> dict[str, Any] | None:
+def _inherited_manifest(context: Mapping[str, Any]) -> dict[str, Any] | None:  # noqa: PLR0912 complexity baseline, #771
     """Return the immutable experiment a context states, if it states one.
 
     Bounded and validated like every other value that crosses a process
@@ -359,7 +359,7 @@ def _context_expiry(context: Mapping[str, Any]) -> datetime | None:
     return moment.astimezone(UTC)
 
 
-def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measurement | None:
+def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measurement | None:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     """Continue measuring a selection another process already made.
 
     This is for the one case where a root operation outlives the process that

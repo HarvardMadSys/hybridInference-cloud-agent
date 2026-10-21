@@ -18,6 +18,7 @@ from tests.integration.storage.test_sandbox_restore_store import (
     pool as pool,
     store as store,
 )
+from tests.support.follow_ups import append_follow_up
 
 if TYPE_CHECKING:
     from cloud_agent.storage.assembly import Storage
@@ -35,9 +36,9 @@ async def _silent_for(pool, seconds: int, host: str = "runner-a") -> None:
         )
 
 
-async def _follow_up(store: Storage, job: dict) -> dict:
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+async def _follow_up(pool, job: dict) -> dict:
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     return follow_up
@@ -48,7 +49,7 @@ async def test_another_host_takes_a_long_silent_hosts_covered_group_at_its_claim
 ):
     """A machine that died does not keep its chats waiting for its return."""
     job, _ = await _covered(pool, store)
-    follow_up = await _follow_up(store, job)
+    follow_up = await _follow_up(pool, job)
     await _host(store, "runner-c", _RESTORE_HOST)
 
     await _silent_for(pool, 600)
@@ -70,7 +71,7 @@ async def test_a_silent_host_with_no_other_host_continues_with_its_group_on_retu
 ):
     """Nothing moves without a taker, so the Host that comes back still has it."""
     job, group = await _covered(pool, store)
-    follow_up = await _follow_up(store, job)
+    follow_up = await _follow_up(pool, job)
     await _silent_for(pool, 7200)
     # A host that cannot restore takes nothing.
     await _host(store, "runner-b", _ARCHIVE_HOST)
@@ -89,7 +90,7 @@ async def test_a_claim_that_finds_no_slot_leaves_the_group_with_its_silent_host(
     pool, store: Storage
 ):
     job, _ = await _covered(pool, store)
-    await _follow_up(store, job)
+    await _follow_up(pool, job)
     await _host(store, "runner-c", _RESTORE_HOST)
     await _silent_for(pool, 7200)
 
@@ -114,7 +115,7 @@ async def test_a_claim_that_finds_no_slot_leaves_the_group_with_its_silent_host(
 
 async def test_a_silent_hosts_group_without_a_covering_checkpoint_stays(pool, store: Storage):
     job, _ = await _settled_stopped_group(pool, store)
-    await _follow_up(store, job)
+    await _follow_up(pool, job)
     await _host(store, "runner-c", _RESTORE_HOST)
     await _silent_for(pool, 7200)
 
@@ -125,7 +126,7 @@ async def test_a_silent_hosts_group_without_a_covering_checkpoint_stays(pool, st
 async def test_a_turn_a_host_claimed_before_going_silent_keeps_its_group(pool, store: Storage):
     """The reaper requeues that turn first; only then may the group move."""
     job, _ = await _covered(pool, store)
-    await _follow_up(store, job)
+    await _follow_up(pool, job)
     assert await _claim(store, "runner-a", _ARCHIVE_HOST) is not None
     await _host(store, "runner-c", _RESTORE_HOST)
 

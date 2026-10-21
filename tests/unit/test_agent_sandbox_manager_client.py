@@ -9,7 +9,11 @@ import httpx
 import pytest
 
 from cloud_agent import sandbox_manager_client
-from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
+from cloud_agent.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+    identity_from_row,
+)
 from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER
 
 
@@ -269,19 +273,23 @@ async def test_shared_fork_client_forwards_the_group_origin(monkeypatch, plugins
 
     result = await sandbox_manager.fork_shared_session(
         "athr_source",
-        sandbox_id="asbx_shared",
-        generation=2,
-        origin_thread_id="athr_origin",
-        runtime_id="codex",
-        runtime_version="0.145.0",
-        sandbox_image_digest="sha256:image",
-        expected_container_id="container-shared",
-        resident_slot_capacity=8,
-        memory_limit="4g",
-        cpu_limit="2",
-        disk_limit_mib=16384,
-        stop_timeout_s=10,
-        members=[],
+        identity=identity_from_row(
+            {
+                "sandbox_id": "asbx_shared",
+                "generation": 2,
+                "origin_thread_id": "athr_origin",
+                "runtime_id": "codex",
+                "runtime_version": "0.145.0",
+                "sandbox_image_digest": "sha256:image",
+                "container_id": "container-shared",
+                "resident_slot_capacity": 8,
+                "memory_limit": "4g",
+                "cpu_limit": "2",
+                "disk_limit_mib": 16384,
+                "stop_timeout_seconds": 10,
+            },
+            members=[],
+        ),
         operation_id="asfo_test",
         source_native_session_id="native-source",
         source_native_turn_no=2,

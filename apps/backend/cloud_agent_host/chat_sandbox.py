@@ -21,7 +21,6 @@ import contextlib
 import errno
 import fcntl
 import hashlib
-import io
 import json
 import logging
 import math
@@ -33,7 +32,6 @@ import shlex
 import signal
 import struct
 import subprocess
-import tarfile
 import tempfile
 import termios
 import threading
@@ -41,7 +39,16 @@ import time
 import tty
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_host import chat_sandbox_markers as markers
 from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines, text_chunks
+from cloud_agent_host.chat_sandbox_markers import (
+    FINAL_ARCHIVE_MARKER_MAX_BYTES,
+    FINAL_ARCHIVE_MARKER_NAME,
+    FINAL_ARCHIVE_MARKER_PATH,
+    INITIAL_ARCHIVE_MARKER_MAX_BYTES,
+    INITIAL_ARCHIVE_MARKER_NAME,
+    SETUP_MARKER_MAX_BYTES,
+)
 from cloud_agent_host.chat_sandbox_models import (
     CHAT_CHECKPOINT_LABEL as CHAT_CHECKPOINT_LABEL,
     CHAT_CONTAINER_PREFIX as CHAT_CONTAINER_PREFIX,
@@ -126,13 +133,11 @@ from cloud_agent_shared.operation_profiling import StageObserver, substage
 
 if TYPE_CHECKING:
     import builtins
-    import ipaddress
     from collections.abc import Callable, Iterator, Sequence
     from typing import BinaryIO
 
     from _typeshed import SupportsWrite
 
-    from cloud_agent_shared.egress import SandboxNetwork
 #: A probe older than this was abandoned by a process killed mid-probe. Since
 #: discovery no longer stops it, the next probe in the namespace removes it.
 PROBE_ABANDONED_AFTER_S = 3600
@@ -188,149 +193,6 @@ MEMBER_TMPFS_ROOT = "/run/agent-members"
 #: and resumes them itself. Its exec allows 20, which leaves that resume time to
 #: finish before the host stops waiting for the census's reply.
 _SHARED_WRITER_CENSUS_BUDGET_S = 10
-#: Sandbox Manager-owned durable receipt for the immutable pre-prompt archive. It is
-#: deliberately outside every agent-writable or archived root.  Guest root
-#: creates this directory as 0700 and the one marker as 0600; all operations
-#: validate those exact properties without following symlinks.
-# Keep the on-disk path so existing retained containers keep their archive fences.
-INITIAL_ARCHIVE_MARKER_ROOT = "/var/lib/freeinference-broker"
-INITIAL_ARCHIVE_MARKER_NAME = "initial-archive-v1.json"
-INITIAL_ARCHIVE_MARKER_MAX_BYTES = 4096
-#: Root-owned policy fence written before a final Docker stop. Unlike the
-#: initial receipt, a newer running lifecycle deliberately replaces this file:
-#: the retained bridge, not marker presence alone, distinguishes pending from
-#: completed final archival after a sandbox manager restart.
-FINAL_ARCHIVE_MARKER_NAME = "final-archive-v1.json"
-# The canonical uploaded receipt can exceed 4 KiB at the accepted policy and
-# S3 VersionId field bounds. Keep the sandbox-manager-private record tightly bounded,
-# but leave enough room for every schema-valid marker.
-FINAL_ARCHIVE_MARKER_MAX_BYTES = 8192
-SETUP_MARKER_MAX_BYTES = 1024
-
-# Runs only through an exact-container, guest-root ``docker exec``.  Keeping
-# the filesystem checks in one source-controlled program makes read, publish,
-# and delete agree on the same trust boundary.  The immediate parent is also
-# checked because ``O_NOFOLLOW`` protects only the final path component.
-_INITIAL_ARCHIVE_MARKER_PREAMBLE = r"""
-import fcntl
-import os
-import stat
-import sys
-
-root, name, limit_text, uid_text, gid_text = sys.argv[1:6]
-limit = int(limit_text)
-expected_uid = int(uid_text)
-expected_gid = int(gid_text)
-
-def same_identity(left, right):
-    return (
-        left.st_dev,
-        left.st_ino,
-        left.st_mode,
-        left.st_uid,
-        left.st_gid,
-        left.st_nlink,
-        left.st_size,
-        left.st_mtime_ns,
-        left.st_ctime_ns,
-    ) == (
-        right.st_dev,
-        right.st_ino,
-        right.st_mode,
-        right.st_uid,
-        right.st_gid,
-        right.st_nlink,
-        right.st_size,
-        right.st_mtime_ns,
-        right.st_ctime_ns,
-    )
-
-def checked_parent():
-    parent = os.path.dirname(root)
-    leaf = os.path.basename(root)
-    if not parent or not leaf or leaf in ('.', '..'):
-        raise RuntimeError('invalid marker root')
-    before = os.lstat(parent)
-    if (
-        not stat.S_ISDIR(before.st_mode)
-        or before.st_uid != expected_uid
-        or before.st_gid != expected_gid
-        or stat.S_IMODE(before.st_mode) & 0o022
-    ):
-        raise RuntimeError('marker parent cannot be trusted')
-    descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    after = os.fstat(descriptor)
-    if not same_identity(before, after):
-        os.close(descriptor)
-        raise RuntimeError('marker parent changed while opening')
-    return descriptor, leaf
-
-def checked_root():
-    parent_fd, leaf = checked_parent()
-    try:
-        try:
-            os.mkdir(leaf, 0o700, dir_fd=parent_fd)
-        except FileExistsError:
-            pass
-        else:
-            os.fsync(parent_fd)
-        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
-        if (
-            not stat.S_ISDIR(before.st_mode)
-            or before.st_uid != expected_uid
-            or before.st_gid != expected_gid
-            or stat.S_IMODE(before.st_mode) != 0o700
-        ):
-            raise RuntimeError('marker directory cannot be trusted')
-        descriptor = os.open(
-            leaf,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-            dir_fd=parent_fd,
-        )
-        after = os.fstat(descriptor)
-        if not same_identity(before, after):
-            os.close(descriptor)
-            raise RuntimeError('marker directory changed while opening')
-    finally:
-        os.close(parent_fd)
-    fcntl.flock(descriptor, fcntl.LOCK_EX)
-    return descriptor
-
-def read_checked(descriptor):
-    try:
-        before = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-    except FileNotFoundError:
-        return None
-    if (
-        not stat.S_ISREG(before.st_mode)
-        or before.st_uid != expected_uid
-        or before.st_gid != expected_gid
-        or stat.S_IMODE(before.st_mode) != 0o600
-        or before.st_nlink != 1
-        or not 0 < before.st_size <= limit
-    ):
-        raise RuntimeError('marker file cannot be trusted')
-    marker_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptor)
-    try:
-        opened = os.fstat(marker_fd)
-        if not same_identity(before, opened):
-            raise RuntimeError('marker file changed while opening')
-        chunks = []
-        remaining = limit + 1
-        while remaining:
-            chunk = os.read(marker_fd, remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        payload = b''.join(chunks)
-        after = os.fstat(marker_fd)
-        if not same_identity(opened, after) or len(payload) != before.st_size:
-            raise RuntimeError('marker file changed while reading')
-        return payload
-    finally:
-        os.close(marker_fd)
-"""
 #: This module is a library boundary: it reports what it observed and
 #: leaves the decision to the caller, so a warning here is the only
 #: record an operator gets of a partially capable guest.
@@ -553,71 +415,13 @@ class ChatSandboxManager:
     # only other endpoints on it are the two relays, copied from the relay
     # network, and the host holds an exact exception for each of them.
 
-    def _network(self) -> SandboxNetwork:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._network()
-
     def network_for(self, spec: ChatSandboxSpec) -> str:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle.network_for(spec)
 
-    def _relay_aliases(self) -> tuple[str, ...]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._relay_aliases()
-
-    def _network_labels(self, spec: ChatSandboxSpec) -> dict[str, str]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._network_labels(spec)
-
-    def _inspect_network(self, network: str) -> dict[str, Any] | None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._inspect_network(network)
-
-    def _verify_group_network(self, network: dict[str, Any], spec: ChatSandboxSpec) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._verify_group_network(network, spec)
-
-    def _network_uses_chat_pool(self, network: dict[str, Any]) -> bool:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._network_uses_chat_pool(network)
-
-    def _inspect_containers(self, container_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._inspect_containers(container_ids)
-
-    @staticmethod
-    def _endpoint_aliases(raw: dict[str, Any], network: str) -> set[str] | None:
-        """Delegate to the group-network lifecycle owner."""
-        return ChatSandboxNetwork._endpoint_aliases(raw, network)
-
-    def _network_aliases_for(
-        self, container_ids: Sequence[str], network: str
-    ) -> dict[str, set[str]]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._network_aliases_for(container_ids, network)
-
-    def _discover_relays(self) -> tuple[dict[str, list[str]], dict[str, dict[str, Any]]]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._discover_relays()
-
-    def _relay_owners(self) -> dict[str, list[str]]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._relay_owners()
-
-    def _container_network_aliases(self, container_id: str, network: str) -> set[str] | None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._container_network_aliases(container_id, network)
-
     def relay_addresses(self, network: str) -> dict[str, str]:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle.relay_addresses(network)
-
-    @staticmethod
-    def _relay_addresses_from(
-        owners: dict[str, list[str]], raw: dict[str, Any] | None
-    ) -> dict[str, str]:
-        """Delegate to the group-network lifecycle owner."""
-        return ChatSandboxNetwork._relay_addresses_from(owners, raw)
 
     def _sync_kata_guest_network(
         self,
@@ -627,87 +431,6 @@ class ChatSandboxManager:
     ) -> None:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle._sync_kata_guest_network(spec, current, addresses)
-
-    def _relay_endpoint(self, container_id: str, network: str) -> tuple[set[str], int] | None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._relay_endpoint(container_id, network)
-
-    @classmethod
-    def _relay_endpoint_from(
-        cls, raw: dict[str, Any] | None, network: str
-    ) -> tuple[set[str], int] | None:
-        """Delegate to the group-network lifecycle owner."""
-        return ChatSandboxNetwork._relay_endpoint_from(raw, network)
-
-    def _ensure_service_connection(
-        self,
-        *,
-        network: str,
-        container_id: str,
-        aliases: builtins.list[str],
-        inspected: dict[str, Any] | None = None,
-    ) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._ensure_service_connection(
-            network=network, container_id=container_id, aliases=aliases, inspected=inspected
-        )
-
-    def _reconcile_group_members(
-        self,
-        *,
-        network: str,
-        spec: ChatSandboxSpec,
-        service_ids: set[str],
-        service_aliases: tuple[str, ...],
-        sandbox: ChatSandboxInspection | None = None,
-    ) -> dict[str, Any]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._reconcile_group_members(
-            network=network,
-            spec=spec,
-            service_ids=service_ids,
-            service_aliases=service_aliases,
-            sandbox=sandbox,
-        )
-
-    def _candidate_chat_subnets(self, network_name: str) -> Iterator[ipaddress.IPv4Network]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._candidate_chat_subnets(network_name)
-
-    @staticmethod
-    def _is_subnet_allocation_conflict(stderr: str) -> bool:
-        """Delegate to the group-network lifecycle owner."""
-        return ChatSandboxNetwork._is_subnet_allocation_conflict(stderr)
-
-    def _create_group_network(self, expected: str, spec: ChatSandboxSpec) -> dict[str, Any]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._create_group_network(expected, spec)
-
-    def _attach_relays(
-        self,
-        network: str,
-        discovery: tuple[dict[str, list[str]], dict[str, dict[str, Any]]] | None = None,
-    ) -> set[str]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._attach_relays(network, discovery)
-
-    def _sync_relay_exceptions(self, network: str, addresses: dict[str, str] | None = None) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._sync_relay_exceptions(network, addresses)
-
-    def _drop_relay_exceptions(self, network_name: str) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._drop_relay_exceptions(network_name)
-
-    def _ensure_group_services(
-        self,
-        network: str,
-        spec: ChatSandboxSpec,
-        *,
-        sandbox: ChatSandboxInspection | None = None,
-    ) -> _GroupNetworkSnapshot:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._ensure_group_services(network, spec, sandbox=sandbox)
 
     def sync_ssh_targets(self, spec: ChatSandboxSpec, endpoints: set[tuple[str, int]]) -> None:
         """Delegate to the group-network lifecycle owner."""
@@ -720,34 +443,6 @@ class ChatSandboxManager:
     def renew_host_rules(self) -> None:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle.renew_host_rules()
-
-    def _ensure_group_network(
-        self,
-        spec: ChatSandboxSpec,
-        *,
-        current: ChatSandboxInspection | None = None,
-        snapshot: _GroupNetworkSnapshot | None = None,
-    ) -> str:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._ensure_group_network(
-            spec, current=current, snapshot=snapshot
-        )
-
-    def _owned_network_matches(self, network_name: str, spec: ChatSandboxSpec) -> bool:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._owned_network_matches(network_name, spec)
-
-    def _disconnect_endpoint(
-        self,
-        network: str,
-        container_id: str,
-        *,
-        network_name: str | None = None,
-    ) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._disconnect_endpoint(
-            network, container_id, network_name=network_name
-        )
 
     def _release_owned_network(
         self,
@@ -767,10 +462,6 @@ class ChatSandboxManager:
             expected_container_id=expected_container_id,
         )
 
-    def _release_orphan_network(self, network: dict[str, Any]) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._release_orphan_network(network)
-
     def _release_sandbox_networks(
         self,
         spec: ChatSandboxSpec,
@@ -783,41 +474,9 @@ class ChatSandboxManager:
             spec, current, expected_container_id=expected_container_id
         )
 
-    @staticmethod
-    def _network_is_stale_for_prune(network: dict[str, Any]) -> bool:
-        """Delegate to the group-network lifecycle owner."""
-        return ChatSandboxNetwork._network_is_stale_for_prune(network)
-
     def prune_orphan_networks(self, specs: builtins.list[ChatSandboxSpec]) -> None:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle.prune_orphan_networks(specs)
-
-    def _endpoint_is_current(
-        self,
-        current: ChatSandboxInspection,
-        network_name: str,
-        network: dict[str, Any] | None = None,
-    ) -> bool:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._endpoint_is_current(current, network_name, network)
-
-    def _attach_to_group_network(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        snapshot: _GroupNetworkSnapshot | None = None,
-    ) -> ChatSandboxInspection:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._attach_to_group_network(spec, current, snapshot)
-
-    def _verify_group_snapshot(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        observed: _GroupNetworkSnapshot,
-    ) -> ChatSandboxInspection | None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._verify_group_snapshot(spec, current, observed)
 
     def _require_group_network(
         self,
@@ -876,7 +535,7 @@ class ChatSandboxManager:
             )
         return actual
 
-    def build_create_command(
+    def build_create_command(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         *,
@@ -3239,7 +2898,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                 continue
             self._run([self.backend.docker_binary, "rm", "--force", container_id], timeout=30)
 
-    def _probe_guest_observer_once(self) -> str:
+    def _probe_guest_observer_once(self) -> str:  # noqa: PLR0912 complexity baseline, #771
         """One probe, on a sandbox of its own that is removed however it ends."""
         self._remove_abandoned_probes()
         token = secrets.token_hex(12)
@@ -3796,48 +3455,14 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         fails closed before any S3 decision can cause workspace preparation to
         be skipped.
         """
-        script = (
-            _INITIAL_ARCHIVE_MARKER_PREAMBLE
-            + r"""
-descriptor = checked_root()
-try:
-    payload = read_checked(descriptor)
-    if payload is None:
-        raise SystemExit(44)
-    sys.stdout.buffer.write(payload)
-finally:
-    os.close(descriptor)
-"""
-        )
-        result = self.exec_capture(
+        return markers.read(
+            self,
             spec,
-            [
-                "python3",
-                "-c",
-                script,
-                INITIAL_ARCHIVE_MARKER_ROOT,
-                INITIAL_ARCHIVE_MARKER_NAME,
-                str(INITIAL_ARCHIVE_MARKER_MAX_BYTES),
-                "0",
-                "0",
-            ],
-            workdir="/",
-            timeout_s=20,
-            user_uid=0,
-            user_gid=0,
+            name=INITIAL_ARCHIVE_MARKER_NAME,
+            max_bytes=INITIAL_ARCHIVE_MARKER_MAX_BYTES,
+            what="initial archive marker",
             expected_container_id=expected_container_id,
         )
-        if result.returncode == 44:
-            return None
-        if result.returncode != 0:
-            raise SandboxError(
-                "initial archive marker cannot be trusted: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
-        payload = result.stdout
-        if not 0 < len(payload) <= INITIAL_ARCHIVE_MARKER_MAX_BYTES:
-            raise SandboxError("initial archive marker has an invalid size")
-        return payload
 
     def write_initial_archive_marker(
         self,
@@ -3853,15 +3478,13 @@ finally:
         response was lost, so replacing it would destroy the only safe retry
         proof.
         """
-        if not isinstance(payload, bytes) or not 0 < len(payload) <= (
-            INITIAL_ARCHIVE_MARKER_MAX_BYTES
-        ):
-            raise ValueError("initial archive marker payload has an invalid size")
-        self._write_archive_marker(
+        markers.check_payload(payload, INITIAL_ARCHIVE_MARKER_MAX_BYTES, "initial archive marker")
+        markers.write(
+            self,
             spec,
             payload,
-            marker_name=INITIAL_ARCHIVE_MARKER_NAME,
-            marker_max_bytes=INITIAL_ARCHIVE_MARKER_MAX_BYTES,
+            name=INITIAL_ARCHIVE_MARKER_NAME,
+            max_bytes=INITIAL_ARCHIVE_MARKER_MAX_BYTES,
             expected_container_id=expected_container_id,
             replace_existing=False,
         )
@@ -3877,48 +3500,14 @@ finally:
         It sits beside the archive markers, so the sandbox user can neither
         write nor forge it, and a checkpoint or snapshot carries it along.
         """
-        script = (
-            _INITIAL_ARCHIVE_MARKER_PREAMBLE
-            + r"""
-descriptor = checked_root()
-try:
-    payload = read_checked(descriptor)
-    if payload is None:
-        raise SystemExit(44)
-    sys.stdout.buffer.write(payload)
-finally:
-    os.close(descriptor)
-"""
-        )
-        result = self.exec_capture(
+        return markers.read(
+            self,
             spec,
-            [
-                "python3",
-                "-c",
-                script,
-                INITIAL_ARCHIVE_MARKER_ROOT,
-                SETUP_MARKER_NAME,
-                str(SETUP_MARKER_MAX_BYTES),
-                "0",
-                "0",
-            ],
-            workdir="/",
-            timeout_s=20,
-            user_uid=0,
-            user_gid=0,
+            name=SETUP_MARKER_NAME,
+            max_bytes=SETUP_MARKER_MAX_BYTES,
+            what="environment setup marker",
             expected_container_id=expected_container_id,
         )
-        if result.returncode == 44:
-            return None
-        if result.returncode != 0:
-            raise SandboxError(
-                "environment setup marker cannot be trusted: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
-        payload = result.stdout
-        if not 0 < len(payload) <= SETUP_MARKER_MAX_BYTES:
-            raise SandboxError("environment setup marker has an invalid size")
-        return payload
 
     def write_environment_setup_marker(
         self,
@@ -3928,13 +3517,13 @@ finally:
         expected_container_id: str,
     ) -> None:
         """Record, root-only, which installation this container's layer holds."""
-        if not isinstance(payload, bytes) or not 0 < len(payload) <= SETUP_MARKER_MAX_BYTES:
-            raise ValueError("environment setup marker payload has an invalid size")
-        self._write_archive_marker(
+        markers.check_payload(payload, SETUP_MARKER_MAX_BYTES, "environment setup marker")
+        markers.write(
+            self,
             spec,
             payload,
-            marker_name=SETUP_MARKER_NAME,
-            marker_max_bytes=SETUP_MARKER_MAX_BYTES,
+            name=SETUP_MARKER_NAME,
+            max_bytes=SETUP_MARKER_MAX_BYTES,
             expected_container_id=expected_container_id,
             replace_existing=True,
         )
@@ -3953,20 +3542,21 @@ finally:
         before its next stop, so replacing that stale marker is both necessary
         and safe. The owned bridge remains the durable pending/completed bit.
         """
-        if not isinstance(payload, bytes) or not 0 < len(payload) <= (
-            FINAL_ARCHIVE_MARKER_MAX_BYTES
-        ):
-            raise ValueError("final archive marker payload has an invalid size")
-        current = self._require(spec)
-        if current.container_id != expected_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed before archive marker")
-        if not current.running:
-            raise SandboxError("final archive marker requires the exact running container")
-        self._write_archive_marker(
+        markers.check_payload(payload, FINAL_ARCHIVE_MARKER_MAX_BYTES, "final archive marker")
+        markers.require_container(
+            self,
+            spec,
+            expected_container_id,
+            running=True,
+            before="archive marker",
+            refusal="final archive marker requires the exact running container",
+        )
+        markers.write(
+            self,
             spec,
             payload,
-            marker_name=FINAL_ARCHIVE_MARKER_NAME,
-            marker_max_bytes=FINAL_ARCHIVE_MARKER_MAX_BYTES,
+            name=FINAL_ARCHIVE_MARKER_NAME,
+            max_bytes=FINAL_ARCHIVE_MARKER_MAX_BYTES,
             expected_container_id=expected_container_id,
             replace_existing=True,
         )
@@ -3978,141 +3568,22 @@ finally:
         expected_container_id: str,
     ) -> bytes | None:
         """Read a trusted final marker before replacing it on a running stop."""
-        current = self._require(spec)
-        if current.container_id != expected_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed before marker read")
-        if not current.running:
-            raise SandboxError("running final archive marker requires a running container")
-        script = (
-            _INITIAL_ARCHIVE_MARKER_PREAMBLE
-            + r"""
-descriptor = checked_root()
-try:
-    payload = read_checked(descriptor)
-    if payload is None:
-        raise SystemExit(44)
-    sys.stdout.buffer.write(payload)
-finally:
-    os.close(descriptor)
-"""
-        )
-        result = self.exec_capture(
+        markers.require_container(
+            self,
             spec,
-            [
-                "python3",
-                "-c",
-                script,
-                INITIAL_ARCHIVE_MARKER_ROOT,
-                FINAL_ARCHIVE_MARKER_NAME,
-                str(FINAL_ARCHIVE_MARKER_MAX_BYTES),
-                "0",
-                "0",
-            ],
-            workdir="/",
-            timeout_s=20,
-            user_uid=0,
-            user_gid=0,
+            expected_container_id,
+            running=True,
+            before="marker read",
+            refusal="running final archive marker requires a running container",
+        )
+        return markers.read(
+            self,
+            spec,
+            name=FINAL_ARCHIVE_MARKER_NAME,
+            max_bytes=FINAL_ARCHIVE_MARKER_MAX_BYTES,
+            what="running final archive marker",
             expected_container_id=expected_container_id,
         )
-        if result.returncode == 44:
-            return None
-        if result.returncode != 0:
-            raise SandboxError(
-                "running final archive marker cannot be trusted: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
-        payload = result.stdout
-        if not 0 < len(payload) <= FINAL_ARCHIVE_MARKER_MAX_BYTES:
-            raise SandboxError("running final archive marker has an invalid size")
-        return payload
-
-    def _write_archive_marker(
-        self,
-        spec: ChatSandboxSpec,
-        payload: bytes,
-        *,
-        marker_name: str,
-        marker_max_bytes: int,
-        expected_container_id: str,
-        replace_existing: bool,
-    ) -> None:
-        """Publish one fsynced sandbox-manager-private marker through guest root."""
-        script = (
-            _INITIAL_ARCHIVE_MARKER_PREAMBLE
-            + r"""
-payload = sys.stdin.buffer.read(limit + 1)
-if not 0 < len(payload) <= limit:
-    raise RuntimeError('marker payload has an invalid size')
-replace_existing = sys.argv[6] == '1'
-descriptor = checked_root()
-temporary = '.%s.%s.tmp' % (name, os.getpid())
-try:
-    existing = read_checked(descriptor)
-    if existing is not None:
-        if existing == payload:
-            raise SystemExit(0)
-        if not replace_existing:
-            raise RuntimeError('a different marker already exists')
-    marker_fd = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o600,
-        dir_fd=descriptor,
-    )
-    try:
-        offset = 0
-        while offset < len(payload):
-            offset += os.write(marker_fd, payload[offset:])
-        os.fchmod(marker_fd, 0o600)
-        written = os.fstat(marker_fd)
-        if (
-            written.st_uid != expected_uid
-            or written.st_gid != expected_gid
-            or stat.S_IMODE(written.st_mode) != 0o600
-            or written.st_nlink != 1
-            or written.st_size != len(payload)
-        ):
-            raise RuntimeError('temporary marker cannot be trusted')
-        os.fsync(marker_fd)
-    finally:
-        os.close(marker_fd)
-    os.replace(temporary, name, src_dir_fd=descriptor, dst_dir_fd=descriptor)
-    os.fsync(descriptor)
-    if read_checked(descriptor) != payload:
-        raise RuntimeError('published marker failed verification')
-finally:
-    try:
-        os.unlink(temporary, dir_fd=descriptor)
-    except FileNotFoundError:
-        pass
-    os.close(descriptor)
-"""
-        )
-        result = self.exec_capture(
-            spec,
-            [
-                "python3",
-                "-c",
-                script,
-                INITIAL_ARCHIVE_MARKER_ROOT,
-                marker_name,
-                str(marker_max_bytes),
-                "0",
-                "0",
-                "1" if replace_existing else "0",
-            ],
-            workdir="/",
-            timeout_s=20,
-            input_bytes=payload,
-            user_uid=0,
-            user_gid=0,
-            expected_container_id=expected_container_id,
-        )
-        if result.returncode != 0:
-            raise SandboxError(
-                "sandbox archive marker could not be persisted: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
 
     def read_final_archive_marker(
         self,
@@ -4127,45 +3598,7 @@ finally:
         host filesystem and the exact immutable container id fences the copy.
         Absence or any malformed ownership/mode/type fails closed.
         """
-        current = self._require(spec)
-        if current.container_id != expected_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed before marker read")
-        if current.running:
-            raise SandboxError("final archive recovery requires the exact stopped container")
-        marker_path = f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
-        with tempfile.TemporaryFile(prefix="freeinference-final-archive-marker-") as archive:
-            self.export_archive(
-                spec,
-                marker_path,
-                archive,
-                max_bytes=FINAL_ARCHIVE_MARKER_MAX_BYTES + 32 * 1024,
-                expected_container_id=expected_container_id,
-            )
-            archive.seek(0)
-            try:
-                with tarfile.open(fileobj=archive, mode="r:*") as copied:
-                    entries = copied.getmembers()
-                    if len(entries) != 1:
-                        raise SandboxError("final archive marker copy has unexpected entries")
-                    entry = entries[0]
-                    if (
-                        not entry.isreg()
-                        or entry.name.rsplit("/", 1)[-1] != FINAL_ARCHIVE_MARKER_NAME
-                        or entry.uid != 0
-                        or entry.gid != 0
-                        or entry.mode & 0o7777 != 0o600
-                        or not 0 < entry.size <= FINAL_ARCHIVE_MARKER_MAX_BYTES
-                    ):
-                        raise SandboxError("final archive marker cannot be trusted")
-                    source = copied.extractfile(entry)
-                    if source is None:
-                        raise SandboxError("final archive marker has no readable payload")
-                    payload = source.read(FINAL_ARCHIVE_MARKER_MAX_BYTES + 1)
-            except (tarfile.TarError, OSError) as exc:
-                raise SandboxError("final archive marker copy is invalid") from exc
-        if len(payload) != entry.size:
-            raise SandboxError("final archive marker changed while being read")
-        return payload
+        return markers.read_stopped_final(self, spec, expected_container_id=expected_container_id)
 
     def read_stopped_final_archive_marker_optional(
         self,
@@ -4180,11 +3613,10 @@ finally:
                 expected_container_id=expected_container_id,
             )
         except FileNotFoundError as exc:
-            marker_path = f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
             # export_archive normalizes only Docker's exact missing source
             # for the inspected container. Host-side missing files and other
             # Docker failures must still prevent activation.
-            if exc.args != (marker_path,):
+            if exc.args != (FINAL_ARCHIVE_MARKER_PATH,):
                 raise
             return None
 
@@ -4202,56 +3634,9 @@ finally:
         marker and therefore fails closed; the read-back must exactly match
         before the caller can release the retained bridge.
         """
-        if not isinstance(payload, bytes) or not 0 < len(payload) <= (
-            FINAL_ARCHIVE_MARKER_MAX_BYTES
-        ):
-            raise ValueError("final archive marker payload has an invalid size")
-        current = self._require(spec)
-        if current.container_id != expected_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed before marker write")
-        if current.running:
-            raise SandboxError("stopped final archive marker requires a stopped container")
-        with tempfile.TemporaryFile(prefix="freeinference-final-archive-marker-write-") as archive:
-            with tarfile.open(fileobj=archive, mode="w") as payload_archive:
-                marker_root = INITIAL_ARCHIVE_MARKER_ROOT.rsplit("/", 1)[-1]
-                directory = tarfile.TarInfo(marker_root)
-                directory.type = tarfile.DIRTYPE
-                directory.mode = 0o700
-                directory.uid = 0
-                directory.gid = 0
-                directory.mtime = 0
-                payload_archive.addfile(directory)
-                entry = tarfile.TarInfo(f"{marker_root}/{FINAL_ARCHIVE_MARKER_NAME}")
-                entry.size = len(payload)
-                entry.mode = 0o600
-                entry.uid = 0
-                entry.gid = 0
-                entry.mtime = 0
-                payload_archive.addfile(entry, io.BytesIO(payload))
-            archive.seek(0)
-            result = self._run_bytes(
-                [
-                    self.backend.docker_binary,
-                    "cp",
-                    "-",
-                    f"{current.container_id}:{INITIAL_ARCHIVE_MARKER_ROOT.rsplit('/', 1)[0]}",
-                ],
-                timeout=30,
-                stdin=archive,
-            )
-        if result.returncode != 0:
-            raise SandboxError(
-                "stopped final archive marker could not be persisted: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
-        if (
-            self.read_final_archive_marker(
-                spec,
-                expected_container_id=expected_container_id,
-            )
-            != payload
-        ):
-            raise SandboxError("stopped final archive marker failed verification")
+        markers.write_stopped_final(
+            self, spec, payload, expected_container_id=expected_container_id
+        )
 
     def clear_final_archive_marker(
         self,
@@ -4260,49 +3645,7 @@ finally:
         expected_container_id: str,
     ) -> None:
         """Remove any trusted stale completion marker while the container runs."""
-        current = self._require(spec)
-        if current.container_id != expected_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed before marker clear")
-        if not current.running:
-            raise SandboxError("final archive marker can be cleared only while running")
-        script = (
-            _INITIAL_ARCHIVE_MARKER_PREAMBLE
-            + r"""
-descriptor = checked_root()
-try:
-    if read_checked(descriptor) is None:
-        raise SystemExit(0)
-    os.unlink(name, dir_fd=descriptor)
-    os.fsync(descriptor)
-    if read_checked(descriptor) is not None:
-        raise RuntimeError('marker deletion was not durable')
-finally:
-    os.close(descriptor)
-"""
-        )
-        result = self.exec_capture(
-            spec,
-            [
-                "python3",
-                "-c",
-                script,
-                INITIAL_ARCHIVE_MARKER_ROOT,
-                FINAL_ARCHIVE_MARKER_NAME,
-                str(FINAL_ARCHIVE_MARKER_MAX_BYTES),
-                "0",
-                "0",
-            ],
-            workdir="/",
-            timeout_s=20,
-            user_uid=0,
-            user_gid=0,
-            expected_container_id=expected_container_id,
-        )
-        if result.returncode != 0:
-            raise SandboxError(
-                "final archive marker could not be cleared safely: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
+        markers.clear_final(self, spec, expected_container_id=expected_container_id)
 
     def delete_initial_archive_marker(
         self,
@@ -4312,56 +3655,9 @@ finally:
         expected_container_id: str,
     ) -> None:
         """Atomically unlink and fsync only the marker the caller read."""
-        if not isinstance(expected_payload, bytes) or not 0 < len(expected_payload) <= (
-            INITIAL_ARCHIVE_MARKER_MAX_BYTES
-        ):
-            raise ValueError("initial archive marker payload has an invalid size")
-        script = (
-            _INITIAL_ARCHIVE_MARKER_PREAMBLE
-            + r"""
-expected = sys.stdin.buffer.read(limit + 1)
-if not 0 < len(expected) <= limit:
-    raise RuntimeError('expected marker has an invalid size')
-descriptor = checked_root()
-try:
-    if read_checked(descriptor) != expected:
-        raise RuntimeError('marker changed before deletion')
-    os.unlink(name, dir_fd=descriptor)
-    os.fsync(descriptor)
-    try:
-        os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-    except FileNotFoundError:
-        pass
-    else:
-        raise RuntimeError('marker deletion was not durable')
-finally:
-    os.close(descriptor)
-"""
+        markers.delete_initial(
+            self, spec, expected_payload, expected_container_id=expected_container_id
         )
-        result = self.exec_capture(
-            spec,
-            [
-                "python3",
-                "-c",
-                script,
-                INITIAL_ARCHIVE_MARKER_ROOT,
-                INITIAL_ARCHIVE_MARKER_NAME,
-                str(INITIAL_ARCHIVE_MARKER_MAX_BYTES),
-                "0",
-                "0",
-            ],
-            workdir="/",
-            timeout_s=20,
-            input_bytes=expected_payload,
-            user_uid=0,
-            user_gid=0,
-            expected_container_id=expected_container_id,
-        )
-        if result.returncode != 0:
-            raise SandboxError(
-                "initial archive marker could not be removed safely: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
 
     def reset_unsettled_state(self, spec: ChatSandboxSpec, *, keep_workspace: bool = False) -> None:
         """Clear a never-settled first-turn import before an idempotent retry.
@@ -4521,7 +3817,7 @@ finally:
                 + result.stderr.decode("utf-8", "replace")[:300]
             )
 
-    def export_archive(
+    def export_archive(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         path: str,

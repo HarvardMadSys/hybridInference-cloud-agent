@@ -78,12 +78,6 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
     build_backend_from_env,
 )
-from cloud_agent_host.sandbox_archive import (
-    DEFAULT_ARCHIVE_STATE_DIR,
-    MAX_ARCHIVE_BYTES,
-    ArchiveIdentity,
-    SandboxArchiveService as SandboxDeletionArchiveService,
-)
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveConfigError
 from cloud_agent_host.sandbox_archives import safe_archive_error_type
@@ -93,6 +87,12 @@ from cloud_agent_host.sandbox_checkpoints import (
     SandboxCheckpointCapture,
     SandboxCheckpointError,
     SandboxCheckpointStore,
+)
+from cloud_agent_host.sandbox_deletion_backup import (
+    DEFAULT_ARCHIVE_STATE_DIR,
+    MAX_ARCHIVE_BYTES,
+    ArchiveIdentity,
+    SandboxDeletionBackupService,
 )
 from cloud_agent_host.sandbox_resources import SandboxResourceCollector
 from cloud_agent_host.session_lifecycle import (
@@ -122,6 +122,11 @@ from cloud_agent_shared.operation_profiling import PROFILING_CONTEXT_HEADER
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicyError
 from cloud_agent_shared.sandbox_manager_compat import manager_env
+from cloud_agent_shared.sandbox_manager_wire import (
+    SharedGroupIdentity,
+    SharedMember,
+    member_manifest,
+)
 from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER, parse_start_fence
 from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
 from cloud_agent_shared.workspace_browser import (
@@ -386,16 +391,6 @@ class FileWriteRequest(BaseModel):
     content: str = Field(..., max_length=MAX_FILE_WRITE_BYTES)
 
 
-class TerminalRequest(BaseModel):
-    """One interactive-shell command inside the retained workspace."""
-
-    environment: BoundEnvironment | None = Field(None, repr=False)
-    model_config = ConfigDict(extra="forbid")
-    command: str = Field(..., min_length=1, max_length=8000)
-    cwd: str = Field("/workspace", min_length=1, max_length=4096)
-    timeout_seconds: float = Field(DEFAULT_COMMAND_TIMEOUT_S, gt=0, le=120)
-
-
 class TerminalCreateRequest(BaseModel):
     """Dimensions and fixed environment for one interactive terminal."""
 
@@ -542,20 +537,6 @@ class SandboxArchiveUploadRequest(SandboxArchiveCommitRequest):
     ] = Field(..., min_length=4, max_length=4)
 
 
-class SharedSandboxMemberRequest(BaseModel):
-    """Authoritative durable identity for one member alias."""
-
-    thread_id: str = Field(..., min_length=1, max_length=256)
-    native_session_id: str | None = Field(None, max_length=512)
-    context_status: Literal["new", "live", "restored", "lost"] = "new"
-    activation_generation: int = Field(0, ge=0)
-    process_generation: int = Field(0, ge=0)
-    residency_generation: int = Field(0, ge=0)
-    resident_state: Literal["stopped", "starting", "live", "restarting", "lost"] = "stopped"
-    resident_slot_id: int = Field(..., ge=0, le=127)
-    last_settled_job_id: str | None = Field(None, max_length=256)
-
-
 class SharedSandboxRestoreRequest(BaseModel):
     """The control plane's record of a moved group's checkpoint."""
 
@@ -574,24 +555,9 @@ class SharedSandboxRestoreRequest(BaseModel):
             raise ValueError(str(exc)) from exc
 
 
-class SharedSandboxIdentityRequest(BaseModel):
+class SharedSandboxIdentityRequest(SharedGroupIdentity):
     """Immutable group identity plus its current member manifest."""
 
-    sandbox_id: str = Field(..., min_length=1, max_length=256)
-    generation: int = Field(..., ge=1)
-    origin_thread_id: str = Field(..., min_length=1, max_length=256)
-    runtime_id: str = Field(..., min_length=1, max_length=128)
-    runtime_version: str | None = Field(None, max_length=128)
-    sandbox_image_digest: str | None = Field(None, max_length=512)
-    expected_container_id: str | None = Field(None, min_length=1, max_length=256)
-    resident_slot_capacity: int = Field(8, ge=2, le=128)
-    memory_limit: str = Field("4g", min_length=1, max_length=32)
-    cpu_limit: str = Field("2", min_length=1, max_length=32)
-    disk_limit_mib: int = Field(0, ge=0, le=16777216, strict=True)
-    stop_timeout_s: int = Field(10, ge=1, le=300)
-    members: list[SharedSandboxMemberRequest] = Field(..., min_length=1, max_length=128)
-    #: The control plane's start fence for the request; see ``_Group.start_seq``.
-    start_seq: int | None = Field(None, ge=0)
     #: The checkpoint a moved group is recreated from, only while it is restoring.
     restore: SharedSandboxRestoreRequest | None = None
 
@@ -1376,7 +1342,7 @@ class _TerminalManager:
                 if holders > 1:
                     self._workspace_locks[workspace_id] = (lock, holders - 1)
 
-    def create(
+    def create(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         workspace_id: str,
         workdir: Path | str,
@@ -1937,59 +1903,6 @@ def _run_sandbox(
     return exit_code, "".join(chunks), stderr
 
 
-def _run_terminal(
-    backend: SandboxBackend,
-    workdir: Path | str,
-    request: TerminalRequest,
-    *,
-    default_timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S,
-    max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
-) -> dict[str, Any]:
-    from cloud_agent_host.environment_process import tool_environment
-
-    marker = secrets.token_hex(16)
-    script = (
-        "umask 0002; "
-        'cd "$WORKSPACE_CWD" 2>/dev/null || { printf "invalid working directory\\n" >&2; '
-        "exit 125; }; "
-        'eval "$WORKSPACE_COMMAND"; status=$?; '
-        f'printf "\\n__HYI_{marker}_CWD__%s\\n__HYI_{marker}_STATUS__%s\\n" "$PWD" "$status"'
-    )
-    process_status, stdout, stderr = _run_sandbox(
-        backend,
-        workdir=workdir,
-        script=script,
-        env={
-            **(tool_environment() if request.environment else {}),
-            **(request.environment.values("runtime") if request.environment else {}),
-            "WORKSPACE_COMMAND": request.command,
-            "WORKSPACE_CWD": request.cwd,
-        },
-        timeout_s=(
-            request.timeout_seconds
-            if "timeout_seconds" in request.model_fields_set
-            else default_timeout_s
-        ),
-        max_output_bytes=max_output_bytes,
-    )
-    cwd_marker = f"\n__HYI_{marker}_CWD__"
-    status_marker = f"\n__HYI_{marker}_STATUS__"
-    cwd = request.cwd
-    status = process_status
-    marker_index = stdout.rfind(cwd_marker)
-    if marker_index >= 0:
-        trailer = stdout[marker_index + len(cwd_marker) :]
-        stdout = stdout[:marker_index]
-        cwd_line, separator, status_text = trailer.partition(status_marker)
-        if separator:
-            cwd = cwd_line.strip() or request.cwd
-            try:
-                status = int(status_text.strip().splitlines()[0])
-            except (ValueError, IndexError):
-                status = process_status
-    return {"output": stdout, "stderr": stderr, "exit_code": status, "cwd": cwd}
-
-
 class SnapshotBaseMissing(HTTPException):
     """A capture's refusal when the workspace lacks the commit its diff is cut from.
 
@@ -2179,7 +2092,7 @@ def _terminal_attached_frame(last_seq: int) -> str:
     return f"event: attached\ndata: {data}\n\n"
 
 
-def create_app(
+def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
     backend: SandboxBackend | None = None,
     token: str | None = None,
@@ -2359,7 +2272,7 @@ def create_app(
             supervisor_ready.set()
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915 complexity baseline, #771
         # Docker owns every chat workspace and provider state. The sandbox manager keeps
         # only an in-memory index reconstructed from container labels/PID files.
         sandbox.preflight()
@@ -2475,11 +2388,8 @@ def create_app(
         )
 
     app.state.terminal_manager = terminals
-    app.state.shared_session_supervisor = shared_supervisor
-    app.state.sandbox_archive_service = archive_boundary
-    app.state.sandbox_archive_controller = archive_controller
     app.state.sandbox_checkpoint_store = checkpoint_store
-    app.state.sandbox_deletion_archive_service = SandboxDeletionArchiveService(shared_supervisor)
+    app.state.sandbox_deletion_archive_service = SandboxDeletionBackupService(shared_supervisor)
     app.state.sandbox_resource_collector = None
 
     async def runtime_refused(_request: Request, exc: Exception) -> JSONResponse:
@@ -2785,7 +2695,7 @@ def create_app(
         *,
         start_seq: int | None = None,
     ) -> dict[str, Any]:
-        """Run an owner's one-shot command or Git inspection on the command pool."""
+        """Run an owner's workspace download or Git inspection on the command pool."""
         give_back = command_slots.take(workspace_id)
 
         def run() -> dict[str, Any]:
@@ -2838,9 +2748,7 @@ def create_app(
             resident_slot_capacity=body.resident_slot_capacity,
         )
 
-    def shared_manifest(
-        members: list[SharedSandboxMemberRequest],
-    ) -> list[SharedMemberManifest]:
+    def shared_manifest(members: list[SharedMember]) -> list[SharedMemberManifest]:
         return [SharedMemberManifest(**member.model_dump()) for member in members]
 
     def resident_launch(
@@ -3108,7 +3016,7 @@ def create_app(
         return asdict(descriptor)
 
     @app.post("/shared-sandboxes/{thread_id}/turn")
-    async def run_shared_turn(
+    async def run_shared_turn(  # noqa: C901, PLR0915 complexity baseline, #771
         thread_id: str,
         body: SharedTurnRequest,
         _: None = Depends(authenticate),
@@ -3148,7 +3056,7 @@ def create_app(
 
         turn_boundary_closed = False
 
-        def frames() -> Generator[str, None, None]:
+        def frames() -> Generator[str, None, None]:  # noqa: PLR0915 complexity baseline, #771
             nonlocal turn_boundary_closed
             tool_windows = ToolWindowTracker()
             resources: dict[str, Any] | None = None
@@ -3763,20 +3671,7 @@ def create_app(
             # whole shared container, including terminals opened by a fork.
             origin["terminal_count"] = sum(row["terminal_count"] for row in members)
             origin["shared_live"] = True
-            origin["members"] = [
-                {
-                    "thread_id": row["thread_id"],
-                    "native_session_id": row["native_session_id"],
-                    "context_status": row["context_status"],
-                    "activation_generation": row["activation_generation"],
-                    "process_generation": row["process_generation"],
-                    "residency_generation": row["residency_generation"],
-                    "resident_state": row["resident_state"],
-                    "resident_slot_id": row["resident_slot_id"],
-                    "last_settled_job_id": row["last_settled_job_id"],
-                }
-                for row in members
-            ]
+            origin["members"] = member_manifest(members)
             rows.append(origin)
         resource_collector = app.state.sandbox_resource_collector
         if resource_collector is not None and thread_id is None:
@@ -3990,37 +3885,6 @@ def create_app(
             raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc
-
-    @app.post("/workspaces/{workspace_id}/terminal")
-    async def terminal(
-        workspace_id: str,
-        request: Request,
-        body: TerminalRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        start_seq = parse_start_fence(request.headers.get(START_FENCE_HEADER))
-        if body.environment is not None and body.environment.required:
-            owner = await endpoint_calls.run(retained_owner, workspace_id)
-            await endpoint_calls.run(
-                owner.prepare_environment,
-                workspace_id,
-                body.environment,
-                environment_preparation,
-                start_seq=start_seq,
-            )
-        return await owner_command(
-            workspace_id,
-            lambda retained, _call: _run_terminal(
-                retained,
-                "/workspace",
-                body,
-                default_timeout_s=applied_settings["workspace_command_timeout_s"],
-                max_output_bytes=int(applied_settings["workspace_command_output_max_mib"])
-                * 1024
-                * 1024,
-            ),
-            start_seq=start_seq,
-        )
 
     @app.post("/workspaces/{workspace_id}/terminals")
     async def create_terminal(
@@ -4302,7 +4166,6 @@ __all__ = [
     "FileWriteRequest",
     "TerminalCreateRequest",
     "TerminalInputRequest",
-    "TerminalRequest",
     "TerminalResizeRequest",
     "create_app",
 ]

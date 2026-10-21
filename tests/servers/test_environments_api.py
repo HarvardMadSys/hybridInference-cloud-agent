@@ -346,9 +346,11 @@ async def test_dotenv_preview_requires_review_of_short_values_without_echoing_th
 
 
 async def test_empty_binding_terminal_does_not_prepare_or_interrupt_a_running_turn(monkeypatch):
+    from starlette.requests import Request
+
     from cloud_agent.api import workspace
     from cloud_agent.sandbox_manager_client import SandboxManagerError
-    from cloud_agent.schemas import AgentTerminalRequest
+    from cloud_agent.schemas import AgentTerminalSessionCreateRequest
     from cloud_agent_shared.environment import BoundEnvironment
 
     job = {
@@ -359,31 +361,37 @@ async def test_empty_binding_terminal_does_not_prepare_or_interrupt_a_running_tu
     }
     broker = SimpleNamespace(
         prepare_environment=AsyncMock(side_effect=SandboxManagerError(409, "SessionBusy")),
-        terminal=AsyncMock(
-            return_value={"output": "1", "stderr": "", "cwd": "/workspace", "exit_code": 0}
+        create_terminal=AsyncMock(
+            return_value={
+                "id": "term_1",
+                "shell": "/bin/bash",
+                "state": "running",
+                "cwd": "/workspace",
+                "rows": 24,
+                "cols": 80,
+                "last_seq": 0,
+            }
         ),
     )
     store = SimpleNamespace(
-        conversation_queries=object(),
-        sandbox=object(),
         environments=SimpleNamespace(
             get_environment_binding=AsyncMock(return_value=BoundEnvironment(binding_id="empty"))
         ),
     )
-    monkeypatch.setattr(workspace, "_owned_job", AsyncMock(return_value=job))
-    monkeypatch.setattr(workspace, "_require_workspace_entitlement", AsyncMock())
-    monkeypatch.setattr(workspace, "_require_mutable_workspace_ready", AsyncMock())
-    monkeypatch.setattr(workspace, "_sandbox_manager_for_job", AsyncMock(return_value=broker))
-    result = await workspace.run_agent_job_terminal_command(
+    monkeypatch.setattr(
+        workspace, "_terminal_owner_workspace", AsyncMock(return_value=(job, broker))
+    )
+    response = await workspace.create_agent_job_terminal(
         "job",
-        AgentTerminalRequest(command="echo 1"),
+        Request({"type": "http", "headers": []}),
+        AgentTerminalSessionCreateRequest(rows=24, cols=80),
         user={"user_id": "alice"},
         store=store,
         app_credentials=None,
     )
-    assert result.exit_code == 0
+    assert response.status_code == 200
     broker.prepare_environment.assert_not_awaited()
-    assert "environment" not in broker.terminal.call_args.kwargs
+    assert "environment" not in broker.create_terminal.call_args.kwargs
 
 
 async def test_test_retry_returns_original_before_github_or_latest_config(monkeypatch):
