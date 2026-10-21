@@ -67,6 +67,17 @@ class AgentConfigResponse(BaseModel):
         default_factory=list,
         description="MCP servers this deployment offers. Empty means none are configured.",
     )
+    default_model: str | None = Field(
+        default=None,
+        description=(
+            "The model a new task should start on, first available of: this "
+            "owner's pin in My Settings, the model their newest turn used, the "
+            "deployment default. Always one of `models`, so a retired model is "
+            "never pre-selected. Null means none of the three resolves, or the "
+            "catalog was unreadable — the composer then leaves its model "
+            "control empty and asks, rather than choosing one for the owner."
+        ),
+    )
     mcp_runtimes: list[str] = Field(
         default_factory=list,
         description=(

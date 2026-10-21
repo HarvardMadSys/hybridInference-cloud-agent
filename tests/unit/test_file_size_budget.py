@@ -33,7 +33,6 @@ BASELINE = {
     "apps/backend/cloud_agent/storage/repositories/environments.py": 1996,
     "apps/backend/cloud_agent/storage/repositories/snapshot.py": 1751,
     "apps/backend/cloud_agent_host/host_capacity.py": 1640,
-    "apps/backend/cloud_agent/settings.py": 1598,
     "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1595,
     "apps/backend/cloud_agent/providers/compute/host_bootstrap.py": 1578,
     "apps/backend/cloud_agent_host/sandbox_checkpoints.py": 1563,

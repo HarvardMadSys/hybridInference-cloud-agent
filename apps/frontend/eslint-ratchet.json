@@ -240,6 +240,7 @@
       "files": [
         "src/app/(agents)/admin/hosts/ComputeResourcePanel.tsx",
         "src/app/(agents)/admin/measurements/MeasurementControlPanel.tsx",
+        "src/app/(agents)/admin/settings/ApplicationSettingGroup.tsx",
         "src/app/(agents)/admin/settings/SandboxArchiveSettings.tsx",
         "src/components/features/agents/job-detail/JobComposer.tsx",
         "src/components/features/agents/useSideChatSession.ts"
@@ -255,10 +256,7 @@
       }
     },
     {
-      "files": [
-        "src/app/(agents)/admin/settings/ApplicationSettingGroup.tsx",
-        "src/components/features/agents/LedgerUsage.tsx"
-      ],
+      "files": ["src/components/features/agents/LedgerUsage.tsx"],
       "rules": {
         "complexity": ["error", 47]
       }
@@ -549,7 +547,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1402
+            "max": 1401
           }
         ]
       }
@@ -560,7 +558,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1304
+            "max": 1303
           }
         ]
       }
