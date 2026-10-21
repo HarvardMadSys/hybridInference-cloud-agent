@@ -9,17 +9,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host import chat_sandbox
+from cloud_agent_host import chat_sandbox, chat_sandbox_observer as observer
 from cloud_agent_host.chat_sandbox import (
     CHAT_PROBE_LABEL,
-    GUEST_OBSERVER_PROBE_ATTEMPTS,
     MEMBER_REAPER_TARGET,
     MEMBER_UID_BASE,
-    PROBE_ABANDONED_AFTER_S,
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,
     ChatSandboxStatus,
+)
+from cloud_agent_host.chat_sandbox_observer import (
+    GUEST_OBSERVER_PROBE_ATTEMPTS,
+    PROBE_ABANDONED_AFTER_S,
 )
 from cloud_agent_host.guest_observer import GUEST_OBSERVER_BINARY
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
@@ -341,7 +343,7 @@ def test_a_probe_removes_only_its_own_namespaces_abandoned_probes(monkeypatch):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(manager, "_run", run)
-    manager._remove_abandoned_probes()
+    observer.remove_abandoned_probes(manager)
     assert [argv[-1] for argv in calls if argv[1:3] == ["rm", "--force"]] == ["abandoned"]
 
 
@@ -507,31 +509,16 @@ def test_guest_network_sync_refuses_a_file_the_guest_user_could_rewrite(monkeypa
     assert resolv.read_text() == "nameserver 10.0.0.2\n"
 
 
-def _self_test_manager(monkeypatch):
-    """A manager whose privileged exec answers the observer self-test."""
-    manager = _manager()
-    monkeypatch.setattr(
-        manager,
-        "_kata_privileged_exec",
-        lambda spec, argv, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
-    )
-    return manager
-
-
-def test_the_self_test_must_name_the_helper(monkeypatch):
+def test_the_self_test_must_name_the_helper():
     """An answer that is not the reviewed helper is a failed preflight."""
-    manager = _self_test_manager(monkeypatch)
-
     with pytest.raises(SandboxError):
-        manager._check_observer_self_test("some other program\n")
+        observer.check_self_test("some other program\n")
 
 
-def test_a_guest_without_a_window_capability_is_accepted_but_reported(monkeypatch, caplog):
+def test_a_guest_without_a_window_capability_is_accepted_but_reported(caplog):
     """Lifecycle events still work; the missing capability is not silent."""
-    manager = _self_test_manager(monkeypatch)
-
     with caplog.at_level(logging.WARNING):
-        manager._check_observer_self_test("freeinference-guest-observer-v2\n")
+        observer.check_self_test("freeinference-guest-observer-v2\n")
 
     assert any(
         record.__dict__.get("event") == "guest_observer_window_capability_absent"
@@ -539,12 +526,10 @@ def test_a_guest_without_a_window_capability_is_accepted_but_reported(monkeypatc
     )
 
 
-def test_a_partial_window_capability_names_what_is_missing(monkeypatch, caplog):
+def test_a_partial_window_capability_names_what_is_missing(caplog):
     """A kernel that cannot read PSS must say so where an operator looks."""
-    manager = _self_test_manager(monkeypatch)
-
     with caplog.at_level(logging.WARNING):
-        manager._check_observer_self_test(
+        observer.check_self_test(
             "freeinference-guest-observer-v2\n"
             '{"window":{"cpu":true,"storage_io":true,'
             '"pss":false,"counters":3}}\n'
@@ -558,11 +543,9 @@ def test_a_partial_window_capability_names_what_is_missing(monkeypatch, caplog):
     assert partial and partial[0].__dict__.get("missing") == ["pss"]
 
 
-def test_a_complete_capability_report_is_not_a_warning(monkeypatch, caplog):
-    manager = _self_test_manager(monkeypatch)
-
+def test_a_complete_capability_report_is_not_a_warning(caplog):
     with caplog.at_level(logging.WARNING):
-        manager._check_observer_self_test(
+        observer.check_self_test(
             "freeinference-guest-observer-v2\n"
             '{"window":{"cpu":true,"storage_io":true,'
             '"pss":true,"counters":7}}\n'

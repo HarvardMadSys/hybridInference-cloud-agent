@@ -20,6 +20,7 @@ import pytest
 from cloud_agent_host import (
     chat_sandbox as chat_sandbox_mod,
     chat_sandbox_members as members,
+    chat_sandbox_observer as observer,
     chat_sandbox_writers as writers,
 )
 from cloud_agent_host.chat_sandbox import (
@@ -624,7 +625,7 @@ def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
 
     monkeypatch.setattr(manager, "exec_capture", capture)
 
-    snapshot = manager._guest_observer_snapshot(_spec(), after_poll_seq=21)
+    snapshot = observer.snapshot(manager, _spec(), after_poll_seq=21)
 
     assert snapshot.status.poll_seq == 22
     command = calls[0]
