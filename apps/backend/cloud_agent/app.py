@@ -179,6 +179,7 @@ def create_app() -> FastAPI:
         host_profiling,
         hosts,
         mcp_connections,
+        model_preferences,
         owner_usage,
         routes,
         service_jobs,
@@ -254,6 +255,7 @@ def create_app() -> FastAPI:
     app.include_router(work_insights.router)
     app.include_router(agent_memory.router)
     app.include_router(user_profile.router)
+    app.include_router(model_preferences.router)
     app.include_router(teams.router)
     app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
@@ -300,6 +302,7 @@ def create_app() -> FastAPI:
             "/v1/agent/memories",
             "/v1/agent/insights",
             "/v1/agent/profile",
+            "/v1/agent/model-preference",
             "/v1/agent/conversations/read-receipts",
         ),
     )

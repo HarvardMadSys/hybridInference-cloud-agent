@@ -156,6 +156,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // Drops whose folders are still being walked; their files are not attached yet.
   const [readingDrops, setReadingDrops] = useState(0);
   const taskBox = useRef<HTMLTextAreaElement>(null);
+  const modelTrigger = useRef<HTMLButtonElement | null>(null);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const [models, setModels] = useState<string[]>([]);
   // Empty until the owner picks one. A task changes a real repository, so
@@ -248,10 +249,23 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     setRuntime((current) =>
       current && cfg.runtimes.includes(current) ? current : (cfg.runtimes[0] ?? ''),
     );
-    const defaultModel = modelIds.includes('deepseek-v4-flash')
-      ? 'deepseek-v4-flash'
-      : (modelIds[0] ?? '');
-    setModel((current) => (current && modelIds.includes(current) ? current : defaultModel));
+    // `default_model` is what the server resolved for *this owner*: their pin,
+    // else the model their last task used, else the deployment default. It is
+    // the only thing allowed to fill this control in.
+    //
+    // There is deliberately no "first model in the list" fallback. The model
+    // decides what runs the task — different models differ in cost, speed and
+    // what they can do — so picking one on the owner's behalf is the same
+    // mistake as picking a repository for them, which this composer already
+    // refuses to do. With nothing resolved the control stays empty and Run
+    // waits, exactly as it does for an unset repository.
+    setModel((current) =>
+      current && modelIds.includes(current)
+        ? current
+        : cfg.default_model && modelIds.includes(cfg.default_model)
+          ? cfg.default_model
+          : '',
+    );
   }, []);
 
   // The one place a repository is chosen for the owner: they opened the page
@@ -440,6 +454,9 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const busy =
     submitting || goalCommand.busy || rewriting || Boolean(repo && environmentStatus === 'loading');
   const missingRepository = config?.github_connected === true && !repo;
+  // Separate from the repository so the one missing step gets named, and so
+  // the Run button's title says which control to look at.
+  const missingModel = !model && models.length > 0;
   const canRun =
     !locked &&
     (temporary || (config?.github_connected === true && Boolean(repo))) &&
@@ -632,6 +649,9 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
       // The one thing missing is where to run it: ask, rather than ignore the
       // key. Nothing is sent until a repository has actually been chosen.
       if (missingRepository && task.trim() && !busy) openRepositoryPicker(true);
+      // Same rule for the model. There is no sensible default to fall back on,
+      // so the key press is answered by pointing at the control that is empty.
+      if (missingModel && !busy) modelTrigger.current?.focus();
       return;
     }
     // The first temporary workspace waits for its owner to say they know its
@@ -887,6 +907,12 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
               value={model}
               options={models}
               onChange={setModel}
+              // Empty until something resolves for this owner. The model is
+              // never filled in for them: see applyConfig.
+              placeholder={t('composer.chooseModelPlaceholder')}
+              triggerRef={(element) => {
+                modelTrigger.current = element;
+              }}
             />
             <Picker
               label={t('composer.reasoning')}
@@ -900,7 +926,13 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
             type="button"
             disabled={!canRun}
             onClick={() => void run()}
-            title={missingRepository ? t('composer.chooseRepository') : t('composer.runTitle')}
+            title={
+              missingRepository
+                ? t('composer.chooseRepository')
+                : missingModel
+                  ? t('composer.chooseModel')
+                  : t('composer.runTitle')
+            }
             className="ui-button ui-button-primary ml-auto shrink-0 px-3 text-xs"
           >
             {submitting || goalCommand.busy ? t('composer.starting') : t('composer.run')}

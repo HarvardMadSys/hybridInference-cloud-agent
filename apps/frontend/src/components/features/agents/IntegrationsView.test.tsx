@@ -11,6 +11,7 @@ import {
   type AgentMemoryScope,
 } from '@/lib/api/agentMemory';
 import { getInsights, type WorkInsights } from '@/lib/api/insights';
+import { getModelPreference } from '@/lib/api/modelPreference';
 import { getUserProfile } from '@/lib/api/userProfile';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
@@ -36,6 +37,10 @@ import { listSkills } from '@/lib/api/skills';
 import { listSshServers } from '@/lib/api/sshServers';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn(), saveUserProfile: vi.fn() }));
+vi.mock('@/lib/api/modelPreference', () => ({
+  getModelPreference: vi.fn(),
+  saveModelPreference: vi.fn(),
+}));
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentConfig: vi.fn(),
@@ -180,6 +185,12 @@ beforeEach(() => {
   });
   localStorage.clear();
   document.documentElement.lang = 'en';
+  vi.mocked(getModelPreference).mockResolvedValue({
+    default_model: null,
+    last_model: 'model-a',
+    effective_model: 'model-a',
+    deployment_default: null,
+  });
   vi.mocked(getAgentConfig).mockResolvedValue({
     models: ['model-a', 'model-b'],
     repos: [],
@@ -413,7 +424,7 @@ describe('IntegrationsView', () => {
     expect(within(section).getByRole('switch', { name: '启用记忆' })).toBeChecked();
     expect(within(section).queryByRole('heading', { name: '建议' })).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '项目记忆' })).toBeInTheDocument();
-    expect(screen.getByText('管理你的个人资料和通知。')).toBeInTheDocument();
+    expect(screen.getByText('管理你的个人资料、默认模型和通知。')).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 1, name: '键盘快捷键' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: '键盘快捷键' })).toBeInTheDocument();
   });

@@ -4110,6 +4110,18 @@
           "attachment_limits": {
             "$ref": "#/components/schemas/AttachmentLimits"
           },
+          "default_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The model a new task should start on, first available of: this owner's pin in My Settings, the model their newest turn used, the deployment default. Always one of `models`, so a retired model is never pre-selected. Null means none of the three resolves, or the catalog was unreadable — the composer then leaves its model control empty and asks, rather than choosing one for the owner.",
+            "title": "Default Model"
+          },
           "environment_limits": {
             "additionalProperties": true,
             "title": "Environment Limits",
@@ -13769,6 +13781,57 @@
         "title": "MessageRequestDetail",
         "type": "object"
       },
+      "ModelPreferenceView": {
+        "description": "An owner's pinned model, the one they used last, and what that resolves to.",
+        "properties": {
+          "default_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Model"
+          },
+          "deployment_default": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployment Default"
+          },
+          "effective_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Model"
+          },
+          "last_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Model"
+          }
+        },
+        "title": "ModelPreferenceView",
+        "type": "object"
+      },
       "NodeRegistrationRequest": {
         "additionalProperties": false,
         "description": "A node's SSH host public keys and the token it was created with.",
@@ -19050,6 +19113,29 @@
           "expected_version"
         ],
         "title": "UpdateMemory",
+        "type": "object"
+      },
+      "UpdateModelPreference": {
+        "additionalProperties": false,
+        "description": "Pin a default model, or (``null``) go back to following the last used one.\n\nThe field is required rather than defaulting to ``None``: omitting it is a\nmalformed request, while sending ``null`` is the deliberate act of clearing\nthe pin. Treating the two alike would let a client clear a choice by\nforgetting to send one.",
+        "properties": {
+          "default_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Model"
+          }
+        },
+        "required": [
+          "default_model"
+        ],
+        "title": "UpdateModelPreference",
         "type": "object"
       },
       "UpdateProfile": {
@@ -35114,6 +35200,114 @@
         "summary": "Restore Memory",
         "tags": [
           "agent-memory"
+        ]
+      }
+    },
+    "/v1/agent/model-preference": {
+      "get": {
+        "description": "Read what a new task would start on, and where that came from.",
+        "operationId": "read_model_preference_v1_agent_model_preference_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPreferenceView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Model Preference",
+        "tags": [
+          "model-preference"
+        ]
+      },
+      "put": {
+        "description": "Pin the model a new task starts on, or go back to following the last one.\n\n``{\"default_model\": null}`` is a real choice, distinct from omitting the\nfield: it clears the pin. The field is required so a client cannot clear a\nchoice by forgetting to send one.",
+        "operationId": "save_model_preference_v1_agent_model_preference_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateModelPreference"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPreferenceView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Model Preference",
+        "tags": [
+          "model-preference"
         ]
       }
     },

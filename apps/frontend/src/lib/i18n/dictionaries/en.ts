@@ -541,7 +541,7 @@ export const en = {
   'settings.backToChats': 'Back to chats',
   'settings.collapseNavigation': 'Collapse settings navigation',
   'settings.expandNavigation': 'Expand settings navigation',
-  'settings.personalDescription': 'Manage your profile and notifications.',
+  'settings.personalDescription': 'Manage your profile, default model, and notifications.',
   'settings.plugins': 'Plugins & MCPs',
   'settings.pluginsDescription':
     'Connect MCP servers and manage the skills available to your agents.',
@@ -669,6 +669,20 @@ export const en = {
   'settings.projectMemory.projectsError': 'Could not load repositories.',
   'settings.projectMemory.noProjects': 'Repositories you work in appear here.',
   'settings.projectMemory.confirmTitle': 'Clear the memory of {repo}?',
+  'settings.model.title': 'Model',
+  'settings.model.description':
+    'The model a new task starts on. The picker in the composer can still change it for that task, and nothing is chosen for you when none of these apply.',
+  'settings.model.label': 'Default model',
+  'settings.model.followDescription': 'Follow my last model ({model})',
+  'settings.model.followDescriptionEmpty': 'Follow my last model',
+  'settings.model.followDeployment': 'Follow my last model ({model} until you have one)',
+  'settings.model.retired': '{model} (no longer available)',
+  'settings.model.effective': 'New tasks start on {model}.',
+  'settings.model.noModels': 'No model is available yet. A new task waits until one is offered.',
+  'settings.model.loading': 'Loading your default model…',
+  'settings.model.error': 'Could not load your default model.',
+  'settings.model.saveError': 'Could not save. Your previous choice is unchanged.',
+  'settings.model.retry': 'Try again',
   'settings.notifications.title': 'Notifications',
   'settings.notifications.description':
     'Get browser notifications when an agent asks a question or finishes a turn. Keep the app open to receive them.',
@@ -945,6 +959,8 @@ export const en = {
   'composer.repositoryUnavailable':
     '{repo} is not available to you. Choose another repository, or configure repository access.',
   'composer.chooseRepository': 'Choose a repository first',
+  'composer.chooseModel': 'Choose a model first',
+  'composer.chooseModelPlaceholder': 'Choose model',
   'composer.branch': 'Branch',
   'composer.agent': 'Agent',
   'picker.search': 'Search…',

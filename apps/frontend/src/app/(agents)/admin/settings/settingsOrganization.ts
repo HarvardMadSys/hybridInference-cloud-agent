@@ -141,7 +141,7 @@ const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     title: 'Sandbox execution',
-    important: ['default_execution_profile'],
+    important: ['default_execution_profile', 'default_model'],
     advanced: ['sandbox_manager_token', 'sandbox_manager_url_allowed_hosts'],
   },
   {

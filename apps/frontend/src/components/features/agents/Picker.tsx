@@ -12,21 +12,36 @@ export function Picker({
   options: suppliedOptions,
   onChange,
   compact = false,
+  placeholder,
+  triggerRef,
 }: {
   label: string;
   value: string;
   options: string[];
   onChange: (next: string) => void;
   compact?: boolean;
+  /**
+   * What an empty control reads. Empty is a real state for a setting the owner
+   * must choose — the model, which has no safe default — and drawing nothing
+   * would look like a rendering fault rather than an answer.
+   */
+  placeholder?: string;
+  /**
+   * The trigger button, so a caller can focus the empty control. A callback
+   * ref, not a RefObject: this component owns the element and must hand it out
+   * without the caller being able to reassign it.
+   */
+  triggerRef?: (element: HTMLButtonElement | null) => void;
 }) {
   const t = useT();
   const options = suppliedOptions.filter((option) => typeof option === 'string');
   const id = useId();
-  const trigger = useRef<HTMLButtonElement>(null);
+  const trigger = useRef<HTMLButtonElement | null>(null);
   const panel = useRef<HTMLDivElement>(null);
   const search = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const typeahead = useRef({ text: '', at: 0 });
+  const shown = value || placeholder || '';
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(value);
@@ -133,7 +148,10 @@ export function Picker({
   return (
     <>
       <button
-        ref={trigger}
+        ref={(element) => {
+          trigger.current = element;
+          if (typeof triggerRef === 'function') triggerRef(element);
+        }}
         type="button"
         value={value}
         aria-label={label}
@@ -141,7 +159,7 @@ export function Picker({
         aria-haspopup="dialog"
         aria-expanded={visible}
         aria-controls={visible ? id : undefined}
-        title={`${label}: ${value}`}
+        title={`${label}: ${shown}`}
         onClick={() => (visible ? close() : show())}
         onKeyDown={(event) => {
           if (['ArrowDown', 'ArrowUp'].includes(event.key)) {
@@ -152,8 +170,11 @@ export function Picker({
         className={`ui-focus-ring inline-flex min-h-8 max-w-full shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-xs text-foreground transition-colors hover:bg-surface-hover [@media(pointer:coarse)]:min-h-11 ${visible ? 'border-border bg-surface-hover' : 'border-transparent'}`}
       >
         {!compact ? <span className="shrink-0 text-muted">{label}</span> : null}
-        <span id={`${id}-value`} className="min-w-0 max-w-[11rem] truncate font-medium">
-          {value}
+        <span
+          id={`${id}-value`}
+          className={`min-w-0 max-w-[11rem] truncate font-medium ${value ? '' : 'italic text-muted'}`}
+        >
+          {shown}
         </span>
         <svg
           aria-hidden

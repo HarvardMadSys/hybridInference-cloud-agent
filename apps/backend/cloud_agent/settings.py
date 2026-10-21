@@ -1041,6 +1041,20 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         env="AGENT_MCP_ALLOW_PLAIN_HTTP",
         description="Allow unencrypted HTTP MCP connections. Takes effect for new MCP transports after restarting the MCP listener.",
     ),
+    Setting(
+        "default_model",
+        "Default model for new tasks",
+        "Execution",
+        "deepseek-v4-flash",
+        env="AGENT_DEFAULT_MODEL",
+        description=(
+            "The model a new task starts on when its owner has not chosen one. A user's "
+            "pinned model beats their last used model, which beats this default. A model "
+            "the gateway does not offer to a user is skipped rather than forced, and if "
+            "this one is unavailable the task waits for the user to choose. Empty means "
+            "this deployment offers no default at all."
+        ),
+    ),
 )
 SETTINGS += MIGRATED_SETTINGS
 SETTINGS_BY_KEY = {setting.key: setting for setting in SETTINGS}
