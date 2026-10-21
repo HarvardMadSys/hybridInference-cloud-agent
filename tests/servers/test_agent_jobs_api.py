@@ -3734,7 +3734,7 @@ async def test_expired_browser_jwt_is_not_reinterpreted_as_api_key(store: FakeSt
 
 async def test_sandbox_token_stays_out_of_owner_routes(store: FakeStorage):
     """A structured Agent token must not be mistaken for a browser JWT."""
-    from cloud_agent.tokens import SCOPE_MODEL
+    from cloud_agent.tokens import SCOPE_MCP
 
     app = _build_app(store)
     app.dependency_overrides.pop(authenticate_agent_owner)
@@ -3742,7 +3742,7 @@ async def test_sandbox_token_stays_out_of_owner_routes(store: FakeStorage):
         job_id="ajob_0001",
         attempt_id=1,
         lease_generation=1,
-        scope=SCOPE_MODEL,
+        scope=SCOPE_MCP,
     )
 
     transport = ASGITransport(app=app)
