@@ -19,11 +19,15 @@ from cloud_agent_host.drivers import (
     TURN_COMPLETED,
     TURN_FAILED,
     TURN_STARTED,
+    ClaudeCodeLiveSession,
+    CodexAppServerSession,
     DriverError,
     HttpAgentLiveSession,
     LaunchContext,
+    PiRpcSession,
     TurnInput,
     driver_for,
+    get_driver,
 )
 from cloud_agent_host.runtimes import (
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -32,6 +36,7 @@ from cloud_agent_host.runtimes import (
     KiloRuntime,
     OpencodeRuntime,
     PiRuntime,
+    registered_runtimes,
 )
 
 _ANSWER = {
@@ -540,6 +545,34 @@ def test_launch_resident_live_needs_the_state_mount(tmp_path):
         driver_for(ClaudeCodeRuntime()).launch_resident_live(context, session_id="s")
 
 
+#: The session class each registered CLI's driver opens. Written out rather than
+#: read from the driver table, so that the table is checked against it.
+_LIVE_SESSION_TYPES = {
+    "claude-code": ClaudeCodeLiveSession,
+    "codex": CodexAppServerSession,
+    "pi": PiRpcSession,
+    "opencode": HttpAgentLiveSession,
+    "kilo": HttpAgentLiveSession,
+}
+
+
+@pytest.mark.parametrize("runtime_id", registered_runtimes())
+def test_launch_resident_live_opens_each_runtimes_session_on_the_id_it_resumes(
+    tmp_path, runtime_id
+):
+    """Every CLI resumes through its own session class; a fresh launch resumes nothing."""
+    context, _spawned = _live(_LiveProcess(), tmp_path)
+    driver = get_driver(runtime_id)
+
+    resumed = driver.launch_resident_live(context, session_id="native-prev")
+    fresh = driver.launch_live(context)
+
+    assert type(resumed) is _LIVE_SESSION_TYPES[runtime_id]
+    assert type(fresh) is _LIVE_SESSION_TYPES[runtime_id]
+    assert resumed._resume_session_id == "native-prev"
+    assert fresh._resume_session_id is None
+
+
 @pytest.mark.parametrize("kind", ["init", "assistant", "result"])
 def test_claude_rejects_a_different_root_session_before_accepting_its_output(tmp_path, kind):
     process = _LiveProcess()
@@ -752,6 +785,45 @@ def test_codex_sandbox_mode_follows_the_backend_boundary(tmp_path, isolated, san
     assert start["params"]["sandbox"] == sandbox
     assert start["params"]["model"] == "glm-5.1"
     assert start["params"]["modelProvider"] == "hybridinference"
+
+
+def test_codex_resumes_its_thread_by_id_and_runs_the_next_turn_on_it(tmp_path):
+    """A resumed session asks the app-server for its thread by id, then runs turns on it."""
+    process = _LiveProcess()
+    context, _spawned = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines(
+        {"id": "initialize-1", "result": {"userAgent": "codex"}},
+        {"id": "thread-2", "result": {"thread": {"id": "thread-prev"}}},
+    )
+    session = driver_for(CodexRuntime()).launch_resident_live(context, session_id="thread-prev")
+    session.ensure_started(model="gpt", reasoning_effort=None)
+    process.feed = _turn_lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
+    session.start_turn(TurnInput(prompt="go on", model="gpt"))
+
+    sent = [json.loads(line) for line in process.sent]
+    assert [line.get("method") for line in sent] == [
+        "initialize",
+        "initialized",
+        "thread/resume",
+        "turn/start",
+    ]
+    assert sent[2]["params"]["threadId"] == "thread-prev"
+    assert sent[3]["params"]["threadId"] == "thread-prev"
+
+
+def test_codex_refuses_a_resume_answered_with_another_thread(tmp_path):
+    """A different thread has none of this conversation; it is refused, not adopted."""
+    process = _LiveProcess()
+    context, _spawned = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines(
+        {"id": "initialize-1", "result": {"userAgent": "codex"}},
+        {"id": "thread-2", "result": {"thread": {"id": "thread-other"}}},
+    )
+    session = driver_for(CodexRuntime()).launch_resident_live(context, session_id="thread-prev")
+
+    with pytest.raises(DriverError, match="different native thread"):
+        session.ensure_started(model="gpt", reasoning_effort=None)
+    assert session.runtime.session_id is None
 
 
 def test_codex_mutable_tool_updates_emit_one_tool_use(tmp_path):
