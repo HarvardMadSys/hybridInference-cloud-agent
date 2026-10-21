@@ -214,14 +214,3 @@ class EnvironmentRepository(Protocol):
     ) -> bool:
         """Persist a lifecycle receipt only under the matching live attempt fence."""
         ...
-
-    async def save_environment_preparation(
-        self,
-        sandbox_id: str,
-        binding_id: str,
-        container_id: str,
-        boot_id: str,
-        steps: builtins.list[dict[str, Any]],
-    ) -> None:
-        """Persist preparation results using immutable binding and container identity."""
-        ...

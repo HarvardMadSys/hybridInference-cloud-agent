@@ -26,6 +26,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
     MIN_MULTIPART_PART_BYTES,
     SANDBOX_ARCHIVE_S3_URI,
     SandboxArchivePolicy,
+    SandboxArchivePolicyError,
 )
 
 _ACCOUNT = "123456789012"
@@ -163,13 +164,7 @@ class RecordingS3Client:
 
 
 def _config(**overrides: Any) -> SandboxArchiveS3Config:
-    values: dict[str, Any] = {
-        "region": _REGION,
-        "kms_key_arn": _KMS_KEY,
-        "expected_bucket_owner": _ACCOUNT,
-    }
-    values.update(overrides)
-    return SandboxArchiveS3Config(**values)
+    return SandboxArchiveS3Config.from_policy(_policy(**{"revision": 0, **overrides}))
 
 
 def _policy(**overrides: Any) -> SandboxArchivePolicy:
@@ -243,8 +238,6 @@ def test_disabled_policy_cannot_create_an_s3_service_config() -> None:
 @pytest.mark.parametrize(
     "updates, message",
     [
-        ({"uri": "s3://other/cloud-agent/sandbox"}, "exactly"),
-        ({"uri": f"{SANDBOX_ARCHIVE_S3_URI}/"}, "exactly"),
         ({"expected_bucket_owner": "123"}, "12-digit"),
         (
             {"kms_key_arn": "arn:aws:kms:us-west-2:123456789012:key/12345678"},
@@ -261,14 +254,50 @@ def test_disabled_policy_cannot_create_an_s3_service_config() -> None:
 def test_config_rejects_destination_and_bound_weakening(
     updates: dict[str, Any], message: str
 ) -> None:
-    values: dict[str, Any] = {
-        "region": _REGION,
-        "kms_key_arn": _KMS_KEY,
-        "expected_bucket_owner": _ACCOUNT,
-    }
-    values.update(updates)
-    with pytest.raises(SandboxArchiveConfigError, match=message):
-        SandboxArchiveS3Config(**values)
+    """A config holds a parsed policy, so weakening it is refused while parsing.
+
+    The destination is no field of either: a config always writes to the fixed
+    bucket, and a policy naming any other ``s3_uri`` does not parse.
+    """
+    with pytest.raises(SandboxArchivePolicyError, match=message):
+        SandboxArchiveS3Config.from_policy(_policy(**updates))
+
+
+@pytest.mark.parametrize("missing", ["expected_bucket_owner", "kms_key_arn"])
+def test_workload_identity_needs_the_kms_key_and_bucket_owner(missing: str) -> None:
+    """Credentials resolved for a pinned policy can leave an access-key policy without a key."""
+    policy = _policy(
+        **{missing: ""},
+        aws_access_key_id=_ACCESS_KEY_ID,
+        aws_secret_access_key=_SECRET_ACCESS_KEY,
+    )
+    assert SandboxArchiveS3Config.from_policy(policy).aws_access_key_id == _ACCESS_KEY_ID
+    with pytest.raises(SandboxArchiveConfigError):
+        SandboxArchiveS3Config.from_policy(policy, aws_access_key_id="", aws_secret_access_key="")
+
+
+@pytest.mark.parametrize("missing", [(), ("expected_bucket_owner", "kms_key_arn")])
+def test_a_config_given_no_credentials_keeps_the_policys_access_key(
+    missing: tuple[str, ...],
+) -> None:
+    """Built directly, a config uses the policy's own key, as ``from_policy`` does.
+
+    With the KMS key and owner it is not workload identity, and without them
+    it is not refused.
+    """
+    policy = _policy(
+        **dict.fromkeys(missing, ""),
+        aws_access_key_id=_ACCESS_KEY_ID,
+        aws_secret_access_key=_SECRET_ACCESS_KEY,
+    )
+
+    config = SandboxArchiveS3Config(policy)
+
+    assert config == SandboxArchiveS3Config.from_policy(policy)
+    assert config.aws_access_key_id == _ACCESS_KEY_ID
+    assert config.aws_secret_access_key == _SECRET_ACCESS_KEY
+    assert config.as_policy().uses_access_key
+    assert _SECRET_ACCESS_KEY not in repr(config)
 
 
 def test_single_upload_uses_opaque_key_sha256_kms_and_expected_owner() -> None:
@@ -1097,6 +1126,55 @@ def test_checkpoint_retry_refuses_different_existing_bytes() -> None:
 
     with pytest.raises(SandboxArchiveUploadError, match="does not match"):
         _upload_checkpoint(uploader, payload)
+
+
+@pytest.mark.parametrize("kind", ["checkpoint", "environment snapshot"])
+def test_an_existing_object_found_after_the_deadline_is_not_accepted(kind: str) -> None:
+    """A retry that finds its own earlier write still answers within its deadline.
+
+    The refused put is followed by two HEADs of the existing object: one that
+    proves it is this upload's, then the one the receipt is read from. Only
+    the second is slow here.
+    """
+    payload = b"oci-archive"
+    now = 0.0
+
+    class SlowHeadClient(RecordingS3Client):
+        def head_object(self, **kwargs: Any) -> dict[str, Any]:
+            nonlocal now
+            response = super().head_object(**kwargs)
+            if [call[0] for call in self.calls].count("head_object") == 2:
+                now = 2.0
+            return response
+
+    head = _matching_head(payload) | {
+        "ContentType": "application/x-tar",
+        "Metadata": {
+            "archive-phase": "checkpoint",
+            "archive-format": "oci-layer-archive-v1",
+            "archive-size-bytes": str(len(payload)),
+            "archive-sha256": hashlib.sha256(payload).hexdigest(),
+        },
+    }
+    client = SlowHeadClient(put_error=PreconditionFailure(), head_response=head)
+    uploader = SandboxArchiveS3Uploader(_config(), client=client, clock=lambda: now)
+    upload = {
+        "body": io.BytesIO(payload),
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "deadline": 1.0,
+    }
+
+    with pytest.raises(SandboxArchiveDeadlineExceeded, match="deadline exceeded"):
+        if kind == "checkpoint":
+            uploader.upload_checkpoint(
+                sandbox_id=_SANDBOX_ID,
+                generation=_GENERATION,
+                checkpoint_id=_CHECKPOINT_ID,
+                **upload,
+            )
+        else:
+            uploader.upload_environment_snapshot(owner="a" * 64, snapshot_id="b" * 32, **upload)
 
 
 @pytest.mark.parametrize("checkpoint_id", ["", "F" * 32, "f" * 31, "../" + "f" * 29])

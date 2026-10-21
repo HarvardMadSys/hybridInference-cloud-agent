@@ -593,7 +593,7 @@ class HostNetworkGuard:
             ["list", "set", "inet", table, "pool4"],
         ]
 
-    def _verify(self, rendered: str, *, listings: list[list[Any]] | None = None) -> None:
+    def _verify(self, rendered: str, *, listings: list[list[Any]] | None = None) -> None:  # noqa: C901, PLR0912 complexity baseline, #771
         table = self.network.table
         if listings is None:
             listings = self._list_many(self._verification_reads())

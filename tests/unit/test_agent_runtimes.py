@@ -17,9 +17,9 @@ from cloud_agent_host.runtimes import (
     MAX_INIT_TOOLS,
     MERGED_MCP_SERVER_NAME,
     REPLY_PREVIEW,
+    AgentRuntime,
     ClaudeCodeRuntime,
     CodexRuntime,
-    GenericRuntime,
     KiloRuntime,
     OpencodeRuntime,
     PiRuntime,
@@ -484,17 +484,13 @@ def test_a_preview_follows_a_harness_that_resends_the_whole_text():
 
 
 def test_claude_asks_for_the_answer_while_it_is_written():
-    """Both transports carry the flag that makes the CLI stream its text."""
-    runtime = ClaudeCodeRuntime()
-    common = {
-        "workdir": "/tmp/x",
-        "model": "glm-5.1",
-        "gateway_base_url": "https://gateway.example.com/v1",
-        "credential": "ajt.a.b",
-    }
-    argv, _ = runtime.prepare(task_prompt="do the thing", **common)
-    live, _ = runtime.prepare_live(**common)
-    assert "--include-partial-messages" in argv
+    """The live process carries the flag that makes the CLI stream its text."""
+    live, _ = ClaudeCodeRuntime().prepare_live(
+        workdir="/tmp/x",
+        model="glm-5.1",
+        gateway_base_url="https://gateway.example.com/v1",
+        credential="ajt.a.b",
+    )
     assert "--include-partial-messages" in live
 
 
@@ -901,16 +897,16 @@ def test_pi_system_prompt_is_not_part_of_the_conversation():
     assert PiRuntime().parse_event(line) is None
 
 
-def test_claude_prepare_points_at_the_gateway_and_disables_telemetry():
+def test_claude_points_at_the_gateway_and_disables_telemetry():
     """The agent talks to our gateway with the job's token and phones nobody."""
-    argv, env = ClaudeCodeRuntime().prepare(
+    argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
-        task_prompt="do the thing",
         model="glm-5.1",
         gateway_base_url="https://gateway.example.com/v1",
         credential="ajt.a.b",
     )
-    assert argv[:3] == ["claude", "-p", "do the thing"]
+    # Prompts arrive on stdin, as stream-json, and each is echoed when read.
+    assert argv[:5] == ["claude", "-p", "--input-format", "stream-json", "--replay-user-messages"]
     assert "--output-format" in argv and "stream-json" in argv
     # Ignore both user-level and committed .mcp.json servers. Platform MCP is
     # supplied explicitly later; the effective set here must stay empty.
@@ -922,120 +918,47 @@ def test_claude_prepare_points_at_the_gateway_and_disables_telemetry():
     assert env["DISABLE_AUTOUPDATER"] == "1"
 
 
-@pytest.mark.parametrize("live", [False, True])
-def test_claude_native_requests_use_bounded_extended_retries(live):
-    runtime = ClaudeCodeRuntime()
-    settings = {
-        "workdir": "/w",
-        "model": "kimi-k3",
-        "gateway_base_url": "http://gateway",
-        "credential": "inference-credential",
-    }
-    _argv, env = (
-        runtime.prepare_live(**settings)
-        if live
-        else runtime.prepare(task_prompt="do it", **settings)
+def test_claude_native_requests_use_bounded_extended_retries():
+    _argv, env = ClaudeCodeRuntime().prepare_live(
+        workdir="/w",
+        model="kimi-k3",
+        gateway_base_url="http://gateway",
+        credential="inference-credential",
     )
     assert env["CLAUDE_CODE_MAX_RETRIES"] == "15"
     assert env["CLAUDE_CODE_RETRY_WATCHDOG"] == "0"
 
 
-def test_codex_prepare_and_config_target_the_gateway():
-    """Codex is pointed at the gateway through a scratch provider config."""
-    runtime = CodexRuntime()
-    argv, env = runtime.prepare(
+def test_codex_config_targets_the_gateway():
+    """Codex is pointed at the gateway through command-line provider flags.
+
+    The model, the workspace and the sandbox mode go to the app-server over RPC
+    instead; ``test_live_sessions`` covers those.
+    """
+    argv, env = CodexRuntime().prepare_live(
         workdir="/tmp/x",
-        task_prompt="do it",
         model="glm-5.1",
         gateway_base_url="http://localhost:8000",
         credential="ajt.a.b",
     )
-    assert argv[:2] == ["codex", "exec"]
+    assert argv[0] == "codex"
+    assert argv[-1] == "app-server"
     assert env["CODEX_API_KEY"] == "ajt.a.b"
-
-    # The owner's model must actually reach the CLI. This used to ride
-    # `CODEX_MODEL`, which Codex does not read, so the choice was dropped
-    # silently and the run used whatever the CLI defaulted to.
-    assert "--model" in argv
-    assert argv[argv.index("--model") + 1] == "glm-5.1"
 
     joined = " ".join(argv)
     assert 'model_provider="hybridinference"' in joined
     assert 'model_providers.hybridinference.name="HybridInference"' in joined
     assert 'base_url="http://localhost:8000/v1"' in joined
+    assert 'model_providers.hybridinference.env_key="CODEX_API_KEY"' in joined
     # Codex removed chat wire support upstream (openai/codex#7782); the gateway
     # serves /v1/responses. `chat` here would fail every turn.
     assert 'wire_api="responses"' in joined
-    # The operator's own Codex config must not reach a sandbox run.
-    assert "--ignore-user-config" in argv
-    # The prompt is the final operand, after every flag.
-    assert argv[-1] == "do it"
 
 
-def test_codex_sandbox_mode_follows_the_backend_boundary():
-    """Only an outer sandbox may replace Codex's own workspace sandbox."""
-    runtime = CodexRuntime()
-    kwargs = {
-        "workdir": "/tmp/x",
-        "task_prompt": "do it",
-        "model": "glm-5.1",
-        "gateway_base_url": "http://localhost:8000",
-        "credential": "ajt.a.b",
-    }
-
-    process_argv, _ = runtime.prepare(**kwargs)
-    container_argv, _ = runtime.prepare(**kwargs, provides_isolation=True)
-
-    assert process_argv[process_argv.index("--sandbox") + 1] == "workspace-write"
-    assert container_argv[container_argv.index("--sandbox") + 1] == "danger-full-access"
-
-
-def test_codex_events_normalize():
-    """Codex item events map onto the same normalized kinds."""
-    runtime = CodexRuntime()
-    tool = runtime.parse_event(
-        json.dumps({"type": "item.started", "item": {"type": "command_execution", "command": "ls"}})
-    )
-    assert tool.event_type == "tool_use"
-    result = runtime.parse_event(
-        json.dumps(
-            {
-                "type": "item.completed",
-                "item": {
-                    "id": "item-1",
-                    "type": "command_execution",
-                    "command": "ls",
-                    "aggregated_output": "README.md\n",
-                    "exit_code": 0,
-                },
-            }
-        )
-    )
-    assert result.event_type == "tool_result"
-    assert result.payload == {
-        "tool_use_id": "item-1",
-        "is_error": False,
-        "content": "README.md\n",
-        "exit_code": 0,
-    }
-    message = runtime.parse_event(
-        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "hi"}})
-    )
-    assert message.event_type == "message"
-    assert runtime.parse_event(json.dumps({"type": "turn.completed"})).event_type == "lifecycle"
-
-
-def test_codex_native_session_id_is_captured_and_resumed_from_state_root():
-    runtime = CodexRuntime()
-    started = runtime.parse_event(
-        json.dumps({"type": "thread.started", "thread_id": "codex-thread-123"})
-    )
-    assert started.event_type == "lifecycle"
-    assert runtime.session_id == "codex-thread-123"
-
-    argv, env = runtime.prepare(
+def test_codex_keeps_its_native_state_in_the_state_root():
+    """The app-server's sessions live in the retained state; resume is an RPC."""
+    argv, env = CodexRuntime().prepare_live(
         workdir="/tmp/x",
-        task_prompt="only the follow-up",
         model="glm-5.1",
         gateway_base_url="http://backend:8080",
         credential="ajt.a.b",
@@ -1043,29 +966,8 @@ def test_codex_native_session_id_is_captured_and_resumed_from_state_root():
         session_state_dir="/agent-state",
         resume_session_id="codex-thread-123",
     )
-    resume_at = argv.index("resume")
-    assert argv[resume_at : resume_at + 3] == [
-        "resume",
-        "codex-thread-123",
-        "only the follow-up",
-    ]
     assert env["CODEX_HOME"] == "/agent-state"
-
-
-def test_generic_runtime_streams_raw_and_never_uses_a_shell():
-    """Tier 2 gets a log tail for free, with no shell interpretation."""
-    runtime = GenericRuntime("mytool --prompt {prompt} --model {model}")
-    argv, env = runtime.prepare(
-        workdir="/tmp/x",
-        task_prompt="a b; rm -rf /",
-        model="m",
-        gateway_base_url="http://gw",
-        credential="ajt.a.b",
-    )
-    # The dangerous string stays a single argv element — no shell, no split.
-    assert "a b; rm -rf /" in argv
-    assert env["OPENAI_API_KEY"] == "ajt.a.b"
-    assert runtime.parse_event("some log line").event_type == "raw"
+    assert "codex-thread-123" not in argv
 
 
 def test_registry_resolution_and_refusal():
@@ -1089,9 +991,8 @@ def test_pi_runtime_targets_the_gateway_through_its_wrapper():
     into timeouts that read like a broken model.
     """
     runtime = PiRuntime()
-    argv, env = runtime.prepare(
+    argv, env = runtime.prepare_live(
         workdir="/tmp/x",
-        task_prompt="do the thing; carefully",
         model="glm-5.1",
         gateway_base_url="http://backend:8080",
         credential="ajt.a.b",
@@ -1099,10 +1000,10 @@ def test_pi_runtime_targets_the_gateway_through_its_wrapper():
 
     assert argv[0] == "pi-freeinference"
     assert runtime.binary == "pi-freeinference"
-    # The prompt stays one argv element — no shell anywhere on the path.
-    assert "do the thing; carefully" in argv
     assert argv[argv.index("--model") + 1] == "glm-5.1"
-    assert "--mode" in argv and argv[argv.index("--mode") + 1] == "json"
+    # Prompts arrive over RPC; none is ever an argument.
+    assert "--mode" in argv and argv[argv.index("--mode") + 1] == "rpc"
+    assert "-p" not in argv
     assert "--no-session" not in argv
     # The pinned pi release implements MCP through executable extensions,
     # including extensions committed under .pi/.
@@ -1121,9 +1022,8 @@ def test_pi_native_session_is_persisted_and_resumed_explicitly():
     assert event.payload["session_id"] == "pi-session-123"
     assert runtime.session_id == "pi-session-123"
 
-    argv, env = runtime.prepare(
+    argv, env = runtime.prepare_live(
         workdir="/tmp/x",
-        task_prompt="only the follow-up",
         model="glm-5.1",
         gateway_base_url="http://backend:8080",
         credential="ajt.a.b",
@@ -1135,29 +1035,36 @@ def test_pi_native_session_is_persisted_and_resumed_explicitly():
     assert env["PI_CODING_AGENT_DIR"] == "/run/agent-activation/pi"
 
 
+class _Unmediated(AgentRuntime):
+    """An adapter with no verified way to shut out the CLI's other MCP sources."""
+
+    name = "unmediated"
+
+    def prepare_live(
+        self, *, mcp_config: RuntimeMCPConfig, gateway_base_url: str, **_: object
+    ) -> tuple[list[str], dict[str, str]]:
+        env: dict[str, str] = {}
+        self._accept_mcp(mcp_config, gateway_base_url=gateway_base_url, env=env)
+        return ["unmediated"], env
+
+
 @pytest.mark.parametrize(
     "runtime",
-    [
-        CodexRuntime(),
-        PiRuntime(),
-        OpencodeRuntime(),
-        KiloRuntime(),
-        GenericRuntime("some-agent {prompt}"),
-    ],
-    ids=["codex", "pi", "opencode", "kilo", "generic"],
+    [CodexRuntime(), PiRuntime(), OpencodeRuntime(), KiloRuntime(), _Unmediated()],
+    ids=["codex", "pi", "opencode", "kilo", "unmediated"],
 )
 def test_mcp_config_fails_closed_without_an_isolated_relay(runtime):
     """An adapter with no mediated path refuses rather than dropping servers.
 
     ``ClaudeCodeRuntime`` is excluded because it now *has* that path; the
-    invariant it has to satisfy instead is the next test's.
+    invariant it has to satisfy instead is the next test's. An adapter that
+    does not override ``_accept_mcp`` refuses any server at all.
     """
     config = RuntimeMCPConfig(server_ids=("repository-supplied-server",))
 
     with pytest.raises(RuntimeMCPUnavailableError) as raised:
-        runtime.prepare(
+        runtime.prepare_live(
             workdir="/tmp/x",
-            task_prompt="do it",
             model="glm-5.1",
             gateway_base_url="http://backend:8080",
             credential="mcp-secret-must-not-leak",
@@ -1181,9 +1088,8 @@ def test_a_sandbox_managered_runtime_emits_only_relay_endpoints_and_no_credentia
     kept apart, so it asserts that the inference credential is *not* what opens
     MCP.
     """
-    argv, env = ClaudeCodeRuntime().prepare(
+    argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
-        task_prompt="do it",
         model="glm-5.1",
         gateway_base_url="http://backend:8080",
         credential="agr-inference-grant-must-not-leak",
@@ -1209,9 +1115,8 @@ def test_claude_idle_timeout_covers_owner_approval_and_returns_its_outcome():
     """The remote idle timer must not cancel a call before the approval window."""
     from cloud_agent.mcp.invocations import DEFAULT_DECISION_WINDOW
 
-    argv, env = ClaudeCodeRuntime().prepare(
+    argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
-        task_prompt="do it",
         model="glm-5.1",
         gateway_base_url="http://backend:8080",
         credential="test-grant",
@@ -1234,9 +1139,8 @@ def test_claude_idle_timeout_covers_owner_approval_and_returns_its_outcome():
 def test_runtime_credentials_stay_out_of_process_arguments(runtime):
     """The model-scoped token is environment-only, never argv/log material."""
     credential = "ajt.secret.value"
-    argv, _env = runtime.prepare(
+    argv, _env = runtime.prepare_live(
         workdir="/tmp/x",
-        task_prompt="do it",
         model="glm-5.1",
         gateway_base_url="http://backend:8080",
         credential=credential,
@@ -1255,42 +1159,32 @@ def test_opencode_runtime_targets_the_gateway_through_its_wrapper():
     that otherwise hard-fails every offline run.
     """
     runtime = OpencodeRuntime()
-    argv, env = runtime.prepare(
+    argv, env = runtime.prepare_live(
         workdir="/tmp/x",
-        task_prompt="fix the bug; then run tests",
         model="glm-5.1",
         gateway_base_url="http://backend:8080",
         credential="ajt.a.b",
     )
 
-    assert argv[0] == "opencode-freeinference"
+    # The bridge runs the wrapper's `serve`; the host checks for the wrapper.
+    assert argv == ["http-agent-live-bridge", "opencode"]
     assert runtime.binary == "opencode-freeinference"
-    assert "fix the bug; then run tests" in argv
-    # The model rides inside the provider-qualified -m argument.
-    assert argv[argv.index("-m") + 1] == "freeinference/glm-5.1"
-    # The sandbox is the boundary; an interactive permission gate inside it
-    # only guarantees the agent cannot do the work.
-    assert "--auto" in argv
     assert env["OPENAI_BASE_URL"] == "http://backend:8080/v1"
     assert env["OPENAI_API_KEY"] == "ajt.a.b"
     assert env["OPENCODE_GATEWAY_MODEL"] == "glm-5.1"
-    assert runtime.parse_event('{"type":"text"}').event_type == "raw"
+    assert env["AGENT_LIVE_WORKDIR"] == "/tmp/x"
 
 
 def test_opencode_native_session_id_and_xdg_state_are_explicit():
-    runtime = OpencodeRuntime()
-    runtime.parse_event('{"type":"text","sessionID":"ses_open_123"}')
-    assert runtime.session_id == "ses_open_123"
-    argv, env = runtime.prepare(
+    _argv, env = OpencodeRuntime().prepare_live(
         workdir="/tmp/x",
-        task_prompt="only the follow-up",
         model="glm-5.1",
         gateway_base_url="http://backend:8080",
         credential="ajt.a.b",
         session_state_dir="/agent-state",
         resume_session_id="ses_open_123",
     )
-    assert argv[argv.index("--session") + 1] == "ses_open_123"
+    assert env["AGENT_LIVE_SESSION_ID"] == "ses_open_123"
     assert env["XDG_DATA_HOME"] == "/agent-state/opencode/data"
     assert env["OPENCODE_FREEINFERENCE_CONFIG_DIR"] == "/run/agent-activation/opencode"
 
@@ -1305,42 +1199,32 @@ def test_kilo_runtime_targets_the_gateway_through_its_wrapper():
     paths (PostHog, session ingest and share links to app.kilo.ai).
     """
     runtime = KiloRuntime()
-    argv, env = runtime.prepare(
+    argv, env = runtime.prepare_live(
         workdir="/tmp/x",
-        task_prompt="fix the bug; then run tests",
         model="glm-5.1",
         gateway_base_url="http://backend:8080",
         credential="ajt.a.b",
     )
 
-    assert argv[0] == "kilo-freeinference"
+    # The bridge runs the wrapper's `serve`; the host checks for the wrapper.
+    assert argv == ["http-agent-live-bridge", "kilo"]
     assert runtime.binary == "kilo-freeinference"
-    assert "fix the bug; then run tests" in argv
-    # The model rides inside the provider-qualified -m argument.
-    assert argv[argv.index("-m") + 1] == "freeinference/glm-5.1"
-    # The sandbox is the boundary; an interactive permission gate inside it
-    # only guarantees the agent cannot do the work.
-    assert "--auto" in argv
     assert env["OPENAI_BASE_URL"] == "http://backend:8080/v1"
     assert env["OPENAI_API_KEY"] == "ajt.a.b"
     assert env["KILO_GATEWAY_MODEL"] == "glm-5.1"
-    assert runtime.parse_event('{"type":"text"}').event_type == "raw"
+    assert env["AGENT_LIVE_WORKDIR"] == "/tmp/x"
 
 
 def test_kilo_native_session_id_and_xdg_state_are_explicit():
-    runtime = KiloRuntime()
-    runtime.parse_event('{"type":"text","sessionID":"ses_kilo_123"}')
-    assert runtime.session_id == "ses_kilo_123"
-    argv, env = runtime.prepare(
+    _argv, env = KiloRuntime().prepare_live(
         workdir="/tmp/x",
-        task_prompt="only the follow-up",
         model="glm-5.1",
         gateway_base_url="http://backend:8080",
         credential="ajt.a.b",
         session_state_dir="/agent-state",
         resume_session_id="ses_kilo_123",
     )
-    assert argv[argv.index("--session") + 1] == "ses_kilo_123"
+    assert env["AGENT_LIVE_SESSION_ID"] == "ses_kilo_123"
     assert env["XDG_DATA_HOME"] == "/agent-state/kilo/data"
     assert env["KILO_FREEINFERENCE_CONFIG_DIR"] == "/run/agent-activation/kilo"
 
@@ -1505,9 +1389,8 @@ _MCP_GATEWAY = "http://backend:8080"
 
 def _mcp_argv(*server_ids: str) -> list[str]:
     """Build the Claude Code invocation for a job with these servers."""
-    argv, _env = ClaudeCodeRuntime().prepare(
+    argv, _env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
-        task_prompt="do it",
         model="glm-5.1",
         gateway_base_url=_MCP_GATEWAY,
         credential="mcp-secret-must-not-leak",
@@ -1538,9 +1421,8 @@ def test_repository_supplied_mcp_config_is_shut_out_even_with_no_servers():
 
 def test_the_relay_base_url_is_normalized_once():
     """A relay url already ending in /v1 must not produce /v1/v1."""
-    argv, _env = ClaudeCodeRuntime().prepare(
+    argv, _env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
-        task_prompt="do it",
         model="glm-5.1",
         gateway_base_url=_MCP_GATEWAY,
         credential="inference-credential",
@@ -1562,9 +1444,8 @@ def test_requesting_mcp_with_no_relay_address_refuses_rather_than_guessing():
     "the tool is broken" rather than "this run has no relay".
     """
     with pytest.raises(RuntimeMCPUnavailableError):
-        ClaudeCodeRuntime().prepare(
+        ClaudeCodeRuntime().prepare_live(
             workdir="/tmp/x",
-            task_prompt="do it",
             model="glm-5.1",
             gateway_base_url=_MCP_GATEWAY,
             credential="inference-credential",
@@ -1597,9 +1478,8 @@ def test_pi_loads_the_images_bridge_and_nothing_else():
     explicit `-e`. Verified against 0.73.1: with both flags a repository's
     `.pi/extensions/*.ts` does not load and the bridge's tools do.
     """
-    argv, env = PiRuntime().prepare(
+    argv, env = PiRuntime().prepare_live(
         workdir="/w",
-        task_prompt="do it",
         model="glm-5.1",
         gateway_base_url=_MCP_GATEWAY,
         credential="inference-credential",
@@ -1619,9 +1499,8 @@ def test_pi_loads_the_images_bridge_and_nothing_else():
 
 
 @pytest.mark.parametrize("runtime", [CodexRuntime, KiloRuntime])
-@pytest.mark.parametrize("live", [False, True])
-def test_codex_and_kilo_carry_the_same_mcp_scope_in_both_transports(runtime, live):
-    """Fresh and resident invocations share one relay and a separate MCP token."""
+def test_codex_and_kilo_carry_one_relay_and_a_separate_mcp_token(runtime):
+    """The resident invocation gets the merged relay and its own MCP token."""
     agent = runtime()
     settings = {
         "workdir": "/w",
@@ -1634,9 +1513,7 @@ def test_codex_and_kilo_carry_the_same_mcp_scope_in_both_transports(runtime, liv
             credential="mcp-token",
         ),
     }
-    argv, env = (
-        agent.prepare_live(**settings) if live else agent.prepare(task_prompt="do it", **settings)
-    )
+    argv, env = agent.prepare_live(**settings)
     assert env["AGENT_MCP_TOKEN"] == "mcp-token"
     assert "mcp-token" not in " ".join(argv)
     if runtime is CodexRuntime:
@@ -1662,9 +1539,8 @@ def test_a_wrapper_runtime_publishes_the_relay_urls_and_the_token_reference():
     bare prefix answers for all of them and namespaces what it lists by alias,
     so one entry per connection would register the same catalogue twice.
     """
-    argv, env = OpencodeRuntime().prepare(
+    argv, env = OpencodeRuntime().prepare_live(
         workdir="/w",
-        task_prompt="do it",
         model="glm-5.1",
         gateway_base_url=_MCP_GATEWAY,
         credential="inference-credential",
@@ -1682,31 +1558,6 @@ def test_a_wrapper_runtime_publishes_the_relay_urls_and_the_token_reference():
     assert env["AGENT_MCP_TOKEN"] == "mcp-token-must-not-leak"
     assert "mcp-token-must-not-leak" not in " ".join(argv)
     assert "mcp-token-must-not-leak" not in env["AGENT_MCP_SERVERS"]
-
-
-def test_the_resident_path_carries_the_same_relay_config():
-    """A hot session must not be the turn where MCP quietly disappears.
-
-    ``prepare_live`` assembles its own argv/env around the same dialect layer,
-    so a change that only touched ``prepare`` would leave every resumed
-    conversation without tools -- and the agent would work around their absence
-    instead of failing.
-    """
-    argv, env = OpencodeRuntime().prepare_live(
-        workdir="/w",
-        model="glm-5.1",
-        gateway_base_url=_MCP_GATEWAY,
-        credential="inference-credential",
-        mcp_config=RuntimeMCPConfig(
-            server_ids=("github",),
-            base_url=_MCP_GATEWAY,
-            credential="mcp-token",
-        ),
-    )
-    assert json.loads(env["AGENT_MCP_SERVERS"]) == {
-        MERGED_MCP_SERVER_NAME: f"{_MCP_GATEWAY}/v1/agent/mcp"
-    }
-    assert env["AGENT_MCP_TOKEN"] == "mcp-token"
     assert argv[0] == "http-agent-live-bridge"
 
 
@@ -1717,9 +1568,8 @@ def test_a_wrapper_runtime_refuses_connections_it_has_no_credential_for():
     server rather than as a run that was never given a credential.
     """
     with pytest.raises(RuntimeMCPUnavailableError):
-        OpencodeRuntime().prepare(
+        OpencodeRuntime().prepare_live(
             workdir="/w",
-            task_prompt="do it",
             model="glm-5.1",
             gateway_base_url=_MCP_GATEWAY,
             credential="inference-credential",
@@ -1728,9 +1578,8 @@ def test_a_wrapper_runtime_refuses_connections_it_has_no_credential_for():
 
 
 def _prepare(runtime, **kwargs):
-    return runtime.prepare(
+    return runtime.prepare_live(
         workdir="/w",
-        task_prompt="do it",
         model="glm-5.3",
         gateway_base_url="https://gw.test/v1",
         credential="tok",
@@ -1842,27 +1691,11 @@ def test_config_file_runtimes_carry_the_level_in_the_environment():
 def test_an_unknown_runtime_still_refuses_rather_than_ignores():
     """The base class stays fail-closed for whatever gets registered next."""
 
-    class Newcomer(GenericRuntime):
+    class Newcomer(AgentRuntime):
         name = "newcomer"
 
     with pytest.raises(RuntimeEffortUnsupportedError):
-        _prepare(Newcomer("newcomer {prompt}"), reasoning_effort="high")
-
-
-def test_the_live_invocation_carries_the_same_effort_as_the_one_shot():
-    """Built by the same code, so HOT and COLD cannot drift apart."""
-    runtime = ClaudeCodeRuntime()
-    one_shot, _ = _prepare(runtime, reasoning_effort="low")
-    live, _ = runtime.prepare_live(
-        workdir="/w",
-        model="glm-5.3",
-        gateway_base_url="https://gw.test/v1",
-        credential="tok",
-        reasoning_effort="low",
-    )
-
-    assert one_shot[one_shot.index("--effort") + 1] == "low"
-    assert live[live.index("--effort") + 1] == "low"
+        Newcomer().effort_args("high")
 
 
 def test_only_runtimes_with_a_verified_flag_are_advertised():

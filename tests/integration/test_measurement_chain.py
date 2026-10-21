@@ -202,10 +202,6 @@ class _Stored:
         """Return the catalogue, newest first."""
         return list(self.runs.values())[:limit]
 
-    async def get_profiling_run(self, run_id: str):
-        """Return one experiment."""
-        return self.runs.get(run_id)
-
     async def list_operation_measurements(self, **kwargs):
         """Return a filtered page, newest first, honouring the cursor."""
         rows = [

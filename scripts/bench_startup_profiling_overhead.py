@@ -17,7 +17,7 @@ the four real startup paths is a separate script,
 What is measured
 ----------------
 
-One *simulated* startup attempt, shaped after ``run_once`` and
+One *simulated* startup attempt, shaped after the claim in ``run_forever`` and
 ``_run_shared_live_attempt`` in ``apps/backend/cloud_agent_host/runner.py``:
 
 * one ``start_operation(operation="attempt.startup", host=..., worker_id=...)``,

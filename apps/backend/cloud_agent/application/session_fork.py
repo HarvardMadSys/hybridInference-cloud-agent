@@ -34,10 +34,12 @@ from cloud_agent.sandbox_manager_client import (
     SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S,
     SHARED_SESSION_FORK_TIMEOUT_S,
     SandboxManagerError,
+    identity_from_row,
 )
 from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 from cloud_agent.workspace_errors import _sandbox_manager_http_error
 from cloud_agent_shared.environment import environment_payload
+from cloud_agent_shared.sandbox_manager_wire import member_manifest
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -64,6 +66,19 @@ class _ForkMaterializationStorage(Protocol):
 # installation needs a longer request and lease; the stalled-saga reconciler
 # also respects that live lease.
 SESSION_FORK_COORDINATOR_LEASE_S = SHARED_SESSION_FORK_TIMEOUT_S + 30.0
+
+
+def _recorded_group(operation: dict[str, Any]) -> dict[str, Any]:
+    """The group as this Fork recorded it, not whatever the group holds now.
+
+    The operation's own ``generation`` counts the Fork's row; the group's is
+    ``sandbox_generation``. Its container is required: the host reads a null
+    expected container as no expectation, and would skip its check or create
+    a container.
+    """
+    if not operation.get("container_id"):
+        raise KeyError("container_id")
+    return {**operation, "generation": operation["sandbox_generation"]}
 
 
 async def materialize_session_fork(
@@ -111,23 +126,7 @@ async def materialize_session_fork(
     # reason to leak two renewable grants into an uncallable saga.
     source_job = operation.get("source_job") or {}
     source_thread_id = str(operation["source_thread_id"])
-    members: list[dict[str, Any]] = []
-    for member in operation.get("group_members") or []:
-        manifest = {
-            key: member.get(key)
-            for key in (
-                "thread_id",
-                "native_session_id",
-                "context_status",
-                "activation_generation",
-                "process_generation",
-                "residency_generation",
-                "resident_state",
-                "resident_slot_id",
-                "last_settled_job_id",
-            )
-        }
-        members.append(manifest)
+    members = member_manifest(operation.get("group_members") or [])
     source_member = next(
         (member for member in members if member["thread_id"] == source_thread_id),
         None,
@@ -241,20 +240,7 @@ async def materialize_session_fork(
     try:
         receipt = await sandbox_manager.fork_shared_session(
             source_thread_id,
-            sandbox_id=str(operation["sandbox_id"]),
-            generation=int(operation["sandbox_generation"]),
-            origin_thread_id=str(operation["origin_thread_id"]),
-            runtime_id=str(operation["runtime_id"]),
-            runtime_version=operation.get("runtime_version"),
-            sandbox_image_digest=operation.get("sandbox_image_digest"),
-            expected_container_id=str(operation["container_id"]),
-            resident_slot_capacity=int(operation["resident_slot_capacity"]),
-            memory_limit=str(operation["memory_limit"]),
-            cpu_limit=str(operation["cpu_limit"]),
-            disk_limit_mib=int(operation.get("disk_limit_mib", 0)),
-            stop_timeout_s=int(operation["stop_timeout_seconds"]),
-            members=members,
-            start_seq=operation.get("start_seq"),
+            identity=identity_from_row(_recorded_group(operation), members=members),
             operation_id=operation_id,
             source_native_session_id=str(operation["source_native_session_id"]),
             source_native_turn_no=int(operation["source_native_turn_no"]),

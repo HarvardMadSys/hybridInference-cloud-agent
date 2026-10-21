@@ -7,12 +7,18 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent_host.drivers import CLAUDE_TOOL_MARKS, LaunchContext, TurnResult, get_driver
+from cloud_agent_host.runtimes import registered_runtimes
 from cloud_agent_host.tool_windows import hook_settings
 
 
 def test_the_result_contract_is_unrepresentable_to_break():
     with pytest.raises(ValueError, match="non-empty final_output"):
         TurnResult(status="completed", final_output="  ", exit_code=0)
+
+
+def test_every_registered_runtime_has_a_live_driver():
+    for runtime_id in registered_runtimes():
+        assert get_driver(runtime_id).runtime.name == runtime_id
 
 
 def test_only_registered_live_drivers_resolve():

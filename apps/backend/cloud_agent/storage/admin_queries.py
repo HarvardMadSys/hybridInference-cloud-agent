@@ -12,9 +12,6 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.admin_observability import (
     SOURCE_LEDGER_SENTINEL,
-    ActivityCursor,
-    AdminActivity,
-    AdminActivityPage,
     AdminRun,
     AdminRunList,
     LlmRequestSourceCursor,
@@ -28,7 +25,6 @@ from cloud_agent.storage._sql.attempts import NEXT_ATTEMPT_START_SQL
 from cloud_agent.storage._sql.ledger import LEDGER_WINDOW_UNTIL_SQL
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.thread_stats import _TOKEN_KEY_GROUPS
-from cloud_agent_shared.event_payloads import MAX_EVENT_PAYLOAD_BYTES, bound_event_payload
 from cloud_agent_shared.turn_resources import summarize_run_resources
 
 if TYPE_CHECKING:
@@ -76,32 +72,6 @@ _RUN_COLUMNS = """
 # child collections are fetched separately anyway, because one row per call or
 # process does not belong in a single flat SELECT.
 _RESOURCE_DERIVED_FIELDS = frozenset({"tool_calls", "processes", "turn_summary"})
-
-_EVENT_COLUMNS = """
-    e.id, e.attempt_id, a.attempt_no, e.seq,
-    LEFT(e.event_type, 64) AS event_type, e.created_at,
-    CASE WHEN e.event_type = 'tool_use'
-              AND jsonb_typeof(e.payload->'id') = 'string'
-              AND LENGTH(e.payload->>'id') <= 256 THEN e.payload->>'id'
-         WHEN e.event_type = 'tool_result'
-              AND jsonb_typeof(e.payload->'tool_use_id') = 'string'
-              AND LENGTH(e.payload->>'tool_use_id') <= 256 THEN e.payload->>'tool_use_id'
-    END AS tool_use_id,
-    CASE WHEN e.event_type IN ('tool_use', 'tool_result')
-              AND jsonb_typeof(e.payload->'name') = 'string'
-         THEN LEFT(e.payload->>'name', 160) END AS tool_name,
-    CASE WHEN e.event_type = 'tool_result'
-              AND jsonb_typeof(e.payload->'is_error') = 'boolean'
-         THEN (e.payload->>'is_error')::boolean END AS is_error,
-    -- Content means something a reveal would actually return. An empty object
-    -- is not content, and neither is a payload reduced to the truncation
-    -- markers alone: advertising a reveal there leads to an empty payload.
-    (jsonb_typeof(e.payload) = 'object' AND EXISTS (
-        SELECT 1 FROM jsonb_each(e.payload) AS field(key, value)
-        WHERE value <> 'null'::jsonb
-          AND key NOT IN ('truncated', 'original_payload_bytes', 'truncation_notice')
-     )) AS has_content
-"""
 
 # Share exactly the spellings understood by the accounting implementation.
 # Values must also be numbers, so an arbitrary object hidden under a familiar
@@ -395,62 +365,6 @@ class AdminRunQueries:
             "events": [{**dict(row), "payload": load_json(row["payload"])} for row in rows],
         }
 
-    async def activity(
-        self,
-        job_id: str,
-        *,
-        attempt_id: int | None,
-        cursor: ActivityCursor | None,
-        limit: int,
-    ) -> AdminActivityPage:
-        """Page across attempt-local sequences without reordering late arrivals.
-
-        A cursor fixes the upper global event ID. A fresh first page sees new
-        events; subsequent pages finish the same snapshot even if older attempts
-        receive a late control event meanwhile.
-        """
-        async with self._read() as conn:
-            snapshot_id = (
-                cursor.snapshot_id
-                if cursor
-                else await conn.fetchval(
-                    "SELECT COALESCE(MAX(id), 0) FROM agent_job_events WHERE job_id = $1", job_id
-                )
-            )
-            rows = await conn.fetch(
-                f"""
-                SELECT {_EVENT_COLUMNS}
-                FROM agent_job_events e JOIN agent_attempts a ON a.id = e.attempt_id
-                WHERE e.job_id = $1 AND a.job_id = $1 AND e.id <= $2
-                  AND ($3::bigint IS NULL OR e.attempt_id = $3)
-                  AND ($4::integer IS NULL
-                       OR (a.attempt_no, e.attempt_id, e.seq) > ($4, $5::bigint, $6::integer))
-                ORDER BY a.attempt_no, e.attempt_id, e.seq
-                LIMIT $7
-                """,
-                job_id,
-                snapshot_id,
-                attempt_id,
-                cursor.attempt_no if cursor else None,
-                cursor.attempt_id if cursor else None,
-                cursor.seq if cursor else None,
-                limit + 1,
-            )
-        page = [AdminActivity.model_validate(dict(row)) for row in rows[:limit]]
-        next_cursor = None
-        if len(rows) > limit:
-            last = page[-1]
-            next_cursor = encode_cursor(
-                ActivityCursor(
-                    scope=cursor_scope([job_id, attempt_id]),
-                    snapshot_id=snapshot_id,
-                    attempt_no=last.attempt_no,
-                    attempt_id=last.attempt_id,
-                    seq=last.seq,
-                )
-            )
-        return AdminActivityPage(events=page, next_cursor=next_cursor)
-
     async def resources(self, job_id: str, attempt_id: int) -> dict[str, Any] | None:
         """Read one attempt's resource rows with their original source and gaps.
 
@@ -499,38 +413,3 @@ class AdminRunQueries:
         if telemetry["processes_truncated"]:
             telemetry["process_observation_complete"] = False
         return telemetry
-
-    async def event_content(self, job_id: str, event_id: int) -> dict[str, Any] | None:
-        """Fetch one payload, including a bounded preview for oversized old rows.
-
-        Postgres bounds the legacy preview before sending it over the wire.
-        The shared final limiter also counts JSON escaping and UTF-8 bytes.
-        This method must only be called by an authenticated, audited reveal.
-        """
-        async with self._read() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT e.id, e.attempt_id, e.seq, LEFT(e.event_type, 64) AS event_type,
-                       e.created_at,
-                       CASE WHEN OCTET_LENGTH(e.payload::text) > $3 THEN
-                           jsonb_build_object(
-                               'preview', LEFT(e.payload::text, 32768),
-                               'truncated', TRUE,
-                               'original_payload_bytes', OCTET_LENGTH(e.payload::text),
-                               'truncation_notice', 'Stored event exceeds 256 KiB; showing a preview.'
-                           )
-                       WHEN jsonb_typeof(e.payload) = 'object' THEN e.payload
-                       ELSE '{}'::jsonb END AS payload
-                FROM agent_job_events e JOIN agent_attempts a ON a.id = e.attempt_id
-                WHERE e.job_id = $1 AND a.job_id = $1 AND e.id = $2
-                """,
-                job_id,
-                event_id,
-                MAX_EVENT_PAYLOAD_BYTES,
-            )
-        if row is None:
-            return None
-        result = dict(row)
-        result["payload"] = bound_event_payload(load_json(row["payload"]) or {})
-        result["truncated"] = result["payload"].get("truncated") is True
-        return result
