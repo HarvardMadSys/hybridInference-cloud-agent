@@ -380,7 +380,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     from cloud_agent.application.profiling_control import ProfilingControlService
     from cloud_agent.capacity_history import prune_host_capacity_history
     from cloud_agent.gateway import GatewayClient
-    from cloud_agent.grants import GrantClient
+    from cloud_agent.grants import GrantClient, RenewalSchedule
     from cloud_agent.ledger import collect_usage_snapshots
     from cloud_agent.mcp.catalog import McpCatalog
     from cloud_agent.mcp.runtime import close_host, maintain_host_sessions
@@ -440,6 +440,11 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # building their own per call. They take the same seam; until this was
         # wired, the comment here described sharing that was not happening.
         app.state.grants = GrantClient(client=http)
+        # What each grant's last renewal bought, so a grant with plenty left is
+        # not renewed again on every pass. One per process, read and fed by the
+        # renewal task below and by the host heartbeat, which only this main
+        # listener receives; `get_renewal_schedule` hands it to the heartbeat.
+        app.state.renewal_schedule = RenewalSchedule()
         if background:
             _build_source_control(app)
         else:
@@ -473,7 +478,13 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.mcp_catalog = McpCatalog(storage.mcp_catalog, http)
             app.state.mcp_catalog_task = asyncio.create_task(app.state.mcp_catalog.run())
             app.state.mcp_catalog_task.add_done_callback(_forget_background_task)
-            reaper = asyncio.create_task(reap_expired_attempts(storage, grants=app.state.grants))
+            reaper = asyncio.create_task(
+                reap_expired_attempts(
+                    storage,
+                    grants=app.state.grants,
+                    schedule=app.state.renewal_schedule,
+                )
+            )
             environment_maintenance = asyncio.create_task(
                 run_environment_maintenance(storage.environments, storage.environment_snapshots)
             )

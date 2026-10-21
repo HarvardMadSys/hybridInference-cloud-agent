@@ -11,9 +11,10 @@ dependencies they asked for there. Three kinds arrive at this module:
   without a configured database or App is a supported shape, and the routes
   already handle it. A configured App this process could not load is *not*
   ``None``: see :func:`get_agent_app_credentials`. The attribute names
-  (``store``, ``gateway``, ``grants``, ``source_control``) are the contract
-  with the lifespan; renaming one there without renaming it here degrades
-  silently to "not configured" rather than failing.
+  (``store``, ``gateway``, ``grants``, ``renewal_schedule``,
+  ``source_control``) are the contract with the lifespan; renaming one there
+  without renaming it here degrades silently to "not configured" rather than
+  failing.
 
 - **Identity and admin auth, which this service answers from its own world.**
   There is no ``users`` table here and no ``api_keys`` table: the gateway kept
@@ -79,7 +80,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from cloud_agent.gateway import GatewayClient
-    from cloud_agent.grants import GrantClient
+    from cloud_agent.grants import GrantClient, RenewalSchedule
     from cloud_agent.ports import AuditRepository
     from cloud_agent.storage.assembly import Storage
     from cloud_agent.workers.job_event_signal import JobEventSignal
@@ -146,6 +147,23 @@ def get_grant_client(request: Request) -> GrantClient:
         client = _GrantClient()
         request.app.state.grants = client
     return client
+
+
+def get_renewal_schedule(request: Request) -> RenewalSchedule:
+    """Dependency to obtain this process's record of what each grant's renewal bought.
+
+    The lifespan builds one per process and gives the same one to the grant
+    renewal task. Built here, like the grant client, when the lifespan did not:
+    an empty record renews every grant it is asked about, which is what every
+    heartbeat did before there was one.
+    """
+    schedule = getattr(request.app.state, "renewal_schedule", None)
+    if schedule is None:
+        from cloud_agent.grants import RenewalSchedule as _RenewalSchedule
+
+        schedule = _RenewalSchedule()
+        request.app.state.renewal_schedule = schedule
+    return schedule
 
 
 def get_work_signal(request: Request) -> WorkSignal | None:

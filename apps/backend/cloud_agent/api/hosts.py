@@ -22,12 +22,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
-from cloud_agent.api.deps import get_grant_client, get_storage
+from cloud_agent.api.deps import get_grant_client, get_renewal_schedule, get_storage
+from cloud_agent.grants import (
+    RenewalSchedule,  # noqa: TC001 — FastAPI resolves annotations at runtime.
+)
 from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
@@ -279,6 +282,9 @@ async def heartbeat_host(
     host: dict[str, Any] = Depends(authenticate_host),
     store: _HostsStorage | None = Depends(get_storage),
     grants: Any = Depends(get_grant_client),
+    # Annotated rather than a `Depends` default, so the handler called
+    # directly, outside a request, is given no schedule and renews every grant.
+    schedule: Annotated[RenewalSchedule | None, Depends(get_renewal_schedule)] = None,
 ) -> HostHeartbeatResponse:
     """Report liveness, and whatever about this machine has changed.
 
@@ -454,7 +460,7 @@ async def heartbeat_host(
                     )
                 )
     if renewals and grants is not None:
-        background_tasks.add_task(_renew_residency_grants, grants, list(renewals))
+        background_tasks.add_task(_renew_residency_grants, grants, list(renewals), schedule)
     # This beat may carry the last report an agent update was waiting for.
     # Bookkeeping, so a failure here costs the host nothing but a later switch.
     try:
@@ -508,7 +514,9 @@ async def heartbeat_host(
 from cloud_agent.application.residency import residency_ttl_s
 
 
-async def _renew_residency_grants(grants: Any, grant_ids: list[str]) -> None:
+async def _renew_residency_grants(
+    grants: Any, grant_ids: list[str], schedule: RenewalSchedule | None = None
+) -> None:
     """Renew the grants a heartbeat extended, together, after its reply was sent.
 
     Each renewal may take the gateway's whole request timeout, and the host
@@ -516,11 +524,22 @@ async def _renew_residency_grants(grants: Any, grant_ids: list[str]) -> None:
     the reply, two slow renewals were enough for the host never to receive the
     stops and lost residencies that answer carries. Best-effort, as before: a
     missed renewal starves hot turns into warm, never into an outage.
+
+    Only the grants that are running low, though. Every beat extends every
+    residency it names, and renewing each one's grant every thirty seconds
+    asked the gateway ten times for every step it granted. The beat has just
+    extended these residencies, which is all the store says about their grants,
+    so the schedule decides only *when*: a grant whose last renewal has plenty
+    left waits for a later beat. Without a schedule, every one is renewed.
     """
 
     async def renew(grant_id: str) -> None:
+        if schedule is not None and not schedule.due(grant_id):
+            return
         with contextlib.suppress(Exception):
-            await grants.renew(grant_id)
+            renewal = await grants.renew(grant_id)
+            if schedule is not None:
+                schedule.record(grant_id, renewal)
 
     await asyncio.gather(*(renew(grant_id) for grant_id in grant_ids))
 

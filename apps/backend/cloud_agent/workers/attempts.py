@@ -14,6 +14,7 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import integer_setting
 
 if TYPE_CHECKING:
+    from cloud_agent.grants import RenewalSchedule
     from cloud_agent.ports import (
         AttachmentRepository,
         AttemptCommands,
@@ -296,7 +297,11 @@ async def _abandon_unrenewable_attempt(store: AttemptCommands, row: dict[str, An
 
 
 async def _renew_live_grants(
-    store: _GrantRenewal, grants: Any, *, failures: dict[str, int]
+    store: _GrantRenewal,
+    grants: Any,
+    *,
+    failures: dict[str, int],
+    schedule: RenewalSchedule | None = None,
 ) -> None:
     """Extend the grants of attempts that are still current — and only those.
 
@@ -307,6 +312,14 @@ async def _renew_live_grants(
     anywhere would notice. ``list_renewable_grants`` answers only for attempts
     that are ``running`` with an unexpired lease, so a superseded attempt stops
     being renewed on the very next pass and its capability dies at its own TTL.
+
+    **Current is necessary, not sufficient.** A grant the schedule says still
+    has plenty of its last renewal left is not renewed this pass; it is asked
+    about again on the next one, and only if the store still lists it. The
+    schedule can hold a renewal back but never cause one, so the fence above is
+    untouched. A grant with any refusal counted is renewed every pass whatever
+    the schedule says, so the give-up below still comes while its capability is
+    alive.
 
     A failed renewal is retried on the next pass — one bad minute at the
     gateway must not end a job — but a *definitively refused* one is not
@@ -334,6 +347,9 @@ async def _renew_live_grants(
             caller so it survives between passes. A count at the give-up
             threshold marks a grant that was given up on. Pruned here to the
             grants still live, so a finished job leaves nothing behind.
+        schedule: What each grant's last renewal bought, shared with the host
+            heartbeat and fed here from every renewal's answer. ``None``
+            renews every listed grant on every pass.
     """
     seen: set[str] = set()
     renewed: list[str] = []
@@ -357,8 +373,12 @@ async def _renew_live_grants(
             # would only repeat the refusal -- and, with a count started over,
             # the futile give-up -- for as long as the turn runs.
             return
+        if schedule is not None and not failures.get(grant_id) and not schedule.due(grant_id):
+            # Its last renewal has plenty left. The next pass asks again, if
+            # the store still lists it.
+            return
         try:
-            await grants.renew(grant_id)
+            renewal = await grants.renew(grant_id)
         except Exception as exc:
             definitive = (
                 isinstance(exc, GatewayError)
@@ -406,6 +426,8 @@ async def _renew_live_grants(
         # is a gateway blip, and must not accumulate toward a give-up over the
         # hours a long job runs.
         failures.pop(grant_id, None)
+        if schedule is not None:
+            schedule.record(grant_id, renewal)
 
     # **Concurrently, because a pass must finish inside a grant's lifetime.**
     # Serially, one pass cost the sum of every renewal's round trip: at the
@@ -466,7 +488,11 @@ async def _renew_live_grants(
 
 
 async def _renew_live_grants_loop(
-    store: _GrantRenewal, grants: Any, *, interval_seconds: float
+    store: _GrantRenewal,
+    grants: Any,
+    *,
+    interval_seconds: float,
+    schedule: RenewalSchedule | None = None,
 ) -> None:
     """Renew current grants on their own cadence, independent of maintenance."""
     failures: dict[str, int] = {}
@@ -475,7 +501,7 @@ async def _renew_live_grants_loop(
     while True:
         await asyncio.sleep(max(0.0, next_pass - loop.time()))
         try:
-            await _renew_live_grants(store, grants, failures=failures)
+            await _renew_live_grants(store, grants, failures=failures, schedule=schedule)
         except Exception:
             logger.warning("Grant renewal pass failed", exc_info=True)
         next_pass += interval_seconds
@@ -821,6 +847,7 @@ async def reap_expired_attempts(
     interval_seconds: float = REAP_INTERVAL_S,
     max_attempts: int | None = None,
     grants: Any | None = None,
+    schedule: RenewalSchedule | None = None,
 ) -> None:
     """Run attempt maintenance beside independent handoff and grant loops.
 
@@ -830,6 +857,10 @@ async def reap_expired_attempts(
     has its own cadence, so a slow maintenance or sandbox manager call cannot
     hold up authorization renewal. Cancelling this worker cancels and joins all
     three owned tasks, including work they own.
+
+    ``schedule`` is the process's record of what each grant's last renewal
+    bought, which the renewal task shares with the host heartbeat; without one
+    it renews every live grant on every pass.
     """
     # Created first, so a restarted control plane still replays settled
     # terminals before anything else, as it did when that replay ran ahead of
@@ -844,7 +875,9 @@ async def reap_expired_attempts(
     )
     renewal = (
         asyncio.create_task(
-            _renew_live_grants_loop(store, grants, interval_seconds=interval_seconds),
+            _renew_live_grants_loop(
+                store, grants, interval_seconds=interval_seconds, schedule=schedule
+            ),
             name="agent-grant-renewal",
         )
         if grants is not None
