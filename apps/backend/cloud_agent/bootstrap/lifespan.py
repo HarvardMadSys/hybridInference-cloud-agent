@@ -39,6 +39,7 @@ from cloud_agent.workers.work_signal import WorkSignal
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    import asyncpg
     from fastapi import FastAPI
 
     from cloud_agent.publish_worker import PublishStorage
@@ -62,6 +63,42 @@ ENV_DATABASE_URL = "AGENT_DATABASE_URL"
 #: that ran in 85 ms, and each reaper pass spent 170 ms compiling a check that
 #: ran in under one.
 DATABASE_SESSION_SETTINGS = {"jit": "off"}
+
+#: The connections the control plane holds open to its database: asyncpg's own
+#: default, written down so that changing it is a decision.
+DATABASE_POOL_SIZE = 10
+
+
+async def _release_as_is(_connection: asyncpg.Connection) -> None:
+    """Return a pooled connection to the pool without asyncpg's reset query.
+
+    The default reset runs ``SELECT pg_advisory_unlock_all(); CLOSE ALL;
+    UNLISTEN *; RESET ALL;`` on every release: one more round trip for every
+    repository call, since each acquires a connection per call. asyncpg still
+    rolls back a transaction left open, and drops its listeners, before this.
+
+    **No session state on a pooled connection.** That is what makes this safe.
+    Settings are ``SET LOCAL``; LISTEN has its own connection
+    (``workers/notifications.py``); and the one session advisory lock
+    (``storage/repositories/source_control.py``) is released, or its
+    connection reset, before the connection goes back. A session-level
+    ``SET``, LISTEN, advisory lock or cursor taken on a pooled connection would
+    outlive the caller that took it.
+    """
+
+
+async def create_database_pool(dsn: str) -> asyncpg.Pool:
+    """Open the control plane's connection pool."""
+    import asyncpg
+
+    pool: asyncpg.Pool = await asyncpg.create_pool(
+        dsn,
+        min_size=DATABASE_POOL_SIZE,
+        max_size=DATABASE_POOL_SIZE,
+        server_settings=DATABASE_SESSION_SETTINGS,
+        reset=_release_as_is,
+    )
+    return pool
 
 
 ENV_PUBLISH_BASE_BRANCH = "AGENT_PUBLISH_BASE_BRANCH"
@@ -338,7 +375,6 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     or record anything, so it refuses to start rather than serving an API that
     fails at every call.
     """
-    import asyncpg
     import httpx
 
     from cloud_agent.application.profiling_control import ProfilingControlService
@@ -367,7 +403,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
 
     # One region after the pool exists: any later failure still releases what
     # startup opened, and a cleanup error must not replace that failure.
-    pool = await asyncpg.create_pool(dsn, server_settings=DATABASE_SESSION_SETTINGS)
+    pool = await create_database_pool(dsn)
     http = None
     local_measurement_writer = None
     writer_installed = False
