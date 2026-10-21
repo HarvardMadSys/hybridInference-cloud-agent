@@ -2787,7 +2787,7 @@ class TestConnectors:
         assert store.connector_connections[connector["id"]] == set()
 
     def test_a_new_connection_cannot_name_another_users_connector(self) -> None:
-        """Creation reads the connector under the caller's ownership, as binding does."""
+        """Creation reads the connector under the caller's ownership."""
         store = FakeStore()
         store.connectors[9] = {
             "id": 9,

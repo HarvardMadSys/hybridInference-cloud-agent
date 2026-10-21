@@ -612,9 +612,8 @@ async def create_connection(
         # nothing makes the provenance unreadable.
         raise _bad_request(f"unknown template: {template!r}")
     if body.connector_id is not None:
-        # The same ownership read the bind route makes. Without it the column
-        # could name another user's machine, and that user's revocation would
-        # then reach into this connection.
+        # A connection may name only its owner's connector: another user's
+        # answers 404, as a missing one does, and nothing is stored.
         await _require_connector(job_store, connector_id=body.connector_id, user_id=user["user_id"])
 
     if body.connector_id is not None:

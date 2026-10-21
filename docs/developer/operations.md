@@ -1013,10 +1013,10 @@ or bridge; it crosses seams the per-layer suites do not.
 
 No connector runtime ships, and the routes that registered, bound and revoked a
 user's machine are retired. A `user-connector` connection can still name a
-connector registered before then, and is refused at use. Deleting it, or moving
-it to another location, removes its connector route in the same transaction.
-Managed-worker connections likewise require an available worker. Configuration
-support does not establish execution support.
+connector registered before then, and is refused at use. Deleting the
+connection removes its link to that connector, and the connector's authorization
+for it, in the same transaction. Managed-worker connections likewise require an
+available worker. Configuration support does not establish execution support.
 
 ### Deployment and rollback
 

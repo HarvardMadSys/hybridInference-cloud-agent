@@ -144,10 +144,9 @@ _SSE_HEADERS = {
 }
 
 #: The largest request body the relay reads: the bound every JSON-RPC frame in
-#: this service already has. It is enforced while bytes arrive, and again after
-#: canonical encoding, whose ASCII escapes can grow a UTF-8 body. The relay is
-#: one process every tenant shares; a body read whole before measurement has
-#: already cost what the bound saves.
+#: this service already has. It is enforced on the declared length, and again
+#: while bytes arrive. The relay is one process every tenant shares; a body read
+#: whole before measurement has already cost what the bound saves.
 MAX_RELAY_BODY_BYTES = MAX_MESSAGE_BYTES
 
 #: The most messages one JSON-RPC batch may carry. Current MCP revisions do not
@@ -254,7 +253,7 @@ class _BodyRefused(Exception):
 
 
 def _require_body_size(size: int) -> None:
-    """Apply the same bound to the received and canonical request encodings."""
+    """Refuse a body whose declared or received size is over :data:`MAX_RELAY_BODY_BYTES`."""
     if size > MAX_RELAY_BODY_BYTES:
         raise _BodyRefused(413, f"An MCP request body is limited to {MAX_RELAY_BODY_BYTES} bytes.")
 

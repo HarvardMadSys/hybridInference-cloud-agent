@@ -2719,7 +2719,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         *,
         start_seq: int | None = None,
     ) -> dict[str, Any]:
-        """Run an owner's one-shot command or Git inspection on the command pool."""
+        """Run an owner's workspace download or Git inspection on the command pool."""
         give_back = command_slots.take(workspace_id)
 
         def run() -> dict[str, Any]:
