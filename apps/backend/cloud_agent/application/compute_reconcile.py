@@ -154,7 +154,7 @@ def _provider_observation_is_fresh(observation: ResourceObservation) -> bool:
     return -30 <= age <= 300
 
 
-def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:
+def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:  # noqa: PLR0912 complexity baseline, #771
     """Validate provider diagnostic values as well as their field names."""
     details: dict[str, str | int | bool] = {}
     operation = source.get("provider_operation")
@@ -670,7 +670,7 @@ class ComputeReconciler:
             },
         )
 
-    async def _acquire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+    async def _acquire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:  # noqa: PLR0912, PLR0915 complexity baseline, #771
         provider = self.commands.registry.get(allocation["provider_id"]).provider
         observation = await self._acquired_resource(operation, allocation, provider)
         await self.save_observation(operation, allocation, observation)

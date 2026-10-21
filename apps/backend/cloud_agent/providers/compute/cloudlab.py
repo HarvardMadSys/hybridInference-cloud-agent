@@ -199,7 +199,7 @@ _PORTAL_REASON_CODES: tuple[DiagnosticReason, ...] = (
 )
 
 
-def _error_reason_code(response: httpx.Response) -> DiagnosticReason:
+def _error_reason_code(response: httpx.Response) -> DiagnosticReason:  # noqa: C901, PLR0912 complexity baseline, #771
     """Map bounded provider text to a stable reason code; never return that text."""
     status = response.status_code
     if status in {401, 403}:
