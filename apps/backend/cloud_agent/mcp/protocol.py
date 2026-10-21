@@ -103,6 +103,8 @@ _NAME_SAFE = re.compile(r"[^A-Za-z0-9_-]")
 # native prefix (Claude/Codex) so a bridge need not truncate the stable digest.
 MAX_PRESENTED_NAME = 64 - len("mcp__session__")
 _HASH_NAMESPACE = "mcp_h"
+#: Hex digits of the digest that ends a generated name.
+_DIGEST_HEX = 32
 NAMESPACE_SEPARATOR = "__"
 
 
@@ -765,12 +767,32 @@ def presented_name(alias: str, capability: str) -> str:
         and len(candidate) <= MAX_PRESENTED_NAME
     ):
         return candidate
-    digest = hashlib.sha256(json.dumps([alias, capability]).encode()).hexdigest()[:32]
+    digest = hashlib.sha256(json.dumps([alias, capability]).encode()).hexdigest()[:_DIGEST_HEX]
     # Reserve a namespace that survives native CLI normalization. A leading
     # underscore alone is not sufficient: pi strips it before registering tools.
     prefix = f"{_HASH_NAMESPACE}{NAMESPACE_SEPARATOR}"
     budget = MAX_PRESENTED_NAME - len(prefix) - len(digest) - len(NAMESPACE_SEPARATOR)
     return f"{prefix}{candidate[:budget]}{NAMESPACE_SEPARATOR}{digest}"
+
+
+def may_present(alias: str, presented: str) -> bool:
+    """Whether :func:`presented_name` could give ``presented`` for some capability of ``alias``.
+
+    Lets one call be routed without resolving every binding to learn which one
+    presents its name. It is never false for the alias that does present it: a
+    readable name begins with that alias, and a generated one keeps a prefix of
+    the alias's sanitized form ahead of its digest. A true answer for another
+    alias only costs one binding the catalogue then rules out.
+    """
+    if presented.startswith(f"{alias}{NAMESPACE_SEPARATOR}"):
+        return True
+    prefix = f"{_HASH_NAMESPACE}{NAMESPACE_SEPARATOR}"
+    tail = len(NAMESPACE_SEPARATOR) + _DIGEST_HEX
+    if not presented.startswith(prefix) or len(presented) < len(prefix) + tail:
+        return False
+    head = presented[len(prefix) : len(presented) - tail]
+    expected = f"{sanitize_name(alias)}{NAMESPACE_SEPARATOR}"
+    return head.startswith(expected) or expected.startswith(head)
 
 
 def build_namespace(

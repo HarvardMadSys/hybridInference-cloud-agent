@@ -34,6 +34,26 @@ def test_names_are_independent_of_catalogue_order_and_membership(pairs):
             assert len("mcp__session__" + name) <= 64
 
 
+_ALIASES = ["github", "docs", "a__b", "a", "a_", "mcp_h", "mcp", "Docs.v2", "über", "x" * 70, ""]
+_CAPABILITIES = ["get_issue", "search", "b__c", "_b", "a.b", "a/b", "tool", "", "x" * 70]
+
+
+@pytest.mark.parametrize("alias", _ALIASES)
+@pytest.mark.parametrize("capability", _CAPABILITIES)
+def test_routing_never_rules_out_the_alias_that_presents_a_name(alias, capability):
+    """A call is routed by resolving only the aliases that may present its name."""
+    assert protocol.may_present(alias, protocol.presented_name(alias, capability))
+
+
+def test_a_readable_name_rules_out_every_other_alias():
+    """The common case resolves one binding, not all of them."""
+    name = protocol.presented_name("docs", "search")
+    assert protocol.may_present("docs", name)
+    assert not protocol.may_present("github", name)
+    assert not protocol.may_present("doc", name)
+    assert not protocol.may_present("docs", "github__get_issue")
+
+
 def test_common_short_names_keep_their_readable_form():
     """Existing ordinary names remain stable too."""
     assert protocol.presented_name("github", "get_issue") == "github__get_issue"

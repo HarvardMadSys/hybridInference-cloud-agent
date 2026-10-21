@@ -37,7 +37,7 @@ from tests.support.storage import AllCapabilities, OneFake
 from cloud_agent import memory_tool
 from cloud_agent.api import mcp_relay as agent_mcp_router
 from cloud_agent.api.deps import get_storage
-from cloud_agent.mcp import runtime as mcp_runtime
+from cloud_agent.mcp import protocol, runtime as mcp_runtime
 from cloud_agent.mcp.host import ContentBlock, Session, ToolResult
 from cloud_agent.mcp.protocol import Handshake
 from cloud_agent.mcp.registry import mcp_cipher
@@ -598,6 +598,44 @@ class TestRoutingACall:
         assert host.opened[-1]["connection"].connection_id == "8"
         # The connection's own credential, not the sandbox's job token.
         assert host.opened[-1]["secret"] == "Docs-secret"
+
+    @pytest.mark.parametrize(
+        ("tool", "presented"),
+        [
+            ("search", "docs__search"),
+            ("git.hub/search", protocol.presented_name("docs", "git.hub/search")),
+        ],
+    )
+    async def test_a_call_reads_only_the_connection_that_presents_its_name(
+        self,
+        client: AsyncClient,
+        store: FakeStore,
+        host: StubHost,
+        monkeypatch: pytest.MonkeyPatch,
+        tool: str,
+        presented: str,
+    ) -> None:
+        """Routing one call does not read and decrypt every bound connection."""
+        store.bindings[1]["rules"] = {tool: {"policy": "allow", "fingerprint": ""}}
+        store.snapshots[8] = _snapshot(8, tool)
+        read: list[int] = []
+        original = store.get_mcp_connection
+
+        async def recording(*, connection_id: int, user_id: str | None = None):
+            read.append(int(connection_id))
+            return await original(connection_id=connection_id, user_id=user_id)
+
+        monkeypatch.setattr(store, "get_mcp_connection", recording)
+        response = await client.post(
+            _HOST_URL,
+            json=_rpc("tools/call", name=presented, arguments={}),
+            headers=_auth(),
+        )
+        assert response.status_code == 200
+        assert "result" in response.json()
+        assert host.called[-1]["name"] == tool
+        assert host.opened[-1]["connection"].connection_id == "8"
+        assert read and set(read) == {8}
 
     async def test_an_unknown_name_is_refused_without_dialling_anything(
         self, client: AsyncClient, host: StubHost
