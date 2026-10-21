@@ -1612,18 +1612,20 @@ def test_member_permission_normalization_prunes_platform_and_sibling_provider_ho
     )
 
     script = calls[0][0][2]
-    assert script.count("-path /agent-state/.platform") == 2
-    assert script.count("-path /agent-state/claude ") == 2
-    assert "normalize_dirs /agent-state/claude/projects" in script
-    assert "normalize_files /agent-state/claude/projects" in script
+    # One walk of /agent-state, and it prunes every one of these.
+    walks = script.count("find /agent-state ")
+    assert walks == 1
+    assert script.count("-path /agent-state/.platform") == walks
+    assert script.count("-path /agent-state/claude ") == walks
+    assert "normalize /agent-state/claude/projects" in script
     assert "/home/agent-member-" not in script
-    assert script.count("-path /agent-state/codex-members") == 2
-    assert script.count("-path /agent-state/opencode-members") == 2
-    assert script.count("-path /agent-state/kilo-members") == 2
+    assert script.count("-path /agent-state/codex-members") == walks
+    assert script.count("-path /agent-state/opencode-members") == walks
+    assert script.count("-path /agent-state/kilo-members") == walks
     # The trusted collections hold other members' 0700 homes; a traversal
     # into them would fail on the first one it cannot open.
     for runtime_id in ("codex", "opencode", "kilo"):
-        assert script.count(f"-path /agent-state/{runtime_id}-homes ") == 2
+        assert script.count(f"-path /agent-state/{runtime_id}-homes ") == walks
     # A member's provider home is never widened, not even by its owner: the
     # pass no longer enters the collections at all.
     assert "-members/" not in script

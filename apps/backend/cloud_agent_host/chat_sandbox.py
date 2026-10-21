@@ -174,12 +174,22 @@ LEGACY_MEMBER_HOME_COLLECTIONS = tuple(
 #: full, where installation runs after this step. A directory of theirs the
 #: sandbox user cannot search is skipped rather than failing the turn.
 _NOT_OURS_AND_UNSEARCHABLE = '\\( -type d ! -uid "$me" ! \\( -readable -executable \\) -prune \\)'
+#: What both permission passes do to an entry they reach: open a directory to
+#: the group (rwx and setgid, ``-2070``) or a file (rw, ``-0060``) unless it
+#: already is. One walk does both, and an entry that already has its bits is
+#: left alone, so a pass over a tree that has not changed since the last one
+#: changes nothing: no chmod, and no new ctime for Git's index to re-check.
+#: The two branches are one parenthesized group so that a ``-uid`` written
+#: before it applies to both: ``find`` binds an implicit AND tighter than
+#: ``-o``.
+_OPEN_TO_GROUP = (
+    "\\( \\( -type d ! -perm -2070 -exec chmod g+rwx,g+s -- {} + \\) "
+    "-o \\( -type f ! -perm -0060 -exec chmod g+rw -- {} + \\) \\)"
+)
 SHARED_WORKSPACE_PERMISSIONS_SCRIPT = (
     "set -eu; me=$(id -u); "
     f"find {CHAT_WORKDIR} {CHAT_STATE_DIR} -xdev {_NOT_OURS_AND_UNSEARCHABLE} "
-    '-o \\( -type d -uid "$me" -exec chmod g+rwx,g+s -- {} + \\); '
-    f"find {CHAT_WORKDIR} {CHAT_STATE_DIR} -xdev {_NOT_OURS_AND_UNSEARCHABLE} "
-    '-o \\( -type f -uid "$me" -exec chmod g+rw -- {} + \\); '
+    f'-o -uid "$me" {_OPEN_TO_GROUP}; '
     f"git -C {CHAT_WORKDIR} config core.sharedRepository group"
 )
 ACTIVATION_TMPFS = "/run/agent-activation"
@@ -2246,14 +2256,13 @@ class ChatSandboxManager:
         # /home/agent-member-N/.claude-members, outside this traversal. Only projects/
         # remains shared; never widen other legacy shared Claude files.
         # Normalize shared roots while pruning every private-home collection.
+        # This runs at the end of every turn, so it walks each root once and
+        # touches only what the turn left without its group bits.
         trusted_prunes = "".join(f"-o -path {path} " for path in PRIVATE_MEMBER_HOME_COLLECTIONS)
         script = (
             "set -eu; uid=$1; "
-            'normalize_dirs() { find "$@" -xdev -uid "$uid" -type d '
-            "-exec chmod g+rwx,g+s -- {} +; }; "
-            'normalize_files() { find "$@" -xdev -uid "$uid" -type f '
-            "-exec chmod g+rw -- {} +; }; "
-            f"normalize_dirs {CHAT_WORKDIR}; normalize_files {CHAT_WORKDIR}; "
+            f'normalize() {{ find "$@" -xdev -uid "$uid" {_OPEN_TO_GROUP}; }}; '
+            f"normalize {CHAT_WORKDIR}; "
             f"find {CHAT_STATE_DIR} -xdev "
             f"\\( -path {CHAT_STATE_DIR}/.platform "
             f"-o -path {CHAT_STATE_DIR}/claude "
@@ -2261,18 +2270,9 @@ class ChatSandboxManager:
             f"-o -path {CHAT_STATE_DIR}/opencode-members "
             f"-o -path {CHAT_STATE_DIR}/kilo-members "
             f"{trusted_prunes}\\) -prune -o "
-            '-uid "$uid" -type d -exec chmod g+rwx,g+s -- {} +; '
-            f"find {CHAT_STATE_DIR} -xdev "
-            f"\\( -path {CHAT_STATE_DIR}/.platform "
-            f"-o -path {CHAT_STATE_DIR}/claude "
-            f"-o -path {CHAT_STATE_DIR}/codex-members "
-            f"-o -path {CHAT_STATE_DIR}/opencode-members "
-            f"-o -path {CHAT_STATE_DIR}/kilo-members "
-            f"{trusted_prunes}\\) -prune -o "
-            '-uid "$uid" -type f -exec chmod g+rw -- {} +; '
+            f'-uid "$uid" {_OPEN_TO_GROUP}; '
             f"if test -d {CLAUDE_SHARED_PROJECTS_DIR}; then "
-            f"normalize_dirs {CLAUDE_SHARED_PROJECTS_DIR}; "
-            f"normalize_files {CLAUDE_SHARED_PROJECTS_DIR}; fi"
+            f"normalize {CLAUDE_SHARED_PROJECTS_DIR}; fi"
         )
         result = self.exec_capture(
             spec,
