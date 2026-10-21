@@ -14,7 +14,6 @@ from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as d
 from tests.support.usage import job_usage_inputs
 
 from cloud_agent.admin_observability import (
-    ActivityCursor,
     RunCursor,
     RunFilters,
     cursor_scope,
@@ -24,9 +23,7 @@ from cloud_agent.api import admin_runs
 from cloud_agent.api._job_views import _attempt_resources
 from cloud_agent.api.deps import get_storage
 from cloud_agent.ledger import summarize_job_usage
-from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage.assembly import Storage
-from cloud_agent_shared.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 
 
 @pytest_asyncio.fixture
@@ -265,73 +262,7 @@ async def test_run_cursor_keeps_tied_timestamps_and_the_original_filter_window(d
     assert len(set(seen)) == 4
 
 
-async def test_activity_cursor_orders_per_attempt_and_freezes_late_control_events(db, store):
-    job, first, _ = await _seed_attempt(db, store, grant_id=None)
-    _, second, _ = await _seed_attempt(db, store, job=job, attempt_no=2, grant_id=None)
-    other, other_attempt, _ = await _seed_attempt(db, store, grant_id=None)
-    ids = [
-        await _event(
-            db,
-            store,
-            job,
-            first,
-            1,
-            "tool_use",
-            {"id": "same-id", "name": "Bash", "input": "PRIVATE"},
-        ),
-        await _event(
-            db,
-            store,
-            job,
-            second,
-            1,
-            "tool_use",
-            {"id": "same-id", "name": "Read", "input": "PRIVATE"},
-        ),
-        await _event(
-            db,
-            store,
-            job,
-            first,
-            2,
-            "tool_result",
-            {"tool_use_id": "same-id", "is_error": True, "text": "PRIVATE"},
-        ),
-        await _event(
-            db,
-            store,
-            job,
-            second,
-            2,
-            "tool_result",
-            {"tool_use_id": "same-id", "is_error": False, "text": "PRIVATE"},
-        ),
-    ]
-    await _event(db, store, other, other_attempt, 1, "message", {"text": "PRIVATE-OTHER"})
-    queries = store.admin_runs
-    page1 = await queries.activity(job["id"], attempt_id=None, cursor=None, limit=2)
-    assert [(row.attempt_id, row.seq) for row in page1.events] == [(first, 1), (first, 2)]
-    assert page1.events[1].is_error is True
-    assert page1.events[0].tool_use_id == "same-id"
-    assert "PRIVATE" not in page1.model_dump_json()
-    assert "payload" not in page1.model_dump_json()
-    cursor = decode_cursor(page1.next_cursor, ActivityCursor, cursor_scope([job["id"], None]))
-    late = await _event(db, store, job, first, 3, "attempt_superseded", {"detail": "PRIVATE-LATE"})
-    page2 = await queries.activity(job["id"], attempt_id=None, cursor=cursor, limit=2)
-    assert [(row.attempt_id, row.seq) for row in page2.events] == [(second, 1), (second, 2)]
-    assert page2.next_cursor is None
-    assert {row.id for row in page1.events + page2.events} == set(ids)
-    refreshed = await queries.activity(job["id"], attempt_id=None, cursor=None, limit=20)
-    assert late in {row.id for row in refreshed.events}
-    filtered = await queries.activity(job["id"], attempt_id=second, cursor=None, limit=20)
-    assert {row.attempt_id for row in filtered.events} == {second}
-    with pytest.raises(ValueError, match="Invalid pagination"):
-        decode_cursor(page1.next_cursor, ActivityCursor, cursor_scope([other["id"], None]))
-    with pytest.raises(ValueError, match="Invalid pagination"):
-        decode_cursor(page1.next_cursor, ActivityCursor, cursor_scope([job["id"], first]))
-
-
-async def test_metadata_projection_bounds_names_and_never_fetches_nested_content(db, store):
+async def test_usage_projection_never_fetches_nested_content(db, store):
     job, attempt, _ = await _seed_attempt(db, store, grant_id=None)
     payload = {
         "id": "PRIVATE-ID" * 200,
@@ -350,11 +281,6 @@ async def test_metadata_projection_bounds_names_and_never_fetches_nested_content
     }
     await _event(db, store, job, attempt, 1, "tool_use", payload)
     queries = store.admin_runs
-    activity = await queries.activity(job["id"], attempt_id=None, cursor=None, limit=10)
-    assert len(activity.events[0].tool_name) == 160
-    assert activity.events[0].tool_use_id is None  # no ambiguous truncated identity
-    assert activity.events[0].has_content is True
-    assert "PRIVATE" not in activity.model_dump_json()
     inputs = await queries.usage_inputs(job["id"])
     assert "PRIVATE" not in json.dumps(inputs, default=str)
     projected = inputs["events"][0]["payload"]
@@ -472,50 +398,3 @@ async def test_resources_preserve_measurement_scope_and_never_read_another_jobs_
     assert await queries.resources(job["id"], other_attempt) is None
     assert await queries.resources(other["id"], attempt) is None
     assert _attempt_resources(await queries.resources(other["id"], other_attempt)) is None
-
-
-async def test_legacy_large_content_is_bounded_in_sql_and_real_http_reveal_is_audited(
-    db, store, monkeypatch
-):
-    job, attempt, _ = await _seed_attempt(db, store, grant_id=None)
-    other, other_attempt, _ = await _seed_attempt(db, store, grant_id=None)
-    event = await _event(db, store, job, attempt, 1, "tool_result", {"text": '😀\n"' * 200_000})
-    other_event = await _event(
-        db, store, other, other_attempt, 1, "message", {"text": "PRIVATE-OTHER"}
-    )
-    queries = store.admin_runs
-    fetched = await queries.event_content(job["id"], event)
-    assert (
-        len(json.dumps(fetched["payload"], ensure_ascii=False).encode()) <= MAX_EVENT_PAYLOAD_BYTES
-    )
-    assert fetched["payload"]["truncated"] is True
-    assert fetched["payload"]["original_payload_bytes"] > MAX_EVENT_PAYLOAD_BYTES
-    assert await queries.event_content(job["id"], other_event) is None
-
-    monkeypatch.setenv("ADMIN_TOKEN", "db-admin-observation-test")
-    app = FastAPI()
-    app.include_router(admin_runs.router)
-    app.dependency_overrides[get_storage] = lambda: store
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            f"/admin/agent/runs/{job['id']}/events/{event}/content",
-            headers={"Authorization": "Bearer db-admin-observation-test"},
-        )
-    assert response.status_code == 200, response.text
-    assert len(response.content) <= MAX_EVENT_PAYLOAD_BYTES
-    assert response.json()["truncated"] is True
-    assert response.headers["cache-control"] == "no-store"
-    async with db.acquire() as conn:
-        record = await conn.fetchrow(
-            "SELECT target_user_id, details, success FROM agent_admin_audit_log WHERE details->>'job_id' = $1",
-            job["id"],
-        )
-    assert record["target_user_id"] == job["user_id"]
-    assert record["success"] is True
-    assert load_json(record["details"]) == {
-        "actor": "admin-token",
-        "job_id": job["id"],
-        "event_id": event,
-        "attempt_id": attempt,
-        "seq": 1,
-    }

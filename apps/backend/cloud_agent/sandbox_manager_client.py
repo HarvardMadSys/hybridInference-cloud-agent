@@ -37,10 +37,10 @@ SHARED_SESSION_FORK_TIMEOUT_S = 180.0
 SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S = 960.0
 
 #: The most this process buffers from one sandbox manager reply that carries workspace
-#: content: a file or listing, a one-shot command, Git inspection or a shared
-#: snapshot. The sandbox manager's own bounds, which a misbehaving host does not have to
-#: keep, stop those at 2 MiB of command or Git output plus 2 MiB of stderr, a
-#: 512 KiB preview or 5,000 directory entries. JSON escapes a control byte as
+#: content: a file or listing, Git inspection or a shared snapshot. The sandbox
+#: manager's own bounds, which a misbehaving host does not have to keep, stop
+#: those at 2 MiB of Git output plus 2 MiB of stderr, a 512 KiB preview or 5,000
+#: directory entries. JSON escapes a control byte as
 #: six bytes, the widest any character grows, so no honest reply passes 24 MiB.
 MAX_SANDBOX_MANAGER_CONTENT_BYTES = 32 * 1024 * 1024
 #: The same for every other reply: lifecycle answers, terminal bookkeeping,
@@ -48,7 +48,7 @@ MAX_SANDBOX_MANAGER_CONTENT_BYTES = 32 * 1024 * 1024
 #: cut from protocol records of at most 8 MiB.
 MAX_SANDBOX_MANAGER_CONTROL_BYTES = 16 * 1024 * 1024
 #: The route suffixes whose replies are workspace content.
-_CONTENT_ROUTES = frozenset({"files", "terminal", "git", "snapshot"})
+_CONTENT_ROUTES = frozenset({"files", "git", "snapshot"})
 
 
 async def _read_capped(response: httpx.Response, limit: int) -> bytes | None:
@@ -504,39 +504,6 @@ class SandboxManagerClient:
         """Replace one UTF-8 file in a live workspace."""
         return await self._request(
             "PUT", workspace_id, "files", params={"path": path}, json={"content": content}
-        )
-
-    async def terminal(
-        self,
-        workspace_id: str,
-        *,
-        command: str,
-        cwd: str,
-        timeout_seconds: float,
-        environment: Any = None,
-    ) -> dict[str, Any]:
-        """Execute one bounded command in an isolated workspace sandbox."""
-        if environment is not None and environment.required:
-            await self.require_environment_capability(environment)
-        else:
-            environment = None
-        return await self._request(
-            "POST",
-            workspace_id,
-            "terminal",
-            json={
-                "command": command,
-                "cwd": cwd,
-                "timeout_seconds": timeout_seconds,
-                # A terminal needs no snapshot fields, which an older
-                # broker would refuse.
-                **(
-                    {"environment": environment_payload(environment, ())}
-                    if environment is not None
-                    else {}
-                ),
-            },
-            timeout=timeout_seconds + 10,
         )
 
     async def create_terminal(
