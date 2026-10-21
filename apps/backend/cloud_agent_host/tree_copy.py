@@ -103,11 +103,14 @@ def staged_tree(
             raise SandboxError(f"could not prepare {what} in this chat")
         # Streamed, not buffered: a CLI is a few hundred megabytes. Root
         # ownership stays in Docker's archive the whole way.
-        reader = subprocess.Popen(
-            [docker, "cp", f"{source_id}:{source}", "-"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
+        try:
+            reader = subprocess.Popen(
+                [docker, "cp", f"{source_id}:{source}", "-"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            raise SandboxError(f"could not copy {what} into this chat") from exc
         try:
             copied = manager._run_bytes(
                 [docker, "cp", "-", f"{current.container_id}:{stage}"],

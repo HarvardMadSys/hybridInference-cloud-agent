@@ -8,6 +8,7 @@ hosts look for it. ``tests/external`` runs the same steps against real Docker.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import re
@@ -1136,6 +1137,21 @@ def test_a_cleanup_that_fails_still_removes_the_source_and_hides_no_failure(down
     with pytest.raises(SandboxError, match=r"could not activate claude-code 2\.1\.300"):
         runtime_install.ensure_downloaded_runtime(manager, None, "claude-code", "2.1.300")
     # …and the source is still removed after the stage could not be.
+    assert manager.runs[-1] == ["docker", "rm", "source-container"]
+
+
+def test_a_copy_that_cannot_start_fails_as_the_copy_and_still_cleans_up(downloaded, monkeypatch):
+    """A ``docker cp`` that cannot even start fails the copy, as one that exits non-zero does."""
+
+    def no_process(argv, **_kwargs):
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr(tree_copy.subprocess, "Popen", no_process)
+    manager = FakeManager()
+    with pytest.raises(SandboxError, match=r"could not copy claude-code 2\.1\.300 into this chat"):
+        runtime_install.ensure_downloaded_runtime(manager, None, "claude-code", "2.1.300")
+    assert manager.copies == []
+    assert manager.execs[-1][0][:2] == ["rm", "-rf"]
     assert manager.runs[-1] == ["docker", "rm", "source-container"]
 
 
