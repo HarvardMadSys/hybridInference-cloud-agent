@@ -1114,6 +1114,29 @@ def test_a_tree_that_is_not_root_owned_is_refused(downloaded):
     assert manager.runs[-1] == ["docker", "rm", "source-container"]
 
 
+def test_a_cleanup_that_fails_still_removes_the_source_and_hides_no_failure(downloaded):
+    """Removing the stage times out, as in a chat stopped mid-copy, and so does the source."""
+
+    class Stuck(FakeManager):
+        def exec_capture(self, spec, argv, **kwargs):
+            if argv[0] == "rm":
+                raise SandboxError("chat sandbox exec failed: timed out")
+            return super().exec_capture(spec, argv, **kwargs)
+
+        def _run(self, argv, *, timeout):
+            ran = super()._run(argv, timeout=timeout)
+            if argv[1] == "rm":
+                raise SandboxError("Docker lifecycle command failed: timed out")
+            return ran
+
+    manager = Stuck(activate_exit=1)
+    # The caller hears why the copy failed, not why its cleanup did…
+    with pytest.raises(SandboxError, match=r"could not activate claude-code 2\.1\.300"):
+        runtime_install.ensure_downloaded_runtime(manager, None, "claude-code", "2.1.300")
+    # …and the source is still removed after the stage could not be.
+    assert manager.runs[-1] == ["docker", "rm", "source-container"]
+
+
 def test_a_version_this_host_never_downloaded_says_how_to_fix_it(downloaded):
     with pytest.raises(SandboxError, match="update the agent again"):
         runtime_install.ensure_downloaded_runtime(FakeManager(), None, "claude-code", "2.1.301")

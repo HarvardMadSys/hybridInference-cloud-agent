@@ -10,7 +10,7 @@ filesystem, whose ownership may differ in development.
 from __future__ import annotations
 
 import subprocess
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING, BinaryIO, cast
 
 from cloud_agent_host.runtime_images import SOURCE_LABEL, WORK_LABEL
@@ -58,8 +58,9 @@ def staged_tree(
     """Copy ``source`` out of ``image`` into the new directory ``stage`` in the chat.
 
     Run the activation inside the block. ``stage`` and the source container
-    are removed when it ends, whether or not anything failed. ``what`` names
-    the tree in errors.
+    are removed when it ends, whether or not anything failed, and a removal
+    that fails never hides a failure before it. ``what`` names the tree in
+    errors.
     """
     docker = manager.backend.docker_binary
     current = manager._require(spec)
@@ -123,8 +124,18 @@ def staged_tree(
         if read != 0 or copied.returncode != 0:
             raise SandboxError(f"could not copy {what} into this chat")
         yield
-    finally:
+    except BaseException:
+        with suppress(Exception):
+            _remove(manager, spec, stage, source_id)
+        raise
+    _remove(manager, spec, stage, source_id)
+
+
+def _remove(manager: ChatSandboxManager, spec: ChatSandboxSpec, stage: str, source_id: str) -> None:
+    """Remove ``stage`` from the chat, then the source container even if that failed."""
+    try:
         manager.exec_capture(
             spec, ["rm", "-rf", stage], workdir="/", timeout_s=60, user_uid=0, user_gid=0
         )
-        manager._run([docker, "rm", source_id], timeout=30)
+    finally:
+        manager._run([manager.backend.docker_binary, "rm", source_id], timeout=30)
