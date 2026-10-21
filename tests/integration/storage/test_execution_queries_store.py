@@ -29,6 +29,7 @@ import pytest
 import pytest_asyncio
 from tests.integration.storage.test_agent_job_store import _claim, _create_job
 from tests.support.db import reset_agent_tables
+from tests.support.follow_ups import append_follow_up
 from tests.support.migrations import apply_migrations
 from tests.support.usage import job_usage_inputs
 
@@ -151,7 +152,7 @@ async def test_the_thread_read_pages_by_event_id(
 
 
 async def test_the_thread_read_pages_identically_when_other_threads_interleave(
-    store: Storage, queries: PostgresExecutionQueries
+    db, store: Storage, queries: PostgresExecutionQueries
 ) -> None:
     """Every page is the same rows in the same order as one unpaged read.
 
@@ -175,8 +176,8 @@ async def test_the_thread_read_pages_identically_when_other_threads_interleave(
         to_state="failed",
     )
     for number in range(2, 5):
-        follow_up = await store.conversation_commands.create_follow_up(
-            parent_job_id=turns[-1]["id"], user_id=_OWNER, prompt=f"turn {number}"
+        follow_up = await append_follow_up(
+            db, parent_job_id=turns[-1]["id"], user_id=_OWNER, prompt=f"turn {number}"
         )
         assert follow_up is not None
         claim = await _claim(
