@@ -34,6 +34,11 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatBackend,
     _RetainedExecProcess,
 )
+from cloud_agent_host.chat_sandbox_models import (
+    ENVIRONMENT_TEST_LABEL,
+    ChatSandboxInspection,
+    ChatSandboxStatus,
+)
 from cloud_agent_host.drivers import InputOutcome
 from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
 from cloud_agent_host.resident_transport import ResidentLaunch
@@ -556,6 +561,18 @@ def test_sandbox_manager_requires_a_container_backend_without_an_injected_superv
         create_app(backend=ProcessBackend(acknowledged_unsafe=True), token="x")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/openapi.json", "/docs", "/redoc"])
+async def test_sandbox_manager_serves_no_schema_or_docs_route(path):
+    """Every route requires the manager token; these would answer without it."""
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(_SharedSupervisor())), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.get(path)
+
+    assert response.status_code == 404
+
+
 class _ArchiveService:
     def __init__(self, events: list[str]) -> None:
         self.events = events
@@ -603,6 +620,124 @@ class _ArchiveController(_ArchiveService):
 
     def prepare_markerless_final(self, *_args, **_kwargs) -> bool:
         return self.revision is not None and not self.enabled
+
+
+class _SnapshotController(_ArchiveController):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(events)
+        self.captured: list[str] = []
+
+    def capture_environment_snapshot(self, _spec, inspection, *, owner, snapshot_id):
+        self.captured.append(inspection.container_id)
+        return {"snapshot_id": snapshot_id}
+
+
+def _on_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+_SNAPSHOT_CAPTURE = {
+    "run_id": "run1",
+    "lease_generation": 1,
+    "container_id": "container-run1",
+    "owner": "a" * 64,
+    "snapshot_id": "b" * 32,
+}
+
+
+def _snapshot_app(controller: _SnapshotController):
+    return create_app(
+        backend=ContainerBackend(image="img"),
+        token="sandbox-manager-secret",
+        shared_session_supervisor=_SharedSupervisor(),  # type: ignore[arg-type]
+        sandbox_archive_controller=controller,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_capture_inspects_its_run_container_off_the_event_loop(monkeypatch):
+    inspected_on_loop: list[bool] = []
+
+    def inspect(_manager, container: str, *, verify_mounts: bool = True):
+        inspected_on_loop.append(_on_event_loop())
+        return ChatSandboxInspection(
+            container_id="container-run1",
+            name=container,
+            status=ChatSandboxStatus.STOPPED,
+            running=False,
+            image="img",
+            labels={ENVIRONMENT_TEST_LABEL: "run1"},
+            mounts=(),
+            networks=(),
+        )
+
+    monkeypatch.setattr(ChatSandboxManager, "inspect", inspect)
+    controller = _SnapshotController([])
+    app = _snapshot_app(controller)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.post(
+            "/environment-snapshots/capture",
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
+            json=_SNAPSHOT_CAPTURE,
+        )
+
+    assert response.status_code == 200
+    assert inspected_on_loop == [False], "docker inspect must not block the event loop"
+    assert controller.captured == ["container-run1"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_snapshot_inspection_is_refused_like_a_failed_capture(monkeypatch):
+    def inspect(_manager, _container: str, *, verify_mounts: bool = True):
+        raise SandboxError("docker daemon did not answer")
+
+    monkeypatch.setattr(ChatSandboxManager, "inspect", inspect)
+    controller = _SnapshotController([])
+    app = _snapshot_app(controller)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.post(
+            "/environment-snapshots/capture",
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
+            json=_SNAPSHOT_CAPTURE,
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "docker daemon did not answer"
+    assert controller.captured == []
+
+
+@pytest.mark.asyncio
+async def test_environment_cancel_takes_the_supervisor_lock_off_the_event_loop():
+    supervisor = _SharedSupervisor()
+    cancelled_on_loop: list[bool] = []
+
+    def cancel_environment(thread_id: str, activation_owner: str) -> None:
+        cancelled_on_loop.append(_on_event_loop())
+
+    supervisor.cancel_environment = cancel_environment  # type: ignore[attr-defined]
+
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(supervisor)), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.post(
+            "/workspaces/athr_source/environment/cancel",
+            params={"activation_owner": "activation-1"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"cancelled": True}
+    assert cancelled_on_loop == [False]
 
 
 @pytest.mark.asyncio

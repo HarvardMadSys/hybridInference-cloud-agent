@@ -2630,6 +2630,28 @@ def test_a_token_still_closes_after_a_manifest_drops_its_opener(kind):
     assert manager.items[_spec().container_name].running is False
 
 
+def test_closing_a_terminal_does_not_arm_the_idle_deadline_of_a_lost_group():
+    """A lost group still reads as running, but nothing will ever stop it again.
+
+    Armed, the idle sweep would pick it on every pass and fail each time.
+    """
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=30, clock=lambda: 100.0)
+    supervisor.register_manifest(_spec(), _members())
+    token, _ = supervisor.terminal_opened("athr_source")
+    manager.items.pop(_spec().container_name)
+    with pytest.raises(RetainedChatLost, match="missing"):
+        supervisor.list_for_thread("athr_peer")
+    group = supervisor._members["athr_source"]
+    assert group.container_lost is True
+    assert group.inspection.running is True
+
+    supervisor.terminal_closed("athr_source", token, last_activity_monotonic=90.0)
+
+    assert group.idle_deadline is None
+    assert supervisor.sweep() == []
+
+
 def test_a_changed_idle_timeout_arms_the_next_quiet_moment_with_the_new_value():
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=30, clock=lambda: 100.0)

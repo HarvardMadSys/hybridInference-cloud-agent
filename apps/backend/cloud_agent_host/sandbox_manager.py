@@ -2446,7 +2446,15 @@ def create_app(
                 safe_cause = RuntimeError(f"{component} cleanup failed ({error_type})")
                 raise RuntimeError("sandbox manager shutdown cleanup failed") from safe_cause
 
-    app = FastAPI(title="Agent sandbox manager", docs_url=None, redoc_url=None, lifespan=lifespan)
+    # No schema or docs routes: they are served outside the routes' auth
+    # dependency, and nothing reads them.
+    app = FastAPI(
+        title="Agent sandbox manager",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import JSONResponse
 
@@ -2912,14 +2920,16 @@ def create_app(
         if archive_controller is None or retained_manager is None:
             raise HTTPException(status_code=409, detail="snapshots are not configured here")
         spec = environment_run_spec(body.run_id, body.lease_generation, body.sandbox_image_digest)
-        inspection = retained_manager.inspect(spec.container_name)
-        if (
-            inspection is None
-            or inspection.container_id != body.container_id
-            or inspection.labels.get(ENVIRONMENT_TEST_LABEL) != body.run_id
-        ):
-            raise HTTPException(status_code=404, detail="environment run container not found")
         try:
+            # ``docker container inspect`` can take its whole timeout on a slow
+            # daemon, so it runs off the event loop like the capture itself.
+            inspection = await endpoint_calls.run(retained_manager.inspect, spec.container_name)
+            if (
+                inspection is None
+                or inspection.container_id != body.container_id
+                or inspection.labels.get(ENVIRONMENT_TEST_LABEL) != body.run_id
+            ):
+                raise HTTPException(status_code=404, detail="environment run container not found")
             return await endpoint_calls.run(
                 archive_controller.capture_environment_snapshot,
                 spec,
@@ -3921,7 +3931,11 @@ def create_app(
     async def environment_cancel(
         workspace_id: str, activation_owner: str, _: None = Depends(authenticate)
     ) -> dict[str, bool]:
-        retained_owner(workspace_id).cancel_environment(workspace_id, activation_owner)
+        def cancel() -> None:
+            retained_owner(workspace_id).cancel_environment(workspace_id, activation_owner)
+
+        # The supervisor's lock stays off the event loop, as in ``prepare``.
+        await endpoint_calls.run(cancel)
         return {"cancelled": True}
 
     @app.post("/workspaces/{workspace_id}/environment/prepare")
