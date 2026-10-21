@@ -1,11 +1,11 @@
-"""Appending a turn to a conversation the way production does.
+"""Appending a person's turn to a conversation the way production does.
 
-Production never appends a follow-up in a transaction of its own. Every turn
-after the first is written by ``insert_follow_up`` inside the transaction that
-decided to write it: the queue's settlement promoting a waiting message, an
-idle-only message, or a goal round. A test whose subject is something else and
-that needs a later turn as a precondition calls that same function, committed
-on its own, rather than a store method only tests reached.
+Production never appends a follow-up in a transaction of its own. Every
+person's turn after the first is written by ``insert_follow_up`` inside the
+transaction that decided to write it: the queue's settlement promoting a
+waiting message, or an idle-only message. A test whose subject is something
+else and that needs a later turn as a precondition calls that same function,
+committed on its own, rather than a store method only tests reached.
 """
 
 from __future__ import annotations
