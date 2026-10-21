@@ -104,9 +104,12 @@ never reactivates an old environment value.
 
 Configure automatic lifecycle archives only in **Admin → Settings → Sandbox**.
 Cloud Agent stores them as one revisioned policy in the Agent database, and no
-environment variable configures them: the `AGENT_SANDBOX_ARCHIVE_S3_*` variables
-under *Sandbox deletion archives* configure the separate archive the **Archive to
-S3 and delete** control takes. The lifecycle archive destination is fixed at
+environment variable sets that policy or its destination. The
+`AGENT_SANDBOX_ARCHIVE_S3_*` variables under *Sandbox deletion archives* are a
+one-time import for the separate archive the **Archive to S3 and delete**
+control takes, and `AGENT_SANDBOX_ARCHIVE_STATE_DIR` is where a Sandbox Manager
+keeps the local state of both, restorable checkpoints included. The lifecycle
+archive destination is fixed at
 `s3://freeinference/cloud-agent/sandbox`. The saved policy contains enablement,
 region, bounded upload sizes, and either an AWS access key or the workload
 identity fields (customer-managed KMS key ARN and expected bucket owner). The
