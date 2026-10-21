@@ -130,12 +130,6 @@ export function ago(value: string | null | undefined, now: number = Date.now()):
   });
 }
 
-/** A UTC calendar day, without a time, for bucket labels. */
-export function utcDate(value: string | null | undefined): string {
-  if (!value || !Number.isFinite(Date.parse(value))) return 'Unavailable';
-  return new Date(value).toLocaleDateString('en-US', { dateStyle: 'medium', timeZone: 'UTC' });
-}
-
 export function number(value: number | null | undefined): string {
   // Any finite number is shown, including a negative one. Hiding a value the
   // code produced behind "Unavailable" is how a wrong count goes unnoticed.

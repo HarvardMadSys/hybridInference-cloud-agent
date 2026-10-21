@@ -4,7 +4,6 @@ import type { DomainRange } from './trajectoryTimeline';
 import {
   activeWindow,
   committedRange,
-  fractionOf,
   rangeFraction,
   sameZoom,
   shiftedWindow,
@@ -46,7 +45,6 @@ describe('viewportAfterWheel', () => {
     const window_ = next as DomainRange;
     expect(windowDuration(window_)).toBeLessThan(windowDuration(DOMAIN));
     expect(valueAtFraction(window_, 0.5)).toBeCloseTo(30_000, 6);
-    expect(fractionOf(30_000, window_)).toBeCloseTo(0.5, 6);
   });
 
   it('keeps a zoom pinned to the left edge', () => {

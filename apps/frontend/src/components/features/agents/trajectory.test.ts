@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentJobEventApi } from '@/lib/api/agents';
-import { filterTrajectory, preview, toSessionLog, toTrajectory } from './trajectory';
+import { preview, toSessionLog, toTrajectory } from './trajectory';
 
 function event(over: Partial<AgentJobEventApi> & { id: number }): AgentJobEventApi {
   return {
@@ -123,27 +123,6 @@ describe('preview', () => {
 
   it('renders a structured payload rather than [object Object]', () => {
     expect(preview({ a: 1 })).toBe('{"a":1}');
-  });
-});
-
-describe('filterTrajectory', () => {
-  const rows = toTrajectory([
-    event({
-      id: 1,
-      event_type: 'tool_use',
-      payload: { id: 't1', name: 'Bash', detail: 'cargo build' },
-    }),
-    event({ id: 2, event_type: 'message', payload: { text: 'done' } }),
-  ]);
-
-  it('matches what the reader can actually see on the row', () => {
-    expect(filterTrajectory(rows, 'cargo').map((row) => row.id)).toEqual([1]);
-    expect(filterTrajectory(rows, 'BASH').map((row) => row.id)).toEqual([1]);
-    expect(filterTrajectory(rows, 'message').map((row) => row.id)).toEqual([2]);
-  });
-
-  it('returns everything for an empty query', () => {
-    expect(filterTrajectory(rows, '   ')).toHaveLength(2);
   });
 });
 

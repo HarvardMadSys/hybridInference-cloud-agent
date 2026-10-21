@@ -44,7 +44,6 @@ import {
   unpinAgentJob,
   streamAgentTerminal,
   writeAgentTerminalInput,
-  writeAgentJobFile,
   type AgentJobApi,
   type AgentJobFilesApi,
   type AgentJobUsageApi,
@@ -222,7 +221,6 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentGoal: vi.fn(),
   streamAgentTerminal: vi.fn(),
   writeAgentTerminalInput: vi.fn(),
-  writeAgentJobFile: vi.fn(),
 }));
 
 const AGENT_CONFIG = {
@@ -1753,7 +1751,6 @@ describe('JobDetail', () => {
     vi.mocked(resizeAgentTerminal).mockReset();
     vi.mocked(streamAgentTerminal).mockReset();
     vi.mocked(writeAgentTerminalInput).mockReset();
-    vi.mocked(writeAgentJobFile).mockReset();
     sessionStorage.clear();
     localStorage.clear();
   });
@@ -5199,7 +5196,6 @@ describe('JobDetail', () => {
     expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Edit README.md' })).not.toBeInTheDocument();
-    expect(writeAgentJobFile).not.toHaveBeenCalled();
   });
 
   it('expands a directory in place and keeps the tree around the open file', async () => {
