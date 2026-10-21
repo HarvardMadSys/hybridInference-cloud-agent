@@ -4406,8 +4406,8 @@ def run_forever(
             # exactly when it is worth asking.
             claims += 1
             turn_worker_id = f"{worker_id}-{claims}"
-            # Selected before the request, exactly as the single-process path
-            # does: the wait for a claim is part of the startup a user feels.
+            # Selected before the request: the wait for a claim is part of
+            # the startup a user feels.
             # The slot is claimed here and not in the child, so one attempt
             # costs one sample however the turn is actually executed.
             measurement = operation_profiling.start_operation(
