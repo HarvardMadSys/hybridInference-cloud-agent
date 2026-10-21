@@ -276,6 +276,30 @@ def test_workload_identity_needs_the_kms_key_and_bucket_owner(missing: str) -> N
         SandboxArchiveS3Config.from_policy(policy, aws_access_key_id="", aws_secret_access_key="")
 
 
+@pytest.mark.parametrize("missing", [(), ("expected_bucket_owner", "kms_key_arn")])
+def test_a_config_given_no_credentials_keeps_the_policys_access_key(
+    missing: tuple[str, ...],
+) -> None:
+    """Built directly, a config uses the policy's own key, as ``from_policy`` does.
+
+    With the KMS key and owner it is not workload identity, and without them
+    it is not refused.
+    """
+    policy = _policy(
+        **dict.fromkeys(missing, ""),
+        aws_access_key_id=_ACCESS_KEY_ID,
+        aws_secret_access_key=_SECRET_ACCESS_KEY,
+    )
+
+    config = SandboxArchiveS3Config(policy)
+
+    assert config == SandboxArchiveS3Config.from_policy(policy)
+    assert config.aws_access_key_id == _ACCESS_KEY_ID
+    assert config.aws_secret_access_key == _SECRET_ACCESS_KEY
+    assert config.as_policy().uses_access_key
+    assert _SECRET_ACCESS_KEY not in repr(config)
+
+
 def test_single_upload_uses_opaque_key_sha256_kms_and_expected_owner() -> None:
     client = RecordingS3Client()
     uploader = SandboxArchiveS3Uploader(_config(), client=client)

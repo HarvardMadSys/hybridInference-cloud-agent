@@ -125,21 +125,34 @@ class SandboxArchiveS3Config:
     """
 
     policy: SandboxArchivePolicy
-    aws_access_key_id: str = field(default="", repr=False)
-    aws_secret_access_key: str = field(default="", repr=False)
+    # A credential left as None is the policy's own.
+    aws_access_key_id: str | None = field(default=None, repr=False)
+    aws_secret_access_key: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Refuse a disabled policy, or workload identity without its KMS key and owner."""
         if not isinstance(self.policy, SandboxArchivePolicy) or not self.policy.enabled:
             raise SandboxArchiveConfigError("sandbox archive policy is disabled")
-        if not self.aws_access_key_id and not self.policy.expected_bucket_owner:
+        key_id = (
+            self.policy.aws_access_key_id
+            if self.aws_access_key_id is None
+            else self.aws_access_key_id
+        )
+        secret = (
+            self.policy.aws_secret_access_key
+            if self.aws_secret_access_key is None
+            else self.aws_secret_access_key
+        )
+        if not key_id and not self.policy.expected_bucket_owner:
             raise SandboxArchiveConfigError(
                 "sandbox archive expected bucket owner must be a 12-digit AWS account id"
             )
-        if not self.aws_access_key_id and not self.policy.kms_key_arn:
+        if not key_id and not self.policy.kms_key_arn:
             raise SandboxArchiveConfigError(
                 "sandbox archive KMS key must be a key ARN, not an alias"
             )
+        object.__setattr__(self, "aws_access_key_id", key_id)
+        object.__setattr__(self, "aws_secret_access_key", secret)
         # Validated by the policy's own rules, and compared with the config.
         object.__setattr__(
             self,
@@ -147,8 +160,8 @@ class SandboxArchiveS3Config:
             replace(
                 self.policy,
                 access_key_auth=False,
-                aws_access_key_id=self.aws_access_key_id,
-                aws_secret_access_key=self.aws_secret_access_key,
+                aws_access_key_id=key_id,
+                aws_secret_access_key=secret,
             ),
         )
 
@@ -213,14 +226,8 @@ class SandboxArchiveS3Config:
         """Build the config for one enabled policy, with its own or the given credentials."""
         return cls(
             policy=policy,
-            aws_access_key_id=(
-                policy.aws_access_key_id if aws_access_key_id is None else aws_access_key_id
-            ),
-            aws_secret_access_key=(
-                policy.aws_secret_access_key
-                if aws_secret_access_key is None
-                else aws_secret_access_key
-            ),
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
         )
 
     def as_policy(self) -> SandboxArchivePolicy:
@@ -699,8 +706,8 @@ class SandboxArchiveS3Uploader:
             if self._client is None:
                 self._client = _default_s3_client(
                     self.config.region,
-                    aws_access_key_id=self.config.aws_access_key_id,
-                    aws_secret_access_key=self.config.aws_secret_access_key,
+                    aws_access_key_id=self.config.policy.aws_access_key_id,
+                    aws_secret_access_key=self.config.policy.aws_secret_access_key,
                 )
             return self._client
 
