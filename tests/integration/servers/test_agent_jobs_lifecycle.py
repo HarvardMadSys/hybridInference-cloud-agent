@@ -32,7 +32,6 @@ from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
     get_grant_client,
-    get_log_store,
     get_storage,
 )
 from cloud_agent.api.worker import verify_claiming_host
@@ -160,9 +159,6 @@ async def api(monkeypatch):
     app.dependency_overrides[get_gateway_client] = _FakeGateway
     app.dependency_overrides[get_grant_client] = _FakeGrants
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
-    # No log store here either: the source's app had no services container,
-    # so spend and usage were absent rather than a fabricated zero.
-    app.dependency_overrides[get_log_store] = lambda: None
     # The source overrode ``verify_api_key`` with ``role: "pro"``, which never
     # took effect: ``authenticate_agent_owner`` calls that dependency directly,
     # so FastAPI could not intercept it, and the real one answered with an
