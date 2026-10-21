@@ -51,8 +51,12 @@ def store():
         queue_job_ledger_refresh=AsyncMock(),
     )
 
-    async def job_usage_reads(*, job_id: str, user_id: str) -> dict:
-        # The one-snapshot read, made of the rows each test sets above.
+    async def job_usage_reads(*, job_id: str, user_id: str) -> dict | None:
+        # The one-snapshot read, made of the rows each test sets above — and
+        # scoped the way the real snapshot read is: None for someone else's
+        # job, a missing one, or a deleted conversation.
+        if job_id != "ajob_1" or user_id != "owner":
+            return None
         return {
             "job": fake.get_job.return_value,
             "ledger_rows": fake.ledger_rows_for_job.return_value,
@@ -98,6 +102,16 @@ async def test_usage_keeps_runtime_and_gateway_counts_in_separate_same_job_field
 
 
 @pytest.mark.asyncio
+async def test_a_usage_read_answers_from_the_scoped_snapshot_alone(app, store):
+    """GET /usage fences inside the owner-scoped snapshot read, with no whole-job fetch."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/v1/agent/jobs/ajob_1/usage")
+    assert response.status_code == 200
+    store.get_job.assert_not_awaited()
+    store.job_usage_reads.assert_awaited_once_with(job_id="ajob_1", user_id="owner")
+
+
+@pytest.mark.asyncio
 async def test_refresh_returns_existing_cache_and_only_enqueues_work(app, store):
     store.ledger_rows_for_job.return_value = [
         ledger_row(refreshing=True, queried_at=END - timedelta(seconds=30))
@@ -117,9 +131,14 @@ async def test_another_owner_cannot_read_or_queue_usage(app, store, method, path
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await getattr(client, method)("/v1/agent/jobs/ajob_other" + path)
     assert response.status_code == 404
-    store.job_usage_reads.assert_not_awaited()
     store.ledger_rows_for_job.assert_not_awaited()
     store.queue_job_ledger_refresh.assert_not_awaited()
+    if method == "post":
+        # The refresh still refuses on the ownership check, before any read.
+        store.job_usage_reads.assert_not_awaited()
+    else:
+        # The read itself is owner-scoped: it refuses by answering None.
+        store.job_usage_reads.assert_awaited_once_with(job_id="ajob_other", user_id="owner")
 
 
 @pytest.mark.asyncio
@@ -165,7 +184,12 @@ async def test_jobs_without_attempts_only_wait_for_usage_while_still_runnable(
         "cache_read_tokens": None,
         "normalized_input_tokens": None,
     }
-    store.get_job.assert_awaited_once_with("ajob_1")
+    if method == "post":
+        # The refresh still fetches the whole job for its ownership check.
+        store.get_job.assert_awaited_once_with("ajob_1")
+    else:
+        # The read answers from the owner-scoped snapshot alone.
+        store.get_job.assert_not_awaited()
     store.job_usage_reads.assert_awaited_once_with(job_id="ajob_1", user_id="owner")
 
 

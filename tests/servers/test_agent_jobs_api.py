@@ -1407,7 +1407,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
 
     async def get_thread_for_job(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         job = self.jobs.get(job_id)
-        if job is None or job["user_id"] != user_id:
+        # The real read joins the thread and refuses a deleted conversation.
+        if job is None or job["user_id"] != user_id or job.get("deleted_at") is not None:
             return None
         thread_id = job["thread_id"]
         jobs = sorted(
@@ -1440,7 +1441,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
 
     async def thread_stats_inputs(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         job = self.jobs.get(job_id)
-        if job is None or job["user_id"] != user_id:
+        # The real read joins the thread and refuses a deleted conversation.
+        if job is None or job["user_id"] != user_id or job.get("deleted_at") is not None:
             return None
         thread_id = job["thread_id"]
         thread_jobs = sorted(
@@ -1501,7 +1503,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
     ) -> list[dict[str, Any]] | None:
         """Every event of the containing thread, labelled by turn."""
         job = self.jobs.get(job_id)
-        if job is None or job.get("user_id") != user_id:
+        # The real read joins the thread and refuses a deleted conversation.
+        if job is None or job.get("user_id") != user_id or job.get("deleted_at") is not None:
             return None
         thread_id = job.get("thread_id")
         turns = {
@@ -2603,6 +2606,39 @@ async def test_thread_stats_are_owner_scoped(client: AsyncClient, store: FakeSto
     response = await client.get(f"/v1/agent/jobs/{job_id}/thread/stats")
 
     assert response.status_code == 404
+
+
+async def test_thread_reads_answer_from_the_owner_scoped_query_alone(
+    client: AsyncClient, store: FakeStorage
+):
+    """Thread, stats, and event pages fence and serve in one owner-scoped read.
+
+    The query that serves each read is already scoped to the caller's own,
+    undeleted job, so a whole-job fetch before it — sandbox subqueries,
+    skill summaries, conversation state — buys the handler nothing: it
+    discards the row. Someone else's job and a missing one must stay one
+    indistinguishable 404.
+    """
+    job_id = await _create_job(client)
+    foreign_id = await _create_job(client)
+    store.jobs[foreign_id]["user_id"] = _OTHER
+    whole_job = store.conversation_queries.get_job
+    calls = {"whole_job": 0}
+
+    async def counting_get_job(job_id: str):
+        calls["whole_job"] += 1
+        return await whole_job(job_id)
+
+    store.conversation_queries.get_job = counting_get_job
+
+    for suffix in ("/thread", "/thread/stats", "/thread/events"):
+        owned = await client.get(f"/v1/agent/jobs/{job_id}{suffix}")
+        assert owned.status_code == 200, (suffix, owned.text)
+        foreign = await client.get(f"/v1/agent/jobs/{foreign_id}{suffix}")
+        assert foreign.status_code == 404, suffix
+        missing = await client.get(f"/v1/agent/jobs/ajob_missing{suffix}")
+        assert missing.status_code == 404, suffix
+    assert calls["whole_job"] == 0
 
 
 async def test_thread_stats_answer_a_thread_that_never_ran(client: AsyncClient):
