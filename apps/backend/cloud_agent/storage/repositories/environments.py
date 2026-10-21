@@ -1728,6 +1728,15 @@ class PostgresEnvironmentRepository:
             and bool(attestation.get("guest_kernel"))
             and attestation.get("guest_kernel") != attestation.get("host_kernel")
         )
+        # Advisory emptiness check before the locking transaction (issue
+        # #775): the common empty case must never take the host-row lock,
+        # which conflicts with the same host's heartbeat. The locked path
+        # still re-checks the queued filter itself.
+        async with self._pool.acquire() as conn:
+            if not await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM agent_environment_runs WHERE state='queued')"
+            ):
+                return None
         async with self._pool.acquire() as conn, conn.transaction():
             policy = await conn.fetchrow(
                 "SELECT active_host FROM agent_runner_policy WHERE id FOR SHARE"
