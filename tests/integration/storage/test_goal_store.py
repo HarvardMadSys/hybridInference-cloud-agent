@@ -41,6 +41,7 @@ from cloud_agent.goals.models import (
 from cloud_agent.goals.report import GoalReportEnvelope
 from cloud_agent.goals.retry_policy import is_exhausted, wakeup_backoff
 from cloud_agent.storage._sql.goals import arm_finish_wakeup
+from cloud_agent.storage.repositories.goal_wakeups import _WAKEUP_COLUMNS
 from cloud_agent.storage.repositories.goals import _arm
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -250,11 +251,14 @@ async def _arm_finish(pool, job_id: str) -> str:
 
 
 async def _pending_wakeup(pool, thread_id: str) -> dict[str, Any] | None:
-    """The newest unprocessed wakeup of a conversation, if any."""
+    """The newest unprocessed wakeup of a conversation, if any.
+
+    In the columns a claim returns, so that a case can compare the two rows.
+    """
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM agent_goal_wakeups WHERE thread_id = $1 AND state = 'pending' "
-            "ORDER BY created_at DESC LIMIT 1",
+            f"SELECT {_WAKEUP_COLUMNS} FROM agent_goal_wakeups "
+            "WHERE thread_id = $1 AND state = 'pending' ORDER BY created_at DESC LIMIT 1",
             thread_id,
         )
     return None if row is None else dict(row)
