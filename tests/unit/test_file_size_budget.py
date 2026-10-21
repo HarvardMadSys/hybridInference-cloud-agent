@@ -12,7 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-PACKAGES = ("cloud_agent", "cloud_agent_host", "cloud_agent_shared")
 LIMIT = 1500
 
 #: Line counts of the modules over the limit when it arrived.
@@ -42,12 +41,11 @@ BASELINE = {
 
 
 def _modules() -> dict[str, int]:
-    """Every backend module and its line count, as ``wc -l`` counts them."""
-    counts = {}
-    for package in PACKAGES:
-        for path in (REPO / "apps" / "backend" / package).rglob("*.py"):
-            counts[path.relative_to(REPO).as_posix()] = path.read_text().count("\n")
-    return counts
+    """Every module under ``apps/backend`` and its line count, as ``wc -l`` counts them."""
+    return {
+        path.relative_to(REPO).as_posix(): path.read_bytes().count(b"\n")
+        for path in (REPO / "apps" / "backend").rglob("*.py")
+    }
 
 
 def test_no_module_grows_past_its_budget() -> None:
