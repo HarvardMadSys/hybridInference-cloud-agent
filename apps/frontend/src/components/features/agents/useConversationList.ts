@@ -100,7 +100,8 @@ async function readRows(
  *
  * `refresh` reads every loaded row again. `reorder` says only activity moved,
  * which can only lift rows to the top: it reads the first page and keeps the
- * rows below it when that page shows nothing else moved.
+ * rows below it when that page shows nothing else moved. The pinned list, and
+ * a list whose last refresh failed, are read in full instead.
  */
 export function useConversationList({
   q = '',
@@ -134,7 +135,8 @@ export function useConversationList({
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
-  const busy = useRef(false);
+  // The read under way: one of the whole list, or of the page after its cursor.
+  const busy = useRef<'all' | 'more' | null>(null);
   const [tick, setTick] = useState(0);
   const reload = useCallback(() => {
     generation.current += 1;
@@ -202,7 +204,7 @@ export function useConversationList({
       activeRequest.current?.abort();
       const controller = new AbortController();
       activeRequest.current = controller;
-      busy.current = true;
+      busy.current = next ? 'more' : 'all';
       const previous = dataRef.current;
       // Refresh even an empty loaded list without inserting a status row and
       // shifting the sidebar. First loads and explicit pagination show progress.
@@ -232,7 +234,7 @@ export function useConversationList({
       } finally {
         if (activeRequest.current === controller) activeRequest.current = null;
         if (generation.current === version) {
-          busy.current = false;
+          busy.current = null;
           setLoadMode(null);
         }
       }
@@ -242,7 +244,7 @@ export function useConversationList({
   useEffect(() => {
     const version = ++generation.current;
     setError(null);
-    busy.current = false;
+    busy.current = null;
     setLoadMode(null);
     if (enabled) void fetchPage(undefined, version);
     return () => {
@@ -256,11 +258,21 @@ export function useConversationList({
     if (reorder === appliedReorder.current) return;
     appliedReorder.current = reorder;
     const loaded = dataRef.current;
-    // A full read under way, or none finished yet, already covers the move.
-    if (!enabled || busy.current || loaded.identity !== identity || loaded.loadedRefresh === null)
+    // A read of the whole list under way, or none finished yet, already covers
+    // the move. A page being loaded does not, so this read replaces it.
+    if (
+      !enabled ||
+      busy.current === 'all' ||
+      loaded.identity !== identity ||
+      loaded.loadedRefresh === null
+    )
       return;
-    void fetchPage(undefined, generation.current, 'reorder');
-  }, [reorder, enabled, identity, fetchPage]);
+    // Rows below the first page can be kept only from a read of this `refresh`.
+    // Pinned rows keep their place as activity moves, so a page of the pinned
+    // list never shows what moved below it.
+    const mode = loaded.loadedRefresh === refresh && !pinned ? 'reorder' : 'full';
+    void fetchPage(undefined, ++generation.current, mode);
+  }, [reorder, enabled, identity, refresh, pinned, fetchPage]);
   const rows = data.identity === identity ? data.rows : EMPTY_ROWS;
   const cursor = data.identity === identity ? data.cursor : null;
   const loadedRefresh = data.identity === identity ? data.loadedRefresh : null;

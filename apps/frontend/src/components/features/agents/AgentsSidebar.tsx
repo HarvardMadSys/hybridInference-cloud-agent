@@ -166,6 +166,7 @@ export function AgentsSidebar({
     enabled: active && searching && debounced === query.trim(),
     userId,
     refresh,
+    reorder: activityMoved,
   });
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(query.trim()), 250);

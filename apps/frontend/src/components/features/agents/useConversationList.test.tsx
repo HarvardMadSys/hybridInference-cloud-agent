@@ -460,4 +460,87 @@ describe('reordering after activity moved', () => {
       server.all.slice(0, 100).map((item) => item.job.id),
     );
   });
+
+  it('replaces a page being loaded, which would not show the move', async () => {
+    const server = pagedServer(
+      Array.from({ length: 120 }, (_, index) => active(String(index), index)),
+    );
+    const { result, rerender } = renderHook(({ reorder }) => useConversationList({ reorder }), {
+      initialProps: { reorder: 0 },
+    });
+    await waitFor(() => expect(result.current.rows).toHaveLength(50));
+    api.list.mockImplementationOnce(
+      (_options: unknown, signal: AbortSignal) =>
+        new Promise((_resolve, reject) =>
+          signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError'))),
+        ),
+    );
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+    server.all = [active('30', -1), ...server.all.filter((item) => item.job.id !== '30')];
+
+    rerender({ reorder: 1 });
+    await waitFor(() => expect(result.current.rows[0]?.key).toBe('30'));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(api.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ limit: 50, cursor: undefined }),
+      expect.any(AbortSignal),
+    );
+    expect(result.current.cursor).toBe('50');
+    expect(result.current.error).toBeNull();
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(result.current.rows).toHaveLength(100));
+  });
+
+  it('reads every loaded page again when the last refresh failed', async () => {
+    const server = pagedServer(
+      Array.from({ length: 120 }, (_, index) => active(String(index), index)),
+    );
+    const { result, rerender } = renderHook(
+      ({ refresh, reorder }) => useConversationList({ refresh, reorder }),
+      { initialProps: { refresh: 0, reorder: 0 } },
+    );
+    await waitFor(() => expect(result.current.rows).toHaveLength(50));
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(result.current.rows).toHaveLength(100));
+    api.list.mockRejectedValueOnce(new Error('Offline'));
+    rerender({ refresh: 1, reorder: 0 });
+    await waitFor(() => expect(result.current.error).toBe('Offline'));
+    // Archived elsewhere while that refresh failed, below the first page.
+    server.all = server.all.filter((item) => item.job.id !== '80');
+    api.list.mockClear();
+
+    rerender({ refresh: 1, reorder: 1 });
+    await waitFor(() => expect(result.current.loadedRefresh).toBe(1));
+    expect(api.list.mock.calls.map(([options]) => [options.limit, options.cursor])).toEqual([
+      [100, undefined],
+    ]);
+    expect(result.current.rows.map((item) => item.key)).not.toContain('80');
+    expect(result.current.error).toBeNull();
+  });
+
+  it('reads the pinned list in full, since its rows keep their place as activity moves', async () => {
+    pagedServer(
+      Array.from({ length: 120 }, (_, index) => {
+        const item = active(String(index), index);
+        return { ...item, job: { ...item.job, pinned_at: '2026-08-01T00:00:00Z' } };
+      }),
+    );
+    const { result, rerender } = renderHook(
+      ({ reorder }) => useConversationList({ pinned: true, reorder }),
+      { initialProps: { reorder: 0 } },
+    );
+    await waitFor(() => expect(result.current.rows).toHaveLength(50));
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(result.current.rows).toHaveLength(100));
+    api.list.mockClear();
+
+    rerender({ reorder: 1 });
+    await waitFor(() => expect(api.list).toHaveBeenCalled());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(api.list.mock.calls.map(([options]) => [options.limit, options.cursor])).toEqual([
+      [100, undefined],
+    ]);
+    expect(result.current.rows).toHaveLength(100);
+  });
 });
