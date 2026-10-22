@@ -1478,7 +1478,7 @@ class SharedChatSessionSupervisor:
                     or (
                         not inspection.running
                         and inspection.status is not ChatSandboxStatus.CREATED
-                        and self._manager.network_for(spec) in inspection.networks
+                        and self._manager.network.network_for(spec) in inspection.networks
                         and self._is_quiescent(group)
                         and not group.stop_archive_blocked
                         and not group.orphan_finalization_pending
@@ -1525,7 +1525,7 @@ class SharedChatSessionSupervisor:
                 found.extend(
                     replace(item, group_busy=not self._is_quiescent(group)) for item in reconciled
                 )
-        self._manager.prune_orphan_networks(specs)
+        self._manager.network.prune_orphan_networks(specs)
         return found
 
     def _reconcile_checked_group(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
@@ -1538,6 +1538,7 @@ class SharedChatSessionSupervisor:
     ) -> builtins.list[SharedSessionDescriptor]:
         """Classify and recover the reserved exact group without holding the global lock."""
         group, spec = check.group, check.spec
+        network = self._manager.network
         found: builtins.list[SharedSessionDescriptor] = []
         marker_payload = None
         marker_error = None
@@ -1548,14 +1549,12 @@ class SharedChatSessionSupervisor:
                 if (
                     marker_payload is None
                     and inspection.status is not ChatSandboxStatus.CREATED
-                    and (
-                        inspection.running or self._manager.network_for(spec) in inspection.networks
-                    )
+                    and (inspection.running or network.network_for(spec) in inspection.networks)
                 ):
                     marker_prepared = self._prepare_markerless_final(spec, inspection)
             except BaseException as exc:
                 marker_error = exc
-        owned_bridge = self._manager.network_for(spec)
+        owned_bridge = network.network_for(spec)
         finalize = False
         retry = False
         blocked = False
@@ -4666,7 +4665,7 @@ class SharedChatSessionSupervisor:
         quarantine_unreadable = False
         with self._lock:
             self._require_lifecycle_check_locked(check)
-            owned_bridge = self._manager.network_for(group.spec)
+            owned_bridge = self._manager.network.network_for(group.spec)
             blocked = group.stop_archive_blocked
             retry_pending = (
                 group.stop_archive_pending
@@ -5533,14 +5532,14 @@ class SharedChatSessionSupervisor:
             self._renew_idle_host_rules()
             return []
         try:
-            self._manager.verify_host_rules(specs)
+            self._manager.network.verify_host_rules(specs)
             return []
         except SandboxError:
             pass
         try:
             # A failed check is never cached, so this is a full second attempt:
             # one Docker hiccup is not reason enough to stop every group.
-            self._manager.verify_host_rules(specs)
+            self._manager.network.verify_host_rules(specs)
             return []
         except SandboxError as exc:
             logger.error(
@@ -5609,7 +5608,7 @@ class SharedChatSessionSupervisor:
         activation repeats the same check and refuses on its own.
         """
         try:
-            self._manager.renew_host_rules()
+            self._manager.network.renew_host_rules()
         except SandboxError as exc:
             if not self._idle_host_rules_failing:
                 logger.warning(

@@ -399,10 +399,10 @@ def test_relay_names_use_the_current_bridge_endpoint(monkeypatch, address, alias
         },
     )
     if valid:
-        assert manager.relay_addresses("group-bridge") == {"agent-gateway": "10.240.0.2"}
+        assert manager.network.relay_addresses("group-bridge") == {"agent-gateway": "10.240.0.2"}
     else:
         with pytest.raises(SandboxError):
-            manager.relay_addresses("group-bridge")
+            manager.network.relay_addresses("group-bridge")
 
 
 def test_guest_network_sync_replaces_relays_and_resolver_and_is_idempotent(monkeypatch, tmp_path):
@@ -446,7 +446,7 @@ def test_guest_network_sync_replaces_relays_and_resolver_and_is_idempotent(monke
         return SimpleNamespace(returncode=0, stderr="")
 
     monkeypatch.setattr(manager, "_kata_privileged_exec", run)
-    manager._sync_kata_guest_network(spec, current)
+    manager._network_lifecycle._sync_kata_guest_network(spec, current)
     first = hosts.read_text()
     assert "127.0.0.1 localhost" in first
     assert "old-proxy" not in first
@@ -454,10 +454,10 @@ def test_guest_network_sync_replaces_relays_and_resolver_and_is_idempotent(monke
     # The deployment's one resolver, and nothing the image or a previous
     # generation left behind.
     assert resolv.read_text() == "nameserver 1.1.1.1\n"
-    manager._sync_kata_guest_network(spec, current)
+    manager._network_lifecycle._sync_kata_guest_network(spec, current)
     assert hosts.read_text() == first
     addresses["agent-gateway"] = "10.3.0.2"
-    manager._sync_kata_guest_network(spec, current)
+    manager._network_lifecycle._sync_kata_guest_network(spec, current)
     assert "10.2.0.2" not in hosts.read_text()
     assert "10.3.0.2 agent-gateway" in hosts.read_text()
 
@@ -503,7 +503,7 @@ def test_guest_network_sync_refuses_a_file_the_guest_user_could_rewrite(monkeypa
 
     monkeypatch.setattr(manager, "_kata_privileged_exec", run)
     with pytest.raises(SandboxError, match=r"resolv\.conf"):
-        manager._sync_kata_guest_network(spec, current)
+        manager._network_lifecycle._sync_kata_guest_network(spec, current)
     assert resolv.read_text() == "nameserver 10.0.0.2\n"
 
 

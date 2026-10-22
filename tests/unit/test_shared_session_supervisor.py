@@ -143,6 +143,10 @@ class _Manager:
         """The image already holds every version these tests launch."""
         self.runtimes_ensured = [*getattr(self, "runtimes_ensured", []), (runtime, version)]
 
+    @property
+    def network(self) -> _Manager:
+        return self
+
     def network_for(self, _spec: ChatSandboxSpec) -> str:
         return "agent-net"
 
@@ -4501,7 +4505,7 @@ def _archive_shutdown_group(
             # The controller reads the skipped marker and uploads nothing.
             events.append("archive:skipped")
             return
-        assert manager.network_for(_spec) in inspection.networks
+        assert manager.network.network_for(_spec) in inspection.networks
         events.append("archive")
 
     supervisor = SharedChatSessionSupervisor(
