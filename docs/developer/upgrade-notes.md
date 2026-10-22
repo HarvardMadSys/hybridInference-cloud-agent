@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0102_admin_sandbox_marker_order`. The supported deployment scripts run migrations
+`0103_terminal_resume_keyset`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -54,6 +54,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0103_terminal_resume_keyset` | Rebuilds the partial terminal-resume index on `(updated_at, id)`, matching the replay keyset so every bounded continuation seeks directly instead of sorting equal-time rows again. The online build does not block foreground writes and changes no row. A downgrade restores the preceding one-column index. |
 | `0102_admin_sandbox_marker_order` | Replaces revision 0097's membership trigger so that it locks a membership's sandbox group before marking the group changed, the order every write to the group already takes. Before it, settling, abandoning, ending, releasing or reaping a turn could deadlock with the admin terminal check or a workspace start on the same group, and Postgres aborted one of the two. Only the trigger function changes: no table is locked or rewritten, and the previous release's statements run unchanged under it. A downgrade restores the 0097 trigger. |
 | `0101_notification_state_deltas` | Adds coalesced per-owner job/thread change markers, an active-job index, and a partial recent-terminal marker index. Notification clients bootstrap active and recent terminal work in bounded keyset pages from a request-time database clock baseline, then request bounded snapshot deltas; no historical jobs are backfilled or replayed. Markers age out lazily after 24 hours and stale cursors explicitly rebuild. The previous push stream remains available. A downgrade drops only derived state and restores push-only trigger behavior. |
 | `0100_memory_archive_pages` | Builds partial owner/scope indexes for active memories and archive cursor pages concurrently. Existing memory rows are unchanged. Online builds avoid blocking foreground writes; interrupted builds can be retried. Offline SQL uses ordinary index builds. Downgrade drops only these indexes. |
