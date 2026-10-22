@@ -35,6 +35,7 @@ from cloud_agent.ports.ledger import LedgerRepository
 from cloud_agent.ports.mcp import McpConnectionRepository
 from cloud_agent.ports.mcp_catalog import McpCatalogRepository
 from cloud_agent.ports.model_preferences import ModelPreferenceRepository
+from cloud_agent.ports.notification_maintenance import NotificationMaintenanceRepository
 from cloud_agent.ports.operation_measurements import (
     MeasurementWriteResult,
     OperationMeasurements,
@@ -91,6 +92,7 @@ __all__ = [
     "McpConnectionRepository",
     "MeasurementWriteResult",
     "ModelPreferenceRepository",
+    "NotificationMaintenanceRepository",
     "OperationMeasurements",
     "OwnerUsageQueries",
     "PendingMessageRepository",

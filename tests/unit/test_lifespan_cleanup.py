@@ -30,6 +30,7 @@ _EXPECTED_SHUTDOWN_TASKS = (
     "mcp_catalog_task",
     "reaper_task",
     "environment_maintenance_task",
+    "notification_maintenance_task",
     "queued_follow_up_maintenance_task",
     "goal_wakeup_maintenance_task",
     "goal_scheduling_maintenance_task",
@@ -340,6 +341,10 @@ def _prepare(
         (
             "cloud_agent.bootstrap.lifespan.run_environment_maintenance",
             "environment_maintenance_task",
+        ),
+        (
+            "cloud_agent.bootstrap.lifespan.run_notification_maintenance",
+            "notification_maintenance_task",
         ),
         (
             "cloud_agent.bootstrap.lifespan.run_queued_follow_up_maintenance",

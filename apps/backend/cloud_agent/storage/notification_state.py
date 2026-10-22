@@ -6,7 +6,6 @@ and make delayed commits visible without scanning an owner's historical jobs.
 
 from __future__ import annotations
 
-from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.notification_state import (
@@ -18,9 +17,6 @@ from cloud_agent.notification_state import (
 
 if TYPE_CHECKING:
     import asyncpg
-
-_PRUNE_INTERVAL_SECONDS = 60.0
-_next_prune_at = 0.0
 
 
 async def read_notification_state(
@@ -38,7 +34,6 @@ async def read_notification_state(
         # request-receipt baseline, so response latency can neither replay old
         # history nor move the baseline past a completion found by this read.
         bootstrap_at = await conn.fetchval("SELECT clock_timestamp()") if cursor is None else None
-        await _prune_if_due(conn, force=cursor is None)
         async with conn.transaction(isolation="repeatable_read"):
             await conn.execute("SET LOCAL statement_timeout = '5s'")
             if cursor is None:
@@ -380,48 +375,3 @@ async def _changes(
         ),
         "reset_required": False,
     }
-
-
-async def _prune_if_due(conn: Any, *, force: bool = False) -> None:
-    """Bound retention work across bootstrap and long-lived delta clients."""
-    global _next_prune_at
-
-    now = monotonic()
-    if not force and now < _next_prune_at:
-        return
-    _next_prune_at = now + _PRUNE_INTERVAL_SECONDS
-    try:
-        await _prune(conn)
-    except BaseException:
-        _next_prune_at = 0.0
-        raise
-
-
-async def _prune(conn: Any) -> None:
-    """Bound cleanup; a cursor behind its owner's floor explicitly rebuilds.
-
-    Selected row versions are committed and locked here; concurrent rewrites
-    are skipped. The floor records this prune transaction, so old cursors do
-    not see it while cursors created after cleanup do, even when an unrelated
-    older transaction still pins the cluster-wide snapshot horizon.
-    """
-    async with conn.transaction(isolation="read_committed"):
-        await conn.execute("SET LOCAL statement_timeout = '5s'")
-        await conn.execute(
-            """
-            WITH expired AS (
-                SELECT kind,entity_id FROM agent_notification_changes
-                WHERE changed_at<NOW()-interval '24 hours'
-                ORDER BY changed_at LIMIT 500 FOR UPDATE SKIP LOCKED
-            ), removed AS (
-                DELETE FROM agent_notification_changes c USING expired e
-                WHERE c.kind=e.kind AND c.entity_id=e.entity_id
-                RETURNING c.user_id
-            )
-            INSERT INTO agent_notification_change_floors (user_id,floor_xid)
-            SELECT user_id,pg_current_xact_id()
-            FROM (SELECT DISTINCT user_id FROM removed) affected
-            ORDER BY user_id
-            ON CONFLICT (user_id) DO UPDATE SET floor_xid=EXCLUDED.floor_xid
-            """
-        )

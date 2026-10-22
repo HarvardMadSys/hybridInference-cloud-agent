@@ -43,6 +43,7 @@ from cloud_agent.storage.repositories import (
     PostgresMcpCatalogRepository,
     PostgresMcpConnectionRepository,
     PostgresModelPreferenceRepository,
+    PostgresNotificationMaintenanceRepository,
     PostgresOperationMeasurementRepository,
     PostgresOwnerUsageRepository,
     PostgresPendingMessageRepository,
@@ -89,6 +90,7 @@ if TYPE_CHECKING:
         McpCatalogRepository,
         McpConnectionRepository,
         ModelPreferenceRepository,
+        NotificationMaintenanceRepository,
         OperationMeasurements,
         OwnerUsageQueries,
         PendingMessageRepository,
@@ -150,6 +152,9 @@ class Storage:
         )
         self.mcp_catalog: McpCatalogRepository = PostgresMcpCatalogRepository(pool)
         self.model_preferences: ModelPreferenceRepository = PostgresModelPreferenceRepository(pool)
+        self.notification_maintenance: NotificationMaintenanceRepository = (
+            PostgresNotificationMaintenanceRepository(pool)
+        )
         self.owner_usage: OwnerUsageQueries = PostgresOwnerUsageRepository(pool)
         self.pending_messages: PendingMessageRepository = PostgresPendingMessageRepository(pool)
         self.profiling_control: ProfilingControl = PostgresProfilingControlRepository(pool)
