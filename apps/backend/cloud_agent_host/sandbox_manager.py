@@ -2539,7 +2539,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         This authenticated runner-to-sandbox-manager channel may carry one saved AWS
         access key. The sandbox manager keeps it in memory for S3 and never writes it
         into a sandbox marker. With no key, the sandbox manager's workload identity
-        remains the S3 authority. The destination stays fixed.
+        remains the S3 authority. The policy names the bucket; the prefix stays fixed.
         """
         if archive_controller is None:
             raise HTTPException(
