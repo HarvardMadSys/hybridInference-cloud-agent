@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0098_measurement_counts`. The supported deployment scripts run migrations
+`0099_thread_stats_rollups`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -54,6 +54,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0099_thread_stats_rollups` | Adds a derived, versioned per-attempt cache for owner thread statistics. Missing or stale attempts reduce their compact event projections in bounded 1,000-row pages; unchanged reads compare the newest indexed sequence and reuse the cache without transferring historical event rows. Event storage and the authoritative billing ledger are unchanged. A downgrade drops only this rebuildable cache. |
 | `0098_measurement_counts` | Backfills exact profiling counts into at most 64 counter shards per run and installs transactional accounting triggers. The historical scan holds a write-conflicting lock on measurements until migration commit; schedule this one-time write pause for the size of retained history. Raw samples and whole-run summaries are unchanged. Downgrade removes only counters and triggers. |
 | `0097_admin_sandbox_deltas` | Adds coalesced metadata-change markers and short-lived, content-free admin inventory snapshot pages. Admin refreshes request only changed identities after their initial snapshot; expired cursors explicitly resynchronize. Triggers cover sandboxes, membership counts, origin titles, and host heartbeats without a fleet-wide write lock. Deploy the migration before enabling the new UI; older list clients remain supported. A downgrade discards only derived inventory state and its triggers. |
 | `0096_snapshot_title_context` | Adds a bounded JSON title context to immutable sandbox snapshots. Existing snapshots start with an empty context and retain the deterministic changed-file fallback; newly captured snapshots persist recent conversation material so a publisher claim never rebuilds or transfers the sandbox's unbounded transcript. A downgrade drops only this derived context. |

@@ -47,13 +47,13 @@ BASELINE = {
 #: entries become stale on any shrink so they can only move downward.
 TEST_BASELINE = {
     "tests/integration/servers/test_pending_message_queue.py": 2420,
-    "tests/integration/storage/test_agent_job_store.py": 5999,
+    "tests/integration/storage/test_agent_job_store.py": 5966,
     "tests/integration/storage/test_compute_resources.py": 3862,
     "tests/integration/storage/test_goal_store.py": 2133,
     "tests/integration/storage/test_host_pool_store.py": 3431,
     "tests/integration/storage/test_mcp_connection_store.py": 3182,
     "tests/servers/test_admin_compute.py": 2101,
-    "tests/servers/test_agent_jobs_api.py": 6332,
+    "tests/servers/test_agent_jobs_api.py": 6331,
     "tests/unit/test_agent_publish_worker.py": 2080,
     "tests/unit/test_agent_runner.py": 2746,
     "tests/unit/test_agent_sandbox_manager.py": 3975,
