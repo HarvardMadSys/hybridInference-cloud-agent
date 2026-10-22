@@ -57,9 +57,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if __package__:
-    from . import accept_artifacts as aa, smoke
+    from . import accept_artifacts as aa, artifact_catalog, smoke
 else:  # direct execution from the release directory
     import accept_artifacts as aa
+    import artifact_catalog
     import smoke
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
@@ -81,7 +82,7 @@ ACCEPTANCE_PASSWORD = "acceptance-only-not-a-secret"
 #: Both are asserted by the deployment — the health probe reads the first and
 #: the console's bundle was compiled with the second — so a deployment that
 #: mixes them fails in a way no image check would catch.
-VARIANTS: dict[str, tuple[str, str]] = {"root": ("", "/api"), "agents": ("/agents", "/agents/api")}
+VARIANTS: dict[str, tuple[str, str]] = artifact_catalog.site_variants()
 
 #: What the deploy script prints on its way to the fence. Each line stands for a
 #: stage that has to have happened for the next one to mean anything, so they are
