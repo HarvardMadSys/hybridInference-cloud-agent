@@ -211,6 +211,35 @@ async def test_retention_bounds_each_pass_and_cleans_self_references(store, pool
         }
 
 
+async def test_archives_page_without_repeats_when_a_new_archive_arrives(store, pool):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_memories(id,user_id,content,description,origin,status,archived_at) "
+            "SELECT 'archive-' || lpad(n::text,6,'0'),'alice','old','old','agent','archived', "
+            "NOW()-make_interval(secs=>n) FROM generate_series(1,100000) n"
+        )
+    first = await store.agent_memory.list_memories("alice", None)
+    assert len(first["archived"]) == 50
+    assert first["archived_next_cursor"] is not None
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_memories(id,user_id,content,description,origin,status,archived_at) "
+            "VALUES ('new','alice','new','new','agent','archived',NOW())"
+        )
+    second = await store.agent_memory.list_memories(
+        "alice", None, archive_cursor=first["archived_next_cursor"]
+    )
+    assert len(second["archived"]) == 50
+    assert {m["id"] for m in first["archived"]}.isdisjoint(m["id"] for m in second["archived"])
+    assert second["archived"][0]["id"] == "archive-000051"
+    assert (await store.agent_memory.list_memories("bob", None))["archived"] == []
+    assert (await store.agent_memory.set_memory_enabled("alice", None, False))["archived"][0][
+        "id"
+    ] == "new"
+    with pytest.raises(ValueError):
+        await store.agent_memory.list_memories("alice", None, archive_cursor="invalid")
+
+
 async def test_migration_round_trip(store, pool):
     config = _db_config()
     try:

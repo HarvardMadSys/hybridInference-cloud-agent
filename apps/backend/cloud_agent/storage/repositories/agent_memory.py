@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -207,23 +208,47 @@ class PostgresAgentMemoryRepository:
         """Share the existing pool."""
         self._pool = pool
 
-    async def list_memories(self, user_id: str, repo: str | None) -> dict[str, Any]:
-        """Read one scope's active and archived memories and its enabled setting."""
+    async def list_memories(
+        self, user_id: str, repo: str | None, *, archive_cursor: str | None = None
+    ) -> dict[str, Any]:
+        """Read active memories and at most 50 archives, newest first."""
+        before = None
+        before_id = ""
+        if archive_cursor is not None:
+            timestamp, separator, before_id = archive_cursor.partition("|")
+            before = datetime.fromisoformat(timestamp)
+            if not separator or not before.tzinfo or not before_id or len(before_id) > 128:
+                raise ValueError("Invalid archive cursor")
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
+            active = await conn.fetch(
                 f"SELECT {_COLUMNS} FROM agent_memories "
-                "WHERE user_id = $1 AND repo IS NOT DISTINCT FROM $2 "
-                "ORDER BY archived_at DESC NULLS FIRST, created_at DESC, id",
+                "WHERE user_id = $1 AND COALESCE(repo, '') = $2 AND status='active' "
+                "ORDER BY created_at DESC, id",
                 user_id,
-                repo,
+                repo or "",
+            )
+            archived = await conn.fetch(
+                f"SELECT {_COLUMNS} FROM agent_memories "
+                "WHERE user_id=$1 AND COALESCE(repo, '')=$2 AND status='archived' "
+                "AND ($3::timestamptz IS NULL OR (archived_at,id) < ($3,$4)) "
+                "ORDER BY archived_at DESC,id DESC LIMIT 51",
+                user_id,
+                repo or "",
+                before,
+                before_id,
             )
             enabled = await _enabled(conn, user_id, repo)
-        memories = [_memory(row) for row in rows]
+        page = archived[:50]
         return AgentMemoryScopeView(
             repo=repo,
             enabled=enabled,
-            memories=[memory for memory in memories if memory.status == "active"],
-            archived=[memory for memory in memories if memory.status == "archived"],
+            memories=[_memory(row) for row in active],
+            archived=[_memory(row) for row in page],
+            archived_next_cursor=(
+                f"{page[-1]['archived_at'].isoformat()}|{page[-1]['id']}"
+                if len(archived) > 50
+                else None
+            ),
         ).model_dump(mode="json")
 
     async def add_memory(self, user_id: str, repo: str | None, content: str) -> dict[str, Any]:
