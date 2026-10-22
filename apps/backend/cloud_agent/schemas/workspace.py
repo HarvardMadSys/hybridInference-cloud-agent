@@ -175,11 +175,18 @@ class AgentGitCommit(BaseModel):
     authored_at: str
 
 
-class AgentGitWorkspaceResponse(BaseModel):
-    """Live diff, status, and commit data from the retained workspace."""
+class AgentGitWorkspaceMetadataResponse(BaseModel):
+    """Cheap status and revision data for invalidating an on-demand Git view."""
 
     available: bool
+    revision: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
     branch: str = ""
     changes: list[AgentGitChange] = Field(default_factory=list)
+    change_count: int = Field(0, ge=0)
+
+
+class AgentGitWorkspaceResponse(AgentGitWorkspaceMetadataResponse):
+    """Live diff, status, and commit data from the retained workspace."""
+
     patch: str = ""
     commits: list[AgentGitCommit] = Field(default_factory=list)

@@ -55,6 +55,7 @@ from cloud_agent.operation_measurement import (
 )
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import (
+    AgentGitWorkspaceMetadataResponse,
     AgentGitWorkspaceResponse,
     AgentTerminalSessionCreateRequest,
     AgentTerminalSessionInputRequest,
@@ -817,6 +818,58 @@ async def delete_agent_job_terminal(
         raise _terminal_sandbox_manager_http_error(exc) from exc
 
 
+def _git_workspace_response(
+    payload: dict[str, Any], *, metadata_only: bool
+) -> AgentGitWorkspaceMetadataResponse | AgentGitWorkspaceResponse:
+    if metadata_only:
+        return AgentGitWorkspaceMetadataResponse.model_validate(payload)
+    return AgentGitWorkspaceResponse.model_validate(payload)
+
+
+async def _agent_job_git_workspace(
+    *,
+    job_id: str,
+    user: dict[str, Any],
+    store: _WorkspaceStorage | None,
+    app_credentials: Any | None,
+    metadata_only: bool,
+) -> AgentGitWorkspaceMetadataResponse | AgentGitWorkspaceResponse:
+    job_store = _require_store(store)
+    job = await _owned_job(job_store.conversation_queries, job_id, user)
+    await _require_workspace_entitlement(
+        job=job, user=user, store=job_store, app_credentials=app_credentials
+    )
+    sandbox_manager = await _sandbox_manager_for_job(job_store, job)
+    if sandbox_manager is None:
+        return _git_workspace_response({"available": False}, metadata_only=metadata_only)
+    operation = sandbox_manager.git_metadata if metadata_only else sandbox_manager.git
+    try:
+        payload = await operation(_workspace_id(job), base_sha=job.get("base_sha"))
+        return _git_workspace_response(payload, metadata_only=metadata_only)
+    except SandboxManagerError as exc:
+        if _workspace_not_materialized(exc):
+            return _git_workspace_response({"available": False}, metadata_only=metadata_only)
+        raise _sandbox_manager_http_error(exc) from exc
+
+
+@router.get("/jobs/{job_id}/git/metadata", response_model=AgentGitWorkspaceMetadataResponse)
+async def get_agent_job_git_workspace_metadata(
+    job_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _WorkspaceStorage | None = Depends(get_storage),
+    app_credentials: Any | None = Depends(get_agent_app_credentials),
+) -> AgentGitWorkspaceMetadataResponse:
+    """Read a cheap live-workspace revision and changed-path summary."""
+    result = await _agent_job_git_workspace(
+        job_id=job_id,
+        user=user,
+        store=store,
+        app_credentials=app_credentials,
+        metadata_only=True,
+    )
+    return AgentGitWorkspaceMetadataResponse.model_validate(result)
+
+
 @router.get("/jobs/{job_id}/git", response_model=AgentGitWorkspaceResponse)
 async def get_agent_job_git_workspace(
     job_id: str,
@@ -825,19 +878,11 @@ async def get_agent_job_git_workspace(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentGitWorkspaceResponse:
     """Read live retained-workspace status, diff and recent commits."""
-    job_store = _require_store(store)
-    job = await _owned_job(job_store.conversation_queries, job_id, user)
-    await _require_workspace_entitlement(
-        job=job, user=user, store=job_store, app_credentials=app_credentials
+    result = await _agent_job_git_workspace(
+        job_id=job_id,
+        user=user,
+        store=store,
+        app_credentials=app_credentials,
+        metadata_only=False,
     )
-    sandbox_manager = await _sandbox_manager_for_job(job_store, job)
-    if sandbox_manager is None:
-        return AgentGitWorkspaceResponse(available=False)
-    try:
-        return AgentGitWorkspaceResponse(
-            **(await sandbox_manager.git(_workspace_id(job), base_sha=job.get("base_sha")))
-        )
-    except SandboxManagerError as exc:
-        if _workspace_not_materialized(exc):
-            return AgentGitWorkspaceResponse(available=False)
-        raise _sandbox_manager_http_error(exc) from exc
+    return AgentGitWorkspaceResponse.model_validate(result)

@@ -75,7 +75,7 @@ if TYPE_CHECKING:
     from cloud_agent.grants import GrantClient
     from cloud_agent.ports import (
         HostPoolRepository,
-        SnapshotRepository,
+        SnapshotPublishWorkerRepository,
         SourceControlRepository,
     )
     from cloud_agent.ports.environments import EnvironmentBindingRepository
@@ -92,7 +92,11 @@ class PublishStorage(Protocol):
     workspace it is publishing from.
     """
 
-    snapshot: SnapshotRepository
+    @property
+    def snapshot(self) -> SnapshotPublishWorkerRepository:
+        """Snapshot persistence needed by this flow."""
+        ...
+
     host_pool: HostPoolRepository
     source_control: SourceControlRepository
 
