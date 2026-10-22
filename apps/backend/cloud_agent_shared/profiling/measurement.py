@@ -12,7 +12,6 @@ from .clock import clock
 from .models import _EMPTY_SPAN, _NULL_SPAN, Measurement, _SpanRecord
 from .policy import _claim_budget, _load, _release_budget
 from .schema import (
-    _OUTCOMES,
     BOUNDARIES_BY_OPERATION,
     BOUNDARY_VERSION,
     COVERAGE_BY_OPERATION,
@@ -24,6 +23,7 @@ from .schema import (
     STARTUP_OPERATION,
     STARTUP_OUTCOME_ALIAS,
     STOP_REASON_EXPIRED,
+    V3_OUTCOMES,
 )
 
 
@@ -65,7 +65,7 @@ def start_operation(
         return None
     if clock().monotonic() > run.deadline_mono:
         return None
-    target_host = run.target.get("host")
+    target_host = run.manifest.target.get("host")
     if target_host is not None and target_host != host:
         return None
     if not _claim_budget(run):
@@ -73,21 +73,13 @@ def start_operation(
 
     measurement = Measurement(
         operation=operation,
-        run_id=run.run_id,
+        run_manifest=run.manifest,
         measurement_id=f"msm_{uuid.uuid4().hex[:16]}",
         started_mono_ns=clock().monotonic_ns(),
         deadline_mono=run.deadline_mono,
-        control_revision=_load().control.config_version,
-        run_operations=run.operations,
-        run_target=dict(run.target),
-        run_max_operations=run.max_operations,
-        run_continuous=run.continuous,
-        run_config_version=run.config_version,
-        run_source=run.source,
+        control_revision=loaded.control.config_version,
         producer=producer,
         coverage_scope=coverage_scope or COVERAGE_BY_OPERATION.get(operation, ""),
-        run_expires_at=run.expires_at_utc,
-        run_admission_instances=run.admission_instances,
         facts={"operation": operation, "request_kind": operation},
     )
     if host:
@@ -122,7 +114,7 @@ def bind(measurement: Measurement | None, **facts: Any) -> bool:
     # The measurement's own scope, not the deployment's current one: a record
     # handed over from a parent must be judged by the experiment that selected
     # it, and re-reading here would let a later experiment widen the filter.
-    for key, wanted in measurement.run_target.items():
+    for key, wanted in measurement.run_manifest.target.items():
         observed = measurement.facts.get(key)
         if observed is None or str(observed) != wanted:
             measurement.selected = False
@@ -376,9 +368,9 @@ def frozen_record(
     # that ``finish`` is about to re-decide from a later clock.
     finalize(measurement, outcome)
     frozen_outcome = measurement.frozen_outcome
-    if frozen_outcome not in _OUTCOMES:  # pragma: no cover - guarded by callers
+    if frozen_outcome not in V3_OUTCOMES:  # pragma: no cover - guarded by callers
         frozen_outcome = "incomplete"
-    if measurement.run_target and not measurement.bound:
+    if measurement.run_manifest.target and not measurement.bound:
         return None
     if measurement.frozen_payload is None:
         measurement.frozen_failure_stage = failure_stage
@@ -564,9 +556,9 @@ def to_record(
     # that delivers it also states the manifest, and a manifest built without
     # this would have to re-derive an instant that is the experiment's
     # identity -- the one thing it must not guess at.
-    if measurement.run_expires_at is not None:
-        record["run_expires_at"] = measurement.run_expires_at.isoformat()
-    elif measurement.run_continuous:
+    if measurement.run_manifest.expires_at is not None:
+        record["run_expires_at"] = measurement.run_manifest.expires_at.isoformat()
+    elif measurement.run_manifest.continuous:
         record["run_expires_at"] = None
     if measurement.operation == STARTUP_OPERATION:
         # A v1 consumer reads this field by name. It is written only where the
@@ -577,7 +569,7 @@ def to_record(
     # administrator started -- the deployment revision that authorized it. A
     # reader that has the revision can tell two experiments that reused a run
     # id apart, and can tell an old sample from one taken after a Stop.
-    record["run_source"] = measurement.run_source
+    record["run_source"] = measurement.run_manifest.source
     record["control_revision"] = measurement.control_revision
     if measurement.truncated:
         record["truncated"] = True

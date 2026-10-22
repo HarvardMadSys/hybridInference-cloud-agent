@@ -28,6 +28,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_grant_client, get_storage
+from cloud_agent.application.grant_revocation import revoke_detached_grants
 from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
@@ -332,6 +333,7 @@ async def heartbeat_host(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #
     # The grants of every residency this beat extends, once each, renewed after
     # the reply: see ``_renew_residency_grants``.
     renewals: dict[str, None] = {}
+    revocations: list[str] = []
     for residency_beat in body.residencies or []:
         extended = await job_store.residency.heartbeat_residency(
             thread_id=residency_beat.thread_id,
@@ -409,8 +411,7 @@ async def heartbeat_host(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #
                     sandbox_id=retained.sandbox_id,
                 )
                 if released and grants is not None:
-                    with contextlib.suppress(Exception):
-                        await grants.revoke(released)
+                    revocations.append(released)
                 continue
             # Starting/restarting is a bounded launch window. Renew only a
             # process that has proved itself LIVE.
@@ -453,6 +454,8 @@ async def heartbeat_host(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #
                         {**due, "activation_generation": retained.activation_generation}
                     )
                 )
+    if revocations:
+        background_tasks.add_task(revoke_detached_grants, grants, revocations)
     if renewals and grants is not None:
         background_tasks.add_task(_renew_residency_grants, grants, list(renewals))
     # This beat may carry the last report an agent update was waiting for.

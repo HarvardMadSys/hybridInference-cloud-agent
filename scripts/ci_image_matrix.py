@@ -10,66 +10,28 @@ from __future__ import annotations
 import argparse
 import json
 
-ARTIFACTS = [
-    {
-        "name": "control",
-        "arch": "arm64",
-        "smoke_args": "--role control",
-        "dockerfile": "deploy/control-plane/Dockerfile",
-        "runner": '["self-hosted","Linux","ARM64","image-verify-arm64"]',
-        "build_args": "",
-    },
-    {
-        # Mount prefixes are compiled into the bundle; check both variants.
-        "name": "web-root",
-        "arch": "arm64",
-        "smoke_args": "--role web --variant root",
-        "dockerfile": "deploy/control-plane/Dockerfile.web",
-        "runner": '["self-hosted","Linux","ARM64","image-verify-arm64"]',
-        "build_args": "NEXT_PUBLIC_BASE_PATH=\nNEXT_PUBLIC_AGENT_API_URL=/api\n",
-    },
-    {
-        "name": "web-agents",
-        "arch": "arm64",
-        "smoke_args": "--role web --variant agents",
-        "dockerfile": "deploy/control-plane/Dockerfile.web",
-        "runner": '["self-hosted","Linux","ARM64","image-verify-arm64"]',
-        "build_args": "NEXT_PUBLIC_BASE_PATH=/agents\nNEXT_PUBLIC_AGENT_API_URL=/agents/api\n",
-    },
-    {
-        "name": "runner",
-        "arch": "amd64",
-        "smoke_args": "--role runner",
-        "dockerfile": "deploy/host/Dockerfile.agent-runner",
-        "runner": '["self-hosted","Linux","X64","image-verify-x64"]',
-        "build_args": "",
-    },
-    {
-        "name": "sandbox",
-        "arch": "amd64",
-        "smoke_args": "--role sandbox",
-        "dockerfile": "deploy/sandbox/Dockerfile.agent-sandbox",
-        "runner": '["self-hosted","Linux","X64","image-verify-x64"]',
-        "build_args": "",
-    },
-    {
-        "name": "tunnel",
-        "arch": "amd64",
-        "smoke_args": "--role tunnel",
-        "dockerfile": "deploy/host/Dockerfile.agent-gateway-tunnel",
-        "runner": '["self-hosted","Linux","X64","image-verify-x64"]',
-        "build_args": "",
-    },
-]
+
+def _catalog():
+    # This file is executed by path in minimal CI, where sys.path starts at
+    # scripts/ rather than the repository root. Import lazily after adding the
+    # root, without importing any application package or third-party library.
+    import sys
+    from pathlib import Path
+
+    root = str(Path(__file__).resolve().parents[1])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from deploy.release.artifact_catalog import artifacts
+
+    return artifacts()
 
 
 def image_matrix(scope: str) -> list[dict[str, str]]:
     """Return the complete catalog unless the classifier proves a narrow scope."""
-    selected = {
-        "web": {"web-root", "web-agents"},
-        "backend": {"control", "runner", "sandbox"},
-    }.get(scope)
-    return [cell for cell in ARTIFACTS if selected is None or cell["name"] in selected]
+    entries = _catalog()
+    if scope in {"web", "backend"}:
+        entries = tuple(entry for entry in entries if scope in entry.ci_scopes)
+    return [entry.matrix_cell() for entry in entries]
 
 
 def main() -> None:

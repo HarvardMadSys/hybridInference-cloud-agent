@@ -1422,9 +1422,19 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         operation.update(state="ready", target_anchor_job_id=copied["id"])
         return copied
 
-    async def get_thread_for_job(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
+    async def get_thread_for_job(
+        self,
+        *,
+        job_id: str,
+        user_id: str,
+        cursor: str | None = None,
+        after: str | None = None,
+        limit: int = 50,
+        anchor: bool = False,
+    ) -> dict[str, Any] | None:
         job = self.jobs.get(job_id)
-        if job is None or job["user_id"] != user_id:
+        # The real read joins the thread and refuses a deleted conversation.
+        if job is None or job["user_id"] != user_id or job.get("deleted_at") is not None:
             return None
         thread_id = job["thread_id"]
         jobs = sorted(
@@ -1457,7 +1467,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
 
     async def thread_stats_inputs(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         job = self.jobs.get(job_id)
-        if job is None or job["user_id"] != user_id:
+        # The real read joins the thread and refuses a deleted conversation.
+        if job is None or job["user_id"] != user_id or job.get("deleted_at") is not None:
             return None
         thread_id = job["thread_id"]
         thread_jobs = sorted(
@@ -1518,7 +1529,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
     ) -> list[dict[str, Any]] | None:
         """Every event of the containing thread, labelled by turn."""
         job = self.jobs.get(job_id)
-        if job is None or job.get("user_id") != user_id:
+        # The real read joins the thread and refuses a deleted conversation.
+        if job is None or job.get("user_id") != user_id or job.get("deleted_at") is not None:
             return None
         thread_id = job.get("thread_id")
         turns = {
@@ -1552,6 +1564,41 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             return []
         attempt_id = self.jobs[job_id].get("current_attempt_id") or 100
         return [{"attempt_id": attempt_id, "attempt_no": 1, **newest}]
+
+    async def trajectory_timings(
+        self, *, job_ids: list[str], user_id: str, max_attempts: int
+    ) -> dict[str, Any]:
+        """Return the compact, owner-fenced projection used by the timeline."""
+        owned = [
+            job_id
+            for job_id in job_ids
+            if (job := self.jobs.get(job_id)) is not None
+            and job.get("user_id") == user_id
+            and job.get("deleted_at") is None
+        ]
+        attempts = [
+            {"job_id": job_id, **row}
+            for job_id in owned
+            for row in await self.job_attempts_telemetry(job_id=job_id)
+        ]
+        compact = []
+        if len(attempts) <= max_attempts:
+            for row in attempts:
+                tool_calls = row.get("tool_calls") or []
+                compact.append(
+                    {
+                        **row,
+                        "tool_time_ms": row.get("tool_time_ms"),
+                        "tool_calls_truncated": bool(row.get("tool_calls_truncated")),
+                        "tool_timing_exact": bool(tool_calls)
+                        and all(call.get("timing_source") == "exact" for call in tool_calls),
+                    }
+                )
+        return {
+            "owned_count": len(owned),
+            "attempt_count": len(attempts),
+            "attempts": compact,
+        }
 
     async def record_attempt_resources(
         self, *, attempt_id: int, lease_generation: int, rollup: dict[str, Any]
@@ -2136,6 +2183,12 @@ class _FakeGateway:
         """
         return list(_TEST_MODELS), dict(self.aliases)
 
+    async def model_catalog_bundle(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+        """The one-read admission bundle (issue #781): names, aliases, efforts."""
+        return list(_TEST_MODELS), dict(self.aliases), await self.model_reasoning_efforts(user_id)
+
     async def model_reasoning_efforts(self, user_id: str) -> dict[str, list[str]]:
         """Which models take a reasoning effort, and which values.
 
@@ -2622,6 +2675,39 @@ async def test_thread_stats_are_owner_scoped(client: AsyncClient, store: FakeSto
     assert response.status_code == 404
 
 
+async def test_thread_reads_answer_from_the_owner_scoped_query_alone(
+    client: AsyncClient, store: FakeStorage
+):
+    """Thread, stats, and event pages fence and serve in one owner-scoped read.
+
+    The query that serves each read is already scoped to the caller's own,
+    undeleted job, so a whole-job fetch before it — sandbox subqueries,
+    skill summaries, conversation state — buys the handler nothing: it
+    discards the row. Someone else's job and a missing one must stay one
+    indistinguishable 404.
+    """
+    job_id = await _create_job(client)
+    foreign_id = await _create_job(client)
+    store.jobs[foreign_id]["user_id"] = _OTHER
+    whole_job = store.conversation_queries.get_job
+    calls = {"whole_job": 0}
+
+    async def counting_get_job(job_id: str):
+        calls["whole_job"] += 1
+        return await whole_job(job_id)
+
+    store.conversation_queries.get_job = counting_get_job
+
+    for suffix in ("/thread", "/thread/stats", "/thread/events"):
+        owned = await client.get(f"/v1/agent/jobs/{job_id}{suffix}")
+        assert owned.status_code == 200, (suffix, owned.text)
+        foreign = await client.get(f"/v1/agent/jobs/{foreign_id}{suffix}")
+        assert foreign.status_code == 404, suffix
+        missing = await client.get(f"/v1/agent/jobs/ajob_missing{suffix}")
+        assert missing.status_code == 404, suffix
+    assert calls["whole_job"] == 0
+
+
 async def test_thread_stats_answer_a_thread_that_never_ran(client: AsyncClient):
     """A queued thread has no events yet and still renders a bar."""
     job_id = await _create_job(client)
@@ -2967,7 +3053,7 @@ async def test_create_fails_fast_on_a_model_this_deployment_cannot_serve(client:
 @pytest.mark.parametrize(
     ("read", "choices"),
     [
-        ("model_catalog_with_aliases", {}),
+        ("model_catalog_bundle", {}),
         ("model_reasoning_efforts", {"reasoning_effort": "high"}),
     ],
     ids=["model", "effort"],
@@ -3934,7 +4020,7 @@ async def test_expired_browser_jwt_is_not_reinterpreted_as_api_key(store: FakeSt
 # ``update_key_last_used``. The API-key branch was deleted on 2026-08-04 — it
 # had no producer here and never will — so the case has no subject left and
 # passed only because it injected the store production never has. Recorded in
-# MIGRATION.md's "Discarded tests" register, which also says where the property
+# the extraction record's "Discarded tests" register, which also says where the property
 # lives now: the gateway, which still authenticates API keys for its own
 # surfaces.
 
@@ -5740,7 +5826,7 @@ async def test_terminal_stream_drains_beyond_one_page(client: AsyncClient, store
 # The case below is its in-place replacement. The full record — the original's
 # four assertions, which three of them the replacement keeps verbatim, and why
 # "does not parse at all" is stronger than "parses with a narrow scope" — is
-# MIGRATION.md § Discarded tests → "`test_agent_jobs_api.py` — two cases E9
+# the extraction record § Discarded tests → "`test_agent_jobs_api.py` — two cases E9
 # replaced in place (E7/E8/E9)", case 1. Ratified 2026-08-04.
 
 
@@ -5780,7 +5866,7 @@ async def test_the_claim_hands_over_a_gateway_grant_not_a_minted_token(
 # The case below is its in-place replacement: same four endpoints, same
 # positive control, line-for-line identical otherwise. The full record — and
 # the note that ``_worker_claims``' 403 scope branch lost its only test with
-# the original — is MIGRATION.md § Discarded tests → "`test_agent_jobs_api.py`
+# the original — is the extraction record § Discarded tests → "`test_agent_jobs_api.py`
 # — two cases E9 replaced in place (E7/E8/E9)", case 2. Ratified 2026-08-04.
 
 
@@ -5824,7 +5910,7 @@ async def test_the_sandbox_grant_cannot_write_job_state(client: AsyncClient):
 # ``insufficient_scope`` on ``/v1/agent/jobs``) and, for the worker surface,
 # ``test_the_sandbox_grant_cannot_write_job_state`` (the in-place replacement
 # for ``test_sandbox_token_cannot_write_job_state``; 401 against the gateway
-# grant the sandbox now carries). Recorded in MIGRATION.md's discarded-test
+# grant the sandbox now carries). Recorded in the extraction record's discarded-test
 # register.
 
 
@@ -8114,7 +8200,7 @@ async def test_web_search_provider_enables_mcp_without_exposing_keys(
     monkeypatch.setattr(
         worker.web_search,
         "text_setting",
-        lambda key, fallback="": values.get(key, fallback),
+        lambda key: values[key],
     )
     created = await client.post("/v1/agent/jobs", json=_job_body(runtime=runtime))
     assert created.status_code == 201, created.text
@@ -8864,6 +8950,126 @@ async def test_attempt_telemetry_is_fenced_to_the_owned_job(
     assert (await client.get(f"/v1/agent/jobs/{job_id}/attempts/999/telemetry")).status_code == 404
     store.jobs[another]["user_id"] = "someone-else"
     assert (await client.get(f"/v1/agent/jobs/{another}/attempts/999/telemetry")).status_code == 404
+
+
+async def test_trajectory_telemetry_batches_attempt_timing_without_detail(
+    client: AsyncClient, store: FakeStorage, monkeypatch: pytest.MonkeyPatch
+):
+    """One owner-fenced read keeps requested turn and attempt order plus nulls."""
+    first_job = await _create_job(client)
+    second_job = await _create_job(client)
+    started = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+    store.attempt_telemetry[first_job] = [
+        {
+            "attempt_id": 101,
+            "attempt_no": 1,
+            "continuity_mode": "new",
+            "context_status": "new",
+            "started_at": started,
+            "finished_at": started + timedelta(milliseconds=1_234),
+            "tool_time_ms": 400,
+            "tool_calls": [
+                {"call_seq": 1, "timing_source": "exact"},
+                {"call_seq": 2, "timing_source": "exact"},
+            ],
+        },
+        {
+            "attempt_id": 102,
+            "attempt_no": 2,
+            "continuity_mode": "warm_native",
+            "context_status": "restored",
+            "started_at": started + timedelta(seconds=2),
+            "finished_at": None,
+            "tool_time_ms": None,
+            "tool_calls_truncated": True,
+            "tool_calls": [{"call_seq": 1, "timing_source": "message"}],
+        },
+    ]
+    store.attempt_telemetry[second_job] = []
+    read_batch = AsyncMock(wraps=store.trajectory_timings)
+    monkeypatch.setattr(store, "trajectory_timings", read_batch)
+
+    response = await client.post(
+        "/v1/agent/jobs/trajectory-telemetry",
+        json={"job_ids": [second_job, first_job]},
+    )
+
+    assert response.status_code == 200, response.text
+    second, first = response.json()["jobs"]
+    assert second == {"job_id": second_job, "attempts": []}
+    assert first["job_id"] == first_job
+    attempt_one, attempt_two = first["attempts"]
+    assert attempt_one == {
+        "attempt_id": 101,
+        "attempt_no": 1,
+        "continuity_mode": "new",
+        "context_status": "new",
+        "duration_ms": 1_234,
+        "tool_time_ms": 400,
+        "tool_calls_truncated": False,
+        "tool_timing_exact": True,
+    }
+    assert attempt_two["duration_ms"] is None
+    assert attempt_two["tool_time_ms"] is None
+    assert attempt_two["tool_calls_truncated"] is True
+    assert attempt_two["tool_timing_exact"] is False
+    read_batch.assert_awaited_once_with(
+        job_ids=[second_job, first_job], user_id=_OWNER, max_attempts=2_000
+    )
+
+
+@pytest.mark.parametrize("unavailable", ["foreign", "deleted", "missing"])
+async def test_trajectory_telemetry_does_not_disclose_unavailable_jobs(
+    client: AsyncClient, store: FakeStorage, unavailable: str
+):
+    job_id = await _create_job(client)
+    if unavailable == "foreign":
+        store.jobs[job_id]["user_id"] = _OTHER
+    elif unavailable == "deleted":
+        store.jobs[job_id]["deleted_at"] = datetime.now(UTC)
+    else:
+        job_id = "ajob_missing"
+
+    response = await client.post("/v1/agent/jobs/trajectory-telemetry", json={"job_ids": [job_id]})
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Job not found"}
+
+
+@pytest.mark.parametrize(
+    "job_ids",
+    [
+        ["ajob_same", "ajob_same"],
+        [f"ajob_{index}" for index in range(101)],
+        ["ajob_bad\x00id"],
+    ],
+)
+async def test_trajectory_telemetry_rejects_invalid_or_unbounded_jobs(
+    client: AsyncClient,
+    store: FakeStorage,
+    monkeypatch: pytest.MonkeyPatch,
+    job_ids: list[str],
+):
+    read_batch = AsyncMock()
+    monkeypatch.setattr(store, "trajectory_timings", read_batch)
+
+    response = await client.post("/v1/agent/jobs/trajectory-telemetry", json={"job_ids": job_ids})
+
+    assert response.status_code == 422
+    read_batch.assert_not_awaited()
+
+
+async def test_trajectory_telemetry_rejects_an_oversized_attempt_result(
+    client: AsyncClient, store: FakeStorage, monkeypatch: pytest.MonkeyPatch
+):
+    job_id = await _create_job(client)
+    read_batch = AsyncMock(return_value={"owned_count": 1, "attempt_count": 2_001, "attempts": []})
+    monkeypatch.setattr(store, "trajectory_timings", read_batch)
+
+    response = await client.post("/v1/agent/jobs/trajectory-telemetry", json={"job_ids": [job_id]})
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Too many attempts in trajectory batch"}
 
 
 # ── Reasoning effort ───────────────────────────────────────────────────

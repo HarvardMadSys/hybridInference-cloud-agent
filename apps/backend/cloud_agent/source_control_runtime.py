@@ -23,9 +23,9 @@ So a provider here is in one of three states, and they are kept apart:
 in place — a ``chown``, a remount — and a restart should not be the only way
 to find out. There is no retry task: whatever needs the credentials asks for
 them, and an ask that finds the App unavailable, with the last attempt at
-least :data:`RETRY_INTERVAL_S` ago, reads the key again first. The publisher
-asks every 15 seconds and the reaper every 30, so a repaired key is picked up
-within a minute whether or not anybody is using the site.
+least ``github_reload_interval_s`` ago, reads the key again first. The
+publisher asks every 15 seconds and the reaper every 30, so a repaired key is
+picked up within a minute whether or not anybody is using the site.
 
 Admin settings are checked when each provider is requested. Saving a changed
 configuration replaces the credentials on the next operation. Explicitly
@@ -61,9 +61,6 @@ logger = get_logger("cloud_agent.app")
 
 LoadStatus = Literal["unconfigured", "unavailable", "ready"]
 
-#: Seconds between attempts to load an App that failed. Also the ``Retry-After``
-#: a caller refused in the meantime is given.
-RETRY_INTERVAL_S = 30.0
 
 #: The one variable that says a deployment uses a GitHub App. Not the key path:
 #: the control-plane compose file always sets that one, and mounts
@@ -180,7 +177,7 @@ class GitHubAppProvider:
     def _retry_interval_s(self) -> float:
         if self._retry_interval_override is not None:
             return self._retry_interval_override
-        return number_setting("github_reload_interval_s", RETRY_INTERVAL_S)
+        return number_setting("github_reload_interval_s")
 
     @property
     def load_status(self) -> LoadStatus:
@@ -421,7 +418,6 @@ class SourceControlRuntime:
 
 __all__ = [
     "ENV_GITHUB_APP_ID",
-    "RETRY_INTERVAL_S",
     "GitHubAppProvider",
     "GitHubAppSource",
     "GitHubAppState",

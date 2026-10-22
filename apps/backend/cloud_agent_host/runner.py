@@ -114,6 +114,11 @@ from cloud_agent_host.measurement_delivery import (
 from cloud_agent_host.profiling_policy import ProfilingPolicySync
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
+from cloud_agent_host.runner_stop import (
+    STOPPING as _STOPPING,
+    drain_on_sigterm as _drain_on_sigterm,
+    stay_down as _stay_down,
+)
 from cloud_agent_host.runtime_downloads import (
     ENV_RUNTIME_DOWNLOAD_NETWORK,
     ENV_RUNTIME_REGISTRY_URL,
@@ -140,6 +145,11 @@ from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorError,
 )
 from cloud_agent_host.setup import run_setup
+from cloud_agent_host.source_preparation import (
+    SOURCE_PREFETCH_JOIN_TIMEOUT_S,
+    read_tracked_lockfiles,
+    run_source_git,
+)
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.environment import (
@@ -148,9 +158,7 @@ from cloud_agent_shared.environment import (
 )
 from cloud_agent_shared.environment_snapshots import (
     ENVIRONMENT_SNAPSHOT_CAPABILITY,
-    MAX_LOCKFILES,
     EnvironmentSnapshotRef,
-    is_lockfile,
 )
 from cloud_agent_shared.git.patch_gate import branch_name_for
 from cloud_agent_shared.git.source_archive import (
@@ -159,6 +167,7 @@ from cloud_agent_shared.git.source_archive import (
     build_source_archive,
     build_upload_archive,
 )
+from cloud_agent_shared.git.source_cancellation import check_source_stop, checked_entries
 from cloud_agent_shared.git.temporary_workspace import (
     EMPTY_TREE_SHA,
     TEMPORARY_WORKSPACE_BASE_SHA,
@@ -629,9 +638,22 @@ def _run_git(
     cwd: str | None = None,
     env_extra: dict[str, str] | None = None,
     input_text: str | None = None,
+    stop: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one git command hermetically and return the completed process."""
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV, **(env_extra or {})}
+    if stop is not None:
+        result = run_source_git(
+            args,
+            cwd=cwd,
+            env=env,
+            timeout=_GIT_TIMEOUT_S,
+            stop=stop,
+            input_bytes=None if input_text is None else input_text.encode(),
+        )
+        return subprocess.CompletedProcess(
+            result.args, result.returncode, result.stdout.decode(), result.stderr.decode()
+        )
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -660,47 +682,16 @@ def _checkout_bytes(workdir: str) -> int:
     return total
 
 
-def tracked_lockfiles(workdir: str) -> dict[str, str] | None:
-    """Each tracked dependency manifest's Git object id, the snapshot match key.
-
-    Equal object ids mean byte-identical files, on the host checkout of a
-    snapshot's build and of a later task alike. ``None`` when Git cannot say,
-    or when a repository has more manifests than a snapshot records, so that it
-    is never matched.
-    """
-    # Bytes, not text: Git keeps each name as the bytes it was committed
-    # with, and ``-z`` prints them unquoted.
-    listed = subprocess.run(
-        ["git", "ls-files", "-s", "-z"],
-        cwd=workdir,
+def tracked_lockfiles(
+    workdir: str, *, stop: threading.Event | None = None
+) -> dict[str, str] | None:
+    """Each tracked manifest's object id, or ``None`` when Git cannot say."""
+    return read_tracked_lockfiles(
+        workdir,
         env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV},
-        capture_output=True,
         timeout=_GIT_TIMEOUT_S,
-        stdin=subprocess.DEVNULL,
-        check=False,
+        stop=stop,
     )
-    if listed.returncode != 0:
-        return None
-    found: dict[str, str] = {}
-    for entry in listed.stdout.split(b"\0"):
-        meta, _, raw = entry.partition(b"\t")
-        fields = meta.split()
-        if len(fields) != 3:
-            continue
-        try:
-            path = raw.decode()
-        except UnicodeDecodeError:
-            # A manifest whose own name is text may sit in a directory whose
-            # name is not; no receipt can record it, so Git cannot say.
-            if is_lockfile(raw.rpartition(b"/")[2].decode(errors="replace")):
-                return None
-            continue
-        if not is_lockfile(path):
-            continue
-        found[path] = fields[1].decode()
-        if len(found) > MAX_LOCKFILES:
-            return None
-    return found
 
 
 def _choose_environment_snapshot(
@@ -843,7 +834,9 @@ def _basic_credential(clone_token: str) -> str:
     return base64.b64encode(f"x-access-token:{clone_token}".encode()).decode()
 
 
-def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None:
+def _assert_no_credential_on_disk(
+    workdir: str, clone_token: str | None, *, stop: threading.Event | None = None
+) -> None:
     """Fail rather than mount a worktree that carries the clone credential.
 
     No repository credential may be stored in the source tree, which is about
@@ -863,7 +856,7 @@ def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None
         base64.b64encode(clone_token.encode()).decode().rstrip("="),
     )
     git_dir = pathlib.Path(workdir) / ".git"
-    for path in git_dir.rglob("*"):
+    for path in checked_entries(git_dir.rglob("*"), stop):
         # Object and pack files hold repository content, not our configuration,
         # and are compressed; skipping them keeps this check bounded.
         if not path.is_file() or path.is_symlink() or "objects" in path.parts:
@@ -927,12 +920,12 @@ def prepare_worktree(
         args: list[str], env_extra: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
         if max_bytes is None:
-            return _run_git(args, cwd=workdir, env_extra=env_extra)
+            return _run_git(args, cwd=workdir, env_extra=env_extra, stop=stop)
         return _run_git_within(
             args, cwd=workdir, max_bytes=max_bytes, env_extra=env_extra, stop=stop
         )
 
-    init = _run_git(["init", "--quiet", workdir])
+    init = _run_git(["init", "--quiet", workdir], stop=stop)
     if init.returncode != 0:
         raise WorktreeError(f"git init failed: {init.stderr.strip()[:200]}")
 
@@ -952,12 +945,12 @@ def prepare_worktree(
     if checkout.returncode != 0:
         raise WorktreeError(f"could not check out {ref}: {checkout.stderr.strip()[:200]}")
 
-    resolved = _run_git(["rev-parse", "HEAD"], cwd=workdir).stdout.strip()
-    _assert_no_credential_on_disk(workdir, clone_token)
+    resolved = _run_git(["rev-parse", "HEAD"], cwd=workdir, stop=stop).stdout.strip()
+    _assert_no_credential_on_disk(workdir, clone_token, stop=stop)
     return resolved or (base_sha or "")
 
 
-def prepare_temporary_worktree(*, workdir: str) -> str:
+def prepare_temporary_worktree(*, workdir: str, stop: threading.Event | None = None) -> str:
     """Start a temporary workspace in ``workdir`` and return its first commit.
 
     A temporary workspace has no repository, so nothing is fetched and no
@@ -975,7 +968,7 @@ def prepare_temporary_worktree(*, workdir: str) -> str:
         env_extra: dict[str, str] | None = None,
         input_text: str | None = None,
     ) -> str:
-        result = _run_git(args, cwd=workdir, env_extra=env_extra, input_text=input_text)
+        result = _run_git(args, cwd=workdir, env_extra=env_extra, input_text=input_text, stop=stop)
         if result.returncode != 0:
             raise WorktreeError(
                 f"could not start the temporary workspace: git {args[0]} failed: "
@@ -1055,10 +1048,12 @@ def source_import_max_bytes(env: dict[str, str] | None = None) -> int:
     return mib * 1024 * 1024
 
 
-def checkout_output_branch(workdir: str, branch_id: str) -> str:
+def checkout_output_branch(
+    workdir: str, branch_id: str, *, stop: threading.Event | None = None
+) -> str:
     """Put a fresh durable worktree on the publisher's local output branch."""
     branch = branch_name_for(branch_id)
-    switched = _run_git(["checkout", "--quiet", "-B", branch, "HEAD"], cwd=workdir)
+    switched = _run_git(["checkout", "--quiet", "-B", branch, "HEAD"], cwd=workdir, stop=stop)
     if switched.returncode != 0:
         raise WorktreeError(
             f"could not create workspace branch {branch}: {switched.stderr.strip()[:200]}"
@@ -1704,7 +1699,7 @@ class _SourcePrefetch:
 
     The thread is not a daemon: a turn that ends while the clone is still
     running waits for it at exit, so its temporary directory is always removed.
-    Discarding stops a clone still running, so that wait is short.
+    Discarding cancels Git and archive preparation before joining its cleanup.
     """
 
     def __init__(self, job: ClaimedJob, *, uid: int, gid: int, max_bytes: int | None) -> None:
@@ -1727,9 +1722,10 @@ class _SourcePrefetch:
         archive: Any = None
         try:
             with tempfile.TemporaryDirectory(prefix="freeinference-source-") as source:
+                check_source_stop(self._stop)
                 if self._job.repo is None:
                     # Nothing to clone and nothing to publish, so no output branch.
-                    base_sha = prepare_temporary_worktree(workdir=source)
+                    base_sha = prepare_temporary_worktree(workdir=source, stop=self._stop)
                 else:
                     base_sha = prepare_worktree(
                         workdir=source,
@@ -1740,8 +1736,11 @@ class _SourcePrefetch:
                         max_bytes=self._max_bytes,
                         stop=self._stop,
                     )
-                    checkout_output_branch(source, self._job.thread_id)
-                self._lockfiles = tracked_lockfiles(source)
+                    check_source_stop(self._stop)
+                    checkout_output_branch(source, self._job.thread_id, stop=self._stop)
+                check_source_stop(self._stop)
+                self._lockfiles = tracked_lockfiles(source, stop=self._stop)
+                check_source_stop(self._stop)
                 # Unnamed and outside the checkout: the archive is spooled to
                 # disk, not held in this process, and gone when it is closed,
                 # which import_into or discard does once the clone is done.
@@ -1754,6 +1753,7 @@ class _SourcePrefetch:
                     uid=self._uid,
                     gid=self._gid,
                     max_bytes=self._max_bytes,
+                    stop=self._stop,
                 )
                 archive.flush()
                 archive.seek(0)
@@ -1804,13 +1804,14 @@ class _SourcePrefetch:
         return self._base_sha
 
     def discard(self) -> None:
-        """Release the archive now, and stop a clone that is still running."""
+        """Cancel preparation and give its owner a bounded wait to clean up."""
         self._stop.set()
         with self._lock:
             self._discarded = True
             archive, self._archive = self._archive, None
         if archive is not None:
             archive.close()
+        self._thread.join(timeout=SOURCE_PREFETCH_JOIN_TIMEOUT_S)
 
 
 def _prefetch_retained_source(
@@ -3567,43 +3568,6 @@ def _run_turn(
         control.close()
 
 
-#: Set by SIGTERM. A container being replaced gets one, and until this existed
-#: it killed the process outright — Python's default handler terminates, and
-#: only ``KeyboardInterrupt`` (SIGINT) was caught. Every `docker compose up -d`
-#: that recreated a runner therefore abandoned whatever job it was running.
-#:
-#: That is not only a deploy problem, but the deploy is where it bites on a
-#: schedule: since CD, every merge to dev recreates these containers.
-_STOPPING = threading.Event()
-
-
-def _drain_on_sigterm() -> None:
-    """Finish the job in hand on SIGTERM, then exit; SIGINT still stops now.
-
-    The split is deliberate. `docker stop` sends SIGTERM; supported activation
-    asks the Engine to wait indefinitely, so a job finishes before its runner
-    is replaced. Direct, out-of-band Compose operations retain their configured
-    grace period. A person pressing Ctrl-C means *now*, and turning that into a
-    several-minute wait would be its own surprise.
-
-    The lease machinery remains the backstop for a host failure or an explicit
-    forced kill, not the deployment plan.
-    """
-
-    def handler(signum: int, frame: object) -> None:
-        _STOPPING.set()
-        print(
-            "agent runner: SIGTERM received; finishing the current job, then exiting",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    # Only the main thread may install one; tests and embedders that call
-    # `serve` from elsewhere get the old behaviour rather than an exception.
-    with contextlib.suppress(ValueError):
-        signal.signal(signal.SIGTERM, handler)
-
-
 def _sandbox_manager_url_from_env() -> str | None:
     """This host's sandbox manager address, **as the control plane will reach it**.
 
@@ -4278,6 +4242,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
 
     work = _WorkWaiter(base_url=base_url, interval_s=tick_s)
     immediate = False
+    rejected = False
     claims = 0
     try:
         while True:
@@ -4304,6 +4269,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                     file=sys.stderr,
                     flush=True,
                 )
+                rejected = True
                 break
 
             # Whatever the last successful beat carried, including nothing:
@@ -4453,6 +4419,8 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             turns.shutdown(immediate=immediate)
         finally:
             stop_all()
+    if rejected:
+        _stay_down()
     return 0
 
 
@@ -5018,7 +4986,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # In the source repo, importing sandbox configured root logging as a side
     # effect; the host shim removed that on purpose. This is the sanctioned
-    # replacement (MIGRATION.md's deferred-behaviour register, the
+    # replacement (the extraction record's deferred-behaviour register, the
     # runner-logging row) — without it every INFO event a runner emits goes
     # nowhere.
     configure_process_logging()

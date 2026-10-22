@@ -1454,7 +1454,7 @@ deploy/host/sandbox_host.sh activate # drain, replace, prove
 
 Use the standalone host stack even on the gateway's machine, with tunnel
 destinations pointing to its local listeners. The old co-located
-`agent_runner.sh` overlay did not move; [MIGRATION.md](../../MIGRATION.md) records
+`agent_runner.sh` overlay did not move; [the repository extraction record](../agents/reviews/2026-08-09-repository-extraction-record.md) records
 that decision. `preflight` checks Docker, retained-session configuration, host
 isolation, and the configured image. `up` repeats those checks against the image
 it deploys.
@@ -2838,9 +2838,10 @@ status is draining`. Replaying step 1's generated statements puts back
 6. Deploy the target commit as usual. `migrate` finds the database at head,
    the control plane starts, and the runner's next heartbeat authenticates
    against the restored `credential_hash`; readiness then sees a fresh
-   heartbeat and the deploy completes. If the host stack was restarted
-   meanwhile and died on `agent_host_credential_rejected`, restart it after
-   step 5 — the credential it holds is valid again.
+   heartbeat and the deploy completes. If the runner logged
+   `agent_host_credential_rejected` meanwhile, restart the host stack after
+   step 5: a refused runner stays idle until it is restarted, and the
+   credential it holds is valid again.
 
 7. Prove it end to end before calling it done: create a task and confirm it
    is claimed (`SELECT state FROM agent_jobs` reaches `running`), then a

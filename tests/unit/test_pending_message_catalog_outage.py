@@ -50,6 +50,12 @@ class _Gateway:
         self._catalog()
         return ["glm-5.1"], {}
 
+    async def model_catalog_bundle(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+        self._catalog()
+        return ["glm-5.1"], {}, {"glm-5.1": ["low", "high"]}
+
     async def model_reasoning_efforts(self, user_id: str) -> dict[str, list[str]]:
         self._catalog()
         return {"glm-5.1": ["low", "high"]}

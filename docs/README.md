@@ -9,9 +9,10 @@ quickstart. `docs/` has two folders:
 | [agents/](agents/) | Engineering records written by and for coding agents: [specs/](agents/specs/) and [reviews/](agents/reviews/). |
 
 Repository-wide references stay at the root: [AGENTS.md](../AGENTS.md),
-[CONTRIBUTING.md](../CONTRIBUTING.md), [ENVIRONMENT.md](../ENVIRONMENT.md),
-[SECURITY.md](../SECURITY.md), and the completed split record,
-[MIGRATION.md](../MIGRATION.md).
+[CONTRIBUTING.md](../CONTRIBUTING.md), [ENVIRONMENT.md](../ENVIRONMENT.md) and
+[SECURITY.md](../SECURITY.md). The completed split's
+[extraction record](agents/reviews/2026-08-09-repository-extraction-record.md)
+is with the dated reviews.
 
 ## Reading the records
 

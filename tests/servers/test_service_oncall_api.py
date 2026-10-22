@@ -134,6 +134,11 @@ class _FakeGateway:
     async def model_catalog_with_aliases(self, user_id: str) -> tuple[list[str], dict[str, str]]:
         return list(_TEST_MODELS), {}
 
+    async def model_catalog_bundle(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+        return list(_TEST_MODELS), {}, {}
+
     async def agent_access(self, user_id: str) -> dict[str, Any]:
         return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
 
@@ -349,7 +354,7 @@ async def test_unresolvable_model_fails_fast(client):
 async def test_unregistered_runtime_is_refused(client):
     """The registry check guards this door too, not only the owner route.
 
-    It lives in the shared ``_create_job_as`` helper for exactly that reason:
+    It lives in the shared ``create_job_as`` helper for exactly that reason:
     a check only the owner route ran would let the relay queue a job that dies
     at claim time — the drift the shared helper exists to prevent.
     """

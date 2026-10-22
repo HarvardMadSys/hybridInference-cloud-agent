@@ -33,7 +33,7 @@ from cloud_agent.api.deps import (
     get_storage,
     require_store,
 )
-from cloud_agent.application.job_admission import _create_job_as
+from cloud_agent.application.job_admission import create_job_as
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.entitlement import REPO_PATTERN
@@ -41,6 +41,7 @@ from cloud_agent.goals.models import GoalConflict
 from cloud_agent.ledger import JobLedgerSummary, summarize_job_ledger
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
+    MAX_TRAJECTORY_TIMING_ATTEMPTS,
     AgentAttemptTelemetry,
     AgentJobCancelResponse,
     AgentJobCreate,
@@ -51,6 +52,10 @@ from cloud_agent.schemas import (
     AgentThreadPublicationResponse,
     AgentThreadRenameRequest,
     AgentThreadRenameResponse,
+    AgentTrajectoryAttemptTiming,
+    AgentTrajectoryJobTiming,
+    AgentTrajectoryTimingRequest,
+    AgentTrajectoryTimingResponse,
     GoalClearedResponse,
     GoalRequest,
     GoalResponse,
@@ -81,7 +86,7 @@ if TYPE_CHECKING:
     from cloud_agent.source_control_runtime import GitHubAppSource
 
 
-from cloud_agent.api.environments import CredentialSafeRoute
+from cloud_agent.api._environment_route_policy import EnvironmentSensitiveRoute
 
 router = APIRouter(prefix="/v1/agent")
 
@@ -95,14 +100,14 @@ class _JobsStorage(Protocol):
     """The capabilities the job surface reaches the store for.
 
     Ten of them, and four are reached through a helper rather than spelled
-    here: `application.job_admission._create_job_as` is typed against
+    here: `application.job_admission.create_job_as` is typed against
     `_JobCreationStorage`, which names `attachments` among them.
 
     Four of these are reached through a helper rather than spelled here,
     and leaving them out is not a narrowing: `cancel_agent_job` hands the whole
     store (through `_resume_terminals_after_cancel`) to
     `_workspace_access._sandbox_manager_for_job`, and `create_agent_job`
-    hands it to `application.job_admission._create_job_as`, which is typed against
+    hands it to `application.job_admission.create_job_as`, which is typed against
     `_JobCreationStorage` (`conversation_commands`, `mcp`, `skills`,
     `source_control`). mypy says so at the call site, which is the point of
     declaring capabilities rather than trusting a reader to trace them.
@@ -169,7 +174,7 @@ async def create_agent_job(
     different content is a 409 ``idempotency_conflict``.
     """
     job_store = _require_store(store)
-    job = await _create_job_as(
+    job = await create_job_as(
         body,
         user,
         job_store=job_store,
@@ -202,6 +207,43 @@ async def list_agent_jobs(
         user_id=user["user_id"], limit=limit, archived=archived, repo=repo, temporary=temporary
     )
     return AgentJobListResponse(jobs=[_job_response(job) for job in jobs])
+
+
+@router.post("/jobs/trajectory-telemetry", response_model=AgentTrajectoryTimingResponse)
+async def get_agent_trajectory_telemetry(
+    body: AgentTrajectoryTimingRequest,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _JobsStorage | None = Depends(get_storage),
+) -> AgentTrajectoryTimingResponse:
+    """Read compact timing for a bounded set of the caller's turns."""
+    job_store = _require_store(store)
+    result = await job_store.execution_queries.trajectory_timings(
+        job_ids=body.job_ids,
+        user_id=user["user_id"],
+        max_attempts=MAX_TRAJECTORY_TIMING_ATTEMPTS,
+    )
+    if result["owned_count"] != len(body.job_ids):
+        raise HTTPException(status_code=404, detail="Job not found")
+    if result["attempt_count"] > MAX_TRAJECTORY_TIMING_ATTEMPTS:
+        raise HTTPException(status_code=413, detail="Too many attempts in trajectory batch")
+    attempts_by_job: dict[str, list[AgentTrajectoryAttemptTiming]] = {
+        job_id: [] for job_id in body.job_ids
+    }
+    for timing in result["attempts"]:
+        attempts_by_job[timing["job_id"]].append(
+            AgentTrajectoryAttemptTiming(
+                **_attempt_summary_response(timing).model_dump(),
+                tool_time_ms=timing.get("tool_time_ms"),
+                tool_calls_truncated=bool(timing.get("tool_calls_truncated")),
+                tool_timing_exact=bool(timing.get("tool_timing_exact")),
+            )
+        )
+    return AgentTrajectoryTimingResponse(
+        jobs=[
+            AgentTrajectoryJobTiming(job_id=job_id, attempts=attempts_by_job[job_id])
+            for job_id in body.job_ids
+        ]
+    )
 
 
 @router.get("/jobs/{job_id}", response_model=AgentJobResponse)
@@ -794,5 +836,5 @@ router.add_api_route(
     methods=["POST"],
     response_model=AgentJobResponse,
     status_code=201,
-    route_class_override=CredentialSafeRoute,
+    route_class_override=EnvironmentSensitiveRoute,
 )

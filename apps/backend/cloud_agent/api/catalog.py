@@ -271,6 +271,8 @@ async def list_agent_projects(
                 last_activity_at=_iso(project["last_activity_at"]),
                 pinned_count=project.get("pinned_count", 0),
                 pinned_at=_iso(project.get("pinned_at")),
+                refresh_token=project.get("refresh_token"),
+                membership_token=project.get("membership_token"),
             )
             for project in projects
         ]

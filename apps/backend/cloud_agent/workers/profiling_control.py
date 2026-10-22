@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -221,8 +220,8 @@ def _descriptor_for_run(run: Mapping[str, Any]) -> ProfilingRun | None:
         "run_id": str(run.get("run_id") or ""),
         "operations": [str(item) for item in run.get("operations") or ()],
         "expires_at": expires_at_text,
-        "config_version": int(run.get("config_version") or 1),
-        "max_operations": int(run.get("max_operations") or 100),
+        "config_version": run.get("config_version", 1),
+        "max_operations": run.get("max_operations", 100),
         "target": dict(run.get("target") or {}),
         "admission_instances": [dict(item) for item in run.get("admission_instances") or ()],
     }
@@ -231,13 +230,13 @@ def _descriptor_for_run(run: Mapping[str, Any]) -> ProfilingRun | None:
             return None
         descriptor.update(continuous=True, expires_at=run.get("expires_at"), max_operations=0)
     try:
-        parsed = parse_profile_run(json.dumps(descriptor), allow_continuous=True)
+        return parse_profile_run(
+            json.dumps(descriptor),
+            allow_continuous=True,
+            source=SOURCE_ADMIN,
+        )
     except Exception:
         return None
-    # The parsed descriptor states which control source rooted it. That travels
-    # into every measurement, so a reader can tell an administrator's
-    # experiment from one a deployment's static configuration described.
-    return replace(parsed, source=SOURCE_ADMIN)
 
 
 __all__ = [

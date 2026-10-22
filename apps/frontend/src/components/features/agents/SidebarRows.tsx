@@ -4,6 +4,7 @@ import { useT } from '@/components/providers';
 import { projectLabel, projectTitle } from './conversations';
 import { CONVERSATION_STATE_KEYS, getConversationState } from './conversationState';
 import { activityLabel } from './relativeTime';
+import type { ConversationReader } from './sidebarReadQueue';
 import { useConversationList, type SidebarConversation } from './useConversationList';
 import { useSessionReview } from './useSessionReview';
 import { SessionReviewBadge } from './SessionReviewBadge';
@@ -324,6 +325,11 @@ export function ProjectFolder({
   selected,
   userId,
   refresh,
+  activityMoved = 0,
+  refreshKey,
+  retryKey,
+  managedRefresh = false,
+  readPage,
   hiddenThreads,
   pinUpdates,
   registerRows,
@@ -342,6 +348,12 @@ export function ProjectFolder({
   selected?: SidebarConversation;
   userId?: string;
   refresh: number;
+  /** Bumped when only activity moved: the section reads its first page. */
+  activityMoved?: number;
+  refreshKey?: string;
+  retryKey?: number;
+  managedRefresh?: boolean;
+  readPage?: ConversationReader;
   hiddenThreads: Set<string>;
   pinUpdates?: ReadonlyMap<string, SidebarPinUpdate>;
   registerRows: (rows: SidebarConversation[], loadedRefresh: number | null) => void;
@@ -356,6 +368,11 @@ export function ProjectFolder({
     enabled: enabled && expanded,
     userId,
     refresh,
+    reorder: activityMoved,
+    refreshKey,
+    retryKey,
+    managedRefresh,
+    readPage,
   });
   const [shown, setShown] = useState(15);
   useEffect(() => {

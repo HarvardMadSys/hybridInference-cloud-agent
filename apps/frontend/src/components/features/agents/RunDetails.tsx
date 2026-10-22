@@ -346,7 +346,9 @@ export function RunDetails({
   const attempts = useMemo(() => {
     const grouped = new Map<number, AgentThreadEventApi[]>();
     for (const event of runEvents) {
-      grouped.set(event.attempt_id, [...(grouped.get(event.attempt_id) ?? []), event]);
+      const group = grouped.get(event.attempt_id);
+      if (group) group.push(event);
+      else grouped.set(event.attempt_id, [event]);
     }
     return [...grouped.entries()].sort(([a], [b]) => a - b);
   }, [runEvents]);
