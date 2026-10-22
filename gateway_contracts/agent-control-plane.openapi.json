@@ -6622,19 +6622,6 @@
             "title": "Active",
             "type": "boolean"
           },
-          "broker_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "deprecated": true,
-            "description": "Compatibility alias for sandbox_manager_url.",
-            "title": "Broker Url"
-          },
           "capabilities": {
             "description": "What this machine can run. A job may only go to a host declaring all of it.",
             "items": {
@@ -11785,19 +11772,6 @@
       "HostHeartbeatResponse": {
         "description": "What the control plane thinks of this host after the heartbeat.",
         "properties": {
-          "broker_error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "deprecated": true,
-            "description": "Compatibility alias for sandbox_manager_error.",
-            "title": "Broker Error"
-          },
           "heartbeat_interval_seconds": {
             "description": "How often to report in. Missing three consecutive intervals is what moves a host to offline.",
             "title": "Heartbeat Interval Seconds",
@@ -11975,19 +11949,6 @@
       "HostRegisterResponse": {
         "description": "The host's identity and the credential it authenticates with.",
         "properties": {
-          "broker_error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "deprecated": true,
-            "description": "Compatibility alias for sandbox_manager_error.",
-            "title": "Broker Error"
-          },
           "credential": {
             "description": "Long-lived host credential. Shown once; only its hash is stored. Revoking the host clears that hash and the credential dies.",
             "title": "Credential",

@@ -17,7 +17,6 @@ from cloud_agent.schemas._host_reports import (
     _HostReportVersion,
     _HostVersionMenu,
 )
-from cloud_agent.schemas._sandbox_manager_wire import _SandboxManagerWireNames
 from cloud_agent.schemas.archive_settings import (
     HostSandboxArchiveSettings,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
@@ -137,7 +136,7 @@ class HostRegisterRequest(BaseModel):
     )
 
 
-class HostRegisterResponse(_SandboxManagerWireNames):
+class HostRegisterResponse(BaseModel):
     """The host's identity and the credential it authenticates with."""
 
     host: str
@@ -149,9 +148,6 @@ class HostRegisterResponse(_SandboxManagerWireNames):
         ),
     )
     status: str
-    broker_error: str | None = Field(
-        default=None, deprecated=True, description="Compatibility alias for sandbox_manager_error."
-    )
     sandbox_manager_error: str | None = Field(
         None,
         description=(
@@ -478,7 +474,7 @@ class HostResidencyEstablishResponse(BaseModel):
     )
 
 
-class HostHeartbeatResponse(_SandboxManagerWireNames):
+class HostHeartbeatResponse(BaseModel):
     """What the control plane thinks of this host after the heartbeat."""
 
     host: str
@@ -529,9 +525,6 @@ class HostHeartbeatResponse(_SandboxManagerWireNames):
             "Settled-idle or failed-attempt Docker stop commands fenced to the "
             "durable container and activation generations reported by this host."
         ),
-    )
-    broker_error: str | None = Field(
-        default=None, deprecated=True, description="Compatibility alias for sandbox_manager_error."
     )
     sandbox_manager_error: str | None = Field(
         None,
