@@ -28,7 +28,7 @@ from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import AgentAttemptTelemetry, AttemptResources, TurnResourceSummary
-from cloud_agent.session_statistics import summarize_session_statistics
+from cloud_agent.thread_stats import summarize_session_statistics
 from cloud_agent_shared.turn_resources import summarize_turn_resources
 
 if TYPE_CHECKING:

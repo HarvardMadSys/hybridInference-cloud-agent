@@ -82,23 +82,6 @@ UNLIMITED_ROUNDS: None = None
 #: restate it. Only when the runtime can be pinned to tool-free execution, and
 #: only once: a second failure pauses.
 MAX_REPORT_REPAIRS = 1
-#: How recently an ``active`` goal with no pending obligation must have moved
-#: for the recovery sweep to assume a consumer is still about to act on it.
-#: Long enough to cover a decision in flight, short enough that a goal nothing
-#: is working on is noticed rather than re-armed for ever.
-ARM_AFTER_S = 60.0
-#: How long an ``active`` goal may sit with no queued or running turn and no
-#: pending wakeup before the recovery sweep pauses it. This is a backstop for a
-#: path that forgot to schedule, not a mechanism: every ordinary way a goal
-#: stops being able to continue pauses it where and when it happens.
-STALLED_AFTER_S = 900.0
-#: How many times a wakeup may fail on temporary scheduling infrastructure
-#: before the goal is paused with ``scheduling_failed`` rather than retried
-#: forever behind a green "active" badge.
-MAX_WAKEUP_ATTEMPTS = 5
-#: The first backoff step; each retry doubles it up to the cap.
-WAKEUP_BACKOFF_S = 5.0
-WAKEUP_BACKOFF_MAX_S = 300.0
 
 GoalState = Literal["active", "paused", "complete"]
 #: ``work`` is an ordinary automatic round. ``repair`` is the bounded second
@@ -251,19 +234,14 @@ class GoalView(BaseModel):
 
 
 __all__ = [
-    "ARM_AFTER_S",
     "GOAL_PAUSE_REASONS",
     "GOAL_REPORT_PROTOCOL",
     "GOAL_REPORT_RUNTIMES",
     "MAX_OBJECTIVE_CHARS",
     "MAX_REASON_CHARS",
     "MAX_REPORT_REPAIRS",
-    "MAX_WAKEUP_ATTEMPTS",
     "REPORT_REPAIR_RUNTIMES",
-    "STALLED_AFTER_S",
     "UNLIMITED_ROUNDS",
-    "WAKEUP_BACKOFF_MAX_S",
-    "WAKEUP_BACKOFF_S",
     "CompletionBasis",
     "GoalConflict",
     "GoalError",

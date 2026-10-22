@@ -1427,7 +1427,7 @@ async def _host_fetch(  # noqa: PLR0912 complexity baseline, #771
         kind = capability.kind
     else:
         kind = CapabilityKind.PROMPT
-        catalogue = await _host_catalogue(identity, store, kind)
+        catalogue = await _host_catalogue(protocol.presenting(identity, key), store, kind)
         entry = catalogue.get(key)
         if entry is None:
             return _error_reply(
@@ -1692,7 +1692,7 @@ async def _host_call(
             authorization=authorization,
             stateless=stateless,
         )
-    catalogue = await _host_catalogue(identity, store)
+    catalogue = await _host_catalogue(protocol.presenting(identity, name), store)
     entry = catalogue.get(name)
     if entry is None:
         return _error_reply(

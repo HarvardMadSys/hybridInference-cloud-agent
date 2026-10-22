@@ -40,6 +40,38 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+it('pauses a collapsed workspace and reads fresh state when reopened', async () => {
+  vi.mocked(getWorkspaceEnvironment).mockResolvedValue(binding);
+  const view = render(
+    <WorkspaceEnvironment jobId="job" repo="org/repo" visible={false} onTerminal={() => {}} />,
+  );
+  expect(getWorkspaceEnvironment).not.toHaveBeenCalled();
+  view.rerender(<WorkspaceEnvironment jobId="job" repo="org/repo" visible onTerminal={() => {}} />);
+  await waitFor(() => expect(getWorkspaceEnvironment).toHaveBeenCalledTimes(1));
+});
+
+it('rechecks settled readiness so restarts are still detected', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    vi.mocked(getWorkspaceEnvironment).mockResolvedValue({
+      ...binding,
+      required: false,
+      steps: [],
+    });
+    render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+    await waitFor(() => expect(getWorkspaceEnvironment).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(getWorkspaceEnvironment).toHaveBeenCalledTimes(1);
+    vi.mocked(getWorkspaceEnvironment).mockResolvedValue({ ...binding, required: true, steps: [] });
+    await vi.advanceTimersByTimeAsync(25000);
+    expect(getWorkspaceEnvironment).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(getWorkspaceEnvironment).toHaveBeenCalledTimes(3);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 const binding: EnvironmentBinding = {
   binding_id: 'b',
   environment_id: 'env',
@@ -228,7 +260,7 @@ describe('an action outliving its panel', () => {
     vi.mocked(getEnvironmentActionRun).mockResolvedValue({ ...done, output: 'served' });
     render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
     expect(await screen.findByText('served')).toBeInTheDocument();
-    expect(getEnvironmentActionRun).toHaveBeenCalledWith('run-1');
+    expect(getEnvironmentActionRun).toHaveBeenCalledWith('run-1', expect.any(AbortSignal));
   });
 
   it('resends an unanswered start under its key after the panel is opened again', async () => {

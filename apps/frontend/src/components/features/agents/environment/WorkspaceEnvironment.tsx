@@ -23,6 +23,7 @@ import type {
 } from '@/lib/api/environments';
 import type { TranslationKey } from '@/lib/i18n/translate';
 import { EnvironmentDialog } from './EnvironmentDialog';
+import { pollWhileVisible } from './visiblePolling';
 import { emptyEnvironment } from './EnvironmentManager';
 import {
   ACTIVE_STATES,
@@ -99,10 +100,12 @@ export function WorkspaceEnvironment({
   jobId,
   repo,
   onTerminal,
+  visible = true,
 }: {
   jobId: string;
   repo: string;
   onTerminal: () => void;
+  visible?: boolean;
 }) {
   const t = useT();
   const phase = usePhaseLabel();
@@ -123,24 +126,13 @@ export function WorkspaceEnvironment({
     globals: EnvironmentConfig;
   } | null>(null);
   useEffect(() => {
+    if (!visible) return;
     let active = true;
-    const refresh = () => {
-      void getWorkspaceEnvironment(jobId)
-        .then((value) => {
-          if (!active) return;
-          setBound(value);
-          setLoadError('');
-          adoptRuns(value.action_runs ?? []);
-        })
-        .catch((e) => {
-          if (active) setLoadError(e instanceof Error ? e.message : String(e));
-        });
-    };
     // The panel's own record of a run is newer than any listing: it may hold a
     // start this read predates. A listed run fills only an action the panel
     // knows nothing about, as when it was opened again mid-run; a finished one
     // is read once more for the output the listing leaves out.
-    const adoptRuns = (listed: ActionRun[]) => {
+    const adoptRuns = async (listed: ActionRun[], signal: AbortSignal) => {
       const known = listedRuns.current;
       const adopted = listed.filter((run) => run.action_id && !known.has(run.action_id));
       if (!adopted.length) return;
@@ -150,50 +142,68 @@ export function WorkspaceEnvironment({
         for (const run of adopted) next[run.action_id!] ??= run;
         return next;
       });
-      adopted
-        .filter((run) => !ACTIVE_STATES.includes(run.state))
-        .forEach((run) => {
-          void getEnvironmentActionRun(run.id)
-            .then((value) => {
-              if (!active) return;
-              setRuns((previous) =>
-                previous[run.action_id!]?.id === run.id
-                  ? { ...previous, [run.action_id!]: value }
-                  : previous,
-              );
-            })
-            .catch(() => {
-              // The state is already shown; only its output is missing.
-            });
-        });
+      await Promise.all(
+        adopted
+          .filter((run) => !ACTIVE_STATES.includes(run.state))
+          .map((run) =>
+            getEnvironmentActionRun(run.id, signal)
+              .then((value) => {
+                if (!active || signal.aborted) return;
+                setRuns((previous) =>
+                  previous[run.action_id!]?.id === run.id
+                    ? { ...previous, [run.action_id!]: value }
+                    : previous,
+                );
+              })
+              .catch(() => {
+                // The state is already shown; only its output is missing.
+                known.delete(run.action_id!);
+              }),
+          ),
+      );
     };
-    refresh();
-    const timer = setInterval(refresh, 5000);
+    const stop = pollWhileVisible(async (signal) => {
+      try {
+        const value = await getWorkspaceEnvironment(jobId, signal);
+        if (!active || signal.aborted) return 5000;
+        setBound(value);
+        setLoadError('');
+        await adoptRuns(value.action_runs ?? [], signal);
+        const unsettled =
+          ['pending', 'preparing'].includes(status(value)) ||
+          value.action_runs?.some((run) => ACTIVE_STATES.includes(run.state));
+        // Keep a bounded reconciliation interval even after success: a container
+        // restart or a change from another tab invalidates previous readiness.
+        return unsettled ? 5000 : 30000;
+      } catch (e) {
+        if (active && !signal.aborted) setLoadError(e instanceof Error ? e.message : String(e));
+        return 5000;
+      }
+    });
     return () => {
       active = false;
-      clearInterval(timer);
+      stop();
     };
-  }, [jobId, reload]);
+  }, [jobId, reload, visible]);
   useEffect(() => {
-    let active = true;
+    if (!visible) return;
     const current = Object.entries(runs).filter(([, run]) => ACTIVE_STATES.includes(run.state));
     if (!current.length) return;
-    const timer = setInterval(() => {
-      current.forEach(([id, run]) => {
-        void getEnvironmentActionRun(run.id)
-          .then((value) => {
-            if (active) setRuns((previous) => ({ ...previous, [id]: value }));
-          })
-          .catch((e) => {
-            if (active) setError(e instanceof Error ? e.message : String(e));
-          });
-      });
+    return pollWhileVisible(async (signal) => {
+      const updates = await Promise.all(
+        current.map(async ([id, run]) => {
+          try {
+            return [id, await getEnvironmentActionRun(run.id, signal)] as const;
+          } catch (e) {
+            if (!signal.aborted) setError(e instanceof Error ? e.message : String(e));
+            return [id, run] as const;
+          }
+        }),
+      );
+      if (!signal.aborted) setRuns((previous) => ({ ...previous, ...Object.fromEntries(updates) }));
+      return 1500;
     }, 1500);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [runs]);
+  }, [runs, visible]);
   async function perform(action: () => Promise<unknown>) {
     setBusy(true);
     setError('');

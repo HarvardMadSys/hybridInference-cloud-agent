@@ -173,5 +173,5 @@ Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
 ## License
 
 [MIT](LICENSE). Cloud Agent was extracted from HybridInference in August 2026
-and keeps that project's copyright and license; [MIGRATION.md](MIGRATION.md)
+and keeps that project's copyright and license; [the repository extraction record](docs/agents/reviews/2026-08-09-repository-extraction-record.md)
 records the split.

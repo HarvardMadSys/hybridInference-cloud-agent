@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.host_pool import hash_secret, new_enroll_token
+from cloud_agent.sandbox_manager_routing import retire_sandbox_manager_hosts
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 
 if TYPE_CHECKING:
@@ -219,7 +220,10 @@ class HostCommands:
                 409,
                 f"{host!r} is held by an automated deployment drain; release it first or repeat with force=true.",
             )
-        return outcome in {"draining", "moving_out"}
+        deferred = outcome in {"draining", "moving_out"}
+        if not deferred:
+            retire_sandbox_manager_hosts([host])
+        return deferred
 
     async def global_settings(self, changes: Mapping[str, int | None]) -> dict[str, Any]:
         """Change runtime settings for every server; return the old values for audit."""

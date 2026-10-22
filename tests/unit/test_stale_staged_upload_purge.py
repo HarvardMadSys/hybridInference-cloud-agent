@@ -104,7 +104,6 @@ async def test_one_reaper_pass_purges_abandoned_staged_uploads(monkeypatch: pyte
 
     await _one_pass(store, monkeypatch)
 
-    assert attempts.STAGED_UPLOAD_RETENTION_HOURS == 24
     assert store.events == ["reap_expired", ("purge", 24), "revoke_grants"]
 
 

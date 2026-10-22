@@ -73,7 +73,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0091_env_queued_runs_index`) before
+Run `alembic upgrade head` (through `0093_recent_requests`) before
 starting this release; the [upgrade notes](docs/developer/upgrade-notes.md)
 say what each recent migration changes. The main control-plane listener then
 initializes the settings document once from its existing environment. The
@@ -102,9 +102,14 @@ also apply to newly enrolled hosts. Later environment changes are ignored.
 Clearing an override falls through to the global value or built-in default; it
 never reactivates an old environment value.
 
-Configure sandbox archives only in **Admin → Settings → Sandbox**. Cloud
-Agent stores them as one revisioned policy in the Agent database. There is no
-`AGENT_SANDBOX_ARCHIVE_*` environment surface. The destination is fixed at
+Configure automatic lifecycle archives only in **Admin → Settings → Sandbox**.
+Cloud Agent stores them as one revisioned policy in the Agent database, and no
+environment variable sets that policy or its destination. The
+`AGENT_SANDBOX_ARCHIVE_S3_*` variables under *Sandbox deletion archives* are a
+one-time import for the separate archive the **Archive to S3 and delete**
+control takes, and `AGENT_SANDBOX_ARCHIVE_STATE_DIR` is where a Sandbox Manager
+keeps the local state of both, restorable checkpoints included. The lifecycle
+archive destination is fixed at
 `s3://freeinference/cloud-agent/sandbox`. The saved policy contains enablement,
 region, bounded upload sizes, and either an AWS access key or the workload
 identity fields (customer-managed KMS key ARN and expected bucket owner). The

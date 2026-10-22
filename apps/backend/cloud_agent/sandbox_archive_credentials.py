@@ -7,9 +7,9 @@ and a missing key fails closed instead of writing the secret unprotected.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.domain_cipher import settings_root_key
 from cloud_agent.source_control import SourceControlCipher, SourceControlError
 from cloud_agent_shared.sandbox_archive_settings import (
     SandboxArchivePolicy,
@@ -24,11 +24,7 @@ _SECRET = "aws_secret_access_key"
 
 
 def _cipher() -> SourceControlCipher:
-    secret = (
-        os.environ.get("AGENT_SETTINGS_ENCRYPTION_KEY")
-        or os.environ.get("AGENT_SESSION_SECRET")
-        or ""
-    )
+    secret = settings_root_key()
     if len(secret.encode()) < 32:
         raise SandboxArchivePolicyError(
             "A settings encryption key of at least 32 bytes is required to store an AWS secret access key"

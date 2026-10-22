@@ -37,7 +37,7 @@ from cloud_agent.workers.snapshots import coordinate_shared_snapshots
 from cloud_agent.workers.work_signal import WorkSignal
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Coroutine
 
     from fastapi import FastAPI
 
@@ -99,8 +99,10 @@ def _forget_background_task(task: asyncio.Task[Any]) -> None:
         )
 
 
-#: Historical shutdown order. Each attribute is cancelled and awaited on its
-#: own, so one task that already failed cannot skip the ones after it.
+#: Every background task the lifespan starts, by its ``app.state`` attribute,
+#: in shutdown order. Each is cancelled and awaited on its own, so one task
+#: that already failed cannot skip the ones after it. A task can only be
+#: started under a name listed here, so shutdown stops all of them.
 _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "settings_task",
     "mcp_maintenance_task",
@@ -123,6 +125,18 @@ _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "compute_resource_task",
     "notification_listener_task",
 )
+
+
+def _spawn(app: FastAPI, name: str, work: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+    """Start a background loop, keep it referenced, and store it where shutdown finds it."""
+    if name not in _SHUTDOWN_TASK_ATTRS:
+        work.close()
+        raise ValueError(f"{name} is not in the shutdown order")
+    task = asyncio.create_task(work)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_forget_background_task)
+    setattr(app.state, name, task)
+    return task
 
 
 def _build_source_control(app: FastAPI) -> None:
@@ -153,18 +167,17 @@ def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
         token = setting_env(ENV_GITHUB_TOKEN, "")
         return GitHubCredential(token) if token else None
 
-    task = asyncio.create_task(
+    _spawn(
+        app,
+        "publish_task",
         publish_loop(
             store,
             credential_provider=credential_provider,
             github_app=app.state.source_control.github,
             grants=app.state.grants,
             wake=getattr(app.state, "background_wake", None),
-        )
+        ),
     )
-    _BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_forget_background_task)
-    app.state.publish_task = task
 
 
 async def _invoke(action: Any, errors: list[BaseException]) -> None:
@@ -387,9 +400,10 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.gateway_issuer = await ensure_gateway_namespace(pool, issuer)
 
         app.state.storage = storage
-        app.state.settings_task = asyncio.create_task(synchronize_settings(storage.settings))
-        _BACKGROUND_TASKS.add(app.state.settings_task)
-        app.state.settings_task.add_done_callback(_forget_background_task)
+        # A task this process does not start stays None.
+        for name in _SHUTDOWN_TASK_ATTRS:
+            setattr(app.state, name, None)
+        _spawn(app, "settings_task", synchronize_settings(storage.settings))
         # One pool, shared by both gateway clients. Each call used to build its own
         # client and pay a connect — and a TLS handshake, where the gateway is
         # behind TLS — and admission is not an occasional call: `require_agent_owner`
@@ -420,9 +434,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # So this is a parameter of the lifespan rather than a property of it, and
         # `create_mcp_app` says no.
         app.state.mcp_catalog = None
-        app.state.mcp_catalog_task = None
         app.state.compute_commands = None
-        app.state.compute_resource_task = None
         if background:
             from cloud_agent.bootstrap.compute import build_compute_runtime
 
@@ -431,48 +443,55 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 host_pool=storage.host_pool,
                 http=http,
             )
-            app.state.compute_resource_task = asyncio.create_task(compute_worker.run())
-            _BACKGROUND_TASKS.add(app.state.compute_resource_task)
-            app.state.compute_resource_task.add_done_callback(_forget_background_task)
+            _spawn(app, "compute_resource_task", compute_worker.run())
             app.state.mcp_catalog = McpCatalog(storage.mcp_catalog, http)
-            app.state.mcp_catalog_task = asyncio.create_task(app.state.mcp_catalog.run())
-            app.state.mcp_catalog_task.add_done_callback(_forget_background_task)
-            reaper = asyncio.create_task(reap_expired_attempts(storage, grants=app.state.grants))
-            environment_maintenance = asyncio.create_task(
-                run_environment_maintenance(storage.environments, storage.environment_snapshots)
+            _spawn(app, "mcp_catalog_task", app.state.mcp_catalog.run())
+            _spawn(app, "reaper_task", reap_expired_attempts(storage, grants=app.state.grants))
+            _spawn(
+                app,
+                "environment_maintenance_task",
+                run_environment_maintenance(storage.environments, storage.environment_snapshots),
             )
-            queued_follow_up_maintenance = asyncio.create_task(
-                run_queued_follow_up_maintenance(storage)
+            _spawn(
+                app, "queued_follow_up_maintenance_task", run_queued_follow_up_maintenance(storage)
             )
-            goal_wakeup_maintenance = asyncio.create_task(
+            _spawn(
+                app,
+                "goal_wakeup_maintenance_task",
                 run_goal_wakeup_maintenance(
                     storage,
                     github_app=app.state.source_control.github,
                     gateway=app.state.gateway,
-                )
+                ),
             )
-            goal_scheduling_maintenance = asyncio.create_task(
-                run_goal_scheduling_maintenance(storage)
+            _spawn(
+                app, "goal_scheduling_maintenance_task", run_goal_scheduling_maintenance(storage)
             )
-            pending_message_maintenance = asyncio.create_task(
+            _spawn(
+                app,
+                "pending_message_maintenance_task",
                 run_pending_message_maintenance(
                     storage,
                     github_app=app.state.source_control.github,
                     gateway=app.state.gateway,
-                )
+                ),
             )
             # The workers below wait on this as well as their clocks; the shared
             # listener started further down is what sets it.
             app.state.background_wake = BackgroundWake()
-            snapshot_coordinator = asyncio.create_task(
-                coordinate_shared_snapshots(storage, wake=app.state.background_wake)
+            _spawn(
+                app,
+                "snapshot_task",
+                coordinate_shared_snapshots(storage, wake=app.state.background_wake),
             )
-            sandbox_deletions = asyncio.create_task(coordinate_sandbox_deletions(storage))
-            sandbox_move_out = asyncio.create_task(coordinate_move_out(storage))
-            ledger_collector = asyncio.create_task(
+            _spawn(app, "sandbox_deletion_task", coordinate_sandbox_deletions(storage))
+            _spawn(app, "sandbox_move_out_task", coordinate_move_out(storage))
+            _spawn(
+                app,
+                "ledger_task",
                 collect_usage_snapshots(
                     storage.ledger, app.state.grants, wake=app.state.background_wake
-                )
+                ),
             )
             # Host capacity history keeps filling whether or not anybody has the
             # admin page open — that is the whole reason it is stored at all rather
@@ -480,46 +499,8 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             # heartbeats that accept them; what runs here is the retention that
             # bounds the table, in its own task, so a slow delete cannot delay a
             # heartbeat or the reaper.
-            capacity_history = asyncio.create_task(
-                prune_host_capacity_history(storage.host_capacity)
-            )
-            agent_memories = asyncio.create_task(maintain_agent_memories(storage.agent_memory))
-            _BACKGROUND_TASKS.add(reaper)
-            _BACKGROUND_TASKS.add(environment_maintenance)
-            _BACKGROUND_TASKS.add(queued_follow_up_maintenance)
-            _BACKGROUND_TASKS.add(goal_wakeup_maintenance)
-            _BACKGROUND_TASKS.add(goal_scheduling_maintenance)
-            _BACKGROUND_TASKS.add(pending_message_maintenance)
-            _BACKGROUND_TASKS.add(snapshot_coordinator)
-            _BACKGROUND_TASKS.add(sandbox_deletions)
-            _BACKGROUND_TASKS.add(sandbox_move_out)
-            _BACKGROUND_TASKS.add(ledger_collector)
-            _BACKGROUND_TASKS.add(capacity_history)
-            _BACKGROUND_TASKS.add(agent_memories)
-            reaper.add_done_callback(_forget_background_task)
-            environment_maintenance.add_done_callback(_forget_background_task)
-            queued_follow_up_maintenance.add_done_callback(_forget_background_task)
-            goal_wakeup_maintenance.add_done_callback(_forget_background_task)
-            goal_scheduling_maintenance.add_done_callback(_forget_background_task)
-            pending_message_maintenance.add_done_callback(_forget_background_task)
-            snapshot_coordinator.add_done_callback(_forget_background_task)
-            sandbox_deletions.add_done_callback(_forget_background_task)
-            sandbox_move_out.add_done_callback(_forget_background_task)
-            ledger_collector.add_done_callback(_forget_background_task)
-            capacity_history.add_done_callback(_forget_background_task)
-            agent_memories.add_done_callback(_forget_background_task)
-            app.state.reaper_task = reaper
-            app.state.environment_maintenance_task = environment_maintenance
-            app.state.queued_follow_up_maintenance_task = queued_follow_up_maintenance
-            app.state.goal_wakeup_maintenance_task = goal_wakeup_maintenance
-            app.state.goal_scheduling_maintenance_task = goal_scheduling_maintenance
-            app.state.pending_message_maintenance_task = pending_message_maintenance
-            app.state.snapshot_task = snapshot_coordinator
-            app.state.sandbox_deletion_task = sandbox_deletions
-            app.state.sandbox_move_out_task = sandbox_move_out
-            app.state.ledger_task = ledger_collector
-            app.state.capacity_task = capacity_history
-            app.state.agent_memory_task = agent_memories
+            _spawn(app, "capacity_task", prune_host_capacity_history(storage.host_capacity))
+            _spawn(app, "agent_memory_task", maintain_agent_memories(storage.agent_memory))
             # The profiling policy loop runs only here, in the one main process
             # that owns the reaper: file and terminal requests are rooted in this
             # process alone (the relay listener roots none, see below), so this is
@@ -533,12 +514,8 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             )
             profiling_worker = ProfilingPolicyWorker(service=profiling_service)
             app.state.profiling_policy_worker = profiling_worker
-            app.state.profiling_policy_task = asyncio.create_task(profiling_worker.run())
-            _BACKGROUND_TASKS.add(app.state.profiling_policy_task)
-            app.state.profiling_policy_task.add_done_callback(_forget_background_task)
-            app.state.queue_monitor_task = asyncio.create_task(monitor_queue(storage.host_pool))
-            _BACKGROUND_TASKS.add(app.state.queue_monitor_task)
-            app.state.queue_monitor_task.add_done_callback(_forget_background_task)
+            _spawn(app, "profiling_policy_task", profiling_worker.run())
+            _spawn(app, "queue_monitor_task", monitor_queue(storage.host_pool))
             # One connection to Postgres answers what waits on a change: idle hosts
             # parked on the worker wait endpoint (a job was queued, requeued or
             # ended), owners' event streams (their job stored an event or changed
@@ -548,7 +525,9 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.work_signal = WorkSignal()
             app.state.job_event_signal = JobEventSignal()
             app.state.owner_change_signal = OwnerChangeSignal()
-            app.state.notification_listener_task = asyncio.create_task(
+            _spawn(
+                app,
+                "notification_listener_task",
                 listen(
                     dsn,
                     (
@@ -557,10 +536,8 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                         app.state.owner_change_signal,
                         app.state.background_wake,
                     ),
-                )
+                ),
             )
-            _BACKGROUND_TASKS.add(app.state.notification_listener_task)
-            app.state.notification_listener_task.add_done_callback(_forget_background_task)
             # This listener holds no tool call for its owner's decision.
             app.state.mcp_decision_signal = None
             _start_publisher(app, storage)
@@ -569,21 +546,6 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             # The relay listener roots no file or terminal request, so it has no
             # configuration to apply and nothing to collect.
             app.state.profiling_policy_worker = None
-            app.state.profiling_policy_task = None
-            app.state.reaper_task = None
-            app.state.environment_maintenance_task = None
-            app.state.queued_follow_up_maintenance_task = None
-            app.state.goal_wakeup_maintenance_task = None
-            app.state.goal_scheduling_maintenance_task = None
-            app.state.pending_message_maintenance_task = None
-            app.state.snapshot_task = None
-            app.state.sandbox_deletion_task = None
-            app.state.sandbox_move_out_task = None
-            app.state.ledger_task = None
-            app.state.capacity_task = None
-            app.state.agent_memory_task = None
-            app.state.queue_monitor_task = None
-            app.state.publish_task = None
             app.state.work_signal = None
             app.state.job_event_signal = None
             app.state.owner_change_signal = None
@@ -592,11 +554,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             # decision wakes the call it names: its own connection, on that one
             # channel.
             app.state.mcp_decision_signal = McpDecisionSignal()
-            app.state.notification_listener_task = asyncio.create_task(
-                listen(dsn, (app.state.mcp_decision_signal,))
-            )
-            _BACKGROUND_TASKS.add(app.state.notification_listener_task)
-            app.state.notification_listener_task.add_done_callback(_forget_background_task)
+            _spawn(app, "notification_listener_task", listen(dsn, (app.state.mcp_decision_signal,)))
             logger.info("cloud agent relay listener started")
 
         # Reached only after the start log. Shutdown then logs the stop line,
@@ -604,8 +562,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         entered = True
         # Each listener owns upstream sockets in its own process, even when it
         # does not run the control plane's grant reaper or publisher.
-        app.state.mcp_maintenance_task = asyncio.create_task(maintain_host_sessions(storage))
-        app.state.mcp_maintenance_task.add_done_callback(_forget_background_task)
+        _spawn(app, "mcp_maintenance_task", maintain_host_sessions(storage))
         # Created per process, but worker tasks remain lazy until a selected
         # file/terminal record is actually offered.
         local_measurement_writer = MeasurementWriter()

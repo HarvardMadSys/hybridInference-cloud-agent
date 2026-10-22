@@ -114,6 +114,11 @@ from cloud_agent_host.measurement_delivery import (
 from cloud_agent_host.profiling_policy import ProfilingPolicySync
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
+from cloud_agent_host.runner_stop import (
+    STOPPING as _STOPPING,
+    drain_on_sigterm as _drain_on_sigterm,
+    stay_down as _stay_down,
+)
 from cloud_agent_host.runtime_downloads import (
     ENV_RUNTIME_DOWNLOAD_NETWORK,
     ENV_RUNTIME_REGISTRY_URL,
@@ -3567,43 +3572,6 @@ def _run_turn(
         control.close()
 
 
-#: Set by SIGTERM. A container being replaced gets one, and until this existed
-#: it killed the process outright — Python's default handler terminates, and
-#: only ``KeyboardInterrupt`` (SIGINT) was caught. Every `docker compose up -d`
-#: that recreated a runner therefore abandoned whatever job it was running.
-#:
-#: That is not only a deploy problem, but the deploy is where it bites on a
-#: schedule: since CD, every merge to dev recreates these containers.
-_STOPPING = threading.Event()
-
-
-def _drain_on_sigterm() -> None:
-    """Finish the job in hand on SIGTERM, then exit; SIGINT still stops now.
-
-    The split is deliberate. `docker stop` sends SIGTERM; supported activation
-    asks the Engine to wait indefinitely, so a job finishes before its runner
-    is replaced. Direct, out-of-band Compose operations retain their configured
-    grace period. A person pressing Ctrl-C means *now*, and turning that into a
-    several-minute wait would be its own surprise.
-
-    The lease machinery remains the backstop for a host failure or an explicit
-    forced kill, not the deployment plan.
-    """
-
-    def handler(signum: int, frame: object) -> None:
-        _STOPPING.set()
-        print(
-            "agent runner: SIGTERM received; finishing the current job, then exiting",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    # Only the main thread may install one; tests and embedders that call
-    # `serve` from elsewhere get the old behaviour rather than an exception.
-    with contextlib.suppress(ValueError):
-        signal.signal(signal.SIGTERM, handler)
-
-
 def _sandbox_manager_url_from_env() -> str | None:
     """This host's sandbox manager address, **as the control plane will reach it**.
 
@@ -4278,6 +4246,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
 
     work = _WorkWaiter(base_url=base_url, interval_s=tick_s)
     immediate = False
+    rejected = False
     claims = 0
     try:
         while True:
@@ -4304,6 +4273,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                     file=sys.stderr,
                     flush=True,
                 )
+                rejected = True
                 break
 
             # Whatever the last successful beat carried, including nothing:
@@ -4453,6 +4423,8 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             turns.shutdown(immediate=immediate)
         finally:
             stop_all()
+    if rejected:
+        _stay_down()
     return 0
 
 
@@ -5018,7 +4990,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # In the source repo, importing sandbox configured root logging as a side
     # effect; the host shim removed that on purpose. This is the sanctioned
-    # replacement (MIGRATION.md's deferred-behaviour register, the
+    # replacement (the extraction record's deferred-behaviour register, the
     # runner-logging row) — without it every INFO event a runner emits goes
     # nowhere.
     configure_process_logging()

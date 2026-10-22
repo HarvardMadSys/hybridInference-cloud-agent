@@ -39,6 +39,10 @@ from cloud_agent.storage._sql.sandbox import (
     member_turn_running,
     quiet_idle_deadline,
 )
+from cloud_agent.storage._sql.terminal_replay import (
+    page as terminal_replay_page,
+    pending_ids as terminal_replay_ids,
+)
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS
 
@@ -1807,19 +1811,14 @@ class PostgresSandboxRepository:
     async def list_terminal_resumes_pending(self, *, limit: int = 100) -> list[str]:
         """List settled workspaces whose sandbox manager resume still needs confirmation."""
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT id
-                FROM agent_jobs
-                WHERE terminal_resume_pending = TRUE
-                  AND state = ANY($1::text[])
-                ORDER BY updated_at
-                LIMIT $2
-                """,
-                list(TERMINAL_STATES),
-                limit,
-            )
-        return [row["id"] for row in rows]
+            return await terminal_replay_ids(conn, limit=limit)
+
+    async def terminal_resume_page(
+        self, *, after: tuple[datetime, str] | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Page settled replay routing without job prompts, details or metadata."""
+        async with self._pool.acquire() as conn:
+            return await terminal_replay_page(conn, after=after, limit=limit)
 
     async def mark_terminal_resume_complete(self, *, job_id: str) -> bool:
         """Clear durable recovery state after the sandbox manager confirms a resume."""

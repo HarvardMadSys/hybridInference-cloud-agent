@@ -20,6 +20,7 @@ from cloud_agent.storage._sql.jobs import (
     JOB_SUMMARY_SELECT,
     QUALIFIED_JOB_SUMMARY_COLUMNS,
     SESSION_DELETE_BLOCK_SQL,
+    read_job,
 )
 from cloud_agent.storage._sql.pending_messages import list_pending_messages
 from cloud_agent.storage._sql.rows import job_row_to_dict, sandbox_row_to_dict
@@ -148,18 +149,7 @@ class PostgresConversationQueries:
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         """Fetch one job by id."""
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                SELECT {QUALIFIED_JOB_SUMMARY_COLUMNS}, t.title, t.title_source, t.pinned_at, t.archived_at, t.deleted_at,
-                       to_jsonb(s) AS thread_sandbox
-                FROM agent_jobs j
-                LEFT JOIN agent_threads t ON t.id = j.thread_id
-                LEFT JOIN {THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
-                WHERE j.id = $1
-                """,
-                job_id,
-            )
-        return job_row_to_dict(row) if row else None
+            return await read_job(conn, job_id)
 
     async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
         """Read only an owned job's state and publication URL for its event stream.
@@ -457,6 +447,13 @@ class PostgresConversationQueries:
         The sidebar groups tasks by project, so it needs every repo the user
         has ever run in — not just those represented in the newest-first job
         page, which would silently drop dormant projects from the tree.
+
+        The order-independent refresh fingerprint folds fixed-width row hashes,
+        not bodies or a growing string aggregate. IDs cover membership changes;
+        revisions cover mutations that leave the maximum activity unchanged.
+        The membership fingerprint also detects equal-count repo swaps, which
+        cannot safely reuse an activity-only first-page merge. Both are only
+        invalidation hints, never authority or stable cursors.
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -470,7 +467,9 @@ class PostgresConversationQueries:
                        COUNT(DISTINCT j.thread_id) FILTER (
                            WHERE t.pinned_at IS NOT NULL
                        ) AS pinned_count,
-                       MAX(t.pinned_at) AS pinned_at
+                       MAX(t.pinned_at) AS pinned_at,
+                       bit_xor(('x' || md5(ROW(j.id, j.revision, t.id, t.revision)::text))::bit(128))::text AS refresh_token,
+                       bit_xor(('x' || md5(ROW(j.id, t.id)::text))::bit(128))::text AS membership_token
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = $1
                 WHERE j.user_id = $1
@@ -491,6 +490,8 @@ class PostgresConversationQueries:
                 "last_activity_at": row["last_activity_at"],
                 "pinned_count": int(row["pinned_count"]),
                 "pinned_at": row["pinned_at"],
+                "refresh_token": row["refresh_token"],
+                "membership_token": row["membership_token"],
             }
             for row in rows
         ]

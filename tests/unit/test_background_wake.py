@@ -102,7 +102,6 @@ async def test_one_pass_captures_every_due_workspace(monkeypatch):
 
 
 async def test_an_idle_coordinator_looks_again_when_a_deferred_capture_is_due(monkeypatch):
-    monkeypatch.setattr(snapshots, "SNAPSHOT_IDLE_S", 30.0)
     captured = AsyncMock(return_value=False)
     monkeypatch.setattr(snapshots, "_capture_due_shared_snapshot", captured)
     due = datetime.now(UTC) + timedelta(seconds=0.1)
@@ -119,9 +118,6 @@ async def test_an_idle_coordinator_looks_again_when_a_deferred_capture_is_due(mo
 
 
 async def test_while_nothing_listens_each_worker_looks_on_its_old_clock(monkeypatch):
-    monkeypatch.setattr(snapshots, "SNAPSHOT_IDLE_S", 30.0)
-    monkeypatch.setattr(publish_worker, "PUBLISH_IDLE_S", 30.0)
-    monkeypatch.setattr(ledger, "LEDGER_IDLE_S", 30.0)
     monkeypatch.setattr(ledger, "REFRESH_POLL_SECONDS", 0.01)
     captured = AsyncMock(return_value=False)
     monkeypatch.setattr(snapshots, "_capture_due_shared_snapshot", captured)
@@ -228,7 +224,6 @@ async def test_one_pass_publishes_past_a_failure_and_retries_every_due_import(mo
 
 @pytest.mark.parametrize("retry_kind", ["base_import", "snapshot_publish"])
 async def test_an_idle_publisher_looks_again_when_a_retry_is_due(monkeypatch, retry_kind):
-    monkeypatch.setattr(publish_worker, "PUBLISH_IDLE_S", 30.0)
     imported = AsyncMock()
     monkeypatch.setattr(publish_worker, "_retry_due_base_imports", imported)
     monkeypatch.setattr(publish_worker, "_publish_due", AsyncMock())
@@ -254,7 +249,6 @@ async def test_an_idle_publisher_looks_again_when_a_retry_is_due(monkeypatch, re
 
 
 async def test_an_idle_collector_reads_when_the_earliest_schedule_is_due(monkeypatch):
-    monkeypatch.setattr(ledger, "LEDGER_IDLE_S", 30.0)
     due = datetime.now(UTC) + timedelta(seconds=0.1)
     store = SimpleNamespace(
         claim_due_ledger_refresh=AsyncMock(return_value=None),
@@ -270,7 +264,6 @@ async def test_an_idle_collector_reads_when_the_earliest_schedule_is_due(monkeyp
 
 
 async def test_an_idle_collector_with_nothing_scheduled_waits_for_its_wake_up(monkeypatch):
-    monkeypatch.setattr(ledger, "LEDGER_IDLE_S", 30.0)
     store = SimpleNamespace(
         claim_due_ledger_refresh=AsyncMock(return_value=None),
         next_ledger_refresh_due=AsyncMock(return_value=None),
