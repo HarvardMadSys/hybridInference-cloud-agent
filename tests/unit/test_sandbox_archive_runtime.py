@@ -15,7 +15,7 @@ from cloud_agent_host.chat_sandbox_markers import FINAL_ARCHIVE_MARKER_MAX_BYTES
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveReceipt
-from cloud_agent_host.sandbox_archives import SandboxInitialArchiveMarker
+from cloud_agent_host.sandbox_archives import CaptureGate, SandboxInitialArchiveMarker
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:
@@ -339,7 +339,7 @@ def test_retired_client_close_failure_cannot_rollback_policy_application(
 def test_default_factory_shares_one_capture_gate_across_policy_revisions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    gates: list[threading.BoundedSemaphore] = []
+    gates: list[CaptureGate] = []
     services: list[_Service] = []
 
     class Uploader:
