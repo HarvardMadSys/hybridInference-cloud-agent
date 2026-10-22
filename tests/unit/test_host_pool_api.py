@@ -1308,10 +1308,6 @@ async def test_the_last_host_to_hold_a_version_switches_new_chats_to_it(client):
     assert store.runtime_upgrades["claude-code"]["activated_at"]
 
 
-
-
-
-
 async def test_physical_server_metadata_round_trips_without_changing_identity(client):
     async_client, store = client
     credential = await _enroll(async_client, store)
@@ -2742,10 +2738,6 @@ async def test_legacy_host_residency_mutations_are_not_executable(residency_clie
     assert grants.revoked == []
 
 
-
-
-
-
 class SteppedGrants(RecordingGrants):
     """Renewals that buy the gateway's step from the moment they are asked for."""
 
@@ -2757,10 +2749,6 @@ class SteppedGrants(RecordingGrants):
         await super().renew(grant_id)
         expires_at = self._wall_clock() + timedelta(seconds=GATEWAY_RENEWAL_STEP_S)
         return {"grant_id": grant_id, "expires_at": expires_at.isoformat()}
-
-
-
-
 
 
 async def test_host_heartbeat_reconciles_exact_retained_docker_observations(residency_client):
@@ -2986,16 +2974,6 @@ async def test_stopped_shared_group_releases_and_revokes_each_member_residency(r
     assert response.json()["residencies_lost"] == []
 
 
-
-
-
-
-
-
-
-
-
-
 async def test_stopped_member_revocation_cannot_hold_the_heartbeat_reply(monkeypatch):
     from fastapi import BackgroundTasks
 
@@ -3057,7 +3035,6 @@ async def test_stopped_member_revocation_cannot_hold_the_heartbeat_reply(monkeyp
     assert not started.is_set()
     await asyncio.wait_for(background(), timeout=1)
     assert started.is_set() and cancelled.is_set()
-
 
 
 # ── residency grant minting ────────────────────────────────────────────
@@ -3484,10 +3461,6 @@ async def test_a_checkpoint_bookkeeping_failure_keeps_the_heartbeat(client):
 
     assert response.status_code == 200
     assert len(store.sandbox_observations) == 1
-
-
-
-
 
 
 async def test_a_due_stop_is_fenced_to_the_activation_the_beat_reported(residency_client):

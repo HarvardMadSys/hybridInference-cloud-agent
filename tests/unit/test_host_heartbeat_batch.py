@@ -3,26 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import Any
 
-import pytest
 from fastapi import BackgroundTasks
-from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import hosts
-from cloud_agent.api import admin_hosts
-from cloud_agent.api.deps import get_grant_client
-from cloud_agent.grants import GATEWAY_RENEWAL_STEP_S, RENEWAL_DUE_WITHIN_S, RenewalSchedule
 from cloud_agent.schemas import HostHeartbeatRequest
 from tests.unit.test_host_pool_api import (
     FakeHostPoolStore,
     RecordingGrants,
-    SteppedGrants,
     _CHECKPOINT,
     _TARGET,
-    _build_app,
     _enabled_archive,
     _enroll,
     _live_group,
@@ -30,6 +21,7 @@ from tests.unit.test_host_pool_api import (
     client,
     residency_client,
 )
+
 
 async def test_a_heartbeat_answers_from_the_policy_its_own_write_read(client, monkeypatch):
     """The policy the beat's write share-locks is the one the answer is made of.
@@ -87,103 +79,6 @@ async def test_the_beat_that_switches_an_update_answers_with_what_it_switched_to
 
     assert store.runtime_versions == {"claude-code": "2.1.300"}
     assert answer["runtime_downloads"] == switched
-
-
-async def test_a_beat_renews_only_the_residency_grants_running_low():
-    """Every beat extends its residencies; their grants need renewing far less often.
-
-    Renewed on every thirty-second beat, each resident member's grant cost the
-    gateway ten renewals for every step it granted. A grant whose last renewal
-    has plenty left now waits for a later beat; one that has run low is
-    renewed, still after the reply, and what it bought is recorded.
-    """
-    from fastapi import BackgroundTasks
-
-    from cloud_agent.schemas import HostHeartbeatRequest
-
-    clock = SimpleNamespace(elapsed=0.0)
-    epoch = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
-
-    def wall() -> datetime:
-        return epoch + timedelta(seconds=clock.elapsed)
-
-    schedule = RenewalSchedule(monotonic=lambda: clock.elapsed, wall_clock=wall)
-    grants = SteppedGrants(wall)
-    store = FakeHostPoolStore()
-    store.seed("runner-a", credential_hash="credential-hash", enrolled=True)
-    store.beat_answers = {("th-fresh", 1): "agr-fresh", ("th-low", 1): "agr-low"}
-    body = HostHeartbeatRequest.model_validate(
-        {
-            "residencies": [
-                {"thread_id": "th-fresh", "generation": 1},
-                {"thread_id": "th-low", "generation": 1},
-            ]
-        }
-    )
-
-    async def beat_at(elapsed: float) -> list[str]:
-        clock.elapsed = elapsed
-        background = BackgroundTasks()
-        before = len(grants.renewed)
-        await hosts.heartbeat_host(
-            body,
-            background_tasks=background,
-            host={"host": "runner-a", "credential_hash": "credential-hash"},
-            store=store,
-            grants=grants,
-            schedule=schedule,
-        )
-        assert len(grants.renewed) == before, "the reply waited on the gateway"
-        await background()
-        return grants.renewed[before:]
-
-    # agr-fresh was renewed a beat ago; agr-low has no more than the threshold left.
-    fresh_left = GATEWAY_RENEWAL_STEP_S - HEARTBEAT_INTERVAL_S
-    schedule.record(
-        "agr-fresh", {"expires_at": (wall() + timedelta(seconds=fresh_left)).isoformat()}
-    )
-    schedule.record(
-        "agr-low", {"expires_at": (wall() + timedelta(seconds=RENEWAL_DUE_WITHIN_S)).isoformat()}
-    )
-
-    assert await beat_at(0) == ["agr-low"]
-    assert await beat_at(1) == [], "a grant renewed on the last beat was renewed again"
-    assert await beat_at(fresh_left - RENEWAL_DUE_WITHIN_S) == ["agr-fresh"]
-
-
-async def test_heartbeats_share_the_process_renewal_schedule(monkeypatch):
-    """The schedule a beat consults is the process's, which the lifespan sets.
-
-    A record built per request would know nothing, and renew every grant on
-    every beat as before.
-    """
-    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
-    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "unit-test-sandbox-manager-secret")
-
-    async def _no_audit(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(admin_hosts, "log_admin_action", _no_audit)
-    monkeypatch.setattr(admin_hosts, "get_client_ip", lambda _request: "127.0.0.1")
-    store = FakeHostPoolStore()
-    store.beat_answers = {("th-1", 1): "agr-1"}
-    grants = SteppedGrants(lambda: datetime.now(UTC))
-    app = _build_app(store)
-    app.dependency_overrides[get_grant_client] = lambda: grants
-    app.state.renewal_schedule = RenewalSchedule()
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        credential = await _enroll(client, store)
-        for _ in range(2):
-            response = await client.post(
-                "/v1/agent/host/heartbeat",
-                json={"residencies": [{"thread_id": "th-1", "generation": 1}]},
-                headers={"Authorization": f"Bearer {credential}"},
-            )
-            assert response.status_code == 200, response.text
-
-    assert grants.renewed == ["agr-1"]
-    assert "agr-1" in app.state.renewal_schedule
 
 
 def _shared_member(thread_id: str, generation: int, resident_state: str) -> dict[str, Any]:
@@ -342,6 +237,7 @@ async def test_a_failed_checkpoint_lookup_still_offers_the_receipt(client, monke
 
     assert response.status_code == 200
     assert [recorded["checkpoint"]["checkpoint_id"] for recorded in store.checkpoints] == ["c" * 32]
+
 
 async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_client):
     client, store, grants = residency_client

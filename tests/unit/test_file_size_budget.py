@@ -61,7 +61,7 @@ TEST_BASELINE = {
     "tests/unit/test_compute_providers.py": 2002,
     "tests/unit/test_compute_reconcile.py": 2291,
     "tests/unit/test_deploy_config.py": 2071,
-    "tests/unit/test_host_pool_api.py": 3530,
+    "tests/unit/test_host_pool_api.py": 3503,
     "tests/unit/test_mcp_connections_api.py": 3079,
     "tests/unit/test_retained_deploy.py": 2236,
     "tests/unit/test_runner_host_service.py": 2939,
