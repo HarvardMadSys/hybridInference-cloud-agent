@@ -229,7 +229,10 @@ class PostgresAgentMemoryRepository:
             before = datetime.fromisoformat(timestamp)
             if not separator or not before.tzinfo or not before_id or len(before_id) > 128:
                 raise ValueError("Invalid archive cursor")
-        async with self._pool.acquire() as conn:
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
             active = await conn.fetch(
                 f"SELECT {_COLUMNS} FROM agent_memories "
                 "WHERE user_id = $1 AND COALESCE(repo, '') = $2 AND status='active' "

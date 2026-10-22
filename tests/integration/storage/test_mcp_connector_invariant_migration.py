@@ -99,8 +99,7 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     )
     assert script.get_revision(_HEAD).down_revision == "0099_thread_stats_rollups"
     assert (
-        script.get_revision("0099_thread_stats_rollups").down_revision
-        == "0098_measurement_counts"
+        script.get_revision("0099_thread_stats_rollups").down_revision == "0098_measurement_counts"
     )
     assert script.get_revision("0098_measurement_counts").down_revision == (
         "0097_admin_sandbox_deltas"
