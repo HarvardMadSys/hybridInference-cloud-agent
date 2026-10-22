@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0095_memory_retention`. The supported deployment scripts run migrations
+`0096_snapshot_title_context`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -54,6 +54,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0096_snapshot_title_context` | Adds a bounded JSON title context to immutable sandbox snapshots. Existing snapshots start with an empty context and retain the deterministic changed-file fallback; newly captured snapshots persist recent conversation material so a publisher claim never rebuilds or transfers the sandbox's unbounded transcript. A downgrade drops only this derived context. |
 | `0095_memory_retention` | Builds partial archived-time and non-null superseded-by indexes concurrently, without changing memory rows or the 90-day retention policy. Online builds avoid blocking foreground writes; interrupted builds can be retried. Offline SQL uses ordinary index builds. Downgrade drops only these indexes. |
 | `0094_thread_message_pages` | Builds a concurrent index on each job's messages in the existing prompt-first order, so history pages seek a bounded set of message IDs before reading bodies. Changes no row. An interrupted online build is dropped and retried; offline conversion builds the index plainly inside its transaction. A downgrade drops the index concurrently. |
 | `0093_recent_requests` | Adds an owner/time-indexed projection of eligible recent requests and message/thread maintenance triggers. Backfills existing eligible messages once; trigger installation holds write-conflicting locks while the backfill runs, so schedule for a low-write period on a large history. Source messages are unchanged. Downgrade removes only the projection and triggers. |

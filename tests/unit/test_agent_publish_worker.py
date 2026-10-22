@@ -711,6 +711,51 @@ async def test_title_generation_failure_publishes_a_meaningful_fallback(monkeypa
     generated.assert_awaited_once()
 
 
+async def test_draft_opens_before_slow_generated_title_then_is_enriched(monkeypatch):
+    """Title inference is optional enrichment, not the draft-creation gate."""
+    store = FakeStore(dict(_JOB))
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
+    )
+    title_started = asyncio.Event()
+    title_release = asyncio.Event()
+    draft_opened = asyncio.Event()
+    calls: list[tuple[str, bool]] = []
+
+    async def generated(*args, **kwargs):
+        title_started.set()
+        await title_release.wait()
+        return "[agent] Fix retries with bounded publication latency"
+
+    async def pull_request(**kwargs):
+        calls.append((kwargs["title"], kwargs.get("create_if_missing", True)))
+        draft_opened.set()
+        return "https://github.com/o/n/pull/7"
+
+    monkeypatch.setattr(publish_worker, "generate_pr_title", generated)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", pull_request)
+
+    publishing = asyncio.create_task(publish_one(store, credential=GitHubCredential("t")))
+    try:
+        await asyncio.wait_for(title_started.wait(), timeout=0.5)
+        await asyncio.wait_for(draft_opened.wait(), timeout=0.5)
+        assert calls == [("[agent] Stabilize test retries", True)]
+        assert not publishing.done()
+        title_release.set()
+        assert await asyncio.wait_for(publishing, timeout=0.5) == "https://github.com/o/n/pull/7"
+    finally:
+        if not publishing.done():
+            publishing.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await publishing
+
+    assert calls == [
+        ("[agent] Stabilize test retries", True),
+        ("[agent] Fix retries with bounded publication latency", False),
+    ]
+    assert store.snapshot_recorded == (9, "https://github.com/o/n/pull/7", "s")
+
+
 async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(monkeypatch):
     from cloud_agent import sandbox_manager_routing
 
@@ -1053,6 +1098,35 @@ async def test_a_draft_retargeted_by_a_reviewer_is_refreshed_not_duplicated(monk
     assert url == "https://github.com/o/n/pull/7"
     assert [request.method for request in requests] == ["GET", "PATCH"]
     assert json.loads(requests[1].content) == {"title": "[agent] Fix retries", "body": "Summary"}
+
+
+async def test_optional_title_enrichment_does_not_reopen_a_closed_draft(monkeypatch):
+    """A cosmetic late title cannot create a second PR after owner closure."""
+    requests: list[str] = []
+
+    def handle(request):
+        requests.append(request.method)
+        return httpx.Response(200, json=[])
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs),
+    )
+
+    url = await ensure_draft_pull_request(
+        repo="o/n",
+        head_branch="agent/athr_1",
+        base_branch="dev",
+        title="[agent] Fix retries",
+        body="Summary",
+        credential=GitHubCredential("t"),
+        create_if_missing=False,
+    )
+
+    assert url is None
+    assert requests == ["GET"]
 
 
 async def test_pr_closed_during_update_creates_a_new_draft(monkeypatch):
@@ -1845,6 +1919,46 @@ async def test_entitlement_outage_defers_before_any_publication_effect(monkeypat
     mint.assert_not_awaited()
     push.assert_not_called()
     pull_request.assert_not_awaited()
+
+
+async def test_admission_handoff_does_not_wait_for_entitlement_completion(monkeypatch):
+    """A slow repository check must not block an unrelated claim from starting."""
+    publish_store = FakeStore(dict(_JOB))
+    entitlement_entered = asyncio.Event()
+    entitlement_release = asyncio.Event()
+    admission_started = asyncio.Event()
+
+    async def blocking_entitlement(
+        repo: str,
+        user_id: str,
+        *,
+        store: Any,
+        app_credentials: Any,
+    ) -> None:
+        assert (repo, user_id, store, app_credentials) == ("o/n", "u1", publish_store, None)
+        entitlement_entered.set()
+        await entitlement_release.wait()
+
+    monkeypatch.setattr(publish_worker, "require_entitled_repo", blocking_entitlement)
+    publishing = asyncio.create_task(
+        publish_worker._publish_claimed_owned(
+            publish_store,
+            dict(_JOB),
+            credential=None,
+            app_credentials=None,
+            base_branch="dev",
+            admission_started=admission_started,
+        )
+    )
+    try:
+        await asyncio.wait_for(admission_started.wait(), timeout=0.5)
+        assert entitlement_entered.is_set()
+        assert not entitlement_release.is_set()
+        assert not publishing.done()
+    finally:
+        entitlement_release.set()
+
+    assert await asyncio.wait_for(publishing, timeout=0.5) is None
 
 
 async def test_entitlement_error_after_publication_started_does_not_requeue(monkeypatch):
