@@ -809,46 +809,55 @@ class PostgresSessionForkRepository:
                 )
                 copied: dict[str, str] = {}
                 previous_copy: str | None = None
+                copied_turn_rows: list[tuple[Any, ...]] = []
                 for turn in turns:
                     copy_id = new_job_id()
                     copied[str(turn["id"])] = copy_id
-                    await conn.execute(
-                        """
-                        INSERT INTO agent_jobs (
-                            id, thread_id, parent_job_id, turn_no, native_turn_no, user_id,
-                            base_sha, task_prompt, runtime, model, reasoning_effort, state,
-                            published_pr_url, published_commit_sha, detail, metadata,
-                            fork_source_job_id, skills, created_at, updated_at
-                        ) VALUES (
-                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                            $13, $14, $15, $16::jsonb, $17, $18::jsonb,
-                            clock_timestamp(), clock_timestamp()
+                    copied_turn_rows.append(
+                        (
+                            copy_id,
+                            operation["target_thread_id"],
+                            previous_copy,
+                            turn["turn_no"],
+                            turn["native_turn_no"],
+                            operation["user_id"],
+                            turn["base_sha"],
+                            turn["task_prompt"],
+                            turn["runtime"],
+                            turn["model"],
+                            turn["reasoning_effort"],
+                            turn["state"] if turn["state"] in TERMINAL_STATES else CANCELLED,
+                            turn["published_pr_url"],
+                            turn["published_commit_sha"],
+                            turn["detail"],
+                            json.dumps(load_json(turn["metadata"]))
+                            if turn["metadata"] is not None
+                            else None,
+                            turn["id"],
+                            json.dumps(load_json(turn["skills"]))
+                            if turn["skills"] is not None
+                            else None,
                         )
-                        """,
-                        copy_id,
-                        operation["target_thread_id"],
-                        previous_copy,
-                        turn["turn_no"],
-                        turn["native_turn_no"],
-                        operation["user_id"],
-                        turn["base_sha"],
-                        turn["task_prompt"],
-                        turn["runtime"],
-                        turn["model"],
-                        turn["reasoning_effort"],
-                        turn["state"] if turn["state"] in TERMINAL_STATES else CANCELLED,
-                        turn["published_pr_url"],
-                        turn["published_commit_sha"],
-                        turn["detail"],
-                        json.dumps(load_json(turn["metadata"]))
-                        if turn["metadata"] is not None
-                        else None,
-                        turn["id"],
-                        json.dumps(load_json(turn["skills"]))
-                        if turn["skills"] is not None
-                        else None,
                     )
                     previous_copy = copy_id
+                # This is a driver batch, not a set-based SQL statement.
+                # asyncpg may stream or flush it internally, but finalization
+                # no longer awaits one protocol exchange for every copied turn.
+                await conn.executemany(
+                    """
+                    INSERT INTO agent_jobs (
+                        id, thread_id, parent_job_id, turn_no, native_turn_no, user_id,
+                        base_sha, task_prompt, runtime, model, reasoning_effort, state,
+                        published_pr_url, published_commit_sha, detail, metadata,
+                        fork_source_job_id, skills, created_at, updated_at
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                        $13, $14, $15, $16::jsonb, $17, $18::jsonb,
+                        clock_timestamp(), clock_timestamp()
+                    )
+                    """,
+                    copied_turn_rows,
+                )
                 await conn.executemany(
                     """
                     INSERT INTO agent_thread_messages
