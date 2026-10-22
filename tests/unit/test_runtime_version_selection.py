@@ -17,8 +17,6 @@ pinned here rather than left to the end-to-end run:
 
 from __future__ import annotations
 
-import inspect
-import re
 from typing import Any
 
 from cloud_agent.domain.runtimes import resolve_runtime_version
@@ -33,6 +31,9 @@ from cloud_agent_host.sandbox import (
     _labelled,
     _split_menu,
 )
+from cloud_agent_shared.environment import BoundEnvironment
+from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef, snapshot_object_key
+from cloud_agent_shared.ssh_access import SshAccess
 
 _MENU = {"claude-code": ["2.1.220", "2.1.235"]}
 _DEFAULT = {"claude-code": "2.1.220"}
@@ -261,6 +262,89 @@ def test_the_menu_survives_validation() -> None:
     assert attestation.model_dump()["runner_capabilities"] == ["shared-sandbox-v1"]
 
 
+class _ReadKeys(dict[str, Any]):
+    """A claim body that records each key read from it, whether or not it is there."""
+
+    def __init__(self, body: dict[str, Any]) -> None:
+        super().__init__(body)
+        self.read: set[str] = set()
+
+    def __getitem__(self, key: str) -> Any:
+        self.read.add(key)
+        return super().__getitem__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:  # type: ignore[override]
+        self.read.add(key)
+        return super().get(key, default)
+
+
+def _claim(**optional: Any) -> WorkerClaimResponse:
+    """A claim response with its required fields, and the optional ones given."""
+    return WorkerClaimResponse(
+        job_id="ajob_1",
+        thread_id="athr_1",
+        attempt_id=1,
+        attempt_no=1,
+        repo="owner/name",
+        task_prompt="hi",
+        runtime="claude-code",
+        model="m",
+        worker_token="w",
+        **optional,
+    )
+
+
+def _full_claim() -> WorkerClaimResponse:
+    """A claim response with every optional field filled in, each with a value the runner takes."""
+    owner = "d" * 64
+    snapshot = EnvironmentSnapshotRef.model_validate(
+        {
+            "snapshot_id": "5" * 32,
+            "owner": owner,
+            "object_key": snapshot_object_key(owner, "5" * 32),
+            "sha256": "e" * 64,
+            "size_bytes": 10,
+            "base_image": "ghcr.io/harvardmadsys/cloud-agent-sandbox@sha256:" + "a" * 64,
+            "source_sha": "c" * 40,
+            "built_at": "2026-10-15T00:00:00Z",
+        }
+    )
+    return _claim(
+        thread_attachment_count=2,
+        turn_attachment_count=1,
+        environment=BoundEnvironment(binding_id="b").model_dump(mode="json"),
+        environment_snapshot=snapshot.model_dump(mode="json"),
+        ssh_access=SshAccess(revision=1),
+        parent_job_id="ajob_0",
+        turn_no=2,
+        base_sha="c" * 40,
+        setup_script="make deps",
+        plugins=[{"plugin": "review@tools", "marketplace": "owner/tools"}],
+        execution_profile="untrusted-kata-v1",
+        reasoning_effort="high",
+        runtime_version="2.1.235",
+        thread_sandbox={
+            "thread_id": "athr_1",
+            "sandbox_id": "asbx_1",
+            "generation": 1,
+            "host": "host-a",
+            "container_name": "cloud-agent-asbx_1",
+            "runtime_id": "claude-code",
+            "execution_profile": "untrusted-kata-v1",
+            "state": "running",
+            "context_status": "live",
+            "activation_generation": 1,
+            "process_generation": 1,
+        },
+        sandbox_token="s",
+        mcp_token="t",
+        clone_token="c",
+        github_token="g",
+        mcp_bindings=["docs"],
+        metadata={"source": "test"},
+    )
+
+
 def test_the_claim_response_declares_everything_the_runner_reads() -> None:
     """The other direction of the same wire, and the same failure.
 
@@ -272,13 +356,29 @@ def test_the_claim_response_declares_everything_the_runner_reads() -> None:
     with the row.
 
     Asserted as a join rather than a field list: this fails for whatever is
-    threaded through next and forgotten in the middle.
+    threaded through next and forgotten in the middle. The runner reads some
+    keys only when a section is there, so it is handed two bodies the response
+    model produced, one with no optional field and one with every one. Each
+    remembers every key the runner asks it for, present or not.
     """
-    source = inspect.getsource(ClaimedJob.from_response)
-    read = set(re.findall(r'body\.get\("([a-z_]+)"\)', source))
-    read |= set(re.findall(r'body\["([a-z_]+)"\]', source))
+    full = _full_claim()
+    unfilled = [
+        name
+        for name, field in WorkerClaimResponse.model_fields.items()
+        if getattr(full, name) == field.get_default(call_default_factory=True)
+    ]
+    assert not unfilled, (
+        f"fill {unfilled} in `_full_claim`, or a key the runner reads only when "
+        "they are there is never read here"
+    )
+    bare = _ReadKeys(_claim().model_dump(mode="json"))
+    filled = _ReadKeys(full.model_dump(mode="json"))
+    ClaimedJob.from_response(bare)
+    ClaimedJob.from_response(filled)
+    read = bare.read | filled.read
     declared = set(WorkerClaimResponse.model_fields)
 
+    assert "runtime_version" in read
     unsendable = read - declared
     assert not unsendable, (
         f"ClaimedJob reads {sorted(unsendable)} from the claim body, which "
