@@ -54,6 +54,10 @@ CHAT_CONTAINER_PREFIX = "freeinference-chat"
 MEMBER_UID_BASE = 11001
 MEMBER_UID_LIMIT = 128
 
+#: Private tmpfs mounts: the sandbox UID's activation state, and one per member slot.
+ACTIVATION_TMPFS = "/run/agent-activation"
+MEMBER_TMPFS_ROOT = "/run/agent-members"
+
 
 class ChatSandboxStatus(StrEnum):
     """Docker states relevant to the restartable lifecycle."""
