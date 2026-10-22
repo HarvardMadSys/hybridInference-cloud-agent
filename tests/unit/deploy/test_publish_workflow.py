@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from deploy.release import publish_inputs as pi, release_manifest as rm
+from deploy.release import (
+    artifact_catalog,
+    generate_artifact_contracts,
+    publish_inputs as pi,
+    release_manifest as rm,
+)
 from scripts.ci_image_matrix import image_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -178,21 +183,32 @@ def test_nothing_is_published_until_ci_passed_this_exact_commit() -> None:
 
 
 def test_the_matrix_is_the_one_ci_verifies() -> None:
-    """Same cells, same pools, same build arguments, or the release is not what CI checked."""
+    """Both workflows consume projections of the reviewed catalog."""
     mine = job("artifacts")["strategy"]["matrix"]["artifact"]
     assert yaml.safe_load(CI.read_text())["jobs"]["artifacts"]["strategy"]["matrix"][
         "artifact"
     ] == ("${{ fromJSON(needs.changes.outputs.artifacts) }}")
-    theirs = image_matrix("all")
-    assert sorted(mine, key=lambda cell: cell["name"]) == sorted(
-        theirs, key=lambda cell: cell["name"]
-    )
+    expected = [entry.matrix_cell() for entry in artifact_catalog.artifacts()]
+    assert mine == expected
+    assert image_matrix("all") == expected
+    assert generate_artifact_contracts.stale_outputs() == []
     assert job("artifacts")["strategy"]["fail-fast"] is False
 
 
 def test_the_cells_are_the_ones_the_collector_assembles() -> None:
     names = {cell["name"] for cell in job("artifacts")["strategy"]["matrix"]["artifact"]}
-    assert names == set(pi.expected_cells())
+    assert (
+        names
+        == set(pi.expected_cells())
+        == {
+            "control",
+            "web-root",
+            "web-agents",
+            "runner",
+            "sandbox",
+            "tunnel",
+        }
+    )
 
 
 def test_every_checkout_pins_the_vetted_commit() -> None:

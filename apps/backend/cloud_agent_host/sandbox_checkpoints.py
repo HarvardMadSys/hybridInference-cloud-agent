@@ -31,17 +31,20 @@ from cloud_agent_host.sandbox_checkpoint_oci import (
     read_base_layers,
 )
 from cloud_agent_host.sandbox_checkpoint_store import (
-    CHECKPOINT_FORMAT_VERSION,
     CheckpointArchiveInvalid,
-    CheckpointRestore,
     SandboxCheckpointError,
-    SandboxCheckpointReceipt,
     SandboxCheckpointStore,
 )
 from cloud_agent_shared.environment_snapshots import (
     SNAPSHOT_IMAGE_REPOSITORY,
     snapshot_image_reference,
     valid_snapshot_id,
+)
+from cloud_agent_shared.sandbox_restore import (
+    CHECKPOINT_FORMAT_VERSION,
+    CheckpointRestore,
+    SandboxCheckpointMember,
+    SandboxCheckpointReceipt,
 )
 
 if TYPE_CHECKING:
@@ -240,16 +243,16 @@ class SandboxCheckpointCapture:
             size_bytes=uploaded.size,
             new_layer_bytes=archive.new_layer_bytes,
             layer_count=len(archive.base_layers) + len(archive.new_layers),
-            created_at=self._now().isoformat(),
-            members=tuple(
-                {
-                    "thread_id": member.thread_id,
-                    "native_session_id": member.native_session_id,
-                    "last_settled_job_id": member.last_settled_job_id,
-                    "context_status": member.context_status,
-                }
+            created_at=self._now(),
+            members=[
+                SandboxCheckpointMember(
+                    thread_id=member.thread_id,
+                    native_session_id=member.native_session_id,
+                    last_settled_job_id=member.last_settled_job_id,
+                    context_status=member.context_status,
+                )
                 for member in members
-            ),
+            ],
             durations_ms=durations,
             start_seq=start_seq,
         )
@@ -420,6 +423,10 @@ class SandboxCheckpointCapture:
         host already holds under the checkpoint's name came from that same
         path (or is the original commit) and is reused.
         """
+        try:
+            restore.require_supported()
+        except ValueError as exc:
+            raise SandboxCheckpointError(str(exc)) from exc
         return self._load(
             checkpoint_image_reference(sandbox_id, restore.checkpoint_id),
             restore.base_image,

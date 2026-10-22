@@ -45,7 +45,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_GIT_TIMEOUT_S = 120.0
 #: How many error lines a failed local git command's message quotes.
 _ERROR_LINES_QUOTED = 3
 
@@ -149,7 +148,7 @@ def _run_git(
 
     ``errors`` handles output bytes that do not decode, as for ``bytes.decode``.
     """
-    timeout_s = number_setting("publish_git_timeout_s", _GIT_TIMEOUT_S)
+    timeout_s = number_setting("publish_git_timeout_s")
     try:
         completed = subprocess.run(
             ["git", *_NO_AUTO_MAINTENANCE, *args],
@@ -420,7 +419,7 @@ def _blob_size(repo: Path, sha: str) -> int:
 
 def _read_blob(repo: Path, sha: str, size: int) -> bytes:
     """Read a size-checked object as bytes, without ever logging its contents."""
-    timeout_s = number_setting("publish_git_timeout_s", _GIT_TIMEOUT_S)
+    timeout_s = number_setting("publish_git_timeout_s")
     try:
         completed = subprocess.run(
             ["git", "cat-file", "blob", sha],

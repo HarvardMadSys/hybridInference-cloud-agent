@@ -83,7 +83,6 @@
     {
       "files": [
         "src/components/features/agents/environment/EnvironmentManager.tsx",
-        "src/components/features/agents/useConversationList.ts",
         "src/components/features/agents/useNativeQuestions.ts",
         "src/components/features/settings/UsageSettings.tsx"
       ],
@@ -351,7 +350,7 @@
     {
       "files": ["src/components/features/agents/trajectorySteps.ts"],
       "rules": {
-        "complexity": ["error", 117]
+        "complexity": ["error", 115]
       }
     },
     {
@@ -410,23 +409,12 @@
       }
     },
     {
-      "files": ["src/app/(agents)/admin/sandboxes/SandboxResults.tsx"],
-      "rules": {
-        "max-lines": [
-          "error",
-          {
-            "max": 965
-          }
-        ]
-      }
-    },
-    {
       "files": ["src/components/features/agents/AgentsSidebar.tsx"],
       "rules": {
         "max-lines": [
           "error",
           {
-            "max": 1014
+            "max": 996
           }
         ]
       }
@@ -437,7 +425,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1317
+            "max": 1219
           }
         ]
       }
@@ -492,7 +480,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1541
+            "max": 1531
           }
         ]
       }
@@ -514,7 +502,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1007
+            "max": 1005
           }
         ]
       }
@@ -525,7 +513,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1037
+            "max": 1019
           }
         ]
       }

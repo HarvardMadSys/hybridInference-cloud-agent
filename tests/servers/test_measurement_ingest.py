@@ -29,6 +29,7 @@ from tests.servers.test_agent_jobs_api import FakeStorage, _build_app, _create_j
 from cloud_agent import measurement_ingest
 from cloud_agent.measurement_ingest import MeasurementRejected
 from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
+from cloud_agent_shared import operation_profiling
 
 
 class _MeasurementStore:
@@ -375,10 +376,18 @@ async def test_a_second_manifest_for_one_run_is_reported_as_a_run_conflict(
 # ---------------------------------------------------------------------------
 
 
-def test_an_unknown_schema_version_is_named_as_such():
+@pytest.mark.parametrize("schema_version", [2, 4], ids=["older", "newer"])
+def test_an_unknown_schema_version_is_named_as_such(schema_version: int):
     """Not knowing what a record means is different from it being malformed."""
     with pytest.raises(MeasurementRejected, match="unsupported schema_version"):
-        measurement_ingest.validate_measurement(_record(schema_version=2))
+        measurement_ingest.validate_measurement(_record(schema_version=schema_version))
+
+
+def test_v3_operation_and_outcome_vocabulary_is_shared_but_version_policy_is_local():
+    """One v3 vocabulary does not make the producer choose consumer rollout policy."""
+    assert operation_profiling.V3_OPERATIONS <= measurement_ingest.KNOWN_OPERATIONS
+    assert operation_profiling.V3_OUTCOMES <= measurement_ingest.KNOWN_OUTCOMES
+    assert {3} == measurement_ingest.SUPPORTED_SCHEMA_VERSIONS
 
 
 def test_facts_are_kept_by_whitelist_not_by_denylist():
@@ -615,6 +624,65 @@ def test_a_credential_inside_a_stage_is_refused():
 
     with pytest.raises(MeasurementRejected, match="unknown stages entry field"):
         measurement_ingest.validate_measurement(record)
+
+
+@pytest.mark.parametrize(
+    ("collection", "item", "foreign_field"),
+    [
+        (
+            "stages",
+            {"stage": "read", "duration_us": 5, "span_id": "span-1"},
+            "span_id",
+        ),
+        (
+            "spans",
+            {
+                "span_id": "span-1",
+                "name": "read",
+                "ordinal": 0,
+                "start_offset_us": 0,
+                "duration_us": 5,
+                "outcome": "ok",
+                "stage": "read",
+            },
+            "stage",
+        ),
+    ],
+)
+def test_stage_and_span_fields_cannot_cross_shapes(
+    collection: str, item: dict[str, Any], foreign_field: str
+):
+    """A duration object cannot borrow identity from a different wire shape."""
+    with pytest.raises(
+        MeasurementRejected, match=rf"unknown {collection} entry field.*{foreign_field}"
+    ):
+        measurement_ingest.validate_measurement(_record(**{collection: [item]}))
+
+
+def test_optional_v3_span_and_milestone_fields_survive_ingest():
+    """Representative optional timing fields stay compatible and inspectable."""
+    stored = measurement_ingest.validate_measurement(
+        _record(
+            spans=[
+                {
+                    "span_id": "span-2",
+                    "parent_span_id": "span-1",
+                    "name": "dispatch",
+                    "ordinal": 1,
+                    "start_offset_us": 10,
+                    "duration_us": 20,
+                    "outcome": "ok",
+                    "truncated": False,
+                    "attributes": {"path": "warm"},
+                }
+            ],
+            milestones=[{"name": "ready", "offset_us": 30, "source": "runner"}],
+        )
+    )
+
+    assert stored.record["spans"][0]["parent_span_id"] == "span-1"
+    assert stored.record["spans"][0]["attributes"] == {"path": "warm"}
+    assert stored.record["milestones"] == [{"name": "ready", "offset_us": 30, "source": "runner"}]
 
 
 def test_an_attribute_may_still_hold_a_value_with_an_unknown_name():

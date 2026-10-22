@@ -189,7 +189,7 @@ export function JobTranscript({
               }
               onRewind={
                 rewindAnchor && canForkWorkspace
-                  ? () => void forkFrom(rewindAnchor, message.content)
+                  ? (content) => void forkFrom(rewindAnchor, content ?? message.content)
                   : undefined
               }
             />

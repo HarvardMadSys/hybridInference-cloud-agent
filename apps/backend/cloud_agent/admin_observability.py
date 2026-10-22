@@ -20,7 +20,7 @@ from cloud_agent.ledger import JobUsageResponse  # noqa: TC001 — Pydantic reso
 from cloud_agent.schemas import (
     RunResourceSummary,  # noqa: TC001 — Pydantic resolves this at runtime.
 )
-from cloud_agent.session_statistics import (
+from cloud_agent.thread_stats import (
     SessionStatistics,  # noqa: TC001 — Pydantic resolves this at runtime.
 )
 

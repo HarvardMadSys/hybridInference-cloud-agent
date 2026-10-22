@@ -7,13 +7,12 @@ database values cannot turn one administrator connection into another.
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 from typing import Any, Protocol
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from cloud_agent.domain_cipher import domain_fernet
 from cloud_agent.settings import setting_env
 
 ENV_COMPUTE_SECRET_KEY = "AGENT_COMPUTE_SECRET_KEY"
@@ -58,8 +57,7 @@ class ComputeSecretStore:
         if material:
             if len(material.encode()) < 32:
                 raise ComputeSecretError("compute encryption key must contain at least 32 bytes")
-            digest = hashlib.sha256(_DOMAIN + b"\0" + material.encode()).digest()
-            self._cipher = Fernet(base64.urlsafe_b64encode(digest))
+            self._cipher = domain_fernet(material, _DOMAIN)
         self._material = material
 
     @property

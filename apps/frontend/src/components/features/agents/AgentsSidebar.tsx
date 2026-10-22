@@ -15,13 +15,17 @@ import { archiveAgentJob, deleteAgentSessions, pinAgentJob, unpinAgentJob } from
 import { APIError } from '@/lib/utils/errors';
 import { useAgentReads } from './AgentReadProvider';
 import { ArchiveDeleteDialog, SESSION_ERROR_KEYS } from './ArchiveControls';
-import { latestJob } from './conversationJob';
+import { createProjectRefreshTracker } from './sidebarProjectRefresh';
+import { createSidebarReadQueue } from './sidebarReadQueue';
+import { sidebarFolders } from './sidebarFolders';
+import { readConversationSelection } from './threadHistory';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from './agentPush';
 import { changesSidebarRows, SIDEBAR_ACTIVITY_REFRESH_MS } from './sidebarRecordChanges';
 import { GettingStarted } from './GettingStarted';
 import { PaneResizer } from './PaneResizer';
 import { useAgentProjects } from './useAgentJobs';
+import { useSidebarBackgroundRefresh } from './useSidebarBackgroundRefresh';
 import { announcePaneResize, useResizablePane } from './useResizablePane';
 import { useSidebarPreferences, manualOrder, moveBefore } from './sidebarPreferences';
 import { SidebarViewMenu } from './SidebarViewMenu';
@@ -94,25 +98,11 @@ export function AgentsSidebar({
     error: projectsError,
     reload: reloadProjects,
   } = useAgentProjects(false, active);
-  const backgroundRefreshPending = useRef(false);
-  const refreshInBackground = useCallback(() => {
-    if (!active || document.visibilityState === 'hidden') {
-      backgroundRefreshPending.current = true;
-      return;
-    }
-    backgroundRefreshPending.current = false;
-    reload();
-    reloadProjects();
-  }, [active, reload, reloadProjects]);
-
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState !== 'hidden' && backgroundRefreshPending.current)
-        refreshInBackground();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [refreshInBackground]);
+  const { refreshInBackground, reorderInBackground, activityMoved } = useSidebarBackgroundRefresh(
+    active,
+    reload,
+    reloadProjects,
+  );
 
   const [selected, setSelected] = useState<{
     path: string;
@@ -138,15 +128,22 @@ export function AgentsSidebar({
   const list = useConversationList({
     userId,
     refresh,
+    reorder: activityMoved,
     pinned: false,
     enabled: active && !searching && preferences.group === 'flat',
   });
   const pinnedList = useConversationList({
     userId,
     refresh,
+    reorder: activityMoved,
     pinned: true,
     enabled: active && !searching,
   });
+  const { tracker: projectRefresh, read: readProjectPage } = useMemo(
+    () => ({ userId, tracker: createProjectRefreshTracker(), read: createSidebarReadQueue() }),
+    [userId],
+  );
+  projectRefresh.observe(projects, refresh, activityMoved);
   const [pinnedShown, setPinnedShown] = useState(15);
   const searchInput = useRef<HTMLInputElement>(null);
   const searchButton = useRef<HTMLButtonElement>(null);
@@ -177,6 +174,7 @@ export function AgentsSidebar({
     enabled: active && searching && debounced === query.trim(),
     userId,
     refresh,
+    reorder: activityMoved,
   });
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(query.trim()), 250);
@@ -234,10 +232,9 @@ export function AgentsSidebar({
       ].includes(id)
     )
       return;
-    Promise.all([reads.getAgentJob(id), reads.getAgentJobThread(id)])
-      .then(([job, thread]) => {
+    readConversationSelection(reads, id)
+      .then(({ job, thread, latest }) => {
         if (cancelled || generation !== sessionGeneration.current) return;
-        const latest = latestJob([job, ...(thread?.jobs ?? [])]) ?? job;
         const row = conversationRow({
           job: latest,
           title: thread?.title ?? job.title ?? job.task_prompt.split('\n')[0],
@@ -285,7 +282,7 @@ export function AgentsSidebar({
       // once per window, however many replies land in it.
       activityRefresh.current ??= setTimeout(() => {
         activityRefresh.current = null;
-        refreshInBackground();
+        reorderInBackground();
       }, SIDEBAR_ACTIVITY_REFRESH_MS);
     });
     return () => {
@@ -293,7 +290,7 @@ export function AgentsSidebar({
       if (activityRefresh.current) clearTimeout(activityRefresh.current);
       activityRefresh.current = null;
     };
-  }, [active, pushedRecords, refreshInBackground]);
+  }, [active, pushedRecords, refreshInBackground, reorderInBackground]);
   const pushLive = useAgentPushLive();
   const hasActiveProjects = projects.some((project) => project.active_count > 0);
   useEffect(() => {
@@ -375,32 +372,16 @@ export function AgentsSidebar({
   useEffect(() => {
     registerRows(pinnedList.rows, pinnedList.loadedRefresh);
   }, [pinnedList.rows, pinnedList.loadedRefresh, registerRows]);
-  const baseFolders = useMemo(() => {
-    const repos = new Map(projects.map((project) => [project.repo, project]));
-    for (const repo of preferences.addedProjects)
-      if (!repos.has(repo))
-        repos.set(repo, { repo, task_count: 0, active_count: 0, last_activity_at: null });
-    for (const row of preferences.group === 'flat' ? list.rows : [])
-      if (!repos.has(row.job.repo))
-        repos.set(row.job.repo, {
-          repo: row.job.repo,
-          task_count: 1,
-          active_count: 0,
-          last_activity_at: row.lastActivityAt,
-        });
-    if (activeRepo && !repos.has(activeRepo))
-      repos.set(activeRepo, {
-        repo: activeRepo,
-        task_count: 0,
-        active_count: 0,
-        last_activity_at: null,
-      });
-    return [...repos.values()].sort(
-      (a, b) =>
-        (Date.parse(b.pinned_at ?? '') || 0) - (Date.parse(a.pinned_at ?? '') || 0) ||
-        (Date.parse(b.last_activity_at ?? '') || 0) - (Date.parse(a.last_activity_at ?? '') || 0),
-    );
-  }, [projects, list.rows, activeRepo, preferences.group, preferences.addedProjects]);
+  const baseFolders = useMemo(
+    () =>
+      sidebarFolders(
+        projects,
+        preferences.addedProjects,
+        preferences.group === 'flat' ? list.rows : [],
+        activeRepo,
+      ),
+    [projects, list.rows, activeRepo, preferences.group, preferences.addedProjects],
+  );
   useEffect(() => {
     updatePreferences((old) => {
       if (!old.manualInitialized && old.order !== 'manual') return old;
@@ -930,7 +911,8 @@ export function AgentsSidebar({
                   enabled={active}
                   selected={current?.job.repo === folder.repo ? current : undefined}
                   userId={userId}
-                  refresh={refresh}
+                  {...projectRefresh.forRepo(folder.repo)}
+                  readPage={readProjectPage}
                   {...actions}
                   hiddenThreads={hiddenThreads}
                   pinUpdates={pinUpdates}

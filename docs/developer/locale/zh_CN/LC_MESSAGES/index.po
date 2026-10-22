@@ -104,7 +104,7 @@ msgstr "改动面向所有者的 Web 应用，或者查看每个功能背后的�
 
 #: ../developer/index.md
 msgid "[The owner web app](web-app.md)"
-msgstr ""
+msgstr "[面向所有者的 Web 应用](web-app.md)"
 
 #: ../developer/index.md
 msgid "Send a change"

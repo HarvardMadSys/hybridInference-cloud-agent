@@ -44,6 +44,7 @@ from cloud_agent.api.deps import (
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.application.pending_messages import settle_queue, settle_waiting_queues
 from cloud_agent.goals.controller import run_goal_wakeups
+from cloud_agent.settings import integer_setting
 from cloud_agent.source_control_runtime import SourceControlUnavailable
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories import pending_messages as pending_message_storage
@@ -723,7 +724,7 @@ async def test_the_maintenance_loops_run_queue_and_staged_attachment_sweeps(api:
     # 24-hour default: these two-hour-old rows are eligible at one hour.
     monkeypatch.setattr(
         "cloud_agent.workers.attempts.integer_setting",
-        lambda key, fallback: 1 if key == "attachments.staged_retention_hours" else fallback,
+        lambda key: 1 if key == "attachments.staged_retention_hours" else integer_setting(key),
     )
 
     loops = [

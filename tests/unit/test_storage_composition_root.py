@@ -18,11 +18,12 @@ from cloud_agent import ports
 from cloud_agent.publish_worker import PublishStorage
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.workers import attempts as attempt_worker, snapshots as snapshot_worker
+from cloud_agent.workers.terminal_replay import TerminalReplayStore
 
 #: Every protocol a background task is handed the real ``Storage`` for. They
 #: live beside the loops that declare them now, not in `app.py`.
 TASK_PROTOCOLS = [
-    attempt_worker._SettledTerminals,
+    TerminalReplayStore,
     attempt_worker._GrantRenewal,
     attempt_worker._Reaping,
     snapshot_worker._SnapshotCapture,

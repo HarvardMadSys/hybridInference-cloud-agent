@@ -1839,6 +1839,30 @@ async def test_a_parked_wait_is_answered_when_work_is_queued(wait_client):
     assert store.claims == [], "the wait never claims; the host does that next"
 
 
+async def test_a_turn_only_another_host_can_take_leaves_the_wait_parked(wait_client):
+    async_client, store, app = wait_client
+    headers = _enrolled_host(store)
+    signal = app.state.work_signal
+    held = signal.token_for("runner-a")
+
+    parked = asyncio.create_task(
+        async_client.post(
+            "/v1/agent/worker/wait",
+            json={"since": held, "timeout_seconds": 30},
+            headers=headers,
+        )
+    )
+    await asyncio.sleep(0.05)
+    signal.notified("runner-b")
+    await asyncio.sleep(0.05)
+    assert not parked.done()
+
+    signal.notified("runner-a")
+
+    response = await asyncio.wait_for(parked, 5)
+    assert response.json() == {"token": signal.token_for("runner-a")} != {"token": held}
+
+
 async def test_with_nothing_queued_a_wait_ends_at_its_timeout(wait_client):
     async_client, store, app = wait_client
     held = app.state.work_signal.token
@@ -2994,6 +3018,69 @@ async def test_stopped_shared_group_releases_and_revokes_each_member_residency(r
     assert grants.renewed == []
     assert grants.revoked == ["agr-stopped", "agr-stopped"]
     assert response.json()["residencies_lost"] == []
+
+
+async def test_stopped_member_revocation_cannot_hold_the_heartbeat_reply(monkeypatch):
+    from fastapi import BackgroundTasks
+
+    from cloud_agent.application import grant_revocation
+    from cloud_agent.schemas import HostHeartbeatRequest
+
+    monkeypatch.setattr(grant_revocation, "REVOCATION_DEADLINE_S", 0.02)
+    store = FakeHostPoolStore()
+    store.seed("runner-a", credential_hash="credential-hash", enrolled=True)
+    store.release_answer = "agr-stopped"
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def revoke(_grant_id):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    body = HostHeartbeatRequest.model_validate(
+        {
+            "retained_sandboxes": [
+                {
+                    "thread_id": "athr_source",
+                    "sandbox_id": "asbx_shared",
+                    "container_id": "0123456789abcdef",
+                    "generation": 1,
+                    "activation_generation": 2,
+                    "running": False,
+                    "shared_live": True,
+                    "members": [
+                        {
+                            "thread_id": "athr_source",
+                            "native_session_id": "native",
+                            "process_generation": 11,
+                            "residency_generation": 7,
+                            "resident_state": "stopped",
+                            "resident_slot_id": 0,
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    background = BackgroundTasks()
+    reply = await asyncio.wait_for(
+        hosts.heartbeat_host(
+            body,
+            background_tasks=background,
+            host={"host": "runner-a", "credential_hash": "credential-hash"},
+            store=store,
+            grants=SimpleNamespace(revoke=revoke),
+        ),
+        timeout=1,
+    )
+    assert reply.host == "runner-a"
+    assert store.release_calls == [("athr_source", 7, "runner-a", 11)]
+    assert not started.is_set()
+    await asyncio.wait_for(background(), timeout=1)
+    assert started.is_set() and cancelled.is_set()
 
 
 # ── residency grant minting ────────────────────────────────────────────

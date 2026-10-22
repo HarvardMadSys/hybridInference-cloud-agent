@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0091_env_queued_runs_index`. The supported deployment scripts run migrations
+`0094_thread_message_pages`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -19,12 +19,44 @@ After migrating, start the main control-plane listener with its existing
 complete environment: it imports newly registered settings once, as described
 in [Admin Settings](operations.md#admin-settings).
 
+## Conversation history read contract
+
+This release changes `GET /v1/agent/jobs/{job_id}/thread` to `history_version: 2`.
+Deploy the frontend with the API: the existing message/job arrays and their
+chronological order remain, but they are a bounded page rather than the whole
+conversation. Small histories remain complete. The default page contains at
+most 50 turn/message entries, the maximum `limit` is 100, and the serialized
+response is at most 512 KiB. `current_job_id` identifies the newest turn
+independently of the page; `anchor=true` starts at the selected job instead.
+
+Pass `next_cursor` as `cursor` to load older history explicitly. For refreshes,
+retain older pages and pass `sync_cursor` as `after`; follow each returned
+`next_cursor` as `after` until it is null. This rereads the two mutable tail
+turns so an in-flight write cannot disappear behind a newly allocated ID.
+Merge messages by ID and jobs by ID/revision, preserving turn order and placing
+each opening prompt before its replies and mid-turn messages. Cursors are
+scoped to the owned, undeleted conversation on every request.
+
+Messages longer than 4,096 Unicode characters carry `content_truncated` and
+`next_offset`. Read more through
+`GET /v1/agent/jobs/{job_id}/thread/messages/{message_id}?offset=...`; each
+request returns at most 16,384 characters and offsets count Unicode characters,
+not UTF-8 bytes or JavaScript UTF-16 units. `thread_preview` marks a job whose
+wide fields need the existing single-job detail read. A false
+`pending_messages_complete` means read the unchanged queue endpoint,
+`GET /v1/agent/threads/{thread_id}/messages`; an omitted queue snapshot is not
+an empty queue. This changes the owner-facing read API only, never runtime
+session recovery or transcript replay.
+
 ## Recent migrations
 
 Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0094_thread_message_pages` | Builds a concurrent index on each job's messages in the existing prompt-first order, so history pages seek a bounded set of message IDs before reading bodies. Changes no row. An interrupted online build is dropped and retried; offline conversion builds the index plainly inside its transaction. A downgrade drops the index concurrently. |
+| `0093_recent_requests` | Adds an owner/time-indexed projection of eligible recent requests and message/thread maintenance triggers. Backfills existing eligible messages once; trigger installation holds write-conflicting locks while the backfill runs, so schedule for a low-write period on a large history. Source messages are unchanged. Downgrade removes only the projection and triggers. |
+| `0092_targeted_work_wakes` | Replaces the `agent_work_available` trigger function so that its notification names the one host that can take a retained conversation's turn, and only that host's waiting runner is woken. It changes no table or row. A control plane from the previous release ignores the name and wakes every host, as before. A downgrade restores the empty notification. |
 | `0091_env_queued_runs_index` | Builds a partial index on `agent_environment_runs` concurrently, holding only the runs still queued for a Host to claim. Idle environment-capable Hosts claim every few seconds and the prebuild maintenance pass repeats its scan; without the index every claim read the table's whole test and prebuild history, which no partial index covered since `0078`. It reads the run history without blocking the running API's inserts, and an interrupted build leaves an invalid index that the next run drops and rebuilds. Offline SQL builds it plainly instead, because a conversion transaction cannot run a concurrent build. Changes no row. A downgrade drops the index concurrently; runs already claimed stay claimed. |
 | `0090_user_model_preferences` | Adds an empty table holding each owner's pinned default model for new tasks. It changes no existing row; owners without a pin keep following the model their last task used, and the administrator's default model is a setting rather than a column. A downgrade drops the pins only. |
 | `0089_superseded_removals` | Adds an empty table recording each authorization to remove a container that a moved sandbox group left behind on a Host being released, and when the Host confirmed the removal. It changes no existing rows. A downgrade drops the records; containers already removed stay removed. |

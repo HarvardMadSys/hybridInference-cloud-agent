@@ -317,6 +317,7 @@ async def test_a_change_reaches_the_running_groups_of_its_chats_and_servers(stor
             "sandbox_id": sandbox_id,
             "origin_thread_id": origin["thread_id"],
             "host": "machine",
+            "sandbox_manager_url": None,
             "resident_thread_id": None,
         }
     ]
@@ -324,6 +325,60 @@ async def test_a_change_reaches_the_running_groups_of_its_chats_and_servers(stor
     async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_sandboxes SET state = 'stopped' WHERE id = $1", sandbox_id)
     assert await store.ssh_servers.running_groups_for_ssh_change(server_id=gpu["id"]) == []
+
+
+async def test_batch_states_preserve_revocation_and_revision_order_in_three_queries(store, pool):
+    from contextlib import asynccontextmanager
+
+    from cloud_agent.storage.repositories.ssh_servers import PostgresSshServerRepository
+
+    gpu = await _server(store)
+    first = await _chat(store, ssh_server_ids=[gpu["id"]])
+    peer = await _chat(store)
+    second = await _chat(store, ssh_server_ids=[gpu["id"]])
+    first_group = await _group(pool, [(first, 0), (peer, 1)])
+    second_group = await _group(pool, [(second, 0)])
+    origins = [first["thread_id"], second["thread_id"]]
+    queries = []
+
+    class Connection:
+        def __init__(self, conn):
+            self.conn = conn
+
+        async def fetch(self, sql, *args):
+            queries.append(sql)
+            return await self.conn.fetch(sql, *args)
+
+    class Pool:
+        @asynccontextmanager
+        async def acquire(self):
+            async with pool.acquire() as conn:
+                yield Connection(conn)
+
+    repository = PostgresSshServerRepository(Pool())
+    before = await repository.ssh_group_states(thread_ids=origins)
+    assert len(queries) == 3
+    assert "nextval" in queries[0]
+    assert [before[origin]["sandbox_id"] for origin in origins] == [first_group, second_group]
+    assert len(before[origins[0]]["members"]) == 2
+    await store.ssh_servers.replace_thread_ssh_bindings(
+        user_id="alice", thread_id=origins[0], server_ids=[]
+    )
+    after = await repository.ssh_group_states(thread_ids=origins)
+    assert all(
+        after[origin]["revision"] > max(s["revision"] for s in before.values())
+        for origin in origins
+    )
+    assert all(member["servers"] == [] for member in after[origins[0]]["members"])
+    assert after[origins[1]]["members"][0]["servers"][0]["id"] == gpu["id"]
+    first_page = await repository.running_groups_for_ssh_change(server_id=gpu["id"], limit=1)
+    second_page = await repository.running_groups_for_ssh_change(
+        server_id=gpu["id"], limit=1, after_sandbox_id=first_page[0]["sandbox_id"]
+    )
+    assert {first_page[0]["sandbox_id"], second_page[0]["sandbox_id"]} == {
+        first_group,
+        second_group,
+    }
 
 
 async def _manager_host(store, host: str) -> str:

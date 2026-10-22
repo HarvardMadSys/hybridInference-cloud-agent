@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Any, Protocol
 
 from cloud_agent.application.pending_messages import QueueSweep, settle_waiting_queues
 from cloud_agent.goals.controller import run_goal_wakeups
 from cloud_agent.grants import RENEWAL_INTERVAL_S
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.workers.periodic import run_every, run_pass
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -67,27 +67,16 @@ async def _run_periodic_loop(
     deadline_seconds: float,
 ) -> None:
     """Run one non-overlapping maintenance pass with its own timeout boundary."""
-    while True:
-        await asyncio.sleep(interval_seconds)
-        try:
-            async with asyncio.timeout(deadline_seconds):
-                await operation()
-        except TimeoutError:
-            logger.warning(
-                "%s recovery pass timed out",
-                name.replace("_", " ").capitalize(),
-                extra={
-                    "event": f"agent_{name}_timeout",
-                    "deadline_seconds": deadline_seconds,
-                },
-            )
-        except Exception:
-            logger.warning(
-                "%s recovery pass failed",
-                name.replace("_", " ").capitalize(),
-                exc_info=True,
-                extra={"event": f"agent_{name}_failed"},
-            )
+
+    async def recover() -> None:
+        await run_pass(
+            operation,
+            deadline_seconds=deadline_seconds,
+            description=f"{name.replace('_', ' ').capitalize()} recovery pass",
+            event=f"agent_{name}",
+        )
+
+    await run_every(interval_seconds, recover)
 
 
 async def run_queued_follow_up_maintenance(
