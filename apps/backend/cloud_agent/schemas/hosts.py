@@ -120,7 +120,7 @@ class HostRegisterRequest(BaseModel):
     sandbox_manager_url: str = Field(
         ...,
         # COMPAT(remove-after=2026-11-30): every host sends sandbox_manager_url;
-        # hosts since #773 do.
+        # hosts since #974 do.
         validation_alias=AliasChoices("sandbox_manager_url", "broker_url"),
         max_length=2048,
         description=(
@@ -316,7 +316,7 @@ class HostHeartbeatRequest(BaseModel):
         None,
         max_length=2048,
         # COMPAT(remove-after=2026-11-30): every host sends sandbox_manager_url;
-        # hosts since #773 do.
+        # hosts since #974 do.
         validation_alias=AliasChoices("sandbox_manager_url", "broker_url"),
     )
     capabilities: list[_HostCapability] | None = Field(None, max_length=64)

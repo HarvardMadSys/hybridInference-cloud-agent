@@ -1100,7 +1100,7 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
     sandbox_token = await _mint_sandbox_grant(job_store, grants, claim)
 
     # COMPAT(remove-after=2026-11-30): no host reads the claim's mcp_token, as
-    # none since #773 does: each member's CLI reaches the MCP relay with its
+    # none since #974 does: each member's CLI reaches the MCP relay with its
     # residency's mcp_credential. Then this attempt-scoped token, its claim
     # field and the relay's SCOPE_MCP branch go together.
     mcp_token = mint_worker_token(**fence, scope=SCOPE_MCP)

@@ -571,7 +571,7 @@ class SandboxManagerClient:
             workspace_id,
             "terminals/suspend",
             # COMPAT(remove-after=2026-11-30): every sandbox manager ignores
-            # lease_generation, as those since #773 do. Then stop sending it.
+            # lease_generation, as those since #974 do. Then stop sending it.
             json={"lease_generation": lease_generation, "job_id": job_id},
             timeout=60,
         )
