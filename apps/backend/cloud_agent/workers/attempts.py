@@ -483,6 +483,12 @@ async def _reap_offline_hosts(store: HostPoolRepository) -> None:
     them into two schedules would make the interval between them a race that
     only shows up under load.
     """
+    from cloud_agent.sandbox_manager_routing import (
+        retire_sandbox_manager_hosts,
+        sweep_sandbox_manager_clients,
+    )
+
+    sweep_sandbox_manager_clients()
     offline = await store.reap_offline_hosts(
         interval_seconds=HEARTBEAT_INTERVAL_S,
         missed_intervals=MISSED_HEARTBEATS_BEFORE_OFFLINE,
@@ -495,6 +501,7 @@ async def _reap_offline_hosts(store: HostPoolRepository) -> None:
     # A removal the operator asked for while the host was busy completes here,
     # once the pass that ended its last attempt has given the slot back.
     removed = await store.finish_host_removals()
+    retire_sandbox_manager_hosts(removed)
     if removed:
         logger.info(
             "agent_hosts_removed",
