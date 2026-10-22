@@ -34,6 +34,12 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   listAgentTerminals: vi.fn().mockResolvedValue([]),
   getAgentJobFiles: vi.fn().mockResolvedValue({ path: '', kind: 'directory', entries: [] }),
   getAgentJobGit: vi.fn().mockResolvedValue({ available: false }),
+  getAgentJobGitMetadata: vi.fn().mockResolvedValue({
+    available: false,
+    branch: '',
+    changes: [],
+    change_count: 0,
+  }),
 }));
 
 vi.mock('@/lib/api/mcp', async (importOriginal) => ({

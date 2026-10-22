@@ -251,6 +251,7 @@ from cloud_agent.schemas.workers import (
 from cloud_agent.schemas.workspace import (
     AgentGitChange,
     AgentGitCommit,
+    AgentGitWorkspaceMetadataResponse,
     AgentGitWorkspaceResponse,
     AgentOperationProfilingFragment,
     AgentTerminalSessionCreateRequest,
@@ -302,6 +303,7 @@ __all__ = [
     "AgentConversationListResponse",
     "AgentGitChange",
     "AgentGitCommit",
+    "AgentGitWorkspaceMetadataResponse",
     "AgentGitWorkspaceResponse",
     "AgentJobCancelResponse",
     "AgentJobCreate",

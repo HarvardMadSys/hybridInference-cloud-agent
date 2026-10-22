@@ -14,9 +14,11 @@ import {
   receiveThreadChange,
   resetAgentPush,
 } from './agentPush';
+import { clearWorkspaceGitCache } from './workspaceGitCache';
 
 vi.mock('@/lib/api/agents', () => ({ getAgentJob: vi.fn(), getAgentJobThread: vi.fn() }));
 vi.mock('@/lib/api/questions', () => ({ listThreadQuestions: vi.fn() }));
+vi.mock('./workspaceGitCache', () => ({ clearWorkspaceGitCache: vi.fn() }));
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -67,6 +69,7 @@ describe('the shell read scope', () => {
     userId = 'bob';
     hook.rerender();
     expect(hook.result.current).not.toBe(alice);
+    expect(clearWorkspaceGitCache).toHaveBeenCalledTimes(1);
     hook.result.current.getAgentJob('job-a');
     expect(getAgentJob).toHaveBeenCalledTimes(2);
   });

@@ -724,6 +724,11 @@ class SandboxManagerClient:
         suffix = f"terminals/{quote(terminal_id, safe='')}"
         return await self._request("DELETE", workspace_id, suffix)
 
+    async def git_metadata(self, workspace_id: str, base_sha: str | None = None) -> dict[str, Any]:
+        """Read a cheap revision and changed-path summary for the live workspace."""
+        params = {"metadata": "true", **({"base_sha": base_sha} if base_sha else {})}
+        return await self._request("GET", workspace_id, "git", params=params, timeout=70)
+
     async def git(self, workspace_id: str, base_sha: str | None = None) -> dict[str, Any]:
         """Read live status, base-relative diff, and recent commits."""
         params = {"base_sha": base_sha} if base_sha else None

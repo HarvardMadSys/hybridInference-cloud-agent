@@ -1,11 +1,12 @@
 'use client';
 
 import { useT } from '@/components/providers';
-import { getAgentJobGit, type AgentGitWorkspaceApi } from '@/lib/api/agents';
+import type { AgentGitWorkspaceApi } from '@/lib/api/agents';
 import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
-import { memo, useEffect, useId, useMemo, useState } from 'react';
+import { memo, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ownerFailureMessage, toDiffFileDetails } from '../adapt';
 import type { AgentDiffFile, AgentJob } from '../types';
+import { loadWorkspaceGit } from '../workspaceGitCache';
 import { ReviewButton, WatchPullRequestButton } from './RunOutcome';
 
 /** Rows drawn at once, as in the file preview: a lockfile's diff runs to tens of thousands. */
@@ -59,7 +60,19 @@ export function GitPanel({
 }: {
   job: Pick<
     AgentJob,
-    'id' | 'state' | 'repo' | 'branch' | 'baseRef' | 'baseSha' | 'prUrl' | 'diffFileDetails'
+    | 'id'
+    | 'threadId'
+    | 'sandboxId'
+    | 'repo'
+    | 'branch'
+    | 'baseRef'
+    | 'baseSha'
+    | 'prUrl'
+    | 'diffFileDetails'
+    | 'workspaceGitChanges'
+    | 'workspaceGitRevision'
+    | 'workspaceGitMetadataPending'
+    | 'workspaceGitAvailable'
   >;
   active: boolean;
   onReview?: () => void;
@@ -72,12 +85,38 @@ export function GitPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const appliedRefresh = useRef(0);
+  const gitTarget = useMemo(
+    () => ({
+      id: job.id,
+      sandboxId: job.sandboxId,
+      threadId: job.threadId,
+      workspaceGitRevision: job.workspaceGitRevision,
+    }),
+    [job.id, job.sandboxId, job.threadId, job.workspaceGitRevision],
+  );
   useEffect(() => {
-    if (!active) return undefined;
+    if (!active || job.workspaceGitMetadataPending) return undefined;
+    if (job.workspaceGitAvailable === false) {
+      setLive({
+        available: false,
+        revision: job.workspaceGitRevision,
+        branch: job.branch,
+        changes: job.workspaceGitChanges ?? [],
+        change_count: job.workspaceGitChanges?.length ?? 0,
+        patch: '',
+        commits: [],
+      });
+      setLoading(false);
+      setError(null);
+      return undefined;
+    }
     let cancelled = false;
+    const refresh = refreshKey > appliedRefresh.current;
+    if (refresh) appliedRefresh.current = refreshKey;
     setLoading(true);
     setError(null);
-    getAgentJobGit(job.id)
+    loadWorkspaceGit(gitTarget, { refresh })
       .then((result) => {
         if (!cancelled) setLive(result);
       })
@@ -93,7 +132,16 @@ export function GitPanel({
     return () => {
       cancelled = true;
     };
-  }, [active, job.id, job.state, refreshKey]);
+  }, [
+    active,
+    gitTarget,
+    job.branch,
+    job.workspaceGitAvailable,
+    job.workspaceGitChanges,
+    job.workspaceGitMetadataPending,
+    job.workspaceGitRevision,
+    refreshKey,
+  ]);
 
   const files = useMemo(
     () => (live?.available ? toDiffFileDetails(live.patch) : (job.diffFileDetails ?? [])),

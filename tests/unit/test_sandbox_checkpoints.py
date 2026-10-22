@@ -380,6 +380,17 @@ def test_store_reports_an_unreadable_receipt_as_absent(tmp_path) -> None:
     assert store.latest("asbx_one") is None
 
 
+def test_store_drops_a_receipt_without_its_wire_version(tmp_path) -> None:
+    store = SandboxCheckpointStore(tmp_path)
+    store.save(_receipt())
+    path = next(tmp_path.glob("*.json"))
+    payload = json.loads(path.read_bytes())
+    del payload["format_version"]
+    path.write_text(json.dumps(payload))
+
+    assert store.latest("asbx_one") is None
+
+
 class _FakeDocker:
     """Answer the four Docker commands a capture issues."""
 
@@ -451,7 +462,7 @@ def test_capture_commits_exports_uploads_and_records_the_receipt(tmp_path) -> No
         return SandboxArchiveReceipt(
             phase="checkpoint",
             bucket="freeinference",
-            key="cloud-agent/sandbox/v2/key.oci.tar",
+            key=(f"cloud-agent/sandbox/v2/{'d' * 64}/g3/{kwargs['checkpoint_id']}.oci.tar"),
             size=kwargs["size"],
             sha256=kwargs["sha256"],
             etag='"etag"',
@@ -484,14 +495,14 @@ def test_capture_commits_exports_uploads_and_records_the_receipt(tmp_path) -> No
     assert receipt.new_layer_bytes == len(NEW)
     assert receipt.layer_count == 3
     assert receipt.version_id == "version-1"
-    assert receipt.members == (
+    assert receipt.as_dict()["members"] == [
         {
             "thread_id": "athr_one",
             "native_session_id": "native-1",
             "last_settled_job_id": "ajob_1",
             "context_status": "live",
-        },
-    )
+        }
+    ]
     assert capture.store.latest("asbx_one") == receipt
 
 
@@ -503,7 +514,7 @@ def test_capture_scans_the_base_image_once(tmp_path) -> None:
         return SandboxArchiveReceipt(
             phase="checkpoint",
             bucket="freeinference",
-            key="k",
+            key=f"cloud-agent/sandbox/v2/{'d' * 64}/g3/{kwargs['checkpoint_id']}.oci.tar",
             size=kwargs["size"],
             sha256=kwargs["sha256"],
             etag="e",
@@ -837,7 +848,7 @@ def _recording_upload(uploads: list[bytes]) -> Any:
         return SandboxArchiveReceipt(
             phase="checkpoint",
             bucket="freeinference",
-            key="k",
+            key=f"cloud-agent/sandbox/v2/{'d' * 64}/g3/{kwargs['checkpoint_id']}.oci.tar",
             size=kwargs["size"],
             sha256=kwargs["sha256"],
             etag="e",

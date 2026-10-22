@@ -11,6 +11,7 @@ import {
 import { listThreadQuestions } from '@/lib/api/questions';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { onAgentRecordsChanged, type AgentRecordsChange } from './agentPush';
+import { clearWorkspaceGitCache } from './workspaceGitCache';
 
 const AgentReadContext = createContext<AgentReadScope>({
   getAgentJob: (jobId) => getAgentJob(jobId),
@@ -78,6 +79,7 @@ export function AgentReadProvider({ userId, children }: { userId?: string; child
       records();
       reads.invalidate();
       questions.invalidate();
+      clearWorkspaceGitCache();
     };
   }, [reads, questions]);
 

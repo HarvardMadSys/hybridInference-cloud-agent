@@ -32,7 +32,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Final, TypeVar, cast
 
@@ -45,7 +45,12 @@ from cloud_agent_shared.environment_snapshots import (
     valid_snapshot_id,
 )
 from cloud_agent_shared.errors import SandboxError
-from cloud_agent_shared.sandbox_restore import pullable_image
+from cloud_agent_shared.sandbox_restore import (
+    CHECKPOINT_FORMAT_VERSION,
+    CheckpointRestore,
+    SandboxCheckpointMember,
+    SandboxCheckpointReceipt,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -60,7 +65,6 @@ logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
-CHECKPOINT_FORMAT_VERSION: Final = 1
 #: Where host Compose mounts containerd's content store, read-only.
 DEFAULT_CONTAINERD_CONTENT_DIR: Final = "/var/lib/hybridinference/containerd-content"
 CHECKPOINT_IMAGE_REPOSITORY: Final = "freeinference-checkpoint"
@@ -68,7 +72,6 @@ CHECKPOINT_IMAGE_REPOSITORY: Final = "freeinference-checkpoint"
 # description and is refused rather than buffered.
 _MAX_METADATA_BYTES: Final = 1024 * 1024
 _DIGEST_RE: Final = re.compile(r"[0-9a-f]{64}")
-_CHECKPOINT_ID_RE: Final = re.compile(r"[0-9a-f]{32}")
 _METADATA_FILES: Final = frozenset(("index.json", "oci-layout", "manifest.json", "repositories"))
 _DIRECTORIES: Final = frozenset(("blobs", "blobs/sha256"))
 _INDEX_TYPES: Final = frozenset(
@@ -111,76 +114,6 @@ class CheckpointArchive:
     base_layers: tuple[str, ...]
     new_layers: tuple[str, ...]
     new_layer_bytes: int
-
-
-@dataclass(frozen=True)
-class SandboxCheckpointReceipt:
-    """Durable identity of one uploaded checkpoint, reported to the control plane."""
-
-    checkpoint_id: str
-    sandbox_id: str
-    generation: int
-    container_id: str
-    base_image: str
-    runtime_id: str
-    runtime_version: str | None
-    object_key: str
-    version_id: str | None
-    sha256: str
-    size_bytes: int
-    new_layer_bytes: int
-    layer_count: int
-    created_at: str
-    members: tuple[dict[str, Any], ...] = field(default_factory=tuple)
-    durations_ms: dict[str, int] = field(default_factory=dict)
-    format_version: int = CHECKPOINT_FORMAT_VERSION
-    #: The control plane's start fence for the run this checkpoint ends. The
-    #: checkpoint covers the group only while that fence is still current;
-    #: ``None`` (the fence was unknown here) never covers it.
-    start_seq: int | None = None
-
-    def as_dict(self) -> dict[str, Any]:
-        """Return the JSON form the store keeps and the heartbeat carries."""
-        payload = asdict(self)
-        payload["members"] = [dict(member) for member in self.members]
-        return payload
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> SandboxCheckpointReceipt:
-        """Rebuild a stored receipt, refusing anything this version did not write."""
-        try:
-            receipt = cls(
-                checkpoint_id=str(value["checkpoint_id"]),
-                sandbox_id=str(value["sandbox_id"]),
-                generation=int(value["generation"]),
-                container_id=str(value["container_id"]),
-                base_image=str(value["base_image"]),
-                runtime_id=str(value["runtime_id"]),
-                runtime_version=(
-                    None if value.get("runtime_version") is None else str(value["runtime_version"])
-                ),
-                object_key=str(value["object_key"]),
-                version_id=None if value.get("version_id") is None else str(value["version_id"]),
-                sha256=str(value["sha256"]),
-                size_bytes=int(value["size_bytes"]),
-                new_layer_bytes=int(value["new_layer_bytes"]),
-                layer_count=int(value["layer_count"]),
-                created_at=str(value["created_at"]),
-                members=tuple(dict(member) for member in value.get("members") or ()),
-                durations_ms={
-                    str(key): int(duration)
-                    for key, duration in (value.get("durations_ms") or {}).items()
-                },
-                format_version=int(value.get("format_version", 0)),
-                start_seq=None if value.get("start_seq") is None else int(value["start_seq"]),
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise SandboxCheckpointError("stored sandbox checkpoint receipt is invalid") from exc
-        if receipt.format_version != CHECKPOINT_FORMAT_VERSION:
-            raise SandboxCheckpointError("stored sandbox checkpoint format is unsupported")
-        if _DIGEST_RE.fullmatch(receipt.sha256) is None:
-            raise SandboxCheckpointError("stored sandbox checkpoint digest is invalid")
-        return receipt
 
 
 class SandboxCheckpointStore:
@@ -913,33 +846,6 @@ class _Watchdog:
         self._timer.cancel()
 
 
-@dataclass(frozen=True)
-class CheckpointRestore:
-    """The control plane's record of the checkpoint a moved group is recreated from."""
-
-    checkpoint_id: str
-    object_key: str
-    version_id: str | None
-    sha256: str
-    size_bytes: int
-    base_image: str
-    format_version: int = CHECKPOINT_FORMAT_VERSION
-
-    def __post_init__(self) -> None:
-        if _CHECKPOINT_ID_RE.fullmatch(self.checkpoint_id or "") is None:
-            raise SandboxCheckpointError("checkpoint id must be 32 lowercase hex digits")
-        if _DIGEST_RE.fullmatch(self.sha256 or "") is None:
-            raise SandboxCheckpointError("checkpoint digest must be 64 lowercase hex digits")
-        if isinstance(self.size_bytes, bool) or not isinstance(self.size_bytes, int):
-            raise SandboxCheckpointError("checkpoint size must be an integer")
-        if self.size_bytes <= 0:
-            raise SandboxCheckpointError("checkpoint size must be positive")
-        if self.format_version != CHECKPOINT_FORMAT_VERSION:
-            raise SandboxCheckpointError("checkpoint format is not supported by this host")
-        if not pullable_image(self.base_image):
-            raise SandboxCheckpointError("checkpoint base image is not a pullable digest")
-
-
 class SandboxCheckpointCapture:
     """Commit, export and upload one stopped group through the Docker CLI."""
 
@@ -1034,16 +940,16 @@ class SandboxCheckpointCapture:
             size_bytes=uploaded.size,
             new_layer_bytes=archive.new_layer_bytes,
             layer_count=len(archive.base_layers) + len(archive.new_layers),
-            created_at=self._now().isoformat(),
-            members=tuple(
-                {
-                    "thread_id": member.thread_id,
-                    "native_session_id": member.native_session_id,
-                    "last_settled_job_id": member.last_settled_job_id,
-                    "context_status": member.context_status,
-                }
+            created_at=self._now(),
+            members=[
+                SandboxCheckpointMember(
+                    thread_id=member.thread_id,
+                    native_session_id=member.native_session_id,
+                    last_settled_job_id=member.last_settled_job_id,
+                    context_status=member.context_status,
+                )
                 for member in members
-            ),
+            ],
             durations_ms=durations,
             start_seq=start_seq,
         )
@@ -1212,6 +1118,10 @@ class SandboxCheckpointCapture:
         host already holds under the checkpoint's name came from that same
         path (or is the original commit) and is reused.
         """
+        try:
+            restore.require_supported()
+        except ValueError as exc:
+            raise SandboxCheckpointError(str(exc)) from exc
         return self._load(
             checkpoint_image_reference(sandbox_id, restore.checkpoint_id),
             restore.base_image,

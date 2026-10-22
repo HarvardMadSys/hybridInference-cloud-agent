@@ -1437,6 +1437,182 @@ def test_status_listing_never_stops_a_managed_running_group():
     assert next(item for item in descriptors if item.thread_id == "athr_source").group_busy is True
 
 
+def test_http_observations_and_runner_heartbeats_do_not_wait_for_final_archive(monkeypatch):
+    """The real endpoint/client stay responsive throughout a held upload."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from anyio.from_thread import start_blocking_portal
+    from fastapi.testclient import TestClient
+
+    from cloud_agent_host import runner
+    from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
+
+    manager = _Manager()
+    entered, release = threading.Event(), threading.Event()
+    archived = []
+    orphan = replace(_spec(), thread_id="athr_orphan", sandbox_id="asbx_orphan")
+
+    def archive(spec, inspection, members):
+        archived.append((spec, inspection, members))
+        entered.set()
+        assert release.wait(timeout=_HELD_S)
+
+    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor.register_manifest(_spec(), _members())
+    manager.items[orphan.container_name] = manager._inspection(orphan, running=True)
+    manager.read_running_final_archive_marker = lambda *_args, **_kwargs: b"pending"
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="test-secret",
+        shared_session_supervisor=supervisor,
+    )
+
+    # A deployed app has one event loop, including its endpoint lifecycle
+    # lock. Keep one portal across all concurrent synchronous HTTP clients.
+    portal_context = start_blocking_portal()
+    portal = portal_context.__enter__()
+
+    def client_from_env(**kwargs):
+        client = SessionSupervisorClient("http://testserver", "test-secret", **kwargs)
+        client._client.close()
+        client._client = TestClient(app, headers=client._headers)
+        client._client.portal = portal
+        return client
+
+    monkeypatch.setattr(runner, "_session_supervisor_from_env", client_from_env)
+    calls = ThreadPoolExecutor(max_workers=8)
+    http = TestClient(app, headers={"X-Agent-Workspace-Token": "test-secret"})
+    http.portal = portal
+    try:
+        # This first observation must discover AND enqueue the orphan without
+        # making the HTTP request own the archive upload's lifetime.
+        rows = calls.submit(runner._retained_sandbox_heartbeat_rows).result(timeout=2)
+        assert rows is not None
+        assert {row["sandbox_id"] for row in rows} == {"asbx_shared", "asbx_orphan"}
+        assert entered.wait(timeout=2)
+        beats = [calls.submit(runner._retained_sandbox_heartbeat_rows) for _ in range(16)]
+        for beat in beats:
+            rows = beat.result(timeout=2)
+            assert rows is not None
+            observed = next(row for row in rows if row["sandbox_id"] == "asbx_orphan")
+            assert observed["running"] is False
+            assert observed["activity_active"] is True
+            assert observed["generation"] == orphan.generation
+            assert observed["container_id"] == "container-shared"
+        response = calls.submit(http.get, "/sandboxes").result(timeout=2)
+        assert response.status_code == 200
+        pending = next(
+            row for row in response.json()["sandboxes"] if row["sandbox_id"] == "asbx_orphan"
+        )
+        assert pending["lifecycle_pending"] is True
+        assert pending["group_busy"] is True
+        assert pending["checkpoint"] is None
+        assert calls.submit(http.get, "/health").result(timeout=2).status_code == 200
+        assert len(archived) == 1
+        assert manager.stop_count == 1
+        assert manager.items[orphan.container_name].networks == ("agent-net",)
+        with pytest.raises(SessionBusy):
+            supervisor.operation_opened(orphan.thread_id)
+    finally:
+        release.set()
+        calls.shutdown(wait=True)
+        supervisor.quiesce()
+        http.close()
+        portal_context.__exit__(None, None, None)
+    assert len(archived) == 1
+    assert manager.stop_count == 2
+    assert manager.items[orphan.container_name].networks == ()
+    assert supervisor.status(orphan.thread_id).lifecycle_pending is False
+
+
+@pytest.mark.parametrize("replace_queued_container", [False, True])
+def test_background_recovery_drains_queued_groups_before_quiesce_returns(replace_queued_container):
+    from concurrent.futures import ThreadPoolExecutor
+
+    manager = _Manager()
+    first, second = _spec(), replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    for spec in (first, second):
+        manager.items[spec.container_name] = manager._inspection(spec, running=True)
+    manager.read_running_final_archive_marker = lambda *_args, **_kwargs: b"pending"
+    entered, release = threading.Event(), threading.Event()
+    archived = []
+
+    def archive(spec, *_args):
+        archived.append(spec.sandbox_id)
+        if spec == first:
+            entered.set()
+            assert release.wait(timeout=_HELD_S)
+
+    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    calls = ThreadPoolExecutor(max_workers=1)
+    try:
+        rows = supervisor.list(background_recovery=True)
+        assert entered.wait(timeout=2)
+        assert all(row.lifecycle_pending for row in rows)
+        for _ in range(10):
+            assert all(row.group_busy for row in supervisor.list(background_recovery=True))
+        with pytest.raises(SessionBusy, match="lifecycle check"):
+            supervisor.operation_opened(second.thread_id)
+        assert archived == [first.sandbox_id]
+        if replace_queued_container:
+            manager.items[second.container_name] = replace(
+                manager.items[second.container_name], container_id="replacement"
+            )
+        drained = calls.submit(supervisor.quiesce)
+        with pytest.raises(TimeoutError):
+            drained.result(timeout=0.05)
+        assert manager.items[first.container_name].networks == ("agent-net",)
+        release.set()
+        drained.result(timeout=2)
+        if replace_queued_container:
+            assert archived == [first.sandbox_id]
+            assert manager.items[second.container_name].running is True
+            assert manager.items[second.container_name].networks == ("agent-net",)
+            assert supervisor.status(first.thread_id).lifecycle_pending is False
+        else:
+            assert archived == [first.sandbox_id, second.sandbox_id]
+            assert all(not row.lifecycle_pending for row in supervisor.list())
+            assert all(item.networks == () for item in manager.items.values())
+    finally:
+        release.set()
+        calls.shutdown(wait=True)
+        supervisor.quiesce()
+
+
+def test_background_final_archive_failure_preserves_fence_and_retries():
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=True)
+    manager.read_running_final_archive_marker = lambda *_args, **_kwargs: b"pending"
+    manager.read_stopped_final_archive_marker_optional = lambda *_args, **_kwargs: b"pending"
+    attempts = []
+
+    def archive(*_args):
+        attempts.append("archive")
+        if len(attempts) == 1:
+            raise SandboxError("upload failed")
+
+    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    try:
+        supervisor.list(background_recovery=True)
+        with supervisor._condition:
+            group = supervisor._members[spec.thread_id]
+            assert supervisor._condition.wait_for(lambda: group.lifecycle_check is None, timeout=2)
+        assert attempts == ["archive"]
+        assert supervisor.status(spec.thread_id).lifecycle_pending is True
+        assert manager.items[spec.container_name].networks == ("agent-net",)
+        with pytest.raises(SessionBusy):
+            supervisor.operation_opened(spec.thread_id)
+        supervisor.list(background_recovery=True)
+        with supervisor._condition:
+            assert supervisor._condition.wait_for(lambda: group.lifecycle_check is None, timeout=2)
+        assert attempts == ["archive", "archive"]
+        assert supervisor.status(spec.thread_id).lifecycle_pending is False
+        assert manager.items[spec.container_name].networks == ()
+    finally:
+        supervisor.quiesce()
+
+
 def test_targeted_listing_refreshes_all_members_without_host_reconciliation(monkeypatch):
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
