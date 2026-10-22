@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from typing import Any
 
 import pytest
@@ -1139,3 +1140,49 @@ def test_a_check_during_a_reinstall_waits_for_its_verification() -> None:
     calls = len(nft.calls)
     assert guard.ensure() is None
     assert len(nft.calls) == calls
+
+
+def test_a_check_after_the_sweep_found_the_rules_changed_trusts_nothing() -> None:
+    """The sweep reads without the lock; what it found must not wait on another bridge's helper."""
+    nft, guard, _bridge = _synced_guard()
+    other = guard.network.bridge_name("freeinference-chat-net-y")
+    helper = _HeldHelper(nft)
+    guard._run = helper
+    helper.hold = True
+    releasing = threading.Thread(target=guard.release_bridge, args=(other,), daemon=True)
+    releasing.start()
+    assert helper.entered.wait(5), "the other bridge's helper never started"
+    nft.table("inet", guard.network.table)["rules"]["from_group"] = 0  # a flushed chain
+    sweeping = threading.Thread(target=guard.recheck, daemon=True)
+    sweeping.start()
+    # The sweep reads the changed table, then waits for the lock to repair it.
+    deadline = time.monotonic() + 2
+    while guard._verified_at is not None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    try:
+        assert not _finishes_within(0.2, guard.ensure), "a check trusted a changed table"
+    finally:
+        helper.finish.set()
+        releasing.join(5)
+        sweeping.join(5)
+    assert nft.table("inet", guard.network.table)["rules"]["from_group"] == 9
+
+
+def test_a_sweep_during_another_checks_reinstall_reads_what_it_left() -> None:
+    """The sweep restores lost exceptions from its read-back, so it must get one."""
+    nft, guard, _bridge = _synced_guard()
+    helper = _HeldHelper(nft)
+    guard._run = helper
+    helper.hold = True
+    installing = threading.Thread(target=guard.ensure, kwargs={"max_age_s": 0}, daemon=True)
+    installing.start()
+    assert helper.entered.wait(5), "the reinstall never started"
+    swept: list[Any] = []
+    sweeping = threading.Thread(target=lambda: swept.append(guard.recheck()), daemon=True)
+    sweeping.start()
+    time.sleep(0.2)  # the sweep finds the verification cleared by the reinstall
+    helper.finish.set()
+    installing.join(5)
+    sweeping.join(5)
+    assert swept, "the sweep never finished"
+    assert swept[0] is not None, "the sweep read nothing to restore from"

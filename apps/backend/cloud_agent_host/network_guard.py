@@ -386,6 +386,11 @@ class HostNetworkGuard:
         """
         with self._state:
             verified_at = self._verified_at
+        if verified_at is None:
+            # An install under way clears the verification until its read-back.
+            # Wait for it, so this pass reads the table it leaves.
+            with self._lock, self._state:
+                verified_at = self._verified_at
         if verified_at is not None and time.monotonic() - verified_at < GUARD_RENEW_S:
             try:
                 read_at = time.monotonic()
@@ -395,6 +400,11 @@ class HostNetworkGuard:
                     self._observe_relays(listings[: len(RELAY_FAMILIES)], read_at=read_at)
                 return _read_exceptions(listings[: len(RELAY_FAMILIES)])
             except NetworkGuardError as exc:
+                # Activations stop trusting the rules now, not once another
+                # bridge's helper lets the invalidation below take the lock.
+                with self._state:
+                    self._verified_at = None
+                    self._held = {}
                 logger.warning(
                     "network_guard_rules_changed",
                     extra={
