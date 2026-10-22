@@ -7,10 +7,11 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime  # noqa: TC003 -- public dataclass type introspection
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from typing import assert_type
 
 from .clock import clock
 from .schema import (
@@ -23,13 +24,22 @@ from .schema import (
 
 
 @dataclass(frozen=True)
-class AdmissionInstance(Mapping[str, object]):
+class AdmissionInstance(Mapping[str, Any]):
     """One producer instance's immutable contribution to a run budget."""
 
     instance: str
     max_operations: int
 
-    def __getitem__(self, key: str) -> object:
+    @overload
+    def __getitem__(self, key: Literal["instance"]) -> str: ...
+
+    @overload
+    def __getitem__(self, key: Literal["max_operations"]) -> int: ...
+
+    @overload
+    def __getitem__(self, key: str) -> Any: ...
+
+    def __getitem__(self, key: str) -> Any:
         """Return one field through the legacy mapping interface."""
         if key == "instance":
             return self.instance
@@ -48,6 +58,14 @@ class AdmissionInstance(Mapping[str, object]):
     def to_payload(self) -> dict[str, Any]:
         """Return the catalogue and handoff representation."""
         return {"instance": self.instance, "max_operations": self.max_operations}
+
+
+if TYPE_CHECKING:
+
+    def _assert_admission_mapping_types(entry: AdmissionInstance) -> None:
+        """Pin the legacy literal-key value types for static consumers."""
+        assert_type(entry["instance"], str)
+        assert_type(entry["max_operations"], int)
 
 
 @dataclass(frozen=True)
