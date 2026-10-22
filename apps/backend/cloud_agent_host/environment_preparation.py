@@ -10,6 +10,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_host.atomic_file import atomic_replace_bytes
 from cloud_agent_host.enrollment import credential_path
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.setup import run_setup
@@ -294,10 +295,11 @@ class EnvironmentPreparation:
 
     @staticmethod
     def _save(path: Path, receipt: dict[str, Any]) -> None:
-        temporary = path.with_suffix(f".{os.urandom(8).hex()}.tmp")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w") as stream:
-            json.dump(receipt, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        # The receipt follows scripts with side effects. Once replacement
+        # succeeds, a directory-sync error must not report the script as failed
+        # and invite a replay; attempt the sync without changing that outcome.
+        atomic_replace_bytes(
+            path,
+            json.dumps(receipt).encode(),
+            directory_sync="best_effort",
+        )
