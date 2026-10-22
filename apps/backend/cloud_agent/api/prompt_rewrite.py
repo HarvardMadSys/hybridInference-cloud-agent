@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_gateway_client, get_grant_client, get_http_client
+from cloud_agent.api.deps import get_gateway_client, get_grant_client
 from cloud_agent.prompt_rewrite import (
     PromptRewriteError,
     PromptRewriteRequest,
@@ -24,13 +24,15 @@ async def rewrite_agent_prompt(
     user: dict[str, Any] = Depends(require_agent_owner),
     gateway: Any = Depends(get_gateway_client),
     grants: Any = Depends(get_grant_client),
-    http: Any = Depends(get_http_client),
 ) -> PromptRewriteResponse:
-    """Ask clarifications or rewrite a draft using the selected model."""
+    """Ask clarifications or rewrite a draft using the selected model.
+
+    The completion opens a client of its own rather than borrowing the shared
+    pool: it holds its connection for the model's whole answer, and a burst of
+    rewrites must not leave owner admission and grant calls waiting for one.
+    """
     try:
-        return await rewrite_prompt(
-            body, user_id=user["user_id"], gateway=gateway, grants=grants, client=http
-        )
+        return await rewrite_prompt(body, user_id=user["user_id"], gateway=gateway, grants=grants)
     except PromptRewriteError as exc:
         raise HTTPException(
             status_code=exc.status_code,

@@ -630,8 +630,6 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
     generate = AsyncMock()
     monkeypatch.setattr(task_titles, "generate_thread_title", generate)
     background = BackgroundTasks()
-    # Stands in for the process's shared pool, which the title borrows.
-    shared = object()
     response = await agent_worker.worker_claim(
         WorkerClaimRequest(worker_id="w1"),
         background,
@@ -640,7 +638,6 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
         app_credentials=None,
         grants=grants,
         gateway=_Gateway(),
-        http=shared,
     )
     assert response.job_id == _JOB
     generate.assert_not_awaited()
@@ -654,14 +651,18 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
             lease_generation=_GENERATION,
             model="glm-5.1",
             sandbox_token="agr.header.signature",
-            client=shared,
         )
     else:
         generate.assert_not_awaited()
 
 
-async def test_a_claimed_title_borrows_the_process_connection_pool(monkeypatch):
-    """Through the route: the title reaches the gateway on the claim's own pool."""
+async def test_a_claimed_title_keeps_its_model_call_off_the_shared_pool(monkeypatch):
+    """Through the route: the title opens a client of its own.
+
+    A model call holds its connection for the whole answer, and a burst of new
+    conversations must not leave owner admission and grant calls waiting for
+    one of the shared pool's connections.
+    """
     from unittest.mock import AsyncMock
 
     store, grants = _ClaimStore(), _Grants()
@@ -674,13 +675,14 @@ async def test_a_claimed_title_borrows_the_process_connection_pool(monkeypatch):
     generate = AsyncMock()
     monkeypatch.setattr(task_titles, "generate_thread_title", generate)
     app = _app(store, grants)
-    app.state.http = shared = object()
+    # The process has a shared pool; the title must not borrow it.
+    app.state.http = object()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
 
     assert response.status_code == 200
     generate.assert_awaited_once()
-    assert generate.await_args.kwargs["client"] is shared
+    assert "client" not in generate.await_args.kwargs
 
 
 async def test_failed_claim_does_not_schedule_title_generation(monkeypatch, claim):

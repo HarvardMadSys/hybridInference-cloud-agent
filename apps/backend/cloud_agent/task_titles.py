@@ -100,15 +100,15 @@ def schedule_thread_title(
     claim: Mapping[str, Any],
     *,
     sandbox_token: str,
-    client: httpx.AsyncClient | None,
 ) -> None:
     """Queue a claimed conversation's title behind the claim, if it still needs one.
 
     FastAPI sends the claim first; title inference cannot delay the runner.
     Only unnamed/contaminated conversations are eligible. A later claim can
     recover a failed generation using the original conversation prompt.
-    ``client`` is the process's shared pool, whose connection to the gateway
-    the claim's grant mint has just used.
+    The title opens a client of its own rather than borrowing the shared pool:
+    it holds its connection for the model's whole answer, and a burst of new
+    conversations must not leave owner admission and grant calls waiting.
     """
     if claim.get("title_generation_pending") is not True:
         return
@@ -120,7 +120,6 @@ def schedule_thread_title(
         lease_generation=claim["lease_generation"],
         model=claim["model"],
         sandbox_token=sandbox_token,
-        client=client,
     )
 
 

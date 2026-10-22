@@ -447,10 +447,12 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # client and pay a connect — and a TLS handshake, where the gateway is
         # behind TLS — and admission is not an occasional call: `require_agent_owner`
         # is a dependency of every owner route, terminal input and resize included.
-        # Task and pull-request titles, prompt rewrites, web search, draft pull
-        # requests and CloudLab borrow it for the same reason, and a title or a
-        # rewrite follows its grant mint to the gateway on the connection the
-        # mint just used. Every borrower passes its own deadline per request, so
+        # Pull-request titles, web search, draft pull requests and CloudLab borrow
+        # it for the same reason, each at a bounded rate. Thread titles and prompt
+        # rewrites do not: an owner sets those off, a model call holds its
+        # connection for the whole answer, and a burst of them could leave
+        # admission and grant calls waiting for one of this pool's hundred
+        # connections. Every borrower passes its own deadline per request, so
         # this one carries no default timeout of its own.
         #
         # It keeps no cookies. A cookie one answer set would go out with every

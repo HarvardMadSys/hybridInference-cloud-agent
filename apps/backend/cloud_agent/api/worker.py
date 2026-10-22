@@ -43,7 +43,6 @@ from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
     get_grant_client,
-    get_http_client,
     get_source_control,
     get_storage,
     get_work_signal,
@@ -832,7 +831,6 @@ async def worker_claim(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     grants: Any = Depends(get_grant_client),
     gateway: Any = Depends(get_gateway_client),
-    http: Any = Depends(get_http_client),
 ) -> WorkerClaimResponse | None:
     """Claim the next queued job and mint this attempt's capability token.
 
@@ -883,7 +881,6 @@ async def worker_claim(
             app_credentials=app_credentials,
             grants=grants,
             gateway=gateway,
-            http=http,
             attestation=body.attestation,
             host=claiming_host["host"],
         )
@@ -936,7 +933,6 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
     app_credentials: Any | None,
     grants: Any,
     gateway: Any,
-    http: Any,
     attestation: WorkerClaimAttestation | None,
     host: str,
 ) -> WorkerClaimResponse:
@@ -1272,7 +1268,6 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         job_store.conversation_commands,
         claim,
         sandbox_token=sandbox_token,
-        client=http,
     )
     return response
 
