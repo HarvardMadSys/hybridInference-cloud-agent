@@ -37,6 +37,7 @@ from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.attempts import lock_live_attempt
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent.storage._sql.environment_runs import env_run_blocks_host, env_runs_holding_slots
+from cloud_agent.storage._sql.event_batches import append_attempt_events
 from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.goals import arm_finish_wakeup, goal_after_terminal
 from cloud_agent.storage._sql.hosts import (
@@ -53,10 +54,6 @@ from cloud_agent.storage._sql.jobs import (
     fail_unrunnable_follow_ups,
     lock_conversation_by_job,
     runnable_queued_turn,
-)
-from cloud_agent.storage._sql.ledger import (
-    REQUEST_ATTEMPT_LEDGER_REFRESH_SQL,
-    carries_model_usage,
 )
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, stored_archive_settings
@@ -82,6 +79,8 @@ from cloud_agent_shared.sandbox_restore import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from cloud_agent.goals.report import GoalReportEnvelope
     from cloud_agent.ports.attempt_commands import TurnSummaryWrite
 
@@ -1107,55 +1106,51 @@ class PostgresAttemptCommands:
         its runner takes a refused append as a lost turn, and marks the chat's
         retained context lost.
         """
-        return await retry_deadlock_victim(
+        stored = await retry_deadlock_victim(
             "append_event",
-            lambda: self._append_event(
+            lambda: self._append_events(
                 attempt_id=attempt_id,
                 lease_generation=lease_generation,
-                event_type=event_type,
-                payload=payload,
-                event_seq=event_seq,
+                events=((event_type, payload, event_seq),),
             ),
         )
+        return None if stored is None else stored[0]
 
-    async def _append_event(
+    async def append_events(
         self,
         *,
         attempt_id: int,
         lease_generation: int,
-        event_type: str,
-        payload: dict[str, Any] | None,
-        event_seq: int | None,
-    ) -> int | None:
-        """Append one event in one transaction."""
+        events: Sequence[tuple[str, dict[str, Any] | None, int | None]],
+    ) -> list[int] | None:
+        """Append a runner's batch of events in order, in one transaction.
+
+        One fence check and one commit, so one notification, for the whole
+        batch, where each event used to cost all three. Each event is stored as
+        :meth:`append_event` stores it, replays and side effects included, so a
+        batch is retried whole: the events it already stored answer with their
+        ids. Returns the ids in the order given, or ``None`` when the caller
+        lost the lease. A deadlock's victim is tried again, as a single append is.
+        """
+        return await retry_deadlock_victim(
+            "append_events",
+            lambda: self._append_events(
+                attempt_id=attempt_id, lease_generation=lease_generation, events=events
+            ),
+        )
+
+    async def _append_events(
+        self,
+        *,
+        attempt_id: int,
+        lease_generation: int,
+        events: Sequence[tuple[str, dict[str, Any] | None, int | None]],
+    ) -> list[int] | None:
+        """Append events in one transaction of their own."""
         async with self._pool.acquire() as conn, conn.transaction():
-            job_id = await lock_live_attempt(conn, attempt_id, lease_generation)
-            if job_id is None:
-                return None
-            phase = (payload or {}).get("phase") if event_type == "lifecycle" else None
-            if phase == "workspace_ready":
-                await conn.execute(
-                    "UPDATE agent_attempts SET terminal_ready = TRUE WHERE id = $1",
-                    attempt_id,
-                )
-            elif phase in {"workspace_preparing", "workspace_finalizing"}:
-                await conn.execute(
-                    "UPDATE agent_attempts SET terminal_ready = FALSE WHERE id = $1",
-                    attempt_id,
-                )
-            event_id = await insert_event(
-                conn,
-                job_id=job_id,
-                attempt_id=attempt_id,
-                event_type=event_type,
-                payload=payload,
-                client_seq=event_seq,
+            return await append_attempt_events(
+                conn, attempt_id=attempt_id, lease_generation=lease_generation, events=events
             )
-            if carries_model_usage(event_type, payload):
-                # A model call just finished: read its usage now rather than
-                # when a page next asks, so every open tab is pushed the total.
-                await conn.execute(REQUEST_ATTEMPT_LEDGER_REFRESH_SQL, attempt_id)
-            return event_id
 
     async def record_continuity_mode(
         self,

@@ -12,6 +12,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from cloud_agent.goals.report import GoalReportEnvelope
 
 #: Every outcome of :meth:`AttemptCommands.record_attempt_turn_summary`.
@@ -206,6 +208,21 @@ class AttemptCommands(Protocol):
         Returns the global event id (the SSE ``Last-Event-ID`` cursor), or
         ``None`` when the caller lost the lease. The row lock on the attempt
         serializes ``seq`` assignment for the single legitimate writer.
+        """
+        ...
+
+    async def append_events(
+        self,
+        *,
+        attempt_id: int,
+        lease_generation: int,
+        events: Sequence[tuple[str, dict[str, Any] | None, int | None]],
+    ) -> list[int] | None:
+        """Append ``(event_type, payload, event_seq)`` events in order, in one transaction.
+
+        Each event is stored as :meth:`append_event` stores it, side effects
+        included, under one fence check. Returns their ids in the order given,
+        or ``None`` when the caller lost the lease, and then stores none.
         """
         ...
 

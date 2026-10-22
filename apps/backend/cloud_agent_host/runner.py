@@ -1975,6 +1975,8 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
     sandbox_error: str | None = None
 
     def outcome(exit_code: int) -> tuple[int, str, list[str], dict[str, Any] | None, str | None]:
+        # Events the control plane could not record fail the turn before its outcome counts.
+        control.flush()
         if agent_error:
             reported = f"agent reported an error: {agent_error[:900]}"
         elif sandbox_error:
@@ -1986,11 +1988,12 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
     try:
         # The sandbox manager admits and dispatches the prompt before opening this
         # response stream. Resident follow-ups need not emit a native init
-        # event, so report this shared boundary before waiting for CLI output.
+        # event, so store this shared boundary before waiting for CLI output.
         control.append_event(NormalizedEvent("lifecycle", {"phase": "turn_started"}))
+        control.flush()
         frames = OutputPump(stream.frames(), name="shared-agent-stream")
         while True:
-            if heart.lease_lost:
+            if heart.lease_lost or control.lease_lost:
                 with contextlib.suppress(Exception):
                     supervisor.interrupt_shared(job.thread_id, token=lease_token)
                 raise LeaseLost("lease lost while the shared Agent CLI was running")
@@ -2083,15 +2086,8 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
         elif status != "completed" and exit_code == 0:
             exit_code = 1
         if tool_errors:
-            control.append_event(
-                NormalizedEvent(
-                    "error",
-                    {
-                        "detail": f"{len(tool_errors)} tool call(s) failed",
-                        "first": tool_errors[0],
-                    },
-                )
-            )
+            summary = {"detail": f"{len(tool_errors)} tool call(s) failed", "first": tool_errors[0]}
+            control.append_event(NormalizedEvent("error", summary))
         return outcome(exit_code)
     finally:
         if frames is not None:

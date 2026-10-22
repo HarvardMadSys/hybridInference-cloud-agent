@@ -107,7 +107,9 @@ wire changes require the contract update described in the developer guide.
 `claimed_job.py` defines claim payloads and lease errors;
 `control_plane_client.py` owns attempt-scoped worker HTTP calls, request
 deadlines, and event replay. The runner explicitly re-exports their existing
-public names and keeps client construction at its orchestration boundary.
+public names and keeps client construction at its orchestration boundary. The
+client queues a turn's events on the ordered sender in `event_sender.py`, which
+uploads them in batches.
 
 `chat_sandbox_models.py` holds retained-container specs, inspection/status
 values, ownership labels, and identity bounds. Group bridges, relay membership,

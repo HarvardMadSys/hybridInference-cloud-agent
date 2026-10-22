@@ -100,8 +100,6 @@ from cloud_agent.schemas import (
     WorkerClaimResponse,
     WorkerContinuityRequest,
     WorkerEnvironmentSnapshotReport,
-    WorkerEventRequest,
-    WorkerEventResponse,
     WorkerFinishRequest,
     WorkerHeartbeatRequest,
     WorkerHeartbeatResponse,
@@ -1332,37 +1330,6 @@ async def worker_heartbeat(
     return WorkerHeartbeatResponse(
         ok=True, state=beat["state"], cancel_requested=beat["cancel_requested"]
     )
-
-
-@router.post("/worker/jobs/{job_id}/events", response_model=WorkerEventResponse, status_code=201)
-async def worker_append_event(
-    job_id: str,
-    body: WorkerEventRequest,
-    authorization: str | None = Header(None),
-    store: _WorkerStorage | None = Depends(get_storage),
-) -> WorkerEventResponse:
-    """Append one normalized event to the job's append-only log."""
-    job_store = _require_store(store)
-    claims = _worker_claims(authorization)
-    _match_job(claims, job_id)
-    event_id = await job_store.attempt_commands.append_event(
-        attempt_id=claims["attempt_id"],
-        lease_generation=claims["lease_generation"],
-        event_type=body.event_type,
-        payload=body.payload,
-        event_seq=body.event_seq,
-    )
-    if event_id is None:
-        raise _lease_lost()
-    if (
-        body.event_type == "lifecycle"
-        and body.payload
-        and body.payload.get("phase") == "environment_prepared"
-    ):
-        await job_store.environments.record_worker_environment_preparation(
-            job_id, claims["attempt_id"], claims["lease_generation"], body.payload
-        )
-    return WorkerEventResponse(event_id=event_id)
 
 
 #: How long after its attempt ends a startup measurement is still accepted.

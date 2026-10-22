@@ -19130,6 +19130,41 @@
         "title": "WorkerAttachmentListResponse",
         "type": "object"
       },
+      "WorkerBatchEvent": {
+        "description": "One event of a batch, which always carries the worker's number for it.",
+        "properties": {
+          "event_seq": {
+            "description": "The worker's own number for this event within its attempt. A batch whose answer was lost is sent again whole, and each number already stored is answered with that event's id instead of a duplicate row.",
+            "minimum": 1.0,
+            "title": "Event Seq",
+            "type": "integer"
+          },
+          "event_type": {
+            "description": "thinking|message|tool_use|...|lifecycle",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "payload": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payload"
+          }
+        },
+        "required": [
+          "event_type",
+          "event_seq"
+        ],
+        "title": "WorkerBatchEvent",
+        "type": "object"
+      },
       "WorkerClaimAttestation": {
         "description": "Runtime evidence collected by this exact claiming runner replica.",
         "properties": {
@@ -19622,6 +19657,43 @@
           "outcome"
         ],
         "title": "WorkerEnvironmentSnapshotReport",
+        "type": "object"
+      },
+      "WorkerEventBatchRequest": {
+        "description": "Normalized events a worker reports together, oldest first.",
+        "properties": {
+          "events": {
+            "description": "Stored in this order, so their numbers must increase.",
+            "items": {
+              "$ref": "#/components/schemas/WorkerBatchEvent"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Events",
+            "type": "array"
+          }
+        },
+        "required": [
+          "events"
+        ],
+        "title": "WorkerEventBatchRequest",
+        "type": "object"
+      },
+      "WorkerEventBatchResponse": {
+        "description": "The id of each event in the batch, in the order it was sent.",
+        "properties": {
+          "event_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Event Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "event_ids"
+        ],
+        "title": "WorkerEventBatchResponse",
         "type": "object"
       },
       "WorkerEventRequest": {
@@ -39175,6 +39247,72 @@
           }
         },
         "summary": "Worker Append Event"
+      }
+    },
+    "/v1/agent/worker/jobs/{job_id}/events:batch": {
+      "post": {
+        "description": "Append several normalized events, oldest first, in one fenced transaction.\n\nWhat a runner sends instead of one request per event: one token check, one\nlease check and one commit for the batch. Every event is stored or none\nis, and a replayed ``event_seq`` answers with the stored event's id, so a\nbatch whose answer was lost is sent again whole. A control plane without\nthis route answers 404, and the runner then posts each event on its own.",
+        "operationId": "worker_append_events_v1_agent_worker_jobs__job_id__events_batch_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkerEventBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerEventBatchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Worker Append Events"
       }
     },
     "/v1/agent/worker/jobs/{job_id}/finish": {

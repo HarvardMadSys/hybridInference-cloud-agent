@@ -1579,11 +1579,16 @@ class _Supervisor:
 
 
 class _Control:
+    lease_lost = False
+
     def __init__(self):
         self.events = []
 
     def append_event(self, event):
         self.events.append((event.event_type, event.payload))
+
+    def flush(self):
+        """Each event is recorded as it is appended, so nothing is left to deliver."""
 
 
 @pytest.mark.parametrize(
@@ -1645,6 +1650,40 @@ def test_shared_turn_lease_loss_interrupts_and_fences():
         )
     assert supervisor.interrupted is True
     assert supervisor.stream.closed is True
+
+
+def test_a_lease_an_event_upload_lost_ends_the_turn_at_once():
+    """Uploads are not waited for, so the loop reads the sender's flag beside the heartbeat's."""
+
+    class _Refused(_Control):
+        def append_event(self, event):
+            super().append_event(event)
+            if event.event_type == "assistant":
+                self.lease_lost = True
+
+    supervisor = _Supervisor(
+        [
+            {"kind": "event", "event_type": "assistant", "payload": {"text": "one"}},
+            {"kind": "event", "event_type": "assistant", "payload": {"text": "two"}},
+            {"kind": "result", "status": "completed", "exit_code": 0},
+        ]
+    )
+    control = _Refused()
+    with pytest.raises(LeaseLost):
+        runner_mod._stream_shared_agent_turn(
+            supervisor=supervisor,
+            job=_JOB,
+            control=control,
+            heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+            lease_token="lease",
+            timeout_s=30,
+        )
+
+    assert supervisor.interrupted is True
+    assert control.events == [
+        ("lifecycle", {"phase": "turn_started"}),
+        ("assistant", {"text": "one"}),
+    ]
 
 
 def _run_frames(frames):
@@ -1847,6 +1886,12 @@ def _event_control(endpoint) -> runner_mod.ControlPlane:
     return control
 
 
+def _uploaded_events(request: httpx.Request) -> list[dict[str, Any]]:
+    """The events one upload carries: a batch's, or the one a single post sends."""
+    body = json.loads(request.content)
+    return body["events"] if request.url.path.endswith("/events:batch") else [body]
+
+
 def test_a_control_plane_restart_mid_turn_does_not_lose_the_turn(monkeypatch):
     """Events refused for ten seconds are replayed; the turn still settles.
 
@@ -1859,12 +1904,13 @@ def test_a_control_plane_restart_mid_turn_does_not_lose_the_turn(monkeypatch):
     refused: list[int] = []
 
     def endpoint(request):
-        body = json.loads(request.content)
-        if body["event_type"] == "assistant" and clock.now < 10:
-            refused.append(body["event_seq"])
+        uploaded = _uploaded_events(request)
+        assistant = [body["event_seq"] for body in uploaded if body["event_type"] == "assistant"]
+        if assistant and clock.now < 10:
+            refused.extend(assistant)
             raise httpx.ConnectError("connection refused", request=request)
-        delivered.append(body)
-        return httpx.Response(201, json={"event_id": len(delivered)})
+        delivered.extend(uploaded)
+        return httpx.Response(201, json={"event_ids": list(range(len(uploaded)))})
 
     events = _event_control(endpoint)
     stream = _Stream(
@@ -1875,8 +1921,12 @@ def test_a_control_plane_restart_mid_turn_does_not_lose_the_turn(monkeypatch):
     )
     stream_turn = runner_mod._stream_shared_agent_turn
 
-    def configure(control, supervisor, _finish):
+    def configure(control, supervisor, finish):
         control.append_event.side_effect = events.append_event
+        control.flush.side_effect = events.flush
+        control.lease_lost = False
+        # The real finish delivers whatever the turn still has queued first.
+        finish.side_effect = lambda *_args, **_kwargs: events.flush()
         supervisor.start_shared_turn.return_value = stream
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream_turn)
 
@@ -1900,6 +1950,58 @@ def test_a_control_plane_restart_mid_turn_does_not_lose_the_turn(monkeypatch):
     assert [body["event_seq"] for body in delivered] == list(range(1, len(delivered) + 1))
 
 
+def test_a_turn_whose_events_cannot_be_recorded_fails_instead_of_settling(monkeypatch):
+    """Uploads run beside the stream now, and the bounded retry still ends the turn.
+
+    The turn is not left running unseen, nor settled as if its reply had been
+    recorded: its outcome waits for its events, and the failure is reported
+    through the same sender before the attempt ends.
+    """
+    clock = _virtual_clock(monkeypatch)
+    delivered: list[dict[str, Any]] = []
+
+    def endpoint(request):
+        uploaded = _uploaded_events(request)
+        if any(body["event_type"] == "assistant" for body in uploaded):
+            raise httpx.ConnectError("connection refused", request=request)
+        delivered.extend(uploaded)
+        return httpx.Response(201, json={"event_ids": list(range(len(uploaded)))})
+
+    events = _event_control(endpoint)
+    stream = _Stream(
+        [
+            {"kind": "event", "event_type": "assistant", "payload": {"text": "hi"}},
+            {"kind": "result", "status": "completed", "exit_code": 0},
+        ]
+    )
+    stream_turn = runner_mod._stream_shared_agent_turn
+
+    def configure(control, supervisor, finish):
+        control.append_event.side_effect = events.append_event
+        control.flush.side_effect = events.flush
+        control.lease_lost = False
+        finish.side_effect = lambda *_args, **_kwargs: events.flush()
+        supervisor.start_shared_turn.return_value = stream
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream_turn)
+
+    try:
+        result, control, supervisor, finish = _run_shared_boundary_case(
+            monkeypatch, 0, None, "claude-code", configure=configure
+        )
+    finally:
+        events.close()
+
+    assert result == 2
+    finish.assert_called_once()
+    assert finish.call_args.args[0] == "failed"
+    assert finish.call_args.args[1].endswith("connection refused")
+    supervisor.settle_shared.assert_not_called()
+    control.settle_chat_sandbox.assert_not_called()
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is True
+    assert clock.now <= control_plane_client._EVENT_RETRY_BUDGET_S + runner_mod.DEFAULT_LEASE_TTL_S
+    assert delivered[-1]["event_type"] == "error"
+
+
 @pytest.mark.parametrize(
     ("answers", "outcome", "requests"),
     [
@@ -1917,20 +2019,22 @@ def test_event_upload_retries_only_what_a_replay_can_fix(monkeypatch, answers, o
     bodies: list[dict[str, Any]] = []
 
     def endpoint(request):
-        bodies.append(json.loads(request.content))
+        bodies.extend(_uploaded_events(request))
         answer = pending.pop(0)
         if isinstance(answer, Exception):
             raise answer
-        return httpx.Response(answer, json={"event_id": 1})
+        return httpx.Response(answer, json={"event_ids": [1]})
 
     control = _event_control(endpoint)
     event = runner_mod.NormalizedEvent("assistant", {"text": "hi"})
     try:
         if outcome is None:
             control.append_event(event)
+            control.flush()
         else:
             with pytest.raises(outcome):
                 control.append_event(event)
+                control.flush()
     finally:
         control.close()
 
@@ -1952,6 +2056,7 @@ def test_event_upload_gives_up_inside_its_budget(monkeypatch):
     try:
         with pytest.raises(httpx.ConnectError):
             control.append_event(runner_mod.NormalizedEvent("assistant", {"text": "hi"}))
+            control.flush()
     finally:
         control.close()
 
@@ -2358,7 +2463,9 @@ def test_stream_helper_closes_the_measurement_at_the_prompt_handoff(monkeypatch,
     code, _tail, _errors, _frame, _reported = runner_mod._stream_shared_agent_turn(
         supervisor=SimpleNamespace(start_shared_turn=start_shared_turn),
         job=_JOB,
-        control=SimpleNamespace(append_event=lambda _event: None),
+        control=SimpleNamespace(
+            append_event=lambda _event: None, flush=lambda: None, lease_lost=False
+        ),
         heart=SimpleNamespace(lease_lost=False, cancel_requested=False),
         lease_token="lease",
         timeout_s=5,

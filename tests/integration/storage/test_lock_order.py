@@ -42,6 +42,7 @@ from tests.integration.storage.test_sandbox_restore_store import (
 )
 from tests.support.follow_ups import append_follow_up
 
+from cloud_agent.storage._sql import event_batches
 from cloud_agent.storage._sql.sandbox import fence_sandbox_start
 from cloud_agent.storage.repositories import (
     attempt_commands as attempt_module,
@@ -763,7 +764,7 @@ async def test_titling_a_thread_does_not_deadlock_with_its_streaming_reply(
     assert claim is not None and claim["title_generation_pending"]
     held, release = asyncio.Event(), asyncio.Event()
     append_pid: list[int] = []
-    original = attempt_module.insert_event
+    original = event_batches.insert_event
 
     async def hold_the_attempt(conn, **fields):
         if fields["event_type"] == "message":
@@ -772,7 +773,7 @@ async def test_titling_a_thread_does_not_deadlock_with_its_streaming_reply(
             await release.wait()
         return await original(conn, **fields)
 
-    monkeypatch.setattr(attempt_module, "insert_event", hold_the_attempt)
+    monkeypatch.setattr(event_batches, "insert_event", hold_the_attempt)
     # A deadlock the append lost would otherwise be retried out of sight.
     monkeypatch.setattr(attempt_module, "retry_deadlock_victim", _first_try_only)
     append = title = None

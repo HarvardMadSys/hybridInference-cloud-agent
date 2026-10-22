@@ -2559,6 +2559,8 @@ def _frozen(measurement_id: str = "msm_1", **overrides: Any) -> dict[str, Any]:
 class _StubControl:
     """A control plane that answers measurements with a scripted verdict."""
 
+    lease_lost = False
+
     def __init__(self, answers: list[Any]) -> None:
         self.answers = answers
         self.sent: list[tuple[str, dict[str, Any]]] = []
@@ -2568,6 +2570,9 @@ class _StubControl:
     def append_event(self, event: Any) -> None:
         """Record execution milestones separately from measurement delivery."""
         self.events.append((event.event_type, event.payload))
+
+    def flush(self) -> None:
+        """Each milestone is recorded as it is appended, so nothing is left to deliver."""
 
     def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
         """Record the body and return the next scripted answer."""
