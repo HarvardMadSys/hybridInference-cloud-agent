@@ -69,6 +69,7 @@ cd "$APP_DIR"
 export BUILDX_CONFIG="${APP_DIR}/.buildx"
 
 log() { printf '[sandbox-host] %s\n' "$*"; }
+warn() { printf '[sandbox-host] WARNING: %s\n' "$*" >&2; }
 die() { printf '[sandbox-host] ERROR: %s\n' "$*" >&2; exit 1; }
 
 case "$AGENT_DEPLOY_MODE" in
@@ -107,6 +108,8 @@ raw_env_or_dotenv() {
 
 # Accept existing host .env files while examples and new deployments use the
 # Sandbox Manager names. The compose wrapper also supplies the normalized token.
+# COMPAT(remove-after=2026-12-31): no host's .env or environment sets a former
+# name; check each deploy root's .env. A fallback below warns, naming it.
 env_or_dotenv() {
   local name="$1" value legacy
   value="$(raw_env_or_dotenv "$name")"
@@ -121,7 +124,10 @@ env_or_dotenv() {
     AGENT_SANDBOX_MANAGER_*) legacy="AGENT_BROKER_${name#AGENT_SANDBOX_MANAGER_}" ;;
     *) return 0 ;;
   esac
-  raw_env_or_dotenv "$legacy"
+  value="$(raw_env_or_dotenv "$legacy")"
+  # The name only: the value may be the sandbox manager's credential.
+  [[ -z "$value" ]] || warn "${legacy} is a former name for ${name}; set that instead"
+  printf '%s' "$value"
 }
 
 # Ask Compose itself to parse the interpolation environment used by the stack.
@@ -197,6 +203,8 @@ COMPOSE_PROJECT="$(env_or_dotenv COMPOSE_PROJECT)"
 compose() {
   # Nested :? fallbacks are evaluated eagerly by Compose. Normalize the legacy
   # token here, then let the recipe require the canonical credential as before.
+  # COMPAT(remove-after=2026-12-31): as env_or_dotenv's; then Compose reads the
+  # token from .env itself, and this override goes.
   local manager_token
   manager_token="$(env_or_dotenv AGENT_SANDBOX_MANAGER_TOKEN)"
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
@@ -1598,8 +1606,6 @@ KATA_SETUP_SCRIPT="${KATA_SETUP_SCRIPT:-deploy/host/setup_kata_runtime.sh}"
 if [[ "$AGENT_DEPLOY_MODE" == "artifacts" && "$KATA_SETUP_SCRIPT" == "deploy/host/setup_kata_runtime.sh" ]]; then
   KATA_SETUP_SCRIPT="$SCRIPT_DIR/setup_kata_runtime.sh"
 fi
-
-warn() { printf '[sandbox-host] WARNING: %s\n' "$*" >&2; }
 
 require_kata_host() {
   # Gate before anything starts. The runner's own preflight would fail per job

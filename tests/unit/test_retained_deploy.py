@@ -533,6 +533,7 @@ def test_upgrade_drains_and_removes_the_previous_service_before_starting_replace
 def test_existing_host_environment_can_pass_preflight_after_service_rename(tmp_path):
     env = _host(tmp_path)
     _add_required_host_paths(env, tmp_path)
+    assert "former name" not in _run(env, "status").stderr
     dotenv = Path(env["APP_DIR"]) / ".env"
     contents = dotenv.read_text()
     for current, previous in (
@@ -553,6 +554,13 @@ def test_existing_host_environment_can_pass_preflight_after_service_rename(tmp_p
     status = _run(env, "status")
     assert status.returncode == 0, status.stderr
     assert token_log.read_text().splitlines()[-1] == "test-sandbox-manager-token"
+    # A former name that supplies a value says so, so the operator knows what
+    # to rename; it never prints the value, here the manager's credential.
+    assert (
+        "[sandbox-host] WARNING: AGENT_WORKSPACE_BROKER_TOKEN is a former name for "
+        "AGENT_SANDBOX_MANAGER_TOKEN; set that instead" in status.stderr
+    )
+    assert "test-sandbox-manager-token" not in status.stderr
 
 
 def test_down_drains_runners_then_sandbox_manager_before_compose_removal() -> None:

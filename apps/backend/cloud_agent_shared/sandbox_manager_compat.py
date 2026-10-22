@@ -20,8 +20,10 @@ logger = logging.getLogger(__name__)
 # A stable wire ID: old nodes and historical measurements use this value.
 SANDBOX_MANAGER_PRODUCER = "broker"
 
-# COMPAT(remove-after=2026-12-31): no environment sets a former name. Each use
-# logs sandbox_manager_legacy_env, once per name and process.
+# COMPAT(remove-after=2026-12-31): no deployment sets a former name. Compose and
+# the deploy scripts map theirs before Python runs (each marked there), so check
+# each deploy root's .env too: sandbox_manager_legacy_env, logged once per name
+# and process, sees only what Python reads itself, such as a compute profile.
 LEGACY_ENV_NAMES = {
     "AGENT_SANDBOX_MANAGER_TOKEN": "AGENT_WORKSPACE_BROKER_TOKEN",
     "AGENT_SANDBOX_MANAGER_URL": "AGENT_WORKSPACE_BROKER_URL",
