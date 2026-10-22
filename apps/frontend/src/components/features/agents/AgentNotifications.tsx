@@ -8,6 +8,7 @@ import {
   getAgentNotificationState,
   type AgentJobApi,
   type AgentNotificationJobApi,
+  type AgentNotificationStateApi,
 } from '@/lib/api/agents';
 import { useQuestionReads } from './AgentReadProvider';
 import { onAgentRecordsChanged, isAgentPushLive, PUSH_FALLBACK_POLL_MS } from './agentPush';
@@ -23,6 +24,10 @@ export const NOTIFICATION_QUESTION_POLL_MS = 2_000;
 export const NOTIFICATION_STATE_POLL_MS = 10_000;
 const TERMINAL_STATES = new Set(['succeeded', 'failed', 'cancelled']);
 const RECEIPT_LIMIT = 200;
+
+function isRejectedChangeCursor(cause: unknown, cursor: string | undefined): boolean {
+  return !!cursor && cause instanceof APIError && cause.statusCode === 422;
+}
 
 export interface AgentNotice {
   key: string;
@@ -385,7 +390,18 @@ export function useAgentNotifications(
         let resetOnce = false;
         const retried = new Set<string>();
         while (current()) {
-          const result = await getAgentNotificationState(cursor);
+          let result: AgentNotificationStateApi;
+          try {
+            result = await getAgentNotificationState(cursor);
+          } catch (cause) {
+            if (!isRejectedChangeCursor(cause, cursor) || resetOnce) throw cause;
+            resetOnce = true;
+            prepareReset();
+            await retryUnconfirmed(retried);
+            changeCursor = undefined;
+            cursor = undefined;
+            continue;
+          }
           if (!current()) return;
           establishNotificationEpoch(result.observed_at);
           if (result.reset_required) {
