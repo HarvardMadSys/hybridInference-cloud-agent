@@ -222,14 +222,15 @@ async def test_one_pass_publishes_past_a_failure_and_retries_every_due_import(mo
         await _stop(task)
 
 
-async def test_slow_publication_does_not_hold_up_unrelated_claims_and_fanout_is_bounded(
+async def test_admission_starts_in_order_while_slow_entitlement_does_not_hold_up_others(
     monkeypatch,
 ):
-    """One slow title/provider path must not serialize another sandbox's PR."""
+    """Claim-order entry stays deterministic without serializing remote checks."""
     monkeypatch.setattr(publish_worker, "_PUBLISH_CONCURRENCY", 2)
     claims = [{"job_id": f"job-{index}", "snapshot_id": index} for index in range(6)]
-    slow_release = asyncio.Event()
-    slow_started = asyncio.Event()
+    entitlement_release = asyncio.Event()
+    first_entitlement_started = asyncio.Event()
+    entered: list[str] = []
     completed: list[str] = []
     active = 0
     peak_active = 0
@@ -239,9 +240,11 @@ async def test_slow_publication_does_not_hold_up_unrelated_claims_and_fanout_is_
         active += 1
         peak_active = max(peak_active, active)
         try:
+            entered.append(job["job_id"])
+            kwargs["admission_started"].set()
             if job["job_id"] == "job-0":
-                slow_started.set()
-                await slow_release.wait()
+                first_entitlement_started.set()
+                await entitlement_release.wait()
             completed.append(job["job_id"])
         finally:
             active -= 1
@@ -259,13 +262,19 @@ async def test_slow_publication_does_not_hold_up_unrelated_claims_and_fanout_is_
         )
     )
     try:
-        await asyncio.wait_for(slow_started.wait(), timeout=AT_ONCE_S)
+        await asyncio.wait_for(first_entitlement_started.wait(), timeout=AT_ONCE_S)
+        await _eventually(lambda: claim.await_count >= 2)
+        await _eventually(lambda: entered[:2] == ["job-0", "job-1"])
+        await _eventually(lambda: "job-1" in completed)
+        assert not entitlement_release.is_set()
+        await _eventually(lambda: entered == [f"job-{index}" for index in range(6)])
         await _eventually(lambda: completed == [f"job-{index}" for index in range(1, 6)])
         assert not publishing.done()
         assert peak_active == 2
-        slow_release.set()
+        entitlement_release.set()
         await asyncio.wait_for(publishing, timeout=AT_ONCE_S)
     finally:
+        entitlement_release.set()
         if not publishing.done():
             await _stop(publishing)
 
@@ -274,7 +283,7 @@ async def test_slow_publication_does_not_hold_up_unrelated_claims_and_fanout_is_
 
 
 async def test_a_crashed_publication_does_not_cancel_healthy_siblings(monkeypatch):
-    """An unexpected child failure is isolated to its own fenced claim."""
+    """A preflight crash releases its gate without cancelling healthy siblings."""
     monkeypatch.setattr(publish_worker, "_PUBLISH_CONCURRENCY", 2)
     claims = [
         {"job_id": "crashes", "snapshot_id": 1},
@@ -288,8 +297,8 @@ async def test_a_crashed_publication_does_not_cancel_healthy_siblings(monkeypatc
 
     async def publish_claimed(store, job, **kwargs):
         if job["job_id"] == "crashes":
-            await slow_started.wait()
             raise RuntimeError("unexpected storage failure")
+        kwargs["admission_started"].set()
         if job["job_id"] == "slow":
             slow_started.set()
             try:
@@ -315,6 +324,7 @@ async def test_a_crashed_publication_does_not_cancel_healthy_siblings(monkeypatc
     )
     try:
         await _eventually(lambda: completed == ["later"])
+        assert slow_started.is_set()
         assert not publishing.done()
         assert cancelled == []
         slow_release.set()

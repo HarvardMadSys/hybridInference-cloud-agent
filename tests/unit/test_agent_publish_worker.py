@@ -1921,6 +1921,46 @@ async def test_entitlement_outage_defers_before_any_publication_effect(monkeypat
     pull_request.assert_not_awaited()
 
 
+async def test_admission_handoff_does_not_wait_for_entitlement_completion(monkeypatch):
+    """A slow repository check must not block an unrelated claim from starting."""
+    publish_store = FakeStore(dict(_JOB))
+    entitlement_entered = asyncio.Event()
+    entitlement_release = asyncio.Event()
+    admission_started = asyncio.Event()
+
+    async def blocking_entitlement(
+        repo: str,
+        user_id: str,
+        *,
+        store: Any,
+        app_credentials: Any,
+    ) -> None:
+        assert (repo, user_id, store, app_credentials) == ("o/n", "u1", publish_store, None)
+        entitlement_entered.set()
+        await entitlement_release.wait()
+
+    monkeypatch.setattr(publish_worker, "require_entitled_repo", blocking_entitlement)
+    publishing = asyncio.create_task(
+        publish_worker._publish_claimed_owned(
+            publish_store,
+            dict(_JOB),
+            credential=None,
+            app_credentials=None,
+            base_branch="dev",
+            admission_started=admission_started,
+        )
+    )
+    try:
+        await asyncio.wait_for(admission_started.wait(), timeout=0.5)
+        assert entitlement_entered.is_set()
+        assert not entitlement_release.is_set()
+        assert not publishing.done()
+    finally:
+        entitlement_release.set()
+
+    assert await asyncio.wait_for(publishing, timeout=0.5) is None
+
+
 async def test_entitlement_error_after_publication_started_does_not_requeue(monkeypatch):
     store = FakeStore(dict(_JOB))
     _patch_publish(

@@ -860,6 +860,17 @@ async def _replacing_a_refused_token(
     return await use(await _publishing_credential(app_credentials, repo))
 
 
+def _release_admission_when_done(
+    ready: asyncio.Event,
+) -> Callable[[asyncio.Task[str | None]], None]:
+    """Release later claims if a publisher exits before starting preflight."""
+
+    def release(_finished: asyncio.Task[str | None]) -> None:
+        ready.set()
+
+    return release
+
+
 async def _publish_due(
     store: PublishStorage,
     *,
@@ -872,7 +883,9 @@ async def _publish_due(
 
     A refusal marks its snapshot failed. A retryable failure, including an
     entitlement outage, returns it to the queue until five defers are spent.
-    Snapshots behind either still go out in this pass.
+    Snapshots behind either still go out in this pass. Claims enter entitlement
+    preflight in storage order; once each check has started, independent remote
+    work proceeds concurrently.
     """
     in_flight: set[asyncio.Task[str | None]] = set()
     try:
@@ -881,19 +894,24 @@ async def _publish_due(
                 job = await store.snapshot.claim_for_publish()
                 if job is None:
                     break
-                in_flight.add(
-                    asyncio.create_task(
-                        _publish_claimed(
-                            store,
-                            job,
-                            credential=credential,
-                            app_credentials=app_credentials,
-                            grants=grants,
-                            base_branch=base_branch,
-                        ),
-                        name=f"snapshot-publish-{job.get('snapshot_id', 'unknown')}",
-                    )
+                admission_started = asyncio.Event()
+                task = asyncio.create_task(
+                    _publish_claimed(
+                        store,
+                        job,
+                        credential=credential,
+                        app_credentials=app_credentials,
+                        grants=grants,
+                        base_branch=base_branch,
+                        admission_started=admission_started,
+                    ),
+                    name=f"snapshot-publish-{job.get('snapshot_id', 'unknown')}",
                 )
+                # An unexpected failure before preflight must not strand every
+                # later claim behind this gate.
+                task.add_done_callback(_release_admission_when_done(admission_started))
+                in_flight.add(task)
+                await admission_started.wait()
             if not in_flight:
                 return
             done, in_flight = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
@@ -971,6 +989,7 @@ async def _publish_claimed(
     grants: GrantClient | None = None,
     base_branch: str,
     allow_workflow_changes: bool = False,
+    admission_started: asyncio.Event | None = None,
 ) -> str | None:
     """Publish under a claim heartbeat spanning every local and remote phase."""
     snapshot_id = int(job["snapshot_id"])
@@ -1005,6 +1024,7 @@ async def _publish_claimed(
             grants=grants,
             base_branch=base_branch,
             allow_workflow_changes=allow_workflow_changes,
+            admission_started=admission_started,
         )
     except asyncio.CancelledError:
         # A control-plane stop must not leave this claim `publishing` until the
@@ -1041,6 +1061,7 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
     grants: GrantClient | None = None,
     base_branch: str,
     allow_workflow_changes: bool = False,
+    admission_started: asyncio.Event | None = None,
 ) -> str | None:
     """Publish one claimed snapshot. Returns the PR URL, or ``None``."""
     job_id = job["job_id"]
@@ -1079,6 +1100,11 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
     # claim; without this the same deployment would block the read-only token
     # and still hand out the push token.
     environment = None
+    if admission_started is not None:
+        # Event.set() does not yield. Enter the directly awaited entitlement
+        # coroutine before the loop can start the next claim, preserving call
+        # order without serializing the remote lookup.
+        admission_started.set()
     try:
         await require_entitled_repo(
             job["repo"],
