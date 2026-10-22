@@ -25,7 +25,6 @@ import contextlib
 import hashlib
 import json
 import logging
-import os
 import re
 import secrets
 import subprocess
@@ -37,6 +36,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Final, TypeVar
 
+from cloud_agent_host.atomic_file import atomic_replace_bytes
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveDownloadError
 from cloud_agent_shared.environment_snapshots import (
     SNAPSHOT_IMAGE_REPOSITORY,
@@ -206,22 +206,9 @@ class SandboxCheckpointStore:
         with self._lock:
             self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
             target = self._path(receipt.sandbox_id)
-            descriptor, temporary = tempfile.mkstemp(dir=self._root, prefix=".receipt-")
-            try:
-                with os.fdopen(descriptor, "wb") as handle:
-                    handle.write(payload)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, target)
-            except BaseException:
-                with contextlib.suppress(OSError):
-                    os.unlink(temporary)
-                raise
-            directory = os.open(self._root, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            # This was strict before the shared helper: a checkpoint receipt is
+            # not reported until both its file and directory entry are durable.
+            atomic_replace_bytes(target, payload, directory_sync="strict")
 
     def latest(self, sandbox_id: str) -> SandboxCheckpointReceipt | None:
         """Return the sandbox's latest receipt, or ``None`` when there is none."""

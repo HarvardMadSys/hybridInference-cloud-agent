@@ -82,7 +82,7 @@ if TYPE_CHECKING:
         SandboxRepository,
         SourceControlRepository as SourceControlPort,
     )
-    from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.environments import EnvironmentBindingRepository
     from cloud_agent.sandbox_manager_client import SandboxManagerStream
 
 
@@ -102,7 +102,11 @@ class _WorkspaceStorage(Protocol):
     operation_measurements: OperationMeasurements
     sandbox: SandboxRepository
     source_control: SourceControlPort
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentBindingRepository:
+        """Environment persistence needed by this flow."""
+        ...
 
 
 def _require_store(store: _WorkspaceStorage | None) -> _WorkspaceStorage:

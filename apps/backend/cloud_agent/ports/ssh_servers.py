@@ -83,7 +83,16 @@ class SshServerRepository(Protocol):
         ...
 
     async def running_groups_for_ssh_change(
-        self, *, thread_ids: list[str] | None = None, server_id: str | None = None
+        self,
+        *,
+        thread_ids: list[str] | None = None,
+        server_id: str | None = None,
+        after_sandbox_id: str | None = None,
+        limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Running groups an SSH change reaches: each group's host and the chats it is known by."""
+        ...
+
+    async def ssh_group_states(self, *, thread_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Read a bounded batch of whole-group states with revisions taken before the reads."""
         ...

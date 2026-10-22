@@ -79,6 +79,38 @@ async def test_ciphertext_and_write_only_values_at_every_version(store, pool, mo
         )
 
 
+@pytest.mark.parametrize("count", [1, 100])
+async def test_catalogue_bulk_reads_match_individual_environments(store, pool, monkeypatch, count):
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    await _save(
+        store,
+        repo=None,
+        name="Global",
+        variables=[{"name": "GLOBAL", "value": "g", "secret": False}],
+    )
+    expected = {}
+    for i in range(count):
+        env = await _save(
+            store,
+            name=f"Env {i:03d}",
+            variables=[
+                {"name": "PUBLIC", "value": str(i), "secret": False},
+                {"name": "SECRET", "value": f"secret-{i}", "secret": True},
+            ],
+        )
+        expected[env["id"]] = env
+    rows = await store.environments.list_environments("alice")
+    assert len(rows) == count
+    for row in rows:
+        assert {key: row[key] for key in expected[row["id"]]} == expected[row["id"]]
+    fingerprints = await store.environments.current_setup_fingerprints("alice", list(expected))
+    assert len(set(fingerprints.values())) == count
+    assert all(fingerprints.values())
+    assert (
+        await store.environments.current_setup_fingerprints("alice", list(expected)) == fingerprints
+    )
+
+
 async def test_new_messages_keep_bound_versions_after_rotation_and_global_edit(
     store, pool, monkeypatch
 ):

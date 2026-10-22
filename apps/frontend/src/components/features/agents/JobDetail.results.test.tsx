@@ -39,6 +39,7 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
     changes: [],
     change_count: 0,
   }),
+  getAgentTrajectoryTimings: vi.fn().mockRejectedValue(new Error('Timing unavailable')),
   getAgentJob: vi.fn().mockRejectedValue(new Error('Timing unavailable')),
   getAgentAttemptTelemetry: vi.fn().mockRejectedValue(new Error('Timing unavailable')),
   getAgentJobUsage: vi.fn().mockResolvedValue(null),

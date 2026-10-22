@@ -576,6 +576,52 @@ def test_with_nothing_to_hold_the_worker_only_cleans_up(docker):
     assert asked == {("ps", "--all"), ("image", "ls")}
 
 
+def test_a_ready_worker_reuses_one_inventory_and_moves_to_the_settled_audit(docker):
+    """Unchanged READY targets do only one low-frequency Docker inventory."""
+    _held(docker, "2.1.300")
+    downloads = _downloads()
+    downloads.apply([_target()])
+    docker.calls.clear()
+
+    delay = downloads._reconcile()
+
+    assert delay == runtime_downloads._SETTLED_AUDIT_S
+    assert [call[:2] for call in docker.calls] == [
+        ["image", "inspect"],
+        ["image", "ls"],
+        ["container", "prune"],
+    ]
+    assert _reported(downloads)["state"] == "ready"
+
+
+def test_failed_targets_keep_the_short_base_image_audit(docker):
+    """A new base remains an automatic retry signal after a failed attempt."""
+    downloads = _downloads()
+    downloads.apply([_target()])
+    target = next(iter(downloads._targets.values()))
+    downloads._set(target, runtime_downloads.FAILED, 0, "failed")
+
+    assert downloads._poll_interval() == runtime_downloads._POLL_S
+
+
+def test_ready_targets_keep_the_short_retry_when_stale_image_removal_times_out(docker):
+    clock = Clock()
+    _held(docker, "2.1.300")
+    stale = _held(docker, "2.1.200")
+    downloads = _downloads(clock=clock)
+    downloads.apply([_target()])
+    assert downloads._reconcile() == runtime_downloads._POLL_S
+    clock.now += runtime_downloads.UNNEEDED_GRACE_S
+    docker.hang_rmi = {stale}
+
+    assert downloads._reconcile() == runtime_downloads._POLL_S
+
+    assert _reported(downloads)["state"] == "ready"
+    assert downloads._cleanup_due
+    assert stale in docker.images
+    assert ["rmi", stale] in docker.calls
+
+
 # ── removing what nothing needs ───────────────────────────────────────────
 
 

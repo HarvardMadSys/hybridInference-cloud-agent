@@ -25,14 +25,13 @@ from cloud_agent.storage._sql.goals import (
     PAUSE_GOALS_SQL,
     arm_goal_wakeup,
 )
-from cloud_agent.storage._sql.jobs import JOB_SELECT, SESSION_DELETE_BLOCK_SQL
+from cloud_agent.storage._sql.jobs import JOB_SELECT, SESSION_DELETE_BLOCK_SQL, read_job
 from cloud_agent.storage._sql.mcp import write_mcp_bindings
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.read_receipts import merge_read_receipts
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.ssh import enable_ssh_servers
-from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
-from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
+from cloud_agent.storage.repositories.environments import bind_environment
 from cloud_agent.storage.repositories.goals import new_goal_id
 from cloud_agent.task_titles import (
     fallback_title,
@@ -70,16 +69,8 @@ class PostgresConversationCommands:
     """Submissions, follow-ups, and the thread metadata a person edits."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
-        """Wrap the pool the control plane already owns.
-
-        A submission that loses the idempotency race reads the winner back,
-        and that read is ``PostgresConversationQueries.get_job`` -- the same
-        call it made when both lived on one class, over the same pool, and
-        outside any transaction this class holds. Held as a peer rather than
-        reimplemented, so there is still one statement behind it.
-        """
+        """Wrap the pool the control plane already owns."""
         self._pool = pool
-        self._queries = PostgresConversationQueries(pool)
 
     async def merge_read_receipts(
         self, *, user_id: str, receipts: list[dict[str, Any]]
@@ -170,9 +161,9 @@ class PostgresConversationCommands:
             async with self._pool.acquire() as conn, conn.transaction():
                 binding_id = None
                 if environment_selection is not None:
-                    binding_id, setup_script = await PostgresEnvironmentRepository(
-                        self._pool
-                    )._bind_environment(conn, user_id, repo, environment_selection)
+                    binding_id, setup_script = await bind_environment(
+                        conn, user_id, repo, environment_selection
+                    )
                 # What every turn of this conversation shares is written once,
                 # here, on the thread; the turns below carry only their own.
                 await conn.execute(
@@ -325,7 +316,8 @@ class PostgresConversationCommands:
             return None
         if row["client_request_fingerprint"] != fingerprint:
             return {"error": "client_request_conflict"}
-        return await self._queries.get_job(str(row["id"]))
+        async with self._pool.acquire() as conn:
+            return await read_job(conn, str(row["id"]))
 
     async def set_sessions_archived(
         self, *, thread_ids: list[str], user_id: str, archived: bool

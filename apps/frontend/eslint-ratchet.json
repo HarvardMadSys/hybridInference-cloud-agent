@@ -409,23 +409,12 @@
       }
     },
     {
-      "files": ["src/app/(agents)/admin/sandboxes/SandboxResults.tsx"],
-      "rules": {
-        "max-lines": [
-          "error",
-          {
-            "max": 965
-          }
-        ]
-      }
-    },
-    {
       "files": ["src/components/features/agents/AgentsSidebar.tsx"],
       "rules": {
         "max-lines": [
           "error",
           {
-            "max": 1005
+            "max": 997
           }
         ]
       }

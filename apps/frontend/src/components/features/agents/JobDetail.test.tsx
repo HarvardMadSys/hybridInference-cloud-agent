@@ -19,6 +19,7 @@ import {
   createAgentTerminal,
   deleteAgentTerminal,
   getAgentAttemptTelemetry,
+  getAgentTrajectoryTimings,
   forkAgentJob,
   clearAgentGoal,
   getAgentGoal,
@@ -50,6 +51,7 @@ import {
   type AgentJobUsageApi,
   type AgentThreadEventApi,
 } from '@/lib/api/agents';
+import { APIError } from '@/lib/utils/errors';
 
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import {
@@ -69,7 +71,6 @@ import {
   type ThreadMessageResultApi,
 } from '@/lib/api/pendingMessages';
 
-import { APIError } from '@/lib/utils/errors';
 import { TEMPORARY_WORKSPACE } from '@/lib/temporaryWorkspace';
 import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
 import { DEFAULT_KEYBOARD_SHORTCUTS } from '@/lib/keyboardShortcuts';
@@ -192,6 +193,7 @@ import { listSkills } from '@/lib/api/skills';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 
 vi.mock('@/lib/api/agents', () => ({
+  AGENT_TRAJECTORY_TIMING_BATCH_SIZE: 100,
   cancelAgentJob: vi.fn(),
   createAgentTerminal: vi.fn(),
   deleteAgentTerminal: vi.fn(),
@@ -206,6 +208,7 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentJobGitMetadata: vi.fn(),
   getAgentJobUsage: vi.fn(),
   getAgentAttemptTelemetry: vi.fn(),
+  getAgentTrajectoryTimings: vi.fn(),
   getAgentThreadStats: vi.fn(),
   listAgentConversations: vi.fn(),
   listAgentTerminals: vi.fn(),
@@ -1701,6 +1704,9 @@ describe('JobDetail', () => {
       .mockReset()
       .mockResolvedValue({ questions: [], job_id: 'ajob_1', attempt_id: 1 });
     vi.mocked(getAgentJob).mockReset();
+    vi.mocked(getAgentTrajectoryTimings)
+      .mockReset()
+      .mockRejectedValue(new APIError('UNKNOWN_ERROR', 'Not found', 405));
     vi.mocked(getAgentJobThread).mockReset();
     vi.mocked(listAllAgentThreadEvents).mockReset();
     vi.mocked(listMcpInvocations).mockReset().mockResolvedValue({ invocations: [] });
