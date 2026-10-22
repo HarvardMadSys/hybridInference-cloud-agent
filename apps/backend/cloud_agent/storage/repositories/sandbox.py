@@ -39,10 +39,6 @@ from cloud_agent.storage._sql.sandbox import (
     member_turn_running,
     quiet_idle_deadline,
 )
-from cloud_agent.storage._sql.terminal_replay import (
-    page as terminal_replay_page,
-    pending_ids as terminal_replay_ids,
-)
 from cloud_agent.storage._sql.sandbox_observations import (
     MEMBERS_STOPPED_SQL,
     observation_changes_nothing,
@@ -53,6 +49,10 @@ from cloud_agent.storage._sql.sandbox_observations import (
     stored_terminal_count,
     write_observed_container,
     write_reported_members,
+)
+from cloud_agent.storage._sql.terminal_replay import (
+    page as terminal_replay_page,
+    pending_ids as terminal_replay_ids,
 )
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS

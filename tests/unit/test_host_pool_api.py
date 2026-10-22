@@ -33,9 +33,7 @@ from cloud_agent import sandbox_manager_routing
 from cloud_agent.api import admin_hosts, hosts
 from cloud_agent.api.deps import get_grant_client, get_storage, verify_admin_access
 from cloud_agent.application import residency
-from cloud_agent.grants import GATEWAY_RENEWAL_STEP_S, RENEWAL_DUE_WITHIN_S, RenewalSchedule
 from cloud_agent.host_pool import (
-    HEARTBEAT_INTERVAL_S,
     HOST_DISABLED,
     HOST_DRAINING,
     HOST_ENROLLING,
@@ -2736,19 +2734,6 @@ async def test_legacy_host_residency_mutations_are_not_executable(residency_clie
     assert release.status_code == 404
     assert grants.minted == []
     assert grants.revoked == []
-
-
-class SteppedGrants(RecordingGrants):
-    """Renewals that buy the gateway's step from the moment they are asked for."""
-
-    def __init__(self, wall_clock: Any) -> None:
-        super().__init__()
-        self._wall_clock = wall_clock
-
-    async def renew(self, grant_id: str) -> dict[str, Any]:
-        await super().renew(grant_id)
-        expires_at = self._wall_clock() + timedelta(seconds=GATEWAY_RENEWAL_STEP_S)
-        return {"grant_id": grant_id, "expires_at": expires_at.isoformat()}
 
 
 async def test_host_heartbeat_reconciles_exact_retained_docker_observations(residency_client):

@@ -5,22 +5,21 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import BackgroundTasks
+import pytest
 
-from cloud_agent.api import hosts
-from cloud_agent.schemas import HostHeartbeatRequest
+pytest_plugins = ("tests.unit.test_host_pool_api",)
+
 from tests.unit.test_host_pool_api import (
-    FakeHostPoolStore,
-    RecordingGrants,
     _CHECKPOINT,
     _TARGET,
+    FakeHostPoolStore,
+    RecordingGrants,
     _enabled_archive,
     _enroll,
-    _live_group,
     _retained_with_checkpoint,
-    client,
-    residency_client,
 )
+
+from cloud_agent.api import hosts
 
 
 async def test_a_heartbeat_answers_from_the_policy_its_own_write_read(client, monkeypatch):
