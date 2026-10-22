@@ -40159,7 +40159,7 @@
     },
     "/v1/agent/worker/wait": {
       "post": {
-        "description": "Hold an idle host's request until there may be work, then answer.\n\nA host whose claim found nothing asks here instead of sleeping out its poll\ninterval, and claims again when this answers: at once if the token it\npasses is stale, when a job is queued, requeued or ends, or after\n``timeout_seconds`` regardless. The answer is the token for its next wait\nand never a job; the claim stays the only way to take one.\n\nEnrolled hosts only, like the claim it precedes. 404 where nothing listens\nfor work, which is also what a control plane predating this answers, so a\nhost treats both the same way and polls.",
+        "description": "Hold an idle host's request until there may be work, then answer.\n\nA host whose claim found nothing asks here instead of sleeping out its poll\ninterval, and claims again when this answers: at once if its token is stale,\nwhen a job it may take is queued, requeued or ends, or after ``timeout_seconds``.\nThe answer is the token for its next wait, never a job: only a claim takes one.\n\nEnrolled hosts only, like the claim it precedes. 404 where nothing listens\nfor work, which is also what a control plane predating this answers, so a\nhost treats both the same way and polls.",
         "operationId": "worker_wait_v1_agent_worker_wait_post",
         "parameters": [
           {
