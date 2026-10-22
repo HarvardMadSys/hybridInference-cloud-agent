@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0090_user_model_preferences`. The supported deployment scripts run migrations
+`0091_env_queued_runs_index`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -25,6 +25,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0091_env_queued_runs_index` | Builds a partial index on `agent_environment_runs` concurrently, holding only the runs still queued for a Host to claim. Idle environment-capable Hosts claim every few seconds and the prebuild maintenance pass repeats its scan; without the index every claim read the table's whole test and prebuild history, which no partial index covered since `0078`. It reads the run history without blocking the running API's inserts, and an interrupted build leaves an invalid index that the next run drops and rebuilds. Offline SQL builds it plainly instead, because a conversion transaction cannot run a concurrent build. Changes no row. A downgrade drops the index concurrently; runs already claimed stay claimed. |
 | `0090_user_model_preferences` | Adds an empty table holding each owner's pinned default model for new tasks. It changes no existing row; owners without a pin keep following the model their last task used, and the administrator's default model is a setting rather than a column. A downgrade drops the pins only. |
 | `0089_superseded_removals` | Adds an empty table recording each authorization to remove a container that a moved sandbox group left behind on a Host being released, and when the Host confirmed the removal. It changes no existing rows. A downgrade drops the records; containers already removed stay removed. |
 | `0088_sandbox_retry_budget` | Adds the automatic deletion retry window and attempt count. Existing pending requests begin their 24-hour window at their request time; retries stop after eight claims with bounded backoff. An administrator resumes an archived terminal request under its existing request ID and verified receipt. A terminal prearchive request is atomically replaced through the authorized deletion path, giving the host a fresh archive identity after an acknowledged abort. |
