@@ -45,6 +45,7 @@ from cloud_agent_host.guest_observer import (
     GuestObservation,
     GuestObserverCursor,
 )
+from cloud_agent_host.idle_host_rules import IdleHostRules
 from cloud_agent_host.member_resources import (
     MEMBER_WINDOW_SAMPLE_INTERVAL_MS,
     RUNNING_CHECKPOINT_INTERVAL_S,
@@ -557,6 +558,7 @@ class SharedChatSessionSupervisor:
         self._sample_tick_s = min(0.25, self._sample_interval_s / 4)
         self._sampler_thread: threading.Thread | None = None
         self._manager = manager
+        self._idle_host_rules = IdleHostRules(manager)
         self._idle_timeout_s = idle_timeout_s
         self._sweep_interval_s = sweep_interval_s
         self._clock = clock
@@ -5290,9 +5292,7 @@ class SharedChatSessionSupervisor:
             running = [(next(iter(group.members)), group.spec.generation) for group in groups]
             specs = [group.spec for group in groups]
         if not running:
-            # Nothing runs behind the packet boundary. Leave an expired proof
-            # for the next start to renew before joining its group network.
-            # A running container without an active turn is still in `running`.
+            self._idle_host_rules.renew()
             return []
         try:
             self._manager.network.verify_host_rules(specs)
