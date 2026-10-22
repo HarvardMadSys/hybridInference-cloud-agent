@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import oauth
 from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS
@@ -57,7 +58,6 @@ from cloud_agent.mcp.transports import (
     pinned_transport,
     read_bounded,
 )
-from cloud_agent.source_control import SourceControlCipher, SourceControlError
 
 if TYPE_CHECKING:
     from cloud_agent.ports.mcp import McpConnectionRepository
@@ -158,7 +158,7 @@ async def refresh_credential(
     *,
     row: Mapping[str, Any],
     policy: EgressPolicy | None = None,
-    cipher: SourceControlCipher | None = None,
+    cipher: CredentialCipher | None = None,
     fetcher: HttpMetadataFetcher | None = None,
 ) -> RefreshOutcome:
     """Refresh one connection's credential if it is close to expiring.
@@ -181,7 +181,7 @@ async def refresh_credential(
             from cloud_agent.mcp.registry import mcp_cipher
 
             credential_cipher = mcp_cipher()
-        except SourceControlError as exc:
+        except CredentialCipherError as exc:
             raise RefreshRefused(
                 "this deployment has no MCP encryption key, so a credential cannot be read",
                 kind="needs_authorization",
@@ -376,7 +376,7 @@ async def _after_contended_refresh(
         await asyncio.sleep(min(1.0, remaining))
 
 
-def _build_request(row: Mapping[str, Any], *, cipher: SourceControlCipher) -> oauth.TokenRequest:
+def _build_request(row: Mapping[str, Any], *, cipher: CredentialCipher) -> oauth.TokenRequest:
     """Build the refresh request from the stored issuer and client settings."""
     metadata = oauth.AuthorizationServerMetadata(
         issuer=str(row["issuer"]),
@@ -434,7 +434,7 @@ def _build_request(row: Mapping[str, Any], *, cipher: SourceControlCipher) -> oa
     )
 
 
-def _client_secret_cipher() -> SourceControlCipher | None:
+def _client_secret_cipher() -> CredentialCipher | None:
     """The cipher a connection's client secret was written under.
 
     **Always the OAuth cipher, and never the token cipher.** The two are
@@ -453,11 +453,11 @@ def _client_secret_cipher() -> SourceControlCipher | None:
         from cloud_agent.mcp.registry import oauth_cipher
 
         return oauth_cipher()
-    except SourceControlError:
+    except CredentialCipherError:
         return None
 
 
-def _decrypt(cipher: SourceControlCipher | None, value: Any) -> str | None:
+def _decrypt(cipher: CredentialCipher | None, value: Any) -> str | None:
     """Decrypt one stored secret, or ``None`` when there is nothing to read."""
     if not value:
         return None
@@ -468,7 +468,7 @@ def _decrypt(cipher: SourceControlCipher | None, value: Any) -> str | None:
         raise RefreshRefused("this deployment has no key for the credential this connection holds")
     try:
         return cipher.decrypt(str(value))
-    except SourceControlError as exc:
+    except CredentialCipherError as exc:
         raise RefreshRefused(
             "this connection's stored credential could not be read; reconnect it"
         ) from exc

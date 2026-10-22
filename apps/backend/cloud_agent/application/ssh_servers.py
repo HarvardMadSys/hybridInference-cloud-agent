@@ -32,10 +32,15 @@ import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from cloud_agent.credential_cipher import (
+    USER_CREDENTIAL_ENCRYPTION_KEY,
+    CredentialCipher,
+    CredentialCipherError,
+)
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
-from cloud_agent.source_control import SourceControlCipher, SourceControlError
+from cloud_agent.settings import setting_env
 from cloud_agent_shared.ssh_access import (
     HOST_KEY_ALGORITHMS,
     HOST_KEY_TYPES,
@@ -85,9 +90,12 @@ class SshStorage(Protocol):
     host_pool: HostPoolRepository
 
 
-def ssh_key_cipher(secret: str | None = None) -> SourceControlCipher:
+def ssh_key_cipher(secret: str | None = None) -> CredentialCipher:
     """The cipher server private keys are stored under."""
-    return SourceControlCipher(secret, domain=SSH_SERVER_KEY_DOMAIN)
+    material = (
+        secret if secret is not None else setting_env(USER_CREDENTIAL_ENCRYPTION_KEY, "") or ""
+    )
+    return CredentialCipher(material, domain=SSH_SERVER_KEY_DOMAIN)
 
 
 def generate_key_pair(comment: str) -> tuple[str, str]:
@@ -355,7 +363,7 @@ async def check_login(
         raise CheckFailed(_login_error(stderr.decode("utf-8", "replace")))
 
 
-def build_ssh_access(state: dict[str, Any] | None, cipher: SourceControlCipher) -> SshAccess | None:
+def build_ssh_access(state: dict[str, Any] | None, cipher: CredentialCipher) -> SshAccess | None:
     """A group state from the store, with its keys decrypted, as the host receives it.
 
     Only chats with a usable server are listed. The host clears every slot the
@@ -460,7 +468,7 @@ async def push_ssh_access(
 
 async def _push_ssh_batches(
     store: SshStorage,
-    cipher: SourceControlCipher,
+    cipher: CredentialCipher,
     *,
     thread_ids: list[str] | None,
     server_id: str | None,
@@ -497,7 +505,7 @@ async def _push_ssh_host(
     host: str,
     groups: list[dict[str, Any]],
     states: dict[str, dict[str, Any]],
-    cipher: SourceControlCipher,
+    cipher: CredentialCipher,
     semaphore: asyncio.Semaphore,
     unavailable: set[str],
 ) -> None:
@@ -528,7 +536,7 @@ async def _push_ssh_host(
                             raise
         except (
             SandboxManagerError,
-            SourceControlError,
+            CredentialCipherError,
             httpx.HTTPError,
             ValueError,
             TimeoutError,

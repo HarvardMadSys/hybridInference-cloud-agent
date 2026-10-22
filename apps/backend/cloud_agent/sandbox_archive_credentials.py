@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
 from cloud_agent.domain_cipher import settings_root_key
-from cloud_agent.source_control import SourceControlCipher, SourceControlError
 from cloud_agent_shared.sandbox_archive_settings import (
     SandboxArchivePolicy,
     SandboxArchivePolicyError,
@@ -23,15 +23,15 @@ _DOMAIN = b"cloud-agent/sandbox-archive-aws/v1"
 _SECRET = "aws_secret_access_key"
 
 
-def _cipher() -> SourceControlCipher:
+def _cipher() -> CredentialCipher:
     secret = settings_root_key()
     if len(secret.encode()) < 32:
         raise SandboxArchivePolicyError(
             "A settings encryption key of at least 32 bytes is required to store an AWS secret access key"
         )
     try:
-        return SourceControlCipher(secret, domain=_DOMAIN)
-    except SourceControlError as exc:
+        return CredentialCipher(secret, domain=_DOMAIN)
+    except CredentialCipherError as exc:
         raise SandboxArchivePolicyError(str(exc)) from exc
 
 
@@ -49,7 +49,7 @@ def open_archive_secret(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     ):
         try:
             values[_SECRET] = _cipher().decrypt(secret["ciphertext"])
-        except SourceControlError as exc:
+        except CredentialCipherError as exc:
             raise SandboxArchivePolicyError(
                 "stored AWS secret access key could not be decrypted"
             ) from exc
