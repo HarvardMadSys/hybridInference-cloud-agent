@@ -4073,6 +4073,7 @@ async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: Fake
         f"/v1/agent/jobs/{foreign['id']}/events",
         f"/v1/agent/jobs/{foreign['id']}/files",
         f"/v1/agent/jobs/{foreign['id']}/git",
+        f"/v1/agent/jobs/{foreign['id']}/git/metadata",
     ):
         response = await client.get(path)
         assert response.status_code == 404, path
@@ -4148,10 +4149,21 @@ async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStor
                 "source": "workspace",
             }
 
+        async def git_metadata(self, workspace_id: str, base_sha: str | None = None):
+            self.calls.append(("git_metadata", workspace_id, base_sha))
+            return {
+                "available": True,
+                "revision": "a" * 64,
+                "branch": "agent/thread",
+                "changes": [{"code": " M", "path": "README.md"}],
+                "change_count": 1,
+            }
+
         async def git(self, workspace_id: str, base_sha: str | None = None):
             self.calls.append(("git", workspace_id, base_sha))
             return {
                 "available": True,
+                "revision": "a" * 64,
                 "branch": "agent/thread",
                 "changes": [{"code": " M", "path": "README.md"}],
                 "patch": "diff --git a/README.md b/README.md\n",
@@ -4171,20 +4183,30 @@ async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStor
             params={"path": "README.md"},
             json={"content": "updated"},
         )
+        metadata = await local_client.get(f"/v1/agent/jobs/{job_id}/git/metadata")
         git = await local_client.get(f"/v1/agent/jobs/{job_id}/git")
 
     assert listing.status_code == 200
     assert listing.json()["writable"] is True
     assert listing.json()["source"] == "workspace"
     assert saved.status_code == 200
+    assert metadata.json() == {
+        "available": True,
+        "revision": "a" * 64,
+        "branch": "agent/thread",
+        "changes": [{"code": " M", "path": "README.md"}],
+        "change_count": 1,
+    }
+    assert "patch" not in metadata.json()
     assert git.json()["branch"] == "agent/thread"
     assert sandbox_manager.calls == [
         ("files", workspace_id, ""),
         ("write", workspace_id, "README.md", "updated"),
+        ("git_metadata", workspace_id, store.jobs[job_id].get("base_sha")),
         ("git", workspace_id, store.jobs[job_id].get("base_sha")),
     ]
     # Each request may start the stopped container, so each fences it first.
-    assert store.workspace_start_fences == [workspace_id] * 3
+    assert store.workspace_start_fences == [workspace_id] * 4
 
 
 async def test_binary_workspace_payload_preserves_owner_and_path_checks(

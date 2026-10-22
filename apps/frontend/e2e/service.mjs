@@ -297,8 +297,24 @@ export function createFixture() {
           cache_read_tokens: null,
         },
       });
+    else if (/^\/v1\/agent\/jobs\/[^/]+\/git\/metadata$/.test(api))
+      json(res, {
+        available: true,
+        revision: 'a'.repeat(64),
+        branch: 'main',
+        changes: [],
+        change_count: 0,
+      });
     else if (/^\/v1\/agent\/jobs\/[^/]+\/git$/.test(api))
-      json(res, { available: true, branch: 'main', changes: [], patch: '', commits: [] });
+      json(res, {
+        available: true,
+        revision: 'a'.repeat(64),
+        branch: 'main',
+        changes: [],
+        change_count: 0,
+        patch: '',
+        commits: [],
+      });
     else if (/\/thread$/.test(api)) {
       const value = state.jobs.get(api.split('/')[4]);
       json(res, {
