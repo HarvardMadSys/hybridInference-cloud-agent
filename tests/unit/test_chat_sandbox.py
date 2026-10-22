@@ -367,13 +367,13 @@ def test_archive_export_rejects_oversize_and_changed_identity_after_export(monke
 def _plain_group_network(monkeypatch):
     """Keep these tests on one fixed bridge; the group network is tested elsewhere.
 
-    Everything here is about exec, terminals, observers and ownership. Their
-    containers sit on ``agent-net`` and the group network's own lifecycle
-    (creation, relays, host exceptions, release, pruning, the in-guest check)
-    is covered against a model of Docker in ``test_chat_group_network.py``.
+    Exec, terminals, observers and ownership use ``agent-net`` here; group
+    lifecycle (creation, relays, host exceptions, release, pruning, guest check)
+    is tested against a Docker model in ``test_chat_group_network.py``.
     """
     monkeypatch.setattr(ChatSandboxNetwork, "network_for", lambda _self, _spec: "agent-net")
     monkeypatch.setattr(ChatSandboxNetwork, "require_host_rules", lambda _self: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "verify_host_rules", lambda *_args: None)
     monkeypatch.setattr(
         ChatSandboxNetwork,
         "_require_group_network",

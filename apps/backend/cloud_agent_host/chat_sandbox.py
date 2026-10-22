@@ -142,8 +142,7 @@ if TYPE_CHECKING:
 
     from _typeshed import SupportsWrite
 
-#: A probe older than this was abandoned by a process killed mid-probe. Since
-#: discovery no longer stops it, the next probe in the namespace removes it.
+#: A probe older than this was abandoned; the next namespace probe removes it.
 PROBE_ABANDONED_AFTER_S = 3600
 CHAT_WORKDIR = "/workspace"
 #: Where a task's uploaded files land. Outside the worktree on purpose: the
@@ -395,10 +394,8 @@ class ChatSandboxManager:
         # sandbox-manager-wide critical section per manager.
         self._guest_observer_lock = threading.RLock()
         self._guest_observer_active: dict[str, dict[int, int]] = {}
-        # Containers this manager ran ``docker start`` on that have not since
-        # passed the in-guest network check. A start that fails in between
-        # stops its guest; if even that fails, the next activation finds the
-        # guest running and must prove it before reusing it.
+        # Track started guests that have not passed network proof; failed stops
+        # remain here so the next reuse must prove them again.
         self._unproven_guests: set[str] = set()
         self._unproven_guests_lock = threading.Lock()
 
@@ -1133,14 +1130,9 @@ class ChatSandboxManager:
         defer_network_release: bool,
         addresses: dict[str, str] | None = None,
     ) -> ChatSandboxInspection:
-        """Sync and prove a guest Docker has started, or stop it trying.
+        """Prove a started guest or exact-stop it on any network-check failure.
 
-        Any failure on the way -- a relay rollout, a guest helper timing out,
-        the check itself not answering -- stops the exact container, keeping
-        its bridge when ``defer_network_release``, and raises
-        :class:`RetainedChatFailStopped`, as a failed check does. If the stop
-        fails too, the original error is raised and the guest stays recorded
-        as unproven, so :meth:`start` proves it before any reuse.
+        A stop failure leaves the guest marked unproven before any reuse.
         """
         try:
             started = self._require(spec)
@@ -1158,6 +1150,8 @@ class ChatSandboxManager:
                     expected_container_id=container_id,
                     defer_network_release=defer_network_release,
                 )
+            with substage(observer, "host_rules_recheck"):
+                self._network_lifecycle.verify_host_rules([spec])
         except RetainedChatFailStopped:
             raise
         except Exception as exc:
@@ -1169,8 +1163,11 @@ class ChatSandboxManager:
                     release_networks=not defer_network_release,
                 )
             except Exception as stop_exc:
+                from cloud_agent_host.guarded_workloads import exact_stop_unidentified
+
+                exact_stop_unidentified(self, container_id)
                 logger.warning(
-                    "chat_unproven_guest_left_running",
+                    "chat_unproven_guest_structured_stop_failed",
                     extra={
                         "sandbox_id": spec.sandbox_id,
                         "detail": str(exc)[:300],
@@ -1198,10 +1195,12 @@ class ChatSandboxManager:
         release_networks: bool = True,
     ) -> ChatSandboxInspection:
         """Deactivate, release private networking, and retain the writable layer."""
-        current = self._require(spec)
-        exact_container_id = expected_container_id or current.container_id
-        if current.container_id != exact_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed before stop")
+        current = (
+            self._require_exact(spec, expected_container_id)
+            if expected_container_id is not None
+            else self._require(spec)
+        )
+        exact_container_id = current.container_id
         if current.status is ChatSandboxStatus.PAUSED:
             raise SandboxError("refusing to treat a paused chat sandbox as cleanly stopped")
         if not current.running:
@@ -1223,9 +1222,10 @@ class ChatSandboxManager:
         )
         if result.returncode != 0:
             raise SandboxError("chat sandbox could not be stopped: " + result.stderr.strip()[:300])
-        stopped = self._require(spec)
-        if stopped.container_id != exact_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed during stop")
+        try:
+            stopped = self._require_exact(spec, exact_container_id)
+        except RetainedChatLost as exc:
+            raise RetainedChatLost("chat sandbox container identity changed during stop") from exc
         if stopped.running or stopped.status not in {
             ChatSandboxStatus.STOPPED,
             ChatSandboxStatus.CREATED,
@@ -1248,9 +1248,7 @@ class ChatSandboxManager:
         expected_container_id: str,
     ) -> ChatSandboxInspection:
         """Release networking only for one exact, already-stopped container."""
-        current = self._require(spec)
-        if current.container_id != expected_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed during stop")
+        current = self._require_exact(spec, expected_container_id)
         if current.running:
             raise SandboxError("refusing to release networking from a running chat sandbox")
         released = self._network_lifecycle._release_sandbox_networks(
