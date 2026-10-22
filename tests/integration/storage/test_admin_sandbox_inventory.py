@@ -1,5 +1,6 @@
 """Real-PostgreSQL snapshot/delta consistency and fleet-independent idle reads."""
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 
@@ -313,3 +314,13 @@ async def test_repeated_heartbeats_coalesce_without_per_sandbox_fanout(db):
     assert page.sandboxes == page.deleted_ids == []
     assert len(counted.reads) == 3
     assert len(page.model_dump_json()) < 1000
+
+
+async def test_concurrent_resyncs_prune_without_serialization_failures(db):
+    await seed(db, 1000)
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_admin_sandbox_changes SET changed_at=NOW()-interval '2 days'"
+        )
+    snapshots = await asyncio.gather(*(complete(db) for _ in range(4)))
+    assert all(len(rows) == 1000 for rows, _ in snapshots)

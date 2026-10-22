@@ -43,16 +43,18 @@ class AdminSandboxInventory:
     ) -> AdminSandboxInventoryPage:
         """Return one projected snapshot page or one bounded change page."""
         scope = inventory_scope(state, include_archived, limit)
-        async with self._pool.acquire() as conn, conn.transaction(isolation="repeatable_read"):
-            await conn.execute("SET LOCAL statement_timeout = '5s'")
+        async with self._pool.acquire() as conn:
             if cursor is None:
                 await _prune(conn)
-                cursor = await _capture(conn, state, include_archived, limit, scope)
-            if cursor.snapshot_id:
-                return await _snapshot_page(conn, cursor)
-            if not cursor.database_snapshot:
-                raise ValueError("Invalid inventory cursor.")
-            return await _changes(conn, cursor, state, include_archived, limit)
+            async with conn.transaction(isolation="repeatable_read"):
+                await conn.execute("SET LOCAL statement_timeout = '5s'")
+                if cursor is None:
+                    cursor = await _capture(conn, state, include_archived, limit, scope)
+                if cursor.snapshot_id:
+                    return await _snapshot_page(conn, cursor)
+                if not cursor.database_snapshot:
+                    raise ValueError("Invalid inventory cursor.")
+                return await _changes(conn, cursor, state, include_archived, limit)
 
 
 async def _capture(
@@ -209,22 +211,27 @@ async def _hosts(conn: Any, ids: list[str]) -> list[AdminSandboxHostObservation]
 
 async def _prune(conn: Any) -> None:
     """Bound cleanup work; old cursors explicitly resync after marker retention."""
-    await conn.execute(
-        """DELETE FROM agent_admin_sandbox_inventory_snapshots WHERE id IN (
-           SELECT id FROM agent_admin_sandbox_inventory_snapshots WHERE expires_at<=NOW()
-           ORDER BY expires_at LIMIT 20)"""
-    )
-    await conn.execute(
-        """WITH expired AS (
-            SELECT kind,entity_id FROM agent_admin_sandbox_changes
-            WHERE changed_at<NOW()-interval '24 hours'
-              AND change_xid<pg_snapshot_xmin(pg_current_snapshot())
-            ORDER BY changed_at LIMIT 500
-        ), removed AS (
-            DELETE FROM agent_admin_sandbox_changes c USING expired e
-            WHERE c.kind=e.kind AND c.entity_id=e.entity_id RETURNING change_xid
-        ) INSERT INTO agent_admin_sandbox_change_floor (id,floor_xid)
-          SELECT true,(max(change_xid::text::numeric)+1)::text::xid8 FROM removed HAVING count(*)>0
-          ON CONFLICT (id) DO UPDATE SET floor_xid=GREATEST(
-              agent_admin_sandbox_change_floor.floor_xid,EXCLUDED.floor_xid)"""
-    )
+    # Maintenance is separate from the immutable capture. READ COMMITTED plus
+    # SKIP LOCKED prevents two resyncs from failing on concurrent deletes, and
+    # avoids waiting on a live writer before rechecking a marker's retention age.
+    async with conn.transaction(isolation="read_committed"):
+        await conn.execute("SET LOCAL statement_timeout = '5s'")
+        await conn.execute(
+            """DELETE FROM agent_admin_sandbox_inventory_snapshots WHERE id IN (
+               SELECT id FROM agent_admin_sandbox_inventory_snapshots WHERE expires_at<=NOW()
+               ORDER BY expires_at LIMIT 20 FOR UPDATE SKIP LOCKED)"""
+        )
+        await conn.execute(
+            """WITH expired AS (
+                SELECT kind,entity_id FROM agent_admin_sandbox_changes
+                WHERE changed_at<NOW()-interval '24 hours'
+                  AND change_xid<pg_snapshot_xmin(pg_current_snapshot())
+                ORDER BY changed_at LIMIT 500 FOR UPDATE SKIP LOCKED
+            ), removed AS (
+                DELETE FROM agent_admin_sandbox_changes c USING expired e
+                WHERE c.kind=e.kind AND c.entity_id=e.entity_id RETURNING change_xid
+            ) INSERT INTO agent_admin_sandbox_change_floor (id,floor_xid)
+              SELECT true,(max(change_xid::text::numeric)+1)::text::xid8 FROM removed HAVING count(*)>0
+              ON CONFLICT (id) DO UPDATE SET floor_xid=GREATEST(
+                  agent_admin_sandbox_change_floor.floor_xid,EXCLUDED.floor_xid)"""
+        )
