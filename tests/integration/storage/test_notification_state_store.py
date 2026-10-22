@@ -330,99 +330,237 @@ async def test_terminal_job_carries_title_revision_before_the_thread_delta_page(
 async def test_notification_markers_skip_churn_and_expire_explicitly(
     pool, store: Storage, monkeypatch
 ):
-    """Delta traffic prunes stale durable markers while ordinary churn stays push-only."""
+    """Prune generations expire only pre-prune cursors across older XIDs."""
     job = await _create_job(store)
     initial = await store.conversation_queries.notification_state(user_id="user-1", limit=200)
 
-    async with pool.acquire() as conn:
-        before_thread = await conn.fetchrow(
-            """
-            SELECT change_xid::text,changed_at
-            FROM agent_notification_changes WHERE kind='thread' AND entity_id=$1
-            """,
-            job["thread_id"],
-        )
-        before_job = await conn.fetchrow(
-            """
-            SELECT change_xid::text,changed_at
-            FROM agent_notification_changes WHERE kind='job' AND entity_id=$1
-            """,
-            job["id"],
-        )
-        await conn.execute(
-            "UPDATE agent_threads SET updated_at=clock_timestamp() WHERE id=$1",
-            job["thread_id"],
-        )
-        await conn.execute(
-            "UPDATE agent_jobs SET published_pr_url='https://example.test/pr/1' WHERE id=$1",
-            job["id"],
-        )
-        assert (
-            await conn.fetchrow(
+    older = await pool.acquire()
+    transaction = older.transaction()
+    await transaction.start()
+    committed = False
+    try:
+        older_xid = int(await older.fetchval("SELECT pg_current_xact_id()::text"))
+        async with pool.acquire() as conn:
+            before_thread = await conn.fetchrow(
                 """
                 SELECT change_xid::text,changed_at
                 FROM agent_notification_changes WHERE kind='thread' AND entity_id=$1
                 """,
                 job["thread_id"],
             )
-            == before_thread
-        )
-        assert (
-            await conn.fetchrow(
+            before_job = await conn.fetchrow(
                 """
                 SELECT change_xid::text,changed_at
                 FROM agent_notification_changes WHERE kind='job' AND entity_id=$1
                 """,
                 job["id"],
             )
-            == before_job
-        )
+            await conn.execute(
+                "UPDATE agent_threads SET updated_at=clock_timestamp() WHERE id=$1",
+                job["thread_id"],
+            )
+            await conn.execute(
+                "UPDATE agent_jobs SET published_pr_url='https://example.test/pr/1' WHERE id=$1",
+                job["id"],
+            )
+            assert (
+                await conn.fetchrow(
+                    """
+                    SELECT change_xid::text,changed_at
+                    FROM agent_notification_changes WHERE kind='thread' AND entity_id=$1
+                    """,
+                    job["thread_id"],
+                )
+                == before_thread
+            )
+            assert (
+                await conn.fetchrow(
+                    """
+                    SELECT change_xid::text,changed_at
+                    FROM agent_notification_changes WHERE kind='job' AND entity_id=$1
+                    """,
+                    job["id"],
+                )
+                == before_job
+            )
 
-        await conn.execute(
-            "UPDATE agent_threads SET title='A durable title' WHERE id=$1",
-            job["thread_id"],
-        )
-        durable_thread = await conn.fetchrow(
-            """
-            SELECT change_xid::text,changed_at
-            FROM agent_notification_changes WHERE kind='thread' AND entity_id=$1
-            """,
-            job["thread_id"],
-        )
-        assert durable_thread != before_thread
-        removed_through = await conn.fetchval(
-            """
-            WITH aged AS (
+            await conn.execute(
+                "UPDATE agent_threads SET title='A durable title' WHERE id=$1",
+                job["thread_id"],
+            )
+            durable_thread = await conn.fetchrow(
+                """
+                SELECT change_xid::text,changed_at
+                FROM agent_notification_changes WHERE kind='thread' AND entity_id=$1
+                """,
+                job["thread_id"],
+            )
+            assert durable_thread != before_thread
+            await conn.execute(
+                """
                 UPDATE agent_notification_changes
                 SET changed_at=NOW()-interval '25 hours'
                 WHERE user_id='user-1'
-                RETURNING change_xid
+                """
             )
-            SELECT max(change_xid::text::numeric) FROM aged
-            """
-        )
+        durable_xid = int(durable_thread["change_xid"])
+        assert older_xid < durable_xid
 
-    monkeypatch.setattr(notification_state_storage, "_next_prune_at", 0.0)
-    expired = await store.conversation_queries.notification_state(
-        user_id="user-1", cursor=initial["change_cursor"], limit=200
+        monkeypatch.setattr(notification_state_storage, "_next_prune_at", 0.0)
+        expired = await store.conversation_queries.notification_state(
+            user_id="user-1", cursor=initial["change_cursor"], limit=200
+        )
+        assert expired["reset_required"] is True
+        assert expired["change_cursor"] is None
+
+        async with pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    "SELECT count(*) FROM agent_notification_changes WHERE user_id='user-1'"
+                )
+                == 0
+            )
+            floor = int(
+                await conn.fetchval(
+                    """
+                    SELECT floor_xid::text
+                    FROM agent_notification_change_floors WHERE user_id='user-1'
+                    """
+                )
+            )
+        assert durable_xid < floor
+
+        current = await store.conversation_queries.notification_state(user_id="user-1", limit=200)
+        assert [(row["id"], row["title"]) for row in current["jobs"]] == [
+            (job["id"], "A durable title")
+        ]
+        assert current["change_cursor"]
+        steady = await store.conversation_queries.notification_state(
+            user_id="user-1", cursor=current["change_cursor"], limit=200
+        )
+        assert steady["reset_required"] is False
+        assert steady["jobs"] == []
+        assert steady["threads"] == []
+        assert steady["change_cursor"]
+
+        await older.execute(
+            "UPDATE agent_threads SET title='Late lower-XID title' WHERE id=$1",
+            job["thread_id"],
+        )
+        late_xid = int(
+            await older.fetchval(
+                """
+                SELECT change_xid::text FROM agent_notification_changes
+                WHERE kind='thread' AND entity_id=$1
+                """,
+                job["thread_id"],
+            )
+        )
+        assert late_xid == older_xid
+        await transaction.commit()
+        committed = True
+    except BaseException:
+        if not committed:
+            await transaction.rollback()
+        raise
+    finally:
+        await pool.release(older)
+
+    delta = await store.conversation_queries.notification_state(
+        user_id="user-1", cursor=steady["change_cursor"], limit=200
     )
-    assert expired["reset_required"] is True
-    assert expired["change_cursor"] is None
+    assert delta["reset_required"] is False
+    assert [(row["id"], row["title"]) for row in delta["threads"]] == [
+        (job["thread_id"], "Late lower-XID title")
+    ]
+    assert delta["change_cursor"]
+    final = await store.conversation_queries.notification_state(
+        user_id="user-1", cursor=delta["change_cursor"], limit=200
+    )
+    assert final["reset_required"] is False
+    assert final["jobs"] == []
+    assert final["threads"] == []
 
-    async with pool.acquire() as conn:
-        assert (
-            await conn.fetchval(
-                "SELECT count(*) FROM agent_notification_changes WHERE user_id='user-1'"
+
+async def test_notification_prune_floor_tracks_last_committer(pool, store: Storage, monkeypatch):
+    """A later commit with an older XID replaces the visible prune generation."""
+    job = await _create_job(store)
+    initial = await store.conversation_queries.notification_state(user_id="user-1", limit=200)
+
+    older = await pool.acquire()
+    transaction = older.transaction()
+    await transaction.start()
+    committed = False
+    try:
+        older_xid = int(await older.fetchval("SELECT pg_current_xact_id()::text"))
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE agent_notification_changes
+                SET changed_at=NOW()-interval '25 hours'
+                WHERE user_id='user-1'
+                """
             )
-            == 0
+
+        monkeypatch.setattr(notification_state_storage, "_next_prune_at", 0.0)
+        expired = await store.conversation_queries.notification_state(
+            user_id="user-1", cursor=initial["change_cursor"], limit=200
         )
-        floor = await conn.fetchval(
-            """
-            SELECT floor_xid::text
-            FROM agent_notification_change_floors WHERE user_id='user-1'
-            """
+        assert expired["reset_required"] is True
+        async with pool.acquire() as conn:
+            newer_floor = int(
+                await conn.fetchval(
+                    """
+                    SELECT floor_xid::text
+                    FROM agent_notification_change_floors WHERE user_id='user-1'
+                    """
+                )
+            )
+        assert older_xid < newer_floor
+
+        current = await store.conversation_queries.notification_state(user_id="user-1", limit=200)
+        assert current["change_cursor"]
+        await older.execute(
+            "UPDATE agent_threads SET title='Committed after the newer prune' WHERE id=$1",
+            job["thread_id"],
         )
-    assert int(floor) == int(removed_through) + 1
+        await older.execute(
+            """
+            UPDATE agent_notification_changes
+            SET changed_at=NOW()-interval '25 hours'
+            WHERE kind='thread' AND entity_id=$1
+            """,
+            job["thread_id"],
+        )
+        await notification_state_storage._prune(older)
+        assert (
+            int(
+                await older.fetchval(
+                    """
+                SELECT floor_xid::text
+                FROM agent_notification_change_floors WHERE user_id='user-1'
+                """
+                )
+            )
+            == older_xid
+        )
+        await transaction.commit()
+        committed = True
+    except BaseException:
+        if not committed:
+            await transaction.rollback()
+        raise
+    finally:
+        await pool.release(older)
+
+    reset = await store.conversation_queries.notification_state(
+        user_id="user-1", cursor=current["change_cursor"], limit=200
+    )
+    assert reset["reset_required"] is True
+    rebuilt = await store.conversation_queries.notification_state(user_id="user-1", limit=200)
+    assert [(row["id"], row["title"]) for row in rebuilt["jobs"]] == [
+        (job["id"], "Committed after the newer prune")
+    ]
 
 
 async def test_notification_delta_pages_recover_an_older_xid_behind_the_page(pool, store: Storage):

@@ -286,9 +286,9 @@ async def _changes(
     metadata = await conn.fetchrow(
         """
         SELECT NOW() AS observed_at,pg_current_snapshot()::text AS snapshot,
-               COALESCE((
+               COALESCE(NOT pg_visible_in_snapshot((
                    SELECT floor_xid FROM agent_notification_change_floors WHERE user_id=$2
-               ),'0') > pg_snapshot_xmin($1::text::pg_snapshot) AS expired
+               ),$1::text::pg_snapshot),FALSE) AS expired
         """,
         cursor.database_snapshot,
         user_id,
@@ -398,7 +398,13 @@ async def _prune_if_due(conn: Any, *, force: bool = False) -> None:
 
 
 async def _prune(conn: Any) -> None:
-    """Bound cleanup; a cursor behind its owner's floor explicitly rebuilds."""
+    """Bound cleanup; a cursor behind its owner's floor explicitly rebuilds.
+
+    Selected row versions are committed and locked here; concurrent rewrites
+    are skipped. The floor records this prune transaction, so old cursors do
+    not see it while cursors created after cleanup do, even when an unrelated
+    older transaction still pins the cluster-wide snapshot horizon.
+    """
     async with conn.transaction(isolation="read_committed"):
         await conn.execute("SET LOCAL statement_timeout = '5s'")
         await conn.execute(
@@ -406,18 +412,16 @@ async def _prune(conn: Any) -> None:
             WITH expired AS (
                 SELECT kind,entity_id FROM agent_notification_changes
                 WHERE changed_at<NOW()-interval '24 hours'
-                  AND change_xid<pg_snapshot_xmin(pg_current_snapshot())
                 ORDER BY changed_at LIMIT 500 FOR UPDATE SKIP LOCKED
             ), removed AS (
                 DELETE FROM agent_notification_changes c USING expired e
                 WHERE c.kind=e.kind AND c.entity_id=e.entity_id
-                RETURNING c.user_id,c.change_xid
+                RETURNING c.user_id
             )
             INSERT INTO agent_notification_change_floors (user_id,floor_xid)
-            SELECT user_id,(max(change_xid::text::numeric)+1)::text::xid8
-            FROM removed GROUP BY user_id
-            ON CONFLICT (user_id) DO UPDATE SET floor_xid=GREATEST(
-                agent_notification_change_floors.floor_xid,EXCLUDED.floor_xid
-            )
+            SELECT user_id,pg_current_xact_id()
+            FROM (SELECT DISTINCT user_id FROM removed) affected
+            ORDER BY user_id
+            ON CONFLICT (user_id) DO UPDATE SET floor_xid=EXCLUDED.floor_xid
             """
         )
