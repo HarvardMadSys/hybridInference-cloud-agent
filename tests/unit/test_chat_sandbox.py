@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host import chat_sandbox as chat_sandbox_mod
+from cloud_agent_host import chat_sandbox as chat_sandbox_mod, chat_sandbox_writers as writers
 from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
     ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S,
@@ -2127,7 +2127,7 @@ def test_shared_writer_census_rejects_exiting_nonleaders_even_with_matching_coun
         [
             "/bin/sh",
             "-c",
-            ChatSandboxManager._shared_writer_task_state_script() + 'writer_state "$1"',
+            writers.TASK_STATE_SCRIPT + 'writer_state "$1"',
             "sh",
             str(proc),
         ],
@@ -2273,7 +2273,7 @@ def test_shared_writer_freeze_and_thaw_keep_live_writers_fenced_beside_zombies(
 
     manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="d" * 32)
 
-    receipt, already_stopped = manager._parse_frozen_processes(
+    receipt, already_stopped = writers.parse_frozen_processes(
         (tmp_path / Path(manifest).name).read_bytes(), allowed_uids={os.getuid()}
     )
     assert [(pid, uid) for pid, uid, _started in receipt] == [(writer.pid, os.getuid())]
@@ -2315,7 +2315,7 @@ def test_shared_writer_freeze_and_thaw_fence_live_threads_behind_a_zombie_leader
 
     manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="f" * 32)
 
-    receipt, already_stopped = manager._parse_frozen_processes(
+    receipt, already_stopped = writers.parse_frozen_processes(
         (tmp_path / Path(manifest).name).read_bytes(), allowed_uids={os.getuid()}
     )
     assert [(pid, uid) for pid, uid, _started in receipt] == [(writer.pid, os.getuid())]
@@ -2479,7 +2479,7 @@ def test_shared_writer_census_past_its_deadline_resumes_through_its_own_trap(
     owned_shared_writer_processes.append(writer)
     manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
     local_exec = manager.exec_capture
-    monkeypatch.setattr(chat_sandbox_mod, "_SHARED_WRITER_CENSUS_BUDGET_S", 0)
+    monkeypatch.setattr(writers, "CENSUS_BUDGET_S", 0)
     censuses = []
 
     def census_only(spec, argv, **kwargs):
@@ -2528,7 +2528,7 @@ def test_shared_writer_thaw_does_not_resume_a_process_stopped_before_the_freeze(
 
     assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
     assert _shared_writer_process_state(suspended.pid) == "T"
-    frozen, already_stopped = manager._parse_frozen_processes(receipt, allowed_uids={os.getuid()})
+    frozen, already_stopped = writers.parse_frozen_processes(receipt, allowed_uids={os.getuid()})
     assert [pid for pid, _uid, _started in frozen] == [writer.pid]
     assert [pid for pid, _uid, _started in already_stopped] == [suspended.pid]
     assert list(tmp_path.glob("snapshot-*")) == []
@@ -2687,7 +2687,7 @@ def test_shared_writer_thaw_detects_replacement_after_exact_id_cleanup(monkeypat
 )
 def test_shared_writer_manifest_rejects_values_outside_the_identity_fence(payload):
     with pytest.raises(SandboxError, match="snapshot writer census"):
-        ChatSandboxManager._parse_frozen_processes(payload, allowed_uids={10001})
+        writers.parse_frozen_processes(payload, allowed_uids={10001})
 
 
 def test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group(

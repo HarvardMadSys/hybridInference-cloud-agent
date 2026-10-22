@@ -7,6 +7,7 @@ fixed resource identity and request parameters bound the external effects.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import secrets
 from contextlib import suppress
@@ -406,7 +407,7 @@ class ComputeReconciler:
         """Observe leases and submit renewals even while retirement is blocked."""
         now = _now()
         observation_seconds = current_observation_seconds(self.commands.configuration)
-        release = load_control_plane_host_release()
+        release = await asyncio.to_thread(load_control_plane_host_release)
         snapshot = await self.repository.scheduling_inventory()
         for row in snapshot.allocations:
             if row.get("observed_state") == "terminated":
