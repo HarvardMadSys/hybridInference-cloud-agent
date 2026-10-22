@@ -8860,6 +8860,68 @@ def test_a_checkpoint_left_when_its_turn_ends_never_reaches_the_next_turn():
     supervisor.complete_turn("athr_source", lease.token, second)
 
 
+def test_a_journal_read_that_outlives_its_turn_does_not_move_the_next_windows_fence():
+    """A census read still running when the next turn opens leaves that turn's fence.
+
+    The census reads the journal outside the supervisor lock, so a turn can end
+    and the member's next turn open while a read is still running. That read
+    used to record where it stopped on the member, which by then held the next
+    window, so the next window's first read began inside the previous turn's
+    bytes.
+    """
+    read_held = threading.Event()
+    release_read = threading.Event()
+
+    class HeldJournalManager(_RotatingJournalManager):
+        """Holds one journal read, its slice already taken, until the test releases it."""
+
+        hold_next_read = False
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads: list[tuple[str | None, int]] = []
+
+        def member_window_journal_delta(self, spec, cursor, *, timeout_s=10.0):
+            self.reads.append((cursor.measurement_id, cursor.offset))
+            read = super().member_window_journal_delta(spec, cursor, timeout_s=timeout_s)
+            if self.hold_next_read:
+                self.hold_next_read = False
+                read_held.set()
+                assert release_read.wait(timeout=_HELD_S)
+            return read
+
+    manager = HeldJournalManager()
+    supervisor, lease = _windowed_supervisor(manager)
+    member = supervisor._groups["asbx_shared"].members["athr_source"]
+    first = supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    first_measurement = member.observer_cursor.measurement_id
+    manager.append_journal(_journal_sample_line(first_measurement, 2))
+    manager.hold_next_read = True
+    census, outcome = _in_thread(supervisor.sample_open_windows)
+    try:
+        assert read_held.wait(timeout=_HELD_S)
+        supervisor.complete_turn("athr_source", lease.token, first)
+        # The closing census lands after the held read took its slice.
+        manager.append_journal(_journal_sample_line(first_measurement, 3))
+        second = supervisor.start_turn(
+            "athr_source", lease.token, prompt="again", model="glm-5.1", reasoning_effort=None
+        )
+        fence = member.observer_cursor
+    finally:
+        release_read.set()
+        census.join(timeout=_HELD_S)
+    assert not census.is_alive()
+    assert "error" not in outcome
+
+    # Released, the held tick goes on to checkpoint the next window, and that
+    # window's first read starts where it opened.
+    reads = [offset for measurement, offset in manager.reads if measurement == fence.measurement_id]
+    assert reads[:1] == [fence.offset]
+    supervisor.complete_turn("athr_source", lease.token, second)
+
+
 def test_a_turn_refused_at_admission_closes_the_window_it_opened():
     """A turn that loses its lease while starting closes its window with its cursor.
 
