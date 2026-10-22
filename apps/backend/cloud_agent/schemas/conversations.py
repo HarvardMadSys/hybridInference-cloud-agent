@@ -84,6 +84,7 @@ class AgentNotificationJob(BaseModel):
     id: str
     thread_id: str
     title: str
+    thread_revision: int
     repo: str | None
     state: Literal["queued", "waiting", "running", "succeeded", "failed", "cancelled"]
     current_attempt_id: int | None = None

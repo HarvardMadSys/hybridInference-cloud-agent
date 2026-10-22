@@ -6142,6 +6142,10 @@
             "title": "Thread Id",
             "type": "string"
           },
+          "thread_revision": {
+            "title": "Thread Revision",
+            "type": "integer"
+          },
           "title": {
             "title": "Title",
             "type": "string"
@@ -6166,6 +6170,7 @@
           "id",
           "thread_id",
           "title",
+          "thread_revision",
           "repo",
           "state",
           "turn_no",

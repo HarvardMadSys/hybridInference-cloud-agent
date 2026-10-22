@@ -76,6 +76,7 @@ function page(
       id: job.id,
       thread_id: job.thread_id!,
       title: job.title || job.repo || 'Agent task',
+      thread_revision: job.thread_revision ?? 0,
       repo: job.repo ?? null,
       state: job.state as AgentNotificationStateApi['jobs'][number]['state'],
       current_attempt_id: job.current_attempt_id,
@@ -490,6 +491,45 @@ describe('owner-wide agent notifications', () => {
     );
     expect(notify).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ kind: 'succeeded', title: 'Newest title' }),
+    );
+  });
+
+  it('uses a terminal job title before its thread marker arrives on the next page', async () => {
+    list.mockResolvedValueOnce(page([job({ title: 'Old title', thread_revision: 1 })]));
+    await mount({ ...preferences, questions: false });
+    list.mockResolvedValueOnce(
+      page(
+        [
+          job({
+            title: 'Fresh title',
+            thread_revision: 2,
+            state: 'succeeded',
+            revision: 2,
+            finished_at: new Date().toISOString(),
+          }),
+        ],
+        'thread-page',
+        { mode: 'delta' },
+      ),
+    );
+    const threadPage = deferred<AgentNotificationStateApi>();
+    list.mockReturnValueOnce(threadPage.promise);
+    await act(async () => {
+      vi.advanceTimersByTime(NOTIFICATION_STATE_POLL_MS);
+      await Promise.resolve();
+    });
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ kind: 'succeeded', title: 'Fresh title' }),
+    );
+    await act(async () =>
+      threadPage.resolve(
+        page([], null, {
+          mode: 'delta',
+          threads: [{ id: 'thread-1', title: 'Fresh title', revision: 2 }],
+          change_cursor: 'new-tail',
+        }),
+      ),
     );
   });
 

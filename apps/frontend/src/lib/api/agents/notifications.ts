@@ -7,6 +7,7 @@ export interface AgentNotificationJobApi {
   id: string;
   thread_id: string;
   title: string;
+  thread_revision: number;
   repo: string | null;
   state: 'queued' | 'waiting' | 'running' | 'succeeded' | 'failed' | 'cancelled';
   current_attempt_id: number | null;

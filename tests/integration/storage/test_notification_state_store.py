@@ -285,6 +285,48 @@ async def test_notification_state_recovers_delayed_commit_once_and_reports_delet
     assert isolated["threads"] == []
 
 
+async def test_terminal_job_carries_title_revision_before_the_thread_delta_page(
+    pool, store: Storage
+):
+    """A terminal notice has the fresh title even when its thread marker is page two."""
+    job = await _create_job(store)
+    initial = await store.conversation_queries.notification_state(user_id="user-1", limit=1)
+    while initial["next_cursor"]:
+        initial = await store.conversation_queries.notification_state(
+            user_id="user-1", cursor=initial["next_cursor"], limit=1
+        )
+    assert initial["change_cursor"]
+
+    async with pool.acquire() as conn:
+        thread_revision = await conn.fetchval(
+            """
+            UPDATE agent_threads SET title='Fresh title' WHERE id=$1
+            RETURNING revision
+            """,
+            job["thread_id"],
+        )
+    await _finish_for_notification(pool, job)
+
+    first = await store.conversation_queries.notification_state(
+        user_id="user-1", cursor=initial["change_cursor"], limit=1
+    )
+    assert [
+        (row["id"], row["title"], row["thread_revision"], row["state"]) for row in first["jobs"]
+    ] == [(job["id"], "Fresh title", thread_revision, "failed")]
+    assert first["threads"] == []
+    assert first["next_cursor"] and first["change_cursor"] is None
+
+    second = await store.conversation_queries.notification_state(
+        user_id="user-1", cursor=first["next_cursor"], limit=1
+    )
+    assert second["jobs"] == []
+    assert [(row["id"], row["title"], row["revision"]) for row in second["threads"]] == [
+        (job["thread_id"], "Fresh title", thread_revision)
+    ]
+    assert second["next_cursor"] is None
+    assert second["change_cursor"]
+
+
 async def test_notification_markers_skip_churn_and_expire_explicitly(
     pool, store: Storage, monkeypatch
 ):

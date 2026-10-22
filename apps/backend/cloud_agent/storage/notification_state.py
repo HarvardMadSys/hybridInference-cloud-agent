@@ -61,6 +61,7 @@ def _job(row: Any) -> dict[str, Any]:
         "id": row["id"],
         "thread_id": row["thread_id"],
         "title": row["title"],
+        "thread_revision": row["thread_revision"],
         "repo": row["repo"],
         "state": row["state"],
         "current_attempt_id": row["current_attempt_id"],
@@ -75,7 +76,8 @@ def _job(row: Any) -> dict[str, Any]:
 async def _job_rows(conn: Any, *, user_id: str, ids: list[str]) -> list[Any]:
     return await conn.fetch(
         """
-        SELECT j.id,j.thread_id,t.title,t.repo,j.state,j.current_attempt_id,j.turn_no,
+        SELECT j.id,j.thread_id,t.title,t.revision AS thread_revision,t.repo,
+               j.state,j.current_attempt_id,j.turn_no,
                j.revision,j.cancel_requested,a.finished_at,j.updated_at
         FROM agent_jobs j
         JOIN agent_threads t ON t.id=j.thread_id AND t.user_id=j.user_id
@@ -149,7 +151,8 @@ async def _recent_job_rows(
     """Hydrate only terminal rows whose actual completion remains recent."""
     return await conn.fetch(
         """
-        SELECT j.id,j.thread_id,t.title,t.repo,j.state,j.current_attempt_id,j.turn_no,
+        SELECT j.id,j.thread_id,t.title,t.revision AS thread_revision,t.repo,
+               j.state,j.current_attempt_id,j.turn_no,
                j.revision,j.cancel_requested,a.finished_at,j.updated_at
         FROM agent_jobs j
         JOIN agent_threads t ON t.id=j.thread_id AND t.user_id=j.user_id
