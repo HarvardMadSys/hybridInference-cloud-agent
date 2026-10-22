@@ -2669,42 +2669,31 @@ def test_one_failed_check_is_retried_before_anything_is_stopped():
     assert manager.stop_count == 0
 
 
-def test_while_nothing_runs_the_rules_are_renewed_not_read_every_pass():
-    """An idle host keeps its verification fresh so the next start does not pay for it.
-
-    Nothing is read back every pass and nothing is stopped: the renewal is the
-    guard's own cached ensure, which installs and reads back only once the
-    last verification is old enough to need it.
-    """
+def test_while_nothing_runs_the_sweep_does_not_start_guard_helpers():
+    """An empty host leaves expired proofs for the next guarded activation."""
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
 
-    assert supervisor.guard_network() == []
+    for _ in range(120):
+        assert supervisor.guard_network() == []
     assert manager.host_rule_checks == 0
-    assert manager.host_rule_renewals == 1
+    assert manager.host_rule_renewals == 0
     assert manager.stop_count == 0
 
 
-def test_an_idle_renewal_that_fails_is_logged_once_and_stops_nothing(caplog):
-    manager = _Manager()
-    supervisor = SharedChatSessionSupervisor(manager)
-    manager.host_rule_renewal_failures = 2
+def test_a_running_group_without_an_active_turn_keeps_every_guard_check():
+    """Background processes still require the boundary after the turn ends."""
+    manager, supervisor = _running_group()
+    group = supervisor._members["athr_source"]
+    assert group.inspection.running
+    assert not any(member.current_turn for member in group.members.values())
 
-    with caplog.at_level(logging.WARNING):
+    for _ in range(3):
         assert supervisor.guard_network() == []
-        assert supervisor.guard_network() == []
-        assert supervisor.guard_network() == []
-        supervisor.guard_network()
-        manager.host_rule_renewal_failures = 1
-        supervisor.guard_network()
 
-    warnings = [
-        record
-        for record in caplog.records
-        if getattr(record, "event", None) == "shared_chat_idle_host_rules_unavailable"
-    ]
-    assert len(warnings) == 2, "once per failing streak, not once per pass"
-    assert manager.host_rule_renewals == 5
+    assert manager.host_rule_checks == 3
+    assert manager.host_rule_running == [[_spec()]] * 3
+    assert manager.host_rule_renewals == 0
     assert manager.stop_count == 0
 
 
