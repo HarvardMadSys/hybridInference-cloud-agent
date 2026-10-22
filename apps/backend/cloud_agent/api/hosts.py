@@ -381,6 +381,11 @@ async def heartbeat_host(
     # The answer is made of the policy the beat's own write read, under the
     # same lock, rather than of four more reads of it.
     policy = updated["runner_policy"]
+    archive = policy["sandbox_archive_settings"]
+    if archive is None:
+        # The stored archive policy did not decode. Reading it again fails the
+        # answer with its error, now that the beat's own work is done.
+        archive = await job_store.host_pool.sandbox_archive_settings()
     return HostHeartbeatResponse(
         host=updated["host"],
         status=updated["status"],
@@ -394,7 +399,7 @@ async def heartbeat_host(
         # and built-in defaults, so clearing an override never revives its .env.
         settings=merge_admin_values(policy["host_settings"], updated.get("settings_desired")),
         sandbox_archive_settings=_host_archive_settings(
-            policy["sandbox_archive_settings"],
+            archive,
             updated.get("capabilities") or body.capabilities or [],
         ),
         runtime_downloads=await _runtime_downloads(job_store, updated["host"], policy),
