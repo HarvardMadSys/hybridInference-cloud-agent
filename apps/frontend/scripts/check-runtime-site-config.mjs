@@ -67,24 +67,25 @@
 // Use --saved-config-only to check request-scoped caching against an existing
 // production build without rebuilding either variant.
 
-import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { join, resolve } from 'node:path';
-
-const WEB_ROOT = resolve(import.meta.dirname, '..');
-const NEXT_BIN = join(WEB_ROOT, 'node_modules', 'next', 'dist', 'bin', 'next');
-const NEXT_DIR = join(WEB_ROOT, '.next');
-const STANDALONE = join(NEXT_DIR, 'standalone');
-const SERVER = join(STANDALONE, 'server.js');
-const STATIC_DIR = join(NEXT_DIR, 'static');
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import {
+  buildStandalone,
+  NEXT_DIR,
+  sanitizeRuntimeSiteEnvironment,
+  STANDALONE_DIR,
+  STATIC_DIR,
+  startStandalone,
+  waitForResponse,
+} from './standalone-harness.mjs';
+import { fail, runRuntimeGuard, withRuntimeResources } from './runtime-site-config-lifecycle.mjs';
 
 const SENTINEL = 'sentinel-runtime-config-must-not-leak';
 const STARTUP_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 400;
-
-let nextPort = 3411;
 
 const CATALOG = JSON.parse(
   readFileSync(new URL('../../../deploy/release/artifact_catalog.json', import.meta.url), 'utf8'),
@@ -97,7 +98,9 @@ const VARIANTS = CATALOG.artifacts
     apiUrl: artifact.api_url,
     // A mounted app must not answer at the bare path as a second copy.
     foreignPaths: artifact.base_path ? ['/login'] : [],
-  }));
+  }))
+  // Leave the root artifact in .next so the browser suite can reuse it.
+  .sort((left, right) => Number(left.basePath === '') - Number(right.basePath === ''));
 if (VARIANTS.length === 0) throw new Error('Artifact catalog declares no web variants');
 
 function deployment(spec) {
@@ -170,13 +173,6 @@ const NEUTRAL = {
   gatewayUrl: '',
   rag: false,
 };
-
-function fail(message) {
-  console.error(`::error title=Runtime site config::${message}`);
-  process.exit(1);
-}
-
-const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 function titleOf(html) {
   return firstMatch(html, /<title[^>]*>([^<]*)<\/title>/i);
@@ -335,112 +331,42 @@ function hashTree(root) {
  * artifact.
  */
 function artifactDigest() {
-  return `${hashTree(STANDALONE)}:${hashTree(STATIC_DIR)}`;
+  return `${hashTree(STANDALONE_DIR)}:${hashTree(STATIC_DIR)}`;
 }
 
 function buildVariant(variant) {
-  // A stale `.next` could serve the previous variant's inlined values, which
-  // is exactly the class of mistake this script exists to catch.
-  rmSync(NEXT_DIR, { recursive: true, force: true });
-
   const env = {
-    ...process.env,
+    ...sanitizeRuntimeSiteEnvironment(process.env),
     NODE_ENV: 'production',
-    NEXT_PUBLIC_BASE_PATH: variant.basePath,
-    NEXT_PUBLIC_AGENT_API_URL: variant.apiUrl,
   };
-  // The build must never see a deployment identity. If it did, a build-time
-  // read would look like a runtime one and this whole check would be void.
-  for (const key of Object.keys(env)) {
-    if (key.startsWith('AGENT_WEB_')) delete env[key];
+  try {
+    buildStandalone(variant, { env, stdio: 'pipe' });
+  } catch (error) {
+    fail(error.message);
   }
-
-  const result = spawnSync(process.execPath, [NEXT_BIN, 'build'], {
-    cwd: WEB_ROOT,
-    env,
-    encoding: 'utf8',
-  });
-  if (result.error) {
-    fail(`could not run \`next build\` for ${variant.name}: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    fail(
-      `\`next build\` failed for ${variant.name}:\n` +
-        `${(result.stdout ?? '') + (result.stderr ?? '')}`,
-    );
-  }
-
-  if (!existsSync(SERVER)) fail(`no standalone server at ${SERVER} after the build`);
-  // Mirror what the runtime image does: the static assets are emitted outside
-  // `.next/standalone` and have to be copied in.
-  rmSync(join(STANDALONE, '.next', 'static'), { recursive: true, force: true });
-  cpSync(STATIC_DIR, join(STANDALONE, '.next', 'static'), { recursive: true });
 }
 
-function startServer(env, port) {
+async function startServer(env) {
   // The deployment's identity is given, never inherited: a shell or CI job that
   // happens to export one of these must not decide what any render below shows.
-  const inherited = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !key.startsWith('AGENT_WEB_')),
-  );
-  const child = spawn(process.execPath, [SERVER], {
-    cwd: STANDALONE,
+  return startStandalone({
     env: {
-      ...inherited,
-      NODE_ENV: 'production',
-      HOSTNAME: '127.0.0.1',
-      PORT: String(port),
+      ...sanitizeRuntimeSiteEnvironment(process.env),
       ...env,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    captureOutput: true,
   });
-
-  const logs = [];
-  child.stdout.on('data', (chunk) => logs.push(String(chunk)));
-  child.stderr.on('data', (chunk) => logs.push(String(chunk)));
-  child.on('error', (error) => logs.push(`spawn error: ${error.message}`));
-
-  return {
-    logs,
-    stop() {
-      return new Promise((done) => {
-        if (child.exitCode !== null || child.signalCode !== null) return done();
-        child.once('exit', () => done());
-        child.kill('SIGTERM');
-        setTimeout(() => child.kill('SIGKILL'), 5_000).unref();
-      });
-    },
-  };
-}
-
-/**
- * The first response the server gives, whatever its status.
- *
- * Any status means the process is up; the assertions decide whether the
- * status and body are right. Waiting only for 200 would turn a wrongly-built
- * variant into a timeout, which reads as a broken check rather than a broken
- * build.
- */
-async function waitForResponse(url) {
-  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
-  let lastError = 'no attempt made';
-  while (Date.now() < deadline) {
-    try {
-      return await fetch(url);
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      await sleep(POLL_INTERVAL_MS);
-    }
-  }
-  throw new Error(`${url} did not answer within ${STARTUP_TIMEOUT_MS}ms: ${lastError}`);
 }
 
 async function render(variant, env, suffix = '/login') {
-  const port = nextPort++;
-  const server = startServer(env, port);
+  const server = await startServer(env);
   try {
-    const url = `http://127.0.0.1:${port}${variant.basePath}${suffix}`;
-    const response = await waitForResponse(url);
+    const url = `http://127.0.0.1:${server.port}${variant.basePath}${suffix}`;
+    const response = await waitForResponse(url, {
+      server,
+      timeoutMs: STARTUP_TIMEOUT_MS,
+      pollIntervalMs: POLL_INTERVAL_MS,
+    });
     return { status: response.status, html: await response.text(), logs: server.logs.join('') };
   } finally {
     await server.stop();
@@ -448,10 +374,9 @@ async function render(variant, env, suffix = '/login') {
 }
 
 async function probePath(variant, path) {
-  const port = nextPort++;
-  const server = startServer(DEPLOYMENTS[0].env, port);
+  const server = await startServer(DEPLOYMENTS[0].env);
   try {
-    const response = await waitForResponse(`http://127.0.0.1:${port}${path}`);
+    const response = await waitForResponse(`http://127.0.0.1:${server.port}${path}`, { server });
     return response.status;
   } finally {
     await server.stop();
@@ -737,15 +662,8 @@ async function assertSavedConfigRequestScope(variant) {
   });
   await new Promise((done) => controlPlane.listen(0, '127.0.0.1', done));
 
-  const port = nextPort++;
-  const server = startServer(
-    {
-      ...DEPLOYMENTS[0].env,
-      AGENT_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlane.address().port}`,
-    },
-    port,
-  );
-  const url = `http://127.0.0.1:${port}${variant.basePath}/login`;
+  let server;
+  let url;
 
   async function assertSnapshot(expected, label, bounded = false) {
     const before = reads;
@@ -778,68 +696,78 @@ async function assertSavedConfigRequestScope(variant) {
     }
   }
 
-  try {
-    // Start the production process through an asset request, so its startup
-    // time cannot hide the appearance budget or prime the public fallback.
-    const chunk = readdirSync(join(STATIC_DIR, 'chunks')).find((file) =>
-      /^main-app-.*\.js$/.test(file),
-    );
-    if (!chunk) throw new Error('No main-app chunk to check production server readiness');
-    const asset = await waitForResponse(
-      `http://127.0.0.1:${port}${variant.basePath}/_next/static/chunks/${chunk}`,
-    );
-    await asset.arrayBuffer();
-    if (asset.status !== 200 || reads !== 0) {
-      throw new Error(`${variant.name}: static readiness request unexpectedly read settings`);
-    }
+  await withRuntimeResources(
+    {
+      controlPlane,
+      startServer: () =>
+        startServer({
+          ...DEPLOYMENTS[0].env,
+          AGENT_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlane.address().port}`,
+        }),
+    },
+    async (startedServer) => {
+      server = startedServer;
+      url = `http://127.0.0.1:${server.port}${variant.basePath}/login`;
+      // Start the production process through an asset request, so its startup
+      // time cannot hide the appearance budget or prime the public fallback.
+      const chunk = readdirSync(join(STATIC_DIR, 'chunks')).find((file) =>
+        /^main-app-.*\.js$/.test(file),
+      );
+      if (!chunk) throw new Error('No main-app chunk to check production server readiness');
+      const asset = await waitForResponse(
+        `http://127.0.0.1:${server.port}${variant.basePath}/_next/static/chunks/${chunk}`,
+        { server },
+      );
+      await asset.arrayBuffer();
+      if (asset.status !== 200 || reads !== 0) {
+        throw new Error(`${variant.name}: static readiness request unexpectedly read settings`);
+      }
 
-    const neutral = {
-      appName: NEUTRAL.appName,
-      orgName: '',
-      orgUrl: '',
-      statusUrl: '',
-      docsUrl: '',
-      contactUrl: '',
-      gatewayUrl: '',
-    };
-    for (const stalled of ['slow headers', 'slow body']) {
-      mode = stalled;
-      await assertSnapshot(neutral, `cold ${mode}`, true);
-    }
+      const neutral = {
+        appName: NEUTRAL.appName,
+        orgName: '',
+        orgUrl: '',
+        statusUrl: '',
+        docsUrl: '',
+        contactUrl: '',
+        gatewayUrl: '',
+      };
+      for (const stalled of ['slow headers', 'slow body']) {
+        mode = stalled;
+        await assertSnapshot(neutral, `cold ${mode}`, true);
+      }
 
-    mode = 'success';
-    for (const deployment of DEPLOYMENTS) {
-      target = deployment;
-      await assertSnapshot(expectedIdentity(target), `saved ${target.name}`);
-    }
+      mode = 'success';
+      for (const deployment of DEPLOYMENTS) {
+        target = deployment;
+        await assertSnapshot(expectedIdentity(target), `saved ${target.name}`);
+      }
 
-    for (const failure of ['slow headers', 'slow body', 'http', 'invalid']) {
-      mode = failure;
-      await assertSnapshot(expectedIdentity(target), `retained appearance after ${mode}`, true);
-    }
+      for (const failure of ['slow headers', 'slow body', 'http', 'invalid']) {
+        mode = failure;
+        await assertSnapshot(expectedIdentity(target), `retained appearance after ${mode}`, true);
+      }
 
-    mode = 'success';
-    target = DEPLOYMENTS[0];
-    await assertSnapshot(expectedIdentity(target), 'saved edits after backend recovery');
+      mode = 'success';
+      target = DEPLOYMENTS[0];
+      await assertSnapshot(expectedIdentity(target), 'saved edits after backend recovery');
 
-    // Separate concurrent page requests must each read their own settings,
-    // rather than sharing a process-wide in-flight promise.
-    const before = reads;
-    const responses = await Promise.all([fetch(url), fetch(url)]);
-    await Promise.all(responses.map((response) => response.text()));
-    if (responses.some((response) => response.status !== 200) || reads - before !== 2) {
-      throw new Error(`${variant.name}: concurrent pages did not each read one settings snapshot`);
-    }
-    console.log(
-      `${variant.name}: cold and retained appearance fallbacks rendered within ` +
-        `${Math.max(...fallbackTimings).toFixed(0)}ms.`,
-    );
-  } finally {
-    await server.stop();
-    await new Promise((done, reject) =>
-      controlPlane.close((error) => (error ? reject(error) : done())),
-    );
-  }
+      // Separate concurrent page requests must each read their own settings,
+      // rather than sharing a process-wide in-flight promise.
+      const before = reads;
+      const responses = await Promise.all([fetch(url), fetch(url)]);
+      await Promise.all(responses.map((response) => response.text()));
+      if (responses.some((response) => response.status !== 200) || reads - before !== 2) {
+        throw new Error(
+          `${variant.name}: concurrent pages did not each read one settings snapshot`,
+        );
+      }
+      console.log(
+        `${variant.name}: cold and retained appearance fallbacks rendered within ` +
+          `${Math.max(...fallbackTimings).toFixed(0)}ms.`,
+      );
+    },
+  );
 }
 
 /** The headers every response carries, documents and build assets alike. */
@@ -870,15 +798,14 @@ function assertStaticSecurityHeaders(where, headers) {
  * miss while every other one matches.
  */
 async function assertSecurityHeaders(variant) {
-  const port = nextPort++;
-  const server = startServer(DEPLOYMENTS[0].env, port);
-  const origin = `http://127.0.0.1:${port}`;
+  const server = await startServer(DEPLOYMENTS[0].env);
+  const origin = `http://127.0.0.1:${server.port}`;
   try {
     const nonces = new Set();
     let asset = null;
     for (const path of [variant.basePath || '/', `${variant.basePath}/login`]) {
       const where = `${variant.name} / security headers of ${path}`;
-      const response = await waitForResponse(`${origin}${path}`);
+      const response = await waitForResponse(`${origin}${path}`, { server });
       const html = await response.text();
       if (response.status !== 200) {
         fail(`${where}: answered ${response.status}\n${server.logs.join('')}`);
@@ -986,7 +913,7 @@ async function main() {
 
   // An illegal value must be refused. Reading it as "unset" is the silent
   // fallback this work removed, so a normal page is the failure.
-  const broken = await render(VARIANTS[0], {
+  const broken = await render(VARIANTS.at(-1), {
     ...DEPLOYMENTS[0].env,
     AGENT_WEB_STATUS_URL: 'not-a-url',
   });
@@ -999,19 +926,24 @@ async function main() {
 
   console.log(
     `Runtime site config: ${VARIANTS.length} variants, ${DEPLOYMENTS.length} configured ` +
-      `deployments, 1 unconfigured deployment, all correct.`,
+      'deployments, 1 unconfigured deployment, all correct.',
   );
 }
 
-if (process.argv.includes('--saved-config-only')) {
-  const { basePath } = JSON.parse(readFileSync(join(NEXT_DIR, 'routes-manifest.json'), 'utf8'));
-  const variant = VARIANTS.find((item) => item.basePath === basePath);
-  if (!variant)
-    throw new Error(`No runtime config fixture for basePath ${JSON.stringify(basePath)}`);
-  await assertSavedConfigRequestScope(variant);
-  console.log(
-    'Runtime site config: one fetch per request, fresh edits, and concurrent pages correct.',
-  );
-} else {
-  await main();
+async function run() {
+  if (process.argv.includes('--saved-config-only')) {
+    const { basePath } = JSON.parse(readFileSync(join(NEXT_DIR, 'routes-manifest.json'), 'utf8'));
+    const variant = VARIANTS.find((item) => item.basePath === basePath);
+    if (!variant)
+      throw new Error(`No runtime config fixture for basePath ${JSON.stringify(basePath)}`);
+    await assertSavedConfigRequestScope(variant);
+    console.log(
+      'Runtime site config: one fetch per request, fresh edits, and concurrent pages correct.',
+    );
+  } else {
+    await main();
+  }
 }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
+  await runRuntimeGuard(run);

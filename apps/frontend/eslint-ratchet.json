@@ -19,6 +19,18 @@
       }
     },
     {
+      "files": ["scripts/check-runtime-site-config.mjs"],
+      "rules": {
+        "complexity": ["error", 22],
+        "max-lines": [
+          "error",
+          {
+            "max": 950
+          }
+        ]
+      }
+    },
+    {
       "files": [
         "src/app/(agents)/admin/database/DatabaseExplorer.tsx",
         "src/app/(agents)/admin/usage/page.tsx",
