@@ -307,7 +307,9 @@ async def test_a_change_is_pushed_to_every_running_group_it_reaches(monkeypatch)
     }
 
     class Repository:
-        async def running_groups_for_ssh_change(self, *, thread_ids=None, server_id=None):
+        async def running_groups_for_ssh_change(
+            self, *, thread_ids=None, server_id=None, after_sandbox_id=None, limit=100
+        ):
             assert server_id == "srv"
             return [
                 {
@@ -319,12 +321,16 @@ async def test_a_change_is_pushed_to_every_running_group_it_reaches(monkeypatch)
                 for origin, (sandbox_id, host, resident) in groups.items()
             ]
 
-        async def ssh_group_state(self, *, thread_id):
-            if thread_id == "athr_d":
-                return None
+        async def ssh_group_states(self, *, thread_ids):
             # athr_e's membership names another group: its state is not asbx_4's.
-            sandbox_id = "asbx_9" if thread_id == "athr_e" else groups[thread_id][0]
-            return {**state, "sandbox_id": sandbox_id}
+            return {
+                thread: {
+                    **state,
+                    "sandbox_id": "asbx_9" if thread == "athr_e" else groups[thread][0],
+                }
+                for thread in thread_ids
+                if thread != "athr_d"
+            }
 
     class HostPool:
         async def get_host(self, *, host):
@@ -341,3 +347,94 @@ async def test_a_change_is_pushed_to_every_running_group_it_reaches(monkeypatch)
         "a failed push is logged, not raised, and only an unknown chat is tried again"
     )
     assert clients["host-4"].calls == [], "a group is sent only its own state"
+
+
+async def test_push_batches_states_and_delivers_healthy_hosts_during_a_stalled_push(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    state, _ = _state(monkeypatch)
+    groups = [
+        {"sandbox_id": f"s{i:02d}", "origin_thread_id": f"t{i}", "host": f"h{i % 4}"}
+        for i in range(20)
+    ]
+    pages, batches, delivered = [], [], []
+    active = 0
+    peak = 0
+    by_host = {}
+
+    class Repository:
+        async def running_groups_for_ssh_change(self, **kwargs):
+            pages.append(kwargs)
+            after = kwargs["after_sandbox_id"]
+            return [g for g in groups if after is None or g["sandbox_id"] > after][
+                : kwargs["limit"]
+            ]
+
+        async def ssh_group_states(self, *, thread_ids):
+            batches.append(thread_ids)
+            return {
+                g["origin_thread_id"]: {**state, "sandbox_id": g["sandbox_id"]}
+                for g in groups
+                if g["origin_thread_id"] in thread_ids
+            }
+
+    class Client:
+        def __init__(self, host):
+            self.host = host
+
+        async def sync_ssh_access(self, chat, access):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            by_host[self.host] = by_host.get(self.host, 0) + 1
+            assert by_host[self.host] == 1
+            try:
+                if self.host == "h0":
+                    await asyncio.sleep(10)
+                await asyncio.sleep(0.001)
+                delivered.append(chat)
+            finally:
+                active -= 1
+                by_host[self.host] -= 1
+
+    monkeypatch.setattr(app, "sandbox_manager_for_host", lambda group: Client(group["host"]))
+    monkeypatch.setattr(app, "_PUSH_BATCH_SIZE", 8)
+    monkeypatch.setattr(app, "_PUSH_CONCURRENCY", 3)
+    monkeypatch.setattr(app, "_PUSH_GROUP_TIMEOUT_S", 0.05)
+    async with asyncio.timeout(1):
+        await app.push_ssh_access(SimpleNamespace(ssh_servers=Repository()), server_id="server")
+
+    assert set(delivered) == {f"t{i}" for i in range(20) if i % 4}
+    assert 1 < peak <= 3
+    assert [len(batch) for batch in batches] == [8, 8, 4]
+    assert [page["after_sandbox_id"] for page in pages] == [None, "s07", "s15"]
+    assert active == 0
+
+
+async def test_push_pass_deadline_cancels_and_joins_delivery_tasks(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    state, _ = _state(monkeypatch)
+    stopped = asyncio.Event()
+
+    async def blocked(*args):
+        try:
+            await asyncio.sleep(10)
+        finally:
+            stopped.set()
+
+    repo = SimpleNamespace(
+        running_groups_for_ssh_change=AsyncMock(
+            return_value=[{"sandbox_id": "s", "origin_thread_id": "t", "host": "h"}]
+        ),
+        ssh_group_states=AsyncMock(return_value={"t": {**state, "sandbox_id": "s"}}),
+    )
+    monkeypatch.setattr(
+        app, "sandbox_manager_for_host", lambda _: SimpleNamespace(sync_ssh_access=blocked)
+    )
+    monkeypatch.setattr(app, "_PUSH_PASS_TIMEOUT_S", 0.02)
+    await app.push_ssh_access(SimpleNamespace(ssh_servers=repo))
+    assert stopped.is_set()
