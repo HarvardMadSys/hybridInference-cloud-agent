@@ -503,13 +503,14 @@ def test_base_bundle_import_never_lazily_fetches_a_missing_prerequisite(tmp_path
     monkeypatch.setattr(chat_sandbox, "ACTIVATION_TMPFS", str(tmpfs))
     manager = ChatSandboxManager(ContainerBackend(image="img"))
 
-    def exec_here(_spec, argv, *, env, workdir, timeout_s, input_bytes):
+    def exec_here(_spec, argv, *, env, workdir, timeout_s, input_bytes=None, stdin=None):
         # The container's exec without Docker: the same argv, env and stdin.
+        assert input_bytes is None
         return subprocess.run(
             argv,
             cwd=workspace,
             env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), **env},
-            input=input_bytes,
+            stdin=stdin,
             capture_output=True,
             timeout=timeout_s,
             check=False,
@@ -521,7 +522,7 @@ def test_base_bundle_import_never_lazily_fetches_a_missing_prerequisite(tmp_path
     )
 
     # The prerequisite is missing, so the import fails, and fetches nothing.
-    with pytest.raises(SandboxError):
-        manager.import_base_bundle(spec, bundle.read_bytes(), commit=tip, env={})
+    with pytest.raises(SandboxError), bundle.open("rb") as bundle_file:
+        manager.import_base_bundle(spec, bundle_file, commit=tip, env={})
 
     assert not upload_pack_ran.exists()

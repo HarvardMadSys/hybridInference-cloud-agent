@@ -332,21 +332,14 @@ async def heartbeat_host(
         # mid-request. Refusing is right: this credential now names nothing,
         # and the residencies below must not be extended on its word.
         raise _unauthorized("This host credential is no longer valid.")
-    # Residency beats ride the host heartbeat (design §7): one wire message
-    # says "I am here" and "these sandboxes are still mine", generation-scoped
-    # so a beat from a taken-over residency extends nothing — it comes back in
-    # residencies_lost and the host tears that sandbox down. The grants of
-    # every residency this beat extends, once each, are renewed after the
-    # reply: see ``_renew_residency_grants``.
+    # A live retained member's residency rides the host heartbeat (design §7),
+    # generation-scoped so a beat from a taken-over residency extends nothing:
+    # it comes back in residencies_lost, with its generation echoed so a stale
+    # answer cannot kill a successor, and the host tears that member down.
+    lost: list[ResidencyBeat] = []
+    # The grants of every residency this beat extends, once each, renewed after
+    # the reply: see ``_renew_residency_grants``.
     renewals: dict[str, None] = {}
-    ttl_seconds = residency_ttl_s()
-    lost = await _extend_residencies(
-        job_store,
-        updated["host"],
-        [(beat.thread_id, beat.generation) for beat in body.residencies or []],
-        ttl_seconds=ttl_seconds,
-        renewals=renewals,
-    )
     # Docker is the lifecycle authority for retained chat containers; the
     # database is the scheduling/fencing authority.  Heartbeats join those
     # views without treating absence as deletion. In particular, a sandbox manager's
@@ -374,7 +367,7 @@ async def heartbeat_host(
         if member.residency_generation > 0 and member.resident_state == "live"
     ]
     for beat in await _extend_residencies(
-        job_store, updated["host"], live, ttl_seconds=ttl_seconds, renewals=renewals
+        job_store, updated["host"], live, ttl_seconds=residency_ttl_s(), renewals=renewals
     ):
         if beat not in lost:
             lost.append(beat)

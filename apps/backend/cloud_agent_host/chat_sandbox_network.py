@@ -34,6 +34,7 @@ from cloud_agent_host.chat_sandbox_models import (
     RetainedChatFailStopped,
     RetainedChatLost,
 )
+from cloud_agent_host.idle_host_rules import deployment_running
 from cloud_agent_host.network_guard import GUARD_RENEW_S
 from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
 
@@ -844,13 +845,12 @@ class ChatSandboxNetwork:
         self.backend.network_guard().ensure()
 
     def renew_host_rules(self) -> None:
-        """Renew the host-rule verification before it lapses, for the sweep.
+        """Renew the host-rule verification before it lapses, while anything runs behind it.
 
-        A host with no sandbox network configured has nothing to keep warm.
+        The idle sweep calls this (:mod:`cloud_agent_host.idle_host_rules`); no network, no-op.
         """
-        if self.backend.sandbox_network is None:
-            return
-        self.backend.network_guard().ensure(max_age_s=GUARD_RENEW_S)
+        if self.backend.sandbox_network is not None and deployment_running(self._containers):
+            self.backend.network_guard().ensure(max_age_s=GUARD_RENEW_S)
 
     def _ensure_group_network(
         self,

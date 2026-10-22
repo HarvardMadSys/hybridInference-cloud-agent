@@ -45,7 +45,6 @@ from cloud_agent.schemas import (
     AgentThreadResponse,
     AgentThreadStatsResponse,
 )
-from cloud_agent.thread_stats import summarize_thread
 from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI resolves it.
     JobEventSignal,
 )
@@ -186,22 +185,15 @@ async def get_agent_thread_stats(
     thread's runtime does not report come back ``null`` rather than zero.
     """
     job_store = _require_store(store)
-    # thread_stats_inputs is scoped to the caller's own, undeleted job and
+    # thread_stats is scoped to the caller's own, undeleted job and
     # answers the 404 itself; see get_agent_thread.
-    inputs = await job_store.execution_queries.thread_stats_inputs(
-        job_id=job_id, user_id=user["user_id"]
-    )
-    if inputs is None:
+    result = await job_store.execution_queries.thread_stats(job_id=job_id, user_id=user["user_id"])
+    if result is None:
         raise HTTPException(
             status_code=404,
             detail={"error": {"type": "not_found", "message": f"No thread for {job_id}"}},
         )
-    stats = summarize_thread(
-        job_ids=inputs["job_ids"],
-        attempts=inputs["attempts"],
-        events=inputs["events"],
-    )
-    return AgentThreadStatsResponse(thread_id=inputs["thread_id"], **asdict(stats))
+    return AgentThreadStatsResponse(thread_id=result["thread_id"], **asdict(result["stats"]))
 
 
 @router.get("/jobs/{job_id}/thread/events", response_model=AgentThreadEventsResponse)

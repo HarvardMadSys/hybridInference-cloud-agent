@@ -14,6 +14,7 @@ import os
 import threading
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
 from cloud_agent.domain_cipher import settings_root_key
 from cloud_agent.setting_definition import (
     MINIMUM_CREDENTIAL_BYTES as MINIMUM_CREDENTIAL_BYTES,
@@ -39,6 +40,11 @@ if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
 
     from cloud_agent.ports.settings import SettingsRepository
+
+
+class SettingsEncryptionError(Exception):
+    """Persisted settings cannot be encrypted or decrypted safely."""
+
 
 SETTINGS: tuple[Setting, ...] = (
     Setting(
@@ -796,7 +802,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         secret=True,
         minimum_bytes=MINIMUM_CREDENTIAL_BYTES,
         minimum_bytes_new_values_only=True,
-        description="A random key of at least 32 bytes. Protects user source-control and MCP credentials. Once configured, rotation requires a separate re-encryption procedure.",
+        description="A random key of at least 32 bytes. Protects user source-control, MCP, environment, and SSH credentials. Once configured, rotation requires a separate re-encryption procedure.",
     ),
     Setting(
         "compute_encryption_key",
@@ -934,15 +940,13 @@ _values: dict[str, SettingValue] | None = None
 _revision = -1
 
 
-def _cipher(key: str) -> Any:
-    from cloud_agent.source_control import SourceControlCipher, SourceControlError
-
+def _cipher(key: str) -> CredentialCipher:
     secret = settings_root_key()
     if len(secret.encode()) < 32:
-        raise SourceControlError(
+        raise SettingsEncryptionError(
             "A settings encryption key of at least 32 bytes is required to store secret settings"
         )
-    return SourceControlCipher(secret, domain=b"cloud-agent/admin-settings/v1/" + key.encode())
+    return CredentialCipher(secret, domain=b"cloud-agent/admin-settings/v1/" + key.encode())
 
 
 def _encode(setting: Setting, value: SettingValue) -> Any:
@@ -969,8 +973,6 @@ def _decode(
     ``changed`` keys stay strict, so an update cannot save what this refuses.
     Decryption failures and unencrypted secrets always raise.
     """
-    from cloud_agent.source_control import SourceControlError
-
     values: dict[str, SettingValue] = {}
     for setting in SETTINGS:
         value = encoded.get(setting.storage_key, setting.default)
@@ -978,10 +980,10 @@ def _decode(
             cipher = _cipher(setting.storage_key)
             try:
                 value = cipher.decrypt(value["ciphertext"])
-            except SourceControlError:
+            except CredentialCipherError:
                 # Name the setting, never the value: the cipher's own message
                 # cannot say which of the stored secrets failed.
-                raise SourceControlError(
+                raise SettingsEncryptionError(
                     f"Stored secret for {setting.label} could not be decrypted"
                 ) from None
         elif setting.secret and value:
@@ -1422,7 +1424,6 @@ async def initialize_settings(repository: SettingsRepository, *, seed: bool = Tr
 async def synchronize_settings(repository: SettingsRepository) -> None:
     """Refresh every listener's snapshot; failed reads retain the last committed values."""
     from cloud_agent.logging_utils import get_logger
-    from cloud_agent.source_control import SourceControlError
 
     logger = get_logger(__name__)
     while True:
@@ -1433,7 +1434,7 @@ async def synchronize_settings(repository: SettingsRepository) -> None:
             revision, encoded = await repository.read_settings(after_revision=current_revision)
             if revision >= 0:
                 apply_settings(revision, encoded)
-        except (ValueError, SourceControlError) as exc:
+        except (ValueError, SettingsEncryptionError) as exc:
             # Raised by decoding the snapshot, and worded to name a setting
             # without its value; the type alone left nothing to act on.
             logger.warning("settings synchronization failed (%s: %s)", type(exc).__name__, exc)

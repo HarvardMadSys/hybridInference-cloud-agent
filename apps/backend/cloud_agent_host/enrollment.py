@@ -274,7 +274,7 @@ def register(
         {
             "enroll_token": enroll_token,
             "name": host,
-            "broker_url": sandbox_manager_url,
+            "sandbox_manager_url": sandbox_manager_url,
             "slots_total": slots_total,
             "capabilities": capabilities or [],
             "runner_version": runner_version,
@@ -316,7 +316,7 @@ def _warn_sandbox_manager_error(answer: dict[str, Any], host: str) -> None:
     sandbox manager token says so while somebody is still watching, instead of at the
     first terminal request of the first job.
     """
-    error = answer.get("sandbox_manager_error", answer.get("broker_error"))
+    error = answer.get("sandbox_manager_error")
     if not error:
         return
     logger.warning(
@@ -351,7 +351,6 @@ def heartbeat(
     sandbox_image_digest: str | None = None,
     runtime_versions: dict[str, str] | None = None,
     runtime_versions_available: dict[str, list[str]] | None = None,
-    residencies: list[dict[str, Any]] | None = None,
     retained_sandboxes: list[dict[str, Any]] | None = None,
     capacity: dict[str, Any] | None = None,
     profiling: dict[str, Any] | None = None,
@@ -401,14 +400,13 @@ def heartbeat(
             "launch_error": (
                 None if launch_error is None else launch_error[:HOST_LAUNCH_ERROR_MAX_CHARS]
             ),
-            "broker_url": sandbox_manager_url,
+            "sandbox_manager_url": sandbox_manager_url,
             "capabilities": capabilities,
             "runner_version": runner_version,
             "sandbox_runtime": sandbox_runtime,
             "sandbox_image_digest": sandbox_image_digest,
             "runtime_versions": runtime_versions,
             "runtime_versions_available": runtime_versions_available,
-            "residencies": residencies,
             "retained_sandboxes": retained_sandboxes,
             "capacity": capacity,
             "profiling": profiling,
@@ -595,7 +593,6 @@ class HostHeartbeat:
             dict[str, list[str]] | Callable[[], dict[str, list[str]] | None] | None
         ) = None,
         readiness_marker: str | None = None,
-        residency_beats: Callable[[], list[dict[str, Any]]] | None = None,
         retained_sandbox_beats: Callable[[], list[dict[str, Any]] | None] | None = None,
         capacity_beats: Callable[[], dict[str, Any] | None] | None = None,
         profiling: Callable[[], dict[str, Any] | None] | None = None,
@@ -644,7 +641,6 @@ class HostHeartbeat:
         self._readiness_marker_value = self._read_readiness_marker()
         # Freshly asked on every beat — a static list would report sandboxes
         # the pool has already torn down.
-        self._residency_beats = residency_beats
         self._retained_sandbox_beats = retained_sandbox_beats
         # Also asked per beat: the age is recomputed from the sampler's
         # monotonic clock at send time, so a cached block cannot be made to
@@ -760,9 +756,6 @@ class HostHeartbeat:
                         self._runtime_versions_available()
                         if callable(self._runtime_versions_available)
                         else self._runtime_versions_available
-                    ),
-                    residencies=(
-                        self._residency_beats() if self._residency_beats is not None else None
                     ),
                     retained_sandboxes=(
                         self._retained_sandbox_beats()

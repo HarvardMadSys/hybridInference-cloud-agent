@@ -157,6 +157,7 @@ from cloud_agent_host.source_preparation import (
     run_source_git,
 )
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
+from cloud_agent_host.upload_import import import_uploads as _import_uploads
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
@@ -171,7 +172,6 @@ from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
     build_base_bundle,
     build_source_archive,
-    build_upload_archive,
 )
 from cloud_agent_shared.git.source_cancellation import check_source_stop, checked_entries
 from cloud_agent_shared.git.temporary_workspace import (
@@ -1288,15 +1288,6 @@ def _claim_attestation(
         stamp["sandbox_archive_settings_applied_revision"] = (
             sandbox_archive_settings_applied_revision
         )
-    if stamp["runner_capabilities"]:
-        # For a control plane older than this release. Hosts roll out before
-        # the API, so a replacement runner polls that API for a while, and it
-        # refuses every claim that does not name the image's shared-sandbox
-        # protocol. This image has no such label. Its "v2" meant a fork
-        # helper that takes an anchor, which the capabilities above already
-        # required. This control plane reads nothing from it. Remove once
-        # every deployment's control plane is at least this release.
-        stamp["shared_sandbox_protocol"] = "v2"
     return stamp
 
 
@@ -1736,44 +1727,6 @@ def _prefetch_retained_source(
     return _SourcePrefetch(job, uid=uid, gid=gid, max_bytes=max_bytes)
 
 
-def _import_uploads(
-    *,
-    job: ClaimedJob,
-    control: ControlPlane,
-    manager: ChatSandboxManager,
-    spec: ChatSandboxSpec,
-    fresh_container: bool,
-) -> int:
-    """Place this conversation's uploaded files under ``/uploads``.
-
-    Always the whole thread's files, never a delta: the import overwrites the
-    same paths, so one code path serves a new container and a container that
-    gained a file this turn.
-
-    It runs when the container is new, or when this turn attached something.
-    A retained container already holds the earlier turns' files — ``/uploads``
-    is root-owned and read-only, so the sandbox cannot have removed them — and
-    re-fetching them on every follow-up would move the whole conversation's
-    bytes again to write what is already there.
-
-    The files never touch ``CHAT_WORKDIR``. The publish path stages the
-    workspace with ``git add -A -N``, so an upload written there would be
-    committed and appear in the draft pull request.
-    """
-    if job.thread_attachment_count <= 0:
-        return 0
-    if not fresh_container and job.turn_attachment_count <= 0:
-        return 0
-    files: list[tuple[str, bytes]] = []
-    for entry in control.list_attachments():
-        path, content = control.read_attachment(int(entry["id"]))
-        files.append((path, content))
-    if not files:
-        return 0
-    manager.import_archive(spec, CHAT_UPLOADS_DIR, build_upload_archive(files))
-    return len(files)
-
-
 def _import_retained_base(
     *,
     job: ClaimedJob,
@@ -1808,13 +1761,13 @@ def _import_retained_base(
             held = (parent.stdout.strip() or None) if parent.returncode == 0 else None
             if held and not _sandbox_has_commit(CHAT_WORKDIR, held, backend):
                 held = None
-        bundle = build_base_bundle(source, commit=resolved, prerequisite=held)
-        manager.import_base_bundle(
-            spec,
-            bundle,
-            commit=resolved,
-            env=dict(_SAFE_DIRECTORY_ENV),
-        )
+        with build_base_bundle(source, commit=resolved, prerequisite=held) as bundle:
+            manager.import_base_bundle(
+                spec,
+                bundle,
+                commit=resolved,
+                env=dict(_SAFE_DIRECTORY_ENV),
+            )
     return resolved
 
 
@@ -2667,6 +2620,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             # first-turn job can still add files of its own and must import the
             # thread's current attachment set before prompt admission.
             fresh_container=not has_context and not recovered_initial,
+            container_id=str(lease["container_id"]),
         )
         if imported_uploads:
             control.append_event(
@@ -2844,21 +2798,17 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             credential = str(residency.get("credential") or "")
             if not credential:
                 raise SandboxError("control plane returned no shared residency credential")
+            # The residency's: this process serves later turns' tools without a restart.
+            mcp_credential = str(residency.get("mcp_credential") or "") if job.mcp_bindings else ""
+            if job.mcp_bindings and not mcp_credential:
+                raise SandboxError("control plane returned no shared residency MCP credential")
             grant_model = residency.get("model")
             if grant_model not in {None, job.model}:
                 raise SandboxError("shared residency grant model does not match this turn")
             launch = replace(
                 launch,
                 credential=credential,
-                # The residency's MCP credential lets this process serve later
-                # turns' tools without a restart. A control plane that predates
-                # it sends none; the turn's own token then works for this turn,
-                # and the next one restarts the process as it always did.
-                mcp_credential=(
-                    str(residency.get("mcp_credential") or "") or job.mcp_token
-                    if job.mcp_bindings
-                    else ""
-                ),
+                mcp_credential=mcp_credential,
                 residency_generation=int(residency["generation"]),
             )
             resident_call = operation_profiling.expect_fragment(
@@ -4858,16 +4808,13 @@ def build_parser() -> argparse.ArgumentParser:
     # default while both shapes are deployed.
     parser.add_argument(
         "--base-url",
-        default=(
-            os.environ.get("AGENT_CONTROL_PLANE_URL")
-            or os.environ.get("AGENT_GATEWAY_URL")
-            or os.environ.get("FREEINFERENCE_BASE_URL", "")
-        ),
+        default=os.environ.get("AGENT_CONTROL_PLANE_URL")
+        or os.environ.get("AGENT_GATEWAY_URL", ""),
         help="Control plane: claim, heartbeat, events, lifecycle, terminals.",
     )
     parser.add_argument(
         "--gateway-url",
-        default=os.environ.get("AGENT_GATEWAY_URL") or os.environ.get("FREEINFERENCE_BASE_URL", ""),
+        default=os.environ.get("AGENT_GATEWAY_URL", ""),
         help="Inference gateway, as the sandbox reaches it. Model calls only.",
     )
     parser.add_argument("--worker-id", default=default_worker_id())

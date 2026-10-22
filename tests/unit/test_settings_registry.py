@@ -12,7 +12,7 @@ import pytest
 
 from cloud_agent import settings
 from cloud_agent.app import create_app, create_mcp_app
-from cloud_agent.source_control import SourceControlError
+from cloud_agent.settings import SettingsEncryptionError
 
 
 @pytest.fixture(autouse=True)
@@ -77,13 +77,13 @@ def test_secrets_are_encrypted_imported_write_only_and_bound_to_their_key(monkey
     assert view["secret_configured"]["gateway_dispatch_token"] is True
     assert secret not in json.dumps(view)
     moved = {**encoded, "oncall_dispatch_token": encoded["gateway_dispatch_token"]}
-    with pytest.raises(SourceControlError):
+    with pytest.raises(SettingsEncryptionError):
         settings.validate_stored_settings(moved)
 
 
 def test_secret_configuration_requires_a_stable_key(monkeypatch):
     monkeypatch.delenv("AGENT_SESSION_SECRET", raising=False)
-    with pytest.raises(SourceControlError):
+    with pytest.raises(SettingsEncryptionError):
         settings.encode_changes({"gateway_dispatch_token": "secret-that-must-never-be-persisted"})
     assert settings.encode_changes({"github_publish_token": None}) == {"github_publish_token": ""}
 
@@ -305,7 +305,7 @@ def test_an_undecryptable_stored_secret_still_fails_closed(monkeypatch):
     monkeypatch.setenv("GATEWAY_GRANT_DISPATCH_TOKEN", "test-dispatch-secret-unique-value")
     encoded = settings.initial_settings()
     moved = {**encoded, "oncall_dispatch_token": encoded["gateway_dispatch_token"]}
-    with pytest.raises(SourceControlError):
+    with pytest.raises(SettingsEncryptionError):
         settings.apply_settings(1, moved)
     with pytest.raises(ValueError, match="Unencrypted stored secret"):
         settings.apply_settings(1, {**encoded, "oncall_dispatch_token": "plaintext"})
@@ -355,7 +355,7 @@ async def test_a_secret_that_cannot_be_decrypted_is_named_in_the_log(monkeypatch
         await settings.synchronize_settings(repository)
     assert _warnings(caplog) == [
         "settings synchronization failed "
-        "(SourceControlError: Stored secret for On-call dispatch token could not be decrypted)"
+        "(SettingsEncryptionError: Stored secret for On-call dispatch token could not be decrypted)"
     ]
 
 

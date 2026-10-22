@@ -18,6 +18,12 @@ from cloud_agent.domain.thread_history import THREAD_PAGE_SIZE
 class ConversationQueries(Protocol):
     """Port: reading conversations, their jobs, and the project list."""
 
+    async def notification_state(
+        self, *, user_id: str, cursor: str | None = None, limit: int = 200
+    ) -> dict[str, Any]:
+        """Bootstrap active jobs, then page durable job/thread changes."""
+        ...
+
     async def list_read_receipts(
         self, *, user_id: str, after: int | None = None, limit: int = READ_RECEIPT_BATCH_SIZE
     ) -> dict[str, Any]:

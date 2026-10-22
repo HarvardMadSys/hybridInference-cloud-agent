@@ -1877,41 +1877,6 @@ describe('projecting a running turn again', () => {
     expect(changed.diffFileDetails).not.toBe(first.diffFileDetails);
     expect(changed.diffStat).toEqual({ add: 2, del: 1 });
   });
-
-  it('keeps the changed paths of one status read while the turn streams', () => {
-    const project = createDisplayJobAdapter();
-    const gitMetadata = {
-      available: true,
-      revision: 'a'.repeat(64),
-      branch: 'agent/work',
-      changes: [{ code: ' M', path: 'src/app.ts' }],
-      change_count: 1,
-    };
-    const pending = project(JOB, { events: [], gitMetadataPending: true });
-    const stillPending = project(JOB, {
-      events: [event(1, 'message', { text: 'Streamed.' })],
-      gitMetadataPending: true,
-    });
-    expect(stillPending.diffFiles).toEqual([]);
-    expect(stillPending.diffFiles).toBe(pending.diffFiles);
-
-    const first = project(JOB, { events: [], gitMetadata });
-    const again = project(JOB, {
-      events: [event(1, 'message', { text: 'Streamed.' })],
-      gitMetadata,
-    });
-    expect(again.diffFiles).toEqual(['src/app.ts']);
-    expect(again.diffFiles).toBe(first.diffFiles);
-    const reread = project(JOB, {
-      events: [],
-      gitMetadata: {
-        ...gitMetadata,
-        changes: [...gitMetadata.changes, { code: '??', path: 'src/new.ts' }],
-        change_count: 2,
-      },
-    });
-    expect(reread.diffFiles).toEqual(['src/app.ts', 'src/new.ts']);
-  });
 });
 
 describe('workspace publication', () => {

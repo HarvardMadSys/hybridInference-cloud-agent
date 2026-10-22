@@ -74,11 +74,18 @@ async def _turn_with_events(store) -> dict:
     return job
 
 
-async def _reads(store, job: dict) -> tuple[dict, dict]:
+async def _reads(store, pool, job: dict) -> tuple[dict, dict]:
     usage = await store.ledger.job_usage_reads(job_id=job["id"], user_id=job["user_id"])
-    thread = await store.execution_queries.thread_stats_inputs(
-        job_id=job["id"], user_id=job["user_id"]
-    )
+    # A thread's stats reuse an attempt's stored rollup until its events change,
+    # and these tests change only how the events are stored: drop the rollups,
+    # so that each read reduces the events again.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM agent_attempt_thread_stats "
+            "WHERE attempt_id IN (SELECT id FROM agent_attempts WHERE job_id = $1)",
+            job["id"],
+        )
+    thread = await store.execution_queries.thread_stats(job_id=job["id"], user_id=job["user_id"])
     assert usage is not None and thread is not None
     return usage["inputs"], thread
 
@@ -96,13 +103,13 @@ async def test_an_appended_event_stores_what_a_read_would_project(store, pool):
         assert summary.pop("_usage_projection") == USAGE_SUMMARY_VERSION
         # Only what the summaries read: never the bulky fields.
         assert not {"text", "input", "content", "signature", "name"} & summary.keys(), row
-    from_summaries = await _reads(store, job)
+    from_summaries = await _reads(store, pool, job)
 
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_job_events SET usage_summary = NULL WHERE job_id = $1", job["id"]
         )
-    from_payloads = await _reads(store, job)
+    from_payloads = await _reads(store, pool, job)
 
     assert from_summaries == from_payloads
     usage_events = from_summaries[0]["events"]
@@ -124,7 +131,7 @@ async def test_a_summary_stored_under_another_projection_is_not_trusted(store, p
         await conn.execute(
             "UPDATE agent_job_events SET usage_summary = NULL WHERE job_id = $1", job["id"]
         )
-    projected = await _reads(store, job)
+    projected = await _reads(store, pool, job)
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -138,4 +145,4 @@ async def test_a_summary_stored_under_another_projection_is_not_trusted(store, p
             job["id"],
         )
 
-    assert await _reads(store, job) == projected
+    assert await _reads(store, pool, job) == projected

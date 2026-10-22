@@ -18,10 +18,10 @@ Order of operations is load-bearing:
    before a human reads the draft PR.
 3. Push the group snapshot onto its stable ``agent/<origin-thread-id>`` branch
    with a pinned refspec.
-4. Open a **draft** PR against the branch the job was started from, so a human
-   reviews before anything can merge and the diff is the agent's own work. A
-   later snapshot refreshes the branch's open PR and opens a new draft once
-   someone has closed or merged it.
+4. Open a **draft** PR promptly with a deterministic title, then optionally
+   enrich that title from the snapshot's bounded context. A later snapshot
+   refreshes the branch's open PR and opens a new draft once someone has closed
+   or merged it.
 
 A rejected patch fails the snapshot and marks its group dirty without
 rewriting successful Agent turns. It is not retried: a retry loop would either
@@ -45,7 +45,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, overload
 from urllib.parse import urlsplit
 
 import httpx
@@ -70,7 +70,8 @@ from cloud_agent.workers.background_wake import PUBLISH
 from cloud_agent_shared.git.patch_gate import branch_name_for
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
+    from typing import BinaryIO
 
     from cloud_agent.grants import GrantClient
     from cloud_agent.ports import (
@@ -113,6 +114,10 @@ GITHUB_API = "https://api.github.com"
 #: provider/git calls at their 300-second maximum cannot resemble a crashed
 #: publisher to the 900-second reaper.
 _PUBLISH_HEARTBEAT_INTERVAL_S = 60.0
+#: Git and source-control calls are network-bound, but an unbounded fan-out
+#: would mint too many credentials and grants at once. Per-sandbox epoch order
+#: remains a storage invariant; these slots let independent sandboxes proceed.
+_PUBLISH_CONCURRENCY = 4
 
 # Exactly what publishing does: push one branch, open one draft PR. Notably not
 # `workflows`, so a patch touching `.github/` cannot be pushed even if both
@@ -311,6 +316,16 @@ class GitHubCredential:
         }
 
 
+@contextlib.asynccontextmanager
+async def _borrowed(client: httpx.AsyncClient | None) -> AsyncIterator[httpx.AsyncClient]:
+    """``client``, borrowed and left open, or a client of the call's own, closed after it."""
+    if client is not None:
+        yield client
+        return
+    async with httpx.AsyncClient() as own:
+        yield own
+
+
 async def create_draft_pull_request(
     *,
     repo: str,
@@ -329,9 +344,7 @@ async def create_draft_pull_request(
 
     ``client`` is borrowed and left open; without one, the call opens its own.
     """
-    async with contextlib.AsyncExitStack() as stack:
-        if client is None:
-            client = await stack.enter_async_context(httpx.AsyncClient())
+    async with _borrowed(client) as client:
         response = await client.post(
             f"{credential.api_base}/repos/{repo}/pulls",
             headers=_github_headers(credential),
@@ -376,6 +389,7 @@ async def create_draft_pull_request(
     return url
 
 
+@overload
 async def ensure_draft_pull_request(
     *,
     repo: str,
@@ -385,7 +399,35 @@ async def ensure_draft_pull_request(
     body: str,
     credential: GitHubCredential,
     client: httpx.AsyncClient | None = None,
-) -> str:
+    create_if_missing: Literal[True] = True,
+) -> str: ...
+
+
+@overload
+async def ensure_draft_pull_request(
+    *,
+    repo: str,
+    head_branch: str,
+    base_branch: str,
+    title: str,
+    body: str,
+    credential: GitHubCredential,
+    client: httpx.AsyncClient | None = None,
+    create_if_missing: Literal[False],
+) -> str | None: ...
+
+
+async def ensure_draft_pull_request(
+    *,
+    repo: str,
+    head_branch: str,
+    base_branch: str,
+    title: str,
+    body: str,
+    credential: GitHubCredential,
+    client: httpx.AsyncClient | None = None,
+    create_if_missing: bool = True,
+) -> str | None:
     """Refresh an open branch PR, or create a new draft after closure/merge.
 
     Look up the branch even on the first publication: a previous create may
@@ -395,7 +437,9 @@ async def ensure_draft_pull_request(
     Looked up by head alone, and refreshed without touching its base: a
     reviewer who retargets the draft has decided where it merges, and filtering
     by the job's base made the next snapshot open a second draft beside it.
-    ``base_branch`` is only for a draft this creates.
+    ``base_branch`` is only for a draft this creates. Optional enrichment sets
+    ``create_if_missing=False``: if the owner closed the already-created draft
+    while its title was generated, a cosmetic update must not open another.
 
     The lookup, the refresh and the create share one client: ``client``,
     borrowed and left open, or one this call opens. The create used to open a
@@ -404,9 +448,7 @@ async def ensure_draft_pull_request(
     headers = _github_headers(credential)
     endpoint = f"{credential.api_base}/repos/{repo}/pulls"
     timeout = number_setting("publish_pr_timeout_s")
-    async with contextlib.AsyncExitStack() as stack:
-        if client is None:
-            client = await stack.enter_async_context(httpx.AsyncClient())
+    async with _borrowed(client) as client:
         response = await client.get(
             endpoint,
             headers=headers,
@@ -449,6 +491,8 @@ async def ensure_draft_pull_request(
                 # The owner can close/merge while publication is updating it.
                 break
             return url
+        if not create_if_missing:
+            return None
         return await create_draft_pull_request(
             repo=repo,
             head_branch=head_branch,
@@ -561,8 +605,17 @@ def _pr_title(job: dict[str, Any], changed_files: list[str]) -> str:
     )
     # Share the title budget across summaries when several chats settle together.
     fragments = list(lines)
-    if len(fragments) > 5:
-        fragments = [*fragments[:4], f"+{len(fragments) - 4} more"]
+    try:
+        summary_count = int(job.get("session_summary_count", 0))
+    except (TypeError, ValueError):
+        summary_count = 0
+    # A collapsed duplicate or an unreadable summary is no further work; one
+    # the claim did not keep (it keeps the newest few) may be.
+    kept = len(summaries) if isinstance(summaries, list) else 0
+    total = len(fragments) + max(0, summary_count - kept)
+    if total > 5 and fragments:
+        shown = fragments[:4]
+        fragments = [*shown, f"+{total - len(shown)} more"]
     budget = (70 - 2 * (len(fragments) - 1)) // max(1, len(fragments))
     summary = "; ".join(
         line if len(line) <= budget else line[: budget - 1].rstrip() + "…" for line in fragments
@@ -582,7 +635,7 @@ async def _import_snapshot_base(
     *,
     snapshot: dict[str, Any],
     commit_sha: str,
-    bundle: bytes | None,
+    bundle: BinaryIO | None,
 ) -> bool:
     """Import a published commit into Docker without changing HEAD or files.
 
@@ -591,7 +644,7 @@ async def _import_snapshot_base(
     may have moved the group to another one while the request was out.
     """
     snapshot_id = int(snapshot["snapshot_id"])
-    if not bundle:
+    if bundle is None:
         await store.snapshot.record_snapshot_base_import_failure(
             snapshot_id=snapshot_id,
             detail="the publisher produced no retained base bundle",
@@ -669,6 +722,7 @@ async def _retry_base_import(
     the commits published before it; the workspace's own history keeps the
     commit it started from, and every published commit descends from that.
     """
+    bundle: BinaryIO | None = None
     try:
         await require_entitled_repo(
             snapshot["repo"],
@@ -682,7 +736,7 @@ async def _retry_base_import(
             raise PublishError("no GitHub credential is configured for base import")
         commit_sha = str(snapshot["published_commit_sha"])
 
-        async def fetch(credential: GitHubCredential) -> bytes:
+        async def fetch(credential: GitHubCredential) -> BinaryIO:
             return await asyncio.to_thread(
                 fetch_base_bundle,
                 clone_url=credential.clone_url(snapshot["repo"]),
@@ -707,6 +761,9 @@ async def _retry_base_import(
             delay_s=_provider_wait(exc),
         )
         return False
+    finally:
+        if bundle is not None:
+            bundle.close()
 
 
 async def publish_one(
@@ -842,6 +899,17 @@ async def _replacing_a_refused_token(
     return await use(await _publishing_credential(app_credentials, repo))
 
 
+def _release_admission_when_done(
+    ready: asyncio.Event,
+) -> Callable[[asyncio.Task[str | None]], None]:
+    """Release later claims if a publisher exits before starting preflight."""
+
+    def release(_finished: asyncio.Task[str | None]) -> None:
+        ready.set()
+
+    return release
+
+
 async def _publish_due(
     store: PublishStorage,
     *,
@@ -855,18 +923,71 @@ async def _publish_due(
 
     A refusal marks its snapshot failed. A retryable failure, including an
     entitlement outage, returns it to the queue until five defers are spent.
-    Snapshots behind either still go out in this pass.
+    Snapshots behind either still go out in this pass. Claims enter entitlement
+    preflight in storage order; once each check has started, independent remote
+    work proceeds concurrently.
+
+    A claim that raises stops this pass's claiming, and its error is raised
+    once the publications already claimed have finished: cancelling them would
+    defer each one, spending one of its five attempts on that error.
     """
-    while (job := await store.snapshot.claim_for_publish()) is not None:
-        await _publish_claimed(
-            store,
-            job,
-            credential=credential,
-            app_credentials=app_credentials,
-            grants=grants,
-            base_branch=base_branch,
-            http=http,
-        )
+    in_flight: set[asyncio.Task[str | None]] = set()
+    claim_error: Exception | None = None
+    try:
+        while True:
+            while claim_error is None and len(in_flight) < _PUBLISH_CONCURRENCY:
+                try:
+                    job = await store.snapshot.claim_for_publish()
+                except Exception as exc:
+                    claim_error = exc
+                    break
+                if job is None:
+                    break
+                admission_started = asyncio.Event()
+                task = asyncio.create_task(
+                    _publish_claimed(
+                        store,
+                        job,
+                        credential=credential,
+                        app_credentials=app_credentials,
+                        grants=grants,
+                        base_branch=base_branch,
+                        admission_started=admission_started,
+                        http=http,
+                    ),
+                    name=f"snapshot-publish-{job.get('snapshot_id', 'unknown')}",
+                )
+                # An unexpected failure before preflight must not strand every
+                # later claim behind this gate.
+                task.add_done_callback(_release_admission_when_done(admission_started))
+                in_flight.add(task)
+                await admission_started.wait()
+            if not in_flight:
+                if claim_error is not None:
+                    raise claim_error
+                return
+            done, in_flight = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # One unexpected publication failure must not cancel the
+                    # other claimed snapshots. The failed claim's heartbeat
+                    # has stopped, so its stalled-claim reaper can recover it.
+                    logger.warning(
+                        "agent_snapshot_publish_task_failed",
+                        extra={
+                            "event": "agent_snapshot_publish_task_failed",
+                            "task_name": task.get_name(),
+                        },
+                        exc_info=True,
+                    )
+    finally:
+        for task in in_flight:
+            task.cancel()
+        await asyncio.gather(*in_flight, return_exceptions=True)
 
 
 async def _heartbeat_snapshot_publish(
@@ -920,6 +1041,7 @@ async def _publish_claimed(
     grants: GrantClient | None = None,
     base_branch: str,
     allow_workflow_changes: bool = False,
+    admission_started: asyncio.Event | None = None,
     http: httpx.AsyncClient | None = None,
 ) -> str | None:
     """Publish under a claim heartbeat spanning every local and remote phase."""
@@ -955,6 +1077,7 @@ async def _publish_claimed(
             grants=grants,
             base_branch=base_branch,
             allow_workflow_changes=allow_workflow_changes,
+            admission_started=admission_started,
             http=http,
         )
     except asyncio.CancelledError:
@@ -992,6 +1115,7 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
     grants: GrantClient | None = None,
     base_branch: str,
     allow_workflow_changes: bool = False,
+    admission_started: asyncio.Event | None = None,
     http: httpx.AsyncClient | None = None,
 ) -> str | None:
     """Publish one claimed snapshot. Returns the PR URL, or ``None``.
@@ -1035,6 +1159,11 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
     # claim; without this the same deployment would block the read-only token
     # and still hand out the push token.
     environment = None
+    if admission_started is not None:
+        # Event.set() does not yield. Enter the directly awaited entitlement
+        # coroutine before the loop can start the next claim, preserving call
+        # order without serializing the remote lookup.
+        admission_started.set()
     try:
         await require_entitled_repo(
             job["repo"],
@@ -1116,17 +1245,87 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
                 auth_env=credential.git_auth_env(),
                 **({"known_secrets": environment.secrets()} if environment else {}),
             )
-            title = await generate_pr_title(job, result.changed_files, grants=grants, client=http)
-            pr_url = await ensure_draft_pull_request(
-                repo=job["repo"],
-                head_branch=result.branch,
-                base_branch=pr_base,
-                title=title or _pr_title(job, result.changed_files),
-                body=_pr_body(job, result.changed_files),
-                credential=credential,
-                client=http,
-            )
-            return result, pr_url
+            try:
+                fallback_title = _pr_title(job, result.changed_files)
+
+                async def generated_title() -> str | None:
+                    try:
+                        return await generate_pr_title(
+                            job, result.changed_files, grants=grants, client=http
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "agent_pr_title_generation_failed",
+                            extra={
+                                "event": "agent_pr_title_generation_failed",
+                                "snapshot_id": job["snapshot_id"],
+                                "reason": "unexpected_failure",
+                                "error_type": type(exc).__name__,
+                            },
+                        )
+                        return None
+
+                title_task = asyncio.create_task(
+                    generated_title(),
+                    name=f"snapshot-title-{job['snapshot_id']}",
+                )
+                try:
+                    # Preserve the one-call path for an immediately available
+                    # title (including tests and deployments with a local fast
+                    # provider). A network-bound title never holds up the draft.
+                    await asyncio.sleep(0)
+                    title = await title_task if title_task.done() else None
+                    opened_title = title or fallback_title
+                    pr_url = await ensure_draft_pull_request(
+                        repo=job["repo"],
+                        head_branch=result.branch,
+                        base_branch=pr_base,
+                        title=opened_title,
+                        body=_pr_body(job, result.changed_files),
+                        credential=credential,
+                        client=http,
+                    )
+                    if not title_task.done():
+                        title = await title_task
+                    if title is not None and title != opened_title:
+                        try:
+                            enriched_url = await ensure_draft_pull_request(
+                                repo=job["repo"],
+                                head_branch=result.branch,
+                                base_branch=pr_base,
+                                title=title,
+                                body=_pr_body(job, result.changed_files),
+                                credential=credential,
+                                client=http,
+                                create_if_missing=False,
+                            )
+                            if enriched_url is not None:
+                                pr_url = enriched_url
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            # The draft already exists with a meaningful title.
+                            # Optional enrichment must not turn that durable
+                            # publication into a retry or duplicate PR attempt.
+                            logger.warning(
+                                "agent_pr_title_enrichment_failed",
+                                extra={
+                                    "event": "agent_pr_title_enrichment_failed",
+                                    "snapshot_id": job["snapshot_id"],
+                                    "error_type": type(exc).__name__,
+                                },
+                            )
+                finally:
+                    if not title_task.done():
+                        title_task.cancel()
+                    await asyncio.gather(title_task, return_exceptions=True)
+                return result, pr_url
+            except BaseException:
+                if result.base_bundle is not None:
+                    result.base_bundle.close()
+                raise
 
         result, pr_url = await _replacing_a_refused_token(
             app_credentials, job["repo"], credential, publish
@@ -1153,40 +1352,44 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
         await fail(detail)
         return None
 
-    recorded = await store.snapshot.record_snapshot_publish(
-        snapshot_id=int(job["snapshot_id"]),
-        expected_publish_attempt_count=expected_publish_attempt_count,
-        pr_url=pr_url,
-        commit_sha=result.commit_sha,
-    )
-    if not recorded:
-        # The claim was no longer ours: the stalled-publish reaper failed it,
-        # or another publisher settled it. The branch is the same one, but
-        # this PR is recorded nowhere, so say so rather than pretend.
-        logger.warning(
-            "agent_job_publish_raced",
-            extra={"event": "agent_job_publish_raced", "job_id": job_id, "pr_url": pr_url},
+    try:
+        recorded = await store.snapshot.record_snapshot_publish(
+            snapshot_id=int(job["snapshot_id"]),
+            expected_publish_attempt_count=expected_publish_attempt_count,
+            pr_url=pr_url,
+            commit_sha=result.commit_sha,
         )
-        return None
+        if not recorded:
+            # The claim was no longer ours: the stalled-publish reaper failed it,
+            # or another publisher settled it. The branch is the same one, but
+            # this PR is recorded nowhere, so say so rather than pretend.
+            logger.warning(
+                "agent_job_publish_raced",
+                extra={"event": "agent_job_publish_raced", "job_id": job_id, "pr_url": pr_url},
+            )
+            return None
 
-    await _import_snapshot_base(
-        store,
-        snapshot=job,
-        commit_sha=result.commit_sha,
-        bundle=result.base_bundle,
-    )
+        await _import_snapshot_base(
+            store,
+            snapshot=job,
+            commit_sha=result.commit_sha,
+            bundle=result.base_bundle,
+        )
 
-    logger.info(
-        "agent_job_pr_opened",
-        extra={
-            "event": "agent_job_pr_opened",
-            "job_id": job_id,
-            "branch": branch_name_for(job.get("branch_id") or job.get("thread_id") or job_id),
-            "base_branch": pr_base,
-            "pr_url": pr_url,
-        },
-    )
-    return pr_url
+        logger.info(
+            "agent_job_pr_opened",
+            extra={
+                "event": "agent_job_pr_opened",
+                "job_id": job_id,
+                "branch": branch_name_for(job.get("branch_id") or job.get("thread_id") or job_id),
+                "base_branch": pr_base,
+                "pr_url": pr_url,
+            },
+        )
+        return pr_url
+    finally:
+        if result.base_bundle is not None:
+            result.base_bundle.close()
 
 
 async def publish_loop(

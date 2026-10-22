@@ -222,3 +222,32 @@ async def test_a_batch_without_its_lease_stores_none_of_it(store, pool):
     await _expire_attempt(pool, store, fence["attempt_id"])
     assert await store.attempt_commands.append_events(**fence, events=batch) is None
     assert await _stored(pool, fence["attempt_id"]) == []
+
+
+async def test_a_batch_refreshes_the_thread_stats_read_before_it(store, pool):
+    """An attempt's stored stats rollup is reduced again once a batch adds to it.
+
+    A thread's stats reuse an attempt's rollup while the attempt's newest
+    sequence is the one it was reduced at. A batch numbers its events as single
+    appends do, past every stored one, so the next read counts them.
+    """
+    job, fence = await _claimed(store)
+    assert await store.attempt_commands.append_events(
+        **fence, events=[("message", {"text": "Looking."}, 1)]
+    )
+    before = await store.execution_queries.thread_stats(job_id=job["id"], user_id=job["user_id"])
+    assert before is not None and before["stats"].tool_calls == 0
+
+    assert await store.attempt_commands.append_events(
+        **fence,
+        events=[("tool_use", {"id": "call-1", "name": "ls"}, 2), ("tool_use", {"id": "call-2"}, 3)],
+    )
+    after = await store.execution_queries.thread_stats(job_id=job["id"], user_id=job["user_id"])
+
+    assert after is not None and after["stats"].tool_calls == 2
+    async with pool.acquire() as conn:
+        reduced_at = await conn.fetchval(
+            "SELECT event_seq FROM agent_attempt_thread_stats WHERE attempt_id = $1",
+            fence["attempt_id"],
+        )
+    assert reduced_at == 3

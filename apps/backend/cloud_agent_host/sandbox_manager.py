@@ -37,6 +37,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cloud_agent_host import sandbox_manager_profiling_policy
+from cloud_agent_host.base_bundle_request import bind_base_bundle_reader
 from cloud_agent_host.bounded_output import OutputPump
 from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
@@ -112,7 +113,7 @@ from cloud_agent_host.workspace_git import (
     run_git as _workspace_git,
     run_git_metadata as _workspace_git_metadata,
 )
-from cloud_agent_shared.git.source_archive import DEFAULT_MAX_BASE_BUNDLE_BYTES
+from cloud_agent_shared.git.base_bundle_stream import BASE_BUNDLE_STREAM_CAPABILITY
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,
     SANDBOX_MANAGER_SETTING_KEYS,
@@ -370,19 +371,13 @@ class TerminalResizeRequest(BaseModel):
 
 
 class TerminalCoordinationRequest(BaseModel):
-    """Worker fence plus the protected turn owning one suspension token."""
+    """The protected turn owning one suspension token.
 
-    lease_generation: int = Field(..., ge=1)
-    # Optional only for a previous-generation control plane during a rolling
-    # deploy. Current callers always send it so concurrent fork siblings hold
-    # independent suspension tokens in their shared workspace.
-    job_id: str | None = Field(None, min_length=1, max_length=128)
+    Each turn holds a token of its own, so concurrent fork siblings in one
+    shared workspace never thaw each other's suspension.
+    """
 
-
-class TerminalSettledRequest(BaseModel):
-    """Release only the terminal suspension owned by one settled turn."""
-
-    job_id: str | None = Field(None, min_length=1, max_length=128)
+    job_id: str = Field(..., min_length=1, max_length=128)
 
 
 class SharedLeaseRequest(BaseModel):
@@ -467,9 +462,9 @@ class SandboxArchiveDiscardRequest(BaseModel):
 
     request_id: str = Field(..., min_length=1, max_length=128)
     generation: int = Field(..., ge=1)
-    # Optional during a rolling deployment. New control planes include this
-    # durable identity so the broker can safely prove an already-absent target.
-    sandbox_id: str | None = Field(None, min_length=1, max_length=256)
+    # The durable identity that lets the sandbox manager prove an
+    # already-absent target.
+    sandbox_id: str = Field(..., min_length=1, max_length=256)
     expected_container_id: str = Field(..., min_length=1, max_length=256)
 
 
@@ -627,7 +622,9 @@ class SharedBaseImportRequest(SharedSandboxIdentityRequest):
 
     snapshot_id: int = Field(..., ge=1)
     commit_sha: str = Field(..., min_length=7, max_length=64)
-    bundle_b64: str = Field(..., min_length=1)
+
+
+_read_base_bundle_request = bind_base_bundle_reader(SharedBaseImportRequest.model_validate_json)
 
 
 class SharedInitialArchiveRequest(SharedSandboxIdentityRequest):
@@ -735,7 +732,6 @@ class _TerminalManager:
         self._sessions: dict[str, dict[str, _TerminalSession]] = {}
         self._suspended_workspaces: set[str] = set()
         self._workspace_suspensions: dict[str, set[str]] = {}
-        self._workspace_generations: dict[str, int] = {}
         self._lock = threading.RLock()
         # One workspace's suspensions, resumptions and creations still run one
         # at a time, but under a lock of that workspace's own, kept only while
@@ -809,7 +805,6 @@ class _TerminalManager:
             self._sessions.clear()
             self._suspended_workspaces.clear()
             self._workspace_suspensions.clear()
-            self._workspace_generations.clear()
         for session in sessions:
             try:
                 session.close(mark_activity=False)
@@ -1057,35 +1052,11 @@ class _TerminalManager:
             unlist(candidate)
         return unlisted
 
-    @staticmethod
-    def _suspension_key(job_id: str | None) -> str:
-        """Map the rolling-compatibility request onto one reserved token."""
-        return job_id or "__legacy_control_plane__"
-
-    def suspend(
-        self,
-        workspace_id: str,
-        *,
-        lease_generation: int,
-        job_id: str | None = None,
-    ) -> dict[str, Any]:
+    def suspend(self, workspace_id: str, *, job_id: str) -> dict[str, Any]:
         """Freeze PTYs and retain one independent token per protected turn."""
         with self._serialized(workspace_id):
             with self._lock:
-                if job_id is None:
-                    # Previous control planes did not identify the turn.
-                    # Preserve their monotonic check only for that
-                    # compatibility token; current sibling turns must not
-                    # fence one another by their unrelated, per-job lease
-                    # generations.
-                    current_generation = self._workspace_generations.get(workspace_id, 0)
-                    if lease_generation < current_generation:
-                        raise HTTPException(
-                            status_code=409, detail="stale terminal workspace fence"
-                        )
-                    self._workspace_generations[workspace_id] = lease_generation
-                key = self._suspension_key(job_id)
-                self._workspace_suspensions.setdefault(workspace_id, set()).add(key)
+                self._workspace_suspensions.setdefault(workspace_id, set()).add(job_id)
                 # From here no terminal of this workspace takes input or opens.
                 self._suspended_workspaces.add(workspace_id)
                 sessions = list(self._sessions.get(workspace_id, {}).values())
@@ -1099,90 +1070,46 @@ class _TerminalManager:
                 ) from exc
         return {"ok": True, "suspended": len(sessions)}
 
-    def resume(
-        self,
-        workspace_id: str,
-        *,
-        lease_generation: int,
-        job_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Release one turn token and resume PTYs only after the last release."""
-        with self._serialized(workspace_id):
-            return self._resume_serialized(
-                workspace_id, lease_generation=lease_generation, job_id=job_id
-            )
+    def resume(self, workspace_id: str, *, job_id: str) -> dict[str, Any]:
+        """Release one turn token and resume PTYs only after the last release.
 
-    def _resume_serialized(
-        self,
-        workspace_id: str,
-        *,
-        lease_generation: int,
-        job_id: str | None,
-    ) -> dict[str, Any]:
-        """Resume under this workspace's own lock, which the caller holds."""
-        with self._lock:
-            if job_id is None:
-                current_generation = self._workspace_generations.get(workspace_id, 0)
-                if lease_generation < current_generation:
-                    raise HTTPException(status_code=409, detail="stale terminal workspace fence")
-                self._workspace_generations[workspace_id] = lease_generation
-            key = self._suspension_key(job_id)
-            suspensions = self._workspace_suspensions.get(workspace_id)
-            if not suspensions or key not in suspensions:
-                return {"ok": True, "resumed": 0}
-            suspensions.remove(key)
-            if suspensions:
-                return {"ok": True, "resumed": 0}
-            sessions = list(self._sessions.get(workspace_id, {}).values())
-        # The workspace stays fenced until every PTY has resumed: no terminal
-        # of it takes input or opens before then.
-        attempted: list[_TerminalSession] = []
-        try:
-            for session in sessions:
-                attempted.append(session)
-                session.resume()
-        except (SandboxError, OSError) as exc:
-            # Restore every PTY already resumed in this batch. A retry must
-            # see both the logical workspace fence and the actual processes
-            # suspended; otherwise one shell could mutate the shared tree
-            # inside a quiescent capture after a sibling's resume failed.
-            for session in attempted:
-                with contextlib.suppress(SandboxError, OSError):
-                    session.suspend()
-            with self._lock:
-                suspensions.add(key)
-            raise HTTPException(
-                status_code=503,
-                detail="terminal resume could not be confirmed; retry resume",
-            ) from exc
-        with self._lock:
-            self._workspace_suspensions.pop(workspace_id, None)
-            self._suspended_workspaces.discard(workspace_id)
-        return {"ok": True, "resumed": len(sessions)}
-
-    def resume_settled(
-        self,
-        workspace_id: str,
-        *,
-        job_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Release one settled turn without disturbing a concurrent sibling."""
-        # Generation is irrelevant for a terminal job. The reserved legacy
-        # token is the only state an old control plane may release; a new
-        # request names its job and therefore cannot thaw another member.
+        A token the turn does not hold is released as a no-op, so a settled
+        turn's release after its own resume, or a sibling's, thaws nothing.
+        """
         with self._serialized(workspace_id):
             with self._lock:
-                legacy_generation = max(1, self._workspace_generations.get(workspace_id, 0))
-            result = self._resume_serialized(
-                workspace_id,
-                lease_generation=legacy_generation,
-                job_id=job_id,
-            )
-            if job_id is None:
-                # Lease generations restart at one for the next platform job.
+                suspensions = self._workspace_suspensions.get(workspace_id)
+                if not suspensions or job_id not in suspensions:
+                    return {"ok": True, "resumed": 0}
+                suspensions.remove(job_id)
+                if suspensions:
+                    return {"ok": True, "resumed": 0}
+                sessions = list(self._sessions.get(workspace_id, {}).values())
+            # The workspace stays fenced until every PTY has resumed: no terminal
+            # of it takes input or opens before then.
+            attempted: list[_TerminalSession] = []
+            try:
+                for session in sessions:
+                    attempted.append(session)
+                    session.resume()
+            except (SandboxError, OSError) as exc:
+                # Restore every PTY already resumed in this batch. A retry must
+                # see both the logical workspace fence and the actual processes
+                # suspended; otherwise one shell could mutate the shared tree
+                # inside a quiescent capture after a sibling's resume failed.
+                for session in attempted:
+                    with contextlib.suppress(SandboxError, OSError):
+                        session.suspend()
                 with self._lock:
-                    self._workspace_generations.pop(workspace_id, None)
-            return result
+                    suspensions.add(job_id)
+                raise HTTPException(
+                    status_code=503,
+                    detail="terminal resume could not be confirmed; retry resume",
+                ) from exc
+            with self._lock:
+                self._workspace_suspensions.pop(workspace_id, None)
+                self._suspended_workspaces.discard(workspace_id)
+            return {"ok": True, "resumed": len(sessions)}
 
     def list(self, workspace_id: str) -> list[dict[str, Any]]:
         """List visible terminals for one workspace only."""
@@ -2016,6 +1943,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 ENVIRONMENT_CAPABILITY,
                 ENVIRONMENT_INFERENCE_CAPABILITY,
                 SSH_ACCESS_CAPABILITY,
+                BASE_BUNDLE_STREAM_CAPABILITY,
                 *(
                     [ENVIRONMENT_SNAPSHOT_CAPABILITY]
                     if getattr(archive_controller, "snapshots_available", False)
@@ -3047,17 +2975,12 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     @app.post("/shared-sandboxes/{thread_id}/import-base")
     async def import_shared_workspace_base(
         thread_id: str,
-        body: SharedBaseImportRequest,
+        request: Request,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
         """Import a trusted publisher commit object without checkout/reset."""
         owner = require_shared_supervisor()
-        try:
-            bundle = base64.b64decode(body.bundle_b64, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise HTTPException(status_code=422, detail="base bundle is not valid base64") from exc
-        if len(bundle) > DEFAULT_MAX_BASE_BUNDLE_BYTES:
-            raise HTTPException(status_code=413, detail="base bundle exceeds the import limit")
+        body, bundle = await _read_base_bundle_request(request)
         try:
             await endpoint_calls.run(
                 owner.register_manifest,
@@ -3086,6 +3009,8 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 await endpoint_calls.run(owner.operation_closed, thread_id, token)
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc
+        finally:
+            bundle.close()
         return {
             "ok": True,
             "snapshot_id": body.snapshot_id,
@@ -3430,12 +3355,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
         scope = await endpoint_calls.run(terminal_scope, workspace_id)
-        return await endpoint_calls.run(
-            terminals.suspend,
-            scope,
-            lease_generation=body.lease_generation,
-            job_id=body.job_id,
-        )
+        return await endpoint_calls.run(terminals.suspend, scope, job_id=body.job_id)
 
     @app.post("/workspaces/{workspace_id}/terminals/resume")
     async def resume_terminals(
@@ -3444,25 +3364,18 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
         scope = await endpoint_calls.run(terminal_scope, workspace_id)
-        return await endpoint_calls.run(
-            terminals.resume,
-            scope,
-            lease_generation=body.lease_generation,
-            job_id=body.job_id,
-        )
+        return await endpoint_calls.run(terminals.resume, scope, job_id=body.job_id)
 
     @app.post("/workspaces/{workspace_id}/terminals/resume-settled")
     async def resume_settled_terminals(
         workspace_id: str,
-        body: TerminalSettledRequest | None = None,
+        body: TerminalCoordinationRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
+        # A settled turn releases its own token like any other resume; a
+        # concurrent sibling's suspension stays in force.
         scope = await endpoint_calls.run(terminal_scope, workspace_id)
-        return await endpoint_calls.run(
-            terminals.resume_settled,
-            scope,
-            job_id=body.job_id if body is not None else None,
-        )
+        return await endpoint_calls.run(terminals.resume, scope, job_id=body.job_id)
 
     @app.get("/workspaces/{workspace_id}/terminals")
     async def list_terminals(

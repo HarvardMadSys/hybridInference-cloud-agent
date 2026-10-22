@@ -164,9 +164,11 @@ def _world(monkeypatch, *, runtime: str | None = None):
     # The group network is not what these tests are about: its proof is the
     # one test_chat_group_network.py runs against a model of Docker.
     monkeypatch.setattr(
-        manager, "_require_group_network", lambda spec, _current, *_snapshot: manager._require(spec)
+        manager._network_lifecycle,
+        "_require_group_network",
+        lambda spec, _current, *_snapshot: manager._require(spec),
     )
-    monkeypatch.setattr(manager, "_sync_kata_guest_network", lambda *_args: None)
+    monkeypatch.setattr(manager._network_lifecycle, "_sync_kata_guest_network", lambda *_args: None)
     return manager, docker
 
 
@@ -193,7 +195,7 @@ def test_a_network_proof_makes_the_same_promise(monkeypatch):
     manager, docker = _world(monkeypatch)
     spec = _spec()
     docker.add("container-one", spec)
-    monkeypatch.setattr(manager, "network_for", lambda _spec: "agent-net")
+    monkeypatch.setattr(manager.network, "network_for", lambda _spec: "agent-net")
     manager.require_network(spec)
     docker.calls.clear()
 
@@ -337,7 +339,7 @@ def test_a_proof_names_one_spec_and_goes_with_its_container():
 def test_creating_a_container_forgets_the_proof_its_name_held(monkeypatch):
     manager, docker, spec = _proven(monkeypatch)
     docker.containers.pop("container-one")
-    monkeypatch.setattr(manager, "require_host_rules", lambda: None)
+    monkeypatch.setattr(manager.network, "require_host_rules", lambda: None)
     run = docker.run
 
     def create(argv, **kwargs):

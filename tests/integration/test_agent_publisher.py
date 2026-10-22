@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -21,6 +22,10 @@ from cloud_agent.publisher import (
     fetch_base_bundle,
     publish_patch,
 )
+
+if TYPE_CHECKING:
+    from typing import BinaryIO
+
 
 pytestmark = pytest.mark.integration
 
@@ -1212,9 +1217,16 @@ def test_retry_fences_a_branch_advance_after_recovered_tip_validation(
     )
 
 
-def _prerequisites(bundle: bytes) -> list[str]:
+def _bundle_bytes(bundle: BinaryIO) -> bytes:
+    bundle.seek(0)
+    payload = bundle.read()
+    bundle.seek(0)
+    return payload
+
+
+def _prerequisites(bundle: BinaryIO) -> list[str]:
     """The commits a bundle requires the receiving repository to hold."""
-    header = bundle.split(b"\n\n", 1)[0].decode()
+    header = _bundle_bytes(bundle).split(b"\n\n", 1)[0].decode()
     return [line[1:].split()[0] for line in header.splitlines() if line.startswith("-")]
 
 
@@ -1249,7 +1261,7 @@ def test_base_bundle_carries_only_what_the_published_commit_adds(origin, tmp_pat
     _git(["checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd=workspace)
     bundle = tmp_path / "base.bundle"
     for payload in (result.base_bundle, retried):
-        bundle.write_bytes(payload)
+        bundle.write_bytes(_bundle_bytes(payload))
         listed = _git(["bundle", "list-heads", str(bundle), "HEAD"], cwd=workspace).strip()
         assert listed == f"{result.commit_sha} HEAD"
         _git(["bundle", "verify", str(bundle)], cwd=workspace)
@@ -1343,7 +1355,7 @@ def test_a_push_whose_pull_request_failed_is_built_on_by_the_next_publication(or
     bundle = tmp_path / "base.bundle"
     for payload in (second.base_bundle, fetched):
         assert _prerequisites(payload) == [base_sha]
-        bundle.write_bytes(payload)
+        bundle.write_bytes(_bundle_bytes(payload))
         _git(["bundle", "verify", str(bundle)], cwd=workspace)
         _git(["bundle", "unbundle", str(bundle)], cwd=workspace)
     _git(["cat-file", "-e", f"{second.commit_sha}^{{commit}}"], cwd=workspace)
@@ -1606,7 +1618,7 @@ def test_an_import_retry_reaches_the_base_under_any_number_of_own_pushes(origin,
     assert _prerequisites(fetched) == [base_sha]
     workspace = _workspace_at(base_sha, clone_url, tmp_path)
     bundle = tmp_path / "base.bundle"
-    bundle.write_bytes(fetched)
+    bundle.write_bytes(_bundle_bytes(fetched))
     _git(["bundle", "unbundle", str(bundle)], cwd=workspace)
     _git(["cat-file", "-e", f"{published}^{{commit}}"], cwd=workspace)
     with pytest.raises(PublishError, match="is not built on"):

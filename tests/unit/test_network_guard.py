@@ -226,6 +226,25 @@ def test_ensure_installs_both_tables_and_trusts_the_result_for_a_while() -> None
     assert len(nft.transactions()) == installs + 1
 
 
+def test_activation_after_an_idle_gap_rechecks_routes_and_refuses_overlap(monkeypatch) -> None:
+    """Skipping empty-host sweeps never carries an expired proof into a start."""
+    from cloud_agent_host import network_guard
+
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    before = len(nft.calls)
+    now = network_guard.time.monotonic()
+    monkeypatch.setattr(network_guard.time, "monotonic", lambda: now + 3600)
+    nft.routes.append({"dst": "10.240.0.0/16", "dev": "vpn0"})
+
+    with pytest.raises(NetworkGuardError, match="overlaps the host route"):
+        guard.ensure()
+
+    assert len(nft.calls) == before + 2
+    assert guard._verified_at is None
+
+
 def test_ensure_installs_and_reads_back_in_one_helper_and_keeps_routes_unprivileged() -> None:
     """A helper container costs far more than its nft calls, so a check is one helper.
 
@@ -688,10 +707,10 @@ def test_the_managers_host_rule_check_reads_the_kernel_every_time() -> None:
     nft = FakeNft()
     guard = _guard(nft)
     manager = ChatSandboxManager(SimpleNamespace(network_guard=lambda: guard))  # type: ignore[arg-type]
-    manager.verify_host_rules()
+    manager.network.verify_host_rules()
     nft.tables.clear()
 
-    manager.verify_host_rules()
+    manager.network.verify_host_rules()
 
     assert ("inet", guard.network.table) in nft.tables
 

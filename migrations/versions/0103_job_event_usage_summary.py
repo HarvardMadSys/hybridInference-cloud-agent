@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "0095_job_event_usage_summary"
-down_revision = "0094_thread_message_pages"
+revision = "0103_job_event_usage_summary"
+down_revision = "0102_admin_sandbox_marker_order"
 branch_labels = None
 depends_on = None
 

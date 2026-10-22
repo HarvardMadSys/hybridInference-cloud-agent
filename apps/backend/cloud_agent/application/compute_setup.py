@@ -74,6 +74,12 @@ _HOST_BUNDLE_FILES = {
     "pyproject.toml",
 }
 
+# One memo slot per release directory (issue #770). The bundle files change
+# only with a deployment, so the value is a (key, release) pair keyed by the
+# stats of both files plus the expected SHA; a mismatch reloads.
+_HostReleaseKey = tuple[str, int, int, int, int, str]
+_HOST_RELEASE_MEMO: dict[str, tuple[_HostReleaseKey, HostRelease]] = {}
+
 
 def validate_host_bundle(bundle: bytes) -> None:
     """Reject an unsafe or incomplete host archive.
@@ -133,10 +139,40 @@ def load_host_release(directory: Path, *, expected_sha: str) -> HostRelease:
 
 
 def load_control_plane_host_release(directory: Path | None = None) -> HostRelease | None:
-    """Return this process's host bundle, or None when it cannot be deployed."""
+    """Return this process's host bundle, or None when it cannot be deployed.
+
+    Memoized per process, keyed by the ``(st_mtime_ns, st_size)`` of
+    ``release.json`` and ``source.tar.gz`` plus the expected deployment SHA
+    (issue #770). The reconciler's schedule pass calls this every
+    ``compute.poll_seconds`` — synchronous work that used to re-read,
+    re-hash, and re-validate the whole archive each pass. Both files are
+    still stat'ed on every call, so a bundle that changes on disk (a new
+    deployment) reloads and re-validates from scratch. Only a successful
+    load is memoized. Any failure returns None and is retried on the next
+    call: an OSError while stat'ing, invalid content, a SHA mismatch, and
+    an OSError mid-read, which ``load_host_release`` raises as
+    ``HostReleaseError``. A bundle that stays invalid is therefore re-read
+    on every pass, as it was before the memo existed.
+    """
     directory = directory or Path("/app/compute-host-release")
     if not directory.is_dir():
         return None
+    try:
+        manifest_stat = (directory / "release.json").stat()
+        bundle_stat = (directory / "source.tar.gz").stat()
+    except OSError:
+        return None
+    key = (
+        str(directory),
+        manifest_stat.st_mtime_ns,
+        manifest_stat.st_size,
+        bundle_stat.st_mtime_ns,
+        bundle_stat.st_size,
+        os.environ.get("AGENT_DEPLOYMENT_SHA", ""),
+    )
+    memo = _HOST_RELEASE_MEMO.get(str(directory))
+    if memo is not None and memo[0] == key:
+        return memo[1]
     try:
         release = load_host_release(
             directory, expected_sha=os.environ.get("AGENT_DEPLOYMENT_SHA", "")
@@ -144,6 +180,7 @@ def load_control_plane_host_release(directory: Path | None = None) -> HostReleas
         validate_host_bundle(release.bundle)
     except (HostReleaseError, ValueError):
         return None
+    _HOST_RELEASE_MEMO[str(directory)] = (key, release)
     return release
 
 

@@ -23,6 +23,7 @@ from cloud_agent.admin_sandboxes import (
     sandbox_trajectory_cursor_scope,
 )
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage.admin_sandbox_inventory import AdminSandboxInventory
 
 if TYPE_CHECKING:
     import asyncpg
@@ -34,6 +35,7 @@ class AdminSandboxQueries:
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Use the shared Agent database pool."""
         self._pool = pool
+        self.inventory = AdminSandboxInventory(pool)
 
     async def list_running(self, *, cursor: SandboxCursor | None, limit: int) -> AdminSandboxList:
         """Include retained idle groups and paginate before joining their members."""

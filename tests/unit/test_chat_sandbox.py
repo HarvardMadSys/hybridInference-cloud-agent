@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host import chat_sandbox as chat_sandbox_mod
+from cloud_agent_host import chat_sandbox as chat_sandbox_mod, chat_sandbox_writers as writers
 from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
     ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S,
@@ -49,13 +49,12 @@ from cloud_agent_host.chat_sandbox_markers import (
     FINAL_ARCHIVE_MARKER_NAME,
     INITIAL_ARCHIVE_MARKER_ROOT,
 )
+from cloud_agent_host.chat_sandbox_network import ChatSandboxNetwork
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_ROOT,
-    GUEST_OBSERVER_ROTATE_BYTES,
     GUEST_OBSERVER_VERSION,
     MAX_OBSERVATION_BYTES,
-    GuestObservation,
     GuestObserverController,
     GuestObserverCursor,
     GuestObserverSnapshot,
@@ -372,23 +371,19 @@ def _plain_group_network(monkeypatch):
     (creation, relays, host exceptions, release, pruning, the in-guest check)
     is covered against a model of Docker in ``test_chat_group_network.py``.
     """
-    monkeypatch.setattr(ChatSandboxManager, "network_for", lambda _self, _spec: "agent-net")
-    monkeypatch.setattr(ChatSandboxManager, "require_host_rules", lambda _self: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "network_for", lambda _self, _spec: "agent-net")
+    monkeypatch.setattr(ChatSandboxNetwork, "require_host_rules", lambda _self: None)
     monkeypatch.setattr(
-        ChatSandboxManager,
+        ChatSandboxNetwork,
         "_require_group_network",
-        lambda self, spec, _current, *_snapshot: self._require(spec),
+        lambda self, spec, _current, *_snapshot: self._containers._require(spec),
     )
-    monkeypatch.setattr(ChatSandboxManager, "_sync_kata_guest_network", lambda *_args: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "_sync_kata_guest_network", lambda *_args: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "_verify_guest_network", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        ChatSandboxManager,
-        "_verify_guest_network",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        ChatSandboxManager,
+        ChatSandboxNetwork,
         "_release_sandbox_networks",
-        lambda self, spec, _current, *, expected_container_id: self._require_exact(
+        lambda self, spec, _current, *, expected_container_id: self._containers._require_exact(
             spec, expected_container_id
         ),
     )
@@ -719,165 +714,6 @@ def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
     assert observation.source is None
     assert observation.complete is False
     assert "published fence" in (observation.detail or "")
-
-
-def test_retained_guest_journal_rotates_only_without_active_turns(monkeypatch):
-    manager = ChatSandboxManager(ContainerBackend(image="registry/agent:1", runtime=KATA_RUNTIME))
-
-    class Controller:
-        def __init__(self):
-            self.pid = 91
-            self.size = 0
-            self.starts = 0
-            self.restart_choices: list[bool] = []
-
-        def snapshot(self, **_kwargs):
-            return GuestObserverSnapshot(
-                status=GuestObserverStatus(self.pid, 1, 0, 0, 0, self.size),
-                journal_size=self.size,
-                guest_mono_ns=1,
-            )
-
-        def start(self):
-            self.starts += 1
-            self.pid += 1
-            self.size = 0
-
-        def rotate_if_needed(self, *, threshold):
-            if self.size < threshold:
-                return False
-            self.start()
-            return True
-
-        def begin(
-            self,
-            *,
-            user_uid,
-            restart_if_missing=True,
-            rotate_threshold=None,
-            measurement_id=None,
-        ):
-            self.restart_choices.append(restart_if_missing)
-            # The real controller decides rotation on its opening read.
-            if rotate_threshold is not None:
-                self.rotate_if_needed(threshold=rotate_threshold)
-            return GuestObserverCursor(
-                uid=user_uid,
-                observer_pid=self.pid,
-                offset=self.size,
-                available=True,
-                measurement_id=measurement_id,
-            )
-
-        def finish(self, _cursor):
-            return GuestObservation(
-                source="kata-guest-ebpf-v1",
-                complete=True,
-                lost_events=0,
-                truncated=False,
-            )
-
-    controller = Controller()
-    monkeypatch.setattr(manager, "_guest_observer_controller", lambda _spec, **_kwargs: controller)
-
-    first = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE)
-    controller.size = GUEST_OBSERVER_ROTATE_BYTES
-    second = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE + 1)
-    assert controller.starts == 0
-
-    manager.finish_guest_observation(_spec(), first)
-    manager.finish_guest_observation(_spec(), second)
-    third = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE)
-
-    assert controller.starts == 1
-    assert controller.restart_choices == [True, False, True]
-    assert third.observer_pid == 92
-
-
-def test_one_containers_observer_begin_never_waits_for_anothers(monkeypatch):
-    """Each guest's observer lifecycle is serialized, and only that guest's."""
-    manager = ChatSandboxManager(ContainerBackend(image="registry/agent:1", runtime=KATA_RUNTIME))
-    held = replace(_spec(), thread_id="athr_held", sandbox_id="asbx_held")
-    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
-    held_inside = threading.Event()
-    sibling_calling = threading.Event()
-    other_done = threading.Event()
-    release = threading.Event()
-    guard = threading.Lock()
-    inside: dict[str, int] = {}
-    most: dict[str, int] = {}
-
-    class Controller:
-        def __init__(self, spec):
-            self.name = spec.container_name
-
-        def begin(
-            self,
-            *,
-            user_uid,
-            restart_if_missing=True,
-            rotate_threshold=None,
-            measurement_id=None,
-        ):
-            with guard:
-                inside[self.name] = inside.get(self.name, 0) + 1
-                most[self.name] = max(most.get(self.name, 0), inside[self.name])
-            try:
-                if self.name == held.container_name:
-                    held_inside.set()
-                    release.wait(timeout=10)
-                return GuestObserverCursor(uid=user_uid, observer_pid=91, available=True)
-            finally:
-                with guard:
-                    inside[self.name] -= 1
-
-        def finish(self, _cursor):
-            return GuestObservation(
-                source="kata-guest-ebpf-v1",
-                complete=True,
-                lost_events=0,
-                truncated=False,
-            )
-
-    monkeypatch.setattr(
-        manager, "_guest_observer_controller", lambda spec, **_kwargs: Controller(spec)
-    )
-
-    def other_turn():
-        cursor = manager.begin_guest_observation(other, user_uid=MEMBER_UID_BASE)
-        manager.finish_guest_observation(other, cursor)
-        other_done.set()
-
-    def sibling_turn():
-        sibling_calling.set()
-        manager.begin_guest_observation(held, user_uid=MEMBER_UID_BASE + 1)
-
-    threads = [
-        threading.Thread(
-            target=manager.begin_guest_observation,
-            args=(held,),
-            kwargs={"user_uid": MEMBER_UID_BASE},
-        ),
-        threading.Thread(target=other_turn),
-        threading.Thread(target=sibling_turn),
-    ]
-    try:
-        threads[0].start()
-        assert held_inside.wait(timeout=5)
-        threads[1].start()
-        # Another guest's turn opens and closes while this begin holds its own.
-        assert other_done.wait(timeout=5), "another container's begin waited for this one"
-        threads[2].start()
-        assert sibling_calling.wait(timeout=5)
-        time.sleep(0.1)
-    finally:
-        release.set()
-        for thread in threads:
-            if thread.ident is not None:
-                thread.join(timeout=5)
-
-    # A fork sibling on the held guest waited for it: one lifecycle per guest.
-    assert most == {held.container_name: 1, other.container_name: 1}
 
 
 def test_retained_tool_marks_are_read_as_the_shared_state_owner(monkeypatch):
@@ -2242,7 +2078,7 @@ def test_shared_writer_census_rejects_exiting_nonleaders_even_with_matching_coun
         [
             "/bin/sh",
             "-c",
-            ChatSandboxManager._shared_writer_task_state_script() + 'writer_state "$1"',
+            writers.TASK_STATE_SCRIPT + 'writer_state "$1"',
             "sh",
             str(proc),
         ],
@@ -2388,7 +2224,7 @@ def test_shared_writer_freeze_and_thaw_keep_live_writers_fenced_beside_zombies(
 
     manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="d" * 32)
 
-    receipt, already_stopped = manager._parse_frozen_processes(
+    receipt, already_stopped = writers.parse_frozen_processes(
         (tmp_path / Path(manifest).name).read_bytes(), allowed_uids={os.getuid()}
     )
     assert [(pid, uid) for pid, uid, _started in receipt] == [(writer.pid, os.getuid())]
@@ -2430,7 +2266,7 @@ def test_shared_writer_freeze_and_thaw_fence_live_threads_behind_a_zombie_leader
 
     manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="f" * 32)
 
-    receipt, already_stopped = manager._parse_frozen_processes(
+    receipt, already_stopped = writers.parse_frozen_processes(
         (tmp_path / Path(manifest).name).read_bytes(), allowed_uids={os.getuid()}
     )
     assert [(pid, uid) for pid, uid, _started in receipt] == [(writer.pid, os.getuid())]
@@ -2594,7 +2430,7 @@ def test_shared_writer_census_past_its_deadline_resumes_through_its_own_trap(
     owned_shared_writer_processes.append(writer)
     manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
     local_exec = manager.exec_capture
-    monkeypatch.setattr(chat_sandbox_mod, "_SHARED_WRITER_CENSUS_BUDGET_S", 0)
+    monkeypatch.setattr(writers, "CENSUS_BUDGET_S", 0)
     censuses = []
 
     def census_only(spec, argv, **kwargs):
@@ -2643,7 +2479,7 @@ def test_shared_writer_thaw_does_not_resume_a_process_stopped_before_the_freeze(
 
     assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
     assert _shared_writer_process_state(suspended.pid) == "T"
-    frozen, already_stopped = manager._parse_frozen_processes(receipt, allowed_uids={os.getuid()})
+    frozen, already_stopped = writers.parse_frozen_processes(receipt, allowed_uids={os.getuid()})
     assert [pid for pid, _uid, _started in frozen] == [writer.pid]
     assert [pid for pid, _uid, _started in already_stopped] == [suspended.pid]
     assert list(tmp_path.glob("snapshot-*")) == []
@@ -2802,7 +2638,7 @@ def test_shared_writer_thaw_detects_replacement_after_exact_id_cleanup(monkeypat
 )
 def test_shared_writer_manifest_rejects_values_outside_the_identity_fence(payload):
     with pytest.raises(SandboxError, match="snapshot writer census"):
-        ChatSandboxManager._parse_frozen_processes(payload, allowed_uids={10001})
+        writers.parse_frozen_processes(payload, allowed_uids={10001})
 
 
 def test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group(
@@ -2968,10 +2804,13 @@ def test_base_bundle_import_uses_activation_tmpfs_and_preserves_git_state(monkey
     monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
     commit = "a" * 40
 
-    manager.import_base_bundle(spec, b"bundle bytes", commit=commit, env={"SAFE": "1"})
+    bundle = io.BytesIO(b"bundle bytes")
+    manager.import_base_bundle(spec, bundle, commit=commit, env={"SAFE": "1"})
 
     command, kwargs = calls[-1]
-    assert kwargs["input"] == b"bundle bytes"
+    assert kwargs["stdin"] is bundle
+    assert kwargs["input"] is None
+    assert bundle.tell() == 0
     assert command[command.index("--workdir") + 1] == CHAT_WORKDIR
     assert ACTIVATION_TMPFS in command[-4]
     assert "git bundle unbundle" in command[-4]

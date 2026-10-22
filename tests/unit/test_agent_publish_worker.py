@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import io
 import json
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -551,7 +552,7 @@ async def test_a_base_import_replaces_a_token_github_refuses(monkeypatch):
         fetched_with.append(_git_token(kwargs["auth_env"]))
         if fetched_with[-1] == "ghs_1":
             raise TransientPublishError(_GIT_REFUSED.replace("ls-remote", "fetch"))
-        return b"bundle"
+        return io.BytesIO(b"bundle")
 
     monkeypatch.setattr(publish_worker, "fetch_base_bundle", fetch)
     monkeypatch.setattr(publish_worker, "_import_snapshot_base", AsyncMock(return_value=True))
@@ -711,6 +712,51 @@ async def test_title_generation_failure_publishes_a_meaningful_fallback(monkeypa
     generated.assert_awaited_once()
 
 
+async def test_draft_opens_before_slow_generated_title_then_is_enriched(monkeypatch):
+    """Title inference is optional enrichment, not the draft-creation gate."""
+    store = FakeStore(dict(_JOB))
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
+    )
+    title_started = asyncio.Event()
+    title_release = asyncio.Event()
+    draft_opened = asyncio.Event()
+    calls: list[tuple[str, bool]] = []
+
+    async def generated(*args, **kwargs):
+        title_started.set()
+        await title_release.wait()
+        return "[agent] Fix retries with bounded publication latency"
+
+    async def pull_request(**kwargs):
+        calls.append((kwargs["title"], kwargs.get("create_if_missing", True)))
+        draft_opened.set()
+        return "https://github.com/o/n/pull/7"
+
+    monkeypatch.setattr(publish_worker, "generate_pr_title", generated)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", pull_request)
+
+    publishing = asyncio.create_task(publish_one(store, credential=GitHubCredential("t")))
+    try:
+        await asyncio.wait_for(title_started.wait(), timeout=0.5)
+        await asyncio.wait_for(draft_opened.wait(), timeout=0.5)
+        assert calls == [("[agent] Stabilize test retries", True)]
+        assert not publishing.done()
+        title_release.set()
+        assert await asyncio.wait_for(publishing, timeout=0.5) == "https://github.com/o/n/pull/7"
+    finally:
+        if not publishing.done():
+            publishing.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await publishing
+
+    assert calls == [
+        ("[agent] Stabilize test retries", True),
+        ("[agent] Fix retries with bounded publication latency", False),
+    ]
+    assert store.snapshot_recorded == (9, "https://github.com/o/n/pull/7", "s")
+
+
 async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(monkeypatch):
     from cloud_agent import sandbox_manager_routing
 
@@ -732,7 +778,7 @@ async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(
             branch="agent/athr_origin",
             commit_sha="b" * 40,
             changed_files=["x"],
-            base_bundle=b"bundle",
+            base_bundle=io.BytesIO(b"bundle"),
         ),
     )
     captured_pr = _patch_pr(monkeypatch)
@@ -741,8 +787,9 @@ async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(
         def __init__(self) -> None:
             self.imported: tuple[dict[str, Any], str, bytes] | None = None
 
-        async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
-            self.imported = (row, commit_sha, bundle)
+        async def import_shared_base(self, row, *, commit_sha: str, bundle):
+            self.imported = (row, commit_sha, bundle.read())
+            bundle.seek(0)
 
     sandbox_manager = SandboxManager()
 
@@ -783,13 +830,14 @@ async def test_a_retried_base_import_bundles_against_the_workspaces_first_base(m
 
     def fetch(**kwargs: Any) -> bytes:
         fetched.update(kwargs)
-        return b"bundle"
+        return io.BytesIO(b"bundle")
 
     class SandboxManager:
         imported: tuple[str, bytes] | None = None
 
-        async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
-            self.imported = (commit_sha, bundle)
+        async def import_shared_base(self, row, *, commit_sha: str, bundle):
+            self.imported = (commit_sha, bundle.read())
+            bundle.seek(0)
 
     sandbox_manager = SandboxManager()
 
@@ -833,7 +881,7 @@ async def test_a_base_import_that_cannot_fence_its_start_waits(monkeypatch, fenc
     class _SandboxManager:
         imported = False
 
-        async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
+        async def import_shared_base(self, row, *, commit_sha: str, bundle):
             self.imported = True
 
     sandbox_manager = _SandboxManager()
@@ -849,7 +897,7 @@ async def test_a_base_import_that_cannot_fence_its_start_waits(monkeypatch, fenc
         store,
         snapshot={"snapshot_id": 9, "sandbox_id": "asbx_1", "anchor_job_id": "ajob_1"},
         commit_sha="c" * 40,
-        bundle=b"bundle",
+        bundle=io.BytesIO(b"bundle"),
     )
 
     assert sandbox_manager.imported is False
@@ -1055,6 +1103,35 @@ async def test_a_draft_retargeted_by_a_reviewer_is_refreshed_not_duplicated(monk
     assert json.loads(requests[1].content) == {"title": "[agent] Fix retries", "body": "Summary"}
 
 
+async def test_optional_title_enrichment_does_not_reopen_a_closed_draft(monkeypatch):
+    """A cosmetic late title cannot create a second PR after owner closure."""
+    requests: list[str] = []
+
+    def handle(request):
+        requests.append(request.method)
+        return httpx.Response(200, json=[])
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs),
+    )
+
+    url = await ensure_draft_pull_request(
+        repo="o/n",
+        head_branch="agent/athr_1",
+        base_branch="dev",
+        title="[agent] Fix retries",
+        body="Summary",
+        credential=GitHubCredential("t"),
+        create_if_missing=False,
+    )
+
+    assert url is None
+    assert requests == ["GET"]
+
+
 async def test_pr_closed_during_update_creates_a_new_draft(monkeypatch):
     requests = []
 
@@ -1085,69 +1162,6 @@ async def test_pr_closed_during_update_creates_a_new_draft(monkeypatch):
     )
     assert url == "https://github.com/o/n/pull/8"
     assert requests == ["GET", "PATCH", "POST"]
-
-
-async def test_the_pull_request_exchange_rides_one_borrowed_client(monkeypatch):
-    """The lookup, the refresh and the create share the lender's pool and open none."""
-    requests: list[str] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        requests.append(request.method)
-        if request.method == "GET":
-            return httpx.Response(
-                200,
-                json=[{"number": 7, "state": "open", "html_url": "https://github.com/o/n/pull/7"}],
-            )
-        if request.method == "PATCH":
-            return httpx.Response(200, json={"state": "closed"})
-        return httpx.Response(201, json={"html_url": "https://github.com/o/n/pull/8"})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as borrowed:
-        monkeypatch.setattr(
-            httpx, "AsyncClient", Mock(side_effect=AssertionError("opened a client of its own"))
-        )
-        url = await ensure_draft_pull_request(
-            repo="o/n",
-            head_branch="agent/athr_1",
-            base_branch="dev",
-            title="[agent] Fix retries",
-            body="Summary",
-            credential=GitHubCredential("t"),
-            client=borrowed,
-        )
-        assert not borrowed.is_closed, "the pool belongs to whoever lent it"
-    assert url == "https://github.com/o/n/pull/8"
-    assert requests == ["GET", "PATCH", "POST"]
-
-
-@pytest.mark.parametrize("step", ["GET", "POST"])
-async def test_a_borrowed_client_never_carries_the_token_through_a_redirect(step):
-    """The lender's redirect setting must not decide where an installation token goes."""
-    asked: list[tuple[str, str]] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        asked.append((request.method, request.url.host))
-        if request.method == step:
-            return httpx.Response(307, headers={"location": "https://elsewhere.example/pulls"})
-        if request.method == "GET":
-            return httpx.Response(200, json=[])
-        return httpx.Response(201, json={"html_url": "https://github.com/o/n/pull/8"})
-
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handle), follow_redirects=True
-    ) as borrowed:
-        with pytest.raises(TransientPublishError):
-            await ensure_draft_pull_request(
-                repo="o/n",
-                head_branch="agent/athr_1",
-                base_branch="dev",
-                title="[agent] Fix retries",
-                body="Summary",
-                credential=GitHubCredential("t"),
-                client=borrowed,
-            )
-    assert asked[-1] == (step, "api.github.com")
-    assert {host for _method, host in asked} == {"api.github.com"}
 
 
 @pytest.mark.parametrize(
@@ -1731,42 +1745,6 @@ async def test_app_only_deployment_actually_publishes(monkeypatch):
     assert app.scoped is True
 
 
-async def test_the_loop_lends_its_pool_to_each_title_and_pull_request(monkeypatch):
-    """A publication's model calls and GitHub calls each used to open a client of their own."""
-    store = FakeStore(dict(_JOB))
-    _patch_publish(
-        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
-    )
-    opened = _patch_pr(monkeypatch)
-    titled: list[Any] = []
-
-    async def generated(job, changed_files, *, grants, client=None):
-        titled.append(client)
-        return None
-
-    monkeypatch.setattr(publish_worker, "generate_pr_title", generated)
-    shared = object()
-    task = asyncio.create_task(
-        publish_loop(
-            store,
-            credential_provider=lambda: GitHubCredential("t"),
-            interval_seconds=0.01,
-            http=shared,
-        )
-    )
-    for _ in range(200):
-        await asyncio.sleep(0.01)
-        if store.snapshot_recorded:
-            break
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-
-    assert store.snapshot_recorded == (9, "https://github.com/o/n/pull/7", "s")
-    assert titled == [shared]
-    assert opened["client"] is shared
-
-
 async def test_loop_cancellation_during_heartbeat_cleanup_still_stops_the_publisher(monkeypatch):
     """An owner's stop cannot be mistaken for the heartbeat's expected stop."""
     store = FakeStore(dict(_JOB))
@@ -1944,6 +1922,46 @@ async def test_entitlement_outage_defers_before_any_publication_effect(monkeypat
     mint.assert_not_awaited()
     push.assert_not_called()
     pull_request.assert_not_awaited()
+
+
+async def test_admission_handoff_does_not_wait_for_entitlement_completion(monkeypatch):
+    """A slow repository check must not block an unrelated claim from starting."""
+    publish_store = FakeStore(dict(_JOB))
+    entitlement_entered = asyncio.Event()
+    entitlement_release = asyncio.Event()
+    admission_started = asyncio.Event()
+
+    async def blocking_entitlement(
+        repo: str,
+        user_id: str,
+        *,
+        store: Any,
+        app_credentials: Any,
+    ) -> None:
+        assert (repo, user_id, store, app_credentials) == ("o/n", "u1", publish_store, None)
+        entitlement_entered.set()
+        await entitlement_release.wait()
+
+    monkeypatch.setattr(publish_worker, "require_entitled_repo", blocking_entitlement)
+    publishing = asyncio.create_task(
+        publish_worker._publish_claimed_owned(
+            publish_store,
+            dict(_JOB),
+            credential=None,
+            app_credentials=None,
+            base_branch="dev",
+            admission_started=admission_started,
+        )
+    )
+    try:
+        await asyncio.wait_for(admission_started.wait(), timeout=0.5)
+        assert entitlement_entered.is_set()
+        assert not entitlement_release.is_set()
+        assert not publishing.done()
+    finally:
+        entitlement_release.set()
+
+    assert await asyncio.wait_for(publishing, timeout=0.5) is None
 
 
 async def test_entitlement_error_after_publication_started_does_not_requeue(monkeypatch):

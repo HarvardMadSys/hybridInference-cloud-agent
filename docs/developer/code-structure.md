@@ -95,7 +95,7 @@ than importing the facade back into themselves.
 | `runtime_upgrades` | Agent CLI updates started from the admin Settings page |
 | `integrations`, `mcp`, `session` | Source control, MCP selection, identity, and user preferences |
 | `teams` | Teams, members, invitations, and join requests |
-| `_host_reports`, `_sandbox_manager_wire`, `_prompts` | Private helpers: bounds for host and worker reports, Sandbox Manager field-name compatibility, and the prompt text rule |
+| `_host_reports`, `_prompts` | Private helpers: bounds for host and worker reports, and the prompt text rule |
 
 Keep model names and serialized behavior stable during structural refactors.
 Cross-domain annotations must resolve immediately after import. Intentional

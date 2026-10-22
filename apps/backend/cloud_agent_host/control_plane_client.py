@@ -235,6 +235,8 @@ class ControlPlane:
                     raise
                 # A control plane from before batches, still answering while a
                 # deploy rolls forward, or again after one rolled back.
+                # COMPAT(remove-after=2026-12-31): every control plane serves
+                # events:batch; this fallback to one post per event goes then.
                 self._batches = False
                 logger.info(
                     "agent_event_batches_unsupported job_id=%s status_code=%s",

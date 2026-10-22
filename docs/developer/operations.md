@@ -873,20 +873,18 @@ MCP calls pass through the control plane. The sandbox holds a scoped relay
 credential; upstream credentials stay outside it:
 
 ```text
-sandbox ──[residency or attempt mcp credential]──▶ MCP-only relay ──[owner credential]──▶ MCP server
+sandbox ──[residency mcp credential]──▶ MCP-only relay ──[owner credential]──▶ MCP server
 ```
 
 A chat member's CLI process serves several turns, so it holds its residency's
 credential (`amr.…`), returned when the residency is established. On every
 call the relay resolves it to the attempt of that chat running under that
-residency, then applies the same fence as a turn's own token: the attempt must
-be current and leased, its job running and not stopped, its host enrolled.
-Between turns, or once the residency rotates, expires or is released, the
-credential authorizes nothing. A follow-up whose MCP servers did not change
-therefore keeps the live process; adding or removing a connection still
-restarts it, because a CLI reads its servers once at start. A process started
-with a turn's own token (from a control plane that predates residency
-credentials) restarts at the next turn, as before.
+residency, then fences that attempt: it must be current and leased, its job
+running and not stopped, its host enrolled. Between turns, or once the
+residency rotates, expires or is released, the credential authorizes nothing.
+A follow-up whose MCP servers did not change therefore keeps the live process;
+adding or removing a connection still restarts it, because a CLI reads its
+servers once at start.
 
 Each request keeps the attempt and residency generation captured at authentication.
 After waiting for OAuth, an approval or an upstream session, the relay checks
@@ -3587,12 +3585,15 @@ rules, not the host's.
   startup preflight install the tables and read them back — every chain, its
   hook and its rule count, the protected set, the registered pool — and any
   difference stops the runner claiming and the sandbox manager starting. Group network
-  work repeats the check and trusts a pass for 60 seconds. The sandbox manager's
-  sweep renews that pass after 45 seconds, whether or not a group runs, so a
-  start or wake never waits for the install and read-back itself. The runner
-  renews its own pass when it hands a turn over and that pass is 45 seconds old.
-  The turn's process runs no helper of its own: it takes the runner's pass, and
-  declines the turn unless that pass is less than 60 seconds old.
+  work repeats the check and trusts a pass for 60 seconds. While anything of this
+  deployment runs — a group, one that is stopping, or an environment test or
+  prebuild — the sandbox manager's sweep renews that pass after 45 seconds, so a
+  start or wake never waits for the install and read-back itself. A host where
+  nothing runs starts no helper for it: the next start or wake renews a lapsed
+  pass before its group joins a bridge. The runner renews its own pass when it
+  hands a turn over and that pass is 45 seconds old. The turn's process runs no
+  helper of its own: it takes the runner's pass, and declines the turn unless
+  that pass is less than 60 seconds old.
 - **Scoped to this deployment.** The tables recognise traffic by the bridge
   interface prefix. They never flush or edit another deployment's rules, so
   several deployments can share a host.

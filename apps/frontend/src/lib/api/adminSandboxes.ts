@@ -188,7 +188,13 @@ export interface AdminSandboxesPage {
   sandboxes: AdminSandbox[];
   next_cursor: string | null;
   observed_at: string;
-  total_count: number;
+  total_count: number | null;
+  /** Present on the opt-in snapshot/change-feed protocol. */
+  change_cursor?: string | null;
+  mode?: 'snapshot' | 'delta';
+  deleted_ids?: string[];
+  hosts?: { host: string; last_heartbeat_at: string | null }[];
+  reset_required?: boolean;
 }
 
 export function getAdminSandboxes(
@@ -197,6 +203,7 @@ export function getAdminSandboxes(
     limit?: number;
     state?: AdminSandboxState | 'all';
     include_archived?: boolean;
+    sync?: boolean;
   } = {},
   signal?: AbortSignal,
 ): Promise<AdminSandboxesPage> {
@@ -206,6 +213,7 @@ export function getAdminSandboxes(
   if (filters.state) params.set('state', filters.state);
   if (filters.include_archived !== undefined)
     params.set('include_archived', String(filters.include_archived));
+  if (filters.sync) params.set('sync', 'true');
   const query = params.size ? `?${params}` : '';
   return fetchWithAuth(config.apiBase, `/admin/agent/sandboxes${query}`, {
     signal,
