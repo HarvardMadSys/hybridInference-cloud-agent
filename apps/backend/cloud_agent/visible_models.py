@@ -94,15 +94,22 @@ async def agent_canonical_model(model: str, gateway: GatewayClient, *, user_id: 
         )
         raise ModelCatalogUnavailable(str(exc)) from exc
 
-    # An exact catalog entry wins outright. Checking it first means an alias
-    # can never shadow a real model, whatever the table says.
+    return resolve_model_in_catalog(model, models, aliases)
+
+
+def resolve_model_in_catalog(model: str, models: list[str], aliases: dict[str, str]) -> str | None:
+    """Look ``model`` up in an already-read catalog: canonical id or None.
+
+    An exact catalog entry wins outright — checking it first means an alias
+    can never shadow a real model, whatever the table says.
+    """
     if model in models:
         return model
     canonical = aliases.get(model)
     if canonical is not None and canonical in models:
         return canonical
-    # Refused, never dropped: narrowing a requested scope silently is how a job
-    # ends up running against models nobody asked for.
+    # Refused, never dropped: narrowing a requested scope silently is how a
+    # job ends up running against models nobody asked for.
     return None
 
 
@@ -159,5 +166,32 @@ async def agent_model_reasoning_efforts(
             "agent_model_efforts_unavailable",
             exc_info=True,
             extra={"event": "agent_model_efforts_unavailable", "user_id": user_id},
+        )
+        raise ModelCatalogUnavailable(str(exc)) from exc
+
+
+async def agent_model_catalog_bundle(
+    gateway: GatewayClient, *, user_id: str
+) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+    """Read models, aliases, and effort domains from one catalog response.
+
+    The admission path needs the alias table (to resolve the requested
+    model) and the effort domains (to validate the offered effort) on every
+    send — job create, follow-up, queued-message settle. One read serves
+    both checks (issue #781); the catalog stays deliberately uncached
+    across requests, so this is one read per send, not one per process.
+
+    Same failure posture as :func:`agent_canonical_model`.
+
+    Raises:
+        ModelCatalogUnavailable: The catalog could not be read.
+    """
+    try:
+        return await gateway.model_catalog_bundle(user_id)
+    except GatewayError as exc:
+        logger.warning(
+            "agent_model_catalog_unavailable",
+            exc_info=True,
+            extra={"event": "agent_model_catalog_unavailable", "user_id": user_id},
         )
         raise ModelCatalogUnavailable(str(exc)) from exc

@@ -80,6 +80,13 @@ class _FakeGateway:
         # is exactly what an older gateway answers.
         return [_TEST_MODEL], {}
 
+    async def model_catalog_bundle(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+        # The one-read bundle the create path uses (issue #781); no aliases
+        # and no effort domains, the older-gateway shape.
+        return [_TEST_MODEL], {}, {}
+
     async def agent_access(self, user_id: str) -> dict[str, Any]:
         return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
 

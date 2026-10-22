@@ -71,6 +71,15 @@ def test_config_absent_is_none_not_an_error():
     assert AppConfig.from_env({"AGENT_GITHUB_APP_ID": "1"}) is None
 
 
+def _real_pem_load(*args, **kwargs):
+    """The unpatched cryptography parse, immune to the module shadowing the
+    editable install does (the .pth pins ``cloud_agent`` to whichever tree is
+    on sys.path first, so the tests patch PyJWT's own binding instead)."""
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    return load_pem_private_key(*args, **kwargs)
+
+
 def test_config_unescapes_a_pasted_key(keypair):
     """A key pasted into an env var arrives with literal \\n sequences."""
     private_pem, _ = keypair
@@ -103,6 +112,71 @@ def test_unusable_private_key_is_a_clear_error():
     """A malformed key must fail with a message, not a stack trace."""
     with pytest.raises(GitHubAppError):
         build_app_jwt(AppConfig(app_id="1", private_key="not a key"))
+
+
+def test_jwt_signing_parses_the_key_once(keypair, monkeypatch):
+    """Issue #772: the PEM must be parsed once per config, not per signature.
+
+    ``jwt.encode`` with a PEM string re-validates the RSA key on every call
+    (~43 ms measured, on the event loop, on the claim path); with a parsed
+    key object the same signature costs ~0.7 ms. The observable is PyJWT's
+    own parse entry point (``jwt.algorithms.load_pem_private_key``): at the
+    baseline every signature parses, so three signatures count three parses;
+    with the fix's memo the count stays at one. The memo lives on the config
+    object itself, which is replaced wholesale when settings change — so a
+    rotated key can never be served from a stale memo.
+    """
+    import jwt.algorithms
+
+    import cloud_agent.github_app as github_app_module
+
+    calls = 0
+
+    def counting_load(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _real_pem_load(*args, **kwargs)
+
+    # PyJWT's parse entry point, for the baseline where the PEM string still
+    # reaches jwt.encode, and the fix's own binding when present — so a
+    # regression that leaks the PEM back into jwt.encode raises the count
+    # even though the memo still fires.
+    monkeypatch.setattr(jwt.algorithms, "load_pem_private_key", counting_load)
+    if hasattr(github_app_module, "load_pem_private_key"):
+        monkeypatch.setattr(github_app_module, "load_pem_private_key", counting_load)
+
+    config = AppConfig(app_id="12345", private_key=keypair[0])
+    for i in range(3):
+        assert build_app_jwt(config, now=1_000_000 + i)
+    assert calls == 1
+
+
+def test_a_second_config_with_the_same_key_parses_again(keypair, monkeypatch):
+    """The memo is per config object, not global: two holders of the same PEM
+    each parse once, and a config rebuilt after a settings change cannot see
+    a memo computed for an earlier key."""
+    import jwt.algorithms
+
+    import cloud_agent.github_app as github_app_module
+
+    calls = 0
+
+    def counting_load(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _real_pem_load(*args, **kwargs)
+
+    # See test_jwt_signing_parses_the_key_once: hook both PyJWT's binding and,
+    # when present, the fix's module-level parse.
+    monkeypatch.setattr(jwt.algorithms, "load_pem_private_key", counting_load)
+    if hasattr(github_app_module, "load_pem_private_key"):
+        monkeypatch.setattr(github_app_module, "load_pem_private_key", counting_load)
+
+    first = AppConfig(app_id="12345", private_key=keypair[0])
+    second = AppConfig(app_id="12345", private_key=keypair[0])
+    assert build_app_jwt(first)
+    assert build_app_jwt(second)
+    assert calls == 2
 
 
 def test_user_authorization_uses_oauth_even_when_app_is_already_installed(config):
