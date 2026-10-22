@@ -1392,10 +1392,12 @@ def _hot_kata_workspace(monkeypatch, *, stopped_groups: int = 0):
         if argv[:2] != ["docker", "exec"]:
             return popen(argv, **kwargs)
         docker.calls.append(list(argv))
-        # A Git view reads its own markers back over a clean workspace.
+        # A Git view reads its own markers back over a clean workspace: each
+        # section it prints, in its order and empty, then a status of 0.
         tags = {kind: tag for tag, kind in re.findall(r"(__HYI_\w+?_([A-Z]+)__)", argv[-1])}
-        output = "".join(f"\n{tags[kind]}\n" for kind in ("DIFF", "COMMITS")) if tags else ""
-        output += f"\n{tags['STATUS']}0\n" if tags else ""
+        status = tags.pop("STATUS", None)
+        output = "".join(f"\n{tag}\n" for tag in tags.values())
+        output += f"\n{status}0\n" if status else ""
         return popen(["/bin/sh", "-c", 'sleep 0.05; printf "%s" "$1"', "sh", output], **kwargs)
 
     monkeypatch.setattr(subprocess, "run", exec_run)
