@@ -197,13 +197,18 @@ async def _enrolled(store) -> None:
 
 async def _beat(store, retained: list[dict[str, Any]], *, grants: Any = None) -> Any:
     """One heartbeat through the real handler and the real store."""
-    return await hosts.heartbeat_host(
+    background_tasks = BackgroundTasks()
+    reply = await hosts.heartbeat_host(
         HostHeartbeatRequest.model_validate({"retained_sandboxes": retained}),
-        background_tasks=BackgroundTasks(),
+        background_tasks=background_tasks,
         host={"host": HOST, "credential_hash": CREDENTIAL},
         store=store,
         grants=grants,
     )
+    # FastAPI executes these after sending the response. A direct handler call
+    # must run them explicitly to model the complete request lifecycle.
+    await background_tasks()
+    return reply
 
 
 # -- observations that change nothing ------------------------------------------
