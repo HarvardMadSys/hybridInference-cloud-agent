@@ -367,7 +367,10 @@ describe('job page rendering work', () => {
     expect(diff.querySelectorAll('code > span')).toHaveLength(4000);
     expect(diff).toHaveTextContent('"dependency-3999"');
     expect(diff).not.toHaveTextContent('"dependency-4000"');
-    expect(screen.getByText('Diff limited to the first 4,000 lines.')).toBeInTheDocument();
+    // Formatted as the panel formats it, in whatever locale the run has.
+    expect(
+      screen.getByText(`Diff limited to the first ${(4000).toLocaleString()} lines.`),
+    ).toBeInTheDocument();
 
     fireEvent.change(screen.getByRole('combobox', { name: 'Changed file' }), {
       target: { value: 'src/app.ts' },

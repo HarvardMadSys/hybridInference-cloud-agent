@@ -190,8 +190,9 @@ export function useAgentNotifications(
       } finally {
         if (pendingReads.get(id) === version) pendingReads.delete(id);
       }
-      // Outside the fence above, so a turn this read found running has its
-      // questions read at once rather than on the clock's next tick.
+      // Outside the fence above. A turn this read found running in a
+      // conversation not yet watched has its questions read at once; one
+      // already watched is read on its clock's next tick.
       if (accepted) watchQuestions();
     }
 
