@@ -1,7 +1,7 @@
 """Persist the bounded context used to title a snapshot publication.
 
-Revision ID: 0095_snapshot_title_context
-Revises: 0094_thread_message_pages
+Revision ID: 0096_snapshot_title_context
+Revises: 0095_memory_retention
 
 The publisher used to rebuild every captured chat transcript while claiming a
 snapshot.  Keeping the already-bounded title input on the immutable snapshot
@@ -11,8 +11,8 @@ history.
 
 from alembic import op
 
-revision = "0095_snapshot_title_context"
-down_revision = "0094_thread_message_pages"
+revision = "0096_snapshot_title_context"
+down_revision = "0095_memory_retention"
 branch_labels = None
 depends_on = None
 

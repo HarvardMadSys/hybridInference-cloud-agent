@@ -142,6 +142,75 @@ async def test_purge_forgets_expired_archives_only(store, pool):
     assert [memory["id"] for memory in archived] == [recent["id"]]
 
 
+async def test_retention_uses_bounded_index_access_with_100k_archives(store, pool):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_memories "
+            "(id,user_id,content,description,status,origin,archived_at) "
+            "SELECT 'plan-' || n, 'owner-' || (n % 1000), 'Rule', 'Rule', 'archived', 'agent', "
+            "NOW() - make_interval(days => CASE WHEN n <= 1000 THEN 91 ELSE 1 END) "
+            "FROM generate_series(1,100000) n"
+        )
+        await conn.execute(
+            "UPDATE agent_memories SET superseded_by='plan-1' WHERE id='plan-100000'"
+        )
+        await conn.execute("ANALYZE agent_memories")
+        plans = []
+        for query in (
+            "SELECT id FROM agent_memories WHERE status='archived' "
+            "AND archived_at < statement_timestamp()-make_interval(days => 90) "
+            "ORDER BY archived_at,id LIMIT 500 FOR UPDATE SKIP LOCKED",
+            "SELECT id FROM agent_memories WHERE superseded_by='plan-1'",
+        ):
+            raw = await conn.fetchval("EXPLAIN (ANALYZE, FORMAT JSON) " + query)
+            plans.append(json.loads(raw)[0]["Plan"])
+
+    def nodes(plan):
+        yield plan
+        for child in plan.get("Plans", []):
+            yield from nodes(child)
+
+    retention = [node for node in nodes(plans[0]) if node.get("Index Name")]
+    assert [node["Index Name"] for node in retention] == ["idx_agent_memories_retention"]
+    assert retention[0]["Actual Rows"] == 500
+    assert "idx_agent_memories_superseded" in {node.get("Index Name") for node in nodes(plans[1])}
+
+
+async def test_retention_bounds_each_pass_and_cleans_self_references(store, pool, monkeypatch):
+    from cloud_agent.storage.repositories import agent_memory
+
+    monkeypatch.setattr(agent_memory, "_PURGE_BATCH_SIZE", 2)
+    monkeypatch.setattr(agent_memory, "_PURGE_MAX_BATCHES", 2)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_memories (id,user_id,content,description,origin,status,archived_at) "
+            "SELECT 'old-' || n, 'alice', 'old', 'old', 'agent', 'archived', "
+            "NOW() - interval '91 days' FROM generate_series(1,7) n"
+        )
+        await conn.execute(
+            "INSERT INTO agent_memories (id,user_id,content,description,origin,superseded_by) "
+            "VALUES ('active','alice','keep','keep','manual','old-1')"
+        )
+    await store.agent_memory.purge_memories()
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval("SELECT count(*) FROM agent_memories WHERE status='archived'") == 3
+        )
+        assert (
+            await conn.fetchval("SELECT superseded_by FROM agent_memories WHERE id='active'")
+            is None
+        )
+    await store.agent_memory.purge_memories()
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM agent_memories") == 1
+        indexes = await conn.fetch(
+            "SELECT indexname FROM pg_indexes WHERE tablename='agent_memories'"
+        )
+        assert {"idx_agent_memories_retention", "idx_agent_memories_superseded"} <= {
+            row["indexname"] for row in indexes
+        }
+
+
 async def test_migration_round_trip(store, pool):
     config = _db_config()
     try:
