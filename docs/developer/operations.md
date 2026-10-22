@@ -1986,13 +1986,19 @@ Concretely, grant the sandbox manager role `s3:GetBucketVersioning` on
 `arn:aws:s3:::<bucket>`; `s3:ListBucket` on that bucket constrained to the
 `cloud-agent/sandbox/*` prefix (so an exact-key `HeadObject` can distinguish a
 missing immutable initial object from an authorization failure); and
-`s3:GetObject`, `s3:PutObject`, and `s3:AbortMultipartUpload` on
-`arn:aws:s3:::<bucket>/cloud-agent/sandbox/*`. The configured KMS key
-policy must permit `kms:GenerateDataKey` and `kms:Decrypt` for SSE-KMS
-multipart uploads. An access key needs those same S3 actions; SSE-S3 uploads
-do not call KMS. Add an `AbortIncompleteMultipartUpload` bucket lifecycle
-rule as defense in depth for a host that disappears before its bounded abort
-request completes.
+`s3:GetObject`, `s3:GetObjectVersion`, `s3:PutObject`, and
+`s3:AbortMultipartUpload` on `arn:aws:s3:::<bucket>/cloud-agent/sandbox/*`.
+Checkpoint restores and snapshot loads need `s3:GetObjectVersion`: they read
+the exact object version their record names. The configured KMS key policy
+must permit `kms:GenerateDataKey` and `kms:Decrypt` for SSE-KMS multipart
+uploads. An access key needs those same S3 actions; SSE-S3 uploads do not call
+KMS. Snapshot cleanup also uses `s3:DeleteObject` and `s3:DeleteObjectVersion`
+on `arn:aws:s3:::<bucket>/cloud-agent/sandbox/env/*`. Those two are optional:
+a refused delete is logged and retried, and the bucket lifecycle rule described
+under [Environment installation snapshots](#environment-installation-snapshots)
+removes the objects instead. Add an `AbortIncompleteMultipartUpload` bucket
+lifecycle rule as defense in depth for a host that disappears before its
+bounded abort request completes.
 
 Changing the bucket changes where new archives go and where restores read.
 Checkpoints and environment snapshots are read back by object version, which a
@@ -2238,8 +2244,8 @@ could not start it, or reaped because the host died right after claiming. It
 is not a failed restore and starts no wait. The checkpoint is never changed. Workspace
 requests to a `cold` or `restoring` group return `workspace_restoring` (409)
 until a turn has restored it. Restore reads with
-the archive credentials hosts already receive: `s3:GetObject` and
-`kms:Decrypt` on the archive prefix.
+the archive credentials hosts already receive: `s3:GetObject`,
+`s3:GetObjectVersion` and `kms:Decrypt` on the archive prefix.
 
 A turn that was running when its host disappeared is not covered and still
 ends as LOST. A group created from a locally built sandbox image cannot move,
