@@ -3,7 +3,8 @@
     "next/core-web-vitals",
     "plugin:@typescript-eslint/recommended",
     "prettier",
-    "./eslint-ratchet.json"
+    "./eslint-ratchet.json",
+    "./eslint-test-ratchet.json"
   ],
   "parser": "@typescript-eslint/parser",
   "parserOptions": {
