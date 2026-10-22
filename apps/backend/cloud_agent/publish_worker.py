@@ -577,11 +577,16 @@ def _pr_title(job: dict[str, Any], changed_files: list[str]) -> str:
     # Share the title budget across summaries when several chats settle together.
     fragments = list(lines)
     try:
-        summary_count = max(len(fragments), int(job.get("session_summary_count", 0)))
+        summary_count = int(job.get("session_summary_count", 0))
     except (TypeError, ValueError):
-        summary_count = len(fragments)
-    if summary_count > 5:
-        fragments = [*fragments[:4], f"+{summary_count - 4} more"]
+        summary_count = 0
+    # A collapsed duplicate or an unreadable summary is no further work; one
+    # the claim did not keep (it keeps the newest few) may be.
+    kept = len(summaries) if isinstance(summaries, list) else 0
+    total = len(fragments) + max(0, summary_count - kept)
+    if total > 5 and fragments:
+        shown = fragments[:4]
+        fragments = [*shown, f"+{total - len(shown)} more"]
     budget = (70 - 2 * (len(fragments) - 1)) // max(1, len(fragments))
     summary = "; ".join(
         line if len(line) <= budget else line[: budget - 1].rstrip() + "…" for line in fragments
