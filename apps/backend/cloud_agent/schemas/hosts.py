@@ -31,6 +31,10 @@ from cloud_agent_shared.sandbox_resources import (
     SandboxResourceSample,
     parse_sandbox_resource_sample,
 )
+from cloud_agent_shared.sandbox_restore import (
+    SandboxCheckpointMember as SandboxCheckpointMember,
+    SandboxCheckpointReceipt,
+)
 from cloud_agent_shared.shared_protocol import HOST_LAUNCH_ERROR_MAX_CHARS
 
 # The host name is charset-checked in the same shape and for the same reason
@@ -169,42 +173,8 @@ class ResidencyBeat(BaseModel):
     generation: int = Field(..., ge=1)
 
 
-class SandboxCheckpointMember(BaseModel):
-    """One chat's native-session position inside a checkpoint."""
-
-    thread_id: str = Field(..., min_length=1, max_length=128)
-    native_session_id: str | None = Field(None, max_length=256)
-    last_settled_job_id: str | None = Field(None, max_length=256)
-    context_status: str | None = Field(None, max_length=32)
-
-
-class SandboxCheckpointBeat(BaseModel):
+class SandboxCheckpointBeat(SandboxCheckpointReceipt):
     """The latest restorable checkpoint a host stored for one retained group."""
-
-    checkpoint_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
-    sandbox_id: str = Field(..., min_length=1, max_length=128)
-    generation: int = Field(..., ge=1)
-    container_id: str = Field(..., min_length=12, max_length=128)
-    base_image: str = Field(..., min_length=1, max_length=256)
-    runtime_id: str = Field(..., min_length=1, max_length=128)
-    runtime_version: str | None = Field(None, max_length=128)
-    object_key: str = Field(
-        ...,
-        pattern=r"^cloud-agent/sandbox/v2/[0-9a-f]{64}/g[0-9]+/[0-9a-f]{32}\.oci\.tar$",
-        max_length=256,
-    )
-    version_id: str | None = Field(None, max_length=1024)
-    sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
-    size_bytes: int = Field(..., ge=1)
-    new_layer_bytes: int = Field(..., ge=0)
-    layer_count: int = Field(..., ge=1, le=1024)
-    created_at: datetime
-    members: list[SandboxCheckpointMember] = Field(default_factory=list, max_length=128)
-    durations_ms: dict[str, int] = Field(default_factory=dict, max_length=16)
-    format_version: Literal[1] = 1
-    # The group's start fence when the checkpointed run began. Absent from
-    # managers that predate restore; such a receipt never covers its group.
-    start_seq: int | None = Field(None, ge=0)
 
 
 class RetainedSandboxBeat(BaseModel):
