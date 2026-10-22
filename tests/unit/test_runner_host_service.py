@@ -12,6 +12,7 @@ a number, changing their mind, and typing another.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -1425,19 +1426,43 @@ def test_an_unreachable_control_plane_does_not_end_the_service(service, monkeypa
     assert beat is not None and beat.stopped
 
 
-def test_a_rejected_credential_stops_the_service(service, monkeypatch):
+def test_a_rejected_credential_stops_claiming_and_stays_down_until_stopped(service, monkeypatch):
+    """Exiting would let the restart policy start it, and a fresh self-test, again."""
     _identity, backend, _released = service
-    monkeypatch.setattr(runner_mod, "claim_payload", _queue([_job(1)], stop_after=1))
-    handle = FakeHandle()
+    claims = {"n": 0}
 
     def claim(**_kwargs: Any) -> dict | None:
+        claims["n"] += 1
         beat = FakeHeartbeat.last
         assert beat is not None
         beat.removed.set()
         return None
 
     monkeypatch.setattr(runner_mod, "claim_payload", claim)
-    assert _serve(backend, launch=lambda _p: LaunchResult(LAUNCH_STARTED, handle)) == 0
+    served: list[int] = []
+    thread = threading.Thread(
+        target=lambda: served.append(
+            _serve(backend, launch=lambda _p: LaunchResult(LAUNCH_STARTED, FakeHandle()))
+        ),
+        daemon=True,
+    )
+    thread.start()
+    # Not time.sleep: the fixture turns that into the service's stop signal.
+    pause = threading.Event()
+    for _ in range(500):
+        if FakeHeartbeat.last is not None and FakeHeartbeat.last.stopped:
+            break
+        pause.wait(0.01)
+    beat = FakeHeartbeat.last
+    assert beat is not None and beat.stopped, "it stops heartbeating"
+    thread.join(timeout=0.2)
+    assert thread.is_alive(), "it stays up rather than exiting into a restart"
+    assert claims["n"] == 1, "and claims nothing more"
+
+    runner_mod._STOPPING.set()  # what `docker stop` sends
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert served == [0]
 
 
 def test_a_bad_default_limit_is_a_startup_error_naming_the_variable(service, monkeypatch):

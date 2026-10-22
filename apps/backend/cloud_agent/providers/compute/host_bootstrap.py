@@ -30,6 +30,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     RecordedHostState,
     TransferResult,
 )
+from cloud_agent.providers.compute.release_scripts import _INVENTORY, _QUIESCE
 from cloud_agent.providers.compute.ssh import known_hosts_line
 from cloud_agent.providers.compute.transfer_scripts import (
     _AUTHORIZE_TRANSFER,
@@ -736,7 +737,12 @@ _REMOTE_REASONS = frozenset(
         "unsafe_deployment_path",
         "invalid_deployment_archive",
         "host_stop_failed",
+        "host_quiesce_failed",
         "transfer_failed",
+        "host_inventory_unavailable",
+        "retained_containers_present",
+        "unmanaged_containers_present",
+        "orphan_state_present",
     }
 )
 
@@ -1080,7 +1086,32 @@ class SshHostBootstrap:
         result = self._json(
             await self._transport.run(self._connection(node), script, stdin=records, timeout=60)
         )
-        return HostInventory.model_validate(result)
+        return HostInventory.model_validate(
+            {**result, "blocked_reasons": _remote_reasons(result.get("blocked_reasons"))}
+        )
+
+    async def quiesce(
+        self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
+    ) -> int:
+        """Stop a releasing node's runner and remove the self-test sandboxes it left."""
+        params = self._params(profile, intent)
+        script = (
+            "sudo -n python3 -c " + shlex.quote(_QUIESCE) + " " + shlex.quote(json.dumps(params))
+        )
+        result = self._json(
+            await self._transport.run(
+                self._connection(node), script, timeout=_QUIESCE_TIMEOUT_SECONDS
+            )
+        )
+        removed = result.get("probes_removed")
+        if result.get("quiesced") is not True or not isinstance(removed, int):
+            reason = _remote_reason(result.get("reason"))
+            raise ProviderError(
+                reason or "host_quiesce_failed",
+                "The releasing Host's runner could not be stopped",
+                retryable=reason in {None, "host_quiesce_failed"},
+            )
+        return removed
 
     async def stop(
         self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
@@ -1216,7 +1247,10 @@ _TRANSFER_TIMEOUT_SECONDS = 4 * 3600
 # The sandbox manager's drain must end early enough inside the stop's SSH deadline to
 # leave time for the runner, the remaining containers and the daemons.
 _STOP_TIMEOUT_SECONDS = 900
+#: The runner's own 60 second stop grace, with room for Docker around it.
+_QUIESCE_TIMEOUT_SECONDS = 180
 _SANDBOX_MANAGER_DRAIN_SECONDS = 600
+
 
 _STOP = r"""
 import json, subprocess, sys
@@ -1283,108 +1317,4 @@ if state.exists() and not state.is_symlink():
 # Release reads an empty, running daemon as proof that nothing is retained.
 started = subprocess.run(['systemctl', 'start', 'containerd', 'docker'], **quiet).returncode == 0
 print(json.dumps({'wiped': removed and started}))
-"""
-
-
-_INVENTORY = r"""
-import hashlib, json, shutil, subprocess, sys
-from pathlib import Path
-params = json.loads(sys.argv[1])
-root = Path(params['root'])
-marker = root / '.compute-identity.json'
-result = {'complete': False, 'retained_containers': 0, 'unknown_containers': 0, 'orphan_state': False, 'blocked_reasons': []}
-if root.exists() and any(root.iterdir()) and (not marker.is_file() or marker.is_symlink() or json.loads(marker.read_text()) != params['identity']):
-    result['blocked_reasons'].append('deployment_identity_conflict')
-elif not shutil.which('docker'):
-    result['orphan_state'] = any(Path(p).exists() for p in ('/var/lib/docker', '/var/lib/containerd', '/var/lib/cloud-agent', '/var/lib/hybridinference'))
-    result['complete'] = not result['orphan_state']
-else:
-    def output(args):
-        return subprocess.check_output(args, stderr=subprocess.DEVNULL, text=True).strip()
-    try:
-        ids = output(['docker', 'ps', '-aq']).split()
-        containers = json.loads(output(['docker', 'inspect', *ids])) if ids else []
-        project = params.get('project') or 'ca-' + params['identity']['node_id'].replace('-', '').lower()
-        for container in containers:
-            labels = (container.get('Config') or {}).get('Labels') or {}
-            if labels.get('org.freeinference.chat-sandbox') == 'true':
-                result['retained_containers'] += 1
-            elif labels.get('com.docker.compose.project') != project:
-                result['unknown_containers'] += 1
-        networks = output(['docker', 'network', 'ls', '-q', '--filter', 'label=org.freeinference.chat-sandbox-network=true'])
-        volumes = output(['docker', 'volume', 'ls', '-q'])
-        state_root = Path('/var/lib/cloud-agent')
-        state = state_root / params['identity']['host']
-        # Only this exact deployment's enrollment credential and flock file
-        # are inert. Another host, nested same-named file, or a symlink can
-        # hide retained state and must never be excused by its basename.
-        inert = {state / 'credential', state / '.enroll.lock'}
-        # Besides them, only receipts the control plane recorded exactly: the
-        # latest checkpoint of each sandbox (its data is in object storage),
-        # and each confirmed removal of a container a moved group left behind.
-        # Anything else in the archive state, finished or not, still counts.
-        archives = state / 'sandbox-archives'
-        recorded = json.loads(sys.stdin.read() or '{}')
-        def digest(value):
-            return hashlib.sha256(str(value).encode()).hexdigest()
-        checkpoints = {digest(sandbox): expected for sandbox, expected in (recorded.get('checkpoints') or {}).items()}
-        removals = {digest(request): dict(expected, request_id=request) for request, expected in (recorded.get('removals') or {}).items()}
-        def receipt(path):
-            try:
-                value = json.loads(path.read_text())
-            except (OSError, ValueError):
-                return None
-            return value if isinstance(value, dict) else None
-        def removed(directory, expected):
-            # The two receipts the Sandbox Manager's discard leaves, exactly as
-            # it writes them for this request: the container it removed, or one
-            # it proved already absent.
-            if directory.is_symlink() or sorted(p.name for p in directory.iterdir()) != ['discard.json', 'discarded.json']:
-                return False
-            started, finished = receipt(directory / 'discard.json'), receipt(directory / 'discarded.json')
-            identity = {
-                'thread_id': expected['thread_id'], 'request_id': expected['request_id'],
-                'generation': expected['generation'], 'container_id': expected['container_id'],
-                'archive_key': '',
-            }
-            if started is None or started.get('identity') != identity:
-                return False
-            if started.get('target_absent') is True:
-                return (
-                    started == {'identity': identity, 'sandbox_id': expected['sandbox_id'], 'target_absent': True}
-                    and finished == {'identity': identity, 'sandbox_id': expected['sandbox_id']}
-                )
-            spec = started.get('spec')
-            return (
-                set(started) == {'identity', 'spec'} and isinstance(spec, dict)
-                and spec.get('sandbox_id') == expected['sandbox_id']
-                and spec.get('generation') == expected['generation']
-                and finished == {'identity': identity}
-            )
-        def accounted(path):
-            if path.parent == archives / 'checkpoints' and path.suffix == '.json':
-                # The latest checkpoint the control plane holds for that
-                # sandbox from this Host, every recorded field the same.
-                expected, value = checkpoints.get(path.stem), receipt(path)
-                return (
-                    expected is not None and value is not None
-                    and all(key in value and value[key] == expected[key] for key in expected)
-                )
-            if path.parent.parent == archives and path.parent.name in removals:
-                return removed(path.parent, removals[path.parent.name])
-            return False
-        paths = list(state_root.rglob('*')) if state_root.exists() else []
-        unexpected = state_root.is_symlink() or any(p.is_symlink() or (not p.is_dir() and p not in inert and not accounted(p)) for p in paths)
-        legacy = Path('/var/lib/hybridinference')
-        result['orphan_state'] = bool(networks or volumes or unexpected or (legacy.exists() and any(legacy.iterdir())))
-        result['complete'] = True
-    except (subprocess.SubprocessError, ValueError):
-        result['blocked_reasons'].append('host_inventory_unavailable')
-if result['retained_containers']:
-    result['blocked_reasons'].append('retained_containers_present')
-if result['unknown_containers']:
-    result['blocked_reasons'].append('unmanaged_containers_present')
-if result['orphan_state']:
-    result['blocked_reasons'].append('orphan_state_present')
-print(json.dumps(result))
 """
