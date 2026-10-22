@@ -106,6 +106,7 @@ class HostCommands:
                 409,
                 f"{host!r} still has {outcome.replace('_', ' ')}; clear those dependencies before forgetting it.",
             )
+        retire_sandbox_manager_hosts([host])
 
     async def set_status(self, *, host: str, status: str, force: bool = False) -> None:
         """Apply the existing drain/undrain transition table."""
