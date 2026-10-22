@@ -16,7 +16,7 @@ LIMIT = 1500
 
 #: Line counts of the modules over the limit when it arrived.
 BASELINE = {
-    "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5405,
+    "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5381,
     "apps/backend/cloud_agent_host/runner.py": 5034,
     "apps/backend/cloud_agent_host/chat_sandbox.py": 4195,
     "apps/backend/cloud_agent_host/sandbox_manager.py": 4045,
