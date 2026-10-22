@@ -77,11 +77,20 @@ def heartbeat_policy(policy: Mapping[str, Any] | None) -> dict[str, Any]:
     The global ``host_settings``, the ``sandbox_archive_settings``, the
     ``runtime_download_targets``, and whether an agent update is still waiting
     to switch new chats (``runtime_upgrade_waiting``).
+
+    ``sandbox_archive_settings`` is ``None`` when the stored archive policy
+    does not decode. The beat is recorded by then, and its residencies and
+    observations still have to be handled, so the answer reads the policy again
+    and fails there, as it did before the beat read the policy itself.
     """
     upgrades = {} if policy is None else load_json(policy["runtime_upgrades"]) or {}
+    try:
+        archive: dict[str, Any] | None = archive_settings(policy)
+    except (TypeError, ValueError):
+        archive = None
     return {
         "host_settings": {} if policy is None else dict(load_json(policy["host_settings"]) or {}),
-        "sandbox_archive_settings": archive_settings(policy),
+        "sandbox_archive_settings": archive,
         "runtime_download_targets": download_targets(policy),
         "runtime_upgrade_waiting": any(
             isinstance(target, dict) and not target.get("activated_at")

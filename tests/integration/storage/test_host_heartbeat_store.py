@@ -28,6 +28,7 @@ from tests.integration.storage.test_sandbox_checkpoint_receipts import _checkpoi
 
 from cloud_agent.api import hosts
 from cloud_agent.schemas import HostHeartbeatRequest
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicyError
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -725,6 +726,30 @@ async def test_a_repeated_beat_rewrites_only_the_running_group(db, store):
     async with db.acquire() as conn:
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_sandbox_events") == events
     assert grants.revoked == []
+
+
+async def test_an_archive_policy_that_does_not_decode_fails_only_the_answer(db, store):
+    """The beat reads the archive policy in its own write, and that read must not fail it.
+
+    A stored policy that does not decode fails the answer, as it always has,
+    once the beat is recorded and its observations are reconciled.
+    """
+    await _enrolled(store)
+    job = await _stopped_group(db, store, "asbx_policy")
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET state = 'running', "
+            "idle_deadline = NOW() - INTERVAL '1 minute' WHERE id = 'asbx_policy'"
+        )
+        await conn.execute(
+            "UPDATE agent_runner_policy SET sandbox_archive_settings = '{\"enabled\": true}'::jsonb"
+        )
+
+    with pytest.raises(SandboxArchivePolicyError):
+        await _beat(store, [_retained(job, "asbx_policy", running=False)])
+
+    group = await _group(db, "asbx_policy")
+    assert group["state"] == "stopped" and group["idle_deadline"] is None
 
 
 async def test_a_repeated_checkpoint_receipt_is_not_recorded_again(db, store, monkeypatch):

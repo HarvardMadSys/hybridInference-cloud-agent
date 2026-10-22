@@ -50,6 +50,7 @@ from cloud_agent.sandbox_manager_routing import (
     validate_sandbox_manager_url,
 )
 from cloud_agent_shared.host_settings import default_values
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicyError
 
 ADMIN = {"Authorization": "Bearer test-admin"}
 
@@ -90,6 +91,8 @@ class FakeHostPoolStore(AllCapabilities):
         #: Every batch of residency beats, as the store was asked for it.
         self.beat_batches: list[list[tuple[str, int]]] = []
         self.fail_beats = False
+        #: The stored archive policy does not decode, as a hand-edited row may not.
+        self.archive_settings_undecodable = False
         #: ``(sandbox_id, thread_id, generation)`` residencies already released.
         self.closed_residencies: set[tuple[str, str, int]] = set()
         self.release_answer: str | None = None
@@ -269,7 +272,9 @@ class FakeHostPoolStore(AllCapabilities):
             **row,
             "runner_policy": {
                 "host_settings": dict(self.global_settings),
-                "sandbox_archive_settings": dict(self.archive_settings),
+                "sandbox_archive_settings": (
+                    None if self.archive_settings_undecodable else dict(self.archive_settings)
+                ),
                 "runtime_download_targets": self._download_targets(),
                 "runtime_upgrade_waiting": any(
                     not target.get("activated_at") for target in self.runtime_upgrades.values()
@@ -479,6 +484,8 @@ class FakeHostPoolStore(AllCapabilities):
         return switched
 
     async def sandbox_archive_settings(self) -> dict[str, Any]:
+        if self.archive_settings_undecodable:
+            raise SandboxArchivePolicyError("region is required when sandbox archives are enabled")
         return dict(self.archive_settings)
 
     async def host_capacity_history(
@@ -2775,6 +2782,42 @@ async def test_host_heartbeat_reconciles_exact_retained_docker_observations(resi
             "members": [],
         }
     ]
+
+
+async def test_an_archive_policy_that_does_not_decode_fails_only_the_answer(residency_client):
+    """The beat's own work is done before an undecodable archive policy fails it.
+
+    The heartbeat now reads the policy in its own write. A stored policy that
+    does not decode used to fail only the answer, once the beat had extended
+    its residencies and reconciled its observations, and it still does.
+    """
+    client, store, _grants = residency_client
+    credential = await _enroll(client, store)
+    store.archive_settings_undecodable = True
+    store.beat_answers = {("th-1", 1): ""}
+
+    with pytest.raises(SandboxArchivePolicyError):
+        await client.post(
+            "/v1/agent/host/heartbeat",
+            json={
+                "residencies": [{"thread_id": "th-1", "generation": 1}],
+                "retained_sandboxes": [
+                    {
+                        "thread_id": "athr_1",
+                        "sandbox_id": "asbx_1",
+                        "container_id": "0123456789abcdef",
+                        "generation": 3,
+                        "activation_generation": 7,
+                        "running": False,
+                        "members": [],
+                    }
+                ],
+            },
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+
+    assert store.beat_batches[0] == [("th-1", 1)]
+    assert [observation["sandbox_id"] for observation in store.sandbox_observations] == ["asbx_1"]
 
 
 async def test_host_heartbeat_forwards_optional_container_telemetry(residency_client):
