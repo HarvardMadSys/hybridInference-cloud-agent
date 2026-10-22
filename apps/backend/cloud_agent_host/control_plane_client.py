@@ -168,7 +168,10 @@ class ControlPlane:
         longer holds up the turn's stream; it waits only while the sender holds
         its fill. What made the sender give up is raised here, by the next
         append after it: a lost lease, or a control plane that refused an
-        upload or stayed unreachable for the whole retry budget.
+        upload or stayed unreachable for the whole retry budget. Unless the
+        lease was lost, that append's event is queued first: it is often the
+        error the ending turn reports, once, and the finish that follows
+        delivers it to a control plane that is back.
         """
         with self._appending:
             payload = self._redactor.payload(event.payload)

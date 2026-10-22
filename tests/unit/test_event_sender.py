@@ -4,10 +4,11 @@ An event is numbered, redacted and encoded where it is reported, then uploaded
 by one thread, in order, in batches. These pin what that must not change: the
 order and the numbering, redaction before the event is queued, a bounded queue
 that still pushes back on the turn, a lost lease and an exhausted retry budget
-that still end it, a finish that never waits on a sender that could not start,
-and writes that end or interleave with the event log waiting for the events
-reported before them. They also pin the rolling-deploy fallback: a control
-plane without the batch endpoint is sent one event per request.
+that still end it without losing the error it reports, a finish that never
+waits on a sender that could not start, and writes that end or interleave with
+the event log waiting for the events reported before them. They also pin the
+rolling-deploy fallback: a control plane without the batch endpoint is sent one
+event per request.
 """
 
 from __future__ import annotations
@@ -220,7 +221,11 @@ def test_a_control_plane_without_batches_is_sent_one_event_per_request(status):
 
 
 def test_an_append_raises_what_the_sender_gave_up_on_once(monkeypatch):
-    """An append waiting for room learns of the refused upload, and the next one is sent."""
+    """An append waiting for room learns of the refused upload, and its event is still sent.
+
+    The event queued behind the refused upload is dropped with it. The one
+    whose append raises the refusal, and the next, are sent.
+    """
     monkeypatch.setattr(event_sender, "_EVENT_QUEUE_MAX_EVENTS", 1)
     refused = threading.Event()
     held = _Held(lambda _request: None if refused.is_set() else 422)
@@ -244,8 +249,47 @@ def test_an_append_raises_what_the_sender_gave_up_on_once(monkeypatch):
     finally:
         control.close()
 
-    assert plane.uploads() == [[1], [4]]
+    # 2 waited behind the refused upload; 3 is the append that raised the refusal.
+    assert plane.uploads() == [[1], [3], [4]]
     assert plane.events()[-1]["event_type"] == "error"
+
+
+def _given_up(control: ControlPlane) -> None:
+    """Wait until the sender has given up on an upload and holds why."""
+    sender = control._events
+    with sender._state:
+        assert sender._state.wait_for(lambda: sender._failure is not None, timeout=_WAIT_S)
+
+
+def test_the_error_a_turn_reports_after_an_upload_was_given_up_on_is_still_sent():
+    """The append that learns of the failure still queues its event.
+
+    A turn can end for another reason, as when its stream ends with a client
+    error, after the sender gave up on an upload and before any append learned
+    of it. The error event that turn reports is then the append that raises the
+    failure, and the runner does not retry it: dropping it lost the turn's
+    error while its finish still landed.
+    """
+    answers = iter([422])
+    plane = _Plane(lambda _request: next(answers, None))
+    control = _control(plane)
+    try:
+        control.append_event(_event(0))
+        _given_up(control)
+        with pytest.raises(httpx.HTTPStatusError) as raised:
+            control.append_event(NormalizedEvent("error", {"text": "shared turn failed"}))
+        assert raised.value.response.status_code == 422
+        control.finish("failed", "shared turn failed")
+    finally:
+        control.close()
+
+    assert plane.endpoints() == ["events:batch", "events:batch", "finish"]
+    assert plane.uploads() == [[1], [2]]
+    assert plane.events()[-1] == {
+        "event_type": "error",
+        "payload": {"text": "shared turn failed"},
+        "event_seq": 2,
+    }
 
 
 @pytest.mark.parametrize("bound", ["_EVENT_QUEUE_MAX_EVENTS", "_EVENT_QUEUE_MAX_BYTES"])

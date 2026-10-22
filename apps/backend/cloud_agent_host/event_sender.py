@@ -44,7 +44,10 @@ class OrderedSender:
     also given a callable that says whether the sender was closed meanwhile,
     so that a retry can stop early. A batch it gives up on is kept for the
     next :meth:`put` or :meth:`flush` to raise, and the events queued behind
-    it are dropped with it: the turn that queued them is ending.
+    it are dropped with it: the turn that queued them is ending. Events put
+    after it, the one whose put raises it included, are still sent, so the
+    error that turn reports reaches a control plane that is back. After a
+    lost lease, nothing more is queued.
     """
 
     def __init__(self, deliver: Callable[[list[bytes], Callable[[], bool]], None]) -> None:
@@ -65,12 +68,15 @@ class OrderedSender:
     def put(self, body: bytes) -> None:
         """Queue one encoded event, waiting while the sender holds its fill.
 
-        Raises what made the sender give up, before queueing anything. A
-        sending thread that cannot be started is raised once the event is
-        queued, and the next put or flush starts one.
+        A lost lease is raised before anything is queued, every time: no later
+        upload could be stored. Anything else that made the sender give up is
+        raised once the event is queued, so the event is still sent: it is
+        often the error of the turn that failure ends, which reports it once
+        and does not retry. A sending thread that cannot be started is raised
+        once the event is queued too, and the next put or flush starts one.
         """
         with self._state:
-            self._raise_failure()
+            self._raise_lost_lease()
             while self._pending and (
                 len(self._pending) >= _EVENT_QUEUE_MAX_EVENTS
                 or self._pending_bytes + len(body) > _EVENT_QUEUE_MAX_BYTES
@@ -78,11 +84,12 @@ class OrderedSender:
                 # Only a sender makes room, and a failed start left none.
                 self._start_sender()
                 self._state.wait()
-                self._raise_failure()
+                self._raise_lost_lease()
             self._pending.append(body)
             self._pending_bytes += len(body)
             self._state.notify_all()
             self._start_sender()
+            self._raise_failure()
 
     def flush(self) -> None:
         """Wait until every queued event is delivered, or raise what stopped one.
@@ -134,15 +141,20 @@ class OrderedSender:
         thread.start()
         self._thread = thread
 
+    def _raise_lost_lease(self) -> None:
+        """Raise a lost lease, every time it is asked: no upload is stored after one."""
+        failure = self._failure
+        if isinstance(failure, LeaseLost):
+            raise LeaseLost(str(failure)) from failure
+
     def _raise_failure(self) -> None:
         """Raise what made the sender give up: once, or every time for a lost lease.
 
         Once, because the caller it reaches ends the turn, and that turn still
         reports its error and finishes through the same sender.
         """
+        self._raise_lost_lease()
         failure = self._failure
-        if isinstance(failure, LeaseLost):
-            raise LeaseLost(str(failure)) from failure
         if failure is not None:
             self._failure = None
             raise failure
