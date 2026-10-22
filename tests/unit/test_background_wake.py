@@ -340,6 +340,61 @@ async def test_a_crashed_publication_does_not_cancel_healthy_siblings(monkeypatc
     assert cancelled == []
 
 
+async def test_a_failed_claim_does_not_cancel_the_publications_already_claimed(monkeypatch):
+    """A claim the database refuses ends the pass's claiming, not its claimed work.
+
+    A cancelled publication defers its snapshot, which spends one of the five
+    attempts it has, so cancelling them would charge every snapshot in flight
+    for one database error. The pass still fails with that error once they end.
+    """
+    monkeypatch.setattr(publish_worker, "_PUBLISH_CONCURRENCY", 2)
+    slow_started = asyncio.Event()
+    slow_release = asyncio.Event()
+    completed: list[str] = []
+    cancelled: list[str] = []
+
+    async def publish_claimed(store, job, **kwargs):
+        kwargs["admission_started"].set()
+        slow_started.set()
+        try:
+            await slow_release.wait()
+        except asyncio.CancelledError:
+            cancelled.append(job["job_id"])
+            raise
+        completed.append(job["job_id"])
+
+    monkeypatch.setattr(publish_worker, "_publish_claimed", publish_claimed)
+    claim = AsyncMock(
+        side_effect=[{"job_id": "slow", "snapshot_id": 1}, ConnectionError("database unavailable")]
+    )
+    store = SimpleNamespace(snapshot=SimpleNamespace(claim_for_publish=claim))
+    publishing = asyncio.create_task(
+        publish_worker._publish_due(
+            store,  # type: ignore[arg-type]
+            credential=publish_worker.GitHubCredential("token"),
+            app_credentials=None,
+            base_branch="dev",
+        )
+    )
+    try:
+        await asyncio.wait_for(slow_started.wait(), timeout=AT_ONCE_S)
+        await _eventually(lambda: claim.await_count == 2)
+        # Long enough for a cancellation, had there been one, to land.
+        await asyncio.sleep(0.05)
+        assert cancelled == []
+        assert not publishing.done()
+        slow_release.set()
+        with pytest.raises(ConnectionError, match="database unavailable"):
+            await asyncio.wait_for(publishing, timeout=AT_ONCE_S)
+    finally:
+        slow_release.set()
+        if not publishing.done():
+            await _stop(publishing)
+
+    assert completed == ["slow"]
+    assert claim.await_count == 2, "no further claim after the database refused one"
+
+
 @pytest.mark.parametrize("retry_kind", ["base_import", "snapshot_publish"])
 async def test_an_idle_publisher_looks_again_when_a_retry_is_due(monkeypatch, retry_kind):
     imported = AsyncMock()

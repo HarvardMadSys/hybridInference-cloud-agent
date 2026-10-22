@@ -28,6 +28,11 @@ that only ever change under their conversation's lock, such as its waiting
 messages, are ordered by that lock. A lock taken with ``SKIP LOCKED`` or
 ``NOWAIT`` never waits, so it may come out of order; the locks after it may not.
 
+A trigger counts too. The admin inventory marks a changed group or host in
+``agent_admin_sandbox_changes`` right after that row: a membership write's
+trigger locks its group before marking it. Renaming a conversation marks its
+group without the group, as the last thing the rename does.
+
 An owner's environments, their installation snapshots and the environment runs
 that build them have an order of their own: the owner's environment lock, then
 their snapshot lock, then the snapshots, then the runs. A write that locks more
