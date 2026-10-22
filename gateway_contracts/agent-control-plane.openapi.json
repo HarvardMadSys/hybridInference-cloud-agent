@@ -11859,7 +11859,7 @@
                 "type": "null"
               }
             ],
-            "description": "The archive policy this host should apply. Null for a host that cannot apply it: a destination outside the default bucket goes only to a host advertising sandbox-archive-destination-v1."
+            "description": "The archive policy this host should apply. Null for a host that cannot apply it: an enabled policy with a bucket other than the default goes only to a host advertising sandbox-archive-destination-v1."
           },
           "sandbox_manager_error": {
             "anyOf": [

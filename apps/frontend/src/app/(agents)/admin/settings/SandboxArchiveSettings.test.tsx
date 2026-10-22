@@ -106,7 +106,7 @@ describe('sandbox archive settings card', () => {
     ] as AgentRunnerHost[];
     render(
       <SandboxArchiveSettingsCard
-        settings={settings({ s3_uri: 's3://example-archives/cloud-agent/sandbox' })}
+        settings={settings({ enabled: true, s3_uri: 's3://example-archives/cloud-agent/sandbox' })}
         hosts={hosts}
         busy={false}
         onSave={vi.fn()}
@@ -116,6 +116,34 @@ describe('sandbox archive settings card', () => {
     expect(screen.getByLabelText('S3 bucket')).toHaveValue('example-archives');
     expect(screen.getByText(/Applied on 1 of 1 compatible server/)).toHaveTextContent(
       'Applied on 1 of 1 compatible server. runner-b needs a redeploy.',
+    );
+  });
+
+  it('needs no redeploy for another bucket while archives are off', () => {
+    // A disabled policy reaches an older server too, in the default bucket.
+    const hosts = [
+      {
+        host: 'runner-a',
+        capabilities: [SANDBOX_ARCHIVE_SETTINGS_CAPABILITY, SANDBOX_ARCHIVE_DESTINATION_CAPABILITY],
+        sandbox_archive_settings_applied_revision: 7,
+      },
+      {
+        host: 'runner-b',
+        capabilities: [SANDBOX_ARCHIVE_SETTINGS_CAPABILITY],
+        sandbox_archive_settings_applied_revision: 7,
+      },
+    ] as AgentRunnerHost[];
+    render(
+      <SandboxArchiveSettingsCard
+        settings={settings({ s3_uri: 's3://example-archives/cloud-agent/sandbox' })}
+        hosts={hosts}
+        busy={false}
+        onSave={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/^Applied on/)).toHaveTextContent(
+      /^Applied on 2 of 2 compatible servers\.$/,
     );
   });
 

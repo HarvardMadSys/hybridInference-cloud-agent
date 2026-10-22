@@ -512,8 +512,8 @@ class HostHeartbeatResponse(_SandboxManagerWireNames):
         None,
         description=(
             "The archive policy this host should apply. Null for a host that cannot "
-            "apply it: a destination outside the default bucket goes only to a host "
-            "advertising sandbox-archive-destination-v1."
+            "apply it: an enabled policy with a bucket other than the default goes "
+            "only to a host advertising sandbox-archive-destination-v1."
         ),
     )
     runtime_downloads: list[dict[str, str]] = Field(

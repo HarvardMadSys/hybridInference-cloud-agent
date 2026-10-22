@@ -302,12 +302,14 @@ export default function SandboxArchiveSettingsCard({
       description: 'Size of each uploaded part, from 5 MiB through 64 MiB.',
     },
   ];
-  // Another bucket reaches only a server that can archive there; an older one
-  // is sent no policy until it is redeployed.
+  // An enabled policy with another bucket reaches only a server that can
+  // archive there. An older one is sent no policy: until it is redeployed it
+  // takes no work at all, and its sandbox manager goes on archiving the groups
+  // it holds into the previous bucket. A disabled policy reaches every server.
   const required =
-    settings.s3_uri === DEFAULT_SANDBOX_ARCHIVE_URI
-      ? [SANDBOX_ARCHIVE_SETTINGS_CAPABILITY]
-      : [SANDBOX_ARCHIVE_SETTINGS_CAPABILITY, SANDBOX_ARCHIVE_DESTINATION_CAPABILITY];
+    settings.enabled && settings.s3_uri !== DEFAULT_SANDBOX_ARCHIVE_URI
+      ? [SANDBOX_ARCHIVE_SETTINGS_CAPABILITY, SANDBOX_ARCHIVE_DESTINATION_CAPABILITY]
+      : [SANDBOX_ARCHIVE_SETTINGS_CAPABILITY];
   const capable = (host: AgentRunnerHost) =>
     required.every((capability) => host.capabilities.includes(capability));
   const supportedHosts = hosts.filter(capable);

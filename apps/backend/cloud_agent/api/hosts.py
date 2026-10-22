@@ -539,17 +539,24 @@ def _host_archive_settings(
     so an opt-out is reduced to the default (which serializes to nothing) for
     it. It receives the same revision and keeps archiving without checkpoints.
 
-    A destination outside the default bucket has no such reduction: archiving
-    to the default instead would write somewhere the policy does not say. A
-    host that predates the setting gets no policy, so it confirms no revision
-    and is given no work that needs archives until it is upgraded.
+    A host whose sandbox manager predates the bucket setting refuses any bucket
+    but the default. A disabled policy is reduced to the default bucket for it:
+    it creates no S3 service, so nothing is written anywhere, and the host
+    confirms the revision and keeps taking work. An enabled one has no such
+    reduction, since archiving to the default would write somewhere the policy
+    does not say, so that host gets no policy. Until it is redeployed, its
+    sandbox manager keeps the last policy it applied and goes on archiving the
+    groups it holds, checkpoints included, into the previous bucket, and with
+    no confirmed revision the host takes no work at all.
     """
     settings = HostSandboxArchiveSettings.model_validate(values)
     if (
         settings.s3_uri != SANDBOX_ARCHIVE_S3_URI
         and SANDBOX_ARCHIVE_DESTINATION_CAPABILITY not in capabilities
     ):
-        return None
+        if settings.enabled:
+            return None
+        settings = settings.model_copy(update={"s3_uri": SANDBOX_ARCHIVE_S3_URI})
     if SANDBOX_CHECKPOINT_CAPABILITY not in capabilities:
         settings = settings.model_copy(update={"checkpoints_enabled": settings.enabled})
     return settings
