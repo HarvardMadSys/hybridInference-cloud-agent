@@ -24,6 +24,7 @@ import json as json_module
 import math
 import re
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -57,6 +58,9 @@ _TOKEN_REFRESH_MARGIN_S = 300
 # gives the repository a new installation, and an id kept for the life of the
 # process minted against one that no longer exists until a restart.
 _INSTALLATION_TTL_S = 300.0
+# Holder-scoped tokens have one slot per resident conversation. Keep their
+# aggregate memory and secret lifetime bounded even while conversations churn.
+_INSTALLATION_TOKEN_CACHE_MAX = 4096
 # What the token endpoint answers for an installation it no longer knows: gone
 # (404), refused for this repository (422), or the JWT refused (401). Each is
 # worth exactly one fresh look at which installation covers the repository.
@@ -332,7 +336,7 @@ class GitHubAppCredentials:
         """
         self._config = config
         self._timeout_override = timeout_s
-        self._tokens: dict[tuple[int, str], _CachedToken] = {}
+        self._tokens: OrderedDict[tuple[int, str], _CachedToken] = OrderedDict()
         #: Per repository: when its installation was looked up, and the id.
         self._installations = RepositoryCache[str, int]("installations")
         #: Per user, per set of connected installations: when the answer was
@@ -375,6 +379,10 @@ class GitHubAppCredentials:
         loop, and this object is built during application startup.
         """
         effective_timeout_s = self._timeout_s if timeout_s is None else timeout_s
+        # Token state and the owned client belong to the first loop that uses
+        # these credentials. Bind borrowed-client instances too, so retirement
+        # from a dependency worker can marshal cache cleanup back here.
+        self._loop = asyncio.get_running_loop()
         if self._client is not None:
             yield self._client
             return
@@ -386,7 +394,6 @@ class GitHubAppCredentials:
             async with httpx.AsyncClient(timeout=effective_timeout_s) as client:
                 yield client
             return
-        self._loop = asyncio.get_running_loop()
         if self._owned is None:
             self._owned = httpx.AsyncClient(timeout=effective_timeout_s)
         else:
@@ -402,8 +409,23 @@ class GitHubAppCredentials:
     def retire(self) -> None:
         """Release this configuration's pool after its current calls finish."""
         self._retired = True
-        if self._loop is not None and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(self._schedule_retirement)
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            self._clear_tokens()
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            self._retire_on_loop()
+        else:
+            try:
+                loop.call_soon_threadsafe(self._retire_on_loop)
+            except RuntimeError:
+                # A loop can close between the check and the thread-safe call.
+                # It is no longer able to touch the cache, so inline cleanup is safe.
+                self._clear_tokens()
 
     @property
     def _timeout_s(self) -> float:
@@ -416,7 +438,9 @@ class GitHubAppCredentials:
         """Effective deadline used for the next provider request."""
         return self._timeout_s
 
-    def _schedule_retirement(self) -> None:
+    def _retire_on_loop(self) -> None:
+        """Clear loop-owned secrets and close an idle owned client."""
+        self._clear_tokens()
         if not self._active_http and self._owned is not None:
             self._retire_task = asyncio.create_task(self.aclose())
 
@@ -425,9 +449,35 @@ class GitHubAppCredentials:
 
         A borrowed client belongs to whoever passed it in and is left open.
         """
+        self._clear_tokens()
         owned, self._owned = self._owned, None
         if owned is not None:
             await owned.aclose()
+
+    def _discard_token(self, key: tuple[int, str]) -> None:
+        """Drop one cached token and release this object's plaintext reference."""
+        cached = self._tokens.pop(key, None)
+        if cached is not None:
+            cached.token = ""
+
+    def _clear_tokens(self) -> None:
+        """Release every cached plaintext token reference."""
+        for cached in self._tokens.values():
+            cached.token = ""
+        self._tokens.clear()
+
+    def _prune_tokens(self, now: float) -> None:
+        """Drop expired tokens before any cache access or remote mint."""
+        for key in [key for key, cached in self._tokens.items() if cached.expires_at <= now]:
+            self._discard_token(key)
+
+    def _remember_token(self, key: tuple[int, str], cached: _CachedToken) -> None:
+        """Keep a newly minted token in a bounded least-recently-used cache."""
+        self._discard_token(key)
+        self._tokens[key] = cached
+        while len(self._tokens) > _INSTALLATION_TOKEN_CACHE_MAX:
+            _, evicted = self._tokens.popitem(last=False)
+            evicted.token = ""
 
     @property
     def cipher(self) -> SourceControlCipher:
@@ -617,9 +667,13 @@ class GitHubAppCredentials:
         scope_key = json_module.dumps(
             {"h": holder, "p": permissions, "r": repository}, sort_keys=True
         )
-        cached = self._tokens.get((installation_id, scope_key))
+        token_key = (installation_id, scope_key)
+        now = time.time()
+        self._prune_tokens(now)
+        cached = self._tokens.get(token_key)
         margin = max(_TOKEN_REFRESH_MARGIN_S, min_ttl_s)
-        if cached and cached.expires_at - margin > time.time():
+        if not self._retired and cached and cached.expires_at - margin > now:
+            self._tokens.move_to_end(token_key)
             return cached.token, False
 
         payload: dict[str, Any] = {}
@@ -642,11 +696,9 @@ class GitHubAppCredentials:
         expires_at = now + 3600
         if raw_expiry := body.get("expires_at"):
             expires_at = _parse_expiry(raw_expiry, default=expires_at)
-        # Holders come and go with conversations, and so do their slots. One
-        # whose token has expired is never served again.
-        for key in [key for key, held in self._tokens.items() if held.expires_at <= now]:
-            del self._tokens[key]
-        self._tokens[installation_id, scope_key] = _CachedToken(token=token, expires_at=expires_at)
+        self._prune_tokens(now)
+        if not self._retired and expires_at > now:
+            self._remember_token(token_key, _CachedToken(token=token, expires_at=expires_at))
         return token, True
 
     async def exchange_user_code(self, code: str) -> UserTokens:
@@ -1282,7 +1334,7 @@ class GitHubAppCredentials:
         installation_id = self._installations.pop(repo)
         if installation_id is not None:
             for key in [k for k in self._tokens if k[0] == installation_id]:
-                self._tokens.pop(key, None)
+                self._discard_token(key)
 
     def forget_token(self, token: str) -> None:
         """Stop serving a token GitHub refused before it expired.
@@ -1292,7 +1344,7 @@ class GitHubAppCredentials:
         replacement another caller has already minted stays.
         """
         for key in [key for key, cached in self._tokens.items() if cached.token == token]:
-            del self._tokens[key]
+            self._discard_token(key)
 
 
 def _parse_expiry(raw: str, *, default: float) -> float:
