@@ -46,6 +46,11 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
 
+if __package__:
+    from . import artifact_catalog
+else:  # direct execution from the release directory
+    import artifact_catalog
+
 if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
     from collections.abc import Mapping, Sequence
 
@@ -54,6 +59,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_REPOSITORY = "HarvardMadSys/hybridInference-cloud-agent"
 SCHEMA_VERSION = 1
 RECIPE_FORMAT_VERSION = 1
+if artifact_catalog.manifest_schema_version() != SCHEMA_VERSION:
+    raise RuntimeError(
+        "release manifest schema version and artifact catalog contract version disagree"
+    )
 
 #: Every image this release carries is published under this registry path.
 #: Which package or tag it lands in is storage layout — a deployment addresses
@@ -78,18 +87,12 @@ SCHEMA_PATH = REPO_ROOT / "deploy" / "release" / "manifest.schema.json"
 #: about the deployment, not a preference. A release that wants a second
 #: platform has to add it to the build first, which is the point — declaring a
 #: platform nobody built is how a single-platform image gets called multi-arch.
-EXPECTED_PLATFORMS: dict[str, tuple[str, ...]] = {
-    "control": ("linux/arm64",),
-    "web": ("linux/arm64",),
-    "runner": ("linux/amd64",),
-    "sandbox": ("linux/amd64",),
-    "tunnel": ("linux/amd64",),
-}
+EXPECTED_PLATFORMS: dict[str, tuple[str, ...]] = artifact_catalog.expected_platforms()
 
 #: Web is built per mount shape, because `basePath` is resolved while the
 #: bundle is compiled. One artifact per entry here, and the manifest names the
 #: variant so a deployment pins the one it serves rather than guessing.
-WEB_VARIANTS: dict[str, str] = {"": "root", "/agents": "agents"}
+WEB_VARIANTS: dict[str, str] = artifact_catalog.web_variants()
 
 #: The sandbox image's runtime labels. Duplicated from
 #: `cloud_agent_host.sandbox` on purpose — this module is imported by a
