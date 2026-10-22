@@ -537,6 +537,18 @@ def test_real_compose_keeps_persistent_mounts_outside_the_recipe(tmp_path: Path,
             == (state / ".shared-live-ready").resolve()
         )
         assert str(state / "enrollment") in mounts
+        receipt_target = "/var/lib/hybridinference/upload-receipts"
+        manager_mounts = {
+            mount["target"]: mount for mount in document["services"]["sandbox-manager"]["volumes"]
+        }
+        for service_mounts in (mounts, manager_mounts):
+            receipt = service_mounts[receipt_target]
+            assert (
+                Path(receipt["source"]).resolve()
+                == (state / "enrollment/upload-receipts").resolve()
+            )
+            assert not receipt.get("read_only", False)
+        assert str(state / "enrollment") not in manager_mounts
     else:
         edge = document["services"]["edge"]["volumes"][0]
         assert Path(edge["source"]).resolve() == (script.parent / "edge.nginx.conf").resolve()

@@ -21,6 +21,7 @@ import yaml
 from deploy.release import artifact_compose as ac
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+LOCAL_SOURCE = REPO_ROOT / "deploy/local/docker-compose.yml"
 SOURCES = {
     "control-plane": REPO_ROOT / "deploy/control-plane/docker-compose.yml",
     "host": REPO_ROOT / "deploy/host/docker-compose.sandbox.yml",
@@ -161,6 +162,35 @@ def test_supported_services_receive_the_opt_in_profiling_descriptor() -> None:
     assert names <= set(control)
     assert names <= set(host["runner"]["environment"])
     assert names <= set(host["sandbox-manager"]["environment"])
+
+
+def test_host_stacks_share_receipts_without_the_credential_root():
+    cases = (
+        (
+            rendered("host", None)["services"],
+            "${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/upload-receipts",
+            "/var/lib/hybridinference/upload-receipts",
+            "${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}:"
+            "${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}",
+        ),
+        (
+            yaml.safe_load(LOCAL_SOURCE.read_text())["services"],
+            "local-upload-receipts",
+            "/var/lib/freeinference/upload-receipts",
+            "local-host-state:/var/lib/freeinference/agent-host",
+        ),
+    )
+    for services, source_path, target_path, credential_mount in cases:
+        receipt_mount = f"{source_path}:{target_path}"
+        for name in ("runner", "sandbox-manager"):
+            assert services[name]["environment"]["AGENT_UPLOAD_RECEIPT_DIR"] == target_path
+            assert receipt_mount in services[name]["volumes"]
+        assert {
+            name
+            for name, service in services.items()
+            if receipt_mount in service.get("volumes", [])
+        } == {"runner", "sandbox-manager"}
+        assert credential_mount not in services["sandbox-manager"]["volumes"]
 
 
 @pytest.mark.parametrize(

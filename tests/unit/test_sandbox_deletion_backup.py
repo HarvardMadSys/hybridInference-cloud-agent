@@ -225,13 +225,20 @@ def test_deletion_retry_checks_absence_after_status_marks_container_lost(
     assert manager.removals == 1
 
 
-def test_discard_completes_stale_membership_after_proving_container_absent(archive_setup):
+def test_discard_completes_stale_membership_after_proving_container_absent(
+    archive_setup, monkeypatch
+):
     manager, _supervisor, service, identity, spec, _members = archive_setup
     manager.current = None
     restarted = SandboxDeletionBackupService(
         SharedChatSessionSupervisor(manager), state_dir=service._state_dir
     )
     discard = replace(identity, request_id="discard-absent", archive_key="")
+    forgotten: list[str] = []
+    monkeypatch.setattr(
+        "cloud_agent_host.sandbox_deletion_backup.forget_deleted_container_uploads",
+        forgotten.append,
+    )
 
     result = restarted.discard(discard, sandbox_id=spec.sandbox_id)
 
@@ -244,6 +251,7 @@ def test_discard_completes_stale_membership_after_proving_container_absent(archi
     assert json.loads((directory / "discard.json").read_text())["target_absent"] is True
     assert (directory / "discarded.json").exists()
     assert manager.removals == 0
+    assert forgotten == [spec.container_name]
     # Replay from the authorization record after a crash before the final
     # acknowledgement; absence is proved again before completing.
     (directory / "discarded.json").unlink()
@@ -252,6 +260,36 @@ def test_discard_completes_stale_membership_after_proving_container_absent(archi
     assert not (directory / "discarded.json").exists()
     assert restarted.discard(discard, sandbox_id=spec.sandbox_id) == result
     assert json.loads((directory / "discarded.json").read_text())["sandbox_id"] == spec.sandbox_id
+    assert forgotten == [spec.container_name, spec.container_name]
+
+
+def test_absent_discard_retries_when_upload_receipt_cleanup_fails(archive_setup, monkeypatch):
+    manager, _supervisor, service, identity, spec, _members = archive_setup
+    manager.current = None
+    restarted = SandboxDeletionBackupService(
+        SharedChatSessionSupervisor(manager), state_dir=service._state_dir
+    )
+    discard = replace(identity, request_id="discard-cleanup-retry", archive_key="")
+    forgotten: list[str] = []
+
+    def fail_once(container_name: str) -> None:
+        forgotten.append(container_name)
+        if len(forgotten) == 1:
+            raise OSError("cleanup failed")
+
+    monkeypatch.setattr(
+        "cloud_agent_host.sandbox_deletion_backup.forget_deleted_container_uploads",
+        fail_once,
+    )
+
+    with pytest.raises(OSError, match="cleanup failed"):
+        restarted.discard(discard, sandbox_id=spec.sandbox_id)
+
+    directory = restarted._directory(discard)
+    assert (directory / "discard.json").exists()
+    assert not (directory / "discarded.json").exists()
+    assert restarted.discard(discard, sandbox_id=spec.sandbox_id)["deleted"] is True
+    assert forgotten == [spec.container_name, spec.container_name]
 
 
 @pytest.mark.parametrize("replacement", [False, True])
