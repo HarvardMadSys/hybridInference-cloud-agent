@@ -19,7 +19,11 @@ from cloud_agent.domain.teams import (
     AdminTeamRecord,
     TeamNotFound,
 )
-from cloud_agent.storage.repositories.teams import _APPLICANT_VIEW, _NOT_FOUND, _applicant
+from cloud_agent.storage._sql.teams import (
+    APPLICANT_VIEW,
+    TEAM_NOT_FOUND,
+    applicant_from_row,
+)
 
 if TYPE_CHECKING:
     import asyncpg
@@ -117,7 +121,7 @@ class PostgresTeamAdminQueries:
         async with self._pool.acquire() as conn, conn.transaction(isolation="repeatable_read"):
             row = await conn.fetchrow(_ADMIN_TEAM_VIEW + " WHERE t.id = $1", team_id)
             if row is None:
-                raise TeamNotFound(_NOT_FOUND)
+                raise TeamNotFound(TEAM_NOT_FOUND)
             team = _admin_team(row)
             members = await conn.fetch(
                 """
@@ -147,7 +151,7 @@ class PostgresTeamAdminQueries:
                 team_id,
             )
             requests = await conn.fetch(
-                _APPLICANT_VIEW
+                APPLICANT_VIEW
                 + " WHERE r.team_id = $1 AND r.state = 'pending' AND i.expires_at > NOW()"
                 " ORDER BY r.created_at, r.id LIMIT $2",
                 team_id,
@@ -185,7 +189,7 @@ class PostgresTeamAdminQueries:
                 )
                 for member in members
             ],
-            join_requests=[_applicant(request) for request in requests],
+            join_requests=[applicant_from_row(request) for request in requests],
             invitations=invitations,
             departed_count=departed_count,
         )
@@ -196,7 +200,7 @@ class PostgresTeamAdminQueries:
         """Page backwards from ``before`` (exclusive), with each person's profile name."""
         async with self._pool.acquire() as conn:
             if await conn.fetchval("SELECT 1 FROM agent_teams WHERE id = $1", team_id) is None:
-                raise TeamNotFound(_NOT_FOUND)
+                raise TeamNotFound(TEAM_NOT_FOUND)
             rows = await conn.fetch(
                 """
                 SELECT e.id, e.actor_user_id, e.action, e.target_user_id, e.target_id,

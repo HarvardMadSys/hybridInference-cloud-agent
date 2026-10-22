@@ -1043,98 +1043,6 @@ class PostgresEnvironmentRepository:
                 [{"operation": "restore", "source_revision": source_revision}],
             )
 
-    async def _bind_environment(
-        self, conn: Any, user_id: str, repo: str | None, selection: dict[str, Any]
-    ) -> tuple[str, str | None]:
-        """Freeze a snapshot inside the transaction that creates its work item.
-
-        A null ``repo`` is a temporary workspace. Environments belong to one
-        repository, so it binds only the owner's global variables.
-
-        A team's environment binds the member's globals for run time only
-        (:func:`runtime_only`) and records the team and the member's access
-        generation, which every later turn is checked against.
-        """
-        await self._environment_lock(conn, user_id)
-        environment_id = selection.get("environment_id")
-        if repo is None:
-            if environment_id:
-                raise EnvironmentNotFound("A temporary workspace has no repository environment")
-        elif not selection.get("environment_id_provided", False):
-            environment_id = await conn.fetchval(
-                "SELECT environment_id FROM agent_repository_environment_defaults WHERE user_id=$1 AND repo=$2",
-                user_id,
-                repo,
-            )
-            if environment_id is not None:
-                try:
-                    await self._environment_row(conn, user_id, environment_id)
-                except EnvironmentNotFound:
-                    # A team default from a team the account has since left:
-                    # it can no longer select it, as if the team had archived it.
-                    await conn.execute(
-                        "UPDATE agent_repository_environment_defaults "
-                        "SET environment_id=NULL,revision=revision+1 WHERE user_id=$1 AND repo=$2",
-                        user_id,
-                        repo,
-                    )
-                    environment_id = None
-        env = await self._environment_row(conn, user_id, environment_id) if environment_id else None
-        if env and env["repo"] != repo:
-            raise EnvironmentNotFound("Environment not found for this repository")
-        global_row = await conn.fetchrow(
-            "SELECT * FROM agent_environments WHERE user_id=$1 AND repo IS NULL", user_id
-        )
-        for key, row in (("environment_revision", env), ("global_revision", global_row)):
-            if selection.get(key) is not None and selection[key] != (row["revision"] if row else 0):
-                raise EnvironmentConflict(
-                    "Environment version changed; refresh before creating",
-                    current_revision=row["revision"] if row else 0,
-                )
-        version = await self._environment_version(conn, env["id"], env["revision"]) if env else None
-        global_version = (
-            await self._environment_version(conn, global_row["id"], global_row["revision"])
-            if global_row
-            else None
-        )
-        team_id = env["team_id"] if env else None
-        personal = self._environment_decode(
-            await self._environment_stored_variables(
-                conn, global_version["id"] if global_version else None
-            )
-        )
-        merged = merge_variables(
-            runtime_only(personal) if team_id else personal,
-            self._environment_decode(
-                await self._environment_stored_variables(conn, version["id"] if version else None)
-            ),
-        )
-        has_override = bool(selection.get("has_setup_override", False))
-        setup = (
-            selection.get("setup_override")
-            if has_override
-            else (_json(version["document"])["setup_script"] if version else None)
-        )
-        document = _json(version["document"]) if version else {}
-        required = bool(merged or setup or document.get("start_script") or document.get("actions"))
-        binding_id = _id()
-        await conn.execute(
-            "INSERT INTO agent_environment_bindings(id,user_id,repo,environment_version_id,global_version_id,setup_override,has_setup_override,required,setup_fingerprint,team_id,team_access_generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-            binding_id,
-            user_id,
-            repo,
-            version["id"] if version else None,
-            global_version["id"] if global_version else None,
-            selection.get("setup_override"),
-            has_override,
-            required,
-            # Only a saved environment's installation can be snapshotted.
-            optional_setup_fingerprint(setup, merged) if version else None,
-            team_id,
-            env["team_access_generation"] if env and team_id else None,
-        )
-        return binding_id, setup
-
     @classmethod
     async def _require_team_binding_access(cls, conn: Any, binding: Mapping[str, Any]) -> None:
         """Refuse a team binding whose owner left, or left and rejoined, that team."""
@@ -1604,7 +1512,7 @@ class PostgresEnvironmentRepository:
                     user_id,
                 ):
                     raise EnvironmentBusy("An environment test is already queued or running")
-                binding_id, _ = await self._bind_environment(conn, user_id, repo, selection)
+                binding_id, _ = await bind_environment(conn, user_id, repo, selection)
                 row = await conn.fetchrow(
                     "INSERT INTO agent_environment_runs(id,user_id,repo,base_sha,binding_id,idempotency_key,fingerprint,execution_profile) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",
                     _id(),
@@ -1634,7 +1542,7 @@ class PostgresEnvironmentRepository:
             env = await self._environment_row(conn, user_id, environment_id)
             if env["repo"] is None:
                 raise EnvironmentNotFound("Global variables have no installation")
-            binding_id, _ = await self._bind_environment(
+            binding_id, _ = await bind_environment(
                 conn,
                 user_id,
                 env["repo"],
@@ -1929,3 +1837,93 @@ class PostgresEnvironmentRepository:
             any(s.get("phase") == "start" and s.get("state") == "succeeded" for s in steps),
             json.dumps(steps),
         )
+
+
+async def bind_environment(
+    conn: Any, user_id: str, repo: str | None, selection: dict[str, Any]
+) -> tuple[str, str | None]:
+    """Freeze an environment snapshot in the caller's work-item transaction.
+
+    Temporary workspaces bind globals only. Team bindings use member globals at
+    runtime and record the access generation checked by later turns.
+    """
+    ops = PostgresEnvironmentRepository
+    await ops._environment_lock(conn, user_id)
+    environment_id = selection.get("environment_id")
+    if repo is None:
+        if environment_id:
+            raise EnvironmentNotFound("A temporary workspace has no repository environment")
+    elif not selection.get("environment_id_provided", False):
+        environment_id = await conn.fetchval(
+            "SELECT environment_id FROM agent_repository_environment_defaults WHERE user_id=$1 AND repo=$2",
+            user_id,
+            repo,
+        )
+        if environment_id is not None:
+            try:
+                await ops._environment_row(conn, user_id, environment_id)
+            except EnvironmentNotFound:
+                # A team default from a team the account has since left:
+                # it can no longer select it, as if the team had archived it.
+                await conn.execute(
+                    "UPDATE agent_repository_environment_defaults "
+                    "SET environment_id=NULL,revision=revision+1 WHERE user_id=$1 AND repo=$2",
+                    user_id,
+                    repo,
+                )
+                environment_id = None
+    env = await ops._environment_row(conn, user_id, environment_id) if environment_id else None
+    if env and env["repo"] != repo:
+        raise EnvironmentNotFound("Environment not found for this repository")
+    global_row = await conn.fetchrow(
+        "SELECT * FROM agent_environments WHERE user_id=$1 AND repo IS NULL", user_id
+    )
+    for key, row in (("environment_revision", env), ("global_revision", global_row)):
+        if selection.get(key) is not None and selection[key] != (row["revision"] if row else 0):
+            raise EnvironmentConflict(
+                "Environment version changed; refresh before creating",
+                current_revision=row["revision"] if row else 0,
+            )
+    version = await ops._environment_version(conn, env["id"], env["revision"]) if env else None
+    global_version = (
+        await ops._environment_version(conn, global_row["id"], global_row["revision"])
+        if global_row
+        else None
+    )
+    team_id = env["team_id"] if env else None
+    personal = ops._environment_decode(
+        await ops._environment_stored_variables(
+            conn, global_version["id"] if global_version else None
+        )
+    )
+    merged = merge_variables(
+        runtime_only(personal) if team_id else personal,
+        ops._environment_decode(
+            await ops._environment_stored_variables(conn, version["id"] if version else None)
+        ),
+    )
+    has_override = bool(selection.get("has_setup_override", False))
+    setup = (
+        selection.get("setup_override")
+        if has_override
+        else (_json(version["document"])["setup_script"] if version else None)
+    )
+    document = _json(version["document"]) if version else {}
+    required = bool(merged or setup or document.get("start_script") or document.get("actions"))
+    binding_id = _id()
+    await conn.execute(
+        "INSERT INTO agent_environment_bindings(id,user_id,repo,environment_version_id,global_version_id,setup_override,has_setup_override,required,setup_fingerprint,team_id,team_access_generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+        binding_id,
+        user_id,
+        repo,
+        version["id"] if version else None,
+        global_version["id"] if global_version else None,
+        selection.get("setup_override"),
+        has_override,
+        required,
+        # Only a saved environment's installation can be snapshotted.
+        optional_setup_fingerprint(setup, merged) if version else None,
+        team_id,
+        env["team_access_generation"] if env and team_id else None,
+    )
+    return binding_id, setup
