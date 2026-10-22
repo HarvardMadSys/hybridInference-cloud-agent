@@ -77,9 +77,9 @@ export function useAgentNotifications(
     let disposed = false;
     const current = () => !disposed && owner.current === userId;
     const controller = new AbortController();
-    const bootstrapStartedAt = performance.now();
     const jobs = new Map<string, WatchedJob>();
     const titles = new Map<string, string>();
+    const threadRevisions = new Map<string, number>();
     const latestTurns = new Map<string, number>();
     const revisions = new Map<string, number>();
     const reads = new Map<string, number>();
@@ -138,6 +138,18 @@ export function useAgentNotifications(
       void sent.catch(() => {}).finally(() => pendingNotices.delete(notice.key));
     }
 
+    function acceptTitle(threadId: string, title: string, revision?: number): void {
+      if (deletedThreads.has(threadId)) return;
+      const held = threadRevisions.get(threadId);
+      if (revision === undefined) {
+        if (held !== undefined) return;
+      } else {
+        if (held !== undefined && revision < held) return;
+        threadRevisions.set(threadId, revision);
+      }
+      titles.set(threadId, title);
+    }
+
     function accept(job: WatchedJob): void {
       if (!current()) return;
       if (deletedJobs.has(job.id) || (job.thread_id && deletedThreads.has(job.thread_id))) {
@@ -161,7 +173,12 @@ export function useAgentNotifications(
             : null),
       });
       unconfirmedChanges.delete(job.id);
-      if (job.thread_id && job.title) titles.set(job.thread_id, job.title);
+      if (job.thread_id && job.title)
+        acceptTitle(
+          job.thread_id,
+          job.title,
+          'thread_revision' in job ? job.thread_revision : undefined,
+        );
       if (job.thread_id)
         latestTurns.set(
           job.thread_id,
@@ -206,9 +223,10 @@ export function useAgentNotifications(
       if (notificationEpoch !== undefined) return;
       const observed = Date.parse(observedAt);
       if (!Number.isFinite(observed)) throw new Error('Notification state omitted its clock');
-      // Convert the request's monotonic elapsed time into the server clock domain.
-      // No comparison depends on the browser and database wall clocks agreeing.
-      notificationEpoch = observed - Math.max(0, performance.now() - bootstrapStartedAt);
+      // The server samples this baseline when it receives the bootstrap request.
+      // Completion timestamps share that clock, so neither browser skew nor a
+      // delayed response can move old work into the post-enable window.
+      notificationEpoch = observed;
       for (const job of [...jobs.values()])
         if (TERMINAL_STATES.has(job.state)) acceptTerminal(job, undefined);
     }
@@ -275,6 +293,7 @@ export function useAgentNotifications(
       pendingReads.clear();
       jobs.clear();
       titles.clear();
+      threadRevisions.clear();
       revisions.clear();
       for (const job of retained) {
         jobs.set(job.id, job);
@@ -380,11 +399,9 @@ export function useAgentNotifications(
           }
           for (const id of result.deleted_job_ids) forgetJob(id);
           for (const id of result.deleted_thread_ids) forgetThread(id);
-          for (const thread of result.threads) titles.set(thread.id, thread.title);
-          for (const job of result.jobs) {
-            titles.set(job.thread_id, job.title);
-            accept(job);
-          }
+          for (const thread of result.threads)
+            acceptTitle(thread.id, thread.title, thread.revision);
+          for (const job of result.jobs) accept(job);
           cursor = result.next_cursor ?? undefined;
           if (cursor) continue;
           if (!result.change_cursor) throw new Error('Notification state omitted its cursor');
@@ -411,7 +428,7 @@ export function useAgentNotifications(
       for (const thread of change.threads) {
         if (thread.deleted) {
           forgetThread(thread.id);
-        } else if (thread.title) titles.set(thread.id, thread.title);
+        } else if (thread.title) acceptTitle(thread.id, thread.title, thread.revision);
       }
       for (const job of change.jobs) {
         if (job.deleted) {

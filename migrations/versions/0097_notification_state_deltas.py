@@ -44,6 +44,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     changed RECORD;
     durable BOOLEAN := TRUE;
+    terminal_job BOOLEAN := FALSE;
 BEGIN
     IF TG_OP = 'DELETE' THEN
         changed := OLD;
@@ -69,16 +70,24 @@ BEGIN
                 OR OLD.cancel_requested IS DISTINCT FROM NEW.cancel_requested
             ));
     END IF;
+    IF TG_ARGV[0] = 'job' THEN
+        IF TG_OP <> 'DELETE' THEN
+            terminal_job := NEW.fork_source_job_id IS NULL
+                AND NEW.state IN ('succeeded','failed','cancelled');
+        END IF;
+    END IF;
     IF durable THEN
         INSERT INTO agent_notification_changes (
-            kind,entity_id,user_id,change_xid,changed_at
+            kind,entity_id,user_id,change_xid,changed_at,terminal
         ) VALUES (
-            TG_ARGV[0],changed.id,changed.user_id,pg_current_xact_id(),clock_timestamp()
+            TG_ARGV[0],changed.id,changed.user_id,pg_current_xact_id(),
+            clock_timestamp(),terminal_job
         )
         ON CONFLICT (kind,entity_id) DO UPDATE SET
             user_id=EXCLUDED.user_id,
             change_xid=EXCLUDED.change_xid,
-            changed_at=EXCLUDED.changed_at;
+            changed_at=EXCLUDED.changed_at,
+            terminal=EXCLUDED.terminal;
     END IF;
     PERFORM pg_notify(
         'agent_owner_changes',
@@ -125,6 +134,7 @@ def upgrade() -> None:
             user_id TEXT NOT NULL,
             change_xid xid8 NOT NULL,
             changed_at TIMESTAMPTZ NOT NULL,
+            terminal BOOLEAN NOT NULL DEFAULT FALSE,
             PRIMARY KEY (kind,entity_id)
         )
         """
@@ -138,7 +148,8 @@ def upgrade() -> None:
     op.execute(
         """
         CREATE INDEX idx_agent_notification_changes_owner_recent
-            ON agent_notification_changes (user_id,kind,changed_at DESC,entity_id)
+            ON agent_notification_changes (user_id,changed_at DESC,entity_id DESC)
+            WHERE kind='job' AND terminal
         """
     )
     op.execute(

@@ -26,10 +26,22 @@ def test_bootstrap_and_change_cursors_round_trip_for_one_owner_and_page_size():
         database_snapshot="100:104:101,103",
         bootstrap=True,
         bootstrap_at=datetime(2026, 10, 22, tzinfo=UTC),
+        bootstrap_phase="active",
         after_id="job-200",
     )
     decoded = decode_notification_cursor(encode_cursor(bootstrap), user_id="owner-a", limit=200)
     assert decoded == bootstrap
+
+    recent = NotificationStateCursor(
+        scope=notification_scope("owner-a", 200),
+        database_snapshot="100:104:101,103",
+        bootstrap=True,
+        bootstrap_at=datetime(2026, 10, 22, tzinfo=UTC),
+        bootstrap_phase="recent",
+        after_changed_at=datetime(2026, 10, 22, 1, tzinfo=UTC),
+        after_id="job-400",
+    )
+    assert decode_notification_cursor(encode_cursor(recent), user_id="owner-a", limit=200) == recent
 
     changes = NotificationStateCursor(
         scope=notification_scope("owner-a", 200),
@@ -72,6 +84,21 @@ def test_bootstrap_and_change_cursors_round_trip_for_one_owner_and_page_size():
             "bootstrap_at": "2026-10-22T00:00:00Z",
             "after_id": "job\ud800bad",
         },
+        {
+            "bootstrap": True,
+            "bootstrap_at": "2026-10-22T00:00:00Z",
+            "bootstrap_phase": "recent",
+            "after_id": "job-1",
+        },
+        {
+            "bootstrap": True,
+            "bootstrap_at": "2026-10-22T00:00:00Z",
+            "bootstrap_phase": "active",
+            "after_changed_at": "2026-10-22T00:00:00Z",
+            "after_id": "job-1",
+        },
+        {"bootstrap_phase": "active"},
+        {"after_changed_at": "2026-10-22T00:00:00Z"},
         {"target_snapshot": "20:21:", "after_id": "job-1"},
         {"target_snapshot": "20:21:", "after_kind": "job"},
     ],

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
 from tests.integration.storage.test_agent_job_store import (  # noqa: F401 - pytest fixtures
@@ -12,6 +14,7 @@ from tests.integration.storage.test_agent_job_store import (  # noqa: F401 - pyt
     store,
 )
 
+from cloud_agent.notification_state import decode_notification_cursor
 from cloud_agent.storage import notification_state as notification_state_storage
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -120,6 +123,112 @@ async def test_notification_state_ignores_lifetime_history_but_bootstraps_recent
     assert unchanged["deleted_thread_ids"] == []
     assert unchanged["next_cursor"] is None
     assert unchanged["change_cursor"]
+
+
+async def test_notification_bootstrap_pages_100k_recent_terminals_with_bounded_index_reads(
+    pool, store: Storage, monkeypatch
+):
+    """Every bootstrap page touches one index-sized slice, not the 24-hour population."""
+    count = 100_000
+    async with pool.acquire() as conn, conn.transaction():
+        # These are synthetic scale rows, not a trigger test. Avoid 200,000
+        # irrelevant NOTIFY calls and write the exact derived markers directly.
+        await conn.execute("SET LOCAL session_replication_role = 'replica'")
+        await conn.execute(
+            """
+            INSERT INTO agent_threads (id,user_id,repo,title,execution_profile)
+            SELECT 'athr_notification_scale_' || lpad(n::text,6,'0'),
+                   'notification-scale','owner/scale','Scale ' || n,'trusted-v1'
+            FROM generate_series(1,$1) AS n
+            """,
+            count,
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_jobs (
+                id,thread_id,user_id,turn_no,task_prompt,runtime,model,state
+            )
+            SELECT 'ajob_notification_scale_' || lpad(n::text,6,'0'),
+                   'athr_notification_scale_' || lpad(n::text,6,'0'),
+                   'notification-scale',1,'scale','claude-code','glm-5.1','cancelled'
+            FROM generate_series(1,$1) AS n
+            """,
+            count,
+        )
+        await conn.execute("SET LOCAL session_replication_role = 'origin'")
+        await conn.execute(
+            """
+            INSERT INTO agent_notification_changes (
+                kind,entity_id,user_id,change_xid,changed_at,terminal
+            )
+            SELECT 'job','ajob_notification_scale_' || lpad(n::text,6,'0'),
+                   'notification-scale',pg_current_xact_id(),
+                   NOW() - n * interval '1 microsecond',TRUE
+            FROM generate_series(1,$1) AS n
+            """,
+            count,
+        )
+    async with pool.acquire() as conn:
+        await conn.execute("ANALYZE agent_jobs")
+        await conn.execute("ANALYZE agent_notification_changes")
+
+    scans: list[int] = []
+    original = notification_state_storage._recent_candidates
+
+    async def counted(*args, **kwargs):
+        scans.append(kwargs["scan_limit"])
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(notification_state_storage, "_recent_candidates", counted)
+    first = await store.conversation_queries.notification_state(
+        user_id="notification-scale", limit=200
+    )
+    assert len(first["jobs"]) == 200
+    assert first["next_cursor"] and first["change_cursor"] is None
+    cursor = decode_notification_cursor(
+        first["next_cursor"], user_id="notification-scale", limit=200
+    )
+    assert cursor is not None
+    assert cursor.bootstrap_phase == "recent"
+    assert cursor.after_changed_at is not None
+
+    second = await store.conversation_queries.notification_state(
+        user_id="notification-scale", cursor=first["next_cursor"], limit=200
+    )
+    assert len(second["jobs"]) == 200
+    assert {row["id"] for row in first["jobs"]}.isdisjoint(row["id"] for row in second["jobs"])
+    assert scans == [201, 201]
+
+    async with pool.acquire() as conn:
+        raw_plan = await conn.fetchval(
+            "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) "
+            + notification_state_storage._RECENT_CANDIDATES_SQL,
+            "notification-scale",
+            cursor.bootstrap_at,
+            None,
+            None,
+            201,
+        )
+    plan = json.loads(raw_plan)[0]["Plan"]
+
+    def nodes(node):
+        yield node
+        for child in node.get("Plans", []):
+            yield from nodes(child)
+
+    marker_nodes = [
+        node for node in nodes(plan) if node.get("Relation Name") == "agent_notification_changes"
+    ]
+    assert any(
+        node.get("Index Name") == "idx_agent_notification_changes_owner_recent"
+        for node in marker_nodes
+    )
+    examined = sum(
+        (node.get("Actual Rows", 0) + node.get("Rows Removed by Filter", 0))
+        * node.get("Actual Loops", 1)
+        for node in marker_nodes
+    )
+    assert examined <= 201, f"examined {examined} markers for a 200-row page"
 
 
 async def test_notification_state_recovers_delayed_commit_once_and_reports_deletion(

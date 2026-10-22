@@ -33,18 +33,22 @@ async def read_notification_state(
     """Return active jobs once, then only identities changed since the cursor."""
     cursor = decode_notification_cursor(cursor_value, user_id=user_id, limit=limit)
     async with pool.acquire() as conn:
+        # Define enablement in the database clock domain before maintenance or
+        # bootstrap work. Every terminal timestamp is compared to this same
+        # request-receipt baseline, so response latency can neither replay old
+        # history nor move the baseline past a completion found by this read.
+        bootstrap_at = await conn.fetchval("SELECT clock_timestamp()") if cursor is None else None
         await _prune_if_due(conn, force=cursor is None)
         async with conn.transaction(isolation="repeatable_read"):
             await conn.execute("SET LOCAL statement_timeout = '5s'")
             if cursor is None:
-                bootstrap_at, snapshot = await conn.fetchrow(
-                    "SELECT NOW(),pg_current_snapshot()::text"
-                )
+                snapshot = await conn.fetchval("SELECT pg_current_snapshot()::text")
                 cursor = NotificationStateCursor(
                     scope=notification_scope(user_id, limit),
                     database_snapshot=snapshot,
                     bootstrap=True,
                     bootstrap_at=bootstrap_at,
+                    bootstrap_phase="active",
                 )
                 return await _bootstrap(conn, cursor, user_id, limit)
             if cursor.bootstrap:
@@ -86,72 +90,188 @@ async def _job_rows(conn: Any, *, user_id: str, ids: list[str]) -> list[Any]:
     )
 
 
+_ACTIVE_CANDIDATES_SQL = """
+    SELECT id FROM agent_jobs
+    WHERE user_id=$1 AND state IN ('queued','running')
+      AND fork_source_job_id IS NULL
+      AND ($2::text IS NULL OR id>$2)
+    ORDER BY id LIMIT $3
+"""
+
+_RECENT_CANDIDATES_SQL = """
+    SELECT changed_at,entity_id
+    FROM agent_notification_changes
+    WHERE user_id=$1 AND kind='job' AND terminal
+      AND changed_at >= $2::timestamptz - interval '24 hours'
+      AND (
+          $3::timestamptz IS NULL
+          OR (changed_at,entity_id)<($3::timestamptz,$4::text)
+      )
+    ORDER BY changed_at DESC,entity_id DESC LIMIT $5
+"""
+
+
+async def _active_candidates(
+    conn: Any, *, user_id: str, after_id: str | None, scan_limit: int
+) -> list[Any]:
+    """Read at most one index-ordered page, before any visibility joins."""
+    return await conn.fetch(
+        _ACTIVE_CANDIDATES_SQL,
+        user_id,
+        after_id,
+        scan_limit,
+    )
+
+
+async def _recent_candidates(
+    conn: Any,
+    *,
+    user_id: str,
+    bootstrap_at: Any,
+    after_changed_at: Any,
+    after_id: str | None,
+    scan_limit: int,
+) -> list[Any]:
+    """Read one bounded page from the terminal-marker covering index."""
+    return await conn.fetch(
+        _RECENT_CANDIDATES_SQL,
+        user_id,
+        bootstrap_at,
+        after_changed_at,
+        after_id,
+        scan_limit,
+    )
+
+
+async def _recent_job_rows(
+    conn: Any, *, user_id: str, ids: list[str], bootstrap_at: Any
+) -> list[Any]:
+    """Hydrate only terminal rows whose actual completion remains recent."""
+    return await conn.fetch(
+        """
+        SELECT j.id,j.thread_id,t.title,t.repo,j.state,j.current_attempt_id,j.turn_no,
+               j.revision,j.cancel_requested,a.finished_at,j.updated_at
+        FROM agent_jobs j
+        JOIN agent_threads t ON t.id=j.thread_id AND t.user_id=j.user_id
+        LEFT JOIN agent_attempts a ON a.id=j.current_attempt_id
+        WHERE j.user_id=$1 AND t.deleted_at IS NULL
+          AND j.fork_source_job_id IS NULL
+          AND j.id=ANY($2::text[])
+          AND j.state IN ('succeeded','failed','cancelled')
+          AND COALESCE(a.finished_at,j.updated_at)
+              >= $3::timestamptz - interval '24 hours'
+        ORDER BY j.id
+        """,
+        user_id,
+        ids,
+        bootstrap_at,
+    )
+
+
+def _bootstrap_result(
+    cursor: NotificationStateCursor,
+    rows: list[Any],
+    continuation: NotificationStateCursor | None,
+) -> dict[str, Any]:
+    changes = NotificationStateCursor(
+        scope=cursor.scope,
+        database_snapshot=cursor.database_snapshot,
+    )
+    return {
+        "mode": "snapshot",
+        "jobs": [_job(row) for row in rows],
+        "threads": [],
+        "deleted_job_ids": [],
+        "deleted_thread_ids": [],
+        "observed_at": cursor.bootstrap_at,
+        "next_cursor": encode_cursor(continuation) if continuation is not None else None,
+        "change_cursor": encode_cursor(changes) if continuation is None else None,
+        "reset_required": False,
+    }
+
+
 async def _bootstrap(
     conn: Any,
     cursor: NotificationStateCursor,
     user_id: str,
     limit: int,
 ) -> dict[str, Any]:
-    rows = await conn.fetch(
-        """
-        WITH candidates AS MATERIALIZED (
-            SELECT id
-            FROM agent_jobs
-            WHERE user_id=$1 AND state IN ('queued','running')
-              AND fork_source_job_id IS NULL
-              AND ($2::text IS NULL OR id>$2)
-            UNION ALL
-            SELECT c.entity_id
-            FROM agent_notification_changes c
-            JOIN agent_jobs recent ON recent.id=c.entity_id AND recent.user_id=c.user_id
-            LEFT JOIN agent_attempts completed ON completed.id=recent.current_attempt_id
-            WHERE c.user_id=$1 AND c.kind='job'
-              AND recent.fork_source_job_id IS NULL
-              AND c.changed_at >= $4::timestamptz - interval '24 hours'
-              AND COALESCE(completed.finished_at,recent.updated_at)
-                  >= $4::timestamptz - interval '24 hours'
-              AND recent.state IN ('succeeded','failed','cancelled')
-              AND ($2::text IS NULL OR c.entity_id>$2)
+    """Page active jobs, then recent terminals, with O(limit) candidate reads."""
+    phase = cursor.bootstrap_phase or "active"
+    page: list[Any] = []
+
+    if phase == "active":
+        candidates = await _active_candidates(
+            conn,
+            user_id=user_id,
+            after_id=cursor.after_id,
+            scan_limit=limit + 1,
         )
-        SELECT j.id,j.thread_id,t.title,t.repo,j.state,j.current_attempt_id,j.turn_no,
-               j.revision,j.cancel_requested,a.finished_at,j.updated_at
-        FROM candidates c
-        JOIN agent_jobs j ON j.id=c.id AND j.user_id=$1
-        JOIN agent_threads t ON t.id=j.thread_id AND t.user_id=j.user_id
-        LEFT JOIN agent_attempts a ON a.id=j.current_attempt_id
-        WHERE t.deleted_at IS NULL
-        ORDER BY j.id LIMIT $3
-        """,
-        user_id,
-        cursor.after_id,
-        limit + 1,
-        cursor.bootstrap_at,
+        selected = candidates[:limit]
+        if selected:
+            page.extend(
+                await _job_rows(
+                    conn,
+                    user_id=user_id,
+                    ids=[row["id"] for row in selected],
+                )
+            )
+        if len(candidates) > limit:
+            continuation = cursor.model_copy(
+                update={
+                    "bootstrap_phase": "active",
+                    "after_changed_at": None,
+                    "after_id": selected[-1]["id"],
+                }
+            )
+            return _bootstrap_result(cursor, page, continuation)
+
+        remaining = limit - len(page)
+        if remaining == 0:
+            continuation = cursor.model_copy(
+                update={
+                    "bootstrap_phase": "recent",
+                    "after_changed_at": None,
+                    "after_id": None,
+                }
+            )
+            return _bootstrap_result(cursor, page, continuation)
+        after_changed_at = None
+        after_id = None
+    else:
+        remaining = limit
+        after_changed_at = cursor.after_changed_at
+        after_id = cursor.after_id
+
+    recent = await _recent_candidates(
+        conn,
+        user_id=user_id,
+        bootstrap_at=cursor.bootstrap_at,
+        after_changed_at=after_changed_at,
+        after_id=after_id,
+        scan_limit=remaining + 1,
     )
-    page = rows[:limit]
-    more = len(rows) > limit
-    continuation = cursor.model_copy(
-        update={"after_id": page[-1]["id"] if page else cursor.after_id}
-    )
-    changes = NotificationStateCursor(
-        scope=cursor.scope,
-        database_snapshot=cursor.database_snapshot,
-    )
-    # The browser subtracts the request's monotonic elapsed duration from this
-    # database-clock sample. Sampling after page materialization keeps database
-    # work out of the inferred pre-enable window, so old completions cannot be
-    # replayed merely because the bootstrap query was slow.
-    observed_at = await conn.fetchval("SELECT clock_timestamp()")
-    return {
-        "mode": "snapshot",
-        "jobs": [_job(row) for row in page],
-        "threads": [],
-        "deleted_job_ids": [],
-        "deleted_thread_ids": [],
-        "observed_at": observed_at,
-        "next_cursor": encode_cursor(continuation) if more else None,
-        "change_cursor": encode_cursor(changes) if not more else None,
-        "reset_required": False,
-    }
+    selected_recent = recent[:remaining]
+    if selected_recent:
+        page.extend(
+            await _recent_job_rows(
+                conn,
+                user_id=user_id,
+                ids=[row["entity_id"] for row in selected_recent],
+                bootstrap_at=cursor.bootstrap_at,
+            )
+        )
+    recent_continuation: NotificationStateCursor | None = None
+    if len(recent) > remaining:
+        boundary = selected_recent[-1]
+        recent_continuation = cursor.model_copy(
+            update={
+                "bootstrap_phase": "recent",
+                "after_changed_at": boundary["changed_at"],
+                "after_id": boundary["entity_id"],
+            }
+        )
+    return _bootstrap_result(cursor, page, recent_continuation)
 
 
 async def _changes(

@@ -150,22 +150,22 @@ afterEach(() => {
 });
 
 describe('owner-wide agent notifications', () => {
-  it('uses the server epoch when the browser clock is behind during bootstrap', async () => {
+  it('uses the server request baseline when the browser is behind and the response is delayed', async () => {
     const pending = deferred<AgentNotificationStateApi>();
     list.mockReturnValueOnce(pending.promise);
     await mount({ ...preferences, questions: false });
     const older = job({
       id: 'older',
       state: 'succeeded',
-      // This would replay if the one-second bootstrap query were subtracted twice.
-      finished_at: '2026-10-11T12:59:59.500Z',
+      // This predates enablement but falls inside the delayed response window.
+      finished_at: '2026-10-11T12:59:58Z',
     });
-    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
     const terminal = job({ state: 'succeeded', finished_at: '2026-10-11T13:00:00.500Z' });
     await act(async () =>
       pending.resolve(
         page([older, terminal], null, {
-          observed_at: '2026-10-11T13:00:01Z',
+          observed_at: '2026-10-11T13:00:00Z',
           change_cursor: 'bootstrap-tail',
         }),
       ),
@@ -194,7 +194,7 @@ describe('owner-wide agent notifications', () => {
     await changed(terminal);
     expect(notify).not.toHaveBeenCalled();
 
-    await act(async () => pending.resolve(page([], null, { observed_at: '2026-10-11T13:00:01Z' })));
+    await act(async () => pending.resolve(page([], null, { observed_at: '2026-10-11T13:00:00Z' })));
     expect(notify).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ jobId: 'job-1', kind: 'succeeded' }),
     );
@@ -453,6 +453,45 @@ describe('owner-wide agent notifications', () => {
       expect(notify).not.toHaveBeenCalled();
     },
   );
+
+  it('keeps a newer pushed title when an older delta arrives later', async () => {
+    list.mockResolvedValueOnce(page([job({ title: 'Initial title' })]));
+    await mount({ ...preferences, questions: false });
+    const pending = deferred<AgentNotificationStateApi>();
+    list.mockReturnValueOnce(pending.promise);
+    await act(async () => {
+      receiveSync();
+      await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+    });
+    await act(async () => {
+      receiveThreadChange({ id: 'thread-1', title: 'Newest title', revision: 3 });
+      await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+    });
+    await act(async () =>
+      pending.resolve(
+        page(
+          [
+            job({
+              title: 'Stale job title',
+              state: 'succeeded',
+              revision: 2,
+              thread_revision: 2,
+              finished_at: new Date().toISOString(),
+            }),
+          ],
+          null,
+          {
+            mode: 'delta',
+            threads: [{ id: 'thread-1', title: 'Stale delta title', revision: 2 }],
+            change_cursor: 'new-tail',
+          },
+        ),
+      ),
+    );
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ kind: 'succeeded', title: 'Newest title' }),
+    );
+  });
 
   it('does not revive a delivered terminal from an older in-flight delta', async () => {
     await mount();
@@ -717,7 +756,7 @@ describe('owner-wide agent notifications', () => {
     );
   });
 
-  it('uses the server epoch when the browser clock is ahead during bootstrap', async () => {
+  it('uses the server request baseline when the browser clock is ahead', async () => {
     const pending = deferred<AgentNotificationStateApi>();
     list.mockReturnValueOnce(pending.promise);
     await mount({ ...preferences, questions: false });
@@ -736,7 +775,7 @@ describe('owner-wide agent notifications', () => {
       updated_at: '2026-10-11T10:59:00Z',
     };
     await act(async () =>
-      pending.resolve(page([older, terminal], null, { observed_at: '2026-10-11T11:00:01Z' })),
+      pending.resolve(page([older, terminal], null, { observed_at: '2026-10-11T11:00:00Z' })),
     );
     expect(notify).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ kind: 'cancelled', jobId: 'job-1', attemptId: null }),

@@ -27,6 +27,8 @@ class NotificationStateCursor(BaseModel):
     database_snapshot: str = Field(max_length=8192, pattern=r"^[0-9]+:[0-9]+:([0-9]+(,[0-9]+)*)?$")
     bootstrap: bool = False
     bootstrap_at: datetime | None = None
+    bootstrap_phase: Literal["active", "recent"] | None = None
+    after_changed_at: datetime | None = None
     target_snapshot: str | None = Field(
         default=None, max_length=8192, pattern=r"^[0-9]+:[0-9]+:([0-9]+(,[0-9]+)*)?$"
     )
@@ -51,7 +53,16 @@ class NotificationStateCursor(BaseModel):
                 raise ValueError("Invalid bootstrap cursor.")
             if self.after_kind is not None:
                 raise ValueError("Invalid bootstrap position.")
-        elif self.bootstrap_at is not None:
+            phase = self.bootstrap_phase or "active"
+            if phase == "active" and self.after_changed_at is not None:
+                raise ValueError("Invalid bootstrap position.")
+            if phase == "recent" and ((self.after_changed_at is None) != (self.after_id is None)):
+                raise ValueError("Invalid bootstrap position.")
+        elif (
+            self.bootstrap_at is not None
+            or self.bootstrap_phase is not None
+            or self.after_changed_at is not None
+        ):
             raise ValueError("Invalid change cursor.")
         elif self.target_snapshot is None:
             if self.after_kind is not None or self.after_id is not None:
@@ -59,6 +70,8 @@ class NotificationStateCursor(BaseModel):
         elif self.after_kind is None or self.after_id is None:
             raise ValueError("Invalid change position.")
         if self.bootstrap_at is not None and self.bootstrap_at.tzinfo is None:
+            raise ValueError("Invalid bootstrap time.")
+        if self.after_changed_at is not None and self.after_changed_at.tzinfo is None:
             raise ValueError("Invalid bootstrap time.")
         return self
 
