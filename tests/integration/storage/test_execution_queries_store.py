@@ -43,24 +43,28 @@ _OWNER = "user-1"
 _OTHER = "user-2"
 
 
-@pytest_asyncio.fixture
-async def db():
-    """A clean database over the shared test database."""
-    import asyncpg
-
+def _database_config() -> dict[str, str | int]:
+    """The isolated test database selected for this pytest worker."""
     base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
     test_db_name = base_db_name if worker_id == "master" else f"{base_db_name}_{worker_id}"
     if _ALLOWED_TEST_DB_PATTERN not in (test_db_name or ""):
         pytest.fail(f"SAFETY: TEST_DB_NAME='{test_db_name}' is not a test database.")
-
-    config = {
+    return {
         "host": os.getenv("TEST_DB_HOST", "localhost"),
         "port": int(os.getenv("TEST_DB_PORT", "5432")),
         "database": test_db_name,
         "user": os.getenv("TEST_DB_USER", "postgres"),
         "password": os.getenv("TEST_DB_PASSWORD", "postgres"),
     }
+
+
+@pytest_asyncio.fixture
+async def db():
+    """A clean database over the shared test database."""
+    import asyncpg
+
+    config = _database_config()
     try:
         pool = await asyncpg.create_pool(**config, min_size=1, max_size=5)
     except Exception as exc:
@@ -306,3 +310,166 @@ async def test_turn_telemetry_answers_nothing_for_an_attempt_the_job_never_had(
         await queries.job_turn_telemetry(job_id=job["id"], attempt_id=claim["attempt_id"] + 10_000)
         is None
     )
+
+
+async def test_trajectory_timings_are_one_query_for_one_hundred_turns_and_match_detail(db) -> None:
+    """Three retries per turn stay one SQL statement and retain old semantics."""
+    import asyncpg
+
+    thread_id = "athread_trajectory_batch"
+    job_ids = [f"ajob_trajectory_{number:03d}" for number in range(1, 101)]
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_threads (id, user_id, repo, title, execution_profile)
+            VALUES ($1, $2, 'owner/name', 'Trajectory batch', 'trusted-v1')
+            """,
+            thread_id,
+            _OWNER,
+        )
+        await conn.executemany(
+            """
+            INSERT INTO agent_jobs (
+                id, thread_id, user_id, parent_job_id, turn_no,
+                task_prompt, runtime, model, state
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, 'codex', 'gpt-5', 'running')
+            """,
+            [
+                (
+                    job_id,
+                    thread_id,
+                    _OWNER,
+                    job_ids[index - 1] if index else None,
+                    index + 1,
+                    f"turn {index + 1}",
+                )
+                for index, job_id in enumerate(job_ids)
+            ],
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_attempts (
+                job_id, thread_id, attempt_no, lease_owner, lease_generation,
+                lease_expires_at, status, started_at, finished_at,
+                continuity_mode, context_status
+            )
+            SELECT job.id, job.thread_id, attempt_no, 'worker-test', attempt_no,
+                   NOW() + INTERVAL '1 hour',
+                   CASE WHEN attempt_no = 3 THEN 'running' ELSE 'finished' END,
+                   TIMESTAMPTZ '2026-10-20 12:00:00+00'
+                       + job.turn_no * INTERVAL '1 minute'
+                       + attempt_no * INTERVAL '5 seconds',
+                   CASE WHEN attempt_no = 3 THEN NULL
+                        ELSE TIMESTAMPTZ '2026-10-20 12:00:00+00'
+                             + job.turn_no * INTERVAL '1 minute'
+                             + attempt_no * INTERVAL '5 seconds'
+                             + attempt_no * INTERVAL '1 second' END,
+                   CASE WHEN attempt_no = 1 THEN NULL
+                        WHEN attempt_no = 2 THEN 'warm_native' ELSE 'hot' END,
+                   CASE WHEN attempt_no = 1 THEN 'new'
+                        WHEN attempt_no = 2 THEN 'restored' ELSE 'live' END
+            FROM agent_jobs job
+            CROSS JOIN generate_series(1, 3) AS attempt_no
+            WHERE job.thread_id = $1
+            """,
+            thread_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_attempt_resources (
+                attempt_id, job_id, sampler_version, tool_time_ms, tool_calls_truncated
+            )
+            SELECT id, job_id, 'shared-member-v1', attempt_no * 100,
+                   attempt_no = 2
+            FROM agent_attempts
+            WHERE thread_id = $1 AND attempt_no <= 2
+            """,
+            thread_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_tool_call_resources (
+                attempt_id, call_seq, tool_use_id, tool_name, timing_source
+            )
+            SELECT id, 1, 'tool-' || id, 'Read',
+                   CASE WHEN attempt_no = 1 THEN 'exact' ELSE 'message' END
+            FROM agent_attempts
+            WHERE thread_id = $1 AND attempt_no <= 2
+            """,
+            thread_id,
+        )
+
+    logged = []
+
+    async def attach_query_logger(conn) -> None:
+        conn.add_query_logger(logged.append)
+
+    reading_pool = await asyncpg.create_pool(
+        **_database_config(),
+        min_size=1,
+        max_size=1,
+        init=attach_query_logger,
+    )
+    try:
+        batch_queries = PostgresExecutionQueries(reading_pool)
+        requested = list(reversed(job_ids))
+        result = await batch_queries.trajectory_timings(
+            job_ids=requested, user_id=_OWNER, max_attempts=2_000
+        )
+
+        data_queries = [
+            record.query
+            for record in logged
+            if not record.query.startswith("SELECT pg_advisory_unlock_all()")
+        ]
+        assert len(data_queries) == 1, data_queries
+        assert "WITH requested AS MATERIALIZED" in data_queries[0]
+        assert result["owned_count"] == 100
+        assert result["attempt_count"] == 300
+        assert len(result["attempts"]) == 300
+        assert [row["job_id"] for row in result["attempts"][::3]] == requested
+        assert [row["attempt_no"] for row in result["attempts"][:3]] == [1, 2, 3]
+    finally:
+        await reading_pool.close()
+
+    representative = requested[0]
+    old_attempts = await PostgresExecutionQueries(db).job_attempts_telemetry(job_id=representative)
+    compact = [row for row in result["attempts"] if row["job_id"] == representative]
+    assert [
+        (
+            row["attempt_id"],
+            row["attempt_no"],
+            row["continuity_mode"],
+            row["context_status"],
+            row["started_at"],
+            row["finished_at"],
+        )
+        for row in compact
+    ] == [
+        (
+            row["attempt_id"],
+            row["attempt_no"],
+            row["continuity_mode"],
+            row["context_status"],
+            row["started_at"],
+            row["finished_at"],
+        )
+        for row in old_attempts
+    ]
+    for row in compact:
+        detail = await PostgresExecutionQueries(db).job_turn_telemetry(
+            job_id=representative, attempt_id=row["attempt_id"]
+        )
+        assert detail is not None
+        calls = detail.get("tool_calls") or []
+        assert row["tool_time_ms"] == detail.get("tool_time_ms")
+        assert row["tool_calls_truncated"] is bool(detail.get("tool_calls_truncated"))
+        assert row["tool_timing_exact"] is (
+            bool(calls) and all(call["timing_source"] == "exact" for call in calls)
+        )
+
+    refused = await PostgresExecutionQueries(db).trajectory_timings(
+        job_ids=[representative], user_id=_OTHER, max_attempts=2_000
+    )
+    assert refused == {"owned_count": 0, "attempt_count": 0, "attempts": []}

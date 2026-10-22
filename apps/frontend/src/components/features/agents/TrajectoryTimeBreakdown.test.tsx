@@ -7,17 +7,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getAgentJob,
   getAgentAttemptTelemetry,
+  getAgentTrajectoryTimings,
   type AgentJobApi,
   type AgentAttemptTelemetryApi,
 } from '@/lib/api/agents';
+import { APIError } from '@/lib/utils/errors';
 import { TrajectoryTimeBreakdown } from './TrajectoryTimeBreakdown';
 
 afterEach(cleanup);
 vi.mock('@/lib/api/agents', () => ({
+  AGENT_TRAJECTORY_TIMING_BATCH_SIZE: 100,
   getAgentJob: vi.fn(),
   getAgentAttemptTelemetry: vi.fn(),
+  getAgentTrajectoryTimings: vi.fn(),
 }));
 beforeEach(() => {
+  vi.mocked(getAgentTrajectoryTimings)
+    .mockReset()
+    .mockRejectedValue(new APIError('UNKNOWN_ERROR', 'Not found', 405));
   vi.mocked(getAgentJob).mockReset().mockRejectedValue(new Error('Unavailable'));
   vi.mocked(getAgentAttemptTelemetry).mockReset().mockRejectedValue(new Error('Unavailable'));
 });
@@ -53,6 +60,113 @@ function value(label: string): string | null {
 }
 
 describe('TrajectoryTimeBreakdown', () => {
+  it('loads one hundred three-attempt turns with one compact request', async () => {
+    const jobs = Array.from({ length: 100 }, (_, index) =>
+      job({
+        id: `job-${index + 1}`,
+        turn_no: index + 1,
+        state: 'succeeded',
+        revision: 1,
+        current_attempt_id: index * 3 + 3,
+        telemetry_attempt_id: null,
+        duration_ms: null,
+        attempt_telemetry: [],
+        resources: null,
+      }),
+    );
+    vi.mocked(getAgentTrajectoryTimings).mockResolvedValue({
+      jobs: jobs.map((item, jobIndex) => ({
+        job_id: item.id,
+        attempts: Array.from({ length: 3 }, (_, attemptIndex) => ({
+          attempt_id: jobIndex * 3 + attemptIndex + 1,
+          attempt_no: attemptIndex + 1,
+          continuity_mode: null,
+          context_status: null,
+          duration_ms: 1_000,
+          tool_time_ms: 100,
+          tool_calls_truncated: false,
+          tool_timing_exact: true,
+        })),
+      })),
+    });
+
+    render(<TrajectoryTimeBreakdown jobs={jobs} />);
+
+    await waitFor(() => expect(value('Recorded execution')).toBe('5m'));
+    expect(value('Using tools')).toBe('30s');
+    expect(value('Other work')).toBe('4m 30s');
+    expect(getAgentTrajectoryTimings).toHaveBeenCalledOnce();
+    expect(getAgentTrajectoryTimings).toHaveBeenCalledWith(
+      jobs.map((item) => item.id),
+      expect.any(AbortSignal),
+    );
+    expect(getAgentJob).not.toHaveBeenCalled();
+    expect(getAgentAttemptTelemetry).not.toHaveBeenCalled();
+  });
+
+  it('preserves compact message-timing and truncation semantics', async () => {
+    const first = job({ resources: null });
+    const second = job({ id: 'job-2', turn_no: 2, resources: null });
+    vi.mocked(getAgentTrajectoryTimings).mockResolvedValue({
+      jobs: [
+        {
+          job_id: first.id,
+          attempts: [
+            {
+              ...first.attempt_telemetry![0],
+              tool_time_ms: 15_000,
+              tool_calls_truncated: false,
+              tool_timing_exact: false,
+            },
+          ],
+        },
+        {
+          job_id: second.id,
+          attempts: [
+            {
+              ...second.attempt_telemetry![0],
+              tool_time_ms: 15_000,
+              tool_calls_truncated: true,
+              tool_timing_exact: true,
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<TrajectoryTimeBreakdown jobs={[first, second]} />);
+
+    await waitFor(() => expect(value('Using tools')).toBe('≥ ≈ 15s'));
+    expect(value('Recorded execution')).toBe('2m');
+    expect(value('Other work')).toBe('—');
+  });
+
+  it('caps legacy detail requests when the bulk route is unavailable', async () => {
+    const jobs = Array.from({ length: 12 }, (_, index) =>
+      job({ id: `job-${index + 1}`, turn_no: index + 1, resources: null }),
+    );
+    let active = 0;
+    let maxActive = 0;
+    vi.mocked(getAgentAttemptTelemetry).mockImplementation(async (_jobId, attemptId) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      return {
+        ...jobs[0].attempt_telemetry![0],
+        attempt_id: attemptId,
+        resources: jobs[0].resources,
+      } as AgentAttemptTelemetryApi;
+    });
+
+    render(<TrajectoryTimeBreakdown jobs={jobs} />);
+
+    await waitFor(() => expect(getAgentAttemptTelemetry).toHaveBeenCalledTimes(12));
+    await waitFor(() => expect(active).toBe(0));
+    expect(maxActive).toBe(4);
+    expect(getAgentJob).not.toHaveBeenCalled();
+  });
+
   it('loads historical summaries and resource timing omitted from the conversation API', async () => {
     const historical = job();
     vi.mocked(getAgentJob).mockResolvedValue({ ...historical, resources: null });
