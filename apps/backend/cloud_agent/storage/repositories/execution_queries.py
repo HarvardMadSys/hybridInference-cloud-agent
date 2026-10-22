@@ -45,6 +45,14 @@ class PostgresExecutionQueries:
         outputs to reconstruct the historical activity. The result is paged so
         a long thread is not pulled into memory in one response.
 
+        The page's ids are picked first (issue #810): the events of a thread
+        are interleaved with every other thread's in `agent_job_events`, so
+        ordering the full remaining scan fetched nearly every heap row to
+        keep the first page's worth. The materialized inner query stops at
+        the page boundary on the `(job_id, id)` index and only those rows'
+        payloads are fetched, making each page cost its own size rather than
+        the thread's remaining length.
+
         :returns: ``None`` when the job does not exist or is not the caller's,
             matching :meth:`get_thread_for_job`.
         """
@@ -60,6 +68,14 @@ class PostgresExecutionQueries:
                 return None
             rows = await conn.fetch(
                 """
+                WITH page AS MATERIALIZED (
+                    SELECT e.id
+                    FROM agent_job_events e
+                    JOIN agent_jobs j ON j.id = e.job_id
+                    WHERE j.thread_id = $1 AND e.id > $2
+                    ORDER BY e.id
+                    LIMIT $3
+                )
                 SELECT e.id,
                        e.job_id,
                        j.turn_no,
@@ -68,11 +84,10 @@ class PostgresExecutionQueries:
                        e.event_type,
                        e.payload,
                        e.created_at
-                FROM agent_job_events e
+                FROM page
+                JOIN agent_job_events e USING (id)
                 JOIN agent_jobs j ON j.id = e.job_id
-                WHERE j.thread_id = $1 AND e.id > $2
                 ORDER BY e.id
-                LIMIT $3
                 """,
                 thread_id,
                 after_id,

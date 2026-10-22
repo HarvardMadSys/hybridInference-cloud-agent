@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -230,12 +231,32 @@ def test_a_redirect_is_never_a_pass() -> None:
     assert check.judge_routing(bounced).state == check.FAIL
 
 
-def test_the_client_does_not_follow_redirects() -> None:
-    """The judgement above only means anything if the wrapper agrees."""
-    import inspect
+def test_the_client_does_not_follow_redirects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The judgement above only means anything if the wrapper agrees.
 
-    source = inspect.getsource(check.run)
-    assert "follow_redirects=False" in source
+    The origin bounces ``/internal/*`` to a page whose answer would pass the
+    routing check. Followed, the bounce would be judged healthy.
+    """
+    from types import SimpleNamespace
+
+    import httpx
+
+    asked: list[str] = []
+
+    def origin(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        if request.url.path.startswith("/internal/"):
+            return httpx.Response(302, headers={"location": "/login"})
+        return httpx.Response(404, json=json.loads(_gateway_error("internal_api_not_configured")))
+
+    def client(**kwargs: Any) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(origin), **kwargs)
+
+    monkeypatch.setattr(check, "httpx", SimpleNamespace(Client=client, HTTPError=httpx.HTTPError))
+    verdicts = dict(check.run("https://gateway.example", ""))
+
+    assert verdicts["/internal/* reaches the backend"].state == check.FAIL
+    assert "/login" not in asked
 
 
 # ---------------------------------------------------------------------------

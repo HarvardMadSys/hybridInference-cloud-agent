@@ -62,7 +62,7 @@ def test_browser_signin_completes_without_user_client_credentials(managed_app, m
     exchange = AsyncMock(return_value={"access_token": "user-token", "refresh_token": "refresh"})
     monkeypatch.setattr(mcp_connections, "_post_form", exchange)
     with _client(store) as client:
-        presets = client.get("/v1/agent/mcp/templates").json()
+        presets = client.get("/v1/agent/mcp/connections").json()["templates"]
         assert presets[0]["auth_kind"] == "oauth"
         assert presets[0]["browser_sign_in_available"] is True
         assert "service-secret" not in str(presets)

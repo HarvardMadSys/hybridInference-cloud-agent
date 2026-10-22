@@ -442,8 +442,9 @@ def _environment_worker(monkeypatch, tmp_path, prepare, status, *, environment=N
         def discard(self):
             pass
 
-    class _Preparation:
-        root = tmp_path
+    class _Preparation(EnvironmentPreparation):
+        def __init__(self):
+            super().__init__(tmp_path)
 
         def prepare(self, backend, environment, *, callback, cancel):
             prepare(callback, cancel)
@@ -679,9 +680,8 @@ def test_any_other_failed_report_of_a_running_step_still_fails_the_run(monkeypat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("configured", [True, False])
-@pytest.mark.parametrize("operation", ["terminal", "create_terminal"])
 async def test_terminal_prepares_at_the_broker_once_and_empty_bindings_need_no_capability(
-    configured, operation
+    configured,
 ):
     requests = []
 
@@ -697,12 +697,7 @@ async def test_terminal_prepares_at_the_broker_once_and_empty_bindings_need_no_c
     bound = BoundEnvironment(binding_id="b", setup_script="install" if configured else "")
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         broker = SandboxManagerClient("http://broker", "credential", client=client)
-        args = (
-            {"command": "echo 1", "cwd": "/workspace", "timeout_seconds": 60}
-            if operation == "terminal"
-            else {"rows": 24, "cols": 80}
-        )
-        await getattr(broker, operation)("workspace", environment=bound, **args)
+        await broker.create_terminal("workspace", environment=bound, rows=24, cols=80)
     assert len(requests) == (2 if configured else 1)
     assert not any("environment/prepare" in str(request.url) for request in requests)
     assert (b'"environment"' in requests[-1].content) == configured

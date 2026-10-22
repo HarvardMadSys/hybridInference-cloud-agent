@@ -131,6 +131,56 @@ END
 """
 
 
+def first_unfinished_turn(job: str) -> str:
+    """SQL: whether turn ``job`` is the oldest unfinished turn of its conversation.
+
+    A conversation runs its turns one at a time and in order, so no later turn
+    is handed out while an earlier one is queued or running.
+    """
+    return f"""NOT EXISTS (
+        SELECT 1 FROM agent_jobs earlier
+        WHERE earlier.thread_id = {job}.thread_id
+          AND earlier.turn_no < {job}.turn_no
+          AND earlier.state IN ('queued', 'running')
+    )"""
+
+
+def runnable_queued_turn(job: str, *, including_backoff: bool = False) -> str:
+    """SQL: whether queued turn ``job`` may be handed to a Host, whichever asks, in parentheses.
+
+    It is not cancelled, is out of claim backoff, and is the oldest unfinished
+    turn of its conversation (:func:`first_unfinished_turn`). An automatic
+    goal round must also still be for the goal its conversation is working
+    toward: a round queued for an objective the owner has since replaced,
+    paused or cleared must never run, since it would work toward a withdrawn
+    objective and pay for it. The sweep in ``sweep_goal_scheduling`` cancels
+    what this skips, so nothing waits forever. Each caller adds what it needs
+    of the Host and of the turn's group.
+
+    ``including_backoff`` also admits a turn in claim backoff. No claim hands
+    it out until the backoff ends, but it is still waiting for a Host.
+    """
+    backoff = (
+        ""
+        if including_backoff
+        else f" AND ({job}.claim_retry_at IS NULL OR {job}.claim_retry_at <= clock_timestamp())"
+    )
+    return f"""({job}.state = 'queued' AND {job}.cancel_requested = FALSE{backoff}
+      AND {first_unfinished_turn(job)}
+      AND (
+            {job}.turn_source <> 'goal'
+            OR EXISTS (
+                SELECT 1 FROM agent_threads goal_thread
+                WHERE goal_thread.id = {job}.thread_id
+                  AND goal_thread.deleted_at IS NULL
+                  AND goal_thread.goal_state = 'active'
+                  AND goal_thread.goal_id = {job}.goal_id
+                  AND goal_thread.goal_revision = {job}.goal_revision
+            )
+      )
+    )"""
+
+
 async def fail_unrunnable_follow_ups(
     conn: Any,
     *,

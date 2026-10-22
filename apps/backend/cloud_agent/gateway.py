@@ -31,11 +31,6 @@ logger = get_logger(__name__)
 ENV_BASE_URL = "GATEWAY_BASE_URL"
 ENV_DISPATCH_TOKEN = "GATEWAY_GRANT_DISPATCH_TOKEN"
 
-#: Generous enough for a busy gateway, bounded because a control plane blocked
-#: on a lookup is a control plane that has stopped scheduling.
-_TIMEOUT_S = 10.0
-_CONNECT_TIMEOUT_S = 5.0
-
 
 class GatewayError(Exception):
     """The gateway could not answer, or answered unusably.
@@ -149,8 +144,8 @@ class GatewayClient:
             )
         headers = {"Authorization": f"Bearer {self._token}"}
         timeout = httpx.Timeout(
-            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
-            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+            number_setting("gateway_request_timeout_s"),
+            connect=number_setting("gateway_connect_timeout_s"),
         )
         try:
             if self._client is not None:
@@ -296,6 +291,41 @@ class GatewayClient:
         models = [str(model) for model in raw_models]
         return models, _catalog_reasoning_efforts(body, set(models))
 
+    async def model_catalog_bundle(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+        """Read names, aliases, and effort domains from one catalog response.
+
+        Admission checks the requested model against the alias table *and*
+        the offered reasoning effort against the effort domains (issue #781).
+        Both answers live in the same ``/internal/model-catalog`` response,
+        so a send path that needs both reads it once — two round trips here
+        are two synchronous gateway calls on the user-visible send path.
+
+        The alias filtering matches :meth:`model_catalog_with_aliases` and the
+        effort parsing :meth:`model_catalog_with_reasoning_efforts`: an older
+        gateway that omits either field reads as "none", with the catalog
+        itself still valid.
+
+        Raises:
+            GatewayError: If the catalog is unavailable or has no model list.
+        """
+        body = await self._get("/internal/model-catalog", {"user_id": user_id})
+        raw_models = body.get("models")
+        if not isinstance(raw_models, list):
+            raise GatewayError("gateway returned no model list")
+        models = [str(model) for model in raw_models]
+        visible = set(models)
+        raw_aliases = body.get("aliases")
+        aliases: dict[str, str] = {}
+        if isinstance(raw_aliases, dict):
+            aliases = {
+                str(alias): str(canonical)
+                for alias, canonical in raw_aliases.items()
+                if str(canonical) in visible and str(alias) not in visible
+            }
+        return models, aliases, _catalog_reasoning_efforts(body, visible)
+
     async def user_email(self, user_id: str) -> str:
         """Read the account email for Profile, without using account roles for access.
 
@@ -377,8 +407,8 @@ class GatewayClient:
             "redirect_uri": redirect_uri,
         }
         timeout = httpx.Timeout(
-            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
-            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+            number_setting("gateway_request_timeout_s"),
+            connect=number_setting("gateway_connect_timeout_s"),
         )
         path = "/v1/identity/token"
         try:

@@ -83,7 +83,6 @@
     {
       "files": [
         "src/components/features/agents/environment/EnvironmentManager.tsx",
-        "src/components/features/agents/useConversationList.ts",
         "src/components/features/agents/useNativeQuestions.ts",
         "src/components/features/settings/UsageSettings.tsx"
       ],
@@ -240,6 +239,7 @@
       "files": [
         "src/app/(agents)/admin/hosts/ComputeResourcePanel.tsx",
         "src/app/(agents)/admin/measurements/MeasurementControlPanel.tsx",
+        "src/app/(agents)/admin/settings/ApplicationSettingGroup.tsx",
         "src/app/(agents)/admin/settings/SandboxArchiveSettings.tsx",
         "src/components/features/agents/job-detail/JobComposer.tsx",
         "src/components/features/agents/useSideChatSession.ts"
@@ -255,10 +255,7 @@
       }
     },
     {
-      "files": [
-        "src/app/(agents)/admin/settings/ApplicationSettingGroup.tsx",
-        "src/components/features/agents/LedgerUsage.tsx"
-      ],
+      "files": ["src/components/features/agents/LedgerUsage.tsx"],
       "rules": {
         "complexity": ["error", 47]
       }
@@ -353,7 +350,7 @@
     {
       "files": ["src/components/features/agents/trajectorySteps.ts"],
       "rules": {
-        "complexity": ["error", 117]
+        "complexity": ["error", 115]
       }
     },
     {
@@ -428,7 +425,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1014
+            "max": 1005
           }
         ]
       }
@@ -516,7 +513,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1007
+            "max": 1005
           }
         ]
       }
@@ -549,7 +546,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1402
+            "max": 1401
           }
         ]
       }
@@ -560,7 +557,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1304
+            "max": 1303
           }
         ]
       }

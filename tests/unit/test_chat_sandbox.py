@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -31,8 +32,6 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_THREAD_LABEL,
     CHAT_WORKDIR,
-    FINAL_ARCHIVE_MARKER_NAME,
-    INITIAL_ARCHIVE_MARKER_ROOT,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
     TURN_NETWORK_PROOF_S,
@@ -45,6 +44,10 @@ from cloud_agent_host.chat_sandbox import (
     SandboxActionFacts,
     _RetainedTerminalProcess,
     claude_member_config_dir,
+)
+from cloud_agent_host.chat_sandbox_markers import (
+    FINAL_ARCHIVE_MARKER_NAME,
+    INITIAL_ARCHIVE_MARKER_ROOT,
 )
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
@@ -70,6 +73,46 @@ def _spec() -> ChatSandboxSpec:
         runtime_version="2.1.220",
         sandbox_image_digest="sha256:image-pinned",
     )
+
+
+def test_a_reaper_probe_never_waits_on_an_install_into_another_container(monkeypatch):
+    """A runtime copy into one chat must not hold up every other chat's turn."""
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    spec = _spec()
+    other = replace(spec, thread_id="athr_02", sandbox_id="asbx_02")
+    assert spec.container_name != other.container_name
+    installing = threading.Event()
+    finish = threading.Event()
+
+    def exec_capture(target, _argv, **_kwargs):
+        if target.container_name == spec.container_name and not installing.is_set():
+            installing.set()
+            finish.wait(5)
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", exec_capture)
+
+    def ensure_reaper(target):
+        thread = threading.Thread(
+            target=manager.ensure_member_process_reaper, args=(target,), daemon=True
+        )
+        thread.start()
+        return thread
+
+    held = ensure_reaper(spec)
+    try:
+        assert installing.wait(5), "the install never started"
+        elsewhere = ensure_reaper(other)
+        elsewhere.join(1)
+        assert not elsewhere.is_alive(), "a probe waited on another container's install"
+        same = ensure_reaper(spec)
+        same.join(0.2)
+        assert same.is_alive(), "two installs into one container interleaved"
+    finally:
+        finish.set()
+    held.join(5)
+    same.join(5)
+    assert not held.is_alive() and not same.is_alive()
 
 
 def test_archive_export_is_stopped_exact_id_and_metadata_excludes_secrets(monkeypatch, tmp_path):

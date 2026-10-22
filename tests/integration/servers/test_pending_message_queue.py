@@ -44,6 +44,7 @@ from cloud_agent.api.deps import (
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.application.pending_messages import settle_queue, settle_waiting_queues
 from cloud_agent.goals.controller import run_goal_wakeups
+from cloud_agent.settings import integer_setting
 from cloud_agent.source_control_runtime import SourceControlUnavailable
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories import pending_messages as pending_message_storage
@@ -95,6 +96,11 @@ class _Gateway:
 
     async def model_catalog_with_aliases(self, user_id: str) -> tuple[list[str], dict[str, str]]:
         return list(self.models), {}
+
+    async def model_catalog_bundle(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+        return list(self.models), {}, {m: list(v) for m, v in self.efforts.items()}
 
     async def model_reasoning_efforts(self, user_id: str) -> dict[str, list[str]]:
         return {model: list(levels) for model, levels in self.efforts.items()}
@@ -718,7 +724,7 @@ async def test_the_maintenance_loops_run_queue_and_staged_attachment_sweeps(api:
     # 24-hour default: these two-hour-old rows are eligible at one hour.
     monkeypatch.setattr(
         "cloud_agent.workers.attempts.integer_setting",
-        lambda key, fallback: 1 if key == "attachments.staged_retention_hours" else fallback,
+        lambda key: 1 if key == "attachments.staged_retention_hours" else integer_setting(key),
     )
 
     loops = [

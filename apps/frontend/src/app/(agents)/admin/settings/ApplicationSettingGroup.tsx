@@ -11,7 +11,9 @@ import type {
 } from '@/lib/api/adminSettings';
 
 import type { ApplicationSettingsState } from './ApplicationSettings';
-import { ARCHIVE_BUCKET, displayValue, parseValue } from './settingValues';
+import { DefaultModelHints, fieldHints } from './DefaultModelHints';
+import { ARCHIVE_BUCKET, DEFAULT_MODEL, displayValue, parseValue } from './settingValues';
+import { useModelSuggestions } from './useModelSuggestions';
 
 type Changes = Record<string, AdminSettingValue | null>;
 // `snapshot` is what the review shows as current. It applies only at that
@@ -219,6 +221,17 @@ function ReviewChanges({
   );
 }
 
+function describedBy(id: string, note: string | null, error: string | undefined): string {
+  return [`${id}-help`, note && `${id}-note`, error && `${id}-error`].filter(Boolean).join(' ');
+}
+
+/** A model id is one token, so the free-text line toggle stays off it. */
+function offersMultiline(field: AdminSettingDefinition, showInput: boolean): boolean {
+  return (
+    showInput && field.kind === 'string' && !field.choices?.length && field.key !== DEFAULT_MODEL
+  );
+}
+
 export function ApplicationSettingGroup({
   title,
   fields,
@@ -240,6 +253,7 @@ export function ApplicationSettingGroup({
   const returnFocus = useRef<HTMLElement | null>(null);
   const form = useRef<HTMLFormElement>(null);
   const groupId = useId();
+  const modelSuggestions = useModelSuggestions(fields.some((field) => field.key === DEFAULT_MODEL));
   const incoming = (field: AdminSettingDefinition) =>
     field.secret ? '' : String(snapshot?.values[field.key] ?? field.default);
   const changed = fields.filter(
@@ -392,13 +406,14 @@ export function ApplicationSettingGroup({
           const showInput = editable && (!field.secret || replacing[key]);
           const value = drafts[key] ?? incoming(field);
           const error = errors[key];
+          const hints = fieldHints(key, id, value, modelSuggestions);
           const inputProps = {
             id,
             name: key,
             value,
             disabled: busy,
             'aria-invalid': !!error,
-            'aria-describedby': `${id}-help${error ? ` ${id}-error` : ''}`,
+            'aria-describedby': describedBy(id, hints.note, error),
             className: INPUT_CLASS,
             onChange: (
               event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>,
@@ -502,6 +517,7 @@ export function ApplicationSettingGroup({
                         min={field.minimum}
                         max={field.maximum}
                         placeholder={field.secret ? 'Enter new secret' : undefined}
+                        list={hints.list}
                       />
                     )}
                   </div>
@@ -551,7 +567,7 @@ export function ApplicationSettingGroup({
                     {configured ? 'Replace secret' : 'Set secret'}
                   </button>
                 )}
-                {showInput && field.kind === 'string' && !field.choices?.length && (
+                {offersMultiline(field, showInput) && (
                   <label className="mt-2 flex min-h-9 cursor-pointer items-center gap-2 text-xs text-muted">
                     <input
                       type="checkbox"
@@ -566,6 +582,12 @@ export function ApplicationSettingGroup({
                     Multiple lines
                   </label>
                 )}
+                <DefaultModelHints
+                  id={id}
+                  hints={hints}
+                  showInput={showInput}
+                  warn={Boolean(value.trim())}
+                />
                 {error && (
                   <p id={`${id}-error`} role="alert" className="mt-2 text-sm text-status-error">
                     {error}

@@ -324,6 +324,7 @@ export function ProjectFolder({
   selected,
   userId,
   refresh,
+  activityMoved = 0,
   hiddenThreads,
   pinUpdates,
   registerRows,
@@ -342,6 +343,8 @@ export function ProjectFolder({
   selected?: SidebarConversation;
   userId?: string;
   refresh: number;
+  /** Bumped when only activity moved: the section reads its first page. */
+  activityMoved?: number;
   hiddenThreads: Set<string>;
   pinUpdates?: ReadonlyMap<string, SidebarPinUpdate>;
   registerRows: (rows: SidebarConversation[], loadedRefresh: number | null) => void;
@@ -356,6 +359,7 @@ export function ProjectFolder({
     enabled: enabled && expanded,
     userId,
     refresh,
+    reorder: activityMoved,
   });
   const [shown, setShown] = useState(15);
   useEffect(() => {

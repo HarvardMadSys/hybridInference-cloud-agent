@@ -18,7 +18,7 @@ rot:
 Item 2 only checks the paths *inside this repository* and the fact that a
 gateway branch is named. It cannot check the gateway files, which live in
 another repository on unmerged branches; that verification is the "Cross-repo
-readiness" register in MIGRATION.md, redone when those branches land.
+readiness" register in the extraction record, redone when those branches land.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ def test_a_contract_names_where_it_came_from(path: Path) -> None:
 def test_every_pinning_test_a_contract_cites_exists(path: Path) -> None:
     """A citation that cannot be followed reads as verification that did not
     happen. Only this repository's side can be checked here; the gateway's
-    lives in another repo, on branches, and is tracked in MIGRATION.md."""
+    lives in another repo, on branches, and is tracked in the extraction record."""
     consumer = _load(path).get("x-pinned-by", {}).get("consumer", [])
     assert consumer, f"{path.name} claims no consumer test pins it"
     missing = [cited for cited in consumer if not (REPO_ROOT / cited).exists()]

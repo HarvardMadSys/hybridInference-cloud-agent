@@ -1,3 +1,5 @@
+import { modelSelectionZhCN } from './modelSelection';
+
 import type { TranslationKey } from './en';
 
 /**
@@ -515,7 +517,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.backToChats': '返回对话',
   'settings.collapseNavigation': '收起设置导航',
   'settings.expandNavigation': '展开设置导航',
-  'settings.personalDescription': '管理你的个人资料和通知。',
+  'settings.personalDescription': '管理你的个人资料、默认模型和通知。',
   'settings.plugins': '插件与 MCP',
   'settings.pluginsDescription': '连接 MCP 服务器，管理 Agent 可使用的技能。',
   'settings.integrations': '集成',
@@ -631,6 +633,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.projectMemory.projectsError': '无法加载仓库列表。',
   'settings.projectMemory.noProjects': '你在仓库中发起任务后，这里会出现该仓库。',
   'settings.projectMemory.confirmTitle': '清除 {repo} 的记忆？',
+  ...modelSelectionZhCN,
   'settings.notifications.title': '通知',
   'settings.notifications.description':
     'Agent 提问或完成一轮任务时接收浏览器通知。请保持应用打开以接收通知。',
@@ -904,10 +907,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'composer.chooseRepository': '先选择仓库',
   'composer.branch': '分支',
   'composer.agent': 'Agent',
-  'picker.search': '搜索…',
-  'picker.noResults': '没有匹配的选项',
-  'composer.model': '模型',
-  'composer.reasoning': '推理强度',
   'composer.run': '运行',
   'composer.starting': '启动中…',
   'composer.runTitle': '运行 —— ⏎ 发送,⇧⏎ 换行',

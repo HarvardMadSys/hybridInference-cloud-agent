@@ -20,7 +20,6 @@ exactly as with archives disabled. The next clean stop archives normally.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import threading
 from dataclasses import dataclass, field, replace
@@ -31,16 +30,20 @@ from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveReceipt,
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,
+    lifecycle_object_key,
 )
 from cloud_agent_host.sandbox_archives import (
+    CaptureGate,
     SandboxArchiveService,
     SandboxInitialArchiveMarker,
     carried_by_checkpoint,
+    check_marker_identity,
+    decode_marker,
+    encode_marker,
     safe_archive_error_type,
 )
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_BUCKET,
-    SANDBOX_ARCHIVE_PREFIX,
     SandboxArchivePolicy,
 )
 
@@ -51,6 +54,18 @@ logger = logging.getLogger(__name__)
 # quarantined finish their lifecycle and continue after an upgrade.
 _UNARCHIVED_FINAL_STATES = frozenset({"skipped", "blocked"})
 _COMPLETED_FINAL_STATES = frozenset({"uploaded"}) | _UNARCHIVED_FINAL_STATES
+_FINAL_MARKER_KEYS = frozenset(
+    {
+        "container_id",
+        "format_version",
+        "generation",
+        "namespace_sha256",
+        "policy",
+        "receipt",
+        "sandbox_id",
+        "state",
+    }
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -175,22 +190,12 @@ class _FinalArchiveMarker:
         )
 
     def __post_init__(self) -> None:
-        if len(self.namespace_sha256) != 64 or any(
-            character not in "0123456789abcdef" for character in self.namespace_sha256
-        ):
-            raise ValueError("final archive marker namespace identity is invalid")
-        for name, value in (
-            ("sandbox id", self.sandbox_id),
-            ("container id", self.container_id),
-        ):
-            if not isinstance(value, str) or not value or len(value) > 256 or "\x00" in value:
-                raise ValueError(f"final archive marker {name} is invalid")
-        if (
-            isinstance(self.generation, bool)
-            or not isinstance(self.generation, int)
-            or self.generation < 1
-        ):
-            raise ValueError("final archive marker generation is invalid")
+        check_marker_identity(
+            "final archive marker",
+            namespace_sha256=self.namespace_sha256,
+            ids={"sandbox id": self.sandbox_id, "container id": self.container_id},
+            generation=self.generation,
+        )
         if self.state not in {"pending"} | _COMPLETED_FINAL_STATES:
             raise ValueError("final archive marker state is invalid")
         receipt_values = (
@@ -203,10 +208,11 @@ class _FinalArchiveMarker:
             if any(value is not None for value in receipt_values):
                 raise ValueError("non-uploaded final archive marker contains a receipt")
         else:
-            expected_key = (
-                f"{SANDBOX_ARCHIVE_PREFIX}/v1/{self.namespace_sha256}/"
-                f"{hashlib.sha256(self.sandbox_id.encode('utf-8')).hexdigest()}/"
-                f"g{self.generation}/final.tar.gz"
+            expected_key = lifecycle_object_key(
+                namespace_sha256=self.namespace_sha256,
+                sandbox_sha256=hashlib.sha256(self.sandbox_id.encode("utf-8")).hexdigest(),
+                generation=self.generation,
+                phase="final",
             )
             if not self.policy.enabled:
                 raise ValueError("disabled final archive marker cannot be uploaded")
@@ -244,44 +250,31 @@ class _FinalArchiveMarker:
         )
 
     def encode(self) -> bytes:
-        payload = {
-            "container_id": self.container_id,
-            "format_version": 1,
-            "generation": self.generation,
-            "namespace_sha256": self.namespace_sha256,
-            "policy": self.policy.as_dict(),
-            "receipt": (
-                None
-                if self.state != "uploaded"
-                else {
-                    "archive_sha256": self.archive_sha256,
-                    "archive_size_bytes": self.archive_size_bytes,
-                    "object_key": self.object_key,
-                    "version_id": self.version_id,
-                }
-            ),
-            "sandbox_id": self.sandbox_id,
-            "state": self.state,
-        }
-        return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+        return encode_marker(
+            {
+                "container_id": self.container_id,
+                "format_version": 1,
+                "generation": self.generation,
+                "namespace_sha256": self.namespace_sha256,
+                "policy": self.policy.as_dict(),
+                "receipt": (
+                    None
+                    if self.state != "uploaded"
+                    else {
+                        "archive_sha256": self.archive_sha256,
+                        "archive_size_bytes": self.archive_size_bytes,
+                        "object_key": self.object_key,
+                        "version_id": self.version_id,
+                    }
+                ),
+                "sandbox_id": self.sandbox_id,
+                "state": self.state,
+            }
+        )
 
     @classmethod
     def decode(cls, payload: bytes) -> _FinalArchiveMarker:
-        try:
-            value = json.loads(payload)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise SandboxError("final archive marker is not canonical JSON") from exc
-        if not isinstance(value, dict) or set(value) != {
-            "container_id",
-            "format_version",
-            "generation",
-            "namespace_sha256",
-            "policy",
-            "receipt",
-            "sandbox_id",
-            "state",
-        }:
-            raise SandboxError("final archive marker has an invalid schema")
+        value = decode_marker(payload, keys=_FINAL_MARKER_KEYS, what="final archive marker")
         if value["format_version"] != 1 or isinstance(value["format_version"], bool):
             raise SandboxError("final archive marker format version is unsupported")
         if not isinstance(value["policy"], dict):
@@ -333,7 +326,7 @@ class SandboxArchiveController:
         # in-flight capture or failed final retry. They nevertheless share one
         # host-wide spool admission gate, so rapid policy changes cannot
         # multiply the service's documented aggregate scratch-space bound.
-        self._capture_slots = threading.BoundedSemaphore(1)
+        self._capture_slots = CaptureGate(1)
         self._condition = threading.Condition()
         self._policy: SandboxArchivePolicy | None = None
         self._current: _ServiceSlot | None = None

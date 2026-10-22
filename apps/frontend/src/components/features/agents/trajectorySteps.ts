@@ -14,6 +14,7 @@ import { isActiveJobState } from './conversationJob';
 
 import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { preview, toTrajectory, type TrajectoryLane, type TrajectoryRow } from './trajectory';
+import { growAnswer } from './streamedAnswer';
 import {
   rawNotification,
   notificationHasError,
@@ -477,6 +478,8 @@ export function buildTrajectorySteps(
 
   const steps: TrajectoryStep[] = [];
   const byKey = new Map<string, TrajectoryStep>();
+  // Answers whose one-line preview is already cut (see growAnswer).
+  const cutPreviews = new WeakSet<TrajectoryStep>();
   const toolStepByKey = new Map<string, TrajectoryStep>();
 
   const pushUser = (
@@ -668,13 +671,8 @@ export function buildTrajectorySteps(
     if (previewId && typeof payload.stream_state === 'string') {
       const current = byKey.get(previewKey);
       if (current?.blocks) {
-        const text =
-          payload.stream_state === 'reset'
-            ? asText(payload.text)
-            : (current.blocks[0]?.text ?? '') + asText(payload.text);
         current.sourceEvents.push(event);
-        current.blocks = [{ type: 'text', text, channel: 'summary' }];
-        current.detail = preview(text);
+        growAnswer(current, asText(payload.text), payload.stream_state === 'reset', cutPreviews);
         continue;
       }
       const step = pushAssistant(event, '');

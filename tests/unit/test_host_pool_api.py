@@ -1839,6 +1839,30 @@ async def test_a_parked_wait_is_answered_when_work_is_queued(wait_client):
     assert store.claims == [], "the wait never claims; the host does that next"
 
 
+async def test_a_turn_only_another_host_can_take_leaves_the_wait_parked(wait_client):
+    async_client, store, app = wait_client
+    headers = _enrolled_host(store)
+    signal = app.state.work_signal
+    held = signal.token_for("runner-a")
+
+    parked = asyncio.create_task(
+        async_client.post(
+            "/v1/agent/worker/wait",
+            json={"since": held, "timeout_seconds": 30},
+            headers=headers,
+        )
+    )
+    await asyncio.sleep(0.05)
+    signal.notified("runner-b")
+    await asyncio.sleep(0.05)
+    assert not parked.done()
+
+    signal.notified("runner-a")
+
+    response = await asyncio.wait_for(parked, 5)
+    assert response.json() == {"token": signal.token_for("runner-a")} != {"token": held}
+
+
 async def test_with_nothing_queued_a_wait_ends_at_its_timeout(wait_client):
     async_client, store, app = wait_client
     held = app.state.work_signal.token

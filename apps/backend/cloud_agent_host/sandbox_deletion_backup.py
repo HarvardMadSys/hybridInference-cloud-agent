@@ -43,7 +43,7 @@ class ArchiveIdentity:
     archive_key: str
 
 
-class SandboxArchiveService:
+class SandboxDeletionBackupService:
     """Prepare, upload, and remove a stopped group through explicit receipts.
 
     Each phase appends its own immutable JSON record. The commit record is

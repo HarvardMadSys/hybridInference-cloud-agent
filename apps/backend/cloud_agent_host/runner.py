@@ -180,6 +180,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
     SANDBOX_CHECKPOINT_CAPABILITY,
 )
+from cloud_agent_shared.sandbox_manager_wire import member_manifest
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import (
     RESTORE_FAILED_RELEASE_REASON,
@@ -1953,20 +1954,7 @@ def _shared_group_manifest(reservation: dict[str, Any], *, thread_id: str) -> li
     members = [dict(item) for item in raw or [] if isinstance(item, dict)]
     if not members:
         members = [dict(reservation)]
-    allowed = {
-        "thread_id",
-        "native_session_id",
-        "context_status",
-        "activation_generation",
-        "process_generation",
-        "residency_generation",
-        "resident_state",
-        "resident_slot_id",
-        "last_settled_job_id",
-    }
-    projected = [
-        {key: value for key, value in member.items() if key in allowed} for member in members
-    ]
+    projected = member_manifest(members)
     if not any(member.get("thread_id") == thread_id for member in projected):
         raise SandboxError("shared sandbox manifest omitted the claimed chat")
     for member in projected:
@@ -5002,7 +4990,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # In the source repo, importing sandbox configured root logging as a side
     # effect; the host shim removed that on purpose. This is the sanctioned
-    # replacement (MIGRATION.md's deferred-behaviour register, the
+    # replacement (the extraction record's deferred-behaviour register, the
     # runner-logging row) — without it every INFO event a runner emits goes
     # nowhere.
     configure_process_logging()

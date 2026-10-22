@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import time
 import uuid
 from collections import OrderedDict
@@ -21,8 +20,11 @@ from cloud_agent.environments import (
     EnvironmentForbidden,
     EnvironmentNotFound,
 )
-from cloud_agent.execution_profiles import default_execution_profile, shared_sandbox_claim_attested
-from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
+from cloud_agent.execution_profiles import default_execution_profile
+from cloud_agent.storage._sql import environment_runs
+from cloud_agent.storage._sql.environment_claims import (
+    claim_environment_run as claim_queued_run,
+)
 from cloud_agent_shared.environment import (
     MAX_VARIABLES,
     BoundEnvironment,
@@ -1683,7 +1685,7 @@ class PostgresEnvironmentRepository:
         """Expire execution leases and collect only unreferenced archived values."""
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE agent_environment_runs SET state='failed',detail='Environment test host lease expired',finished_at=NOW(),updated_at=NOW() WHERE state='running' AND (lease_expires_at<NOW() OR started_at<NOW()-INTERVAL '30 minutes')"
+                f"UPDATE agent_environment_runs SET state='failed',detail='Environment test host lease expired',finished_at=NOW(),updated_at=NOW() WHERE state='running' AND {environment_runs.env_run_stale()}"
             )
             if time.monotonic() < self._next_gc:
                 return
@@ -1719,71 +1721,14 @@ class PostgresEnvironmentRepository:
         snapshot_capable: bool = False,
     ) -> dict[str, Any] | None:
         """Lease a test, or a prebuild to a snapshot-capable host, within slot capacity."""
-        if not shared_sandbox_claim_attested(
-            attestation, expected_deployment_sha=os.environ.get("AGENT_DEPLOYMENT_SHA")
-        ):
-            return None
-        kata = (
-            attestation.get("sandbox_runtime") == "io.containerd.kata.v2"
-            and bool(attestation.get("guest_kernel"))
-            and attestation.get("guest_kernel") != attestation.get("host_kernel")
+        return await claim_queued_run(
+            self._pool,
+            host,
+            credential_hash,
+            attestation,
+            snapshot_capable=snapshot_capable,
+            run_view=self._environment_run_view,
         )
-        async with self._pool.acquire() as conn, conn.transaction():
-            policy = await conn.fetchrow(
-                "SELECT active_host FROM agent_runner_policy WHERE id FOR SHARE"
-            )
-            await lock_compute_topology(conn)
-            resource_new, resource_claims = await host_compute_admission(conn, host)
-            if (
-                not resource_new
-                or not resource_claims
-                or (policy and policy["active_host"] not in (None, host))
-            ):
-                return None
-            host_row = await conn.fetchrow(
-                "SELECT * FROM agent_runner_hosts WHERE host=$1 FOR UPDATE", host
-            )
-            if (
-                host_row is None
-                or host_row["status"] != "online"
-                or host_row["credential_hash"] != credential_hash
-            ):
-                return None
-            if await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM agent_environment_runs WHERE host=$1 AND NOT cleanup_complete "
-                "AND (lease_expires_at<=NOW() OR started_at<=NOW()-INTERVAL '30 minutes'))",
-                host,
-            ):
-                return None
-            tests = int(
-                await conn.fetchval(
-                    "SELECT COUNT(*) FROM agent_environment_runs WHERE host=$1 AND NOT cleanup_complete AND lease_expires_at>NOW() AND started_at>NOW()-INTERVAL '30 minutes'",
-                    host,
-                )
-            )
-            used = int(host_row["slots_used"]) + tests
-            if any(
-                host_row.get(k) is not None and used >= int(host_row[k])
-                for k in ("slots_total", "slots_desired")
-            ):
-                return None
-            # A prebuild whose snapshot was deleted since would install for nothing.
-            row = await conn.fetchrow(
-                "SELECT * FROM agent_environment_runs WHERE state='queued' AND (execution_profile='trusted-v1' OR $1) "
-                "AND (purpose='test' OR ($2 AND EXISTS (SELECT 1 FROM agent_environment_snapshots s "
-                "WHERE s.id=agent_environment_runs.snapshot_id AND s.state IN ('queued','building')))) "
-                "ORDER BY purpose='prebuild', created_at FOR UPDATE SKIP LOCKED LIMIT 1",
-                kata,
-                snapshot_capable,
-            )
-            if row is None:
-                return None
-            claimed = await conn.fetchrow(
-                "UPDATE agent_environment_runs SET state='running',host=$2,lease_generation=lease_generation+1,lease_expires_at=NOW()+INTERVAL '120 seconds',started_at=NOW(),updated_at=NOW() WHERE id=$1 RETURNING *",
-                row["id"],
-                host,
-            )
-            return self._environment_run_view(claimed)
 
     async def update_environment_run(
         self, run_id: str, host: str, generation: int, update: dict[str, Any]
@@ -1831,7 +1776,7 @@ class PostgresEnvironmentRepository:
                 "lease_expires_at=NOW()+INTERVAL '120 seconds',updated_at=NOW(),cleanup_complete=$8,"
                 "finished_at=CASE WHEN $5='running' THEN NULL ELSE NOW() END "
                 "WHERE id=$1 AND host=$2 AND lease_generation=$3 AND NOT cleanup_complete "
-                "AND (($8 AND $5 IN ('failed','cancelled')) OR (state='running' AND NOT cancel_requested AND lease_expires_at>NOW() AND started_at>NOW()-INTERVAL '30 minutes'))",
+                f"AND (($8 AND $5 IN ('failed','cancelled')) OR (state='running' AND NOT cancel_requested AND {environment_runs.env_run_live()}))",
                 run_id,
                 host,
                 generation,

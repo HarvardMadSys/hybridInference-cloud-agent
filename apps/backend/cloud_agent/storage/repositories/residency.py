@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
+from cloud_agent.storage._sql.mcp_residency import mint_residency_sql
 
 if TYPE_CHECKING:
     import asyncpg
@@ -113,13 +114,7 @@ class PostgresResidencyRepository:
             row = await conn.fetchrow(
                 f"""
                 UPDATE agent_thread_sandbox_memberships AS m
-                SET residency_generation = residency_generation + 1,
-                    residency_status = 'hot',
-                    residency_lease_expires_at = clock_timestamp() + make_interval(secs => $2),
-                    residency_grant_id = NULL,
-                    residency_binding_id = NULL,
-                    residency_established_at = NOW(),
-                    residency_last_active_at = NOW(),
+                SET {mint_residency_sql("$2")},
                     updated_at = NOW()
                 FROM agent_jobs j, agent_attempts a, agent_sandboxes g, agent_threads t
                 WHERE m.thread_id = $1 AND m.active_attempt_id = $3

@@ -456,8 +456,9 @@ def _execute(monkeypatch, tmp_path, **run_fields: Any) -> tuple[list[str], dict[
         def discard(self):
             pass
 
-    class _Preparation:
-        root = tmp_path
+    class _Preparation(EnvironmentPreparation):
+        def __init__(self):
+            super().__init__(tmp_path)
 
         def prepare(self, backend, environment, **kwargs):
             events.append("install, start" if environment.start_script else "install")
@@ -515,6 +516,20 @@ def test_a_prebuild_whose_snapshot_is_gone_installs_nothing(monkeypatch, tmp_pat
     events, final = _execute(monkeypatch, tmp_path, purpose="prebuild", snapshot=None)
     assert events == []
     assert final["state"] == "failed" and "no installation snapshot" in final["detail"]
+
+
+def test_a_finished_run_forgets_its_containers_preparation(monkeypatch, tmp_path):
+    backend = _Backend()
+    backend.manager = SimpleNamespace(
+        inspect=lambda _: SimpleNamespace(container_id="container-1", running=True, started_at="1")
+    )
+    EnvironmentPreparation(tmp_path).prepare(backend, BoundEnvironment(binding_id="b"))
+    assert list(tmp_path.iterdir())
+
+    _, final = _execute(monkeypatch, tmp_path, purpose="test")
+
+    assert final["state"] == "succeeded" and final["cleanup_complete"] is True
+    assert list(tmp_path.iterdir()) == []
 
 
 # -- dropping retired snapshots ---------------------------------------------------

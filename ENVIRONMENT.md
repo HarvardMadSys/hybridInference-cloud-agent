@@ -73,7 +73,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0089_superseded_removals`) before
+Run `alembic upgrade head` (through `0092_targeted_work_wakes`) before
 starting this release; the [upgrade notes](docs/developer/upgrade-notes.md)
 say what each recent migration changes. The main control-plane listener then
 initializes the settings document once from its existing environment. The
@@ -102,9 +102,14 @@ also apply to newly enrolled hosts. Later environment changes are ignored.
 Clearing an override falls through to the global value or built-in default; it
 never reactivates an old environment value.
 
-Configure sandbox archives only in **Admin → Settings → Sandbox**. Cloud
-Agent stores them as one revisioned policy in the Agent database. There is no
-`AGENT_SANDBOX_ARCHIVE_*` environment surface. The destination is fixed at
+Configure automatic lifecycle archives only in **Admin → Settings → Sandbox**.
+Cloud Agent stores them as one revisioned policy in the Agent database, and no
+environment variable sets that policy or its destination. The
+`AGENT_SANDBOX_ARCHIVE_S3_*` variables under *Sandbox deletion archives* are a
+one-time import for the separate archive the **Archive to S3 and delete**
+control takes, and `AGENT_SANDBOX_ARCHIVE_STATE_DIR` is where a Sandbox Manager
+keeps the local state of both, restorable checkpoints included. The lifecycle
+archive destination is fixed at
 `s3://freeinference/cloud-agent/sandbox`. The saved policy contains enablement,
 region, bounded upload sizes, and either an AWS access key or the workload
 identity fields (customer-managed KMS key ARN and expected bucket owner). The
@@ -331,6 +336,7 @@ relay reachability and connection target policy.
 | `AGENT_MCP_GITHUB_CLIENT_ID` / `AGENT_MCP_GITHUB_CLIENT_SECRET` | *Optional legacy import.* Configure GitHub MCP browser sign-in in Admin Settings → MCP. Register a service-owned GitHub OAuth App or GitHub App with callback `<public API base>/v1/agent/mcp/oauth/callback/github` (including the API proxy prefix). Both client values and a public callback base are required. The preset then defaults to browser sign-in; each user authorizes their own account without registering an app or pasting a token. The client secret stays in encrypted settings and pending OAuth flows, while user tokens remain in separate MCP connections. Prefer a GitHub App limited to the required repositories and permissions, including Contents and Pull requests read and write access when agents publish changes; OAuth Apps request `repo` and `read:org` scopes (GitHub's `repo` scope permits writes). A personal access token remains available for narrower repository access. |
 | `AGENT_MCP_ALLOW_PRIVATE_TARGETS` | Whether a user-added MCP connection may dial private and loopback addresses. Off by default: a remote connection that reaches loopback reaches **this** service, and a user who needs a private network should run a connector instead. Turning it on still refuses the ranges this platform never dials, so it cannot be used to reach the cloud metadata service. |
 | `AGENT_MCP_ALLOW_PLAIN_HTTP` | Whether a user-added MCP connection may use `http://` as well as `https://`. Off by default because the credential would travel in the clear. A deployment whose connector bridge is genuinely HTTP inside a private network turns it on deliberately; it is a separate variable from the private-target one because it is a separate risk. |
+| `AGENT_DEFAULT_MODEL` | *Optional legacy import.* The model a new task starts on when its owner has not chosen one — their pinned model in My Settings outranks it, and so does the model their last task used. A model this deployment's gateway does not offer to a user is skipped rather than forced, so a value that is wrong for someone cannot strand them: they are asked to choose instead. Defaults to `deepseek-v4-flash`, which is what the composer hardcoded before this setting existed. Empty means this deployment offers no default and every new owner picks. Imported once; after that, edit it in Admin Settings → Sandbox execution. |
 | `AGENT_MCP_SERVERS` | **Not operator-set — listed so nobody provisions it.** The name the runner publishes the relay endpoints under for the image-shipped wrappers, as one JSON object of `{alias: url}`. The wrappers merge it into the CLI config they already write, under whichever key their CLI spells MCP with, and add the token reference in that CLI's own syntax — which is not portable between them. A value put here by hand would point a sandbox at servers nobody connected. |
 | `AGENT_MCP_TOKEN` | **Not operator-set — listed so nobody provisions it.** The name the generated sandbox runtime config *references* (`${AGENT_MCP_TOKEN}`) for the relay credential the runner injects at launch: a chat process's residency credential, or a turn's own token. A value put here by hand would be a static tool credential shared by every job, which is the thing these scoped credentials exist to avoid. |
 

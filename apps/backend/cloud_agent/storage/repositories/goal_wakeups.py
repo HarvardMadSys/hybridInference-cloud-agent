@@ -19,7 +19,6 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.goals.models import WAKEUP_BACKOFF_MAX_S
 from cloud_agent.settings import number_setting
 
 if TYPE_CHECKING:
@@ -228,7 +227,7 @@ async def _release_on(
     delay = (
         min(
             retry_in_seconds,
-            number_setting("goals.wakeup_backoff_max_seconds", WAKEUP_BACKOFF_MAX_S),
+            number_setting("goals.wakeup_backoff_max_seconds"),
         )
         if retry_in_seconds is not None
         else None

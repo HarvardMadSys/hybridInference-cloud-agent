@@ -80,11 +80,6 @@ from cloud_agent.mcp.protocol import (
 from cloud_agent.mcp.sse import SseDecoder, SseError
 from cloud_agent.settings import number_setting
 
-#: A tool call can be a repo-wide search; it is not a token stream. Bounded all
-#: the same, because a sandbox waiting on a hung upstream burns a job.
-DEFAULT_REQUEST_TIMEOUT = 120.0
-DEFAULT_CONNECT_TIMEOUT = 10.0
-
 #: The header carrying the negotiated protocol revision.
 PROTOCOL_VERSION_HEADER = "mcp-protocol-version"
 #: The header carrying a server-assigned session.
@@ -205,13 +200,13 @@ class RemoteTransportConfig:
 def _request_timeout(config: RemoteTransportConfig) -> float:
     if config.request_timeout is not None:
         return config.request_timeout
-    return number_setting("mcp_request_timeout_s", DEFAULT_REQUEST_TIMEOUT)
+    return number_setting("mcp_request_timeout_s")
 
 
 def _connect_timeout(config: RemoteTransportConfig) -> float:
     if config.connect_timeout is not None:
         return config.connect_timeout
-    return number_setting("mcp_connect_timeout_s", DEFAULT_CONNECT_TIMEOUT)
+    return number_setting("mcp_connect_timeout_s")
 
 
 def _http_timeout(config: RemoteTransportConfig) -> httpx.Timeout:
@@ -508,13 +503,15 @@ async def guard_target(
     """Validate a URL and every address it resolves to before anything dials it.
 
     Module level rather than a method because there is more than one place that
-    dials: the transports, and the per-connection relay that forwards a caller's
-    raw JSON-RPC. A rule enforced at one of them and not the other is not a
-    rule -- the path that skips it becomes the way in.
+    dials: a transport's requests, and the opening GET of a legacy SSE
+    connection, which happens before any transport request exists. A rule
+    enforced at one of them and not the other is not a rule -- the path that
+    skips it becomes the way in.
 
     ``origin`` binds the target to the one the credential belongs to. It is
-    optional because the relay validates a target the registry already chose,
-    and required by the transports, which follow URLs a server hands them.
+    optional because a connection's own endpoint is a target the registry
+    already chose, and required for the URLs a server hands back, which the
+    transports then follow.
     """
     try:
         endpoint = validate_endpoint(url, policy)
@@ -1363,9 +1360,7 @@ class HttpMetadataFetcher(MetadataFetcher):
             raise TransportError(f"{endpoint.host} could not be resolved: {exc}") from exc
         owned = self.client is None
         timeout = httpx.Timeout(
-            self.timeout
-            if self.timeout is not None
-            else number_setting("mcp_metadata_timeout_s", DEFAULT_CONNECT_TIMEOUT * 2)
+            self.timeout if self.timeout is not None else number_setting("mcp_metadata_timeout_s")
         )
         client = self.client or httpx.AsyncClient(
             timeout=timeout,
@@ -1421,8 +1416,6 @@ async def iter_sse(response: httpx.Response) -> AsyncIterator[Any]:
 
 
 __all__ = [
-    "DEFAULT_CONNECT_TIMEOUT",
-    "DEFAULT_REQUEST_TIMEOUT",
     "MAX_RESPONSE_BYTES",
     "PROTOCOL_VERSION_HEADER",
     "SESSION_ID_HEADER",

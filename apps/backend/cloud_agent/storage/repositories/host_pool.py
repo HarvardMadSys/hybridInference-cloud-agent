@@ -41,6 +41,7 @@ from cloud_agent.storage._sql.compute_admission import (
     lock_compute_entry,
     lock_compute_topology,
 )
+from cloud_agent.storage._sql.environment_runs import env_run_blocks_host, env_run_holds_slot
 from cloud_agent.storage._sql.hosts import (
     COVERED_GROUP_SQL,
     HOST_CAPACITY_COLUMNS,
@@ -51,13 +52,14 @@ from cloud_agent.storage._sql.hosts import (
     release_late_covered_sandboxes,
     revoke_host_credentials,
 )
+from cloud_agent.storage._sql.jobs import first_unfinished_turn, runnable_queued_turn
 from cloud_agent.storage._sql.move_out import (
     MOVABLE_GROUP_SQL,
     UNMOVABLE_GROUP_SQL,
     UNMOVED_GROUP_SQL,
     move_out_possible,
 )
-from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage._sql.rows import load_json, stored_archive_settings
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.storage.repositories.host_capacity import insert_capacity_history_point
 from cloud_agent_shared.host_settings import (
@@ -1283,22 +1285,20 @@ class PostgresHostPoolRepository:
         """Read the durable, content-free signal used by compute autoscaling.
 
         A retained turn is tied to its existing Host and therefore cannot be
-        relieved by adding a CloudLab node. Only the first runnable turn of a
-        thread with no sandbox membership is demand here. Capacity is the
-        effective claim ceiling (the lower of reported and desired slots),
-        after liveness, placement, release/rotation holds, deployment
-        attestation, and archive-policy gates have all been applied. Pressure
-        is an exact maximum compatibility matching, not queue depth minus an
-        interchangeable slot count. The shared topology lock stabilizes
-        bindings, but it deliberately remains compatible with claims; repeatable
-        read prevents a claim committed between the job and host queries from
-        combining pre-claim demand with post-claim capacity into a state that
-        never existed.
+        relieved by adding a CloudLab node. Only a turn a claim would hand out
+        now (:func:`runnable_queued_turn`), of a thread with no sandbox
+        membership, is demand here. One in claim backoff is not, but it is
+        counted apart: the pool is not idle while it waits. Capacity is the
+        effective claim ceiling (the lower of reported and desired slots), after
+        liveness, placement, release/rotation holds, deployment attestation, and
+        archive-policy gates have all been applied. Pressure is an exact maximum
+        compatibility matching, not queue depth minus an interchangeable slot
+        count. The shared topology lock stabilizes bindings, but it deliberately
+        remains compatible with claims; repeatable read prevents a claim
+        committed between the job and host queries from combining pre-claim
+        demand with post-claim capacity into a state that never existed.
         """
-        async with (
-            self._pool.acquire() as conn,
-            conn.transaction(isolation="repeatable_read"),
-        ):
+        async with self._pool.acquire() as conn, conn.transaction(isolation="repeatable_read"):
             policy = await conn.fetchrow(
                 """
                 SELECT active_host, sandbox_archive_settings, sandbox_archive_revision
@@ -1308,40 +1308,27 @@ class PostgresHostPoolRepository:
             await lock_compute_topology(conn)
             observed_at = await conn.fetchval("SELECT NOW()")
             job_rows = await conn.fetch(
-                """
+                f"""
                 SELECT t.execution_profile,
-                       COALESCE(j.metadata->'requires', '[]'::jsonb) AS requires
+                       COALESCE(j.metadata->'requires', '[]'::jsonb) AS requires,
+                       {runnable_queued_turn("j")} AS claimable
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id=j.thread_id
-                WHERE j.state='queued' AND NOT j.cancel_requested
+                WHERE {runnable_queued_turn("j", including_backoff=True)}
                   AND NOT EXISTS (
                       SELECT 1 FROM agent_thread_sandbox_memberships m
                       WHERE m.thread_id=j.thread_id
                   )
                   AND NOT EXISTS (
-                      SELECT 1 FROM agent_jobs earlier
-                      WHERE earlier.thread_id=j.thread_id
-                        AND earlier.turn_no < j.turn_no
-                        AND earlier.state IN ('queued','running')
-                  )
-                  AND NOT EXISTS (
                       SELECT 1 FROM agent_jobs parent
                       WHERE parent.id=j.parent_job_id AND parent.state='succeeded'
-                  )
-                  AND (
-                      j.turn_source <> 'goal'
-                      OR (
-                          t.goal_state='active'
-                          AND t.goal_id=j.goal_id
-                          AND t.goal_revision=j.goal_revision
-                      )
                   )
                 ORDER BY j.created_at, j.id
                 """
             )
             job_rows.extend(
                 await conn.fetch(
-                    "SELECT execution_profile, '[\"environment-v1\"]'::jsonb AS requires FROM agent_environment_runs WHERE state='queued'",
+                    "SELECT execution_profile, '[\"environment-v1\"]'::jsonb AS requires, TRUE AS claimable FROM agent_environment_runs WHERE state='queued'",
                 )
             )
             rows = await conn.fetch(
@@ -1359,16 +1346,8 @@ class PostgresHostPoolRepository:
                 """
             )
 
-            archive_raw = (
-                {}
-                if policy is None
-                else {
-                    **(load_json(policy["sandbox_archive_settings"]) or {}),
-                    "revision": policy["sandbox_archive_revision"],
-                }
-            )
             try:
-                archive_policy = SandboxArchivePolicy.from_mapping(archive_raw)
+                archive_policy = SandboxArchivePolicy.from_mapping(stored_archive_settings(policy))
             except SandboxArchivePolicyError:
                 archive_policy = None
 
@@ -1381,7 +1360,8 @@ class PostgresHostPoolRepository:
                     and all(isinstance(value, str) for value in raw_requires)
                     else None
                 )
-                jobs.append((required, str(row["execution_profile"])))
+                if row["claimable"]:
+                    jobs.append((required, str(row["execution_profile"])))
 
             hosts: list[dict[str, Any]] = []
             matching_hosts: list[_HostCapacity] = []
@@ -1390,14 +1370,14 @@ class PostgresHostPoolRepository:
             active_tests = {
                 row["host"]: int(row["count"])
                 for row in await conn.fetch(
-                    "SELECT host,COUNT(*) AS count FROM agent_environment_runs WHERE host IS NOT NULL AND NOT cleanup_complete AND lease_expires_at>NOW() AND started_at>NOW()-INTERVAL '30 minutes' GROUP BY host"
+                    f"SELECT host,COUNT(*) AS count FROM agent_environment_runs WHERE host IS NOT NULL AND {env_run_holds_slot()} GROUP BY host"
                 )
             }
             cleanup_blocked_hosts = {
                 row["host"]
                 for row in await conn.fetch(
-                    "SELECT DISTINCT host FROM agent_environment_runs WHERE host IS NOT NULL AND NOT cleanup_complete "
-                    "AND (lease_expires_at<=NOW() OR started_at<=NOW()-INTERVAL '30 minutes')"
+                    "SELECT DISTINCT host FROM agent_environment_runs WHERE host IS NOT NULL "
+                    f"AND {env_run_blocks_host()}"
                 )
             }
             for raw in rows:
@@ -1485,6 +1465,7 @@ class PostgresHostPoolRepository:
             "observed_at": observed_at,
             "active_host": None if policy is None else policy["active_host"],
             "runnable_new_group_jobs": len(jobs),
+            "backoff_new_group_jobs": len(job_rows) - len(jobs),
             "fresh_effective_free_slots": free_slots,
             "unmatched_new_group_jobs": len(matchable_jobs) - matched,
             "autoscaling_template_hosts": [host for host, _shape in templates],
@@ -1510,14 +1491,7 @@ class PostgresHostPoolRepository:
                 """
             )
             try:
-                archive_policy = load_stored_archive_policy(
-                    {}
-                    if archive_row is None
-                    else {
-                        **(load_json(archive_row["sandbox_archive_settings"]) or {}),
-                        "revision": archive_row["sandbox_archive_revision"],
-                    }
-                )
+                archive_policy = load_stored_archive_policy(stored_archive_settings(archive_row))
                 archive_required = archive_policy.enabled
                 archive_revision = archive_policy.revision
             except SandboxArchivePolicyError:
@@ -1526,7 +1500,7 @@ class PostgresHostPoolRepository:
                 archive_required = True
                 archive_revision = -1
             row = await conn.fetchrow(
-                """
+                f"""
                 WITH waiting AS (
                     SELECT g.host AS owner, t.execution_profile,
                            COALESCE(g.state = 'cold', FALSE) AS cold,
@@ -1538,11 +1512,7 @@ class PostgresHostPoolRepository:
                     LEFT JOIN agent_sandboxes g ON g.id = m.sandbox_id
                     WHERE j.state = 'queued' AND NOT j.cancel_requested
                       AND j.updated_at < NOW() - $3 * INTERVAL '1 second'
-                      AND NOT EXISTS (
-                          SELECT 1 FROM agent_jobs earlier
-                          WHERE earlier.thread_id = j.thread_id AND earlier.turn_no < j.turn_no
-                            AND earlier.state IN ('queued', 'running')
-                      )
+                      AND {first_unfinished_turn("j")}
                 ), serving AS (
                     SELECT h.* FROM agent_runner_hosts h
                     WHERE h.status = 'online' AND h.credential_hash IS NOT NULL
@@ -1584,7 +1554,7 @@ class PostgresHostPoolRepository:
                 """,
                 expected_deployment_sha,
                 KATA_RUNTIME,
-                number_setting("queue_alert_after_s", 600.0),
+                number_setting("queue_alert_after_s"),
                 archive_required,
                 archive_revision,
                 json.dumps([SANDBOX_ARCHIVE_CAPABILITY]),
@@ -1919,9 +1889,7 @@ class PostgresHostPoolRepository:
             # The baseline normally creates the singleton. Keep a missing row
             # readable during restore/bootstrap; the first write recreates it.
             return archive_settings_payload(SandboxArchivePolicy(), None)
-        raw = dict(load_json(row["sandbox_archive_settings"]) or {})
-        raw["revision"] = row["sandbox_archive_revision"]
-        policy = load_stored_archive_policy(raw)
+        policy = load_stored_archive_policy(stored_archive_settings(row))
         return archive_settings_payload(policy, row["sandbox_archive_updated_at"])
 
     async def set_sandbox_archive_settings(
@@ -1943,9 +1911,7 @@ class PostgresHostPoolRepository:
                 """
             )
             assert current is not None
-            current_raw = dict(load_json(current["sandbox_archive_settings"]) or {})
-            current_raw["revision"] = current["sandbox_archive_revision"]
-            current_policy = load_stored_archive_policy(current_raw)
+            current_policy = load_stored_archive_policy(stored_archive_settings(current))
             requested = SandboxArchivePolicy.from_mapping(
                 {**dict(settings), "revision": current_policy.revision}
             )

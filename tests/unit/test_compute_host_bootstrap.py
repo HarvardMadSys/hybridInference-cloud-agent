@@ -790,10 +790,13 @@ def _discarded(
 
     With ``absent`` the container is already gone, and the discard proves it.
     """
-    from tests.unit.test_sandbox_archive import _Manager
+    from tests.unit.test_sandbox_deletion_backup import _Manager
 
     from cloud_agent_host.chat_sandbox import ChatSandboxSpec
-    from cloud_agent_host.sandbox_archive import ArchiveIdentity, SandboxArchiveService
+    from cloud_agent_host.sandbox_deletion_backup import (
+        ArchiveIdentity,
+        SandboxDeletionBackupService,
+    )
     from cloud_agent_host.shared_session_supervisor import (
         SharedChatSessionSupervisor,
         SharedMemberManifest,
@@ -816,7 +819,7 @@ def _discarded(
             ],
             expected_container_id="container-1",
         )
-    service = SandboxArchiveService(supervisor, state_dir=archives)
+    service = SandboxDeletionBackupService(supervisor, state_dir=archives)
     identity = ArchiveIdentity("thread-origin", request_id, 2, "container-1", "")
     service.discard(identity, sandbox_id="sandbox-1")
     assert manager.removals == (0 if absent else 1)
