@@ -18,9 +18,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.goals.models import (
-    ARM_AFTER_S,
     MAX_REASON_CHARS,
-    STALLED_AFTER_S,
     GoalConflict,
 )
 from cloud_agent.settings import number_setting
@@ -530,8 +528,8 @@ class PostgresGoalRepository:
           waiting on anything, or whose conversation has gone idle with no
           wakeup at all. The decision is made again.
         * ``stalled`` — an ``active`` goal with nothing queued, running or
-          pending for longer than :data:`STALLED_AFTER_S`. No path can explain
-          it, so it is paused and said so.
+          pending for longer than the ``goals.stalled_after_seconds`` setting.
+          No path can explain it, so it is paused and said so.
 
         Returns the thread ids by shape, for the caller's log line.
         """
@@ -571,7 +569,7 @@ class PostgresGoalRepository:
                 ORDER BY t.goal_updated_at
                 LIMIT 200
                 """,
-                number_setting("goals.arm_after_seconds", ARM_AFTER_S),
+                number_setting("goals.arm_after_seconds"),
             )
             # The ids of wakeups this pass made due again. Populated before the
             # arming loop below, which appends the goals it newly armed.
@@ -644,7 +642,7 @@ class PostgresGoalRepository:
                 LIMIT 200
                 FOR UPDATE OF t SKIP LOCKED
                 """,
-                number_setting("goals.stalled_after_seconds", STALLED_AFTER_S),
+                number_setting("goals.stalled_after_seconds"),
             )
             stalled_ids = [str(row["id"]) for row in stalled]
             if stalled_ids:

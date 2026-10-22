@@ -53,6 +53,12 @@ class ExecutionQueries(Protocol):
         """Read lightweight attempt summaries without tool or process rows."""
         ...
 
+    async def trajectory_timings(
+        self, *, job_ids: list[str], user_id: str, max_attempts: int
+    ) -> dict[str, Any]:
+        """Read a bounded owner-fenced set of compact attempt timing rows."""
+        ...
+
     async def get_attempt(self, *, job_id: str, attempt_id: int) -> dict[str, Any] | None:
         """Return one attempt of one job, by its exact id.
 

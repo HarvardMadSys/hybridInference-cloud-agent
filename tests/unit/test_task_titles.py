@@ -182,7 +182,13 @@ async def test_incomplete_completion_with_plausible_text_is_not_saved(monkeypatc
 
 async def test_generation_has_total_deadline(monkeypatch):
     monkeypatch.setenv("GATEWAY_BASE_URL", "https://gateway.example")
-    monkeypatch.setattr(task_titles, "_TOTAL_TIMEOUT_S", 0.01)
+    read = task_titles.number_setting
+    # Below the setting's one-second floor, so the test stays fast.
+    monkeypatch.setattr(
+        task_titles,
+        "number_setting",
+        lambda key: 0.01 if key == "task_titles.total_timeout_seconds" else read(key),
+    )
     cancelled = asyncio.Event()
 
     async def handle(request):

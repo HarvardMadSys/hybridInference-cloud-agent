@@ -19,12 +19,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from fastapi.exceptions import RequestValidationError
+from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import JSONResponse
-from fastapi.routing import APIRoute
 
 from cloud_agent.api._owner_auth import require_agent_owner
+from cloud_agent.api._sensitive_routes import SensitiveRoute
 from cloud_agent.api.deps import get_gateway_client, get_storage, require_store
 from cloud_agent.application import teams as flows
 from cloud_agent.domain.teams import (
@@ -58,13 +57,10 @@ from cloud_agent.schemas import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
-
     from cloud_agent.domain.teams import TeamRecord
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.ports.teams import TeamRepository
 
-_NO_STORE = {"Cache-Control": "no-store"}
 _STATUS: dict[type[TeamError], int] = {
     TeamNotFound: 404,
     TeamForbidden: 403,
@@ -77,37 +73,25 @@ def _error(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(
         status_code=status,
         content={"error": {"type": code, "message": message}},
-        headers=_NO_STORE,
     )
 
 
-class _TeamRoute(APIRoute):
+class _TeamRoute(SensitiveRoute):
     """Map team refusals to stable errors and keep every answer out of caches."""
 
-    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
-        """Wrap the generated handler; validation errors never echo the request."""
-        handler = super().get_route_handler()
+    def validation_response(self, exc: Exception) -> JSONResponse:
+        return _error(422, "invalid_request", "Check the request and try again.")
 
-        async def guarded(request: Request) -> Response:
-            try:
-                response = await handler(request)
-            except TeamError as exc:
-                return _error(_STATUS.get(type(exc), 409), exc.code, exc.message)
-            except AgentAccessUnavailable:
-                return _error(
-                    503,
-                    "unavailable",
-                    "Account access cannot be confirmed right now. Try again shortly.",
-                )
-            except RequestValidationError:
-                return _error(422, "invalid_request", "Check the request and try again.")
-            except HTTPException as exc:
-                exc.headers = {**(exc.headers or {}), **_NO_STORE}
-                raise
-            response.headers.update(_NO_STORE)
-            return response
-
-        return guarded
+    def domain_response(self, exc: Exception) -> JSONResponse | None:
+        if isinstance(exc, TeamError):
+            return _error(_STATUS.get(type(exc), 409), exc.code, exc.message)
+        if isinstance(exc, AgentAccessUnavailable):
+            return _error(
+                503,
+                "unavailable",
+                "Account access cannot be confirmed right now. Try again shortly.",
+            )
+        return None
 
 
 router = APIRouter(prefix="/v1/agent", tags=["teams"], route_class=_TeamRoute)

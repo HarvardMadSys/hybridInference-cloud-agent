@@ -58,8 +58,7 @@ async def test_oncall_dispatch_rotation_applies_to_next_request(monkeypatch):
 
 async def test_residency_grants_use_updated_lease_duration(monkeypatch):
     duration = 2400.0
-    monkeypatch.setattr(residency, "setting_env", lambda _: None)
-    monkeypatch.setattr(residency, "number_setting", lambda key, fallback: duration)
+    monkeypatch.setattr(residency, "number_setting", lambda key: duration)
     grants = SimpleNamespace(
         mint=AsyncMock(return_value={"grant_id": "grant-1", "token": "credential"}),
         revoke=AsyncMock(),
@@ -80,7 +79,7 @@ async def test_residency_grants_use_updated_lease_duration(monkeypatch):
 
 
 async def test_usage_timeout_and_capacity_retention_use_current_limits(monkeypatch):
-    monkeypatch.setattr(ledger, "number_setting", lambda key, fallback: 0.01)
+    monkeypatch.setattr(ledger, "number_setting", lambda key: 0.01)
 
     async def stalled_usage(*args, **kwargs):
         await asyncio.Event().wait()
@@ -101,7 +100,7 @@ async def test_usage_timeout_and_capacity_retention_use_current_limits(monkeypat
         },
     )
     assert store.complete_ledger_refresh.call_args.kwargs["error_code"] == "usage_unavailable"
-    monkeypatch.setattr(capacity_history, "number_setting", lambda key, fallback: 7200.0)
+    monkeypatch.setattr(capacity_history, "number_setting", lambda key: 7200.0)
     capacity = SimpleNamespace(prune_capacity_history=AsyncMock(return_value=0))
     await capacity_history._prune(capacity, limit=23, timeout_seconds=1)
     capacity.prune_capacity_history.assert_awaited_once_with(older_than_seconds=7200.0, limit=23)
@@ -118,7 +117,7 @@ async def test_background_workers_pick_up_interval_changes_between_passes(monkey
         if len(delays) == 2:
             raise asyncio.CancelledError
 
-    monkeypatch.setattr(snapshots, "number_setting", lambda key, fallback: interval)
+    monkeypatch.setattr(snapshots, "number_setting", lambda key: interval)
     monkeypatch.setattr(snapshots, "asyncio", SimpleNamespace(sleep=tick))
     monkeypatch.setattr(snapshots, "_capture_due_shared_snapshot", AsyncMock(return_value=False))
     with pytest.raises(asyncio.CancelledError):
@@ -127,7 +126,7 @@ async def test_background_workers_pick_up_interval_changes_between_passes(monkey
 
     delays.clear()
     interval = 5.0
-    monkeypatch.setattr(operational_health, "number_setting", lambda key, fallback: interval)
+    monkeypatch.setattr(operational_health, "number_setting", lambda key: interval)
     monkeypatch.setattr(
         operational_health,
         "asyncio",
@@ -143,7 +142,7 @@ async def test_background_workers_pick_up_interval_changes_between_passes(monkey
 
 async def test_queue_age_is_bound_as_a_runtime_value_in_health_query(monkeypatch):
     duration = 600.0
-    monkeypatch.setattr(host_pool, "number_setting", lambda key, fallback: duration)
+    monkeypatch.setattr(host_pool, "number_setting", lambda key: duration)
 
     class Transaction:
         async def __aenter__(self):

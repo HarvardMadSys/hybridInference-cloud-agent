@@ -694,7 +694,9 @@ async def test_resident_mcp_call_followup_resume_and_fork(
 
         manager = SimpleNamespace(
             _require=lambda spec: SimpleNamespace(container_id=container),
-            backend=SimpleNamespace(docker_binary="docker", image=image),
+            backend=SimpleNamespace(
+                docker_binary="docker", image=image, sandbox_namespace="resident-mcp-parity"
+            ),
             exec_capture=capture,
             _run=ChatSandboxManager._run,
             _run_bytes=ChatSandboxManager._run_bytes,

@@ -16,6 +16,7 @@ from cloud_agent.api.mcp_connections import router
 from cloud_agent.mcp.catalog import McpCatalog, catalog_entry, fetch_catalog
 from cloud_agent.mcp.config_import import parse_import
 from cloud_agent.ports.mcp_catalog import McpCatalogSave, McpCatalogSync
+from cloud_agent.settings import number_setting
 
 _REGISTRY = "https://registry.modelcontextprotocol.io"
 
@@ -709,7 +710,7 @@ async def test_saved_registry_url_replaces_fresh_catalog_on_next_refresh(monkeyp
     monkeypatch.setattr(
         catalog_module,
         "number_setting",
-        lambda name, default=None: 7 if name == "mcp_catalog_request_timeout_s" else default,
+        lambda name: 7 if name == "mcp_catalog_request_timeout_s" else number_setting(name),
     )
     cached = {
         "entries": [catalog_entry(record())],

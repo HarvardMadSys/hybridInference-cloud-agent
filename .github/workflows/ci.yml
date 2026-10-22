@@ -387,6 +387,21 @@ jobs:
             --junitxml="${RUNNER_TEMP}/shared-member-permissions.xml"
           uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/shared-member-permissions.xml"
 
+      # Moving a Host is systemd, sshd's forced command, rsync and Docker's
+      # on-disk state between two machines. Unit doubles replace all of them.
+      # Run the control plane's own steps over SSH between two systemd nodes.
+      - name: A Host moves between two nodes over SSH
+        if: matrix.shard == 1
+        timeout-minutes: 10
+        env:
+          AGENT_HOST_NODE_TEST_IMAGE: alpine:3.20
+        run: |
+          set -euo pipefail
+          docker pull "${AGENT_HOST_NODE_TEST_IMAGE}"
+          uv run pytest -q -m external tests/external/test_host_move_out_two_nodes.py \
+            --junitxml="${RUNNER_TEMP}/host-move-out.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/host-move-out.xml"
+
       # A checkpoint commits the container whole, the Sandbox Manager's own
       # markers included. Unit doubles never do, so a restore that every unit
       # test passed failed on staging. Commit, load and start one for real.
@@ -401,6 +416,22 @@ jobs:
           uv run pytest -q -m external tests/external/test_checkpoint_restore_roundtrip.py \
             --junitxml="${RUNNER_TEMP}/checkpoint-restore.xml"
           uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/checkpoint-restore.xml"
+
+      # Release runs its node scripts against a Docker that restarts the
+      # runner and removes containers while they are read. Unit doubles do
+      # neither, so release passed them all and refused on staging. Run the
+      # same scripts on a Docker-in-Docker node of their own.
+      - name: A released node stops its runner and inventories clean
+        if: matrix.shard == 1
+        timeout-minutes: 8
+        env:
+          AGENT_HOST_NODE_TEST_IMAGE: alpine:3.20
+        run: |
+          set -euo pipefail
+          docker pull "${AGENT_HOST_NODE_TEST_IMAGE}"
+          uv run pytest -q -m external tests/external/test_host_release_real_docker.py \
+            --junitxml="${RUNNER_TEMP}/host-release.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/host-release.xml"
 
       # Completion can precede the native CLI's history flush. Unit doubles
       # cannot catch that race; exercise the shipped pin before CI can deploy.
@@ -645,39 +676,10 @@ jobs:
       # it cannot reach turns a broken service container into a passing job,
       # and a `pytest -m` that silently matches nothing exits 0 too. Neither is
       # distinguishable from success in the check list, so assert the shape of
-      # the run rather than trusting its exit code.
+      # the run rather than trusting its exit code. The floor is not the exact
+      # count, so adding tests never fails it.
       - name: The tier actually ran
-        run: |
-          uv run python - <<'PY'
-          import os, sys, xml.etree.ElementTree as ET
-
-          root = ET.parse(os.environ["RUNNER_TEMP"] + "/dbtest.xml").getroot()
-          suite = root if root.tag == "testsuite" else root.find("testsuite")
-          ran = int(suite.get("tests", 0))
-
-          # Per-testcase, not the suite's `skipped` attribute: junit counts an
-          # xfail as a skip, although an xfail ran. Only type="pytest.skip" is a
-          # test that declined to run, which is what a database-less run
-          # produces.
-          skipped = [
-              tc.get("name")
-              for tc in suite.iter("testcase")
-              for sk in tc.findall("skipped")
-              if sk.get("type") == "pytest.skip"
-          ]
-          print(f"dbtest: {ran} collected, {len(skipped)} skipped")
-
-          # A floor, not the exact count, so adding tests never fails this. It
-          # only has to be high enough that a database-less run cannot clear
-          # it — that run skips all of them.
-          if ran < 100:
-              sys.exit(f"only {ran} dbtests ran; the tier is not being selected")
-          if skipped:
-              sys.exit(
-                  f"{len(skipped)} dbtests skipped — the fixtures skip when Postgres "
-                  f"is unreachable, so this job proved nothing: {skipped[:5]}"
-              )
-          PY
+        run: uv run python scripts/ci_tests_ran.py --min 100 --running-skips-only "${RUNNER_TEMP}/dbtest.xml"
   # -------------------------------------------------------------------- web
   # Two jobs: the checks, and the builds. The checks stay together for the
   # reason spelled out over `lint` above — and more sharply here, because Node

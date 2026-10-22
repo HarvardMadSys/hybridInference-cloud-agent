@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import os
+import pathlib
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:
-    import pathlib
     from collections.abc import Iterable, Iterator
     from typing import BinaryIO
 
@@ -46,46 +46,26 @@ def checked_entries(entries: Iterable[_T], stop: StopSignal | None) -> Iterator[
         yield entry
 
 
-def _directory_names(
-    directory: pathlib.Path, stop: StopSignal | None
-) -> tuple[list[str], list[str]]:
-    """Match os.walk classification, checking every scandir entry."""
-    directories: list[str] = []
-    files: list[str] = []
-    with os.scandir(directory) as entries:
-        for entry in checked_entries(entries, stop):
-            try:
-                is_directory = entry.is_dir()
-            except OSError:
-                is_directory = False
-            (directories if is_directory else files).append(entry.name)
-    return directories, files
-
-
 def source_entries(root: pathlib.Path, stop: StopSignal | None) -> Iterator[pathlib.Path]:
-    """Walk without following symlinks, preserving the existing emission order.
-
-    os.walk collects an entire directory before yielding. A large directory
-    must observe cancellation during that collection too. As before, emit
-    sorted directory names followed by sorted file names, then recurse in
-    the filesystem's directory order. Unreadable directories are skipped,
-    matching os.walk's default behavior.
-    """
-    pending = [root]
-    while pending:
-        check_source_stop(stop)
-        parent = pending.pop()
-        try:
-            directories, files = _directory_names(parent, stop)
-        except OSError:
-            continue
-        for names in (directories, files):
-            for name in checked_entries(sorted(names), stop):
-                yield parent / name
-        for name in checked_entries(reversed(directories), stop):
-            child = parent / name
-            if not child.is_symlink():
-                pending.append(child)
+    """Stream a tree without following symlinks or retaining directory listings."""
+    pending = [os.scandir(root)]
+    try:
+        while pending:
+            check_source_stop(stop)
+            try:
+                entry = next(pending[-1])
+            except StopIteration:
+                pending.pop().close()
+                continue
+            check_source_stop(stop)
+            path = pathlib.Path(entry.path)
+            yield path
+            check_source_stop(stop)
+            if entry.is_dir(follow_symlinks=False):
+                pending.append(os.scandir(path))
+    finally:
+        for directory in pending:
+            directory.close()
 
 
 class CancellableArchiveWriter:

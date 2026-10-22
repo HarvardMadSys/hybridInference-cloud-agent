@@ -20,8 +20,9 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import InvalidToken
 
+from cloud_agent.domain_cipher import domain_fernet
 from cloud_agent.settings import number_setting, settings_environment
 
 if TYPE_CHECKING:
@@ -77,8 +78,7 @@ class SourceControlCipher:
             raise SourceControlError(
                 f"{ENV_ENCRYPTION_KEY} must be set before source-control credentials can be stored"
             )
-        digest = hashlib.sha256(domain + b"\0" + material.encode("utf-8")).digest()
-        self._fernet = Fernet(base64.urlsafe_b64encode(digest))
+        self._fernet = domain_fernet(material, domain)
         self._mac_key = hashlib.sha256(domain + b"\0mac\0" + material.encode("utf-8")).digest()
 
     def encrypt(self, value: str) -> str:
@@ -285,7 +285,7 @@ class GitLabOAuthClient:
         """Effective deadline used for the next provider request."""
         if self._timeout_override is not None:
             return self._timeout_override
-        return number_setting("gitlab_request_timeout_s", 20.0)
+        return number_setting("gitlab_request_timeout_s")
 
     @property
     def refresh_lease_seconds(self) -> int:

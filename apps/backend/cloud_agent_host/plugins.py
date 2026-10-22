@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import queue
 import secrets
+import textwrap
 import threading
 import time
 from concurrent.futures import Future
@@ -87,7 +88,12 @@ def run_plugin_command(
         output.close()
 
 
-_CLAUDE_INSTALL_SCRIPT = r"""
+#: How a member's installer for Claude or Codex begins. It checks that the
+#: state directory ``config`` (argv 1) is the member's own, reads ``plugins``
+#: (argv 2), defines bounded ``read_json`` and atomic ``write_json`` receipts,
+#: and takes an exclusive lock on the directory. ``@DIRECTORY@`` and
+#: ``@RECEIPT@`` name the directory and its receipts in errors.
+_INSTALLER_PREAMBLE = r"""
 import fcntl
 import json
 import os
@@ -101,7 +107,7 @@ config = pathlib.Path(sys.argv[1])
 plugins = json.loads(sys.argv[2])
 info = config.lstat()
 if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
-    raise RuntimeError('plugin config is not member-owned')
+    raise RuntimeError('@DIRECTORY@ is not member-owned')
 os.umask(0o077)
 
 def read_json(path):
@@ -112,7 +118,7 @@ def read_json(path):
     with os.fdopen(fd) as handle:
         raw = handle.read(65537)
     if len(raw) > 65536:
-        raise RuntimeError('plugin receipt exceeds its bound')
+        raise RuntimeError('@RECEIPT@ exceeds its bound')
     try:
         return json.loads(raw)
     except ValueError:
@@ -132,19 +138,37 @@ lock_fd = os.open(config / '.freeinference-plugins.lock',
                   os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
 with os.fdopen(lock_fd, 'r+') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
-    marker = config / '.freeinference-plugins.json'
-    if read_json(marker) == plugins:
-        raise SystemExit(0)
-    marketplaces = set()
-    for plugin in plugins:
-        source = plugin['marketplace']
-        if source not in marketplaces:
-            subprocess.run(['claude', 'plugin', 'marketplace', 'add', source], check=True)
-            marketplaces.add(source)
-        subprocess.run(['claude', 'plugin', 'install', plugin['plugin'],
-                        '--scope', 'user'], check=True)
-    write_json(marker, plugins)
 """
+
+
+def member_installer(*, directory: str, receipt: str, locked: str) -> str:
+    """The installer script: the shared preamble, then ``locked`` under the lock.
+
+    ``locked`` is written at the left margin; it is indented into the lock's
+    block here.
+    """
+    preamble = _INSTALLER_PREAMBLE.replace("@DIRECTORY@", directory)
+    return preamble.replace("@RECEIPT@", receipt) + textwrap.indent(locked, "    ")
+
+
+_CLAUDE_INSTALL_SCRIPT = member_installer(
+    directory="plugin config",
+    receipt="plugin receipt",
+    locked="""\
+marker = config / '.freeinference-plugins.json'
+if read_json(marker) == plugins:
+    raise SystemExit(0)
+marketplaces = set()
+for plugin in plugins:
+    source = plugin['marketplace']
+    if source not in marketplaces:
+        subprocess.run(['claude', 'plugin', 'marketplace', 'add', source], check=True)
+        marketplaces.add(source)
+    subprocess.run(['claude', 'plugin', 'install', plugin['plugin'],
+                    '--scope', 'user'], check=True)
+write_json(marker, plugins)
+""",
+)
 
 
 def install_claude_plugins(
@@ -177,4 +201,9 @@ def install_claude_plugins(
     )
 
 
-__all__ = ["PLUGIN_INSTALL_TIMEOUT_S", "install_claude_plugins", "run_plugin_command"]
+__all__ = [
+    "PLUGIN_INSTALL_TIMEOUT_S",
+    "install_claude_plugins",
+    "member_installer",
+    "run_plugin_command",
+]

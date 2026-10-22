@@ -13,6 +13,7 @@ import os
 import pathlib
 import re
 import stat
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -36,6 +37,8 @@ if TYPE_CHECKING:
 #: Counts the working tree *and* the fetched commit's Git objects, so the
 #: largest checkout that fits is well under this. A host may raise it.
 DEFAULT_MAX_SOURCE_ARCHIVE_BYTES = 1024 * 1024 * 1024
+DEFAULT_MAX_SOURCE_ARCHIVE_ENTRIES = 1_000_000
+DEFAULT_MAX_SOURCE_MANIFEST_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_BASE_BUNDLE_BYTES = 1024 * 1024 * 1024
 #: Uploads are bounded far below the checkout. Every turn's files are imported
 #: together, so the control plane admits a conversation's uploads only while the
@@ -46,6 +49,7 @@ DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES = 64 * 1024 * 1024
 _UPLOAD_FORMAT: Final = tarfile.PAX_FORMAT
 _UPLOAD_ENCODING: Final = "utf-8"
 _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+_MANIFEST_LENGTH = struct.Struct(">I")
 _GIT_ENV = {
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_CONFIG_SYSTEM": "/dev/null",
@@ -60,6 +64,26 @@ def _entries(root: pathlib.Path, *, stop: StopSignal | None = None) -> Iterator[
     return source_entries(root, stop)
 
 
+def _manifest_paths(
+    root: pathlib.Path, manifest: BinaryIO, *, stop: StopSignal | None = None
+) -> Iterator[pathlib.Path]:
+    """Replay the length-prefixed filesystem paths in a validated disk manifest."""
+    while True:
+        check_source_stop(stop)
+        header = manifest.read(_MANIFEST_LENGTH.size)
+        if not header:
+            return
+        if len(header) != _MANIFEST_LENGTH.size:
+            raise SandboxError("source checkout manifest is truncated")
+        (length,) = _MANIFEST_LENGTH.unpack(header)
+        check_source_stop(stop)
+        encoded = manifest.read(length)
+        if len(encoded) != length:
+            raise SandboxError("source checkout manifest is truncated")
+        check_source_stop(stop)
+        yield root / os.fsdecode(encoded)
+
+
 def _human_size(size: int) -> str:
     for unit, scale in (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)):
         if size >= scale:
@@ -67,32 +91,25 @@ def _human_size(size: int) -> str:
     return f"{size} B"
 
 
-def build_source_archive(
-    workdir: str,
-    out: BinaryIO,
+def _write_source_manifest(
+    root: pathlib.Path,
+    manifest: BinaryIO,
     *,
-    uid: int,
-    gid: int,
-    max_bytes: int = DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
+    max_bytes: int,
+    max_entries: int,
+    max_manifest_bytes: int,
     stop: StopSignal | None = None,
-) -> int:
-    """Write a normalized tar of one prepared checkout to ``out``, complete or refuse.
-
-    The tar goes to the caller's file rather than into memory: a checkout near
-    the limit would otherwise be held in the turn process, twice, before Docker
-    read any of it. Returns the bytes written. After a refusal ``out`` holds a
-    partial archive and must be discarded.
-    """
-    check_source_stop(stop)
-    root = pathlib.Path(workdir).resolve()
-    if max_bytes <= 0:
-        raise ValueError("source archive size limit must be positive")
-    if not root.is_dir() or not (root / ".git").exists():
-        raise SandboxError("source preparer produced no Git checkout")
-
-    paths = list(checked_entries(_entries(root, stop=stop), stop))
+) -> None:
+    """Validate one streamed tree walk and spool only its bounded path records."""
     estimated = 0
-    for path in checked_entries(paths, stop):
+    manifest_bytes = 0
+    entry_paths = _entries(root) if stop is None else _entries(root, stop=stop)
+    for entries, path in enumerate(checked_entries(entry_paths, stop), start=1):
+        if entries > max_entries:
+            raise SandboxError(
+                f"source checkout has more than {max_entries:,} entries, which exceeds "
+                "this host's retained import metadata limit"
+            )
         try:
             info = path.lstat()
         except OSError as exc:
@@ -102,40 +119,71 @@ def build_source_archive(
             estimated += info.st_size
         elif not (stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
             raise SandboxError(f"source checkout contains refused file type at {path.name!r}")
-    # Measured to the end, not to the first byte over: the size is what tells
-    # the user this is the repository and not a transient failure to retry.
+        relative = os.fsencode(path.relative_to(root))
+        manifest_bytes += _MANIFEST_LENGTH.size + len(relative)
+        if manifest_bytes > max_manifest_bytes:
+            raise SandboxError(
+                f"source checkout manifest exceeds this host's "
+                f"{_human_size(max_manifest_bytes)} retained import metadata limit"
+            )
+        check_source_stop(stop)
+        manifest.write(_MANIFEST_LENGTH.pack(len(relative)))
+        manifest.write(relative)
+    # Measured to the end, not the first byte over: this tells the user that
+    # the repository itself, rather than a transient operation, is too large.
     if estimated > max_bytes:
         raise SandboxError(
             f"source checkout ({_human_size(estimated)} including its Git objects) exceeds "
             f"this host's {_human_size(max_bytes)} retained import size limit"
         )
+    check_source_stop(stop)
+    manifest.seek(0)
 
-    def normalize(member: tarfile.TarInfo) -> tarfile.TarInfo:
-        name = pathlib.PurePosixPath(member.name)
-        if name.is_absolute() or ".." in name.parts:
-            raise SandboxError(f"source archive path escapes workspace: {member.name!r}")
-        if not (member.isfile() or member.isdir() or member.issym()):
-            raise SandboxError(f"source archive has refused member type: {member.name!r}")
-        member.uid = uid
-        member.gid = gid
-        member.uname = ""
-        member.gname = ""
-        # Reproducible metadata and no setuid/setgid bits crossing the boundary.
-        member.mode &= 0o1777
-        return member
 
-    # Tar headers and padding on top of the file bytes measured above.
+def _normalize_source_member(member: tarfile.TarInfo, *, uid: int, gid: int) -> tarfile.TarInfo:
+    name = pathlib.PurePosixPath(member.name)
+    if name.is_absolute() or ".." in name.parts:
+        raise SandboxError(f"source archive path escapes workspace: {member.name!r}")
+    if not (member.isfile() or member.isdir() or member.issym()):
+        raise SandboxError(f"source archive has refused member type: {member.name!r}")
+    member.uid = uid
+    member.gid = gid
+    member.uname = ""
+    member.gname = ""
+    # Reproducible metadata and no setuid/setgid bits crossing the boundary.
+    member.mode &= 0o1777
+    return member
+
+
+def _write_source_tar(
+    root: pathlib.Path,
+    manifest: BinaryIO,
+    out: BinaryIO,
+    *,
+    uid: int,
+    gid: int,
+    max_bytes: int,
+    stop: StopSignal | None = None,
+) -> int:
+    """Replay the bounded manifest without retaining tar's write-only member index."""
     over_limit = SandboxError(
         f"source archive exceeds this host's {_human_size(max_bytes)} retained import size limit"
     )
     start = out.tell()
+
+    def normalize(member: tarfile.TarInfo) -> tarfile.TarInfo:
+        return _normalize_source_member(member, uid=uid, gid=gid)
+
     try:
         with tarfile.open(
             fileobj=CancellableArchiveWriter(out, stop), mode="w", dereference=False
         ) as archive:
+            paths = _manifest_paths(root, manifest, stop=stop)
             for path in checked_entries(paths, stop):
                 relative = path.relative_to(root).as_posix()
                 archive.add(path, arcname=relative, recursive=False, filter=normalize)
+                # A write-only source archive never reads TarFile's random-access index.
+                archive.getmembers().clear()
                 if out.tell() - start > max_bytes:
                     raise over_limit
     except (OSError, tarfile.TarError) as exc:
@@ -144,6 +192,61 @@ def build_source_archive(
     if written > max_bytes:
         raise over_limit
     return written
+
+
+def build_source_archive(
+    workdir: str,
+    out: BinaryIO,
+    *,
+    uid: int,
+    gid: int,
+    max_bytes: int = DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
+    max_entries: int = DEFAULT_MAX_SOURCE_ARCHIVE_ENTRIES,
+    max_manifest_bytes: int = DEFAULT_MAX_SOURCE_MANIFEST_BYTES,
+    stop: StopSignal | None = None,
+) -> int:
+    """Write a normalized tar of one prepared checkout to ``out``, complete or refuse.
+
+    The tar goes to the caller's file rather than into memory: a checkout near
+    the limit would otherwise be held in the turn process, twice, before Docker
+    read any of it. The validated path manifest is bounded and disk-backed, so
+    metadata memory does not grow with repository entry count. Returns the bytes
+    written. After a refusal ``out`` may hold a partial archive and must be discarded.
+    """
+    check_source_stop(stop)
+    root = pathlib.Path(workdir).resolve()
+    if max_bytes <= 0:
+        raise ValueError("source archive size limit must be positive")
+    if max_entries <= 0:
+        raise ValueError("source archive entry limit must be positive")
+    if max_manifest_bytes <= 0:
+        raise ValueError("source archive manifest size limit must be positive")
+    if not root.is_dir() or not (root / ".git").exists():
+        raise SandboxError("source preparer produced no Git checkout")
+
+    try:
+        with tempfile.TemporaryFile(prefix="freeinference-source-manifest-") as manifest:
+            _write_source_manifest(
+                root,
+                manifest,
+                max_bytes=max_bytes,
+                max_entries=max_entries,
+                max_manifest_bytes=max_manifest_bytes,
+                stop=stop,
+            )
+            return _write_source_tar(
+                root,
+                manifest,
+                out,
+                uid=uid,
+                gid=gid,
+                max_bytes=max_bytes,
+                stop=stop,
+            )
+    except SandboxError:
+        raise
+    except OSError as exc:
+        raise SandboxError(f"source checkout could not be archived: {exc}") from exc
 
 
 def build_base_bundle(
@@ -332,6 +435,8 @@ def upload_archive_size(files: Iterable[tuple[str, int]]) -> int:
 __all__ = [
     "DEFAULT_MAX_BASE_BUNDLE_BYTES",
     "DEFAULT_MAX_SOURCE_ARCHIVE_BYTES",
+    "DEFAULT_MAX_SOURCE_ARCHIVE_ENTRIES",
+    "DEFAULT_MAX_SOURCE_MANIFEST_BYTES",
     "DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES",
     "build_base_bundle",
     "build_source_archive",

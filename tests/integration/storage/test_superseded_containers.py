@@ -31,9 +31,11 @@ from tests.integration.storage.test_sandbox_restore_store import (
     store as store,
 )
 from tests.support.follow_ups import append_follow_up
+from tests.support.host_docker import Docker, probe, service as host_service
 from tests.unit.test_sandbox_deletion_backup import _Manager
 
 from cloud_agent.ports.external.compute_provider import ProviderReceipt
+from cloud_agent.ports.external.host_bootstrap import default_namespace
 from cloud_agent.providers.compute.host_bootstrap import SshHostBootstrap
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.storage._sql.hosts import (
@@ -428,14 +430,15 @@ async def test_a_handed_over_group_without_a_restore_point_still_holds_its_machi
 
 
 class _Machine:
-    """Runs the shipped remote scripts as the node would: its files, no containers.
+    """Runs the shipped remote scripts as the node would: its files, its containers.
 
-    Only ``/var/lib`` maps to ``root``; Docker answers with nothing running.
+    Only ``/var/lib`` maps to ``root``; Docker answers from ``docker``.
     """
 
-    def __init__(self, root: Path, monkeypatch) -> None:
+    def __init__(self, root: Path, monkeypatch, docker: Docker | None = None) -> None:
         self.root = root
         self.monkeypatch = monkeypatch
+        self.docker = docker or Docker()
 
     async def run(self, connection, script: str, *, stdin=None, timeout: float = 30) -> str:
         argv = shlex.split(script)
@@ -453,9 +456,11 @@ class _Machine:
             local.setattr("sys.argv", ["remote", argv[5]])
             local.setattr("sys.stdin", io.StringIO((stdin or b"").decode()))
             local.setattr("shutil.which", lambda command: "/usr/bin/docker")
-            local.setattr("subprocess.check_output", lambda args, **kwargs: "")
+            local.setattr("subprocess.check_output", self.docker.check_output)
+            local.setattr("subprocess.check_call", self.docker.check_call)
             local.setattr("pathlib.Path", isolated_path)
-            exec(argv[4], {})
+            with contextlib.suppress(SystemExit):
+                exec(argv[4], {})
         return output.getvalue()
 
 
@@ -529,9 +534,19 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
     (archives.parent / "credential").write_text("persisted enrollment")
     SandboxCheckpointStore(archives / "checkpoints").save(await _recorded_receipt(pool))
     manager, service = _host_manager(old, archives)
-    r.bootstrap.inventory = SshHostBootstrap(
-        transport=_Machine(tmp_path / "machine", monkeypatch), resolver=AsyncMock()
-    ).inventory
+    # Its runner, refused since the Host was removed, keeps being restarted
+    # and has left one of its self-test sandboxes behind.
+    namespace = allocation.get("slot_namespace") or default_namespace(allocation["nodes"][0]["id"])
+    docker = Docker(
+        host_service("runner", namespace, "runner"),
+        host_service("sandbox-manager", namespace, "sandbox-manager"),
+        probe("self-test", namespace),
+    )
+    machine = SshHostBootstrap(
+        transport=_Machine(tmp_path / "machine", monkeypatch, docker), resolver=AsyncMock()
+    )
+    r.bootstrap.quiesce = machine.quiesce
+    r.bootstrap.inventory = machine.inventory
 
     def listed(host: str) -> list[dict]:
         return list(held.get(host, []))
@@ -599,6 +614,12 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
 
     assert retired["state"] == "succeeded", retired
     assert retired["result"]["superseded_removed"] == 1
+    assert retired["result"]["inventory"][0]["complete"] is True
+    # The runner stays stopped; only the sandbox manager is still up.
+    assert {name: c["running"] for name, c in docker.containers.items()} == {
+        "runner": False,
+        "sandbox-manager": True,
+    }
     assert (await r.repo.get_allocation(allocation["id"]))["release_committed_at"]
     r.provider.release.assert_awaited_once()
     sent = [call.args[1] for call in managers["runner-a"].discard_sandbox_deletion.await_args_list]

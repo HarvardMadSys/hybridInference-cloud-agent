@@ -121,18 +121,18 @@ def test_cancel_during_enumeration_does_not_read_a_whole_large_directory(tmp_pat
     assert consumed == 200, "os.walk consumed the whole directory before noticing cancellation"
 
 
-def test_cancellable_walk_preserves_sorted_emissions_and_never_follows_symlinks(tmp_path):
+def test_cancellable_walk_streams_every_entry_and_never_follows_symlinks(tmp_path):
     root = _checkout(tmp_path)
     (root / "z").mkdir()
     (root / "a").mkdir()
     (root / "z" / "second").touch()
     (root / "a" / "first").touch()
     (root / "directory-link").symlink_to(root / "z", target_is_directory=True)
-    expected = []
+    expected = set()
     for directory, directories, files in source_cancellation.os.walk(root, followlinks=False):
-        expected.extend(pathlib.Path(directory) / name for name in sorted(directories))
-        expected.extend(pathlib.Path(directory) / name for name in sorted(files))
-    assert list(source_archive._entries(root, stop=threading.Event())) == expected
+        expected.update(pathlib.Path(directory) / name for name in directories)
+        expected.update(pathlib.Path(directory) / name for name in files)
+    assert set(source_archive._entries(root, stop=threading.Event())) == expected
 
 
 @pytest.mark.parametrize("stage", ["clone", "branch", "lockfiles"])

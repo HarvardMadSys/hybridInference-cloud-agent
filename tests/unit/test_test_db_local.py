@@ -167,13 +167,13 @@ def test_a_run_locks_then_recreates_this_checkouts_databases_then_runs_the_tier(
 def test_a_run_that_skipped_a_database_test_fails(fake) -> None:
     result, _ = fake("run", FAKE_JUNIT=SKIPPED)
     assert result.returncode != 0
-    assert "database tests skipped, so this run proved nothing" in result.stderr
+    assert "t::a skipped" in result.stderr
 
 
 def test_a_run_that_ran_no_database_test_fails(fake) -> None:
     result, _ = fake("run", FAKE_JUNIT="<testsuites><testsuite/></testsuites>")
     assert result.returncode != 0
-    assert "no database test ran" in result.stderr
+    assert "no test ran" in result.stderr
 
 
 def test_a_failed_pytest_is_the_exit_status(fake) -> None:
