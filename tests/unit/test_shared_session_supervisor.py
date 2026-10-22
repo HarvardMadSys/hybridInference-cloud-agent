@@ -7599,9 +7599,10 @@ def test_a_checkpoint_is_produced_without_any_turn_event():
     The sampler thread owns both the census and the upload cadence, so a turn
     that spends its time inside one silent tool call still leaves a report
     behind. This drives the tick directly and asserts a checkpoint appears with
-    no event stream involved.
+    no event stream involved. The checkpoint is parked for the turn's stream,
+    which is the only delivery there is: the sandbox manager builds its
+    supervisor with no observer of its own.
     """
-    reported: list[tuple[str, dict]] = []
     manager = _Manager()
     manager.backend.runtime = KATA_RUNTIME
     supervisor = SharedChatSessionSupervisor(
@@ -7609,7 +7610,6 @@ def test_a_checkpoint_is_produced_without_any_turn_event():
         transport_factory=_TransportFactory(),
         window_sample_interval_s=10.0,
         checkpoint_interval_s=0.0,
-        window_checkpoint_hook=lambda thread_id, snapshot: reported.append((thread_id, snapshot)),
     )
     lease = supervisor.acquire(
         _spec(),
@@ -7635,69 +7635,17 @@ def test_a_checkpoint_is_produced_without_any_turn_event():
         model="glm-5.1",
         reasoning_effort=None,
     )
-    assert reported == []
+    assert supervisor.take_reported_checkpoint("athr_source") is None
 
     supervisor.sample_open_windows()
 
     # A checkpoint was produced and is waiting for the turn stream to forward,
     # without a single turn event having been read.
-    assert len(reported) == 1
-    assert reported[0][0] == "athr_source"
-    assert reported[0][1]["state"] == "collecting"
     pending = supervisor.take_reported_checkpoint("athr_source")
     assert pending is not None and pending["state"] == "collecting"
     assert pending["cpu"]["capacity_cores"] == 2.0
     # Taking it is what makes forwarding happen once rather than repeatedly.
     assert supervisor.take_reported_checkpoint("athr_source") is None
-
-
-def test_checkpoints_are_produced_without_a_hook_because_production_has_none():
-    """The delivery gate must not depend on an observer nobody installs.
-
-    The sandbox manager builds its supervisor without a checkpoint hook. An earlier
-    version returned early when the hook was absent, so no checkpoint was ever
-    produced in production while a test that passed its own hook stayed green --
-    the same shape of gap as a fixture that does not match the producer.
-    """
-    manager = _Manager()
-    manager.backend.runtime = KATA_RUNTIME
-    supervisor = SharedChatSessionSupervisor(
-        manager,
-        transport_factory=_TransportFactory(),
-        window_sample_interval_s=10.0,
-        checkpoint_interval_s=0.0,
-    )
-    assert supervisor._window_checkpoint_hook is None
-
-    lease = supervisor.acquire(
-        _spec(),
-        thread_id="athr_source",
-        owner="attempt:1",
-        activation_generation=1,
-        has_settled_context=True,
-        manifest=_members(),
-    )
-    supervisor.ensure_resident(
-        "athr_source",
-        lease.token,
-        _launch("athr_source", native_session_id="native-source", slot=0),
-    )
-    supervisor._stop.set()
-    if supervisor._sampler_thread is not None:
-        supervisor._sampler_thread.join(timeout=2)
-
-    supervisor.start_turn(
-        "athr_source",
-        lease.token,
-        prompt="work",
-        model="glm-5.1",
-        reasoning_effort=None,
-    )
-    supervisor.sample_open_windows()
-
-    pending = supervisor.take_reported_checkpoint("athr_source")
-    assert pending is not None
-    assert pending["state"] == "collecting"
 
 
 def test_the_final_report_sequence_stays_above_every_checkpoint():
@@ -8955,13 +8903,11 @@ def test_a_second_window_reads_the_journal_from_its_own_opening_cursor():
     """
     manager = _RotatingJournalManager()
     manager.backend.runtime = KATA_RUNTIME
-    reported: list[tuple[str, dict]] = []
     supervisor = SharedChatSessionSupervisor(
         manager,
         transport_factory=_TransportFactory(),
         window_sample_interval_s=10.0,
         checkpoint_interval_s=0.0,
-        window_checkpoint_hook=lambda thread_id, snapshot: reported.append((thread_id, snapshot)),
     )
     lease = supervisor.acquire(
         _spec(),
@@ -8993,12 +8939,13 @@ def test_a_second_window_reads_the_journal_from_its_own_opening_cursor():
     )
     first_window = supervisor._groups["asbx_shared"].members["athr_source"].window
     assert first_window is not None
-    measurement = first_window.measurement_id
+    measurement = first_window.handle.measurement_id
 
     # One in-window census. It is the only cycle this window may count.
     manager.append_journal(_journal_sample_line(measurement, 2))
     assert supervisor.sample_open_windows() == 1
-    checkpoint = reported[-1][1]
+    checkpoint = supervisor.take_reported_checkpoint("athr_source")
+    assert checkpoint is not None
     assert checkpoint["memory"]["valid_samples"] == 1
 
     supervisor.complete_turn("athr_source", lease.token, turn)
@@ -9016,14 +8963,274 @@ def test_a_second_window_reads_the_journal_from_its_own_opening_cursor():
     )
     second_window = supervisor._groups["asbx_shared"].members["athr_source"].window
     assert second_window is not None
-    second_measurement = second_window.measurement_id
+    second_measurement = second_window.handle.measurement_id
     assert second_measurement != measurement
 
     manager.append_journal(_journal_sample_line(second_measurement, 3))
     assert supervisor.sample_open_windows() == 1
-    checkpoint = reported[-1][1]
+    checkpoint = supervisor.take_reported_checkpoint("athr_source")
+    assert checkpoint is not None
     # The rotated journal was read from its own beginning: the cycle the
     # second window wrote is in the checkpoint instead of being silently lost.
     assert checkpoint["memory"]["valid_samples"] == 1
 
     supervisor.complete_turn("athr_source", lease.token, second_turn)
+
+
+def _windowed_supervisor(manager: _Manager, factory: _TransportFactory | None = None):
+    manager.backend.runtime = KATA_RUNTIME
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        transport_factory=factory or _TransportFactory(),
+        window_sample_interval_s=10.0,
+        checkpoint_interval_s=0.0,
+    )
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    supervisor._stop.set()
+    if supervisor._sampler_thread is not None:
+        supervisor._sampler_thread.join(timeout=2)
+    return supervisor, lease
+
+
+def test_a_checkpoint_left_when_its_turn_ends_never_reaches_the_next_turn():
+    """A parked checkpoint goes with the window that produced it.
+
+    The store fixes an attempt's measurement at the first snapshot it accepts.
+    A checkpoint the sampler parked after the turn stream's last collection,
+    handed to the next turn of the same chat, would claim that turn's attempt
+    for a window that had already ended, and the new window's own reports would
+    then be refused.
+    """
+    supervisor, lease = _windowed_supervisor(_Manager())
+    first = supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    # Parked, and never taken: the stream had already made its last collection.
+    supervisor.sample_open_windows()
+    supervisor.complete_turn("athr_source", lease.token, first)
+
+    second = supervisor.start_turn(
+        "athr_source", lease.token, prompt="again", model="glm-5.1", reasoning_effort=None
+    )
+    assert supervisor.take_reported_checkpoint("athr_source") is None
+
+    supervisor.sample_open_windows()
+    pending = supervisor.take_reported_checkpoint("athr_source")
+    window = supervisor._groups["asbx_shared"].members["athr_source"].window
+    assert pending is not None and window is not None
+    assert pending["measurement_id"] == window.handle.measurement_id
+    # Each window numbers its own reports: the store orders them per measurement.
+    assert pending["report_seq"] == 1
+    supervisor.complete_turn("athr_source", lease.token, second)
+
+
+def test_a_checkpoint_built_across_a_turn_boundary_never_reaches_the_next_turn():
+    """A checkpoint still being built when its turn ends never reaches the next turn.
+
+    The sampler builds a checkpoint outside the supervisor lock, so a turn can
+    end and the member's next turn open before the checkpoint is parked. It
+    used to be parked on the member, which by then held the next window, so the
+    next turn forwarded the previous window's snapshot. The store fixes an
+    attempt's measurement at the first snapshot it accepts, so that snapshot
+    claimed the new attempt for a window that had already ended, and the new
+    window's own reports were then refused.
+    """
+    read_held = threading.Event()
+    release_read = threading.Event()
+
+    class HeldJournalManager(_RotatingJournalManager):
+        """Holds one journal read, its slice already taken, until the test releases it."""
+
+        reads = 0
+        hold_read: int | None = None
+
+        def member_window_journal_delta(self, spec, cursor, *, timeout_s=10.0):
+            self.reads += 1
+            read = super().member_window_journal_delta(spec, cursor, timeout_s=timeout_s)
+            if self.reads == self.hold_read:
+                read_held.set()
+                assert release_read.wait(timeout=_HELD_S)
+            return read
+
+    manager = HeldJournalManager()
+    supervisor, lease = _windowed_supervisor(manager)
+    member = supervisor._groups["asbx_shared"].members["athr_source"]
+    first = supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    manager.append_journal(_journal_sample_line(member.observer_cursor.measurement_id, 2))
+    # A tick folds its census into the window and then builds the checkpoint,
+    # whose own read is the tick's second: that is the one held.
+    manager.hold_read = manager.reads + 2
+    tick, outcome = _in_thread(supervisor.sample_open_windows)
+    try:
+        assert read_held.wait(timeout=_HELD_S)
+        supervisor.complete_turn("athr_source", lease.token, first)
+        second = supervisor.start_turn(
+            "athr_source", lease.token, prompt="again", model="glm-5.1", reasoning_effort=None
+        )
+    finally:
+        release_read.set()
+        tick.join(timeout=_HELD_S)
+    assert not tick.is_alive()
+    assert "error" not in outcome
+
+    assert supervisor.take_reported_checkpoint("athr_source") is None
+    supervisor.complete_turn("athr_source", lease.token, second)
+
+
+def test_a_journal_read_that_outlives_its_turn_does_not_move_the_next_windows_fence():
+    """A census read still running when the next turn opens leaves that turn's fence.
+
+    The census reads the journal outside the supervisor lock, so a turn can end
+    and the member's next turn open while a read is still running. That read
+    used to record where it stopped on the member, which by then held the next
+    window, so the next window's first read began inside the previous turn's
+    bytes.
+    """
+    read_held = threading.Event()
+    release_read = threading.Event()
+
+    class HeldJournalManager(_RotatingJournalManager):
+        """Holds one journal read, its slice already taken, until the test releases it."""
+
+        hold_next_read = False
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads: list[tuple[str | None, int]] = []
+
+        def member_window_journal_delta(self, spec, cursor, *, timeout_s=10.0):
+            self.reads.append((cursor.measurement_id, cursor.offset))
+            read = super().member_window_journal_delta(spec, cursor, timeout_s=timeout_s)
+            if self.hold_next_read:
+                self.hold_next_read = False
+                read_held.set()
+                assert release_read.wait(timeout=_HELD_S)
+            return read
+
+    manager = HeldJournalManager()
+    supervisor, lease = _windowed_supervisor(manager)
+    member = supervisor._groups["asbx_shared"].members["athr_source"]
+    first = supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    first_measurement = member.observer_cursor.measurement_id
+    manager.append_journal(_journal_sample_line(first_measurement, 2))
+    manager.hold_next_read = True
+    census, outcome = _in_thread(supervisor.sample_open_windows)
+    try:
+        assert read_held.wait(timeout=_HELD_S)
+        supervisor.complete_turn("athr_source", lease.token, first)
+        # The closing census lands after the held read took its slice.
+        manager.append_journal(_journal_sample_line(first_measurement, 3))
+        second = supervisor.start_turn(
+            "athr_source", lease.token, prompt="again", model="glm-5.1", reasoning_effort=None
+        )
+        fence = member.observer_cursor
+    finally:
+        release_read.set()
+        census.join(timeout=_HELD_S)
+    assert not census.is_alive()
+    assert "error" not in outcome
+
+    # Released, the held tick goes on to checkpoint the next window, and that
+    # window's first read starts where it opened.
+    reads = [offset for measurement, offset in manager.reads if measurement == fence.measurement_id]
+    assert reads[:1] == [fence.offset]
+    supervisor.complete_turn("athr_source", lease.token, second)
+
+
+def test_a_turn_refused_at_admission_closes_the_window_it_opened():
+    """A turn that loses its lease while starting closes its window with its cursor.
+
+    The turn is interrupted and refused, so no turn is left to close the
+    window's registration, which would otherwise keep measuring a member that
+    runs nothing.
+    """
+    holder: dict[str, Any] = {}
+
+    class LeaseLosingTransport(_Transport):
+        def start_turn(self, **kwargs) -> _Turn:
+            turn = super().start_turn(**kwargs)
+            holder["supervisor"].abandon("athr_source", holder["token"], lost=False)
+            return turn
+
+    class Factory(_TransportFactory):
+        def open(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> _Transport:
+            self.opened.append(launch)
+            transport = LeaseLosingTransport(launch)
+            self.transports.append(transport)
+            return transport
+
+    manager = _Manager()
+    supervisor, lease = _windowed_supervisor(manager, Factory())
+    holder.update(supervisor=supervisor, token=lease.token)
+    manager.events.clear()
+
+    with pytest.raises(SessionLeaseLost, match="during turn admission"):
+        supervisor.start_turn(
+            "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+        )
+
+    assert [event[1] for event in manager.events if event[0] == "member-window"] == [
+        "register",
+        "close",
+    ]
+    assert ("observe-finish", MEMBER_UID_BASE) in manager.events
+
+
+def test_a_group_stop_drops_the_window_of_a_running_turn():
+    """Stopping a group drops each running turn's window with its cursor.
+
+    The stop detaches every member's turn and observer cursor. A window it left
+    on the member was censused on every later tick, against a container that
+    had stopped.
+    """
+    manager = _Manager()
+    supervisor, lease = _windowed_supervisor(manager)
+    supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+
+    supervisor.stop_if_idle("athr_source", generation=1, reason="orphaned_attempt")
+    manager.events.clear()
+
+    assert supervisor.sample_open_windows() == 0
+    assert [event for event in manager.events if event[0] == "member-window"] == []
+
+
+def test_abandon_drops_the_window_when_normal_turn_cleanup_fails(monkeypatch):
+    """An abandon that detaches the turn itself drops its window with its cursor.
+
+    ``complete_turn`` drops the window with the turn. When it fails, abandon's
+    own teardown detaches the turn and its cursor, and a window it left on the
+    member was censused on every later tick for a member running nothing.
+    """
+    manager = _Manager()
+    supervisor, lease = _windowed_supervisor(manager)
+    supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(supervisor, "complete_turn", fail_cleanup)
+    supervisor.abandon("athr_source", lease.token, lost=False)
+    manager.events.clear()
+
+    assert supervisor.sample_open_windows() == 0
+    assert [event for event in manager.events if event[0] == "member-window"] == []
