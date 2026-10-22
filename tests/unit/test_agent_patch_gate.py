@@ -11,6 +11,7 @@ import zlib
 
 import pytest
 
+from cloud_agent_shared.git import patch_gate as patch_gate_module
 from cloud_agent_shared.git.patch_gate import (
     MAX_BLOB_BYTES,
     MAX_CHANGED_BLOB_BYTES,
@@ -243,6 +244,60 @@ def test_file_count_limit_is_enforced():
     assert result.ok is False
     assert "over the 3 limit" in result.reason
     assert len(result.changed_files) == 5
+
+
+def test_many_unique_paths_use_linear_membership_and_keep_all_checks(monkeypatch):
+    """Path collection stays linear without truncating the rejected change set."""
+
+    class EqualityCountingPath(str):
+        comparisons = 0
+
+        def __eq__(self, other):
+            type(self).comparisons += 1
+            return super().__eq__(other)
+
+        __hash__ = str.__hash__
+
+    original_strip_prefix = patch_gate_module._strip_prefix
+
+    def counting_strip_prefix(path):
+        return EqualityCountingPath(original_strip_prefix(path))
+
+    monkeypatch.setattr(patch_gate_module, "_strip_prefix", counting_strip_prefix)
+    paths = [f"src/generated_{index:04}.py" for index in range(1_000)]
+    paths.extend(
+        [
+            ".github/workflows/late.yml",
+            "../late.py",
+            "ghp_0123456789abcdefghij.txt",
+            "late-link",
+            "vendor/late-submodule",
+        ]
+    )
+    patch = "".join(f"diff --git a/{path} b/{path}\n" for path in paths[:-2])
+    patch += (
+        "diff --git a/late-link b/late-link\n"
+        "new file mode 120000\n"
+        "diff --git a/vendor/late-submodule b/vendor/late-submodule\n"
+        "new file mode 160000\n"
+    )
+
+    result = validate_patch(patch)
+    comparisons = EqualityCountingPath.comparisons
+
+    assert comparisons <= 4 * len(paths)
+    assert result.changed_files == sorted(paths)
+    assert result.violations == [
+        f"patch touches {len(paths)} files, over the {MAX_CHANGED_FILES} limit",
+        (
+            "patch modifies CI/workflow configuration, which agent publication does not push: "
+            ".github/workflows/late.yml"
+        ),
+        "patch writes outside the repository: ../late.py",
+        "patch introduces symlinks: late-link",
+        "patch introduces submodule entries: vendor/late-submodule",
+        "patch contains credential-shaped paths: github_token",
+    ]
 
 
 def test_default_file_limit_is_generous_enough_for_real_work():

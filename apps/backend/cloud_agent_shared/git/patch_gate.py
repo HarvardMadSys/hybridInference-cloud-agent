@@ -341,16 +341,16 @@ def _split_hunks(patch: str) -> tuple[str, list[str]]:
     return "\n".join(outside), added
 
 
-def _collect_paths(patch: str) -> tuple[list[str], list[str], list[str]]:
+def _collect_paths(patch: str) -> tuple[set[str], list[str], list[str]]:
     """Return (changed paths, paths given a symlink mode, paths given a gitlink mode)."""
-    changed: list[str] = []
+    changed: set[str] = set()
     symlinks: list[str] = []
     gitlinks: list[str] = []
     pending_paths: list[str] = []
 
     def remember(path: str) -> None:
-        if path and path not in changed:
-            changed.append(path)
+        if path:
+            changed.add(path)
 
     headers, _ = _split_hunks(patch)
     for line in headers.splitlines():
