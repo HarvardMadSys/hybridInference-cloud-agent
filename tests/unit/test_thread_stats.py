@@ -14,9 +14,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from cloud_agent.thread_stats import (
+    AttemptStatsAccumulator,
     attempt_rollup_from_payload,
     attempt_rollup_payload,
-    summarize_attempt_rollup,
     summarize_session_statistics,
     summarize_thread,
     summarize_thread_rollups,
@@ -57,11 +57,12 @@ def _summarize_through_persisted_rollups(
         grouped.setdefault(key, []).append(event)
     rollups = []
     for (job_id, attempt_id), attempt_events in grouped.items():
-        reduced = summarize_attempt_rollup(
-            attempt_id=attempt_id,
-            job_id=job_id,
-            events=attempt_events,
-        )
+        accumulator = AttemptStatsAccumulator(attempt_id=attempt_id, job_id=job_id)
+        ordered = sorted(attempt_events, key=lambda event: int(event.get("seq") or 0))
+        for offset in range(0, len(ordered), 2):
+            accumulator.extend(ordered[offset : offset + 2])
+        reduced = accumulator.finish()
+        assert accumulator.finish() == reduced
         # Exercise the JSON boundary the Postgres cache uses, not merely two
         # functions sharing the same in-memory object.
         payload = json.loads(json.dumps(attempt_rollup_payload(reduced)))

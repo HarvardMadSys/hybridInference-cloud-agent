@@ -164,6 +164,156 @@ class AttemptStatsRollup:
     rate_seconds: float
 
 
+class AttemptStatsAccumulator:
+    """Reduce one attempt from already ordered, bounded event pages.
+
+    Event rows themselves never survive add(). The retained state is
+    only what can cross a page boundary semantically: open tool calls,
+    completed tool intervals, and provisional usage identities. Callers
+    must add one attempt's events in ledger sequence order.
+    """
+
+    def __init__(self, *, attempt_id: int, job_id: str) -> None:
+        self.attempt_id = attempt_id
+        self.job_id = job_id
+        self.tool_calls = 0
+        self.failed_tool_calls = 0
+        self.first_output_at: datetime | None = None
+        self.produced_text = False
+        self._timestamp_count = 0
+        self._first_timestamp: datetime | None = None
+        self._last_timestamp: datetime | None = None
+        self._opened_tools: dict[str, datetime] = {}
+        self._tool_windows: list[tuple[datetime, datetime]] = []
+        self._provisional_usage = _TokenTotals()
+        self._usage_by_response: dict[str, dict[str, int]] = {}
+        self._attempt_usage: dict[str, int] | None = None
+
+    def add(self, event: Mapping[str, Any]) -> None:
+        """Fold one next-sequence event into the attempt state."""
+        event_type = event.get("event_type")
+        payload = _payload(event)
+        timestamp = _timestamp(event)
+        self._record_timestamp(event_type, timestamp)
+        self._record_tool(event_type, payload, timestamp)
+
+        if event_type == _MESSAGE and (
+            payload.get("has_text") is True or bool(str(payload.get("text") or "").strip())
+        ):
+            self.produced_text = True
+        self._record_usage(event)
+
+    def _record_timestamp(self, event_type: Any, timestamp: datetime | None) -> None:
+        """Retain sequence-first span and first-output timing."""
+        if timestamp is not None:
+            if self._first_timestamp is None:
+                self._first_timestamp = timestamp
+            self._last_timestamp = timestamp
+            self._timestamp_count += 1
+            if self.first_output_at is None and event_type in _FIRST_OUTPUT_KINDS:
+                self.first_output_at = timestamp
+
+    def _record_tool(
+        self, event_type: Any, payload: Mapping[str, Any], timestamp: datetime | None
+    ) -> None:
+        """Retain counts and pairing state for one tool event."""
+        if event_type == _TOOL_USE:
+            self.tool_calls += 1
+            call_id = payload.get("id")
+            if timestamp is not None and call_id is not None:
+                self._opened_tools[str(call_id)] = timestamp
+        elif event_type == _TOOL_RESULT:
+            if payload.get("is_error"):
+                self.failed_tool_calls += 1
+            call_id = payload.get("tool_use_id")
+            started = (
+                self._opened_tools.pop(str(call_id), None)
+                if timestamp is not None and call_id is not None
+                else None
+            )
+            if started is not None and timestamp is not None and timestamp >= started:
+                self._tool_windows.append((started, timestamp))
+
+    def _record_usage(self, event: Mapping[str, Any]) -> None:
+        """Retain the canonical totals or provisional response maxima."""
+        record = _normalized_usage(event)
+        if record is None:
+            return
+        usage_payload, usage = record
+        if usage_payload.get("usage_scope") == "attempt":
+            # The last completed attempt total replaces every provisional
+            # response counter, exactly as _distinct_usage does.
+            self._attempt_usage = usage
+            self._provisional_usage = _TokenTotals()
+            self._usage_by_response.clear()
+            return
+        if self._attempt_usage is not None:
+            return
+        response_id = usage_payload.get("usage_id")
+        if not isinstance(response_id, str) or not response_id:
+            self._provisional_usage.add(usage)
+            return
+        current = self._usage_by_response.setdefault(response_id, {})
+        for key, value in usage.items():
+            current[key] = max(current.get(key, 0), value)
+
+    def extend(self, events: Iterable[Mapping[str, Any]]) -> None:
+        """Fold an ordered page without retaining it."""
+        for event in events:
+            self.add(event)
+
+    def finish(self) -> AttemptStatsRollup:
+        """Return the exact version-one rollup for all events added so far."""
+        totals = _TokenTotals()
+        if self._attempt_usage is not None:
+            totals.add(self._attempt_usage)
+        else:
+            totals.add(
+                {
+                    key: value
+                    for key, value in (
+                        ("input_tokens", self._provisional_usage.input_tokens),
+                        ("output_tokens", self._provisional_usage.output_tokens),
+                        ("cache_read_input_tokens", self._provisional_usage.cache_read_tokens),
+                        ("cache_creation_input_tokens", self._provisional_usage.cache_write_tokens),
+                    )
+                    if value is not None
+                }
+            )
+            for usage in self._usage_by_response.values():
+                totals.add(usage)
+        span = (
+            (self._last_timestamp - self._first_timestamp).total_seconds()
+            if self._timestamp_count >= 2
+            and self._first_timestamp is not None
+            and self._last_timestamp is not None
+            else 0.0
+        )
+        in_tools = _union_seconds(self._tool_windows)
+        output = totals.output_tokens
+        model = max(0.0, span - in_tools)
+        contributes_rate = (
+            output is not None and model > 0 and not (output == 0 and self.produced_text)
+        )
+        return AttemptStatsRollup(
+            attempt_id=self.attempt_id,
+            job_id=self.job_id,
+            tool_calls=self.tool_calls,
+            failed_tool_calls=self.failed_tool_calls,
+            wall_seconds=span,
+            tool_seconds=in_tools,
+            first_output_at=self.first_output_at,
+            input_tokens=totals.input_tokens,
+            output_tokens=totals.output_tokens,
+            cache_read_tokens=totals.cache_read_tokens,
+            cache_write_tokens=totals.cache_write_tokens,
+            saw_usage=totals.saw_usage,
+            produced_text=self.produced_text,
+            rate_tokens=output if contributes_rate and output is not None else 0,
+            rate_seconds=model if contributes_rate else 0.0,
+        )
+
+
 def summarize_attempt_rollup(
     *,
     attempt_id: int,
@@ -171,38 +321,9 @@ def summarize_attempt_rollup(
     events: Iterable[Mapping[str, Any]],
 ) -> AttemptStatsRollup:
     """Reduce one attempt while retaining the facts a thread aggregate needs."""
-    ordered = sorted(events, key=_event_sort_key)
-    timestamps = [ts for ts in map(_timestamp, ordered) if ts is not None]
-    span = (timestamps[-1] - timestamps[0]).total_seconds() if len(timestamps) >= 2 else 0.0
-    in_tools = _union_seconds(_tool_windows(ordered))
-    totals = _TokenTotals()
-    for usage in _distinct_usage(ordered):
-        totals.add(usage)
-    output = totals.output_tokens
-    produced_text = _has_text(ordered)
-    model = max(0.0, span - in_tools)
-    contributes_rate = output is not None and model > 0 and not (output == 0 and produced_text)
-    return AttemptStatsRollup(
-        attempt_id=attempt_id,
-        job_id=job_id,
-        tool_calls=sum(1 for event in ordered if event.get("event_type") == _TOOL_USE),
-        failed_tool_calls=sum(
-            1
-            for event in ordered
-            if event.get("event_type") == _TOOL_RESULT and _payload(event).get("is_error")
-        ),
-        wall_seconds=span,
-        tool_seconds=in_tools,
-        first_output_at=_first_output_at(ordered),
-        input_tokens=totals.input_tokens,
-        output_tokens=totals.output_tokens,
-        cache_read_tokens=totals.cache_read_tokens,
-        cache_write_tokens=totals.cache_write_tokens,
-        saw_usage=totals.saw_usage,
-        produced_text=produced_text,
-        rate_tokens=output if contributes_rate and output is not None else 0,
-        rate_seconds=model if contributes_rate else 0.0,
-    )
+    accumulator = AttemptStatsAccumulator(attempt_id=attempt_id, job_id=job_id)
+    accumulator.extend(sorted(events, key=_event_sort_key))
+    return accumulator.finish()
 
 
 def summarize_thread_rollups(
@@ -507,16 +628,10 @@ def _distinct_usage(events: Sequence[Mapping[str, Any]]) -> Iterable[Mapping[str
     """
     by_attempt: dict[Any, list[tuple[Mapping[str, Any], dict[str, int]]]] = {}
     for event in events:
-        usage = _usage_of(event)
-        if not usage:
+        record = _normalized_usage(event)
+        if record is None:
             continue
-        normalized = {
-            keys[0]: value
-            for keys in TOKEN_KEY_GROUPS
-            if (value := _first_int(usage, keys)) is not None
-        }
-        if normalized:
-            by_attempt.setdefault(event.get("attempt_id"), []).append((_payload(event), normalized))
+        by_attempt.setdefault(event.get("attempt_id"), []).append(record)
 
     for records in by_attempt.values():
         final = next(
@@ -540,6 +655,21 @@ def _distinct_usage(events: Sequence[Mapping[str, Any]]) -> Iterable[Mapping[str
             for key, value in usage.items():
                 current[key] = max(current.get(key, 0), value)
         yield from by_response.values()
+
+
+def _normalized_usage(
+    event: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], dict[str, int]] | None:
+    """Return one compact usage record in the reducer's canonical key shape."""
+    usage = _usage_of(event)
+    if not usage:
+        return None
+    normalized = {
+        keys[0]: value
+        for keys in TOKEN_KEY_GROUPS
+        if (value := _first_int(usage, keys)) is not None
+    }
+    return (_payload(event), normalized) if normalized else None
 
 
 def _earliest_attempt_start_per_job(

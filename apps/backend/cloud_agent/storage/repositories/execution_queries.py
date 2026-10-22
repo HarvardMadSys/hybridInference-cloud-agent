@@ -8,7 +8,6 @@ they were; only the class holding them changed.
 from __future__ import annotations
 
 import json
-from collections import defaultdict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
@@ -17,10 +16,10 @@ from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.thread_stats import (
     ATTEMPT_ROLLUP_VERSION,
+    AttemptStatsAccumulator,
     AttemptStatsRollup,
     attempt_rollup_from_payload,
     attempt_rollup_payload,
-    summarize_attempt_rollup,
     summarize_thread_rollups,
 )
 
@@ -28,6 +27,9 @@ if TYPE_CHECKING:
     from typing import Any
 
     import asyncpg
+
+
+THREAD_STATS_EVENT_PAGE_SIZE = 1_000
 
 
 class PostgresExecutionQueries:
@@ -473,49 +475,58 @@ def _partition_attempt_rollups(
 async def _refresh_attempt_rollups(
     conn: Any, stale: list[dict[str, Any]]
 ) -> list[AttemptStatsRollup]:
-    """Load compact rows for stale attempts and reduce each exactly once."""
-    events = await conn.fetch(
-        f"""
-        /* thread_stats_stale_events */
-        SELECT e.job_id,
-               e.attempt_id,
-               e.seq,
-               e.event_type,
-               e.created_at,
-               {USAGE_EVENT_PAYLOAD_SQL} AS payload
-        FROM jsonb_to_recordset($1::jsonb)
-             AS target(attempt_id bigint, event_seq integer)
-        JOIN agent_job_events e
-          ON e.attempt_id = target.attempt_id AND e.seq <= target.event_seq
-        ORDER BY e.attempt_id, e.seq
-        """,
-        json.dumps(
-            [
-                {"attempt_id": target["attempt_id"], "event_seq": target["event_seq"]}
-                for target in stale
-            ]
-        ),
-    )
-    by_attempt: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for row in events:
-        by_attempt[int(row["attempt_id"])].append(
-            {
-                "job_id": row["job_id"],
-                "attempt_id": row["attempt_id"],
-                "seq": row["seq"],
-                "event_type": row["event_type"],
-                "created_at": row["created_at"],
-                "payload": load_json(row["payload"]),
-            }
-        )
-    return [
-        summarize_attempt_rollup(
+    """Reduce stale attempts from fixed-sequence, bounded ordered pages."""
+    rollups: list[AttemptStatsRollup] = []
+    for target in stale:
+        accumulator = AttemptStatsAccumulator(
             attempt_id=target["attempt_id"],
             job_id=target["job_id"],
-            events=by_attempt[target["attempt_id"]],
         )
-        for target in stale
-    ]
+        after_seq: int | None = None
+        while True:
+            events = await conn.fetch(
+                f"""
+                /* thread_stats_stale_events */
+                SELECT e.job_id,
+                       e.attempt_id,
+                       e.seq,
+                       e.event_type,
+                       e.created_at,
+                       {USAGE_EVENT_PAYLOAD_SQL} AS payload
+                FROM agent_job_events e
+                WHERE e.attempt_id = $1
+                  AND e.seq >= COALESCE($2::integer, -2147483648)
+                  AND ($2::integer IS NULL OR e.seq > $2)
+                  AND e.seq <= $3
+                ORDER BY e.seq
+                LIMIT $4
+                """,
+                target["attempt_id"],
+                after_seq,
+                target["event_seq"],
+                THREAD_STATS_EVENT_PAGE_SIZE,
+            )
+            if not events:
+                break
+            accumulator.extend(
+                {
+                    "job_id": row["job_id"],
+                    "attempt_id": row["attempt_id"],
+                    "seq": row["seq"],
+                    "event_type": row["event_type"],
+                    "created_at": row["created_at"],
+                    "payload": load_json(row["payload"]),
+                }
+                for row in events
+            )
+            page_end = int(events[-1]["seq"])
+            if after_seq is not None and page_end <= after_seq:
+                raise RuntimeError("thread stats event cursor did not advance")
+            after_seq = page_end
+            if len(events) < THREAD_STATS_EVENT_PAGE_SIZE or page_end >= target["event_seq"]:
+                break
+        rollups.append(accumulator.finish())
+    return rollups
 
 
 async def _store_attempt_rollups(

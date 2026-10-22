@@ -25,7 +25,8 @@ import gc
 import os
 import time
 import tracemalloc
-from typing import Any
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import pytest_asyncio
@@ -36,7 +37,13 @@ from tests.support.migrations import apply_migrations
 from tests.support.usage import job_usage_inputs
 
 from cloud_agent.storage.assembly import Storage
-from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
+from cloud_agent.storage.repositories.execution_queries import (
+    THREAD_STATS_EVENT_PAGE_SIZE,
+    PostgresExecutionQueries,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -48,15 +55,28 @@ _OTHER = "user-2"
 class _MeasuredConnection:
     """Count repository statements and rows returned by the stale-event read."""
 
-    def __init__(self, connection: Any, measurements: dict[str, int]) -> None:
+    def __init__(
+        self,
+        connection: Any,
+        measurements: dict[str, int],
+        after_first_event_page: Callable[[], Awaitable[None]] | None,
+    ) -> None:
         self._connection = connection
         self._measurements = measurements
+        self._after_first_event_page = after_first_event_page
 
     async def fetch(self, query: str, *args: Any):
         self._measurements["queries"] += 1
         rows = await self._connection.fetch(query, *args)
         if "thread_stats_stale_events" in query:
             self._measurements["event_rows"] += len(rows)
+            self._measurements["event_pages"] += 1
+            self._measurements["max_event_rows"] = max(
+                self._measurements["max_event_rows"], len(rows)
+            )
+            hook, self._after_first_event_page = self._after_first_event_page, None
+            if hook is not None:
+                await hook()
         return rows
 
     async def execute(self, query: str, *args: Any):
@@ -68,27 +88,49 @@ class _MeasuredConnection:
 
 
 class _MeasuredAcquire:
-    def __init__(self, pool: Any, measurements: dict[str, int]) -> None:
+    def __init__(
+        self,
+        pool: Any,
+        measurements: dict[str, int],
+        after_first_event_page: Callable[[], Awaitable[None]] | None,
+    ) -> None:
         self._pool = pool
         self._measurements = measurements
+        self._after_first_event_page = after_first_event_page
         self._context: Any = None
 
     async def __aenter__(self) -> _MeasuredConnection:
         self._context = self._pool.acquire()
         connection = await self._context.__aenter__()
-        return _MeasuredConnection(connection, self._measurements)
+        return _MeasuredConnection(
+            connection,
+            self._measurements,
+            self._after_first_event_page,
+        )
 
     async def __aexit__(self, *exc: Any) -> Any:
         return await self._context.__aexit__(*exc)
 
 
 class _MeasuredPool:
-    def __init__(self, pool: Any, measurements: dict[str, int]) -> None:
+    def __init__(
+        self,
+        pool: Any,
+        measurements: dict[str, int],
+        *,
+        after_first_event_page: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self._pool = pool
         self._measurements = measurements
+        self._after_first_event_page = after_first_event_page
 
     def acquire(self) -> _MeasuredAcquire:
-        return _MeasuredAcquire(self._pool, self._measurements)
+        hook, self._after_first_event_page = self._after_first_event_page, None
+        return _MeasuredAcquire(self._pool, self._measurements, hook)
+
+
+def _new_measurements() -> dict[str, int]:
+    return {"queries": 0, "event_rows": 0, "event_pages": 0, "max_event_rows": 0}
 
 
 def _database_config() -> dict[str, str | int]:
@@ -372,8 +414,8 @@ async def test_the_stats_read_persists_and_reuses_attempt_rollups(
         )
 
 
-async def test_unchanged_hundred_thousand_event_stats_read_is_bounded(db, store: Storage) -> None:
-    """A warm summary transfers no event rows and allocates independently of history."""
+async def test_hundred_thousand_event_stats_reads_use_bounded_pages(db, store: Storage) -> None:
+    """Cold and stale reductions stay bounded while preserving a fixed target."""
     job = await _create_job(store, user_id=_OWNER)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
@@ -416,19 +458,88 @@ async def test_unchanged_hundred_thousand_event_stats_read_is_bounded(db, store:
             claim["attempt_id"],
         )
 
-    cold_counts = {"queries": 0, "event_rows": 0}
-    measured = PostgresExecutionQueries(_MeasuredPool(db, cold_counts))
+    async def append_after_target_was_captured() -> None:
+        async with db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO agent_job_events
+                    (job_id, attempt_id, seq, event_type, payload, created_at)
+                VALUES (
+                    $1, $2, 100001, 'tool_use', '{"id":"concurrent"}'::jsonb,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                        + 100000 * INTERVAL '1 millisecond'
+                )
+                """,
+                job["id"],
+                claim["attempt_id"],
+            )
+
+    cold_counts = _new_measurements()
+    measured = PostgresExecutionQueries(
+        _MeasuredPool(
+            db,
+            cold_counts,
+            after_first_event_page=append_after_target_was_captured,
+        )
+    )
+    gc.collect()
+    tracemalloc.start()
     started = time.perf_counter()
-    cold = await measured.thread_stats(job_id=job["id"], user_id=_OWNER)
-    cold_seconds = time.perf_counter() - started
+    try:
+        cold = await measured.thread_stats(job_id=job["id"], user_id=_OWNER)
+        cold_seconds = time.perf_counter() - started
+        _, cold_peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
     assert cold is not None
-    assert cold_counts == {"queries": 3, "event_rows": 100_000}
+    assert cold_counts == {
+        "queries": 102,
+        "event_rows": 100_000,
+        "event_pages": 100,
+        "max_event_rows": THREAD_STATS_EVENT_PAGE_SIZE,
+    }
+    assert cold_peak_bytes < 16 * 1024 * 1024
     assert cold["stats"].tool_calls == 100
     assert cold["stats"].failed_tool_calls == 50
     assert cold["stats"].input_tokens == 1_000
     assert cold["stats"].output_tokens == 500
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT event_seq FROM agent_attempt_thread_stats WHERE attempt_id = $1",
+                claim["attempt_id"],
+            )
+            == 100_000
+        )
 
-    warm_counts = {"queries": 0, "event_rows": 0}
+    stale_counts = _new_measurements()
+    measured = PostgresExecutionQueries(_MeasuredPool(db, stale_counts))
+    gc.collect()
+    tracemalloc.start()
+    try:
+        stale = await measured.thread_stats(job_id=job["id"], user_id=_OWNER)
+        _, stale_peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert stale is not None
+    assert stale_counts == {
+        "queries": 103,
+        "event_rows": 100_001,
+        "event_pages": 101,
+        "max_event_rows": THREAD_STATS_EVENT_PAGE_SIZE,
+    }
+    assert stale_peak_bytes < 16 * 1024 * 1024
+    assert stale["stats"] == replace(cold["stats"], tool_calls=101)
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT event_seq FROM agent_attempt_thread_stats WHERE attempt_id = $1",
+                claim["attempt_id"],
+            )
+            == 100_001
+        )
+
+    warm_counts = _new_measurements()
     measured = PostgresExecutionQueries(_MeasuredPool(db, warm_counts))
     gc.collect()
     tracemalloc.start()
@@ -440,8 +551,13 @@ async def test_unchanged_hundred_thousand_event_stats_read_is_bounded(db, store:
     finally:
         tracemalloc.stop()
 
-    assert warm == cold
-    assert warm_counts == {"queries": 1, "event_rows": 0}
+    assert warm == stale
+    assert warm_counts == {
+        "queries": 1,
+        "event_rows": 0,
+        "event_pages": 0,
+        "max_event_rows": 0,
+    }
     assert peak_bytes < 4 * 1024 * 1024
     assert warm_seconds < 2.0
     assert warm_seconds < cold_seconds
@@ -472,3 +588,166 @@ async def test_turn_telemetry_answers_nothing_for_an_attempt_the_job_never_had(
         await queries.job_turn_telemetry(job_id=job["id"], attempt_id=claim["attempt_id"] + 10_000)
         is None
     )
+
+
+async def test_trajectory_timings_are_one_query_for_one_hundred_turns_and_match_detail(db) -> None:
+    """Three retries per turn stay one SQL statement and retain old semantics."""
+    import asyncpg
+
+    thread_id = "athread_trajectory_batch"
+    job_ids = [f"ajob_trajectory_{number:03d}" for number in range(1, 101)]
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_threads (id, user_id, repo, title, execution_profile)
+            VALUES ($1, $2, 'owner/name', 'Trajectory batch', 'trusted-v1')
+            """,
+            thread_id,
+            _OWNER,
+        )
+        await conn.executemany(
+            """
+            INSERT INTO agent_jobs (
+                id, thread_id, user_id, parent_job_id, turn_no,
+                task_prompt, runtime, model, state
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, 'codex', 'gpt-5', 'running')
+            """,
+            [
+                (
+                    job_id,
+                    thread_id,
+                    _OWNER,
+                    job_ids[index - 1] if index else None,
+                    index + 1,
+                    f"turn {index + 1}",
+                )
+                for index, job_id in enumerate(job_ids)
+            ],
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_attempts (
+                job_id, thread_id, attempt_no, lease_owner, lease_generation,
+                lease_expires_at, status, started_at, finished_at,
+                continuity_mode, context_status
+            )
+            SELECT job.id, job.thread_id, attempt_no, 'worker-test', attempt_no,
+                   NOW() + INTERVAL '1 hour',
+                   CASE WHEN attempt_no = 3 THEN 'running' ELSE 'finished' END,
+                   TIMESTAMPTZ '2026-10-20 12:00:00+00'
+                       + job.turn_no * INTERVAL '1 minute'
+                       + attempt_no * INTERVAL '5 seconds',
+                   CASE WHEN attempt_no = 3 THEN NULL
+                        ELSE TIMESTAMPTZ '2026-10-20 12:00:00+00'
+                             + job.turn_no * INTERVAL '1 minute'
+                             + attempt_no * INTERVAL '5 seconds'
+                             + attempt_no * INTERVAL '1 second' END,
+                   CASE WHEN attempt_no = 1 THEN NULL
+                        WHEN attempt_no = 2 THEN 'warm_native' ELSE 'hot' END,
+                   CASE WHEN attempt_no = 1 THEN 'new'
+                        WHEN attempt_no = 2 THEN 'restored' ELSE 'live' END
+            FROM agent_jobs job
+            CROSS JOIN generate_series(1, 3) AS attempt_no
+            WHERE job.thread_id = $1
+            """,
+            thread_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_attempt_resources (
+                attempt_id, job_id, sampler_version, tool_time_ms, tool_calls_truncated
+            )
+            SELECT id, job_id, 'shared-member-v1', attempt_no * 100,
+                   attempt_no = 2
+            FROM agent_attempts
+            WHERE thread_id = $1 AND attempt_no <= 2
+            """,
+            thread_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_tool_call_resources (
+                attempt_id, call_seq, tool_use_id, tool_name, timing_source
+            )
+            SELECT id, 1, 'tool-' || id, 'Read',
+                   CASE WHEN attempt_no = 1 THEN 'exact' ELSE 'message' END
+            FROM agent_attempts
+            WHERE thread_id = $1 AND attempt_no <= 2
+            """,
+            thread_id,
+        )
+
+    logged = []
+
+    async def attach_query_logger(conn) -> None:
+        conn.add_query_logger(logged.append)
+
+    reading_pool = await asyncpg.create_pool(
+        **_database_config(),
+        min_size=1,
+        max_size=1,
+        init=attach_query_logger,
+    )
+    try:
+        batch_queries = PostgresExecutionQueries(reading_pool)
+        requested = list(reversed(job_ids))
+        result = await batch_queries.trajectory_timings(
+            job_ids=requested, user_id=_OWNER, max_attempts=2_000
+        )
+
+        data_queries = [
+            record.query
+            for record in logged
+            if not record.query.startswith("SELECT pg_advisory_unlock_all()")
+        ]
+        assert len(data_queries) == 1, data_queries
+        assert "WITH requested AS MATERIALIZED" in data_queries[0]
+        assert result["owned_count"] == 100
+        assert result["attempt_count"] == 300
+        assert len(result["attempts"]) == 300
+        assert [row["job_id"] for row in result["attempts"][::3]] == requested
+        assert [row["attempt_no"] for row in result["attempts"][:3]] == [1, 2, 3]
+    finally:
+        await reading_pool.close()
+
+    representative = requested[0]
+    old_attempts = await PostgresExecutionQueries(db).job_attempts_telemetry(job_id=representative)
+    compact = [row for row in result["attempts"] if row["job_id"] == representative]
+    assert [
+        (
+            row["attempt_id"],
+            row["attempt_no"],
+            row["continuity_mode"],
+            row["context_status"],
+            row["started_at"],
+            row["finished_at"],
+        )
+        for row in compact
+    ] == [
+        (
+            row["attempt_id"],
+            row["attempt_no"],
+            row["continuity_mode"],
+            row["context_status"],
+            row["started_at"],
+            row["finished_at"],
+        )
+        for row in old_attempts
+    ]
+    for row in compact:
+        detail = await PostgresExecutionQueries(db).job_turn_telemetry(
+            job_id=representative, attempt_id=row["attempt_id"]
+        )
+        assert detail is not None
+        calls = detail.get("tool_calls") or []
+        assert row["tool_time_ms"] == detail.get("tool_time_ms")
+        assert row["tool_calls_truncated"] is bool(detail.get("tool_calls_truncated"))
+        assert row["tool_timing_exact"] is (
+            bool(calls) and all(call["timing_source"] == "exact" for call in calls)
+        )
+
+    refused = await PostgresExecutionQueries(db).trajectory_timings(
+        job_ids=[representative], user_id=_OTHER, max_attempts=2_000
+    )
+    assert refused == {"owned_count": 0, "attempt_count": 0, "attempts": []}
