@@ -1,4 +1,20 @@
-"""Docker capture and restore orchestration for restorable checkpoints."""
+"""Restorable checkpoints: a stopped sandbox's changes over its image, kept in S3.
+
+A checkpoint is ``docker commit`` of a cleanly stopped chat container, exported
+as an OCI image archive that omits every layer the sandbox image already
+provides. A host holding the same base image can load it and recreate the
+container, which is what will let a chat move between hosts. This module is the
+Docker capture and restore orchestration; the archive codec is in
+:mod:`cloud_agent_host.sandbox_checkpoint_oci` and the receipt store in
+:mod:`cloud_agent_host.sandbox_checkpoint_store`.
+
+Docker has no command that saves a single layer. When containerd's content
+store is mounted read-only into the broker, the new layers are read straight
+from it: ``docker image inspect`` names the committed manifest, and the
+manifest names its blobs. Otherwise the whole committed image is streamed
+through ``docker image save`` and the base image's blobs are dropped on the
+way, which reads the entire image for every checkpoint.
+"""
 
 from __future__ import annotations
 
@@ -60,6 +76,7 @@ logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
+#: Where host Compose mounts containerd's content store, read-only.
 DEFAULT_CONTAINERD_CONTENT_DIR: Final = "/var/lib/hybridinference/containerd-content"
 CHECKPOINT_IMAGE_REPOSITORY: Final = "freeinference-checkpoint"
 _COPY_CHUNK_BYTES: Final = 1024 * 1024

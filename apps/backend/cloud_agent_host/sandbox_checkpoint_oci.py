@@ -1,8 +1,11 @@
 """Bounded OCI checkpoint archive validation and rewriting.
 
-Archives are untrusted streams. This module never extracts them to the host
-filesystem: it whitelists entries, verifies content digests, enforces explicit
-size ceilings, and emits only the one image identity chosen by its caller.
+The archive is sandbox output and is treated as untrusted. While streaming,
+only regular files under ``blobs/sha256/`` and the OCI index files are accepted,
+every kept blob is checked against its digest, and the manifest must be the
+base image's layers followed by new ones. Nothing is extracted on the host.
+The codec also enforces explicit size ceilings, and emits only the one image
+identity chosen by its caller.
 """
 
 from __future__ import annotations
@@ -28,6 +31,8 @@ class _CheckpointContentStore(Protocol):
     def open(self, digest: str) -> BinaryIO: ...
 
 
+# Index, layout and manifest files are tiny; anything larger is not an image
+# description and is refused rather than buffered.
 _MAX_METADATA_BYTES: Final = 1024 * 1024
 _DIGEST_RE: Final = re.compile(r"[0-9a-f]{64}")
 _METADATA_FILES: Final = frozenset(("index.json", "oci-layout", "manifest.json", "repositories"))
@@ -44,6 +49,9 @@ _MANIFEST_TYPES: Final = frozenset(
         "application/vnd.docker.distribution.manifest.v2+json",
     )
 )
+# Upper bound on what one entry adds besides its padded body (a ustar header,
+# plus room for a PAX extension), and on what closing the archive adds (two
+# zero blocks padded out to a full record).
 _ENTRY_OVERHEAD_BYTES: Final = 3 * tarfile.BLOCKSIZE
 _ARCHIVE_TRAILER_BYTES: Final = 2 * tarfile.BLOCKSIZE + tarfile.RECORDSIZE
 
