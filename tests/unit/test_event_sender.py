@@ -4,9 +4,10 @@ An event is numbered, redacted and encoded where it is reported, then uploaded
 by one thread, in order, in batches. These pin what that must not change: the
 order and the numbering, redaction before the event is queued, a bounded queue
 that still pushes back on the turn, a lost lease and an exhausted retry budget
-that still end it, and writes that end or interleave with the event log waiting
-for the events reported before them. They also pin the rolling-deploy fallback:
-a control plane without the batch endpoint is sent one event per request.
+that still end it, a finish that never waits on a sender that could not start,
+and writes that end or interleave with the event log waiting for the events
+reported before them. They also pin the rolling-deploy fallback: a control
+plane without the batch endpoint is sent one event per request.
 """
 
 from __future__ import annotations
@@ -359,6 +360,50 @@ def test_a_drain_that_was_given_up_on_still_ends_the_attempt(monkeypatch):
     assert plane.endpoints()[-1] == "finish"
     assert plane.endpoints().count("events:batch") > 2
     assert clock.now <= control_plane_client._EVENT_RETRY_BUDGET_S
+
+
+@pytest.mark.parametrize("refusals", [1, None], ids=["refused-once", "always-refused"])
+def test_a_sender_that_could_not_start_never_leaves_the_finish_waiting(monkeypatch, refusals):
+    """A sending thread that could not be started is not kept as the sender.
+
+    The append that could not start it fails, as appends do. Keeping the thread
+    that never ran made every later append believe a sender was running, and
+    the drain ahead of the finish waited for it forever while the heartbeat
+    kept the attempt's lease alive. The drain starts the sender again, which
+    delivers what the append queued, or fails, and the finish lands either way.
+    """
+    start = threading.Thread.start
+    refused: list[threading.Thread] = []
+
+    def refuse_the_sender(thread: threading.Thread) -> None:
+        if thread.name == "agent-event-sender" and (refusals is None or len(refused) < refusals):
+            refused.append(thread)
+            raise RuntimeError("can't start new thread")
+        start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", refuse_the_sender)
+    plane = _Plane()
+    control = _control(plane)
+    try:
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            control.append_event(NormalizedEvent("error", {"text": "the agent exited"}))
+        finishing = threading.Thread(
+            target=control.finish, args=("failed", "the agent exited"), daemon=True
+        )
+        finishing.start()
+        finishing.join(_WAIT_S)
+        assert not finishing.is_alive(), "the finish waited for a sender that never ran"
+    finally:
+        control.close()
+
+    if refusals is None:
+        assert len(refused) == 2, "the append and the drain each tried to start one"
+        assert plane.endpoints() == ["finish"]
+    else:
+        assert plane.endpoints() == ["events:batch", "finish"]
+        assert [(event["event_type"], event["event_seq"]) for event in plane.events()] == [
+            ("error", 1)
+        ]
 
 
 def test_an_event_is_redacted_when_it_is_reported_not_when_it_is_sent():

@@ -65,7 +65,9 @@ class OrderedSender:
     def put(self, body: bytes) -> None:
         """Queue one encoded event, waiting while the sender holds its fill.
 
-        Raises what made the sender give up, before queueing anything.
+        Raises what made the sender give up, before queueing anything. A
+        sending thread that cannot be started is raised once the event is
+        queued, and the next put or flush starts one.
         """
         with self._state:
             self._raise_failure()
@@ -73,23 +75,23 @@ class OrderedSender:
                 len(self._pending) >= _EVENT_QUEUE_MAX_EVENTS
                 or self._pending_bytes + len(body) > _EVENT_QUEUE_MAX_BYTES
             ):
+                # Only a sender makes room, and a failed start left none.
+                self._start_sender()
                 self._state.wait()
                 self._raise_failure()
             self._pending.append(body)
             self._pending_bytes += len(body)
-            if self._thread is None:
-                self._thread = threading.Thread(
-                    target=self._run, args=(self._epoch,), daemon=True, name="agent-event-sender"
-                )
-                self._thread.start()
             self._state.notify_all()
+            self._start_sender()
 
     def flush(self) -> None:
         """Wait until every queued event is delivered, or raise what stopped one.
 
-        The sender stops waiting for company meanwhile.
+        The sender stops waiting for company meanwhile. One that could not be
+        started is started now, or why it cannot be is raised.
         """
         with self._state:
+            self._start_sender()
             epoch = self._epoch
             self._flushing += 1
             self._state.notify_all()
@@ -114,6 +116,23 @@ class OrderedSender:
             self._pending_bytes = 0
             self._in_flight = 0
             self._state.notify_all()
+
+    def _start_sender(self) -> None:
+        """Start a thread for the queued events, unless one already sends them.
+
+        It is kept only once it has started. A thread that cannot be (the
+        process may be out of threads) raises to the caller and leaves the
+        events queued for the next put or flush to try again: keeping it would
+        make every later call believe a sender ran, and a drain would wait for
+        that sender forever while the heartbeat kept the attempt's lease.
+        """
+        if self._thread is not None or not self._pending:
+            return
+        thread = threading.Thread(
+            target=self._run, args=(self._epoch,), daemon=True, name="agent-event-sender"
+        )
+        thread.start()
+        self._thread = thread
 
     def _raise_failure(self) -> None:
         """Raise what made the sender give up: once, or every time for a lost lease.
