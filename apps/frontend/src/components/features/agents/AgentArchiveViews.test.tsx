@@ -38,6 +38,7 @@ vi.mock('@/components/providers', async () => {
 });
 
 vi.mock('@/lib/api/agents', () => ({
+  listAgentConversations: vi.fn(),
   archiveAgentJob: mocks.archive,
   restoreAgentJob: mocks.restore,
   getAgentJob: vi.fn().mockRejectedValue(new Error('fixture')),

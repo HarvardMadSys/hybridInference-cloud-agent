@@ -20,6 +20,8 @@ import type {
   AgentThreadEventApi,
 } from '@/lib/api/agents';
 import { createDisplayJobAdapter } from './adapt';
+import { resumeAfter } from './threadHistory';
+import { useThreadHistory, type ThreadHistoryControl } from './useThreadHistory';
 import { useAgentReads } from './AgentReadProvider';
 import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { projectKey } from '@/lib/temporaryWorkspace';
@@ -186,28 +188,6 @@ function endsStreamingTurn(current: AgentJobApi | null, latest: AgentJobApi): bo
   );
 }
 
-/**
- * Where to read a conversation again when its earlier log is held.
- *
- * Stored events are never changed or removed, so a later read only has to
- * reach what was added. It does not start after the newest held event: ids
- * are taken before their writes commit, so a write still in flight during
- * the earlier read could land below an id that read already returned. The
- * running turn writes, and so do the snapshot and publication that follow
- * the turn before it, which can still be committing when the next turn
- * starts. The last two held turns are therefore read again in full. A write
- * to an older turn takes an id from after they began, and is read either way.
- */
-function resumeAfter(held: readonly AgentThreadEventApi[]): number {
-  const turns = [...new Set(held.map((event) => event.turn_no))].sort((a, b) => b - a);
-  const from = turns[1] ?? turns[0];
-  let first = Infinity;
-  for (const event of held) {
-    if (event.turn_no >= from && event.id < first) first = event.id;
-  }
-  return Number.isFinite(first) ? first - 1 : 0;
-}
-
 export function useAgentJob(
   jobId: string,
   {
@@ -226,6 +206,7 @@ export function useAgentJob(
    * model. Returning them here avoids a second read of the same thread.
    */
   threadJobs: AgentJobApi[];
+  history?: ThreadHistoryControl;
   loading: boolean;
   error: string | null;
   reload: () => void;
@@ -239,6 +220,7 @@ export function useAgentJob(
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const reads = useAgentReads();
+  const { readThread, history } = useThreadHistory(jobId, reads, thread, setThread, loading);
   const seen = useRef<Map<number, AgentThreadEventApi>>(new Map());
   const seenScope = useRef({ jobId, reads });
   const historyRead = useRef<{
@@ -332,7 +314,7 @@ export function useAgentJob(
     // before it ends, so events read after a row that says it ended are all
     // of them; read alongside, they could predate an end the row then reports,
     // and the turn would end on screen without its last events.
-    Promise.all([reads.getAgentJob(jobId), reads.getAgentJobThread(jobId)])
+    Promise.all([reads.getAgentJob(jobId), readThread(jobId)])
       .then(async ([job, foundThread]) => {
         if (cancelled || requestGeneration !== generation.current) return null;
         // Durable messages and the prompt do not depend on downloading the
@@ -420,7 +402,7 @@ export function useAgentJob(
       controller.abort();
       if (historyRead.current === read) historyRead.current = null;
     };
-  }, [active, jobId, reads, tick]);
+  }, [active, jobId, reads, readThread, tick]);
 
   // Diff state belongs to the retained group workspace, not to a per-turn
   // artifact uploaded by the runner. Fork siblings therefore see the same
@@ -743,7 +725,7 @@ export function useAgentJob(
   // Both shapes, deliberately: `job.events` is the chat view's *reading* of
   // the stream — folded, deduplicated, unknown kinds dropped — while the
   // trajectory needs the rows the platform actually stored.
-  return { job, events: threadEvents, threadJobs, loading, error, reload };
+  return { job, events: threadEvents, threadJobs, history, loading, error, reload };
 }
 
 /** One directory of the workspace tree, as far as it has been loaded. */

@@ -31,10 +31,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if __package__:
-    from . import release_manifest as rm, smoke
+    from . import artifact_catalog, release_manifest as rm
 else:  # direct execution from the release directory
+    import artifact_catalog
     import release_manifest as rm
-    import smoke
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
     from collections.abc import Mapping, Sequence
@@ -65,21 +65,13 @@ class Cell:
 def expected_cells() -> dict[str, Cell]:
     """The cells a release is assembled from, by name.
 
-    Derived from the smoke's role table rather than typed: that table is what
-    CI's matrix is pinned against, so the three — CI, the publication matrix
-    and this collector — cannot disagree about which images a release has.
+    Artifact identity comes from the catalog. Behavior stays independent in
+    `smoke.py`, whose coverage test refuses a catalog key without a real check.
     """
-    base_paths = {variant: path for path, variant in rm.WEB_VARIANTS.items()}
-    cells: dict[str, Cell] = {}
-    for role in smoke.ROLES.values():
-        if role.variants:
-            for variant in role.variants:
-                cells[f"{role.name}-{variant}"] = Cell(
-                    role.name, variant, base_paths[variant], role.arch
-                )
-        else:
-            cells[role.name] = Cell(role.name, None, None, role.arch)
-    return cells
+    return {
+        entry.name: Cell(entry.role, entry.variant, entry.base_path, entry.platform)
+        for entry in artifact_catalog.artifacts()
+    }
 
 
 def _image_pattern() -> re.Pattern[str]:

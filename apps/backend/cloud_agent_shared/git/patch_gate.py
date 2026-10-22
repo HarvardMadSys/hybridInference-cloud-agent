@@ -344,12 +344,15 @@ def _split_hunks(patch: str) -> tuple[str, list[str]]:
 def _collect_paths(patch: str) -> tuple[list[str], list[str], list[str]]:
     """Return (changed paths, paths given a symlink mode, paths given a gitlink mode)."""
     changed: list[str] = []
+    changed_seen: set[str] = set()
     symlinks: list[str] = []
     gitlinks: list[str] = []
     pending_paths: list[str] = []
+    pending_paths_seen: set[str] = set()
 
     def remember(path: str) -> None:
-        if path and path not in changed:
+        if path and path not in changed_seen:
+            changed_seen.add(path)
             changed.append(path)
 
     headers, _ = _split_hunks(patch)
@@ -362,6 +365,7 @@ def _collect_paths(patch: str) -> tuple[list[str], list[str], list[str]]:
             # reporting a symlink on a file that had none.
             pending_paths = [_strip_prefix(header.group("a")), _strip_prefix(header.group("b"))]
             pending_paths = [p for p in pending_paths if p]
+            pending_paths_seen = set(pending_paths)
             for path in pending_paths:
                 remember(path)
             continue
@@ -374,7 +378,9 @@ def _collect_paths(patch: str) -> tuple[list[str], list[str], list[str]]:
                 # for this file; otherwise the header's paths already stand.
                 if not pending_paths:
                     pending_paths = [path]
-                elif path not in pending_paths:
+                    pending_paths_seen = {path}
+                elif path not in pending_paths_seen:
+                    pending_paths_seen.add(path)
                     pending_paths.append(path)
                 remember(path)
             continue
@@ -388,6 +394,7 @@ def _collect_paths(patch: str) -> tuple[list[str], list[str], list[str]]:
             match = pattern.match(line)
             if match:
                 path = _strip_prefix(match.group("path"))
+                pending_paths_seen.add(path)
                 pending_paths.append(path)
                 remember(path)
         mode = _NEW_MODE.match(line)

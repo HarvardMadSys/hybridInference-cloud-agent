@@ -3116,6 +3116,38 @@ async def test_remembered_worker_skips_a_locked_thread_without_discarding(store,
     assert await store.mcp.apply_pending_mcp_allow_rules() == 1
 
 
+async def test_remembered_pages_continue_past_a_locked_prefix(store, pool, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from cloud_agent.storage._sql import mcp_maintenance
+    from cloud_agent.storage.repositories import mcp
+
+    monkeypatch.setattr(mcp_maintenance, "ALLOW_GROUP_PAGE", 1)
+    monkeypatch.setattr(mcp, "ALLOW_GROUP_PAGE", 1)
+    monkeypatch.setattr(store.mcp, "_flush_remembered_approvals", AsyncMock())
+    threads = []
+    for _ in range(3):
+        job, connection, binding, rules = await _remembered_setup(store)
+        threads.append(job["thread_id"])
+        invocation = await _invocation(
+            store, job, connection, policy_revision=binding["policy_revision"]
+        )
+        await store.mcp.decide_mcp_invocation(
+            invocation_id=invocation["id"],
+            approve=True,
+            decided_by=_OWNER,
+            always_allow_rule=rules["tool"],
+        )
+        await store.mcp.claim_mcp_invocation(invocation_id=invocation["id"])
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute("SELECT 1 FROM agent_threads WHERE id=$1 FOR UPDATE", min(threads))
+        assert await store.mcp.apply_pending_mcp_allow_rules() == 0
+        assert await store.mcp.apply_pending_mcp_allow_rules() == 1
+        assert await store.mcp.apply_pending_mcp_allow_rules() == 1
+    assert await store.mcp.apply_pending_mcp_allow_rules() == 0  # wrap the exhausted keyset
+    assert await store.mcp.apply_pending_mcp_allow_rules() == 1
+
+
 async def test_cancel_during_permission_save_does_not_orphan_dispatch_claim(store, monkeypatch):
     """A cancellation between commit and claim return must retain a terminal outcome."""
     job, connection, binding, rules = await _remembered_setup(store)

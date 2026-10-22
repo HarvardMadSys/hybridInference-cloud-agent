@@ -533,6 +533,17 @@ not answer is retried as the same request, even once the Host no longer lists
 the container, until the Host confirms it. A release that stopped for attention
 runs again once the provider confirms the machine is gone, and settles.
 
+Right before the machine inventory, release stops each node's runner with
+`docker stop`, so its restart policy leaves it stopped, and removes the
+runner's leftover self-test sandboxes. A self-test sandbox is one with the
+self-test label and the `preflight` runtime in this deployment's namespace.
+The sandbox manager keeps running. A released node never serves again, so the
+runner is not started again. The operation's result keeps what each node's
+inventory found under `inventory`. Release waits and retries only when Docker
+could not be read and nothing else was found; any finding stops it for
+attention. A runner whose Host credential is refused stops claiming and stays
+up, idle, until it is stopped, and does not exit into its restart policy.
+
 ## Moving sandboxes out before a lease ends
 
 A Host whose allocation does not use automatic replacement moves its sandbox

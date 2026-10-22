@@ -182,6 +182,10 @@ class FakeNodes:
         self.calls.append(("inventory", node.display_name))
         return HostInventory(complete=True)
 
+    async def quiesce(self, node, profile, intent):
+        self.calls.append(("quiesce", node.display_name))
+        return 0
+
     async def stage(self, node, profile, intent):
         self.calls.append(("stage", node.display_name))
         assert profile.data_mount == "/mydata"
@@ -359,6 +363,7 @@ async def test_host_moves_to_a_staged_replacement_and_the_old_node_is_released(
         ("deploy", "t1-node"),
         ("revoke", "first-node->t1-node"),
         ("wipe", "first-node"),
+        ("quiesce", "first-node"),
         ("inventory", "first-node"),
     ]
     old = await r.repo.get_allocation(r.allocation_id)
@@ -380,7 +385,7 @@ async def test_a_move_after_an_observation_reaches_each_node_by_its_pinned_key(
             if not (node.connection and node.connection.host_key == HOST_KEY):
                 unpinned.append((effect, node.display_name))
 
-    for effect in ("deploy", "readiness", "inventory", "stage", "stop", "wipe"):
+    for effect in ("deploy", "readiness", "quiesce", "inventory", "stage", "stop", "wipe"):
 
         async def checked(node, *args, _effect=effect, _original=getattr(r.nodes, effect), **kw):
             check(_effect, node)
