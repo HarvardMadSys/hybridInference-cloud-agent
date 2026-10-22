@@ -8,8 +8,12 @@ import pytest
 from tests.integration.storage.test_host_pool_store import db as db
 from tests.support.db import assert_pool_idle
 
-from cloud_agent.admin_observability import decode_cursor
-from cloud_agent.admin_sandbox_inventory import decode_inventory_cursor, inventory_scope
+from cloud_agent.admin_observability import decode_cursor, encode_cursor
+from cloud_agent.admin_sandbox_inventory import (
+    SandboxInventoryCursor,
+    decode_inventory_cursor,
+    inventory_scope,
+)
 from cloud_agent.admin_sandboxes import SandboxCursor, sandbox_cursor_scope
 from cloud_agent.storage.admin_sandbox_inventory import AdminSandboxInventory, _prune
 from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
@@ -250,10 +254,18 @@ async def test_expired_snapshot_and_pruned_receipts_require_explicit_resync(db):
     _, cursor = await complete(db)
     async with db.acquire() as conn:
         await conn.execute("UPDATE agent_sandboxes SET memory_limit='20g'")
+        # Simulate genuinely old receipts, not just old wall-clock timestamps:
+        # pg_snapshot_xmin includes active transactions in other worker databases.
         await conn.execute(
-            "UPDATE agent_admin_sandbox_changes SET changed_at=NOW()-interval '2 days'"
+            "UPDATE agent_admin_sandbox_changes SET changed_at=NOW()-interval '2 days',change_xid='1'"
         )
         await _prune(conn)
+        assert await conn.fetchval("SELECT count(*) FROM agent_admin_sandbox_changes") == 0
+    cursor = encode_cursor(
+        SandboxInventoryCursor(
+            scope=inventory_scope("running", False, 200), database_snapshot="1:1:"
+        )
+    )
     assert (await read(db, cursor)).reset_required
     rows, fresh = await complete(db)
     assert all(row.memory_limit == "20g" for row in rows)
@@ -320,7 +332,24 @@ async def test_concurrent_resyncs_prune_without_serialization_failures(db):
     await seed(db, 1000)
     async with db.acquire() as conn:
         await conn.execute(
-            "UPDATE agent_admin_sandbox_changes SET changed_at=NOW()-interval '2 days'"
+            "UPDATE agent_admin_sandbox_changes SET changed_at=NOW()-interval '2 days',change_xid='1'"
         )
     snapshots = await asyncio.gather(*(complete(db) for _ in range(4)))
     assert all(len(rows) == 1000 for rows, _ in snapshots)
+
+
+async def test_retention_preserves_markers_behind_an_active_transaction(db):
+    await seed(db, 1)
+    _, cursor = await complete(db)
+    async with db.acquire() as slow, slow.transaction():
+        await slow.fetchval("SELECT pg_current_xact_id()")
+        async with db.acquire() as writer:
+            await writer.execute("UPDATE agent_sandboxes SET memory_limit='20g'")
+            await writer.execute(
+                "UPDATE agent_admin_sandbox_changes SET changed_at=NOW()-interval '2 days'"
+            )
+            await _prune(writer)
+            assert await writer.fetchval("SELECT count(*) FROM agent_admin_sandbox_changes") == 1
+        page = await read(db, cursor)
+        assert not page.reset_required
+        assert page.sandboxes[0].memory_limit == "20g"
