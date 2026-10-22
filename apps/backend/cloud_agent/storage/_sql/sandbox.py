@@ -8,7 +8,7 @@ that reads these can import them without importing everything else.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cloud_agent.ports.sandbox import TerminalControlRoute
 from cloud_agent.storage._sql.hosts import (
@@ -24,6 +24,9 @@ from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 NATIVE_FORK_CAPABILITY_JSON = json.dumps([NATIVE_FORK_AT_ANCHOR_CAPABILITY], separators=(",", ":"))
 
@@ -333,6 +336,23 @@ async def fence_sandbox_start(conn: Any, sandbox_id: str) -> tuple[str, int | No
         sandbox_id,
     )
     return str(row["state"]), int(row["start_seq"])
+
+
+async def lock_memberships(conn: Any, thread_ids: Sequence[str]) -> None:
+    """Lock these chats' memberships in thread order, before any of them is written.
+
+    The order the storage lock order sets for several memberships, and the
+    one a heartbeat takes for the residencies it extends together. A write
+    that takes them one at a time, or in one statement whose plan picks the
+    order, deadlocks with a beat that holds one it reaches later.
+    """
+    if not thread_ids:
+        return
+    await conn.execute(
+        "SELECT thread_id FROM agent_thread_sandbox_memberships "
+        "WHERE thread_id = ANY($1::text[]) ORDER BY thread_id FOR UPDATE",
+        list(thread_ids),
+    )
 
 
 async def read_terminal_control_route(

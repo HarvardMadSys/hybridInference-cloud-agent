@@ -190,10 +190,17 @@ class PostgresResidencyRepository:
         Returns the grant id of every residency extended, by ``(thread_id,
         generation)``; one missing from the answer was not extended. One
         transaction for the whole beat: it locks the rows in thread order
-        first, the order every writer that takes several memberships keeps
-        (host revocation does the same), and runs again if Postgres picks it
-        as a deadlock's victim. Any other error is raised and never answered
-        as "not extended": a host tears a sandbox down on that answer.
+        first, the order the storage lock order sets for several memberships.
+        Every writer that takes several takes them so, before writing any:
+        host revocation, the writes to all of a group's members, Fork and
+        owner deletion. The beat runs again if Postgres picks it as a
+        deadlock's victim. Any other error is raised and never answered as
+        "not extended": a host tears a sandbox down on that answer.
+
+        Lapsed rows are locked too, though the update extends none: one a
+        concurrent beat extended just before it lapsed reads as lapsed to the
+        lock and as live to the update, which would then take it out of
+        order. The residency reaper skips locked rows, so it never waits here.
         """
         beats = list(
             dict.fromkeys((str(thread), int(generation)) for thread, generation in residencies)
