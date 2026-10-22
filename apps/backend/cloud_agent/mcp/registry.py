@@ -29,6 +29,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.credential_cipher import (
+    USER_CREDENTIAL_ENCRYPTION_KEY,
+    CredentialCipher,
+    CredentialCipherError,
+)
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.authorization import visible_capabilities
 from cloud_agent.mcp.models import (
@@ -53,7 +58,7 @@ from cloud_agent.mcp.models import (
     Transport,
 )
 from cloud_agent.mcp.net_policy import EndpointRejected, resource_covers
-from cloud_agent.source_control import SourceControlCipher, SourceControlError
+from cloud_agent.settings import setting_env
 
 if TYPE_CHECKING:
     from cloud_agent.ports.mcp import McpConnectionRepository
@@ -79,25 +84,32 @@ class McpRegistryError(Exception):
     """Raised when a caller asks for something its session may not use."""
 
 
-def mcp_cipher(secret: str | None = None) -> SourceControlCipher:
+def _credential_cipher(secret: str | None, *, domain: bytes) -> CredentialCipher:
+    material = (
+        secret if secret is not None else setting_env(USER_CREDENTIAL_ENCRYPTION_KEY, "") or ""
+    )
+    return CredentialCipher(material, domain=domain)
+
+
+def mcp_cipher(secret: str | None = None) -> CredentialCipher:
     """The cipher MCP connection credentials are stored under.
 
-    Raises :class:`~cloud_agent.source_control.SourceControlError` when the
+    Raises :class:`~cloud_agent.credential_cipher.CredentialCipherError` when the
     service has no encryption key, which is the same condition that leaves
     source control unconfigured. Callers that only need to *list* templates
     treat that as "MCP is not configured here" rather than an error.
     """
-    return SourceControlCipher(secret, domain=MCP_CREDENTIAL_DOMAIN)
+    return _credential_cipher(secret, domain=MCP_CREDENTIAL_DOMAIN)
 
 
-def invocation_cipher(secret: str | None = None) -> SourceControlCipher:
+def invocation_cipher(secret: str | None = None) -> CredentialCipher:
     """The cipher a held call's argument body is protected with."""
-    return SourceControlCipher(secret, domain=MCP_INVOCATION_DOMAIN)
+    return _credential_cipher(secret, domain=MCP_INVOCATION_DOMAIN)
 
 
-def oauth_cipher(secret: str | None = None) -> SourceControlCipher:
+def oauth_cipher(secret: str | None = None) -> CredentialCipher:
     """The cipher a flow's verifier and client secret are protected with."""
-    return SourceControlCipher(secret, domain=MCP_OAUTH_DOMAIN)
+    return _credential_cipher(secret, domain=MCP_OAUTH_DOMAIN)
 
 
 @dataclass(frozen=True)
@@ -326,7 +338,7 @@ async def resolve_connection(  # noqa: PLR0912 complexity baseline, #771
     store: McpConnectionRepository,
     *,
     row: Mapping[str, Any],
-    cipher: SourceControlCipher | None = None,
+    cipher: CredentialCipher | None = None,
     load_snapshot: bool = True,
 ) -> ResolvedConnection:
     """Turn one stored connection row into a usable server, or a reason.
@@ -400,7 +412,7 @@ async def resolve_connection(  # noqa: PLR0912 complexity baseline, #771
     if resolved_cipher is None:
         try:
             resolved_cipher = mcp_cipher()
-        except SourceControlError:
+        except CredentialCipherError:
             logger.error(
                 "agent_mcp_encryption_key_missing",
                 extra={
@@ -417,7 +429,7 @@ async def resolve_connection(  # noqa: PLR0912 complexity baseline, #771
 
     try:
         secret = resolved_cipher.decrypt(str(row["access_token_ciphertext"]))
-    except SourceControlError:
+    except CredentialCipherError:
         # Narrow deliberately: this is the whole contract of `decrypt`, and a
         # broader catch would swallow a genuine bug here as "the user's
         # credential is bad" -- the one diagnosis nobody would question.
@@ -455,7 +467,7 @@ async def resolve_for_thread(
     store: McpConnectionRepository,
     *,
     thread_id: str,
-    cipher: SourceControlCipher | None = None,
+    cipher: CredentialCipher | None = None,
 ) -> list[tuple[ResolvedConnection, ThreadBinding]]:
     """Every connection one conversation is bound to, with its state.
 
@@ -554,7 +566,7 @@ async def servers_for_thread(
     store: McpConnectionRepository,
     *,
     thread_id: str,
-    cipher: SourceControlCipher | None = None,
+    cipher: CredentialCipher | None = None,
 ) -> dict[str, McpServer]:
     """Every server a job on ``thread_id`` may reach, keyed by alias.
 

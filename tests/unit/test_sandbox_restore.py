@@ -100,6 +100,19 @@ def _prepare(archive: bytes, **overrides: Any) -> tuple[Any, bytes]:
 # -- the archive a restoring host loads --------------------------------------
 
 
+def test_checkpoint_archive_bytes_stay_stable_across_the_codec_split():
+    exported = _checkpoint_archive()
+    _, prepared = _prepare(exported)
+
+    assert len(exported) == len(prepared) == 20_480
+    assert hashlib.sha256(exported).hexdigest() == (
+        "cb85aafdf8bfbd7c71fbad702c7aa02e41fd8f90750ad59e360d8942f9112048"
+    )
+    assert hashlib.sha256(prepared).hexdigest() == (
+        "0790b2e6b69305cccebe140d8c806369877a49ee1c418e07cac8f7622c241d7f"
+    )
+
+
 def test_a_checkpoint_is_rewritten_under_its_own_name_only():
     forged = _rewrite(
         _checkpoint_archive(),

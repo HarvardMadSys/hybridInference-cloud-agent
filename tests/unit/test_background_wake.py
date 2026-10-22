@@ -222,6 +222,124 @@ async def test_one_pass_publishes_past_a_failure_and_retries_every_due_import(mo
         await _stop(task)
 
 
+async def test_admission_starts_in_order_while_slow_entitlement_does_not_hold_up_others(
+    monkeypatch,
+):
+    """Claim-order entry stays deterministic without serializing remote checks."""
+    monkeypatch.setattr(publish_worker, "_PUBLISH_CONCURRENCY", 2)
+    claims = [{"job_id": f"job-{index}", "snapshot_id": index} for index in range(6)]
+    entitlement_release = asyncio.Event()
+    first_entitlement_started = asyncio.Event()
+    entered: list[str] = []
+    completed: list[str] = []
+    active = 0
+    peak_active = 0
+
+    async def publish_claimed(store, job, **kwargs):
+        nonlocal active, peak_active
+        active += 1
+        peak_active = max(peak_active, active)
+        try:
+            entered.append(job["job_id"])
+            kwargs["admission_started"].set()
+            if job["job_id"] == "job-0":
+                first_entitlement_started.set()
+                await entitlement_release.wait()
+            completed.append(job["job_id"])
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(publish_worker, "_publish_claimed", publish_claimed)
+    claim = AsyncMock(side_effect=lambda: claims.pop(0) if claims else None)
+    store = SimpleNamespace(snapshot=SimpleNamespace(claim_for_publish=claim))
+
+    publishing = asyncio.create_task(
+        publish_worker._publish_due(
+            store,  # type: ignore[arg-type]
+            credential=publish_worker.GitHubCredential("token"),
+            app_credentials=None,
+            base_branch="dev",
+        )
+    )
+    try:
+        await asyncio.wait_for(first_entitlement_started.wait(), timeout=AT_ONCE_S)
+        await _eventually(lambda: claim.await_count >= 2)
+        await _eventually(lambda: entered[:2] == ["job-0", "job-1"])
+        await _eventually(lambda: "job-1" in completed)
+        assert not entitlement_release.is_set()
+        await _eventually(lambda: entered == [f"job-{index}" for index in range(6)])
+        await _eventually(lambda: completed == [f"job-{index}" for index in range(1, 6)])
+        assert not publishing.done()
+        assert peak_active == 2
+        entitlement_release.set()
+        await asyncio.wait_for(publishing, timeout=AT_ONCE_S)
+    finally:
+        entitlement_release.set()
+        if not publishing.done():
+            await _stop(publishing)
+
+    assert completed == ["job-1", "job-2", "job-3", "job-4", "job-5", "job-0"]
+    assert claim.await_count >= 7
+
+
+async def test_a_crashed_publication_does_not_cancel_healthy_siblings(monkeypatch):
+    """A preflight crash releases its gate without cancelling healthy siblings."""
+    monkeypatch.setattr(publish_worker, "_PUBLISH_CONCURRENCY", 2)
+    claims = [
+        {"job_id": "crashes", "snapshot_id": 1},
+        {"job_id": "slow", "snapshot_id": 2},
+        {"job_id": "later", "snapshot_id": 3},
+    ]
+    slow_started = asyncio.Event()
+    slow_release = asyncio.Event()
+    completed: list[str] = []
+    cancelled: list[str] = []
+
+    async def publish_claimed(store, job, **kwargs):
+        if job["job_id"] == "crashes":
+            raise RuntimeError("unexpected storage failure")
+        kwargs["admission_started"].set()
+        if job["job_id"] == "slow":
+            slow_started.set()
+            try:
+                await slow_release.wait()
+            except asyncio.CancelledError:
+                cancelled.append(job["job_id"])
+                raise
+        completed.append(job["job_id"])
+
+    monkeypatch.setattr(publish_worker, "_publish_claimed", publish_claimed)
+    store = SimpleNamespace(
+        snapshot=SimpleNamespace(
+            claim_for_publish=AsyncMock(side_effect=lambda: claims.pop(0) if claims else None)
+        )
+    )
+    publishing = asyncio.create_task(
+        publish_worker._publish_due(
+            store,  # type: ignore[arg-type]
+            credential=publish_worker.GitHubCredential("token"),
+            app_credentials=None,
+            base_branch="dev",
+        )
+    )
+    try:
+        await _eventually(lambda: completed == ["later"])
+        assert slow_started.is_set()
+        assert not publishing.done()
+        assert cancelled == []
+        slow_release.set()
+        await asyncio.wait_for(publishing, timeout=AT_ONCE_S)
+    finally:
+        slow_release.set()
+        if not publishing.done():
+            await _stop(publishing)
+        else:
+            await asyncio.gather(publishing, return_exceptions=True)
+
+    assert completed == ["later", "slow"]
+    assert cancelled == []
+
+
 @pytest.mark.parametrize("retry_kind", ["base_import", "snapshot_publish"])
 async def test_an_idle_publisher_looks_again_when_a_retry_is_due(monkeypatch, retry_kind):
     imported = AsyncMock()

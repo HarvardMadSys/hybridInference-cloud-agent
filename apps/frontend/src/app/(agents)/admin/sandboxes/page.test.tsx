@@ -308,7 +308,7 @@ describe('running sandbox inventory', () => {
     expect(screen.queryByText('sandbox-one')).not.toBeInTheDocument();
     await waitFor(() =>
       expect(getAdminSandboxes).toHaveBeenLastCalledWith(
-        { limit: 200, state: 'all' },
+        { limit: 200, state: 'all', sync: true },
         expect.any(AbortSignal),
       ),
     );
@@ -355,7 +355,7 @@ describe('running sandbox inventory', () => {
     expect(await screen.findByText(/Stop requested\. Waiting for the host/)).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: 'Sandbox state' })).toHaveValue('all');
     expect(getAdminSandboxes).toHaveBeenLastCalledWith(
-      { limit: 200, state: 'all' },
+      { limit: 200, state: 'all', sync: true },
       expect.any(AbortSignal),
     );
   });
@@ -1122,7 +1122,7 @@ describe('sandbox inventory controls', () => {
     });
     await screen.findByText('filtered-sandbox');
     expect(getAdminSandboxes).toHaveBeenLastCalledWith(
-      { limit: 200, state },
+      { limit: 200, state, sync: true },
       expect.any(AbortSignal),
     );
     expect(screen.getByRole('combobox', { name: 'Sandbox state' })).toHaveValue(state);
@@ -1152,7 +1152,7 @@ describe('sandbox inventory controls', () => {
     expect(screen.queryByText('sandbox-one')).not.toBeInTheDocument();
     await waitFor(() =>
       expect(getAdminSandboxes).toHaveBeenLastCalledWith(
-        { limit: 200, state: 'all', include_archived: true },
+        { limit: 200, state: 'all', include_archived: true, sync: true },
         expect.any(AbortSignal),
       ),
     );
@@ -1178,7 +1178,7 @@ describe('sandbox inventory controls', () => {
     fireEvent.click(includeRemoved);
     await screen.findByText('sandbox-one');
     expect(getAdminSandboxes).toHaveBeenLastCalledWith(
-      { limit: 200, state: 'all' },
+      { limit: 200, state: 'all', sync: true },
       expect.any(AbortSignal),
     );
     expect(screen.queryByText('removed-sandbox')).not.toBeInTheDocument();

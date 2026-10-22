@@ -4,14 +4,12 @@ The unit tier drives these through fakes, so it pins what the *code* does with
 rows it is handed. What only Postgres can settle:
 
 - **The scoping is in the query.** `list_thread_events_after` and
-  `thread_stats_inputs` answer ``None`` for a job that is not the caller's --
+  `thread_stats` answer ``None`` for a job that is not the caller's --
   the same answer they give for a job that does not exist, which is what stops
   the difference between the two from being observable.
-- **The aggregate reads are scoped too.** `thread_stats_inputs` joins the
-  thread through the same owner check as the event read, so a stranger's
-  summary is as unavailable as their transcript. It returns the thread's jobs,
-  attempts and events together, because the caller summarizes across all of
-  them rather than one turn at a time.
+- **The aggregate reads are scoped too.** `thread_stats` joins the thread
+  through the same owner check as the event read, so a stranger's summary is
+  as unavailable as their transcript. It refreshes only stale attempt rollups.
 - **Payloads survive the round trip.** `list_thread_events_after` keeps them,
   because reconstructing what an earlier turn did needs the tool inputs, and
   JSONB comes back as text from a bare fetch -- the read decodes it.
@@ -23,7 +21,12 @@ this repository.
 
 from __future__ import annotations
 
+import gc
 import os
+import time
+import tracemalloc
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import pytest_asyncio
@@ -34,13 +37,100 @@ from tests.support.migrations import apply_migrations
 from tests.support.usage import job_usage_inputs
 
 from cloud_agent.storage.assembly import Storage
-from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
+from cloud_agent.storage.repositories.execution_queries import (
+    THREAD_STATS_EVENT_PAGE_SIZE,
+    PostgresExecutionQueries,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 _ALLOWED_TEST_DB_PATTERN = "_test_"
 _OWNER = "user-1"
 _OTHER = "user-2"
+
+
+class _MeasuredConnection:
+    """Count repository statements and rows returned by the stale-event read."""
+
+    def __init__(
+        self,
+        connection: Any,
+        measurements: dict[str, int],
+        after_first_event_page: Callable[[], Awaitable[None]] | None,
+    ) -> None:
+        self._connection = connection
+        self._measurements = measurements
+        self._after_first_event_page = after_first_event_page
+
+    async def fetch(self, query: str, *args: Any):
+        self._measurements["queries"] += 1
+        rows = await self._connection.fetch(query, *args)
+        if "thread_stats_stale_events" in query:
+            self._measurements["event_rows"] += len(rows)
+            self._measurements["event_pages"] += 1
+            self._measurements["max_event_rows"] = max(
+                self._measurements["max_event_rows"], len(rows)
+            )
+            hook, self._after_first_event_page = self._after_first_event_page, None
+            if hook is not None:
+                await hook()
+        return rows
+
+    async def execute(self, query: str, *args: Any):
+        self._measurements["queries"] += 1
+        return await self._connection.execute(query, *args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+
+class _MeasuredAcquire:
+    def __init__(
+        self,
+        pool: Any,
+        measurements: dict[str, int],
+        after_first_event_page: Callable[[], Awaitable[None]] | None,
+    ) -> None:
+        self._pool = pool
+        self._measurements = measurements
+        self._after_first_event_page = after_first_event_page
+        self._context: Any = None
+
+    async def __aenter__(self) -> _MeasuredConnection:
+        self._context = self._pool.acquire()
+        connection = await self._context.__aenter__()
+        return _MeasuredConnection(
+            connection,
+            self._measurements,
+            self._after_first_event_page,
+        )
+
+    async def __aexit__(self, *exc: Any) -> Any:
+        return await self._context.__aexit__(*exc)
+
+
+class _MeasuredPool:
+    def __init__(
+        self,
+        pool: Any,
+        measurements: dict[str, int],
+        *,
+        after_first_event_page: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self._pool = pool
+        self._measurements = measurements
+        self._after_first_event_page = after_first_event_page
+
+    def acquire(self) -> _MeasuredAcquire:
+        hook, self._after_first_event_page = self._after_first_event_page, None
+        return _MeasuredAcquire(self._pool, self._measurements, hook)
+
+
+def _new_measurements() -> dict[str, int]:
+    return {"queries": 0, "event_rows": 0, "event_pages": 0, "max_event_rows": 0}
 
 
 def _database_config() -> dict[str, str | int]:
@@ -266,23 +356,211 @@ async def test_the_stats_inputs_answer_nothing_for_a_stranger(
     """The summary of a thread is as private as the thread."""
     job, _ = await _running_job(store)
 
-    assert await queries.thread_stats_inputs(job_id=job["id"], user_id=_OWNER) is not None
-    assert await queries.thread_stats_inputs(job_id=job["id"], user_id=_OTHER) is None
+    assert await queries.thread_stats(job_id=job["id"], user_id=_OWNER) is not None
+    assert await queries.thread_stats(job_id=job["id"], user_id=_OTHER) is None
 
 
-async def test_the_stats_inputs_carry_the_threads_jobs_attempts_and_events(
-    store: Storage, queries: PostgresExecutionQueries
+async def test_the_stats_read_persists_and_reuses_attempt_rollups(
+    db, store: Storage, queries: PostgresExecutionQueries
 ) -> None:
-    """One read gathers everything a summary needs, across the whole thread."""
-    job, _ = await _running_job(store)
+    """One read reduces stale events and leaves a reusable attempt summary."""
+    job, claim = await _running_job(store)
 
-    inputs = await queries.thread_stats_inputs(job_id=job["id"], user_id=_OWNER)
+    result = await queries.thread_stats(job_id=job["id"], user_id=_OWNER)
 
-    assert inputs is not None
-    assert inputs["thread_id"] == job["thread_id"]
-    assert inputs["job_ids"] == [job["id"]]
-    assert [row["job_id"] for row in inputs["attempts"]] == [job["id"]]
-    assert len(inputs["events"]) == 2
+    assert result is not None
+    assert result["thread_id"] == job["thread_id"]
+    assert result["stats"].turns == 1
+    async with db.acquire() as conn:
+        cached = await conn.fetchrow(
+            "SELECT event_seq, reducer_version, rollup "
+            "FROM agent_attempt_thread_stats WHERE attempt_id = $1",
+            claim["attempt_id"],
+        )
+    assert cached is not None
+    assert cached["event_seq"] == 2
+    assert cached["reducer_version"] == 1
+
+    assert await store.attempt_commands.append_event(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        event_type="tool_use",
+        payload={"id": "after-cache"},
+    )
+    refreshed = await queries.thread_stats(job_id=job["id"], user_id=_OWNER)
+    assert refreshed is not None and refreshed["stats"].tool_calls == 1
+    async with db.acquire() as conn:
+        sequence = await conn.fetchval(
+            "SELECT event_seq FROM agent_attempt_thread_stats WHERE attempt_id = $1",
+            claim["attempt_id"],
+        )
+        await conn.execute(
+            "UPDATE agent_attempt_thread_stats "
+            "SET reducer_version = 999, rollup = '{\"invalid\":true}'::jsonb "
+            "WHERE attempt_id = $1",
+            claim["attempt_id"],
+        )
+    assert sequence == 3
+
+    rebuilt = await queries.thread_stats(job_id=job["id"], user_id=_OWNER)
+    assert rebuilt == refreshed
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT reducer_version FROM agent_attempt_thread_stats WHERE attempt_id = $1",
+                claim["attempt_id"],
+            )
+            == 1
+        )
+
+
+async def test_hundred_thousand_event_stats_reads_use_bounded_pages(db, store: Storage) -> None:
+    """Cold and stale reductions stay bounded while preserving a fixed target."""
+    job = await _create_job(store, user_id=_OWNER)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_job_events
+                (job_id, attempt_id, seq, event_type, payload, created_at)
+            SELECT $1,
+                   $2,
+                   n,
+                   CASE n % 1000
+                       WHEN 1 THEN 'tool_use'
+                       WHEN 2 THEN 'tool_result'
+                       WHEN 3 THEN 'message'
+                       ELSE 'raw'
+                   END,
+                   CASE n % 1000
+                       WHEN 1 THEN jsonb_build_object('id', 'tool-' || n::text)
+                       WHEN 2 THEN jsonb_build_object(
+                           'tool_use_id', 'tool-' || (n - 1)::text,
+                           'is_error', n % 2000 = 2
+                       )
+                       WHEN 3 THEN jsonb_build_object(
+                           'has_text', true,
+                           'usage_id', 'response-' || n::text,
+                           'usage', jsonb_build_object(
+                               'input_tokens', 10,
+                               'output_tokens', 5,
+                               'cache_read_input_tokens', 2
+                           )
+                       )
+                       ELSE '{}'::jsonb
+                   END,
+                   TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                       + n * INTERVAL '1 millisecond'
+            FROM generate_series(1, 100000) AS generated(n)
+            """,
+            job["id"],
+            claim["attempt_id"],
+        )
+
+    async def append_after_target_was_captured() -> None:
+        async with db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO agent_job_events
+                    (job_id, attempt_id, seq, event_type, payload, created_at)
+                VALUES (
+                    $1, $2, 100001, 'tool_use', '{"id":"concurrent"}'::jsonb,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                        + 100000 * INTERVAL '1 millisecond'
+                )
+                """,
+                job["id"],
+                claim["attempt_id"],
+            )
+
+    cold_counts = _new_measurements()
+    measured = PostgresExecutionQueries(
+        _MeasuredPool(
+            db,
+            cold_counts,
+            after_first_event_page=append_after_target_was_captured,
+        )
+    )
+    gc.collect()
+    tracemalloc.start()
+    started = time.perf_counter()
+    try:
+        cold = await measured.thread_stats(job_id=job["id"], user_id=_OWNER)
+        cold_seconds = time.perf_counter() - started
+        _, cold_peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert cold is not None
+    assert cold_counts == {
+        "queries": 102,
+        "event_rows": 100_000,
+        "event_pages": 100,
+        "max_event_rows": THREAD_STATS_EVENT_PAGE_SIZE,
+    }
+    assert cold_peak_bytes < 16 * 1024 * 1024
+    assert cold["stats"].tool_calls == 100
+    assert cold["stats"].failed_tool_calls == 50
+    assert cold["stats"].input_tokens == 1_000
+    assert cold["stats"].output_tokens == 500
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT event_seq FROM agent_attempt_thread_stats WHERE attempt_id = $1",
+                claim["attempt_id"],
+            )
+            == 100_000
+        )
+
+    stale_counts = _new_measurements()
+    measured = PostgresExecutionQueries(_MeasuredPool(db, stale_counts))
+    gc.collect()
+    tracemalloc.start()
+    try:
+        stale = await measured.thread_stats(job_id=job["id"], user_id=_OWNER)
+        _, stale_peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert stale is not None
+    assert stale_counts == {
+        "queries": 103,
+        "event_rows": 100_001,
+        "event_pages": 101,
+        "max_event_rows": THREAD_STATS_EVENT_PAGE_SIZE,
+    }
+    assert stale_peak_bytes < 16 * 1024 * 1024
+    assert stale["stats"] == replace(cold["stats"], tool_calls=101)
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT event_seq FROM agent_attempt_thread_stats WHERE attempt_id = $1",
+                claim["attempt_id"],
+            )
+            == 100_001
+        )
+
+    warm_counts = _new_measurements()
+    measured = PostgresExecutionQueries(_MeasuredPool(db, warm_counts))
+    gc.collect()
+    tracemalloc.start()
+    started = time.perf_counter()
+    try:
+        warm = await measured.thread_stats(job_id=job["id"], user_id=_OWNER)
+        warm_seconds = time.perf_counter() - started
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert warm == stale
+    assert warm_counts == {
+        "queries": 1,
+        "event_rows": 0,
+        "event_pages": 0,
+        "max_event_rows": 0,
+    }
+    assert peak_bytes < 4 * 1024 * 1024
+    assert warm_seconds < 2.0
+    assert warm_seconds < cold_seconds
 
 
 async def test_the_usage_inputs_and_telemetry_answer_for_their_job(

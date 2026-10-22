@@ -32,6 +32,7 @@ from cloud_agent.storage._sql.sessions import (
     session_query,
 )
 from cloud_agent.storage._sql.thread_history import read_message_chunk, read_thread_page
+from cloud_agent.storage.notification_state import read_notification_state
 
 if TYPE_CHECKING:
     from typing import Any
@@ -45,6 +46,16 @@ class PostgresConversationQueries:
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
+
+    async def notification_state(
+        self, *, user_id: str, cursor: str | None = None, limit: int = 200
+    ) -> dict[str, Any]:
+        """Bootstrap active jobs, then read only durable owner changes."""
+        if not 1 <= limit <= 200:
+            raise ValueError("Notification-state page size must be between 1 and 200")
+        return await read_notification_state(
+            self._pool, user_id=user_id, cursor_value=cursor, limit=limit
+        )
 
     async def list_read_receipts(
         self, *, user_id: str, after: int | None = None, limit: int = READ_RECEIPT_BATCH_SIZE

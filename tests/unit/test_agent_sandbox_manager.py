@@ -27,7 +27,10 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient
 from cloud_agent.schemas import RetainedSandboxStop
-from cloud_agent_host import sandbox_manager as sandbox_manager_mod
+from cloud_agent_host import (
+    base_bundle_request as base_bundle_request_mod,
+    sandbox_manager as sandbox_manager_mod,
+)
 from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
     ChatSandboxManager,
@@ -73,6 +76,12 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedTurnTelemetry,
 )
 from cloud_agent_host.tool_windows import ToolMark
+from cloud_agent_shared.git.base_bundle_stream import (
+    BASE_BUNDLE_CONTENT_TYPE,
+    BASE_BUNDLE_STREAM_CAPABILITY,
+    LEGACY_BASE_BUNDLE_CONTENT_TYPE,
+    encode_base_bundle_metadata,
+)
 from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values
 
 
@@ -293,8 +302,9 @@ class _WorkspaceBackend(RetainedChatBackend):
             stderr_text=lambda: "",
         )
 
-    def _import_base_bundle(self, _spec, bundle: bytes, *, commit: str, env):
-        self.imports.append((bundle, commit, env))
+    def _import_base_bundle(self, _spec, bundle, *, commit: str, env):
+        self.imports.append((bundle.read(), commit, env))
+        bundle.seek(0)
 
 
 def _descriptor(thread_id: str = "athr_source") -> SharedSessionDescriptor:
@@ -950,6 +960,7 @@ async def test_health_and_sandbox_inventory_are_authenticated_and_shared_only():
 
     assert denied.status_code == 401
     assert health.json()["ok"] is True
+    assert BASE_BUNDLE_STREAM_CAPABILITY in health.json()["capabilities"]
     rows = listed.json()["sandboxes"]
     assert len(rows) == 1
     assert rows[0]["shared_live"] is True
@@ -1636,6 +1647,17 @@ async def test_shared_registration_snapshot_and_base_import_keep_identity():
     identity = _identity()
     bundle = b"trusted-git-bundle"
     commit_sha = "b" * 40
+    prefix = encode_base_bundle_metadata({**identity, "snapshot_id": 9, "commit_sha": commit_sha})
+
+    async def streamed_bundle():
+        # Fragment the frame header and combine the metadata tail with bundle
+        # bytes so neither side can depend on HTTP chunk boundaries.
+        yield prefix[:3]
+        yield prefix[3:-2]
+        yield prefix[-2:] + bundle[:4]
+        yield bundle[4:]
+
+    import_headers = {**headers, "Content-Type": BASE_BUNDLE_CONTENT_TYPE}
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://sandbox_manager"
@@ -1650,13 +1672,8 @@ async def test_shared_registration_snapshot_and_base_import_keep_identity():
         )
         imported = await client.post(
             "/shared-sandboxes/athr_source/import-base",
-            headers=headers,
-            json={
-                **identity,
-                "snapshot_id": 9,
-                "commit_sha": commit_sha,
-                "bundle_b64": base64.b64encode(bundle).decode(),
-            },
+            headers=import_headers,
+            content=streamed_bundle(),
         )
 
     patch = "diff --git a/a.txt b/a.txt\n"
@@ -1675,6 +1692,120 @@ async def test_shared_registration_snapshot_and_base_import_keep_identity():
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_base_import_accepts_old_control_plane_json_during_rollout():
+    """A new host incrementally accepts the exact previous JSON request."""
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    bundle = b"legacy-trusted-git-bundle"
+    commit_sha = "b" * 40
+    legacy = json.dumps(
+        {
+            **_identity(),
+            "snapshot_id": 9,
+            "commit_sha": commit_sha,
+            "bundle_b64": base64.b64encode(bundle).decode("ascii"),
+        },
+        separators=(",", ":"),
+    ).encode("ascii")
+    marker = legacy.index(b',"bundle_b64":"')
+
+    async def old_request():
+        # TCP/ASGI chunks need not preserve the old client's JSON field boundary.
+        yield legacy[: marker + 5]
+        yield legacy[marker + 5 : marker + 19]
+        yield legacy[marker + 19 : -3]
+        yield legacy[-3:]
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        imported = await client.post(
+            "/shared-sandboxes/athr_source/import-base",
+            headers={
+                "X-Agent-Workspace-Token": "sandbox-manager-secret",
+                "Content-Type": LEGACY_BASE_BUNDLE_CONTENT_TYPE,
+            },
+            content=old_request(),
+        )
+
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["workspace_head_preserved"] is True
+    assert supervisor.imports[0][:2] == (bundle, commit_sha)
+
+
+@pytest.mark.asyncio
+async def test_base_import_refuses_over_limit_before_consuming_the_stream_tail(monkeypatch):
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    identity = _identity()
+    prefix = encode_base_bundle_metadata({**identity, "snapshot_id": 9, "commit_sha": "b" * 40})
+    monkeypatch.setattr(base_bundle_request_mod, "DEFAULT_MAX_BASE_BUNDLE_BYTES", 8)
+    consumed_tail = False
+
+    async def oversized():
+        nonlocal consumed_tail
+        yield prefix
+        yield b"12345678"
+        yield b"9"
+        consumed_tail = True
+        yield b"must-not-be-consumed"
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.post(
+            "/shared-sandboxes/athr_source/import-base",
+            headers={
+                "X-Agent-Workspace-Token": "sandbox-manager-secret",
+                "Content-Type": BASE_BUNDLE_CONTENT_TYPE,
+            },
+            content=oversized(),
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "base bundle exceeds the import limit"
+    assert consumed_tail is False
+    assert supervisor.imports == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_base_import_refuses_over_limit_before_consuming_the_tail(monkeypatch):
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    metadata = json.dumps(
+        {**_identity(), "snapshot_id": 9, "commit_sha": "b" * 40},
+        separators=(",", ":"),
+    ).encode("ascii")
+    prefix = metadata[:-1] + b',"bundle_b64":"'
+    monkeypatch.setattr(base_bundle_request_mod, "DEFAULT_MAX_BASE_BUNDLE_BYTES", 8)
+    consumed_tail = False
+
+    async def oversized():
+        nonlocal consumed_tail
+        yield prefix
+        yield base64.b64encode(b"123456789")
+        consumed_tail = True
+        yield b'"}'
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.post(
+            "/shared-sandboxes/athr_source/import-base",
+            headers={
+                "X-Agent-Workspace-Token": "sandbox-manager-secret",
+                "Content-Type": LEGACY_BASE_BUNDLE_CONTENT_TYPE,
+            },
+            content=oversized(),
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "base bundle exceeds the import limit"
+    assert consumed_tail is False
+    assert supervisor.imports == []
 
 
 @pytest.mark.asyncio
@@ -1770,12 +1901,12 @@ def _workspace_with_imported_bases(
     monkeypatch.setattr(chat_sandbox, "ACTIVATION_TMPFS", str(activation_tmpfs))
     manager = ChatSandboxManager(ContainerBackend(image="img"))
 
-    def exec_here(_spec, argv, *, env, workdir, timeout_s, input_bytes):
+    def exec_here(_spec, argv, *, env, workdir, timeout_s, stdin):
         return subprocess.run(
             argv,
             cwd=workspace,
             env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), **env},
-            input=input_bytes,
+            stdin=stdin,
             capture_output=True,
             timeout=timeout_s,
             check=False,
@@ -1783,7 +1914,7 @@ def _workspace_with_imported_bases(
 
     monkeypatch.setattr(manager, "exec_capture", exec_here)
 
-    def import_base(bundle: bytes, commit: str) -> None:
+    def import_base(bundle, commit: str) -> None:
         manager.import_base_bundle(SimpleNamespace(), bundle, commit=commit, env={})
 
     published: list[str] = []
@@ -1804,6 +1935,7 @@ def _workspace_with_imported_bases(
         )
         assert result.base_bundle
         import_base(result.base_bundle, result.commit_sha)
+        result.base_bundle.close()
         published.append(result.commit_sha)
         current = result.commit_sha
     refs = _hermetic_git(["for-each-ref"], workspace)
@@ -1913,7 +2045,7 @@ async def test_the_import_retry_brings_back_a_base_git_pruned_with_the_one_befor
             return setup.origin
 
     class _Host:
-        async def import_shared_base(self, _row, *, commit_sha: str, bundle: bytes):
+        async def import_shared_base(self, _row, *, commit_sha: str, bundle):
             await asyncio.to_thread(setup.import_base, bundle, commit_sha)
             return {"ok": True}
 
@@ -1989,7 +2121,11 @@ async def test_base_import_resolves_its_workspace_off_the_event_loop(monkeypatch
 
     monkeypatch.setattr(supervisor, "backend", backend)
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    headers = {
+        "X-Agent-Workspace-Token": "sandbox-manager-secret",
+        "Content-Type": BASE_BUNDLE_CONTENT_TYPE,
+    }
+    prefix = encode_base_bundle_metadata({**_identity(), "snapshot_id": 9, "commit_sha": "b" * 40})
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://sandbox_manager"
@@ -1997,12 +2133,7 @@ async def test_base_import_resolves_its_workspace_off_the_event_loop(monkeypatch
         imported = await client.post(
             "/shared-sandboxes/athr_source/import-base",
             headers=headers,
-            json={
-                **_identity(),
-                "snapshot_id": 9,
-                "commit_sha": "b" * 40,
-                "bundle_b64": base64.b64encode(b"trusted-git-bundle").decode(),
-            },
+            content=prefix + b"trusted-git-bundle",
         )
 
     assert imported.status_code == 200

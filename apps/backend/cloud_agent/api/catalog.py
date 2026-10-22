@@ -22,6 +22,9 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
     AgentConversation,
     AgentConversationListResponse,
+    AgentNotificationJob,
+    AgentNotificationStateResponse,
+    AgentNotificationThread,
     AgentProject,
     AgentProjectListResponse,
     AgentReadReceipt,
@@ -206,6 +209,47 @@ async def merge_agent_read_receipts(
     )
     return AgentReadReceiptsResponse(
         user_id=user["user_id"], receipts=[AgentReadReceipt.model_validate(row) for row in receipts]
+    )
+
+
+@router.get("/notifications/state", response_model=AgentNotificationStateResponse)
+async def get_agent_notification_state(
+    response: Response,
+    limit: int = Query(200, ge=1, le=200),
+    cursor: str | None = Query(None, min_length=1, max_length=32768),
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _CatalogStorage | None = Depends(get_storage),
+) -> AgentNotificationStateResponse:
+    """Bootstrap live turns, then page only durable owner changes."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        page = await _require_store(store).conversation_queries.notification_state(
+            user_id=user["user_id"], cursor=cursor, limit=limit
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    observed_at = _iso(page["observed_at"])
+    if observed_at is None:
+        raise RuntimeError("Notification-state read omitted its observation time.")
+    return AgentNotificationStateResponse(
+        mode=page["mode"],
+        jobs=[
+            AgentNotificationJob.model_validate(
+                {
+                    **job,
+                    "finished_at": _iso(job.get("finished_at")),
+                    "updated_at": _iso(job.get("updated_at")),
+                }
+            )
+            for job in page["jobs"]
+        ],
+        threads=[AgentNotificationThread.model_validate(thread) for thread in page["threads"]],
+        deleted_job_ids=page["deleted_job_ids"],
+        deleted_thread_ids=page["deleted_thread_ids"],
+        observed_at=observed_at,
+        next_cursor=page["next_cursor"],
+        change_cursor=page["change_cursor"],
+        reset_required=page["reset_required"],
     )
 
 

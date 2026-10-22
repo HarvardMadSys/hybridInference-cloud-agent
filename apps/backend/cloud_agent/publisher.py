@@ -42,6 +42,7 @@ from cloud_agent_shared.secret_redaction import secret_patterns
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+    from typing import BinaryIO
 
 logger = get_logger(__name__)
 
@@ -120,7 +121,7 @@ class PublishResult:
     branch: str
     commit_sha: str
     changed_files: list[str]
-    base_bundle: bytes | None = None
+    base_bundle: BinaryIO | None = None
 
 
 def _git_env(env_extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -479,6 +480,65 @@ def _validate_staged_blobs(
             )
 
 
+def _push_with_base_bundle(
+    *,
+    repo: Path,
+    job_id: str,
+    branch: str,
+    commit_sha: str,
+    base_sha: str,
+    changed_files: list[str],
+    include_base_bundle: bool,
+    before_push: Callable[[str], None] | None,
+    auth_env: dict[str, str] | None,
+) -> PublishResult:
+    """Build the optional bundle, push, and transfer bundle ownership."""
+    base_bundle = (
+        build_base_bundle(str(repo), commit=commit_sha, prerequisite=base_sha)
+        if include_base_bundle
+        else None
+    )
+    try:
+        # Every local step has succeeded. The caller records the commit before
+        # it is pushed, so a push that lands while this process loses track of
+        # it (a timeout after the remote accepted it, a crash, a later step
+        # that fails) is still the group's own to the next publication.
+        if before_push is not None:
+            before_push(commit_sha)
+        # Pinned refspec: this process can only ever write the one branch, and
+        # never force-updates it. Ordinary receive-pack is also the final
+        # compare-and-set fence: it creates the branch, fast-forwards it, or
+        # changes nothing when it already names this commit, and fails
+        # transiently if somebody advanced it while we reconciled.
+        _run_git(
+            ["push", "--quiet", "origin", f"{commit_sha}:refs/heads/{branch}"],
+            cwd=repo,
+            env_extra=auth_env,
+            remote=True,
+        )
+        logger.info(
+            "agent_job_published",
+            extra={
+                "event": "agent_job_published",
+                "job_id": job_id,
+                "branch": branch,
+                "files": len(changed_files),
+            },
+        )
+        result = PublishResult(
+            branch=branch,
+            commit_sha=commit_sha,
+            changed_files=changed_files,
+            base_bundle=base_bundle,
+        )
+        # Ownership of the unlinked temporary file passes to the caller.
+        base_bundle = None
+        return result
+    finally:
+        if base_bundle is not None:
+            base_bundle.close()
+
+
 def publish_patch(
     *,
     job_id: str,
@@ -607,42 +667,16 @@ def publish_patch(
                 own_pushes=own,
                 auth_env=auth_env,
             )
-        base_bundle = (
-            build_base_bundle(str(repo), commit=commit_sha, prerequisite=base)
-            if include_base_bundle
-            else None
-        )
-        # Every local step has succeeded. The caller records the commit before
-        # it is pushed, so a push that lands while this process loses track of
-        # it (a timeout after the remote accepted it, a crash, a later step
-        # that fails) is still the group's own to the next publication.
-        if before_push is not None:
-            before_push(commit_sha)
-        # Pinned refspec: this process can only ever write the one branch, and
-        # never force-updates it. Ordinary receive-pack is also the final
-        # compare-and-set fence: it creates the branch, fast-forwards it, or
-        # changes nothing when it already names this commit, and fails
-        # transiently if somebody advanced it while we reconciled.
-        _run_git(
-            ["push", "--quiet", "origin", f"{commit_sha}:refs/heads/{branch}"],
-            cwd=repo,
-            env_extra=auth_env,
-            remote=True,
-        )
-        logger.info(
-            "agent_job_published",
-            extra={
-                "event": "agent_job_published",
-                "job_id": job_id,
-                "branch": branch,
-                "files": len(gate.changed_files),
-            },
-        )
-        return PublishResult(
+        return _push_with_base_bundle(
+            repo=repo,
+            job_id=job_id,
             branch=branch,
             commit_sha=commit_sha,
+            base_sha=base,
             changed_files=gate.changed_files,
-            base_bundle=base_bundle,
+            include_base_bundle=include_base_bundle,
+            before_push=before_push,
+            auth_env=auth_env,
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -664,8 +698,8 @@ def fetch_base_bundle(
     commit_sha: str,
     auth_env: dict[str, str] | None = None,
     base_sha: str | None = None,
-) -> bytes:
-    """Fetch one published commit and return its bounded credential-free bundle.
+) -> BinaryIO:
+    """Fetch one published commit into a bounded seekable bundle file.
 
     Two commits deep, so the parent is at hand to leave out of the bundle when
     it is the base the workspace holds. The credential travels as in

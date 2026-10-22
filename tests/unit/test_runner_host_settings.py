@@ -209,7 +209,9 @@ def _run_new_chat(
     control = Mock(spec=runner_mod.ControlPlane)
     control.mark_chat_sandbox_running.return_value = {}
     if job.thread_attachment_count:
-        control.list_attachments.return_value = [{"id": 17}]
+        control.list_attachments.return_value = [
+            {"id": 17, "path": "replacement.txt", "size_bytes": len(b"replacement")}
+        ]
         control.read_attachment.return_value = ("replacement.txt", b"replacement")
 
     def reserve(seed):
@@ -302,7 +304,10 @@ def _run_new_chat(
     )
 
 
-def test_recovered_initial_archive_imports_a_replacement_jobs_new_uploads(monkeypatch):
+def test_recovered_initial_archive_imports_a_replacement_jobs_new_uploads(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "cloud_agent_host.upload_import.credential_path", lambda: tmp_path / "host.json"
+    )
     recovered_base = "c" * 40
     replacement = replace(
         _JOB,

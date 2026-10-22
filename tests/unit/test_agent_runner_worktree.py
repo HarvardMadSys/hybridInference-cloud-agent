@@ -383,7 +383,9 @@ def test_a_missing_follow_up_base_ships_only_what_it_adds_to_a_held_parent(
 
     class Manager:
         def import_base_bundle(self, spec, bundle, *, commit, env):
-            imported.update(bundle=bundle, commit=commit)
+            payload = bundle.read()
+            bundle.seek(0)
+            imported.update(bundle=payload, commit=commit)
 
     monkeypatch.setattr(runner_mod, "repo_clone_base_url", lambda **_: base)
     monkeypatch.setattr(runner_mod, "_sandbox_has_commit", has_commit)

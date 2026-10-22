@@ -389,7 +389,7 @@ describe('IntegrationsView', () => {
     expect(within(section).queryByRole('img')).not.toBeInTheDocument();
     expect(within(section).queryByText(insights.suggestions[0].title)).not.toBeInTheDocument();
     const toggle = within(section).getByRole('switch', { name: 'Use memory' });
-    vi.mocked(getMemories).mockResolvedValueOnce({ ...memory, enabled: false });
+    vi.mocked(setMemoryEnabled).mockResolvedValueOnce({ ...memory, enabled: false });
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle).not.toBeChecked());
     expect(setMemoryEnabled).toHaveBeenCalledWith(null, false, expect.any(AbortSignal));

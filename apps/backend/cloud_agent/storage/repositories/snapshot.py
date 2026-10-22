@@ -29,6 +29,7 @@ from cloud_agent.storage._sql.sandbox import (
     group_is_quiet,
     quiet_idle_deadline,
 )
+from cloud_agent.storage._sql.snapshot_title_context import snapshot_title_context
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -499,11 +500,18 @@ class PostgresSnapshotRepository:
             )
             if group is None:
                 return None
+            title_context = await snapshot_title_context(
+                conn,
+                snapshot_id=snapshot_id,
+                sandbox_id=sandbox_id,
+                workspace_epoch=workspace_epoch,
+            )
             state = "captured" if patch.strip() else "published"
             row = await conn.fetchrow(
                 """
                 UPDATE agent_sandbox_snapshots
                 SET patch_content = $5, content_sha256 = $6, state = $7,
+                    title_context = $8::jsonb,
                     published_commit_sha = CASE WHEN $7 = 'published' THEN base_sha END,
                     captured_at = NOW(),
                     published_at = CASE WHEN $7 = 'published' THEN NOW() END,
@@ -519,6 +527,7 @@ class PostgresSnapshotRepository:
                 patch,
                 content_sha256,
                 state,
+                title_context,
             )
             if row is None:
                 return None
@@ -875,58 +884,7 @@ class PostgresSnapshotRepository:
                            FROM agent_snapshot_jobs included
                            WHERE included.snapshot_id = s.id
                        ) AS included_job_ids,
-                       COALESCE((
-                           SELECT jsonb_agg(summary.content ORDER BY included.created_at, included.job_id)
-                           FROM agent_snapshot_jobs included
-                           JOIN agent_jobs included_job ON included_job.id = included.job_id
-                           JOIN LATERAL (
-                               SELECT LEFT(message.content, 4000) AS content
-                               FROM agent_thread_messages message
-                               JOIN agent_job_events event ON event.id = message.source_event_id
-                               WHERE message.job_id = included.job_id
-                                 AND message.thread_id = included_job.thread_id
-                                 AND message.role = 'assistant'
-                                 AND event.attempt_id = included_job.current_attempt_id
-                               ORDER BY message.id DESC
-                               LIMIT 1
-                           ) summary ON TRUE
-                           WHERE included.snapshot_id = s.id
-                       ), '[]'::jsonb) AS session_summaries,
-                       COALESCE((
-                           SELECT jsonb_agg(
-                               jsonb_build_object(
-                                   'thread_id', message.thread_id,
-                                   'job_id', message.job_id,
-                                   'role', message.role,
-                                   'content', message.content
-                               ) ORDER BY history.thread_id, history.turn_no,
-                                   CASE WHEN message.role = 'user' AND NOT message.mid_turn
-                                        THEN 0 ELSE 1 END,
-                                   message.id
-                           )
-                           FROM (
-                               SELECT included_job.thread_id, MAX(included_job.turn_no) AS turn_no
-                               FROM agent_sandbox_snapshots captured
-                               JOIN agent_snapshot_jobs included ON included.snapshot_id = captured.id
-                               JOIN agent_jobs included_job ON included_job.id = included.job_id
-                               WHERE captured.sandbox_id = s.sandbox_id
-                                 AND captured.workspace_epoch <= s.workspace_epoch
-                               GROUP BY included_job.thread_id
-                           ) boundary
-                           -- A Fork's copies of its source's turns are read
-                           -- once, in the chat they were copied from.
-                           JOIN agent_jobs history ON history.thread_id = boundary.thread_id
-                               AND history.turn_no <= boundary.turn_no
-                               AND history.fork_source_job_id IS NULL
-                           JOIN agent_thread_messages message ON message.job_id = history.id
-                               AND message.thread_id = history.thread_id
-                           LEFT JOIN agent_job_events event ON event.id = message.source_event_id
-                           WHERE message.role = 'user'
-                              OR (message.role = 'assistant' AND (
-                                  message.source_event_id IS NULL
-                                  OR event.attempt_id = history.current_attempt_id
-                              ))
-                       ), '[]'::jsonb) AS session_messages,
+                       s.title_context,
                        g.origin_thread_id,
                        g.generation, g.container_id, g.runtime_id,
                        g.runtime_version, g.sandbox_image_digest,
@@ -1022,6 +980,28 @@ class PostgresSnapshotRepository:
                             "workspace_epoch": snapshot["workspace_epoch"],
                         },
                     )
+                title_context = load_json(snapshot["title_context"]) or {}
+                if not isinstance(title_context, dict):
+                    title_context = {}
+                stored_messages = title_context.get("messages")
+                session_messages = []
+                if isinstance(stored_messages, list):
+                    session_messages = [
+                        {
+                            key: message.get(key)
+                            for key in ("thread_id", "job_id", "role", "content")
+                        }
+                        for message in stored_messages
+                        if isinstance(message, dict)
+                    ]
+                stored_summaries = title_context.get("summaries")
+                session_summaries = []
+                if isinstance(stored_summaries, list):
+                    session_summaries = [
+                        summary["content"]
+                        for summary in stored_summaries
+                        if isinstance(summary, dict) and isinstance(summary.get("content"), str)
+                    ]
                 return {
                     "publication_kind": "shared_snapshot",
                     "snapshot_id": int(snapshot["snapshot_id"]),
@@ -1029,8 +1009,11 @@ class PostgresSnapshotRepository:
                     "sandbox_id": snapshot["sandbox_id"],
                     "workspace_epoch": int(snapshot["workspace_epoch"]),
                     "included_job_ids": load_json(snapshot["included_job_ids"]) or [],
-                    "session_summaries": load_json(snapshot["session_summaries"]) or [],
-                    "session_messages": load_json(snapshot["session_messages"]) or [],
+                    "session_summaries": session_summaries,
+                    "session_summary_count": title_context.get(
+                        "summary_count", len(session_summaries)
+                    ),
+                    "session_messages": session_messages,
                     "job_id": snapshot["id"],
                     "anchor_job_id": snapshot["id"],
                     "thread_id": snapshot["thread_id"],

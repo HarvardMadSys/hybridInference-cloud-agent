@@ -19,13 +19,20 @@ from cloud_agent import publish_worker
 from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.publish_worker import GitHubCredential
 from cloud_agent.publisher import PublishError, PublishResult
+from cloud_agent.storage._sql.snapshot_title_context import (
+    TITLE_CONTEXT_MESSAGE_CHARS,
+    TITLE_CONTEXT_MESSAGE_LIMIT,
+    TITLE_CONTEXT_TOTAL_CHARS,
+)
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.snapshot import PUBLISH_MAX_ATTEMPTS
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
-async def _capture_settled_workspace(store, key: str) -> tuple[dict, dict, str]:
+async def _capture_settled_workspace(
+    store, key: str, *, pool=None, extra_transcript_messages: int = 0
+) -> tuple[dict, dict, str]:
     """Run a distinct shared turn through settlement and immutable capture."""
     host = f"publish-retry-{key}"
     credential_hash = f"credential-{key}"
@@ -112,6 +119,21 @@ async def _capture_settled_workspace(store, key: str) -> tuple[dict, dict, str]:
         from_states=("running",),
         to_state="succeeded",
     )
+    if extra_transcript_messages:
+        assert pool is not None
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO agent_thread_messages (thread_id, job_id, role, content)
+                SELECT $1, $2, 'assistant',
+                       series::text || ':' || repeat('x', $4)
+                FROM generate_series(1, $3) AS series
+                """,
+                job["thread_id"],
+                job["id"],
+                extra_transcript_messages,
+                TITLE_CONTEXT_MESSAGE_CHARS * 2,
+            )
     # The owner publishes the finished turn; a turn boundary publishes nothing.
     requested = await store.snapshot.request_snapshot_publication(
         thread_id=job["thread_id"], user_id=job["user_id"]
@@ -134,6 +156,37 @@ async def _capture_settled_workspace(store, key: str) -> tuple[dict, dict, str]:
         == "captured"
     )
     return job, capture, patch
+
+
+async def test_publication_claim_context_is_bounded_for_a_thousand_message_transcript(store, pool):
+    """Claim transfer/decode size is independent of the accumulated transcript."""
+    _job, capture, _patch = await _capture_settled_workspace(
+        store,
+        "bounded-title-context",
+        pool=pool,
+        extra_transcript_messages=1000,
+    )
+
+    publication = await store.snapshot.claim_for_publish()
+
+    assert publication is not None
+    assert publication["snapshot_id"] == capture["snapshot_id"]
+    assert 0 < len(publication["session_messages"]) <= TITLE_CONTEXT_MESSAGE_LIMIT
+    assert all(
+        len(message["content"]) <= TITLE_CONTEXT_MESSAGE_CHARS
+        for message in publication["session_messages"]
+    )
+    assert publication["session_messages"][-1]["content"].startswith("1000:")
+    assert (
+        sum(len(message["content"]) for message in publication["session_messages"])
+        <= TITLE_CONTEXT_TOTAL_CHARS
+    )
+    async with pool.acquire() as conn:
+        stored_bytes = await conn.fetchval(
+            "SELECT octet_length(title_context::text) FROM agent_sandbox_snapshots WHERE id = $1",
+            capture["snapshot_id"],
+        )
+    assert stored_bytes <= TITLE_CONTEXT_TOTAL_CHARS + TITLE_CONTEXT_MESSAGE_LIMIT * 250
 
 
 async def _insert_later_snapshot(pool, *, job: dict, capture: dict, patch: str) -> int:

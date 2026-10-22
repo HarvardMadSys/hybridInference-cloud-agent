@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import hmac
 import math
 import secrets
 from dataclasses import dataclass
@@ -20,9 +19,12 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
-from cryptography.fernet import InvalidToken
 
-from cloud_agent.domain_cipher import domain_fernet
+from cloud_agent.credential_cipher import (
+    USER_CREDENTIAL_ENCRYPTION_KEY,
+    CredentialCipher,
+    CredentialCipherError,
+)
 from cloud_agent.settings import number_setting, settings_environment
 
 if TYPE_CHECKING:
@@ -49,10 +51,10 @@ def _refresh_lease_seconds(request_timeout_s: float) -> int:
 #: read under this one, so migrating them (task H1) is a decrypt-with-old,
 #: encrypt-with-new step rather than a copy. Copying the ciphertext produces a
 #: connection that looks present and fails at first use.
-ENV_ENCRYPTION_KEY = "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY"
+ENV_ENCRYPTION_KEY = USER_CREDENTIAL_ENCRYPTION_KEY
 
 
-class SourceControlError(Exception):
+class SourceControlError(CredentialCipherError):
     """A safe-to-display source-control integration failure."""
 
 
@@ -67,7 +69,7 @@ class OAuthStateError(SourceControlError):
 SOURCE_CONTROL_DOMAIN = b"hybridinference/source-control/v1"
 
 
-class SourceControlCipher:
+class SourceControlCipher(CredentialCipher):
     """Encrypt provider secrets with a domain-separated server key."""
 
     def __init__(self, secret: str | None = None, *, domain: bytes = SOURCE_CONTROL_DOMAIN) -> None:
@@ -78,22 +80,13 @@ class SourceControlCipher:
             raise SourceControlError(
                 f"{ENV_ENCRYPTION_KEY} must be set before source-control credentials can be stored"
             )
-        self._fernet = domain_fernet(material, domain)
-        self._mac_key = hashlib.sha256(domain + b"\0mac\0" + material.encode("utf-8")).digest()
-
-    def encrypt(self, value: str) -> str:
-        """Return authenticated ciphertext; plaintext is never persisted."""
-        return self._fernet.encrypt(value.encode("utf-8")).decode("ascii")
-
-    def mac(self, value: bytes) -> str:
-        """Keyed SHA-256 of ``value``: equal inputs compare equal, and neither is kept."""
-        return hmac.new(self._mac_key, value, hashlib.sha256).hexdigest()
+        super().__init__(material, domain=domain)
 
     def decrypt(self, value: str) -> str:
         """Decrypt a persisted secret and fail closed on corruption."""
         try:
-            return self._fernet.decrypt(value.encode("ascii")).decode("utf-8")
-        except (InvalidToken, UnicodeError, ValueError) as exc:
+            return super().decrypt(value)
+        except CredentialCipherError as exc:
             raise SourceControlError(
                 "stored source-control credential could not be decrypted"
             ) from exc

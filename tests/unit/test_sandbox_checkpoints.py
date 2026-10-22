@@ -748,6 +748,9 @@ def test_content_store_export_copies_only_the_new_layer_in_docker_save_layout(tm
     }
     assert legacy[0]["RepoTags"] == ["freeinference-checkpoint/abc:def"]
     assert len(legacy[0]["Layers"]) == 3
+    assert hashlib.sha256(output.getvalue()).hexdigest() == (
+        "23d69bb303176b74c9cd27e6e2363ef2a650be23604acc58b71eb30f2117bd88"
+    )
     # The same structural checks the save path applies hold for this archive.
     assert export_checkpoint_archive(
         io.BytesIO(output.getvalue()),

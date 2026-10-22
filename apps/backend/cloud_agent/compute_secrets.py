@@ -10,9 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any, Protocol
 
-from cryptography.fernet import Fernet, InvalidToken
-
-from cloud_agent.domain_cipher import domain_fernet
+from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
 from cloud_agent.settings import setting_env
 
 ENV_COMPUTE_SECRET_KEY = "AGENT_COMPUTE_SECRET_KEY"
@@ -42,7 +40,7 @@ class ComputeSecretStore:
         self._connections = connections
         self._key_override = key
         self._material = ""
-        self._cipher: Fernet | None = None
+        self._cipher: CredentialCipher | None = None
         self._refresh_cipher()
 
     def _refresh_cipher(self) -> None:
@@ -57,7 +55,7 @@ class ComputeSecretStore:
         if material:
             if len(material.encode()) < 32:
                 raise ComputeSecretError("compute encryption key must contain at least 32 bytes")
-            self._cipher = domain_fernet(material, _DOMAIN)
+            self._cipher = CredentialCipher(material, domain=_DOMAIN)
         self._material = material
 
     @property
@@ -75,13 +73,13 @@ class ComputeSecretStore:
         """Bind a secret to its owner before authenticated encryption."""
         cipher = self._require_cipher()
         payload = json.dumps({"id": connection_id, "provider": provider_id, "secret": secret})
-        return cipher.encrypt(payload.encode()).decode("ascii")
+        return cipher.encrypt(payload)
 
     def decrypt(self, connection_id: str, provider_id: str, ciphertext: str) -> str:
         """Verify identity binding as well as integrity before returning plaintext."""
         cipher = self._require_cipher()
         try:
-            payload = json.loads(cipher.decrypt(ciphertext.encode("ascii")))
+            payload = json.loads(cipher.decrypt(ciphertext))
             if (
                 not isinstance(payload, dict)
                 or payload.get("id") != connection_id
@@ -90,7 +88,7 @@ class ComputeSecretStore:
             ):
                 raise ValueError("invalid binding")
             return str(payload["secret"])
-        except (InvalidToken, ValueError, UnicodeError, TypeError):
+        except (CredentialCipherError, ValueError, TypeError):
             raise ComputeSecretError("compute credential cannot be decrypted") from None
 
     async def resolve(self, reference: str) -> str:
@@ -109,7 +107,7 @@ class ComputeSecretStore:
             return known_hosts
         return self.decrypt(connection_id, record["provider_id"], record["secret_ciphertext"])
 
-    def _require_cipher(self) -> Fernet:
+    def _require_cipher(self) -> CredentialCipher:
         self._refresh_cipher()
         if self._cipher is None:
             raise ComputeSecretError("compute secret storage is not configured")
