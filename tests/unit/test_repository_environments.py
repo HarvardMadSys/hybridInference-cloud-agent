@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from cloud_agent.source_control import SourceControlCipher, SourceControlError
+from cloud_agent_host import environment_preparation
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.environment import (
@@ -188,6 +190,47 @@ class _Backend:
     def spawn(self, spec):
         self.calls.append(spec)
         return _Process("demo-secret-123456", 1 if self.fail else 0)
+
+
+def test_running_preparation_receipts_are_coalesced_but_final_state_is_durable(
+    monkeypatch, tmp_path
+):
+    """Chatty setup output must not turn every chunk into an fsync."""
+    now = [0.0]
+    backend = _Backend()
+
+    class _ChattyProcess(_Process):
+        def lines(self):
+            for index in range(12):
+                now[0] += 1
+                yield f"line {index}\n"
+
+    def spawn(spec):
+        backend.calls.append(spec)
+        return _ChattyProcess()
+
+    backend.spawn = spawn
+    saves: list[dict[str, object]] = []
+    monkeypatch.setattr(environment_preparation.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        EnvironmentPreparation,
+        "_save",
+        staticmethod(lambda _path, receipt: saves.append(json.loads(json.dumps(receipt)))),
+    )
+
+    result = EnvironmentPreparation(tmp_path).prepare(
+        backend, BoundEnvironment(binding_id="bound", setup_script="install")
+    )
+
+    # Initial running receipt, then only two five-second progress checkpoints.
+    running_setup = [
+        save
+        for save in saves
+        if any(step["phase"] == "setup" and step["state"] == "running" for step in save["steps"])
+    ]
+    assert len(running_setup) == 3
+    assert [step["state"] for step in result["steps"]] == ["succeeded", "succeeded"]
+    assert saves[-1]["steps"][0]["output"].endswith("line 11\n")
 
 
 def test_preparation_is_fixed_across_member_and_broker_restarts(tmp_path):

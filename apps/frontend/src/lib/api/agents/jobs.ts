@@ -17,6 +17,8 @@ export type AgentJobApiState =
   | 'cancelled';
 
 export interface AgentJobApi {
+  /** History pages may omit large fields; the job detail remains complete. */
+  thread_preview?: boolean;
   skills?: SelectedSkillApi[];
   /** How this turn came to exist. `goal` turns are the platform's own rounds. */
   turn_source?: 'human' | 'goal';

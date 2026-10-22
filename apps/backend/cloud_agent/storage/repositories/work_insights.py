@@ -7,6 +7,19 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import asyncpg
 
+RECENT_REQUESTS_SQL = """
+    SELECT left(m.content, 8000) AS content
+    FROM agent_recent_requests r
+    JOIN agent_thread_messages m ON m.id = r.message_id
+    JOIN agent_jobs j ON j.id = m.job_id AND j.thread_id = m.thread_id
+    JOIN agent_threads t ON t.id = m.thread_id AND t.user_id = j.user_id
+    WHERE r.user_id = $1 AND j.user_id = $1 AND t.deleted_at IS NULL
+      AND m.role = 'user' AND j.fork_source_job_id IS NULL
+      AND (j.turn_source <> 'goal' OR m.mid_turn)
+    ORDER BY r.created_at DESC, r.message_id DESC
+    LIMIT $2
+"""
+
 
 class PostgresWorkInsightsRepository:
     """The owner's own recent requests; nothing is written."""
@@ -23,17 +36,7 @@ class PostgresWorkInsightsRepository:
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                """
-                SELECT left(m.content, 8000) AS content
-                FROM agent_thread_messages m
-                JOIN agent_jobs j ON j.id = m.job_id AND j.thread_id = m.thread_id
-                JOIN agent_threads t ON t.id = m.thread_id AND t.user_id = j.user_id
-                WHERE j.user_id = $1 AND t.deleted_at IS NULL
-                  AND m.role = 'user' AND j.fork_source_job_id IS NULL
-                  AND (j.turn_source <> 'goal' OR m.mid_turn)
-                ORDER BY m.created_at DESC, m.id DESC
-                LIMIT $2
-                """,
+                RECENT_REQUESTS_SQL,
                 user_id,
                 min(max(limit, 0), 50),
             )

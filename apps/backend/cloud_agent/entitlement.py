@@ -35,10 +35,11 @@ a verdict, and never access.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.github_app import UserAuthorizationRevoked
+from cloud_agent.github_app import AppNotInstalled, UserAuthorizationRevoked
 from cloud_agent.github_user_token import forget_revoked_token, user_access_token
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import setting_env
@@ -54,6 +55,7 @@ REPO_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99
 _REPO_RE = re.compile(REPO_PATTERN)
 
 _ALLOWLIST_VAR = "AGENT_REPO_ALLOWLIST"
+_INSTALLATION_LOOKUP_CONCURRENCY = 8
 
 
 class RepoNotAllowed(Exception):
@@ -116,30 +118,116 @@ async def _connected_repos(
     token = await user_access_token(user_id, store=store, app_credentials=app_credentials)
     if token is None:
         return set(), True, True
-    repos: set[str] = set()
-    complete = True
-    for installation_id in installation_ids:
-        try:
+    cache_one = getattr(app_credentials, "cached_user_installation_repositories", None)
+    remember_one = getattr(app_credentials, "remember_user_installation_repositories", None)
+    semaphore = asyncio.Semaphore(_INSTALLATION_LOOKUP_CONCURRENCY)
+
+    async def repositories(installation_id: int) -> list[str]:
+        cached_one = cache_one(user_id, installation_id) if callable(cache_one) else None
+        if cached_one is not None:
+            return list(cached_one)
+        async with semaphore:
             names = await app_credentials.writable_repositories_for_user(
                 token.value, installation_id
             )
-        except UserAuthorizationRevoked:
-            await forget_revoked_token(user_id, token, store=store)
-            return set(), True, True
-        except Exception:
+        if callable(remember_one):
+            remember_one(user_id, installation_id, names)
+        return names
+
+    results = await asyncio.gather(
+        *(repositories(installation_id) for installation_id in installation_ids),
+        return_exceptions=True,
+    )
+    if any(isinstance(result, UserAuthorizationRevoked) for result in results):
+        await forget_revoked_token(user_id, token, store=store)
+        forget_user = getattr(app_credentials, "forget_user", None)
+        if callable(forget_user):
+            forget_user(user_id)
+        return set(), True, True
+    repos: set[str] = set()
+    complete = True
+    for result in results:
+        if isinstance(result, BaseException):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
             # One unreachable installation must not hide the others, and must
             # not widen anything either — it simply contributes nothing, and
-            # an answer missing it is not remembered.
+            # an answer missing it is not remembered as complete.
             complete = False
             logger.warning(
                 "agent_github_user_repositories_unavailable",
                 extra={"event": "agent_github_user_repositories_unavailable"},
             )
             continue
-        repos.update(name for name in names if _REPO_RE.match(name or ""))
+        repos.update(name for name in result if _REPO_RE.match(name or ""))
     if complete:
         app_credentials.remember_user_repositories(user_id, installation_ids, sorted(repos))
     return repos, False, complete
+
+
+async def _connected_repo(
+    repo: str, user_id: str, *, store: SourceControlRepository, app_credentials: Any
+) -> tuple[bool, bool, bool]:
+    """Verify one target in constant upstream work.
+
+    The repository passes only when the App installation covering it is one
+    the user saved *and* GitHub, asked with that user's token, reports push
+    permission. Repository-list caches are positive witnesses only: picker
+    listings are intentionally bounded and may also lag a permission change,
+    so absence from one must fall through to the targeted check. A targeted
+    answer is never promoted to a complete list.
+    """
+    grants = await store.list_repo_grants(user_id=user_id)
+    if not grants:
+        return False, False, True
+    installation_ids = tuple(sorted(int(grant["installation_id"]) for grant in grants))
+    cached = app_credentials.cached_user_repositories(user_id, installation_ids)
+    if cached is not None and any(name.casefold() == repo.casefold() for name in cached):
+        return True, False, True
+    token = await user_access_token(user_id, store=store, app_credentials=app_credentials)
+    if token is None:
+        return False, True, True
+    try:
+        # The token minter may remember an installation id briefly so ordinary
+        # calls avoid an App-JWT lookup. It cannot be the saved-grant fence:
+        # uninstall/reinstall creates a new installation while the user's App
+        # authorization can remain valid, so verify the current id here.
+        installation_id = await app_credentials.installation_id_for(repo, fresh=True)
+    except AppNotInstalled:
+        return False, False, True
+    except Exception:
+        return False, False, False
+    if installation_id not in installation_ids:
+        return False, False, True
+
+    cache_installation = getattr(app_credentials, "cached_user_installation_repositories", None)
+    cached_installation = (
+        cache_installation(user_id, installation_id) if callable(cache_installation) else None
+    )
+    if cached_installation is not None and any(
+        name.casefold() == repo.casefold() for name in cached_installation
+    ):
+        return True, False, True
+    cache_permission = getattr(app_credentials, "cached_user_repository_permission", None)
+    cached_permission = (
+        cache_permission(user_id, installation_id, repo) if callable(cache_permission) else None
+    )
+    if cached_permission is not None:
+        return bool(cached_permission), False, True
+    try:
+        allowed = await app_credentials.user_can_push_repository(token.value, repo)
+    except UserAuthorizationRevoked:
+        await forget_revoked_token(user_id, token, store=store)
+        forget_user = getattr(app_credentials, "forget_user", None)
+        if callable(forget_user):
+            forget_user(user_id)
+        return False, True, True
+    except Exception:
+        return False, False, False
+    remember_permission = getattr(app_credentials, "remember_user_repository_permission", None)
+    if callable(remember_permission):
+        remember_permission(user_id, installation_id, repo, allowed)
+    return allowed, False, True
 
 
 async def repos_for_user(
@@ -195,17 +283,25 @@ async def require_entitled_repo(
     # to enumerate every repository under that owner.
     if repo_is_allowed(repo, env):
         return
-    connected: set[str] = set()
+    authorized = False
     reconnect = False
     complete = True
     if store is not None and app_credentials is not None:
         try:
-            connected, reconnect, complete = await _connected_repos(
-                user_id, store=store, app_credentials=app_credentials
-            )
+            if callable(getattr(app_credentials, "installation_id_for", None)) and callable(
+                getattr(app_credentials, "user_can_push_repository", None)
+            ):
+                authorized, reconnect, complete = await _connected_repo(
+                    repo, user_id, store=store, app_credentials=app_credentials
+                )
+            else:
+                connected, reconnect, complete = await _connected_repos(
+                    user_id, store=store, app_credentials=app_credentials
+                )
+                authorized = any(entry.casefold() == repo.casefold() for entry in connected)
         except Exception:
             raise RepoAccessUnavailable("Repository access is temporarily unavailable.") from None
-    if any(entry.lower() == repo.lower() for entry in connected):
+    if authorized:
         return
     if not complete:
         raise RepoAccessUnavailable("Repository access is temporarily unavailable.")

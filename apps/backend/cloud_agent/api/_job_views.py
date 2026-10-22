@@ -154,6 +154,7 @@ def _job_response(
         turn_no=job.get("turn_no") or 1,
         repo=job["repo"],
         task_prompt=job["task_prompt"],
+        thread_preview=bool(job.get("thread_preview")),
         title=job.get("title"),
         title_source=job.get("title_source"),
         runtime=job["runtime"],

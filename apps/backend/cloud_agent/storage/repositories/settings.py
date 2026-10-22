@@ -29,11 +29,12 @@ class PostgresSettingsRepository:
         """Use the control plane's existing connection pool."""
         self._pool = pool
 
-    async def read_settings(self) -> tuple[int, dict[str, Any]]:
-        """Return the revision and encoded values, or revision minus one before initialization."""
+    async def read_settings(self, *, after_revision: int = -1) -> tuple[int, dict[str, Any]]:
+        """Read a newer snapshot, or ``(-1, {})`` when none is available."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                'SELECT revision, "values" FROM agent_settings WHERE id = TRUE'
+                'SELECT revision, "values" FROM agent_settings WHERE id = TRUE AND revision > $1',
+                after_revision,
             )
         return _snapshot(row)
 

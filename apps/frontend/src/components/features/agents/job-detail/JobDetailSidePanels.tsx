@@ -115,6 +115,7 @@ export function JobDetailSidePanels({
                   jobId={job.id}
                   repo={job.repo}
                   onTerminal={() => openWorkspace('terminal')}
+                  visible={workspaceOpen}
                 />
               )}
             </div>

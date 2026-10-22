@@ -2629,6 +2629,34 @@ async def test_an_expired_residency_cannot_be_revived_by_a_late_heartbeat(db, st
     ]
 
 
+async def test_residency_reaping_pages_and_skips_locked_members(db, store, hosts):
+    await _enrol(store, "runner-a", hosts=hosts, slots_total=4)
+    threads = []
+    for _ in range(3):
+        job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts)
+        threads.append(job["thread_id"])
+        await store.residency.establish_residency(
+            thread_id=job["thread_id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            host="runner-a",
+            runtime_id="claude-code",
+            runtime_version=None,
+            ttl_seconds=-1,
+        )
+    async with db.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "SELECT 1 FROM agent_thread_sandbox_memberships WHERE thread_id=$1 FOR UPDATE",
+            threads[0],
+        )
+        first = await asyncio.wait_for(store.residency.reap_expired_residencies(limit=1), 2)
+        assert len(first) == 1
+        assert first[0]["thread_id"] != threads[0]
+    rest = await store.residency.reap_expired_residencies(limit=2)
+    assert {row["thread_id"] for row in first + rest} == set(threads)
+    assert await store.residency.reap_expired_residencies(limit=1) == []
+
+
 async def test_an_expired_residency_rejects_and_revokes_a_late_grant(db, store, hosts):
     """A mint that loses the clock race leaves neither a link nor a token."""
     await _enrol(store, "runner-a", hosts=hosts)

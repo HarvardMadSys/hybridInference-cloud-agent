@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 import pytest
-from deploy.release import release_manifest as rm, smoke
+from deploy.release import artifact_catalog, release_manifest as rm, smoke
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SANDBOX_DOCKERFILE = REPO_ROOT / "deploy/sandbox/Dockerfile.agent-sandbox"
@@ -23,7 +23,9 @@ COMMIT = "4af1b771ac8f736a1be24f20cb307012af114a18"
 
 
 def test_every_role_a_release_carries_has_a_start_check() -> None:
-    assert sorted(smoke.ROLES) == sorted(rm.EXPECTED_PLATFORMS), (
+    expected = ["control", "runner", "sandbox", "tunnel", "web"]
+    assert sorted(smoke.ROLES) == expected
+    assert sorted({entry.role for entry in artifact_catalog.artifacts()}) == expected, (
         "a role in the release contract without a start check is an image that reaches a "
         "release having never been run"
     )
@@ -31,7 +33,18 @@ def test_every_role_a_release_carries_has_a_start_check() -> None:
 
 def test_web_is_checked_once_per_variant() -> None:
     assert smoke.ROLES["web"].variants == ("root", "agents")
-    assert set(smoke.ROLES["web"].variants) == set(rm.WEB_VARIANTS.values())
+    assert set(smoke.ROLES["web"].variants) == {
+        entry.variant for entry in artifact_catalog.artifacts() if entry.role == "web"
+    }
+
+
+def test_every_catalog_cell_has_an_independently_registered_smoke_case() -> None:
+    expected = {
+        entry.smoke_key: (entry.role, entry.variant) for entry in artifact_catalog.artifacts()
+    }
+    actual = {key: (case.role, case.variant) for key, case in smoke.SMOKE_CASES.items()}
+    assert expected == actual
+    assert all(callable(case.start) for case in smoke.SMOKE_CASES.values())
 
 
 @pytest.mark.parametrize("role", sorted(smoke.ROLES))
