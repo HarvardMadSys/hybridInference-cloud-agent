@@ -378,7 +378,8 @@ class SandboxDeletionBackupService:
             if finished is not None:
                 if finished.get("identity") != self._identity_dict(identity):
                     raise SessionLeaseLost("sandbox discard request identity changed")
-                # A receipt written before the sandbox id was recorded has none.
+                # Only a target-absent discard records the sandbox id, so a
+                # receipt for a container this removed normally has none.
                 recorded_sandbox_id = finished.get("sandbox_id")
                 if recorded_sandbox_id is not None and recorded_sandbox_id != sandbox_id:
                     raise SessionLeaseLost("sandbox discard request identity changed")

@@ -143,7 +143,10 @@ as blocked. From `apps/frontend`, run `npm ci`, `npm run type-check`, and
 - Never commit secrets. This repository will be made public; treat every commit
   as already public.
 - Hosts roll out before the control plane, and each side supports the previous
-  release only. Code kept for an older release is marked
+  release only. Managed compute hosts are the exception: the new control plane
+  rolls them forward once it runs
+  ([Compute resources](docs/developer/operations-compute.md)). Code kept for an
+  older release is marked
   `COMPAT(remove-after=YYYY-MM-DD): <what makes it removable>` in a comment, and
   `tests/unit/test_compat_markers.py` fails once that date has passed: remove
   the code then, or move the date with the reason it must stay.
