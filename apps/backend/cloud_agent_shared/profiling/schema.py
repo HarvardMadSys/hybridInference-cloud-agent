@@ -252,6 +252,98 @@ OUTCOMES = frozenset(
 )
 
 
+#: Root operations emitted by the current record schema. Deriving this from
+#: the boundary table keeps a new operation from acquiring timings without
+#: also acquiring the boundary identity that makes those timings comparable.
+V3_OPERATIONS = frozenset(BOUNDARIES_BY_OPERATION)
+
+
+#: Outcomes emitted by the current record schema. The ingest keeps its own
+#: supported-version policy; this names only the producer vocabulary for v3.
+V3_OUTCOMES = OUTCOMES
+
+
+#: Top-level fields the current v3 producer can emit. Consumer-only aliases
+#: from older producers deliberately stay at the ingest boundary rather than
+#: making this description claim that the current producer writes them.
+V3_RECORD_FIELDS = frozenset(
+    {
+        "schema_version",
+        "measurement_id",
+        "interaction_id",
+        "profiling_run_id",
+        "operation",
+        "boundary_version",
+        "coverage_scope",
+        "start_boundary",
+        "end_boundary",
+        "producer",
+        "producer_instance_id",
+        "clock_domain_id",
+        "duration_us",
+        "outcome",
+        "collection_complete",
+        "end_to_end_complete",
+        "measurement_complete",
+        "boundary_frozen",
+        "observed_at",
+        "facts",
+        "stages",
+        "spans",
+        "milestones",
+        "missing_fragments",
+        "missing_producers",
+        "truncated_fragments",
+        "dropped_spans",
+        "truncated",
+        "producers",
+        "timing_sources",
+        "run_expires_at",
+        "run_source",
+        "control_revision",
+        "startup_outcome",
+        "failure_stage",
+    }
+)
+
+
+#: Fields in a v3 stage. Stages form a recursive duration tree and use the
+#: name ``stage``; they are intentionally distinct from local span records.
+V3_STAGE_FIELDS = frozenset(
+    {
+        "stage",
+        "start_offset_us",
+        "duration_us",
+        "outcome",
+        "truncated",
+        "children",
+        "source",
+        "call_id",
+    }
+)
+
+
+#: Fields in a v3 local span. A span has timeline identity and attributes,
+#: but cannot acquire a stage tree merely because both carry durations.
+V3_SPAN_FIELDS = frozenset(
+    {
+        "span_id",
+        "parent_span_id",
+        "name",
+        "ordinal",
+        "start_offset_us",
+        "duration_us",
+        "outcome",
+        "truncated",
+        "attributes",
+    }
+)
+
+
+#: Fields in a v3 milestone, a named instant rather than an interval.
+V3_MILESTONE_FIELDS = frozenset({"name", "offset_us", "source"})
+
+
 #: Retained for callers written against the first slice.
 _OUTCOMES = OUTCOMES
 

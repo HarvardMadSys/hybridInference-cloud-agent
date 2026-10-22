@@ -4,6 +4,7 @@ import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { onAgentRecordsChanged } from './agentPush';
 import { toDisplayJob } from './adapt';
 import type { ConversationRow } from './conversations';
+import type { ConversationReader } from './sidebarReadQueue';
 
 export interface SidebarConversation extends ConversationRow {
   archived: boolean;
@@ -57,11 +58,9 @@ async function readReordered(
   query: ConversationQuery,
   loaded: ReadRows,
   signal: AbortSignal,
+  readPage: ConversationReader,
 ): Promise<ReadRows | null> {
-  const result = await listAgentConversations(
-    { ...query, cursor: undefined, limit: REORDER_PAGE },
-    signal,
-  );
+  const result = await readPage({ ...query, cursor: undefined, limit: REORDER_PAGE }, signal);
   const page = result.conversations.map(conversationRow);
   const rows = reorderedRows(loaded.rows, page, result.next_cursor);
   return rows && { rows, cursor: result.next_cursor === null ? null : loaded.cursor };
@@ -77,6 +76,7 @@ async function readRows(
   loaded: SidebarConversation[],
   signal: AbortSignal,
   current: () => boolean,
+  readPage: ConversationReader,
 ): Promise<ReadRows | null> {
   const targetCount = next ? 0 : loaded.length;
   const merged = new Map((next ? loaded : []).map((row) => [row.key, row]));
@@ -86,7 +86,7 @@ async function readRows(
     // Each request recomputes conversation activity. Use the API's larger
     // batch size when refreshing history instead of repeating 50-row scans.
     const limit = next ? 50 : Math.min(200, Math.max(50, targetCount - merged.size));
-    const result = await listAgentConversations({ ...query, cursor, limit }, signal);
+    const result = await readPage({ ...query, cursor, limit }, signal);
     if (!current()) return null;
     result.conversations.map(conversationRow).forEach((row) => merged.set(row.key, row));
     following = result.next_cursor;
@@ -112,6 +112,10 @@ export function useConversationList({
   userId,
   refresh = 0,
   reorder = 0,
+  refreshKey,
+  retryKey,
+  managedRefresh = false,
+  readPage = listAgentConversations,
 }: {
   q?: string;
   repo?: string;
@@ -121,6 +125,10 @@ export function useConversationList({
   userId?: string;
   refresh?: number;
   reorder?: number;
+  refreshKey?: string;
+  retryKey?: number;
+  managedRefresh?: boolean;
+  readPage?: ConversationReader;
 } = {}) {
   const identity = JSON.stringify([q, repo, includeArchived, pinned, userId]);
   const [data, setData] = useState<{
@@ -134,6 +142,7 @@ export function useConversationList({
   const [loadMode, setLoadMode] = useState<'foreground' | 'background' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
+  const failedRead = useRef(false);
   const activeRequest = useRef<AbortController | null>(null);
   // The read under way: one of the whole list, or of the page after its cursor.
   const busy = useRef<'all' | 'more' | null>(null);
@@ -167,9 +176,9 @@ export function useConversationList({
             ];
           }),
         }));
-        reload();
+        if (!managedRefresh) reload();
       }),
-    [includeArchived, reload],
+    [includeArchived, managedRefresh, reload],
   );
   // A pushed title or pin shows at once; the list owner's refresh then reads
   // the page again for order and activity.
@@ -214,11 +223,12 @@ export function useConversationList({
           : 'foreground',
       );
       setError(null);
+      failedRead.current = false;
       const query = { q, repo, includeArchived, pinned };
       const current = () => !controller.signal.aborted && generation.current === version;
       try {
         if (mode === 'reorder') {
-          const reordered = await readReordered(query, previous, controller.signal);
+          const reordered = await readReordered(query, previous, controller.signal, readPage);
           if (!current()) return;
           if (reordered) {
             setData({ identity, ...reordered, loadedRefresh: previous.loadedRefresh });
@@ -226,11 +236,13 @@ export function useConversationList({
           }
         }
         const loaded = previous.identity === identity ? previous.rows : [];
-        const read = await readRows(query, next, loaded, controller.signal, current);
+        const read = await readRows(query, next, loaded, controller.signal, current, readPage);
         if (read) setData({ identity, ...read, loadedRefresh: refresh });
       } catch (cause) {
-        if (current())
+        if (current()) {
+          failedRead.current = true;
           setError(cause instanceof Error ? cause.message : 'Could not load conversations');
+        }
       } finally {
         if (activeRequest.current === controller) activeRequest.current = null;
         if (generation.current === version) {
@@ -239,7 +251,7 @@ export function useConversationList({
         }
       }
     },
-    [q, repo, includeArchived, pinned, identity, refresh],
+    [q, repo, includeArchived, pinned, identity, refresh, readPage],
   );
   useEffect(() => {
     const version = ++generation.current;
@@ -252,12 +264,24 @@ export function useConversationList({
       activeRequest.current?.abort();
       activeRequest.current = null;
     };
-  }, [fetchPage, enabled, refresh, tick]);
+  }, [fetchPage, enabled, refresh, refreshKey, tick]);
+  // A failed managed read must not wait for another token change. Each fresh
+  // grouped snapshot retries only failed folders, never successful unchanged ones.
+  useEffect(() => {
+    if (enabled && failedRead.current && !busy.current)
+      void fetchPage(undefined, ++generation.current);
+  }, [retryKey, enabled, fetchPage]);
   const appliedReorder = useRef(reorder);
   useEffect(() => {
     if (reorder === appliedReorder.current) return;
     appliedReorder.current = reorder;
     const loaded = dataRef.current;
+    // The grouped token can arrive after an in-flight read took its snapshot.
+    // Do not acknowledge that newer activity without actually reading it.
+    if (enabled && managedRefresh && busy.current === 'all') {
+      void fetchPage(undefined, ++generation.current);
+      return;
+    }
     // A read of the whole list under way, or none finished yet, already covers
     // the move. A page being loaded does not, so this read replaces it.
     if (
@@ -270,9 +294,10 @@ export function useConversationList({
     // Rows below the first page can be kept only from a read of this `refresh`.
     // Pinned rows keep their place as activity moves, so a page of the pinned
     // list never shows what moved below it.
-    const mode = loaded.loadedRefresh === refresh && !pinned ? 'reorder' : 'full';
+    const mode =
+      loaded.loadedRefresh === refresh && !pinned && !failedRead.current ? 'reorder' : 'full';
     void fetchPage(undefined, ++generation.current, mode);
-  }, [reorder, enabled, identity, refresh, pinned, fetchPage]);
+  }, [reorder, enabled, identity, refresh, pinned, fetchPage, managedRefresh]);
   const rows = data.identity === identity ? data.rows : EMPTY_ROWS;
   const cursor = data.identity === identity ? data.cursor : null;
   const loadedRefresh = data.identity === identity ? data.loadedRefresh : null;

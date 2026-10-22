@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, Response
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
-from cloud_agent.work_insights import ACTIVITY_LIMIT, WorkInsights, build_insights
+from cloud_agent.insights_cache import current_insights
+from cloud_agent.work_insights import ACTIVITY_LIMIT, WorkInsights
 
 if TYPE_CHECKING:
     from cloud_agent.ports.work_insights import WorkInsightsRepository
@@ -31,4 +32,4 @@ async def read_insights(
     messages = await require_store(store).work_insights.recent_requests(
         user["user_id"], ACTIVITY_LIMIT
     )
-    return build_insights(user["user_id"], messages)
+    return current_insights(user["user_id"], messages)

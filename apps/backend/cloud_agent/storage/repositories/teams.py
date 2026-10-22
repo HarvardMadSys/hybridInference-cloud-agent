@@ -38,6 +38,11 @@ from cloud_agent.domain.teams import (
     TeamNotFound,
     TeamRecord,
 )
+from cloud_agent.storage._sql.teams import (
+    APPLICANT_VIEW,
+    TEAM_NOT_FOUND,
+    applicant_from_row,
+)
 
 if TYPE_CHECKING:
     from datetime import timedelta
@@ -63,16 +68,6 @@ _INVITATION_VIEW = """
       LEFT JOIN agent_team_join_requests AS r ON r.invitation_id = i.id
 """
 
-_APPLICANT_VIEW = """
-    SELECT r.id, r.user_id, COALESCE(p.first_name, '') AS first_name,
-           COALESCE(p.last_name, '') AS last_name, r.created_at, i.expires_at,
-           CASE WHEN r.state = 'pending' AND i.expires_at <= NOW() THEN 'expired'
-                ELSE r.state END AS state
-      FROM agent_team_join_requests AS r
-      JOIN agent_team_invitations AS i ON i.id = r.invitation_id
-      LEFT JOIN agent_user_profiles AS p ON p.user_id = r.user_id
-"""
-
 _OWN_REQUEST_VIEW = """
     SELECT r.id, r.team_id, t.name AS team_name, i.created_by_user_id AS inviter_user_id,
            COALESCE(p.first_name, '') AS inviter_first_name,
@@ -85,7 +80,6 @@ _OWN_REQUEST_VIEW = """
       LEFT JOIN agent_user_profiles AS p ON p.user_id = i.created_by_user_id
 """
 
-_NOT_FOUND = "No such team."
 _OWNER_ONLY = "Only the team owner can do this."
 
 
@@ -110,18 +104,6 @@ def _invitation(row: asyncpg.Record) -> InvitationRecord:
         created_at=row["created_at"],
         claimed_by_user_id=row["claimed_by_user_id"],
         request_state=row["request_state"],
-    )
-
-
-def _applicant(row: asyncpg.Record) -> ApplicantRecord:
-    return ApplicantRecord(
-        id=row["id"],
-        user_id=row["user_id"],
-        first_name=row["first_name"],
-        last_name=row["last_name"],
-        state=row["state"],
-        created_at=row["created_at"],
-        expires_at=row["expires_at"],
     )
 
 
@@ -179,7 +161,7 @@ class PostgresTeamRepository:
             actor,
         )
         if team is None or not member_role:
-            raise TeamNotFound(_NOT_FOUND)
+            raise TeamNotFound(TEAM_NOT_FOUND)
         if owner and team["owner_user_id"] != actor:
             raise TeamForbidden(_OWNER_ONLY)
         if manager and team["owner_user_id"] != actor and member_role != "admin":
@@ -189,7 +171,7 @@ class PostgresTeamRepository:
     async def _team_view(self, conn: asyncpg.Connection, actor: str, team_id: str) -> TeamRecord:
         row = await conn.fetchrow(_TEAM_VIEW + " AND t.id = $2", actor, team_id)
         if row is None:
-            raise TeamNotFound(_NOT_FOUND)
+            raise TeamNotFound(TEAM_NOT_FOUND)
         return _team(row, actor)
 
     @staticmethod
@@ -247,11 +229,11 @@ class PostgresTeamRepository:
         self, conn: asyncpg.Connection, team_id: str, request_id: str
     ) -> ApplicantRecord:
         row = await conn.fetchrow(
-            _APPLICANT_VIEW + " WHERE r.team_id = $1 AND r.id = $2", team_id, request_id
+            APPLICANT_VIEW + " WHERE r.team_id = $1 AND r.id = $2", team_id, request_id
         )
         if row is None:
             raise TeamNotFound("No such join request.")
-        return _applicant(row)
+        return applicant_from_row(row)
 
     # ── Teams ─────────────────────────────────────────────────────────
 
@@ -703,13 +685,13 @@ class PostgresTeamRepository:
         async with self._pool.acquire() as conn, conn.transaction():
             await self._lock_team(conn, actor, team_id, manager=True, lock=False)
             rows = await conn.fetch(
-                _APPLICANT_VIEW
+                APPLICANT_VIEW
                 + " WHERE r.team_id = $1 AND r.state = 'pending' AND i.expires_at > NOW()"
                 " ORDER BY r.created_at, r.id LIMIT $2",
                 team_id,
                 LISTING_LIMIT,
             )
-        return [_applicant(row) for row in rows]
+        return [applicant_from_row(row) for row in rows]
 
     async def get_join_request(self, actor: str, team_id: str, request_id: str) -> ApplicantRecord:
         """Read one request as an owner or admin."""

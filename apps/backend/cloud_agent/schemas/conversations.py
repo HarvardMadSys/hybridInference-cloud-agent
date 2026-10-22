@@ -139,6 +139,9 @@ class AgentProject(BaseModel):
     last_activity_at: str | None = None
     pinned_count: int = 0
     pinned_at: str | None = None
+    # Opaque invalidation token, not a permission or pagination cursor.
+    refresh_token: str | None = None
+    membership_token: str | None = None
 
 
 class AgentProjectListResponse(BaseModel):
@@ -211,6 +214,15 @@ class AgentThreadResponse(BaseModel):
     title: str
     messages: list[AgentThreadMessageResponse]
     jobs: list[AgentJobResponse]
+    history_version: int = 2
+    #: Latest turn identity does not depend on which history page is shown.
+    current_job_id: str | None = None
+    #: Continue in the requested direction (older by default, newer with after).
+    next_cursor: str | None = None
+    #: Reload only the mutable tail; retain already loaded older pages.
+    sync_cursor: str | None = None
+    #: False means use the existing /threads/{id}/messages endpoint for the queue.
+    pending_messages_complete: bool = True
     created_at: str | None = None
     updated_at: str | None = None
     archived_at: str | None = None

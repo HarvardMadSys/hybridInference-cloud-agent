@@ -6,10 +6,12 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
+from deploy.host import storage_attestation as host_storage_attestation
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SANDBOX_HOST = REPO_ROOT / "deploy/host/sandbox_host.sh"
@@ -1550,6 +1552,31 @@ def _verdict(env: dict[str, str]) -> dict:
     return json.loads((Path(env["APP_DIR"]) / ".storage-probe" / "verdict.json").read_text())
 
 
+def test_the_extracted_writer_preserves_verdict_bytes_and_permissions(tmp_path: Path) -> None:
+    """The refactor must not silently change the runner-facing file contract."""
+    verdict = tmp_path / ".storage-probe/verdict.json"
+    fixed = host_storage_attestation.datetime.datetime(
+        2026, 10, 22, 3, 4, 5, tzinfo=host_storage_attestation.datetime.UTC
+    )
+    entries = {
+        STORAGE_UPPERDIR: host_storage_attestation.VerdictEntry(
+            "verified", STORAGE_MOUNT_ROOT, "xfs", "123", None
+        )
+    }
+
+    assert host_storage_attestation.write_verdict(verdict, "target-sha", entries, now=lambda: fixed)
+
+    assert verdict.read_bytes() == (
+        b'{"deployment_sha": "target-sha", "entries": {'
+        b'"/var/lib/docker/overlay2/9f1c/diff": {"fstype": "xfs", '
+        b'"mount_root": "/var/lib/docker", "reason": null, "size_bytes": 123, '
+        b'"verdict": "verified"}}, "schema_version": 1, '
+        b'"written_at": "2026-10-22T03:04:05Z"}\n'
+    )
+    assert verdict.parent.stat().st_mode & 0o777 == 0o755
+    assert verdict.stat().st_mode & 0o777 == 0o644
+
+
 def test_a_sound_topology_becomes_a_verified_entry(tmp_path: Path) -> None:
     env = _storage_host(tmp_path)
 
@@ -1819,26 +1846,53 @@ def test_check_does_not_fail_when_the_verdict_directory_cannot_be_created(tmp_pa
     assert "could not prepare the storage-probe directory" in result.stderr
 
 
-def test_no_storage_failure_path_can_end_the_deployment() -> None:
-    """The one exception is the bind-mount source, and it is a separate function."""
-    script = SANDBOX_HOST.read_text()
-    verify = script[
-        script.index("verify_storage_probe() {") : script.index("probe_sandbox_relay() {")
-    ]
-    check = script[script.index("check_shared_live_stack() {") : script.index("# ── Isolation")]
+def test_activate_fails_before_start_when_the_verdict_mount_cannot_be_prepared(
+    tmp_path: Path,
+) -> None:
+    """Preparing the required bind source is the one fatal storage operation."""
+    env = _storage_host(tmp_path)
+    _add_required_host_paths(env, tmp_path)
+    (Path(env["APP_DIR"]) / ".storage-probe").write_text("a file blocks the directory")
 
-    assert "die " not in verify
-    assert "verify_storage_probe " in check
-    # The non-fatal contract is why the fatal verdict list is built before it.
-    assert check.index("verdicts+=(") < check.index("verify_storage_probe ")
-    # And why the attestation runs after every check that can refuse the host.
-    # Those checks retry against this same deadline, so seconds spent measuring
-    # a disk first are seconds they do not get: the attestation cannot end a
-    # deployment by its own exit status, but running before them it can end one
-    # by leaving them no time. Last, it can only spend what they did not need.
-    assert check.rindex("die ") < check.index("verify_storage_probe ")
-    assert check.index("cannot reach the control-plane health endpoint") < check.index(
-        "verify_storage_probe "
+    result = _run(env, "up")
+
+    assert result.returncode != 0
+    assert "could not write the storage-probe verdict" in result.stderr
+    assert "starting the three purpose-scoped tunnels" not in result.stdout
+
+
+def test_no_storage_failure_path_can_end_the_deployment(tmp_path: Path) -> None:
+    """An orchestrator crash is nonfatal, and fatal readiness checks run first."""
+    healthy = _storage_host(tmp_path)
+    python = tmp_path / "bin/python3"
+    _write_executable(
+        python,
+        "#!/bin/sh\n"
+        'test_dir="$(dirname "$(dirname "$0")")"\n'
+        'case "$*" in *"storage_attestation.py verify"*) echo verify >>"$test_dir/python.log"; exit 73 ;; esac\n'
+        f'exec "{sys.executable}" "$@"\n',
+    )
+
+    result = _run(healthy, "check")
+    assert result.returncode == 0, result.stderr
+    assert "failed unexpectedly" in result.stderr
+    assert (tmp_path / "python.log").read_text().splitlines() == ["verify"]
+
+    refused_root = tmp_path / "refused"
+    refused_root.mkdir()
+    refused = _storage_host(refused_root, capability="")
+    refused_python = refused_root / "bin/python3"
+    _write_executable(
+        refused_python,
+        "#!/bin/sh\n"
+        'test_dir="$(dirname "$(dirname "$0")")"\n'
+        'case "$*" in *"storage_attestation.py verify"*) echo verify >>"$test_dir/python.log"; exit 73 ;; esac\n'
+        f'exec "{sys.executable}" "$@"\n',
+    )
+    result = _run(refused, "check")
+    assert result.returncode != 0
+    assert not (refused_root / "python.log").exists(), (
+        "storage refresh must run only after every readiness check that can refuse the host"
     )
 
 
@@ -1922,48 +1976,48 @@ def test_a_probe_that_ignores_sigterm_is_still_cut_off(tmp_path: Path) -> None:
     assert elapsed < 20, f"an ignored SIGTERM held the check for {elapsed:.1f}s"
 
 
-def test_a_storage_attestation_that_cannot_be_bounded_does_not_run() -> None:
+def test_a_storage_attestation_that_cannot_be_bounded_does_not_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Without coreutils `timeout` there is no bound, so there is no attestation.
 
-    Structural on purpose: every host this script supports carries coreutils,
-    which is exactly why the branch cannot be reached by running it here — and
-    why the guard has to be checked rather than assumed. It must also come
-    before the first probe call, or an unbounded call happens anyway.
+    Injecting the command lookup tests the actual orchestration seam without
+    depending on how either the shell wrapper or Python module is laid out.
     """
-    script = SANDBOX_HOST.read_text()
-    verify = script[
-        script.index("verify_storage_probe() {") : script.index("probe_sandbox_relay() {")
-    ]
-    guard = verify.index("command -v timeout")
-    first_call = verify.index('storage_bounded "$storage_deadline" docker exec')
+    monkeypatch.setattr(host_storage_attestation.shutil, "which", lambda _command: None)
+    verdict = tmp_path / "verdict.json"
+    config = host_storage_attestation.AttestationConfig(
+        verdict_file=verdict,
+        deployment_sha="target",
+        daemon_json=tmp_path / "daemon.json",
+        probe="overlay_root",
+        runners=("runner-1",),
+        budget_seconds=30,
+    )
 
-    assert guard < first_call
-    assert "return 0" in verify[guard:first_call]
+    assert host_storage_attestation.StorageAttestor(config).run() == 0
+    assert not verdict.exists()
+    assert "skipping storage attestation" in capsys.readouterr().err
 
 
 def test_the_storage_budget_comes_from_the_fence_not_from_beside_it() -> None:
-    """A rollout's fence caps the attestation; a manual check has no fence."""
-    script = SANDBOX_HOST.read_text()
-    verify = script[
-        script.index("verify_storage_probe() {") : script.index("probe_sandbox_relay() {")
-    ]
-    bounded = script[script.index("storage_bounded() {") : script.index("storage_verdict_file() {")]
+    """Each call reserves KILL grace from the translated remaining duration."""
+    clock = [100.0]
+    calls: list[list[str]] = []
 
-    # The fence flag distinguishes the two callers: an expired rollout fence
-    # must not be read as "no fence, take the full budget".
-    assert "local fenced=0" in script
-    assert 'check_shared_live_stack "$deadline" "$fenced"' in script
-    assert 'verify_storage_probe "$ATTEST_DIR" "$runner_ids" "$deadline" "$fenced"' in script
-    assert "if (( fenced )); then" in verify
-    assert 'storage_deadline="$deadline"' in verify
-    assert "if (( storage_deadline - SECONDS <= STORAGE_KILL_AFTER_S )); then" in verify
-    # Each call may only spend what is left: the per-call bound is recomputed
-    # from the deadline rather than handed out at a fixed eight seconds.
-    assert "remaining=$(( deadline - SECONDS - STORAGE_KILL_AFTER_S ))" in bounded
-    assert 'timeout -k "$STORAGE_KILL_AFTER_S" "$remaining" "$@"' in bounded
-    assert 'storage_bounded "$storage_deadline" docker exec' in verify
-    assert 'storage_bounded "$storage_deadline" findmnt' in verify
-    assert 'storage_df_size "$mount_root" "$storage_deadline"' in verify
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    commands = host_storage_attestation.BoundedCommands(monotonic=lambda: clock[0], run=run)
+    result = commands.run(110.0, ["probe"])
+    assert result.returncode == 0
+    assert calls == [["timeout", "-k", "2", "8", "probe"]]
+
+    clock[0] = 109.0
+    result = commands.run(110.0, ["must-not-start"])
+    assert not result.started
+    assert len(calls) == 1
 
 
 def test_a_partly_spent_fence_shrinks_the_call_bound(tmp_path: Path) -> None:

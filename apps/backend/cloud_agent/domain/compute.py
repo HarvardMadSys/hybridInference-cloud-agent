@@ -6,6 +6,7 @@ import base64
 import binascii
 import hashlib
 import json
+import re
 from typing import Any
 
 from cryptography.exceptions import UnsupportedAlgorithm
@@ -281,6 +282,53 @@ def public_connection(record: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def retirement_cancellable(kind: Any, state: Any, result: dict[str, Any] | None) -> bool:
+    """A retirement may be cancelled while it waits, until it stops its runners.
+
+    Cancelling reopens the Host to new work, and nothing starts a stopped
+    runner again. The workflow records ``runners_stopping`` before the first
+    stop, so a stop whose answer was lost still counts.
+    """
+    return (
+        kind == "retire"
+        and state in {"pending", "waiting", "blocked"}
+        and not (result or {}).get("runners_stopping")
+    )
+
+
+#: What each node's release scan may show: counts, flags and reason codes.
+_INVENTORY_FIELDS = {
+    "node_id": str,
+    "probes_removed": int,
+    "complete": bool,
+    "retained_containers": int,
+    "unknown_containers": int,
+    "orphan_state": bool,
+}
+
+
+def public_inventory(value: Any) -> list[dict[str, Any]]:
+    """Each node's release scan, field by field, dropping anything else it may hold."""
+    scans = []
+    for scan in value if isinstance(value, list) else []:
+        if not isinstance(scan, dict):
+            continue
+        shown = {
+            key: scan[key]
+            for key, kind in _INVENTORY_FIELDS.items()
+            # bool is an int: a count must not be one.
+            if type(scan.get(key)) is kind
+        }
+        reasons = scan.get("blocked_reasons")
+        shown["blocked_reasons"] = [
+            reason
+            for reason in (reasons if isinstance(reasons, list) else [])
+            if isinstance(reason, str) and re.fullmatch(r"[a-z_]{1,64}", reason)
+        ]
+        scans.append(shown)
+    return scans
+
+
 def public_operation(record: dict[str, Any], *, release_committed: bool = False) -> dict[str, Any]:
     """Expose progress, never private requests, worker fences, or profile contents."""
     result: dict[str, Any] = {
@@ -320,13 +368,14 @@ def public_operation(record: dict[str, Any], *, release_committed: bool = False)
         )
         if key in internal
     }
+    if "inventory" in internal:
+        result["result"]["inventory"] = public_inventory(internal["inventory"])
     result["blocked_reasons"] = internal.get("blocked_reasons", [])
     result["allowed_actions"] = []
     if record.get("state") in {"blocked", "failed", "unknown"}:
         result["allowed_actions"].append("retry")
     if (
-        record.get("kind") == "retire"
-        and record.get("state") in {"pending", "waiting", "blocked"}
+        retirement_cancellable(record.get("kind"), record.get("state"), internal)
         and not internal.get("external_pending")
         and not release_committed
     ):
