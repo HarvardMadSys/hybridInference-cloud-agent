@@ -11,6 +11,7 @@ either moves.
 
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 
@@ -102,6 +103,26 @@ def test_a_failed_load_stays_none_and_retries_after_a_change(
     assert load_control_plane_host_release(release_dir) is None
 
     _write_release(release_dir)
+    assert load_control_plane_host_release(release_dir) is not None
+
+
+def test_a_failed_read_is_retried_on_the_next_pass(
+    release_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A read error is not memoized. The files do not change, so a stored None
+    would keep automatic releases off until the process restarts."""
+    original = Path.read_bytes
+    failures = [OSError(errno.EMFILE, "Too many open files")]
+
+    def flaky_read_bytes(self: Path) -> bytes:
+        if failures:
+            raise failures.pop()
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky_read_bytes)
+
+    assert load_control_plane_host_release(release_dir) is None
+    assert not failures
     assert load_control_plane_host_release(release_dir) is not None
 
 

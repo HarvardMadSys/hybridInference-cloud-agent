@@ -78,7 +78,7 @@ _HOST_BUNDLE_FILES = {
 # only with a deployment, so the value is a (key, release) pair keyed by the
 # stats of both files plus the expected SHA; a mismatch reloads.
 _HostReleaseKey = tuple[str, int, int, int, int, str]
-_HOST_RELEASE_MEMO: dict[str, tuple[_HostReleaseKey, HostRelease | None]] = {}
+_HOST_RELEASE_MEMO: dict[str, tuple[_HostReleaseKey, HostRelease]] = {}
 
 
 def validate_host_bundle(bundle: bytes) -> None:
@@ -147,11 +147,12 @@ def load_control_plane_host_release(directory: Path | None = None) -> HostReleas
     ``compute.poll_seconds`` — synchronous work that used to re-read,
     re-hash, and re-validate the whole archive each pass. Both files are
     still stat'ed on every call, so a bundle that changes on disk (a new
-    deployment) reloads and re-validates from scratch; a failed load is
-    memoized the same way and retried as soon as the files change. The
-    None result covers only unreadable or invalid *content*: an OSError
-    while stat'ing returns None unmemoized, and one raised mid-read
-    propagates exactly as before the memo existed.
+    deployment) reloads and re-validates from scratch. Only a successful
+    load is memoized. Any failure returns None and is retried on the next
+    call: an OSError while stat'ing, invalid content, a SHA mismatch, and
+    an OSError mid-read, which ``load_host_release`` raises as
+    ``HostReleaseError``. A bundle that stays invalid is therefore re-read
+    on every pass, as it was before the memo existed.
     """
     directory = directory or Path("/app/compute-host-release")
     if not directory.is_dir():
@@ -178,7 +179,7 @@ def load_control_plane_host_release(directory: Path | None = None) -> HostReleas
         )
         validate_host_bundle(release.bundle)
     except (HostReleaseError, ValueError):
-        release = None
+        return None
     _HOST_RELEASE_MEMO[str(directory)] = (key, release)
     return release
 
