@@ -145,6 +145,20 @@ def test_refresh_refuses_redirected_managed_connections(managed_app, field):
         refresh._build_request(row, cipher=mcp_cipher(_ENCRYPTION_KEY))
 
 
+def test_refresh_refuses_managed_connections_naming_another_client(managed_app):
+    """The service's secret is never sent on behalf of another client."""
+    # Registering an own app keeps the managed flag until that sign-in completes.
+    row = {
+        "url": URL,
+        "resource": URL,
+        "issuer": github_oauth.ISSUER,
+        "token_endpoint": github_oauth.TOKEN_ENDPOINT,
+        "auth_config": {"client_id": "own-client", "managed_github_oauth": True},
+    }
+    with pytest.raises(refresh.RefreshRefused):
+        refresh._build_request(row, cipher=mcp_cipher(_ENCRYPTION_KEY))
+
+
 @pytest.mark.parametrize(
     "missing", ["AGENT_MCP_GITHUB_CLIENT_ID", "AGENT_MCP_GITHUB_CLIENT_SECRET"]
 )
@@ -182,6 +196,25 @@ def test_managed_callback_rejects_wrong_state_and_other_connections(managed_app,
                 follow_redirects=False,
             )
             assert "mcp_authorized=0" in callback.headers["location"]
+    exchange.assert_not_awaited()
+
+
+@pytest.mark.parametrize("field", ["issuer", "token_endpoint", "resource"])
+def test_managed_callback_refuses_flows_bound_elsewhere(managed_app, monkeypatch, field):
+    """The stable path refuses a flow not bound to GitHub before exchanging its code."""
+    store, connection_id = _flow_store()
+    exchange = AsyncMock(return_value={"access_token": "user-token", "refresh_token": "refresh"})
+    monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+    with _client(store) as client:
+        response = client.post(f"/v1/agent/mcp/connections/{connection_id}/authorize")
+        state = parse_qs(urlsplit(response.json()["authorization_url"]).query)["state"][0]
+        store.oauth_flow[field] = "https://attacker.example/token"
+        callback = client.get(
+            "/v1/agent/mcp/oauth/callback/github",
+            params={"state": state, "code": "code"},
+            follow_redirects=False,
+        )
+    assert "mcp_authorized=0" in callback.headers["location"]
     exchange.assert_not_awaited()
 
 
