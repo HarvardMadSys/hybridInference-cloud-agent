@@ -327,7 +327,19 @@ def build_upload_archive(
     *,
     max_bytes: int = DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES,
 ) -> bytes:
-    """Build a root-owned, read-only tar of the files a user attached.
+    """Build a small upload archive in memory; streaming callers use ``write_upload_archive``."""
+    buffer = io.BytesIO()
+    write_upload_archive(files, buffer, max_bytes=max_bytes)
+    return buffer.getvalue()
+
+
+def write_upload_archive(
+    files: Iterable[tuple[str, bytes]],
+    destination: BinaryIO,
+    *,
+    max_bytes: int = DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES,
+) -> None:
+    """Write a root-owned, read-only tar, retaining only the current upload body.
 
     Three differences from :func:`build_source_archive`, each deliberate:
 
@@ -346,13 +358,13 @@ def build_upload_archive(
     """
     if max_bytes <= 0:
         raise ValueError("upload archive size limit must be positive")
-    buffer = io.BytesIO()
+    start = destination.tell()
     seen: set[str] = set()
     directories: set[str] = set()
     total = 0
     try:
         with tarfile.open(
-            fileobj=buffer, mode="w", format=_UPLOAD_FORMAT, encoding=_UPLOAD_ENCODING
+            fileobj=destination, mode="w", format=_UPLOAD_FORMAT, encoding=_UPLOAD_ENCODING
         ) as archive:
             for path, content in files:
                 name = pathlib.PurePosixPath(path)
@@ -371,14 +383,12 @@ def build_upload_archive(
                     directories.add(parent)
                     archive.addfile(_upload_member(parent))
                 archive.addfile(_upload_member(str(name), size=len(content)), io.BytesIO(content))
-                if buffer.tell() > max_bytes:
+                if destination.tell() - start > max_bytes:
                     raise SandboxError("attached files exceed the upload import size limit")
     except tarfile.TarError as exc:
         raise SandboxError(f"attached files could not be archived: {exc}") from exc
-    payload = buffer.getvalue()
-    if len(payload) > max_bytes:
+    if destination.tell() - start > max_bytes:
         raise SandboxError("attached files exceed the upload import size limit")
-    return payload
 
 
 def _upload_member(name: str, *, size: int | None = None) -> tarfile.TarInfo:
