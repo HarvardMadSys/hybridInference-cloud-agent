@@ -99,7 +99,9 @@ async def _capture_pages(
         after_id = sandboxes[-1]["id"]
         page += 1
     await conn.execute(
-        "UPDATE agent_admin_sandbox_inventory_snapshots SET total_count=$2 WHERE id=$1",
+        """UPDATE agent_admin_sandbox_inventory_snapshots
+           SET total_count=$2,expires_at=clock_timestamp()+interval '5 minutes'
+           WHERE id=$1""",
         identity,
         total,
     )

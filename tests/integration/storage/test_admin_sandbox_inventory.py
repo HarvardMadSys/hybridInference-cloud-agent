@@ -15,7 +15,11 @@ from cloud_agent.admin_sandbox_inventory import (
     inventory_scope,
 )
 from cloud_agent.admin_sandboxes import SandboxCursor, sandbox_cursor_scope
-from cloud_agent.storage.admin_sandbox_inventory import AdminSandboxInventory, _prune
+from cloud_agent.storage.admin_sandbox_inventory import (
+    AdminSandboxInventory,
+    _capture_pages,
+    _prune,
+)
 from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -179,6 +183,28 @@ async def test_snapshot_pages_stay_consistent_and_deltas_repair_changes_between_
     removed = await read(db, updated.next_cursor, limit=1)
     assert removed.deleted_ids == ["sandbox-000003"]
     assert removed.change_cursor
+
+
+async def test_snapshot_expiry_begins_after_capture_is_complete(db):
+    await seed(db, 1)
+    async with db.acquire() as conn, conn.transaction(isolation="repeatable_read"):
+        observed_at, snapshot = await conn.fetchrow("SELECT NOW(),pg_current_snapshot()::text")
+        identity = "delayed-inventory-capture"
+        await conn.execute(
+            """INSERT INTO agent_admin_sandbox_inventory_snapshots
+               (id,scope,observed_at,expires_at,database_snapshot,total_count)
+               VALUES ($1,$2,$3,clock_timestamp()-interval '1 second',$4::text::pg_snapshot,0)""",
+            identity,
+            inventory_scope("running", False, 200),
+            observed_at,
+            snapshot,
+        )
+        await _capture_pages(conn, identity, observed_at, "running", False, 200)
+        assert await conn.fetchval(
+            """SELECT expires_at>clock_timestamp()+interval '4 minutes 59 seconds'
+               FROM agent_admin_sandbox_inventory_snapshots WHERE id=$1""",
+            identity,
+        )
 
 
 async def test_delayed_commit_is_not_skipped_after_a_newer_transaction_commits(db):
