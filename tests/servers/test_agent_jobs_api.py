@@ -3976,7 +3976,7 @@ async def test_expired_browser_jwt_is_not_reinterpreted_as_api_key(store: FakeSt
 # ``update_key_last_used``. The API-key branch was deleted on 2026-08-04 — it
 # had no producer here and never will — so the case has no subject left and
 # passed only because it injected the store production never has. Recorded in
-# MIGRATION.md's "Discarded tests" register, which also says where the property
+# the extraction record's "Discarded tests" register, which also says where the property
 # lives now: the gateway, which still authenticates API keys for its own
 # surfaces.
 
@@ -5782,7 +5782,7 @@ async def test_terminal_stream_drains_beyond_one_page(client: AsyncClient, store
 # The case below is its in-place replacement. The full record — the original's
 # four assertions, which three of them the replacement keeps verbatim, and why
 # "does not parse at all" is stronger than "parses with a narrow scope" — is
-# MIGRATION.md § Discarded tests → "`test_agent_jobs_api.py` — two cases E9
+# the extraction record § Discarded tests → "`test_agent_jobs_api.py` — two cases E9
 # replaced in place (E7/E8/E9)", case 1. Ratified 2026-08-04.
 
 
@@ -5822,7 +5822,7 @@ async def test_the_claim_hands_over_a_gateway_grant_not_a_minted_token(
 # The case below is its in-place replacement: same four endpoints, same
 # positive control, line-for-line identical otherwise. The full record — and
 # the note that ``_worker_claims``' 403 scope branch lost its only test with
-# the original — is MIGRATION.md § Discarded tests → "`test_agent_jobs_api.py`
+# the original — is the extraction record § Discarded tests → "`test_agent_jobs_api.py`
 # — two cases E9 replaced in place (E7/E8/E9)", case 2. Ratified 2026-08-04.
 
 
@@ -5866,7 +5866,7 @@ async def test_the_sandbox_grant_cannot_write_job_state(client: AsyncClient):
 # ``insufficient_scope`` on ``/v1/agent/jobs``) and, for the worker surface,
 # ``test_the_sandbox_grant_cannot_write_job_state`` (the in-place replacement
 # for ``test_sandbox_token_cannot_write_job_state``; 401 against the gateway
-# grant the sandbox now carries). Recorded in MIGRATION.md's discarded-test
+# grant the sandbox now carries). Recorded in the extraction record's discarded-test
 # register.
 
 

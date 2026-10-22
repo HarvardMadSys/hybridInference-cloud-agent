@@ -3,7 +3,7 @@
 The dispatch used to choose between two authenticators: this service's session,
 and the gateway's ``api_keys`` table. **The API-key branch was deleted on
 2026-08-04** — it had no producer here and never will, so it answered 503 in
-every real deployment while looking implemented. See MIGRATION.md's deferred
+every real deployment while looking implemented. See the extraction record's deferred
 register for the ruling and its discarded-test row for the ported case that
 went with it.
 
