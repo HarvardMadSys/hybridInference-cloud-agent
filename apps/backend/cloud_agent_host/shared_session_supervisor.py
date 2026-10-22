@@ -67,6 +67,7 @@ from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,
     StaleStartFence,
 )
+from cloud_agent_host.shared_session_recovery import SharedSessionRecovery
 from cloud_agent_shared.environment_snapshots import SNAPSHOT_LABEL, EnvironmentSnapshotRef
 from cloud_agent_shared.errors import SandboxArchiveBlocked
 from cloud_agent_shared.operation_profiling import (
@@ -305,6 +306,8 @@ class SharedSessionDescriptor:
     profiling_call_id: str | None = None
     profiling_recorded: bool = False
     profiling_truncated: bool = False
+    #: A lifecycle check or final archive is queued, running, or needs retry.
+    lifecycle_pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -591,6 +594,7 @@ class SharedChatSessionSupervisor:
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._stop = threading.Event()
+        self._recovery = SharedSessionRecovery(self)
         self._thread: threading.Thread | None = None
         #: How long the pre-prompt archive waits for a concurrent bridge check
         #: or workspace request to finish before it reports the group busy.
@@ -733,6 +737,7 @@ class SharedChatSessionSupervisor:
         # Reconciliation may synchronously upload a final archive.  Do not
         # retain the supervisor-wide metadata lock while that bounded I/O is
         # in flight: unrelated status calls must remain responsive.
+        self._recovery.start()
         self.reconcile()
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -767,6 +772,7 @@ class SharedChatSessionSupervisor:
         for thread in threads:
             if thread is not None:
                 thread.join()
+        self._recovery.quiesce()
         with self._lock:
             self._thread = None
             self._sampler_thread = None
@@ -1365,7 +1371,9 @@ class SharedChatSessionSupervisor:
                 group.starting = False
                 self._condition.notify_all()
 
-    def reconcile(self) -> builtins.list[SharedSessionDescriptor]:  # noqa: PLR0912, PLR0915 complexity baseline, #771
+    def reconcile(
+        self, *, background_recovery: bool = False
+    ) -> builtins.list[SharedSessionDescriptor]:
         """Discover containers, fencing each group's slow recovery independently."""
         with self._lock:
             before = {
@@ -1448,29 +1456,13 @@ class SharedChatSessionSupervisor:
                     found.extend(self._descriptors(group))
                     continue
                 check = self._begin_lifecycle_check_locked(group)
-            reconciled: builtins.list[SharedSessionDescriptor] | None = None
-            try:
-                reconciled = self._reconcile_checked_group(
-                    check, inspection, discovered=discovered, read_marker=read_marker
-                )
-            except SandboxError as exc:
-                # Another call changed this group while its marker was read
-                # without the lock, or the group was lost while its recovery
-                # failed. It is reported as it stands and reconciled again by
-                # the next listing; it must not cost every other group on this
-                # host its listing.
-                logger.warning(
-                    "shared sandbox group was not reconciled",
-                    extra={
-                        "event": "shared_sandbox_reconcile_group_failed",
-                        "sandbox_id": spec.sandbox_id,
-                        "generation": spec.generation,
-                        "detail": str(exc)[:300],
-                    },
-                )
-            finally:
-                with self._lock:
-                    self._end_lifecycle_check_locked(check)
+            reconciled = self._recovery.reconcile(
+                check,
+                inspection,
+                discovered=discovered,
+                read_marker=read_marker,
+                background=background_recovery,
+            )
             with self._lock:
                 if reconciled is None:
                     if self._groups.get(spec.sandbox_id) is group:
@@ -4261,9 +4253,9 @@ class SharedChatSessionSupervisor:
                 stale_transport.close()
         return descriptor
 
-    def list(self) -> builtins.list[SharedSessionDescriptor]:
-        """Return one observation per known membership."""
-        self.reconcile()
+    def list(self, *, background_recovery: bool = False) -> builtins.list[SharedSessionDescriptor]:
+        """Observe memberships; HTTP readers queue slow lifecycle recovery."""
+        self.reconcile(background_recovery=background_recovery)
         stale_transports: builtins.list[ResidentTransport[DialectRuntime]] = []
         with self._lock:
             for group in self._groups.values():
@@ -5221,6 +5213,12 @@ class SharedChatSessionSupervisor:
             docker_status=group.inspection.status.value,
             running=group.inspection.running,
             group_busy=not SharedChatSessionSupervisor._is_quiescent(group),
+            lifecycle_pending=(
+                group.lifecycle_check is not None
+                or group.stopping
+                or group.stop_archive_pending
+                or group.orphan_finalization_pending
+            ),
             busy=member.lease_token is not None or member.current_turn is not None,
             terminal_count=sum(
                 1 for owner in group.terminal_tokens.values() if owner == member.thread_id

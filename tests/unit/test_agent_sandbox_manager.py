@@ -401,7 +401,7 @@ class _SharedSupervisor:
             raise SandboxError("unknown member")
         return _descriptor(thread_id)
 
-    def list(self):
+    def list(self, *, background_recovery=False):
         return [_descriptor("athr_source"), _descriptor("athr_child")]
 
     def list_for_thread(self, thread_id: str):
@@ -976,7 +976,8 @@ async def test_targeted_inventory_is_authenticated_and_isolated_from_full_invent
     supervisor = _SharedSupervisor()
     calls = []
 
-    def failed_inventory():
+    def failed_inventory(*, background_recovery=False):
+        assert background_recovery is True
         calls.append(("list",))
         raise SandboxError("unrelated sandbox reconciliation failed")
 
@@ -1010,7 +1011,7 @@ async def test_targeted_inventory_is_authenticated_and_isolated_from_full_invent
 @pytest.mark.asyncio
 async def test_targeted_inventory_rejects_unknown_members_without_falling_back_to_full_inventory():
     supervisor = _SharedSupervisor()
-    supervisor.list = lambda: pytest.fail("targeted inventory must not list the host")
+    supervisor.list = lambda **_kwargs: pytest.fail("targeted inventory must not list the host")
     app = _app(supervisor)
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://sandbox_manager"
@@ -1092,7 +1093,7 @@ async def test_sandbox_inventory_reports_terminals_across_all_shared_members(
         replace(_descriptor("athr_source"), terminal_count=origin_count),
         replace(_descriptor("athr_child"), terminal_count=child_count),
     ]
-    supervisor.list = lambda: descriptors
+    supervisor.list = lambda **_kwargs: descriptors
     supervisor.list_for_thread = lambda _thread_id: descriptors
     app = _app(supervisor)
     async with AsyncClient(
@@ -1202,7 +1203,7 @@ async def test_native_question_reads_require_a_bounded_owner(params):
 @pytest.mark.parametrize("running", [True, False])
 async def test_inventory_syncs_one_group_and_reads_only_cached_resources(running):
     supervisor = _SharedSupervisor()
-    supervisor.list = lambda: [
+    supervisor.list = lambda **_kwargs: [
         replace(_descriptor("athr_source"), running=running),
         replace(_descriptor("athr_child"), running=running),
     ]
@@ -3707,7 +3708,7 @@ async def test_inventory_rows_carry_each_groups_latest_checkpoint(tmp_path):
         base_image="sha256:" + "b" * 64,
         runtime_id="claude-code",
         runtime_version=None,
-        object_key="key",
+        object_key="cloud-agent/sandbox/v2/" + "d" * 64 + "/g1/" + "c" * 32 + ".oci.tar",
         version_id="v1",
         sha256="e" * 64,
         size_bytes=10,
