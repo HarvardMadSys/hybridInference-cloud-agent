@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -19,6 +20,7 @@ from cloud_agent.agent_memory import (
     memory_key,
     normalize_memory,
 )
+from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
 from cloud_agent.storage._sql.mcp_residency import lock_mcp_residency
 
@@ -33,6 +35,9 @@ _COLUMNS = (
     "id, repo, content, description, status, origin, source_job_ids, version, "
     "created_at, updated_at, last_used_at, archived_at"
 )
+_PURGE_BATCH_SIZE = 500
+_PURGE_MAX_BATCHES = 10
+logger = get_logger(__name__)
 
 
 def _memory(row: Mapping[str, Any]) -> AgentMemoryView:
@@ -499,10 +504,35 @@ class PostgresAgentMemoryRepository:
         return row
 
     async def purge_memories(self) -> None:
-        """Forget archives older than the retention period."""
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM agent_memories WHERE status = 'archived' "
-                "AND archived_at < clock_timestamp() - make_interval(days => $1)",
-                ARCHIVE_RETENTION_DAYS,
-            )
+        """Forget expired archives in bounded transactions and a bounded pass."""
+        started = monotonic()
+        deleted = 0
+        for _ in range(_PURGE_MAX_BATCHES):
+            async with self._pool.acquire() as conn, conn.transaction():
+                await conn.execute("SET LOCAL statement_timeout = '5s'")
+                result = await conn.execute(
+                    """
+                    WITH expired AS MATERIALIZED (
+                        SELECT id FROM agent_memories
+                        WHERE status = 'archived'
+                          AND archived_at < statement_timestamp() - make_interval(days => $1)
+                        ORDER BY archived_at, id
+                        LIMIT $2 FOR UPDATE SKIP LOCKED
+                    )
+                    DELETE FROM agent_memories m USING expired e WHERE m.id = e.id
+                    """,
+                    ARCHIVE_RETENTION_DAYS,
+                    _PURGE_BATCH_SIZE,
+                )
+            batch = int(result.split()[-1])
+            deleted += batch
+            if batch < _PURGE_BATCH_SIZE:
+                break
+        logger.info(
+            "agent_memory_retention_pass",
+            extra={
+                "deleted": deleted,
+                "batch_limit_reached": batch == _PURGE_BATCH_SIZE,
+                "duration_seconds": monotonic() - started,
+            },
+        )
