@@ -3651,7 +3651,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         try:
             owner = require_shared_supervisor()
             shared_descriptors = (
-                await endpoint_calls.run(owner.list)
+                await endpoint_calls.run(owner.list, background_recovery=True)
                 if thread_id is None
                 else await endpoint_calls.run(owner.list_for_thread, thread_id)
             )
