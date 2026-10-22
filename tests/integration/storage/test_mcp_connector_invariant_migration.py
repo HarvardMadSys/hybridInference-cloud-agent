@@ -20,7 +20,7 @@ pytestmark = pytest.mark.dbtest
 _BEFORE = "0057_admin_sandbox_trajectory"
 _THIS = "0058_mcp_connector_invariant"
 _NEXT = "0059_counter_constraints"
-_HEAD = "0091_targeted_work_wakes"
+_HEAD = "0092_targeted_work_wakes"
 _OWNER = "user-owner"
 _OTHER = "user-other"
 _PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=UTC)
@@ -97,14 +97,18 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert script.get_revision("0088_sandbox_retry_budget").down_revision == (
         "0087_sandbox_deletion_attempts"
     )
+    assert script.get_revision(_HEAD).down_revision == "0091_env_queued_runs_index"
     assert (
-        script.get_revision("0089_superseded_removals").down_revision == "0088_sandbox_retry_budget"
+        script.get_revision("0091_env_queued_runs_index").down_revision
+        == "0090_user_model_preferences"
     )
     assert (
         script.get_revision("0090_user_model_preferences").down_revision
         == "0089_superseded_removals"
     )
-    assert script.get_revision(_HEAD).down_revision == "0090_user_model_preferences"
+    assert (
+        script.get_revision("0089_superseded_removals").down_revision == "0088_sandbox_retry_budget"
+    )
 
 
 async def _local_connection(

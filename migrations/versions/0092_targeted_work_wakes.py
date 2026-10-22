@@ -16,16 +16,16 @@ The payload only narrows who is woken first. A stopped group whose host has
 been silent a long time may be handed over to another host, and that host, like
 any host not woken, still claims when its wait times out.
 
-Revision ID: 0091_targeted_work_wakes
-Revises: 0090_user_model_preferences
+Revision ID: 0092_targeted_work_wakes
+Revises: 0091_env_queued_runs_index
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0091_targeted_work_wakes"
-down_revision = "0090_user_model_preferences"
+revision = "0092_targeted_work_wakes"
+down_revision = "0091_env_queued_runs_index"
 branch_labels = None
 depends_on = None
 

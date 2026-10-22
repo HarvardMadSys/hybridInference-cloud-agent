@@ -110,13 +110,30 @@ def setup(monkeypatch):
             }
         ),
     )
+
+    async def job_usage_reads(*, job_id: str, user_id: str) -> dict | None:
+        # The one-snapshot owner read, scoped the way the real one is: None
+        # for a job that is not this caller's. The fixture's run belongs to
+        # another owner, so an owner-route read by the admin's own identity
+        # is refused here — the admin surface never comes through this read
+        # at all, it supplies its own projected inputs.
+        if job_id != run["id"] or user_id != run["user_id"]:
+            return None
+        return {
+            "job": run,
+            "ledger_rows": [ledger_row()],
+            "conversation_rows": [],
+            "inputs": {"job_ids": [run["id"]], "attempts": [], "events": []},
+            "version": "00000000000000000001.000000",
+        }
+
     store = OneFake(
         SimpleNamespace(
             get_job=AsyncMock(return_value=run),
             ledger_rows_for_job=AsyncMock(return_value=[ledger_row()]),
             record_admin_action=AsyncMock(return_value=1),
             queue_job_ledger_refresh=AsyncMock(),
-            job_usage_reads=AsyncMock(),
+            job_usage_reads=AsyncMock(side_effect=job_usage_reads),
         )
     )
     gateway = _AccessGateway(["agent.use", "agent.admin"])
@@ -172,7 +189,9 @@ async def test_admin_reads_another_owner_but_owner_routes_are_unchanged(setup):
     assert "private" not in admin.text
     assert "grant_id" not in admin.text
     assert "binding_id" not in admin.text
-    store.job_usage_reads.assert_not_awaited()
+    # The owner route reached the snapshot read and was refused in it; the
+    # admin read above it must never come through this owner-scoped path.
+    store.job_usage_reads.assert_awaited_once_with(job_id="ajob_other", user_id="admin-person")
     store.record_admin_action.assert_not_awaited()
     store.queue_job_ledger_refresh.assert_not_awaited()
 
