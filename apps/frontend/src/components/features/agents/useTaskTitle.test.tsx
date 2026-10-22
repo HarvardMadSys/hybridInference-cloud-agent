@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import {
   getAgentJob,
-  getAgentJobGit,
+  getAgentJobGitMetadata,
   getAgentJobThread,
   listAllAgentThreadEvents,
   streamAgentJob,
@@ -14,7 +14,7 @@ import { useAgentJob } from './useAgentJobs';
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentJob: vi.fn(),
-  getAgentJobGit: vi.fn(),
+  getAgentJobGitMetadata: vi.fn(),
   getAgentJobThread: vi.fn(),
   listAllAgentThreadEvents: vi.fn(),
   streamAgentJob: vi.fn(),
@@ -32,7 +32,7 @@ const initial = {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.mocked(getAgentJob).mockResolvedValue(initial);
-  vi.mocked(getAgentJobGit).mockRejectedValue(new Error('No workspace'));
+  vi.mocked(getAgentJobGitMetadata).mockRejectedValue(new Error('No workspace'));
   vi.mocked(getAgentJobThread).mockResolvedValue({
     thread_id: initial.thread_id!,
     title: initial.title!,

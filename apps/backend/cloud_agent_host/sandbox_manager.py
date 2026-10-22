@@ -110,6 +110,12 @@ from cloud_agent_host.shared_session_supervisor import (
 )
 from cloud_agent_host.tool_windows import ToolWindowTracker, attribute, tool_time_ms
 from cloud_agent_host.workspace_download import write_workspace_download
+from cloud_agent_host.workspace_git import (
+    COMMIT_SHA as _COMMIT_SHA,
+    GIT_VIEW_ENV as _GIT_VIEW_ENV,
+    run_git as _workspace_git,
+    run_git_metadata as _workspace_git_metadata,
+)
 from cloud_agent_shared.git.source_archive import DEFAULT_MAX_BASE_BUNDLE_BYTES
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,
@@ -167,55 +173,6 @@ TERMINAL_STREAM_WAIT_S = 15.0
 #: lifecycle calls.
 MAX_WORKSPACE_COMMANDS = 16
 MAX_WORKSPACE_COMMANDS_PER_WORKSPACE = 4
-_COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
-#: The Git view, and the shared-workspace snapshot that is the same capture,
-#: runs as the group UID against a ``.git/config`` any member can write. Git
-#: reads that file as instructions to run commands, and the view needs none of
-#: them: the fsmonitor daemon, hooks (``read-tree`` and ``add`` write an
-#: index, which fires ``post-index-change``), the signature check ``git log``
-#: makes under ``log.showSignature``, and the transport a partial clone's lazy
-#: fetch opens for a missing object (``remote.*.uploadpack``,
-#: ``core.sshCommand``, a remote helper). ``GIT_CONFIG_COUNT`` is command-line
-#: configuration, which outranks the repository's own and reaches every Git
-#: process the script starts, submodule ones included. An empty
-#: ``GIT_ALLOW_PROTOCOL`` allows no transport, whatever ``protocol.*.allow``
-#: says.
-_GIT_VIEW_ENV = {
-    "GIT_CONFIG_COUNT": "3",
-    "GIT_CONFIG_KEY_0": "core.fsmonitor",
-    "GIT_CONFIG_VALUE_0": "",
-    "GIT_CONFIG_KEY_1": "core.hooksPath",
-    "GIT_CONFIG_VALUE_1": "/dev/null",
-    "GIT_CONFIG_KEY_2": "log.showSignature",
-    "GIT_CONFIG_VALUE_2": "false",
-    "GIT_ALLOW_PROTOCOL": "",
-}
-
-#: Filter drivers are named by the repository, so they cannot be listed ahead
-#: of time: this reads the names configured when the script starts and empties
-#: each one, after which Git compares the file as it is. git-lfs's own driver,
-#: exactly as ``git lfs install`` writes it, is kept, so a smudged LFS file
-#: still compares equal to its committed pointer; the LFS extensions that
-#: driver would run are emptied with the rest. ``required`` is emptied for
-#: every driver, so an emptied one fails nothing. A subsection name cannot hold
-#: a newline, so one name per line is exact. Writers are stopped for a
-#: snapshot; for the live view this reads what a member left behind.
-_NEUTRALIZE_GIT_FILTERS = """set -f; IFS='
-'; n="${GIT_CONFIG_COUNT:-0}"
-for key in $(git config --name-only --get-regexp '^(filter|lfs[.]extension)[.]'); do
-  value=$(git config --get "$key")
-  case "$key=$value" in
-    'filter.lfs.clean=git-lfs clean -- %f') continue ;;
-    'filter.lfs.smudge=git-lfs smudge -- %f'|'filter.lfs.smudge=git-lfs smudge --skip -- %f')
-      continue ;;
-    'filter.lfs.process=git-lfs filter-process'|'filter.lfs.process=git-lfs filter-process --skip')
-      continue ;;
-  esac
-  export "GIT_CONFIG_KEY_$n=$key" "GIT_CONFIG_VALUE_$n="
-  n=$((n + 1))
-done
-export GIT_CONFIG_COUNT="$n"; unset IFS; set +f
-"""
 
 
 class _EndpointLifecycleCalls:
@@ -1962,106 +1919,33 @@ def _run_git(
     max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
     exact_patch: bool = False,
 ) -> dict[str, Any]:
-    if base_sha and not _COMMIT_SHA.fullmatch(base_sha):
-        raise HTTPException(status_code=400, detail="base SHA is not a commit hash")
-    target = base_sha or "HEAD"
-    marker = secrets.token_hex(16)
-    status_tag = f"__HYI_{marker}_STATUS__"
-    diff_tag = f"__HYI_{marker}_DIFF__"
-    commits_tag = f"__HYI_{marker}_COMMITS__"
-    # Whether a submodule is dirty is answered by running Git inside it, under
-    # that submodule's own configuration, which none of the overrides here
-    # can name. So only its checked-out commit is read: ``status`` and
-    # ``diff`` are told so, and ``add -A`` (which takes no such option) is
-    # kept off every submodule by pathspec; its entry already holds the
-    # target's commit. The patch loses only the ``-dirty`` mark, which
-    # ``git apply`` cannot use. ``--submodule=short`` keeps that one form
-    # whatever ``diff.submodule`` says, and starts no Git in a submodule.
-    # The browser reads each file's name from its ``a/`` and ``b/`` header,
-    # and the publisher applies a snapshot at ``-p1``, so the prefixes are
-    # named too: ``diff.noPrefix`` would leave a name with nothing to strip,
-    # and ``diff.mnemonicPrefix`` writes ``c/`` and ``w/``. Options on the
-    # command line outrank either, on every Git version. ``--no-color`` keeps
-    # the escape codes ``color.ui=always`` would write out of the same text,
-    # and ``--unified=3`` the context ``git apply`` will not apply without,
-    # which ``diff.context=0`` would leave out.
-    script = _NEUTRALIZE_GIT_FILTERS + (
-        "git --no-pager status --porcelain=v1 --branch --ignore-submodules=dirty; "
-        "status_status=$?; "
-        f"printf '\n{diff_tag}\n'; "
-        'index_path="${TMPDIR:-/tmp}/hyi-browser-index.$$"; '
-        'rm -f "$index_path"; trap \'rm -f "$index_path"\' EXIT; '
-        f'GIT_INDEX_FILE="$index_path" git read-tree {target} && '
-        "{ printf '.\\0'; GIT_INDEX_FILE=\"$index_path\" git ls-files -z --stage | "
-        "sed -z -n 's/^160000 [0-9a-f]* [0-3]\\t/:(exclude,literal)/p'; } | "
-        'GIT_INDEX_FILE="$index_path" git add -A -N --pathspec-from-file=- '
-        "--pathspec-file-nul >/dev/null 2>&1 && "
-        f'GIT_INDEX_FILE="$index_path" git --no-pager diff --no-ext-diff --no-textconv '
-        "--no-color --src-prefix=a/ --dst-prefix=b/ --unified=3 "
-        f"--ignore-submodules=dirty --submodule=short --binary {target}; diff_status=$?; "
-        f"printf '\n{commits_tag}\n'; "
-        "git --no-pager log -20 --pretty=format:'%H%x09%h%x09%s%x09%an%x09%aI'; "
-        "log_status=$?; overall_status=$status_status; "
-        '[ "$overall_status" -eq 0 ] && overall_status=$diff_status; '
-        '[ "$overall_status" -eq 0 ] && overall_status=$log_status; '
-        f"printf '\n{status_tag}%s\n' \"$overall_status\""
-    )
-    process_status, stdout, stderr = _run_sandbox(
+    return _workspace_git(
+        _run_sandbox,
         backend,
-        workdir=workdir,
-        script=script,
-        # Inspection must never take the shared index.lock: git status would
-        # otherwise refresh and rewrite /workspace/.git/index, failing an
-        # agent's or the runner's concurrent git add or commit.
-        env={**_GIT_VIEW_ENV, "GIT_OPTIONAL_LOCKS": "0"},
+        workdir,
+        base_sha,
+        timeout_s=timeout_s,
+        max_output_bytes=max_output_bytes,
+        exact_patch=exact_patch,
+    )
+
+
+def _run_git_metadata(
+    backend: SandboxBackend,
+    workdir: Path | str,
+    base_sha: str | None = None,
+    *,
+    timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S,
+    max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
+) -> dict[str, Any]:
+    return _workspace_git_metadata(
+        _run_sandbox,
+        backend,
+        workdir,
+        base_sha,
         timeout_s=timeout_s,
         max_output_bytes=max_output_bytes,
     )
-    status_text, separator, remainder = stdout.partition(f"\n{diff_tag}\n")
-    if not separator:
-        raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    patch, separator, commits_and_status = remainder.partition(f"\n{commits_tag}\n")
-    if not separator:
-        raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    commits_text, _, git_status_text = commits_and_status.rpartition(f"\n{status_tag}")
-    try:
-        git_status = int(git_status_text.strip().splitlines()[0])
-    except (ValueError, IndexError):
-        git_status = process_status
-    if git_status != 0:
-        raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    if exact_patch and "\ufffd" in patch:
-        # Command output is decoded with replacement, so a byte that is not
-        # UTF-8 arrives here as U+FFFD: a captured patch holding one would
-        # restore different bytes than the workspace holds. A file that really
-        # contains U+FFFD cannot be told apart from that and is refused too.
-        raise HTTPException(status_code=502, detail="workspace patch is not exact UTF-8 text")
-
-    status_lines = [line for line in status_text.splitlines() if line]
-    branch = ""
-    if status_lines and status_lines[0].startswith("## "):
-        branch = status_lines.pop(0)[3:].split("...", 1)[0]
-    changes = [{"code": line[:2], "path": line[3:]} for line in status_lines if len(line) >= 4]
-    commits = []
-    for line in commits_text.splitlines():
-        parts = line.split("\t", 4)
-        if len(parts) == 5:
-            commits.append(
-                {
-                    "sha": parts[0],
-                    "short_sha": parts[1],
-                    "subject": parts[2],
-                    "author": parts[3],
-                    "authored_at": parts[4],
-                }
-            )
-    return {
-        "available": True,
-        "branch": branch,
-        "changes": changes,
-        "patch": patch,
-        "commits": commits,
-    }
 
 
 def _terminal_sse_frame(event: _TerminalEvent) -> str:
@@ -4121,11 +4005,13 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         workspace_id: str,
         request: Request,
         base_sha: str | None = Query(None, max_length=64),
+        metadata: bool = False,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
+        operation = _run_git_metadata if metadata else _run_git
         return await owner_command(
             workspace_id,
-            lambda retained, _call: _run_git(
+            lambda retained, _call: operation(
                 retained,
                 "/workspace",
                 base_sha,

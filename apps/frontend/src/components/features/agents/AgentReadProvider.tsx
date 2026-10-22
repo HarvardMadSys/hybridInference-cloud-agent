@@ -7,6 +7,7 @@ import { createQuestionReadScope, type QuestionReadScope } from '@/lib/api/quest
 import { listThreadQuestions } from '@/lib/api/questions';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { onAgentRecordsChanged } from './agentPush';
+import { clearWorkspaceGitCache } from './workspaceGitCache';
 
 const AgentReadContext = createContext<AgentReadScope>({
   getAgentJob: (jobId) => getAgentJob(jobId),
@@ -47,6 +48,7 @@ export function AgentReadProvider({ userId, children }: { userId?: string; child
       sessions();
       records();
       invalidate();
+      clearWorkspaceGitCache();
     };
   }, [reads, questions]);
 

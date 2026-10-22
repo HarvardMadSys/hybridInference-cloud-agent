@@ -22,6 +22,7 @@ import {
   getAgentAttemptTelemetry,
   getAgentJobFiles,
   getAgentJobGit,
+  getAgentJobGitMetadata,
   getAgentJobUsage,
   getAgentJobThread,
   listAllAgentThreadEvents,
@@ -530,6 +531,15 @@ describe('agents api', () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(
+        jsonResponse({
+          available: true,
+          revision: 'a'.repeat(64),
+          branch: 'agent/x',
+          changes: [],
+          change_count: 0,
+        }),
+      )
+      .mockResolvedValueOnce(
         jsonResponse({ available: true, branch: 'agent/x', changes: [], patch: '', commits: [] }),
       );
 
@@ -538,6 +548,7 @@ describe('agents api', () => {
     await writeAgentTerminalInput('job/one', 'term/1', 'λ\r');
     await resizeAgentTerminal('job/one', 'term/1', 30, 100);
     await deleteAgentTerminal('job/one', 'term/1');
+    await getAgentJobGitMetadata('ajob_1');
     await getAgentJobGit('ajob_1');
 
     expect(fetchWithAuth).toHaveBeenNthCalledWith(
@@ -574,6 +585,11 @@ describe('agents api', () => {
     );
     expect(fetchWithAuth).toHaveBeenNthCalledWith(
       6,
+      expect.any(String),
+      '/v1/agent/jobs/ajob_1/git/metadata',
+    );
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      7,
       expect.any(String),
       '/v1/agent/jobs/ajob_1/git',
     );

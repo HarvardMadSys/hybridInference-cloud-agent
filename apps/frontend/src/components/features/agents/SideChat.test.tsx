@@ -18,6 +18,7 @@ import {
   forkAgentJob,
   getAgentJob,
   getAgentJobGit,
+  getAgentJobGitMetadata,
   getAgentJobThread,
   listAllAgentThreadEvents,
   streamAgentJob,
@@ -54,6 +55,7 @@ vi.mock('@/lib/api/agents', () => ({
   forkAgentJob: vi.fn(),
   getAgentJob: vi.fn(),
   getAgentJobGit: vi.fn(),
+  getAgentJobGitMetadata: vi.fn(),
   getAgentJobThread: vi.fn(),
   listAllAgentThreadEvents: vi.fn(),
   streamAgentJob: vi.fn(),
@@ -172,6 +174,12 @@ beforeEach(() => {
   vi.mocked(getAgentJobGit).mockResolvedValue({ available: false } as Awaited<
     ReturnType<typeof getAgentJobGit>
   >);
+  vi.mocked(getAgentJobGitMetadata).mockResolvedValue({
+    available: false,
+    branch: '',
+    changes: [],
+    change_count: 0,
+  });
   vi.mocked(streamAgentJob).mockResolvedValue(undefined);
   // A message to an idle side chat is its next turn at once; one sent while a
   // side turn runs waits in the queue, as the control plane answers.

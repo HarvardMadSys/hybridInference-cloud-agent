@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   getAgentJob,
   getAgentJobFiles,
-  getAgentJobGit,
+  getAgentJobGitMetadata,
   listAllAgentThreadEvents,
   listAgentProjects,
   streamAgentJob,
@@ -14,6 +14,7 @@ import type {
   AgentJobEventApi,
   AgentJobFileApi,
   AgentJobFileEntryApi,
+  AgentGitWorkspaceMetadataApi,
   AgentJobSymlinkApi,
   AgentProjectApi,
   AgentThreadApi,
@@ -233,7 +234,9 @@ export function useAgentJob(
   const [api, setApi] = useState<AgentJobApi | null>(null);
   const [events, setEvents] = useState<AgentJobEventApi[]>([]);
   const [threadEvents, setThreadEvents] = useState<AgentThreadEventApi[]>([]);
-  const [patch, setPatch] = useState<string | null>(null);
+  const [gitMetadata, setGitMetadata] = useState<AgentGitWorkspaceMetadataApi | null | undefined>(
+    undefined,
+  );
   const [thread, setThread] = useState<AgentThreadApi | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -304,6 +307,7 @@ export function useAgentJob(
       }
       seen.current = new Map();
       seenScope.current = { jobId, reads };
+      setGitMetadata(undefined);
     }
     const read = {
       jobId,
@@ -311,7 +315,6 @@ export function useAgentJob(
       lifecycleEvents: new Map<number, AgentThreadEventApi>(),
     };
     historyRead.current = read;
-    setPatch(null);
     setLoading(true);
     const progressive =
       loadedStreamCursor.current?.jobId !== jobId || loadedStreamCursor.current.reads !== reads;
@@ -422,22 +425,18 @@ export function useAgentJob(
     };
   }, [active, jobId, reads, tick]);
 
-  // Diff state belongs to the retained group workspace, not to a per-turn
-  // artifact uploaded by the runner. Fork siblings therefore see the same
-  // current workspace diff, matching the Git panel below. Metadata reloads
-  // clear the cached patch, so refetch even when the job state stays settled.
-  // During an in-place turn change, api still belongs to the previous turn.
-  // Do not open the new stream with that turn's attempt or event identity.
+  // The detail path reads only a cheap status fingerprint. The full patch and
+  // log belong to the Git panel. Avoid inspecting the prior turn under a new URL.
   const state = api?.id === jobId ? api.state : undefined;
   useEffect(() => {
     if (!active || !jobId || !state) return undefined;
     let cancelled = false;
-    getAgentJobGit(jobId)
+    getAgentJobGitMetadata(jobId)
       .then((workspace) => {
-        if (!cancelled) setPatch(workspace.available ? workspace.patch : null);
+        if (!cancelled) setGitMetadata(workspace);
       })
       .catch(() => {
-        if (!cancelled) setPatch(null);
+        if (!cancelled) setGitMetadata(null);
       });
     return () => {
       cancelled = true;
@@ -721,12 +720,13 @@ export function useAgentJob(
     if (!api) return null;
     return adapter.project(api, {
       events,
-      patch,
+      gitMetadata,
+      gitMetadataPending: gitMetadata === undefined,
       thread: visibleThread,
       threadEvents,
       historyLoading,
     });
-  }, [adapter, api, events, patch, visibleThread, threadEvents, historyLoading]);
+  }, [adapter, api, events, gitMetadata, visibleThread, threadEvents, historyLoading]);
   // The turn rows come from the thread read, which is a snapshot: a live
   // attempt replacement updates `api` and would otherwise leave the inspector
   // reading the attempt that is already gone. The current turn is therefore

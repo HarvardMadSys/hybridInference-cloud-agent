@@ -2355,9 +2355,49 @@ def _git_transcript(spec) -> list[str]:
     """A clean Git inspection's output, using the tags the script asked for."""
     tags = {
         kind: tag
-        for tag, kind in re.findall(r"(__HYI_[0-9a-f]{32}_(DIFF|COMMITS|STATUS)__)", spec.argv[-1])
+        for tag, kind in re.findall(
+            r"(__HYI_[0-9a-f]{32}_(REVISION|DIFF|COMMITS|STATUS)__)", spec.argv[-1]
+        )
     }
-    return ["## main\n", f"\n{tags['DIFF']}\n", f"\n{tags['COMMITS']}\n", f"\n{tags['STATUS']}0\n"]
+    transcript = ["## main\0", f"\n{tags['REVISION']}\n"]
+    if "DIFF" in tags:
+        transcript.extend((f"\n{tags['DIFF']}\n", f"\n{tags['COMMITS']}\n"))
+    transcript.append(f"\n{tags['STATUS']}0\n")
+    return transcript
+
+
+@pytest.mark.asyncio
+async def test_git_metadata_endpoint_skips_patch_and_commit_log(monkeypatch):
+    supervisor = _SharedSupervisor()
+    scripts: list[str] = []
+
+    def spawn(spec):
+        scripts.append(spec.argv[-1])
+        return SimpleNamespace(
+            lines=lambda: iter(_git_transcript(spec)),
+            kill=lambda: None,
+            wait=lambda: 0,
+            stderr_text=lambda: "",
+        )
+
+    monkeypatch.setattr(supervisor.workspace_backend, "spawn", spawn)
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.get(
+            "/workspaces/athr_source/git", params={"metadata": "true"}, headers=headers
+        )
+
+    assert response.status_code == 200
+    assert set(response.json()) == {"available", "revision", "branch", "changes", "change_count"}
+    assert len(response.json()["revision"]) == 64
+    assert response.json()["change_count"] == 0
+    assert len(scripts) == 1
+    assert "git add -A -N" not in scripts[0]
+    assert "--binary" not in scripts[0]
+    assert "git --no-pager log" not in scripts[0]
 
 
 def test_lower_terminal_output_limits_apply_to_existing_terminals():
