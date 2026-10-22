@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fail, withRuntimeResources } from './check-runtime-site-config.mjs';
+import { fail, runRuntimeGuard, withRuntimeResources } from './runtime-site-config-lifecycle.mjs';
 
 function deferred() {
   let resolve;
@@ -129,5 +129,24 @@ describe('runtime site config cleanup', () => {
     control.finish();
     expect(await outcome).toBe(stopError);
     expect(control.controlPlane.close).toHaveBeenCalledOnce();
+  });
+
+  it('uses one top-level non-zero exit path for runtime assertions', async () => {
+    const originalExitCode = process.exitCode;
+    process.exitCode = undefined;
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await runRuntimeGuard(async () => {
+        fail('injected top-level assertion');
+      });
+
+      expect(process.exitCode).toBe(1);
+      expect(reported).toHaveBeenCalledOnce();
+      expect(reported).toHaveBeenCalledWith(
+        '::error title=Runtime site config::injected top-level assertion',
+      );
+    } finally {
+      process.exitCode = originalExitCode;
+    }
   });
 });
