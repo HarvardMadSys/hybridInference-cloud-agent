@@ -41,6 +41,16 @@ _PURGE_MAX_BATCHES = 10
 logger = get_logger(__name__)
 
 
+def _archive_page_sql(*, has_cursor: bool) -> str:
+    """Keep the cursor as an index bound even for generic prepared plans."""
+    cursor = "AND (archived_at,id) < ($3,$4) " if has_cursor else ""
+    return (
+        f"SELECT {_COLUMNS} FROM agent_memories "
+        "WHERE user_id=$1 AND COALESCE(repo, '')=$2 AND status='archived' "
+        f"{cursor}ORDER BY archived_at DESC,id DESC LIMIT 51"
+    )
+
+
 def _memory(row: Mapping[str, Any]) -> AgentMemoryView:
     return AgentMemoryView.model_validate(
         {**dict(row), "source_job_ids": list(row["source_job_ids"])}
@@ -228,14 +238,10 @@ class PostgresAgentMemoryRepository:
                 repo or "",
             )
             archived = await conn.fetch(
-                f"SELECT {_COLUMNS} FROM agent_memories "
-                "WHERE user_id=$1 AND COALESCE(repo, '')=$2 AND status='archived' "
-                "AND ($3::timestamptz IS NULL OR (archived_at,id) < ($3,$4)) "
-                "ORDER BY archived_at DESC,id DESC LIMIT 51",
+                _archive_page_sql(has_cursor=before is not None),
                 user_id,
                 repo or "",
-                before,
-                before_id,
+                *((before, before_id) if before is not None else ()),
             )
             enabled = await _enabled(conn, user_id, repo)
         page = archived[:50]

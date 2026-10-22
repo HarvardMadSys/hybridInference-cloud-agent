@@ -24,6 +24,7 @@ from cloud_agent.agent_memory import (
     AgentMemoryTaskEnded,
     MemoryTask,
 )
+from cloud_agent.storage.repositories.agent_memory import _archive_page_sql
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -238,6 +239,36 @@ async def test_archives_page_without_repeats_when_a_new_archive_arrives(store, p
     ] == "new"
     with pytest.raises(ValueError):
         await store.agent_memory.list_memories("alice", None, archive_cursor="invalid")
+    async with pool.acquire() as conn:
+        timestamp = await conn.fetchval(
+            "SELECT archived_at FROM agent_memories WHERE id='archive-090000'"
+        )
+        await conn.execute("ANALYZE agent_memories")
+        await conn.execute("SET plan_cache_mode=force_generic_plan")
+        try:
+            await conn.execute(
+                "PREPARE archive_page(text,text,timestamptz,text) AS "
+                + _archive_page_sql(has_cursor=True)
+            )
+            plan = json.loads(
+                await conn.fetchval(
+                    "EXPLAIN (ANALYZE,FORMAT JSON) EXECUTE archive_page"
+                    f"('alice','','{timestamp.isoformat()}','archive-090000')"
+                )
+            )[0]["Plan"]
+        finally:
+            await conn.execute("DEALLOCATE archive_page; RESET plan_cache_mode")
+
+    def nodes(node):
+        yield node
+        for child in node.get("Plans", []):
+            yield from nodes(child)
+
+    index = next(
+        node for node in nodes(plan) if node.get("Index Name") == "idx_agent_memories_archive_page"
+    )
+    assert index["Actual Rows"] == 51
+    assert index.get("Rows Removed by Filter", 0) == 0
 
 
 async def test_migration_round_trip(store, pool):
