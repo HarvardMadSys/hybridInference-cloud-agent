@@ -55,6 +55,7 @@ from cloud_agent.api.mcp_thread_bindings import (
     ReplaceBindingsRequest,
     router as thread_bindings_router,
 )
+from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import config_import, github_oauth, launch, oauth
 from cloud_agent.mcp.errors import (
@@ -92,7 +93,6 @@ from cloud_agent.mcp.registry import (
     resolve_connection,
 )
 from cloud_agent.settings import setting_env
-from cloud_agent.source_control import SourceControlError
 
 logger = get_logger(__name__)
 
@@ -966,7 +966,7 @@ async def _diagnose(
             key=key,
             capability_revision=resolved.connection.capability_revision + 1,
         )
-    except (HostError, McpRegistryError, SourceControlError) as exc:
+    except (HostError, McpRegistryError, CredentialCipherError) as exc:
         kind = getattr(exc, "kind", ConnectionErrorKind.UNREACHABLE.value)
         await record_status(ConnectionStatus.ERROR.value, kind, str(exc))
         return TestResult(ok=False, error_kind=kind, message=str(exc))
@@ -1041,7 +1041,7 @@ async def authorize_connection(  # noqa: C901, PLR0912, PLR0915 complexity basel
         if body.client_secret:
             try:
                 secret_ciphertext = oauth_cipher().encrypt(body.client_secret)
-            except SourceControlError as exc:
+            except CredentialCipherError as exc:
                 raise _no_encryption_key() from exc
         stored = await job_store.mcp.set_mcp_client_registration(
             connection_id=connection_id,
@@ -1436,7 +1436,7 @@ async def oauth_callback(  # noqa: PLR0912 complexity baseline, #771
     cipher = oauth_cipher()
     try:
         verifier = cipher.decrypt(str(flow["code_verifier_ciphertext"]))
-    except SourceControlError:
+    except CredentialCipherError:
         return _callback_redirect(provider, ok=False, message="this flow could not be read")
 
     from cloud_agent.mcp.transports import TransportError
@@ -2013,7 +2013,7 @@ def _static_credential(
     config["hint"] = f"{secret[:2]}{secret[-2:]}" if len(secret) > 4 else ""
     try:
         ciphertext = mcp_cipher().encrypt(secret)
-    except SourceControlError as exc:
+    except CredentialCipherError as exc:
         raise _no_encryption_key() from exc
     return ciphertext, config
 
@@ -2052,7 +2052,7 @@ def _sealed_launch_spec(
         return None
     try:
         cipher = mcp_cipher()
-    except SourceControlError as exc:
+    except CredentialCipherError as exc:
         raise _no_encryption_key() from exc
     stored = {str(key): str(value) for key, value in (spec.get("env_secrets") or {}).items()}
     for name in wanted:

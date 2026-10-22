@@ -151,6 +151,7 @@ from cloud_agent_host.source_preparation import (
     run_source_git,
 )
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
+from cloud_agent_host.upload_import import import_uploads as _import_uploads
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
@@ -165,7 +166,6 @@ from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
     build_base_bundle,
     build_source_archive,
-    build_upload_archive,
 )
 from cloud_agent_shared.git.source_cancellation import check_source_stop, checked_entries
 from cloud_agent_shared.git.temporary_workspace import (
@@ -1816,44 +1816,6 @@ def _prefetch_retained_source(
     return _SourcePrefetch(job, uid=uid, gid=gid, max_bytes=max_bytes)
 
 
-def _import_uploads(
-    *,
-    job: ClaimedJob,
-    control: ControlPlane,
-    manager: ChatSandboxManager,
-    spec: ChatSandboxSpec,
-    fresh_container: bool,
-) -> int:
-    """Place this conversation's uploaded files under ``/uploads``.
-
-    Always the whole thread's files, never a delta: the import overwrites the
-    same paths, so one code path serves a new container and a container that
-    gained a file this turn.
-
-    It runs when the container is new, or when this turn attached something.
-    A retained container already holds the earlier turns' files — ``/uploads``
-    is root-owned and read-only, so the sandbox cannot have removed them — and
-    re-fetching them on every follow-up would move the whole conversation's
-    bytes again to write what is already there.
-
-    The files never touch ``CHAT_WORKDIR``. The publish path stages the
-    workspace with ``git add -A -N``, so an upload written there would be
-    committed and appear in the draft pull request.
-    """
-    if job.thread_attachment_count <= 0:
-        return 0
-    if not fresh_container and job.turn_attachment_count <= 0:
-        return 0
-    files: list[tuple[str, bytes]] = []
-    for entry in control.list_attachments():
-        path, content = control.read_attachment(int(entry["id"]))
-        files.append((path, content))
-    if not files:
-        return 0
-    manager.import_archive(spec, CHAT_UPLOADS_DIR, build_upload_archive(files))
-    return len(files)
-
-
 def _import_retained_base(
     *,
     job: ClaimedJob,
@@ -1888,13 +1850,13 @@ def _import_retained_base(
             held = (parent.stdout.strip() or None) if parent.returncode == 0 else None
             if held and not _sandbox_has_commit(CHAT_WORKDIR, held, backend):
                 held = None
-        bundle = build_base_bundle(source, commit=resolved, prerequisite=held)
-        manager.import_base_bundle(
-            spec,
-            bundle,
-            commit=resolved,
-            env=dict(_SAFE_DIRECTORY_ENV),
-        )
+        with build_base_bundle(source, commit=resolved, prerequisite=held) as bundle:
+            manager.import_base_bundle(
+                spec,
+                bundle,
+                commit=resolved,
+                env=dict(_SAFE_DIRECTORY_ENV),
+            )
     return resolved
 
 
@@ -2751,6 +2713,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             # first-turn job can still add files of its own and must import the
             # thread's current attachment set before prompt admission.
             fresh_container=not has_context and not recovered_initial,
+            container_id=str(lease["container_id"]),
         )
         if imported_uploads:
             control.append_event(

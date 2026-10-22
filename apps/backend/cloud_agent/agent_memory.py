@@ -50,6 +50,7 @@ class AgentMemoryScopeView(BaseModel):
     enabled: bool
     memories: list[AgentMemoryView] = Field(default_factory=list)
     archived: list[AgentMemoryView] = Field(default_factory=list)
+    archived_next_cursor: str | None = None
 
 
 class AgentMemoryConflict(ValueError):

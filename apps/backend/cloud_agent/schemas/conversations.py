@@ -78,6 +78,45 @@ class AgentSessionDeleteResponse(BaseModel):
     thread_ids: list[str]
 
 
+class AgentNotificationJob(BaseModel):
+    """The small job state needed for completion and question notices."""
+
+    id: str
+    thread_id: str
+    title: str
+    thread_revision: int
+    repo: str | None
+    state: Literal["queued", "waiting", "running", "succeeded", "failed", "cancelled"]
+    current_attempt_id: int | None = None
+    turn_no: int
+    revision: int
+    cancel_requested: bool
+    finished_at: str | None = None
+    updated_at: str | None = None
+
+
+class AgentNotificationThread(BaseModel):
+    """A changed title for a conversation still visible to its owner."""
+
+    id: str
+    title: str
+    revision: int
+
+
+class AgentNotificationStateResponse(BaseModel):
+    """An active-job bootstrap page or durable owner-change page."""
+
+    mode: Literal["snapshot", "delta"]
+    jobs: list[AgentNotificationJob] = Field(default_factory=list)
+    threads: list[AgentNotificationThread] = Field(default_factory=list)
+    deleted_job_ids: list[str] = Field(default_factory=list)
+    deleted_thread_ids: list[str] = Field(default_factory=list)
+    observed_at: str
+    next_cursor: str | None = None
+    change_cursor: str | None = None
+    reset_required: bool = False
+
+
 class AgentConversation(BaseModel):
     """One conversation, with its canonical title and latest run."""
 

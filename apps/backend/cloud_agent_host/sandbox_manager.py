@@ -39,6 +39,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cloud_agent_host import sandbox_manager_profiling_policy
+from cloud_agent_host.base_bundle_request import bind_base_bundle_reader
 from cloud_agent_host.bounded_output import OutputPump
 from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
@@ -114,7 +115,7 @@ from cloud_agent_host.workspace_git import (
     run_git as _workspace_git,
     run_git_metadata as _workspace_git_metadata,
 )
-from cloud_agent_shared.git.source_archive import DEFAULT_MAX_BASE_BUNDLE_BYTES
+from cloud_agent_shared.git.base_bundle_stream import BASE_BUNDLE_STREAM_CAPABILITY
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,
     SANDBOX_MANAGER_SETTING_KEYS,
@@ -627,7 +628,9 @@ class SharedBaseImportRequest(SharedSandboxIdentityRequest):
 
     snapshot_id: int = Field(..., ge=1)
     commit_sha: str = Field(..., min_length=7, max_length=64)
-    bundle_b64: str = Field(..., min_length=1)
+
+
+_read_base_bundle_request = bind_base_bundle_reader(SharedBaseImportRequest.model_validate_json)
 
 
 class SharedInitialArchiveRequest(SharedSandboxIdentityRequest):
@@ -2370,6 +2373,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 ENVIRONMENT_CAPABILITY,
                 ENVIRONMENT_INFERENCE_CAPABILITY,
                 SSH_ACCESS_CAPABILITY,
+                BASE_BUNDLE_STREAM_CAPABILITY,
                 *(
                     [ENVIRONMENT_SNAPSHOT_CAPABILITY]
                     if getattr(archive_controller, "snapshots_available", False)
@@ -3382,17 +3386,12 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     @app.post("/shared-sandboxes/{thread_id}/import-base")
     async def import_shared_workspace_base(
         thread_id: str,
-        body: SharedBaseImportRequest,
+        request: Request,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
         """Import a trusted publisher commit object without checkout/reset."""
         owner = require_shared_supervisor()
-        try:
-            bundle = base64.b64decode(body.bundle_b64, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise HTTPException(status_code=422, detail="base bundle is not valid base64") from exc
-        if len(bundle) > DEFAULT_MAX_BASE_BUNDLE_BYTES:
-            raise HTTPException(status_code=413, detail="base bundle exceeds the import limit")
+        body, bundle = await _read_base_bundle_request(request)
         try:
             await endpoint_calls.run(
                 owner.register_manifest,
@@ -3421,6 +3420,8 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 await endpoint_calls.run(owner.operation_closed, thread_id, token)
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc
+        finally:
+            bundle.close()
         return {
             "ok": True,
             "snapshot_id": body.snapshot_id,

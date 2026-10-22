@@ -922,7 +922,7 @@ class ContainerBackend(SandboxBackend):
             return []
         from cloud_agent_host.chat_sandbox import ChatSandboxManager
 
-        addresses = ChatSandboxManager(self).relay_addresses(network)
+        addresses = ChatSandboxManager(self).network.relay_addresses(network)
         return [
             part
             for alias, address in sorted(addresses.items())

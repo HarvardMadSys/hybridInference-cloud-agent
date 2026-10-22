@@ -125,6 +125,7 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
 )
 from cloud_agent_host.sandbox_checkpoints import checkpoint_image_reference
+from cloud_agent_host.stream_input import interactive_input, require_nonempty_rewindable
 from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
 from cloud_agent_shared.environment import (
     DOCKER_CLIENT_ENV as _DOCKER_CLIENT_ENV,
@@ -136,7 +137,7 @@ from cloud_agent_shared.operation_profiling import StageObserver, substage
 
 if TYPE_CHECKING:
     import builtins
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterator
     from typing import BinaryIO
 
     from _typeshed import SupportsWrite
@@ -403,103 +404,18 @@ class ChatSandboxManager:
 
     # ── the group network ──────────────────────────────────────────────
     #
-    # Delegates preserve the manager surface. The network component owns the
-    # routable bridge per sandbox group, used by setup, the agent and every
-    # fork member alike, named from the group's identity and guarded on the
-    # host by the deployment's rule set (cloud_agent_shared.egress). Docker
-    # routes and masquerades it; the host's rules decide what it reaches. The
-    # only other endpoints on it are the two relays, copied from the relay
-    # network, and the host holds an exact exception for each of them.
+    # The network component owns the routable bridge per sandbox group, used
+    # by setup, the agent and every fork member alike, named from the group's
+    # identity and guarded on the host by the deployment's rule set
+    # (cloud_agent_shared.egress). Docker routes and masquerades it; the host's
+    # rules decide what it reaches. The only other endpoints on it are the two
+    # relays, copied from the relay network, and the host holds an exact
+    # exception for each of them.
 
-    def network_for(self, spec: ChatSandboxSpec) -> str:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.network_for(spec)
-
-    def relay_addresses(self, network: str) -> dict[str, str]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.relay_addresses(network)
-
-    def _sync_kata_guest_network(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        addresses: dict[str, str] | None = None,
-    ) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._sync_kata_guest_network(spec, current, addresses)
-
-    def sync_ssh_targets(self, spec: ChatSandboxSpec, endpoints: set[tuple[str, int]]) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.sync_ssh_targets(spec, endpoints)
-
-    def require_host_rules(self) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.require_host_rules()
-
-    def renew_host_rules(self) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.renew_host_rules()
-
-    def _release_owned_network(
-        self,
-        network_name: str,
-        spec: ChatSandboxSpec,
-        *,
-        only_if_sandbox_unattached: bool = False,
-        expected_network_id: str | None = None,
-        expected_container_id: str | None = None,
-    ) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._release_owned_network(
-            network_name,
-            spec,
-            only_if_sandbox_unattached=only_if_sandbox_unattached,
-            expected_network_id=expected_network_id,
-            expected_container_id=expected_container_id,
-        )
-
-    def _release_sandbox_networks(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        *,
-        expected_container_id: str | None = None,
-    ) -> ChatSandboxInspection:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._release_sandbox_networks(
-            spec, current, expected_container_id=expected_container_id
-        )
-
-    def prune_orphan_networks(self, specs: builtins.list[ChatSandboxSpec]) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.prune_orphan_networks(specs)
-
-    def _require_group_network(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        snapshot: _GroupNetworkSnapshot | None = None,
-    ) -> ChatSandboxInspection:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._require_group_network(spec, current, snapshot)
-
-    def _verify_guest_network(
-        self,
-        spec: ChatSandboxSpec,
-        *,
-        expected_container_id: str | None = None,
-        defer_network_release: bool = False,
-    ) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._verify_guest_network(
-            spec,
-            expected_container_id=expected_container_id,
-            defer_network_release=defer_network_release,
-        )
-
-    def verify_host_rules(self, running: Sequence[ChatSandboxSpec] = ()) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.verify_host_rules(running)
+    @property
+    def network(self) -> ChatSandboxNetwork:
+        """Expose the group-network lifecycle owner to host collaborators."""
+        return self._network_lifecycle
 
     def require_docker_data_root(self, expected: str) -> str:
         """Verify retained state is owned by the intended Docker data root.
@@ -686,7 +602,7 @@ class ChatSandboxManager:
         cannot show them refuses before any container exists.
         """
         with substage(observer, "host_rules"):
-            self.require_host_rules()
+            self._network_lifecycle.require_host_rules()
         existing = self.inspect(spec.container_name)
         if existing is not None:
             # Idempotent adoption, not a creation. No action is noted here:
@@ -976,7 +892,7 @@ class ChatSandboxManager:
             if network_name in {CHAT_NULL_NETWORK, CHAT_BOOTSTRAP_NETWORK}:
                 continue
             try:
-                self._release_owned_network(
+                self._network_lifecycle._release_owned_network(
                     network_name,
                     spec,
                     only_if_sandbox_unattached=True,
@@ -1142,8 +1058,8 @@ class ChatSandboxManager:
         """Start the exact stopped container and verify it reached RUNNING.
 
         A cold start is also where the network is proved from inside: nothing
-        from the repository runs in a guest that has not passed
-        :meth:`_verify_guest_network`. A start that fails after ``docker
+        from the repository runs in a guest that has not passed the network
+        lifecycle's in-guest check. A start that fails after ``docker
         start`` stops its guest again; a running guest whose proof never
         finished is proved before it is reused.
         """
@@ -1153,7 +1069,9 @@ class ChatSandboxManager:
             raise RetainedChatLost("chat sandbox container identity changed before start")
         network_snapshot = _GroupNetworkSnapshot()
         with substage(observer, "group_network"):
-            current = self._require_group_network(spec, current, network_snapshot)
+            current = self._network_lifecycle._require_group_network(
+                spec, current, network_snapshot
+            )
         if current.container_id != exact_container_id:
             raise RetainedChatLost("chat sandbox container identity changed during start")
         if current.running:
@@ -1173,7 +1091,9 @@ class ChatSandboxManager:
                     addresses=network_snapshot.addresses,
                 )
             with substage(observer, "guest_network_sync"):
-                self._sync_kata_guest_network(spec, current, network_snapshot.addresses)
+                self._network_lifecycle._sync_kata_guest_network(
+                    spec, current, network_snapshot.addresses
+                )
             return current
         if current.status is ChatSandboxStatus.PAUSED:
             raise SandboxError("a paused chat sandbox is not a valid stopped activation")
@@ -1231,9 +1151,9 @@ class ChatSandboxManager:
                     f"chat sandbox started into unexpected state {started.status.value!r}"
                 )
             with substage(observer, "guest_network_sync"):
-                self._sync_kata_guest_network(spec, started, addresses)
+                self._network_lifecycle._sync_kata_guest_network(spec, started, addresses)
             with substage(observer, "guest_network_check"):
-                self._verify_guest_network(
+                self._network_lifecycle._verify_guest_network(
                     spec,
                     expected_container_id=container_id,
                     defer_network_release=defer_network_release,
@@ -1333,7 +1253,7 @@ class ChatSandboxManager:
             raise RetainedChatLost("chat sandbox container identity changed during stop")
         if current.running:
             raise SandboxError("refusing to release networking from a running chat sandbox")
-        released = self._release_sandbox_networks(
+        released = self._network_lifecycle._release_sandbox_networks(
             spec,
             current,
             expected_container_id=expected_container_id,
@@ -1356,8 +1276,10 @@ class ChatSandboxManager:
         """
         snapshot = _GroupNetworkSnapshot()
         with substage(observer, "network_ensure"):
-            current = self._require_group_network(spec, self._require(spec), snapshot)
-        expected = self.network_for(spec)
+            current = self._network_lifecycle._require_group_network(
+                spec, self._require(spec), snapshot
+            )
+        expected = self._network_lifecycle.network_for(spec)
         if set(current.networks) != {expected}:
             raise SandboxError(
                 f"retained chat network is {list(current.networks)!r}, not its group "
@@ -1371,7 +1293,7 @@ class ChatSandboxManager:
                 "activated again before anything runs in it"
             )
         with substage(observer, "guest_network_sync"):
-            self._sync_kata_guest_network(spec, current, snapshot.addresses)
+            self._network_lifecycle._sync_kata_guest_network(spec, current, snapshot.addresses)
 
     def build_exec_command(
         self,
@@ -2243,6 +2165,7 @@ class ChatSandboxManager:
         workdir: str = CHAT_WORKDIR,
         timeout_s: float = 60,
         input_bytes: bytes | None = None,
+        stdin: BinaryIO | None = None,
         user_uid: int | None = None,
         user_gid: int | None = None,
         observer: StageObserver | None = None,
@@ -2263,11 +2186,7 @@ class ChatSandboxManager:
         )
         if not current.running:
             raise SandboxError("chat sandbox must be started before exec")
-        interactive = input_bytes is not None
-        if self.backend.runtime == KATA_RUNTIME and not input_bytes:
-            # Attaching and immediately closing an empty stdin can wedge the
-            # Kata shim. build_exec_command supplies /dev/null in this case.
-            interactive = False
+        interactive = interactive_input(input_bytes, stdin, self.backend.runtime == KATA_RUNTIME)
         command = self.build_exec_command(
             spec,
             argv,
@@ -2284,6 +2203,7 @@ class ChatSandboxManager:
                     command,
                     env=self.exec_client_env(env),
                     input=input_bytes,
+                    stdin=stdin,
                     capture_output=True,
                     timeout=timeout_s,
                     check=False,
@@ -3340,7 +3260,7 @@ class ChatSandboxManager:
     def import_base_bundle(
         self,
         spec: ChatSandboxSpec,
-        bundle: bytes,
+        bundle: BinaryIO,
         *,
         commit: str,
         env: dict[str, str] | None = None,
@@ -3351,8 +3271,7 @@ class ChatSandboxManager:
         this command returns. ``git bundle unbundle`` adds objects only: it
         does not move HEAD, refs, the real index, or working-tree files.
         """
-        if not bundle:
-            raise ValueError("base bundle must be non-empty")
+        require_nonempty_rewindable(bundle)
         if not _FULL_OBJECT_ID.fullmatch(commit):
             raise ValueError("base bundle commit must be a full Git object id")
         script = (
@@ -3377,8 +3296,9 @@ class ChatSandboxManager:
             env={**(env or {}), "GIT_ALLOW_PROTOCOL": ""},
             workdir=CHAT_WORKDIR,
             timeout_s=300,
-            input_bytes=bundle,
+            stdin=bundle,
         )
+        bundle.seek(0)
         if result.returncode != 0:
             raise SandboxError(
                 "retained base bundle import failed: "

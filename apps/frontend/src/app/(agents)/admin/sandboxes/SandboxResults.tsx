@@ -4,11 +4,12 @@ import Link from 'next/link';
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { conversationHref } from '@/lib/api/adminConversations';
-import { getAdminSandboxes, type AdminSandboxState } from '@/lib/api/adminSandboxes';
-import { getErrorMessage } from '@/lib/utils/errors';
+import type { AdminSandboxState } from '@/lib/api/adminSandboxes';
 
-import { accessDenied, BUTTON, dateTime, ErrorNotice } from '../runs/shared';
+import { BUTTON, dateTime, ErrorNotice } from '../runs/shared';
+import type { SandboxInventorySnapshot } from './inventorySync';
 import { finiteMetric, formatBytes, formatCpu, type SandboxObservation } from './present';
+import { useSandboxInventory } from './useSandboxInventory';
 import {
   FleetSummary,
   ResourceCell,
@@ -27,7 +28,6 @@ import {
   type SandboxSortKey,
 } from './inventory';
 
-const REFRESH_MS = 30_000;
 const STATE_OPTIONS: { value: AdminSandboxState | 'all'; label: string }[] = [
   { value: 'running', label: 'Running' },
   { value: 'all', label: 'All states' },
@@ -41,14 +41,8 @@ const STATE_OPTIONS: { value: AdminSandboxState | 'all'; label: string }[] = [
   { value: 'restoring', label: 'Restoring' },
 ];
 
-interface Snapshot {
-  sandboxes: SandboxObservation[];
-  observedAt: string;
-  appliedAtMs: number;
-}
-
 export function SandboxResults({ onDenied }: { onDenied: () => void }) {
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<SandboxInventorySnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [denied, setDenied] = useState(false);
@@ -83,79 +77,18 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
     setSelectedIds((current) => new Set([...current].filter((id) => !ids.includes(id))));
   }, []);
 
-  useEffect(() => {
-    if (denied) return;
-    let disposed = false;
-    let accessRevoked = false;
-    let request: AbortController | null = null;
-
-    async function load() {
-      if (request || accessRevoked || disposed || batchBusyRef.current) return;
-      const controller = new AbortController();
-      request = controller;
-      setLoading(true);
-      setError(null);
-      try {
-        // Each refresh traverses the whole fleet, without a creation-time
-        // window. Replace the snapshot only after all pages succeeded.
-        const sandboxes = new Map<string, SandboxObservation>();
-        const cursors = new Set<string>();
-        let cursor: string | undefined;
-        let observedAt = '';
-        let appliedAtMs = 0;
-        do {
-          const page = await getAdminSandboxes(
-            {
-              limit: 200,
-              ...(stateFilter !== 'running' ? { state: stateFilter } : {}),
-              ...(includeArchived ? { include_archived: true } : {}),
-              ...(cursor ? { cursor } : {}),
-            },
-            controller.signal,
-          );
-          if (controller.signal.aborted || disposed) return;
-          const pageObservedAtMs = performance.now();
-          for (const sandbox of page.sandboxes)
-            sandboxes.set(sandbox.id, {
-              sandbox,
-              observedAtMs: pageObservedAtMs,
-              serverObservedAt: page.observed_at,
-            });
-          if (!observedAt) {
-            // Use the server's clock and let the oldest page keep ageing
-            // through pagination; browser wall-clock skew cannot hide staleness.
-            observedAt = page.observed_at;
-            appliedAtMs = pageObservedAtMs;
-          }
-          cursor = page.next_cursor ?? undefined;
-          if (cursor && cursors.has(cursor))
-            throw new Error('Unable to load the complete sandbox list.');
-          if (cursor) cursors.add(cursor);
-        } while (cursor);
-        if (!batchBusyRef.current)
-          setSnapshot({ sandboxes: [...sandboxes.values()], observedAt, appliedAtMs });
-      } catch (e) {
-        if (controller.signal.aborted || disposed) return;
-        if (accessDenied(e)) {
-          accessRevoked = true;
-          denyAccess();
-        } else setError(getErrorMessage(e));
-      } finally {
-        if (!controller.signal.aborted && !disposed) setLoading(false);
-        request = null;
-      }
-    }
-
-    void load();
-    const timer = setInterval(() => {
-      if (autoRefreshRef.current) void load();
-    }, REFRESH_MS);
-    return () => {
-      disposed = true;
-      clearInterval(timer);
-      request?.abort();
-    };
-  }, [revision, stateFilter, includeArchived, denied, denyAccess]);
+  useSandboxInventory({
+    revision,
+    stateFilter,
+    includeArchived,
+    denied,
+    denyAccess,
+    autoRefreshRef,
+    batchBusyRef,
+    setLoading,
+    setError,
+    setSnapshot,
+  });
 
   const hosts = useMemo(
     () => [...new Set(snapshot?.sandboxes.map(({ sandbox }) => sandbox.host) ?? [])].sort(),

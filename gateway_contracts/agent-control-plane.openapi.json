@@ -2220,6 +2220,115 @@
         "title": "AdminSandboxDetail",
         "type": "object"
       },
+      "AdminSandboxHostObservation": {
+        "description": "One host heartbeat change, shared by all its sandbox rows.",
+        "properties": {
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "last_heartbeat_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Heartbeat At"
+          }
+        },
+        "required": [
+          "host"
+        ],
+        "title": "AdminSandboxHostObservation",
+        "type": "object"
+      },
+      "AdminSandboxInventoryPage": {
+        "description": "A snapshot page or bounded upserts/removals; counts belong to snapshots.",
+        "properties": {
+          "change_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Cursor"
+          },
+          "deleted_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deleted Ids",
+            "type": "array"
+          },
+          "hosts": {
+            "items": {
+              "$ref": "#/components/schemas/AdminSandboxHostObservation"
+            },
+            "title": "Hosts",
+            "type": "array"
+          },
+          "mode": {
+            "default": "snapshot",
+            "enum": [
+              "snapshot",
+              "delta"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "reset_required": {
+            "default": false,
+            "title": "Reset Required",
+            "type": "boolean"
+          },
+          "sandboxes": {
+            "items": {
+              "$ref": "#/components/schemas/AdminSandbox"
+            },
+            "title": "Sandboxes",
+            "type": "array"
+          },
+          "total_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Count"
+          }
+        },
+        "required": [
+          "observed_at"
+        ],
+        "title": "AdminSandboxInventoryPage",
+        "type": "object"
+      },
       "AdminSandboxList": {
         "description": "A bounded page of the current inventory, ordered by sandbox identity.",
         "properties": {
@@ -5826,6 +5935,17 @@
             "title": "Archived",
             "type": "array"
           },
+          "archived_next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived Next Cursor"
+          },
           "enabled": {
             "title": "Enabled",
             "type": "boolean"
@@ -5956,6 +6076,210 @@
           "updated_at"
         ],
         "title": "AgentMemoryView",
+        "type": "object"
+      },
+      "AgentNotificationJob": {
+        "description": "The small job state needed for completion and question notices.",
+        "properties": {
+          "cancel_requested": {
+            "title": "Cancel Requested",
+            "type": "boolean"
+          },
+          "current_attempt_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Attempt Id"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "queued",
+              "waiting",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "thread_revision": {
+            "title": "Thread Revision",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "id",
+          "thread_id",
+          "title",
+          "thread_revision",
+          "repo",
+          "state",
+          "turn_no",
+          "revision",
+          "cancel_requested"
+        ],
+        "title": "AgentNotificationJob",
+        "type": "object"
+      },
+      "AgentNotificationStateResponse": {
+        "description": "An active-job bootstrap page or durable owner-change page.",
+        "properties": {
+          "change_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Cursor"
+          },
+          "deleted_job_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deleted Job Ids",
+            "type": "array"
+          },
+          "deleted_thread_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deleted Thread Ids",
+            "type": "array"
+          },
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/AgentNotificationJob"
+            },
+            "title": "Jobs",
+            "type": "array"
+          },
+          "mode": {
+            "enum": [
+              "snapshot",
+              "delta"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "reset_required": {
+            "default": false,
+            "title": "Reset Required",
+            "type": "boolean"
+          },
+          "threads": {
+            "items": {
+              "$ref": "#/components/schemas/AgentNotificationThread"
+            },
+            "title": "Threads",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mode",
+          "observed_at"
+        ],
+        "title": "AgentNotificationStateResponse",
+        "type": "object"
+      },
+      "AgentNotificationThread": {
+        "description": "A changed title for a conversation still visible to its owner.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "revision"
+        ],
+        "title": "AgentNotificationThread",
         "type": "object"
       },
       "AgentOperationProfilingFragment": {
@@ -26183,7 +26507,7 @@
             "schema": {
               "anyOf": [
                 {
-                  "maxLength": 2048,
+                  "maxLength": 32768,
                   "type": "string"
                 },
                 {
@@ -26238,6 +26562,16 @@
             }
           },
           {
+            "in": "query",
+            "name": "sync",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Sync",
+              "type": "boolean"
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,
@@ -26259,7 +26593,15 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AdminSandboxList"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/AdminSandboxList"
+                    },
+                    {
+                      "$ref": "#/components/schemas/AdminSandboxInventoryPage"
+                    }
+                  ],
+                  "title": "Response List Admin Sandboxes Admin Agent Sandboxes Get"
                 }
               }
             },
@@ -34224,6 +34566,23 @@
             }
           },
           {
+            "in": "query",
+            "name": "archive_cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Archive Cursor"
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,
@@ -34740,6 +35099,83 @@
         "tags": [
           "model-preference"
         ]
+      }
+    },
+    "/v1/agent/notifications/state": {
+      "get": {
+        "description": "Bootstrap live turns, then page only durable owner changes.",
+        "operationId": "get_agent_notification_state_v1_agent_notifications_state_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32768,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentNotificationStateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Notification State"
       }
     },
     "/v1/agent/profile": {

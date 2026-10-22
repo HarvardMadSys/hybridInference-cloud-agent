@@ -59,6 +59,7 @@ from cloud_agent.application.ssh_servers import (
 )
 from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
 from cloud_agent.attachments.selection import prompt_with_attachments
+from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATES
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import EnvironmentAccessRevoked, EnvironmentEncryptionError
@@ -123,7 +124,6 @@ from cloud_agent.schemas import (
     WorkerWaitResponse,
 )
 from cloud_agent.skills.selection import prompt_with_skills
-from cloud_agent.source_control import SourceControlError
 from cloud_agent.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
@@ -1011,25 +1011,24 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
             )
             if environment.required:
                 if ENVIRONMENT_CAPABILITY not in capabilities:
-                    raise SourceControlError("Host cannot execute environment configuration")
+                    raise SandboxManagerError(503, "Host cannot execute environment configuration")
                 if (
                     uses_inference_names(environment)
                     and ENVIRONMENT_INFERENCE_CAPABILITY not in capabilities
                 ):
-                    raise SourceControlError("Host cannot keep inference variables from the CLI")
-                from cloud_agent.sandbox_manager_client import SandboxManagerError
+                    raise SandboxManagerError(503, "Host cannot isolate inference variables")
                 from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
                 try:
                     broker = await sandbox_manager_for_job(job_store.host_pool, claim["id"])
                     if broker is None:
-                        raise SourceControlError("Sandbox manager is unavailable")
+                        raise SandboxManagerError(503, "Sandbox manager is unavailable")
                     await broker.require_environment_capability(environment)
                 except (SandboxManagerError, httpx.HTTPError):
-                    raise SourceControlError("Sandbox manager must be upgraded") from None
+                    raise SandboxManagerError(503, "Sandbox manager must be upgraded") from None
             else:
                 environment = None
-        except (SourceControlError, EnvironmentEncryptionError):
+        except (SandboxManagerError, EnvironmentEncryptionError):
             await job_store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
             raise HTTPException(
                 503, "Waiting for environment-capable host or available encryption"
@@ -1074,9 +1073,9 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         capabilities = attestation.runner_capabilities if attestation else []
         try:
             if SSH_ACCESS_CAPABILITY not in capabilities:
-                raise SourceControlError("Host cannot apply SSH access")
+                raise SandboxManagerError(503, "Host cannot apply SSH access")
             ssh_access = build_ssh_access(ssh_state, ssh_key_cipher())
-        except (SourceControlError, ValueError):
+        except (SandboxManagerError, CredentialCipherError, ValueError):
             await job_store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
             raise HTTPException(
                 503, "Waiting for an SSH-capable host or available encryption"
