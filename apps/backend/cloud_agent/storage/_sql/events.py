@@ -33,15 +33,9 @@ async def insert_event(
     A ``client_seq`` the attempt has already stored is a retry of a
     response that never arrived: answer with the stored row's id and do
     not run the thread-message mirror again — it ran when the row landed.
+    The insert handles that check atomically, so first deliveries need one
+    statement and retries pay for the stored-id lookup.
     """
-    if client_seq is not None:
-        existing = await conn.fetchval(
-            "SELECT id FROM agent_job_events WHERE attempt_id = $1 AND client_seq = $2",
-            attempt_id,
-            client_seq,
-        )
-        if existing is not None:
-            return int(existing)
     event_id = await conn.fetchval(
         """
             INSERT INTO agent_job_events (job_id, attempt_id, seq, event_type, payload, client_seq)
@@ -50,6 +44,8 @@ async def insert_event(
                 (SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_job_events WHERE attempt_id = $2),
                 $3, $4::jsonb, $5
             )
+            ON CONFLICT (attempt_id, client_seq)
+                WHERE client_seq IS NOT NULL DO NOTHING
             RETURNING id
             """,
         job_id,
@@ -58,6 +54,18 @@ async def insert_event(
         json.dumps(payload) if payload is not None else None,
         client_seq,
     )
+    if event_id is None:
+        # The partial unique index is the authority for duplicate client_seq
+        # values. The live-attempt row lock serializes legitimate writers, and
+        # this read returns the original id without repeating its side effects.
+        existing = await conn.fetchval(
+            "SELECT id FROM agent_job_events WHERE attempt_id = $1 AND client_seq = $2",
+            attempt_id,
+            client_seq,
+        )
+        if existing is None:
+            raise RuntimeError("event insert conflicted but its stored row was not found")
+        return int(existing)
     text = (payload or {}).get("text")
     is_subagent = subagent_owned(payload)
     if event_type == "message" and isinstance(text, str) and text.strip() and not is_subagent:

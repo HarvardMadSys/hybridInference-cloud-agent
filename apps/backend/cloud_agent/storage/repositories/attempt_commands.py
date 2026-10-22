@@ -34,6 +34,7 @@ from cloud_agent.execution_profiles import (
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
+from cloud_agent.storage._sql.attempts import live_attempt_job
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent.storage._sql.environment_runs import env_run_blocks_host, env_runs_holding_slots
 from cloud_agent.storage._sql.events import insert_event
@@ -103,21 +104,7 @@ class PostgresAttemptCommands:
     @staticmethod
     async def _lock_live_attempt(conn: Any, attempt_id: int, lease_generation: int | None) -> bool:
         """Lock an attempt first, then test its lease against the post-wait wall clock."""
-        locked = await conn.fetchval(
-            "SELECT id FROM agent_attempts "
-            "WHERE id = $1 AND ($2::bigint IS NULL OR lease_generation = $2) AND status = 'running' "
-            "FOR UPDATE",
-            attempt_id,
-            lease_generation,
-        )
-        if locked is None:
-            return False
-        return bool(
-            await conn.fetchval(
-                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
-                attempt_id,
-            )
-        )
+        return await live_attempt_job(conn, attempt_id, lease_generation) is not None
 
     async def sweep_queued_follow_ups(self) -> None:
         """Fail queued follow-ups whose earlier native context is unavailable.
@@ -1142,12 +1129,8 @@ class PostgresAttemptCommands:
     ) -> int | None:
         """Append one event in one transaction."""
         async with self._pool.acquire() as conn, conn.transaction():
-            if not await self._lock_live_attempt(conn, attempt_id, lease_generation):
-                return None
-            attempt = await conn.fetchrow(
-                "SELECT job_id FROM agent_attempts WHERE id = $1", attempt_id
-            )
-            if attempt is None:
+            job_id = await live_attempt_job(conn, attempt_id, lease_generation)
+            if job_id is None:
                 return None
             phase = (payload or {}).get("phase") if event_type == "lifecycle" else None
             if phase == "workspace_ready":
@@ -1162,7 +1145,7 @@ class PostgresAttemptCommands:
                 )
             event_id = await insert_event(
                 conn,
-                job_id=attempt["job_id"],
+                job_id=job_id,
                 attempt_id=attempt_id,
                 event_type=event_type,
                 payload=payload,

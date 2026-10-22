@@ -31,14 +31,14 @@ from typing import Any
 import asyncpg
 import pytest
 import pytest_asyncio
-from tests.integration.storage.test_agent_job_store import _create_job
+from tests.integration.storage.test_agent_job_store import _claim, _create_job
 from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
-from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
+from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -118,15 +118,35 @@ async def test_an_unknown_job_answers_nothing(queries: PostgresConversationQueri
     assert await queries.get_thread_for_job(job_id="ajob_does_not_exist", user_id=_OWNER) is None
 
 
-async def test_stream_state_is_current_and_scoped_to_the_owner(
-    store, queries: PostgresConversationQueries, db
-) -> None:
+async def test_job_stream_page_is_current_and_scoped_to_the_owner(store, db) -> None:
     job = await _create_job(store, user_id=_OWNER)
-    assert await queries.get_job_stream_state(job_id=job["id"], user_id=_OWNER) == JobStreamState(
-        "queued", None
+    queries = PostgresExecutionQueries(db)
+    own_page = await queries.job_stream_page(job_id=job["id"], user_id=_OWNER)
+    assert own_page is not None
+    assert own_page[0] == []
+    assert own_page[1].state == "queued"
+    assert own_page[1].published_pr_url is None
+    assert await queries.job_stream_page(job_id=job["id"], user_id=_OTHER) is None
+    assert await queries.job_stream_page(job_id="ajob_missing", user_id=_OWNER) is None
+    claim = await _claim(store, worker_id="stream-page", lease_ttl_seconds=60)
+    assert claim is not None
+    event_id = await store.attempt_commands.append_event(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        event_type="message",
+        payload={"text": "stream page"},
+        event_seq=1,
     )
-    assert await queries.get_job_stream_state(job_id=job["id"], user_id=_OTHER) is None
-    assert await queries.get_job_stream_state(job_id="ajob_missing", user_id=_OWNER) is None
+    assert event_id is not None
+    page = await queries.job_stream_page(job_id=job["id"], user_id=_OWNER, limit=1)
+    assert page is not None
+    assert len(page[0]) == 1
+    assert page[0][0]["id"] == event_id
+    assert page[0][0]["payload"] == {"text": "stream page"}
+    assert await queries.job_stream_page(job_id=job["id"], user_id=_OWNER, after_id=event_id) == (
+        [],
+        page[1],
+    )
     async with db.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET state = 'succeeded', native_turn_no = 1, "
@@ -134,9 +154,10 @@ async def test_stream_state_is_current_and_scoped_to_the_owner(
             job["id"],
             "https://example.test/pr/42",
         )
-    assert await queries.get_job_stream_state(job_id=job["id"], user_id=_OWNER) == JobStreamState(
-        "succeeded", "https://example.test/pr/42"
-    )
+    final_page = await queries.job_stream_page(job_id=job["id"], user_id=_OWNER)
+    assert final_page is not None
+    assert final_page[1].state == "succeeded"
+    assert final_page[1].published_pr_url == "https://example.test/pr/42"
 
 
 async def test_the_job_list_is_scoped_to_its_owner(

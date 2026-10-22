@@ -36,6 +36,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.job_stream_fake import job_stream_page as combined_job_stream_page
 from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary
 
 from cloud_agent import sandbox_manager_routing
@@ -43,7 +44,6 @@ from cloud_agent.api import routes as agent_jobs_router, worker, workspace as ag
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.attachments.models import AttachmentError
-from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.gateway import GatewayError
 from cloud_agent.goals.models import GoalConflict
@@ -1497,12 +1497,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "goal": self.thread_goals.get(str(job["thread_id"])),
         }
 
-    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
-        job = self.jobs.get(job_id)
-        if job is None or job["user_id"] != user_id:
-            return None
-        return JobStreamState(job["state"], job.get("published_pr_url"))
-
     async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
         said = [
             message
@@ -1831,6 +1825,9 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         return [
             event for event in self.events if event["job_id"] == job_id and event["id"] > after_id
         ][:limit]
+
+    async def job_stream_page(self, **kwargs: Any) -> Any:
+        return await combined_job_stream_page(self, **kwargs)
 
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         return self.thread_workspace_readiness.get(thread_id, True)
