@@ -1,3 +1,4 @@
+import type { ThreadHistoryOptions } from './agents/threads';
 import {
   getAgentJob,
   getAgentJobThread,
@@ -8,7 +9,10 @@ import {
 
 export interface AgentReadScope {
   getAgentJob: (jobId: string) => Promise<AgentJobApi>;
-  getAgentJobThread: (jobId: string) => Promise<AgentThreadApi | null>;
+  getAgentJobThread: (
+    jobId: string,
+    options?: ThreadHistoryOptions,
+  ) => Promise<AgentThreadApi | null>;
   /** The usage snapshot kept for a turn, or undefined when none was kept. */
   getUsage: (jobId: string) => AgentJobUsageApi | null | undefined;
   /** Keep a turn's usage snapshot within this owner's scope. */
@@ -44,7 +48,10 @@ export function createAgentReadScope(): AgentReadScope {
   const usage = new Map<string, AgentJobUsageApi | null>();
   return {
     getAgentJob: (jobId) => pendingRead(jobs, jobId, getAgentJob),
-    getAgentJobThread: (jobId) => pendingRead(threads, jobId, getAgentJobThread),
+    getAgentJobThread: (jobId, options) =>
+      pendingRead(threads, options ? JSON.stringify([jobId, options]) : jobId, () =>
+        options ? getAgentJobThread(jobId, options) : getAgentJobThread(jobId),
+      ),
     getUsage: (jobId) => usage.get(jobId),
     setUsage: (jobId, snapshot) => {
       usage.set(jobId, snapshot);
@@ -58,7 +65,10 @@ export function createAgentReadScope(): AgentReadScope {
         threads.clear();
       } else {
         jobs.delete(jobId);
-        threads.delete(jobId);
+        for (const key of threads.keys()) {
+          if (key === jobId || key.startsWith(`${JSON.stringify([jobId]).slice(0, -1)},`))
+            threads.delete(key);
+        }
       }
     },
   };

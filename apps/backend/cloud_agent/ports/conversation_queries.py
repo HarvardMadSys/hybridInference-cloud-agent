@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
+from cloud_agent.domain.thread_history import THREAD_PAGE_SIZE
 
 if TYPE_CHECKING:
     from cloud_agent.domain.execution import JobStreamState
@@ -26,13 +27,29 @@ class ConversationQueries(Protocol):
         """Page the owner's completion receipts, including archived but not deleted chats."""
         ...
 
-    async def get_thread_for_job(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
-        """Return the conversation containing an owned job.
+    async def get_thread_for_job(
+        self,
+        *,
+        job_id: str,
+        user_id: str,
+        cursor: str | None = None,
+        after: str | None = None,
+        limit: int = THREAD_PAGE_SIZE,
+        anchor: bool = False,
+    ) -> dict[str, Any] | None:
+        """Return a bounded, prompt-first page; cursor reads older, after reads newer."""
+        ...
 
-        With its turns and transcript, and with the messages still waiting to
-        become turns (``pending_messages``, in send order) and why the queue is
-        not moving by itself (``queue_paused_reason``), read together.
-        """
+    async def get_thread_message_chunk(
+        self,
+        *,
+        job_id: str,
+        user_id: str,
+        message_id: int,
+        offset: int,
+        limit: int,
+    ) -> dict[str, Any] | None:
+        """Read one owned message's bounded Unicode-character slice."""
         ...
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:

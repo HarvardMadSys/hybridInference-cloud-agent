@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.agent_memory import (
@@ -20,44 +19,31 @@ from cloud_agent.agent_memory import (
     normalize_memory,
 )
 from cloud_agent.api._owner_auth import require_agent_owner
+from cloud_agent.api._sensitive_routes import SensitiveRoute
 from cloud_agent.api.deps import get_storage, require_store
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
-
     from cloud_agent.ports.agent_memory import AgentMemoryRepository
 
 
 _INVALID_MESSAGE = "Memory must be one lasting rule of at most 240 characters, without credentials."
 
 
-class _MemoryValidationRoute(APIRoute):
+class _MemoryValidationRoute(SensitiveRoute):
     """Keep rejected memory text out of request-validation error responses."""
 
-    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+    def validation_response(self, exc: Exception) -> JSONResponse:
         """Replace validation errors that would otherwise echo submitted input."""
-        handler = super().get_route_handler()
-
-        async def safe_handler(request: Request) -> Response:
-            try:
-                return await handler(request)
-            except RequestValidationError as exc:
-                errors = exc.errors()
-                # Text over the limit is refused here, before it is normalized,
-                # and carries the same typed reason as text normalizing refuses.
-                detail: Any = (
-                    {"error": {"type": "memory_invalid", "message": _INVALID_MESSAGE}}
-                    if errors
-                    and all(tuple(error["loc"]) == ("body", "content") for error in errors)
-                    else "Check the required memory fields and values."
-                )
-                return JSONResponse(
-                    status_code=422,
-                    content={"detail": detail},
-                    headers={"Cache-Control": "no-store"},
-                )
-
-        return safe_handler
+        assert isinstance(exc, RequestValidationError)
+        errors = exc.errors()
+        # Text over the limit is refused here, before it is normalized,
+        # and carries the same typed reason as text normalizing refuses.
+        detail: Any = (
+            {"error": {"type": "memory_invalid", "message": _INVALID_MESSAGE}}
+            if errors and all(tuple(error["loc"]) == ("body", "content") for error in errors)
+            else "Check the required memory fields and values."
+        )
+        return JSONResponse(status_code=422, content={"detail": detail})
 
 
 router = APIRouter(
@@ -123,13 +109,11 @@ def _failure(exc: ValueError) -> HTTPException:
 
 @router.get("", response_model=AgentMemoryScopeView)
 async def list_memories(
-    response: Response,
     repo: str | None = _REPO,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _MemoryStorage | None = Depends(get_storage),
 ) -> AgentMemoryScopeView:
     """Read the owner's memories for every project, or for one repository."""
-    response.headers["Cache-Control"] = "no-store"
     values = await require_store(store).agent_memory.list_memories(user["user_id"], repo)
     return AgentMemoryScopeView.model_validate(values)
 
@@ -148,12 +132,10 @@ class MemoryProjects(BaseModel):
 
 @router.get("/projects", response_model=MemoryProjects)
 async def list_memory_projects(
-    response: Response,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _MemoryStorage | None = Depends(get_storage),
 ) -> MemoryProjects:
     """List repositories the owner worked in or keeps memories for."""
-    response.headers["Cache-Control"] = "no-store"
     projects = await require_store(store).agent_memory.memory_projects(user["user_id"])
     return MemoryProjects(projects=projects)
 
@@ -161,12 +143,10 @@ async def list_memory_projects(
 @router.put("/settings", response_model=AgentMemoryScopeView)
 async def set_memory_enabled(
     body: MemorySetting,
-    response: Response,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _MemoryStorage | None = Depends(get_storage),
 ) -> AgentMemoryScopeView:
     """Turn a scope off to stop showing its memories to tasks and refuse agent writes."""
-    response.headers["Cache-Control"] = "no-store"
     values = await require_store(store).agent_memory.set_memory_enabled(
         user["user_id"], body.repo, body.enabled
     )
@@ -176,12 +156,10 @@ async def set_memory_enabled(
 @router.post("", response_model=AgentMemoryView, status_code=201)
 async def add_memory(
     body: AddMemory,
-    response: Response,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _MemoryStorage | None = Depends(get_storage),
 ) -> AgentMemoryView:
     """Save a memory the owner wrote; it applies from the next task."""
-    response.headers["Cache-Control"] = "no-store"
     try:
         values = await require_store(store).agent_memory.add_memory(
             user["user_id"], body.repo, _content(body.content)
@@ -195,12 +173,10 @@ async def add_memory(
 async def update_memory(
     memory_id: str,
     body: UpdateMemory,
-    response: Response,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _MemoryStorage | None = Depends(get_storage),
 ) -> AgentMemoryView:
     """Rewrite or move a memory; the owner's edit makes it manual."""
-    response.headers["Cache-Control"] = "no-store"
     try:
         values = await require_store(store).agent_memory.update_memory(
             user["user_id"],
@@ -228,19 +204,17 @@ async def delete_memory(
         )
     except ValueError as exc:
         raise _failure(exc) from None
-    return Response(status_code=204, headers={"Cache-Control": "no-store"})
+    return Response(status_code=204)
 
 
 @router.post("/{memory_id}/restore", response_model=AgentMemoryView)
 async def restore_memory(
     memory_id: str,
     body: MemoryVersion,
-    response: Response,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _MemoryStorage | None = Depends(get_storage),
 ) -> AgentMemoryView:
     """Make an archived memory active again."""
-    response.headers["Cache-Control"] = "no-store"
     try:
         values = await require_store(store).agent_memory.restore_memory(
             user["user_id"], memory_id, expected_version=body.expected_version
@@ -258,4 +232,4 @@ async def clear_memories(
 ) -> Response:
     """Delete every memory for every project, or for one repository."""
     await require_store(store).agent_memory.clear_memories(user["user_id"], repo)
-    return Response(status_code=204, headers={"Cache-Control": "no-store"})
+    return Response(status_code=204)

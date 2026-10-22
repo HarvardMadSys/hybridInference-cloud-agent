@@ -53,6 +53,24 @@ describe('owner-scoped pending reads', () => {
     expect(getAgentJobThread).toHaveBeenCalledTimes(2);
   });
 
+  it('coalesces matching history pages and invalidates only that job', async () => {
+    const held = deferred<AgentThreadApi | null>();
+    vi.mocked(getAgentJobThread).mockReturnValue(held.promise);
+    const reads = createAgentReadScope();
+    const anchor = reads.getAgentJobThread('job-a', { anchor: true });
+    expect(reads.getAgentJobThread('job-a', { anchor: true })).toBe(anchor);
+    const older = reads.getAgentJobThread('job-a', { cursor: 'older' });
+    const other = reads.getAgentJobThread('job-b', { anchor: true });
+    expect(getAgentJobThread).toHaveBeenCalledTimes(3);
+    reads.invalidate('job-a');
+    reads.getAgentJobThread('job-a', { anchor: true });
+    reads.getAgentJobThread('job-a', { cursor: 'older' });
+    expect(reads.getAgentJobThread('job-b', { anchor: true })).toBe(other);
+    expect(getAgentJobThread).toHaveBeenCalledTimes(5);
+    held.resolve(null);
+    await Promise.all([anchor, older, other]);
+  });
+
   it('lets both readers see an error and allows the next read to retry', async () => {
     const held = deferred<AgentJobApi>();
     vi.mocked(getAgentJob).mockReturnValueOnce(held.promise).mockResolvedValue(JOB);
