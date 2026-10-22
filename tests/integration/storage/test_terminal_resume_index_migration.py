@@ -28,6 +28,8 @@ pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 _BEFORE = "0084_host_removal_move_out"
 _THIS = "0085_terminal_resume_index"
+_KEYSET_BEFORE = "0102_admin_sandbox_marker_order"
+_KEYSET = "0103_terminal_resume_keyset"
 _INDEX = "idx_agent_jobs_terminal_resume"
 #: Enough history that reading all of it is the plan to avoid.
 _TURNS = 5000
@@ -73,6 +75,31 @@ async def test_an_interrupted_concurrent_build_is_replaced_by_a_valid_index(stor
 
         downgrade_to(config, _BEFORE)
         assert await _index(pool) is None
+    finally:
+        apply_migrations(config)
+
+
+async def test_head_index_covers_the_full_cursor_and_downgrade_restores_its_parent(pool):
+    """The head and its parent each retain the access path their query expects."""
+    config = _db_config()
+    try:
+        downgrade_to(config, _KEYSET_BEFORE)
+        previous = await _index(pool)
+        assert previous is not None
+        assert previous["definition"].endswith(
+            "USING btree (updated_at) WHERE terminal_resume_pending"
+        )
+
+        apply_migrations(config, _KEYSET)
+        keyset = await _index(pool)
+        assert keyset is not None
+        assert keyset["definition"].endswith(
+            "USING btree (updated_at, id) WHERE terminal_resume_pending"
+        )
+
+        downgrade_to(config, _KEYSET_BEFORE)
+        restored = await _index(pool)
+        assert restored is not None and restored["definition"] == previous["definition"]
     finally:
         apply_migrations(config)
 

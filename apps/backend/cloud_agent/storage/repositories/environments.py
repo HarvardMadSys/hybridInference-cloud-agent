@@ -236,7 +236,7 @@ class PostgresEnvironmentRepository:
             OrderedDict()
         )
         # Versions are immutable, so a pair's fingerprint never changes.
-        self._fingerprints: OrderedDict[tuple[str, str | None], str | None] = OrderedDict()
+        self._fingerprints: OrderedDict[tuple[str, str | None], str] = OrderedDict()
 
     @staticmethod
     async def _environment_lock(conn: Any, user_id: str) -> None:
@@ -522,7 +522,7 @@ class PostgresEnvironmentRepository:
                 if key not in self._fingerprints:
                     setup = _json(row["document"]).get("setup_script") or ""
                     try:
-                        self._fingerprints[key] = (
+                        fingerprint = (
                             optional_setup_fingerprint(
                                 setup,
                                 merge_variables(
@@ -534,10 +534,12 @@ class PostgresEnvironmentRepository:
                             else None
                         )
                     except EnvironmentEncryptionError:
-                        self._fingerprints[key] = None
-                    while len(self._fingerprints) > 512:
-                        self._fingerprints.popitem(last=False)
-                result[row["id"]] = self._fingerprints[key]
+                        fingerprint = None
+                    if fingerprint is not None:
+                        self._fingerprints[key] = fingerprint
+                        while len(self._fingerprints) > 512:
+                            self._fingerprints.popitem(last=False)
+                result[row["id"]] = self._fingerprints.get(key)
         return result
 
     async def get_environment(self, user_id: str, environment_id: str) -> dict[str, Any]:
