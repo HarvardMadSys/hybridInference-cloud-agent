@@ -25,7 +25,13 @@ Names inherited from HybridInference remain in use.
 
 The service is named **Sandbox Manager** (`sandbox-manager` in Compose and
 `cloud_agent_host.sandbox_manager` in Python). Use `AGENT_SANDBOX_MANAGER_*`
-names for new deployments. Existing values remain accepted:
+names for new deployments. The previous names remain accepted until 2026-12-31.
+When one supplies a value, the host or local deployment script that reads it
+prints a warning naming the variable, never its value, and a Python service
+that reads one itself, as from a deployment profile's Host environment, logs
+`sandbox_manager_legacy_env`. The fallbacks in the Compose files themselves
+are silent, the control plane's among them, so check each deployment's `.env`
+for these names before then:
 
 | Current name | Previous name |
 | --- | --- |
