@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
 
 
@@ -414,6 +415,23 @@ class SandboxRepository(Protocol):
         terminal_count: int | None = None,
     ) -> str | None:
         """Reconcile one authenticated shared-group Docker observation."""
+        ...
+
+    async def reconcile_thread_sandbox_observations(
+        self, *, host: str, observations: Sequence[Mapping[str, Any]]
+    ) -> list[str | None]:
+        """Reconcile every group one heartbeat reports, writing only what changed.
+
+        Each observation carries the arguments of
+        ``reconcile_thread_sandbox_observation`` but the host, and gets its
+        answer, in order. One unlocked read decides which would change
+        nothing; those take no lock and write nothing. A group the host did
+        not report is left alone.
+        """
+        ...
+
+    async def recorded_sandbox_checkpoints(self, *, checkpoint_ids: Sequence[str]) -> set[str]:
+        """Return which of these checkpoint receipts are already recorded, without locks."""
         ...
 
     async def record_sandbox_checkpoint(

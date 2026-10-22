@@ -226,6 +226,12 @@ class HostPoolRepository(Protocol):
 
         Returns:
             The updated host row, or ``None`` when the host no longer exists.
+            The row also carries ``runner_policy``, what the heartbeat answer
+            needs of the deployment's policy, read under the lock this write
+            takes on it: the global ``host_settings``, the
+            ``sandbox_archive_settings``, the ``runtime_download_targets`` and
+            whether an agent update waits to switch
+            (``runtime_upgrade_waiting``).
         """
         ...
 
