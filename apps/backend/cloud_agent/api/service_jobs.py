@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
+from cloud_agent.api._environment_route_policy import EnvironmentSensitiveRoute
 from cloud_agent.api._job_views import (
     _EVENT_PAGE_SIZE,
     _event_response,
@@ -54,7 +55,6 @@ from cloud_agent.api.deps import (
     require_store,
     verify_admin_access,
 )
-from cloud_agent.api.environments import CredentialSafeRoute
 from cloud_agent.application.job_admission import create_job_as
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.logging_utils import get_logger
@@ -220,7 +220,7 @@ router.add_api_route(
     methods=["POST"],
     response_model=AgentJobResponse,
     status_code=201,
-    route_class_override=CredentialSafeRoute,
+    route_class_override=EnvironmentSensitiveRoute,
 )
 
 
