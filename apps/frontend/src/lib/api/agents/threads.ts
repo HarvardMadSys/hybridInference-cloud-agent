@@ -98,6 +98,10 @@ export interface AgentProjectApi {
   last_activity_at: string | null;
   pinned_count?: number;
   pinned_at?: string | null;
+  /** Opaque grouped-list invalidation token; absent on older deployments. */
+  refresh_token?: string | null;
+  /** Changes to folder membership require a full read, not an activity merge. */
+  membership_token?: string | null;
 }
 
 /**

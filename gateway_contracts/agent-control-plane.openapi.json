@@ -6250,6 +6250,17 @@
             ],
             "title": "Last Activity At"
           },
+          "membership_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Membership Token"
+          },
           "pinned_at": {
             "anyOf": [
               {
@@ -6265,6 +6276,17 @@
             "default": 0,
             "title": "Pinned Count",
             "type": "integer"
+          },
+          "refresh_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refresh Token"
           },
           "repo": {
             "anyOf": [
