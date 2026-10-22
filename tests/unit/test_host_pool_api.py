@@ -2752,6 +2752,30 @@ async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_clie
     assert response.json()["residencies_lost"] == [{"thread_id": "th-lost", "generation": 3}]
 
 
+async def test_a_residency_two_groups_report_is_renewed_once_and_lost_once(residency_client):
+    """A member that two retained groups both report is still one residency.
+
+    The beat is the host's to shape, so the answer is per residency, not per
+    report: the grant of an extended residency is renewed once, and a residency
+    that was not extended comes back in ``residencies_lost`` once.
+    """
+    client, store, grants = residency_client
+    credential = await _enroll(client, store)
+    store.beat_answers = {("th-1", 1): "agr-1"}  # th-gone absent → not extended → lost
+    group = _live_group(("th-1", 1), ("th-gone", 4))
+    second = {**group, "sandbox_id": "asbx_2", "container_id": "fedcba9876543210"}
+
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={"retained_sandboxes": [group, second]},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert grants.renewed == ["agr-1"]
+    assert response.json()["residencies_lost"] == [{"thread_id": "th-gone", "generation": 4}]
+
+
 async def test_a_slow_gateway_does_not_hold_the_heartbeat_reply():
     """Renewals run after the reply, and together.
 
