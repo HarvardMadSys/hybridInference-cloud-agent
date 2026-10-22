@@ -60,6 +60,10 @@ _INSTALLATION_TTL_S = 300.0
 # (404), refused for this repository (422), or the JWT refused (401). Each is
 # worth exactly one fresh look at which installation covers the repository.
 _STALE_INSTALLATION_STATUSES = frozenset({401, 404, 422})
+# Targeted checks accept a repository name from each job request. Bound that
+# higher-cardinality cache so a stream of distinct, valid names cannot retain
+# process memory indefinitely.
+_USER_REPOSITORY_PERMISSIONS_MAX = 4096
 _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 # What the token endpoint answers when the refresh token itself is finished:
 # expired, already spent, or its authorization revoked. GitHub sends its own
@@ -333,6 +337,13 @@ class GitHubAppCredentials:
         #: Per user, per set of connected installations: when the answer was
         #: read, and the repositories it named.
         self._user_repositories: dict[tuple[str, tuple[int, ...]], tuple[float, list[str]]] = {}
+        #: Successful bounded listings for one installation survive a grant-set
+        #: change, so a picker refresh only asks GitHub about newly connected
+        #: ones. Entitlement treats these as positive witnesses, never denials.
+        self._user_installation_repositories: dict[tuple[str, int], tuple[float, list[str]]] = {}
+        #: A single-repository check is not a complete installation listing.
+        #: Cache that narrower answer separately for the same revocation bound.
+        self._user_repository_permissions: dict[tuple[str, int, str], tuple[float, bool]] = {}
         self._cipher: SourceControlCipher | None = None
         self._client = client
         self._owned: httpx.AsyncClient | None = None
@@ -465,15 +476,17 @@ class GitHubAppCredentials:
             )
         return response.json()
 
-    async def installation_id_for(self, repo: str) -> int:
+    async def installation_id_for(self, repo: str, *, fresh: bool = False) -> int:
         """Return the installation covering ``owner/name``.
 
         A repository with no installation is not an error to retry — it means
         the user has not installed the App there, and the publisher must say so
-        rather than appear to be broken.
+        rather than appear to be broken. ``fresh`` bypasses the short token-mint
+        cache when the id is serving as an authorization fence; the answer still
+        refreshes that cache for subsequent minting.
         """
         cached = self._installations.get(repo)
-        if cached is not None and time.monotonic() - cached[0] < _INSTALLATION_TTL_S:
+        if not fresh and cached is not None and time.monotonic() - cached[0] < _INSTALLATION_TTL_S:
             return cached[1]
         owner, _, name = repo.partition("/")
         if not owner or not name:
@@ -737,10 +750,62 @@ class GitHubAppCredentials:
         """Keep one user's answer for the next minute's reads."""
         self._user_repositories[user_id, installation_ids] = (time.monotonic(), list(repositories))
 
+    def cached_user_installation_repositories(
+        self, user_id: str, installation_id: int
+    ) -> list[str] | None:
+        """Return one recent bounded installation listing."""
+        cached = self._user_installation_repositories.get((user_id, installation_id))
+        if cached is None or time.monotonic() - cached[0] > number_setting(
+            "github_repository_cache_s"
+        ):
+            return None
+        return list(cached[1])
+
+    def remember_user_installation_repositories(
+        self, user_id: str, installation_id: int, repositories: list[str]
+    ) -> None:
+        """Remember one successful bounded listing for picker reuse."""
+        self._user_installation_repositories[user_id, installation_id] = (
+            time.monotonic(),
+            list(repositories),
+        )
+
+    def cached_user_repository_permission(
+        self, user_id: str, installation_id: int, repo: str
+    ) -> bool | None:
+        """Return a recent targeted permission answer, including a refusal."""
+        cached = self._user_repository_permissions.get((user_id, installation_id, repo.casefold()))
+        if cached is None or time.monotonic() - cached[0] > number_setting(
+            "github_repository_cache_s"
+        ):
+            return None
+        return cached[1]
+
+    def remember_user_repository_permission(
+        self, user_id: str, installation_id: int, repo: str, allowed: bool
+    ) -> None:
+        """Remember one targeted answer without treating it as a full listing."""
+        key = (user_id, installation_id, repo.casefold())
+        self._user_repository_permissions[key] = (
+            time.monotonic(),
+            allowed,
+        )
+        while len(self._user_repository_permissions) > _USER_REPOSITORY_PERMISSIONS_MAX:
+            oldest = next(iter(self._user_repository_permissions))
+            self._user_repository_permissions.pop(oldest, None)
+
     def forget_user(self, user_id: str) -> None:
         """Drop a user's remembered answer, when their connection changed."""
-        for key in [key for key in self._user_repositories if key[0] == user_id]:
-            self._user_repositories.pop(key, None)
+        for combined_key in [key for key in self._user_repositories if key[0] == user_id]:
+            self._user_repositories.pop(combined_key, None)
+        for installation_key in [
+            key for key in self._user_installation_repositories if key[0] == user_id
+        ]:
+            self._user_installation_repositories.pop(installation_key, None)
+        for permission_key in [
+            key for key in self._user_repository_permissions if key[0] == user_id
+        ]:
+            self._user_repository_permissions.pop(permission_key, None)
 
     async def create_personal_repository(
         self, user_token: str, *, name: str, description: str, private: bool
@@ -869,6 +934,46 @@ class GitHubAppCredentials:
                     break
                 page += 1
         return repos
+
+    async def user_can_push_repository(self, user_token: str, repo: str) -> bool:
+        """Whether GitHub says this user can push to one exact repository.
+
+        This is the constant-work entitlement path. The App installation is
+        checked separately against the user's saved grant, so this user-token
+        request proves only the other half of the boundary: their own push
+        permission. A plain 403/404 is a settled refusal; rate limits and
+        malformed successful answers are unavailable checks, never denials.
+        """
+        endpoint = _repository_endpoint(repo)
+        async with self._http() as client:
+            response = await client.get(
+                f"{self._config.api_base}{endpoint}",
+                headers={
+                    "Authorization": f"Bearer {user_token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+        status = response.status_code
+        if status == 401:
+            raise UserAuthorizationRevoked("GitHub refused the user's token", status=status)
+        wait = rate_limit_wait(response)
+        if wait is None and status in (403, 404):
+            return False
+        if status >= 400:
+            raise GitHubAppError(
+                f"could not read the user's permission for {repo} ({status})",
+                status=status,
+                retry_after_s=wait,
+            )
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise GitHubAppError(f"GitHub returned no permissions for {repo}") from exc
+        permissions = body.get("permissions") if isinstance(body, dict) else None
+        if not isinstance(permissions, dict) or not isinstance(permissions.get("push"), bool):
+            raise GitHubAppError(f"GitHub returned no permissions for {repo}")
+        return permissions["push"]
 
     async def user_profile(self, user_token: str) -> dict[str, Any]:
         """Return ``{"id", "login"}`` for the GitHub user a token speaks as.
