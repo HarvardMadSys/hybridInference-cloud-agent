@@ -29,6 +29,9 @@ from cloud_agent.storage.repositories.mcp_catalog import PostgresMcpCatalogRepos
 from cloud_agent.storage.repositories.model_preferences import (
     PostgresModelPreferenceRepository,
 )
+from cloud_agent.storage.repositories.notification_maintenance import (
+    PostgresNotificationMaintenanceRepository,
+)
 from cloud_agent.storage.repositories.operation_measurements import (
     PostgresOperationMeasurementRepository,
 )
@@ -71,6 +74,7 @@ __all__ = [
     "PostgresMcpCatalogRepository",
     "PostgresMcpConnectionRepository",
     "PostgresModelPreferenceRepository",
+    "PostgresNotificationMaintenanceRepository",
     "PostgresOperationMeasurementRepository",
     "PostgresOwnerUsageRepository",
     "PostgresPendingMessageRepository",

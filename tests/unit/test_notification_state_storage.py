@@ -46,8 +46,8 @@ async def test_bootstrap_uses_request_baseline_and_bounds_both_candidate_reads()
 
 
 @pytest.mark.asyncio
-async def test_initial_read_samples_server_clock_before_maintenance(monkeypatch):
-    """Pruning and bootstrap latency happen after the immutable enable baseline."""
+async def test_initial_read_does_not_run_notification_maintenance(monkeypatch):
+    """Bootstrap stays independent of retention work and its failure modes."""
     events: list[str] = []
     bootstrap_at = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
 
@@ -89,11 +89,6 @@ async def test_initial_read_samples_server_clock_before_maintenance(monkeypatch)
         def acquire(self):
             return Acquire()
 
-    async def prune(conn, *, force):
-        assert conn is connection
-        assert force is True
-        events.append("prune")
-
     async def bootstrap(conn, cursor, user_id, limit):
         assert conn is connection
         assert cursor.bootstrap_at == bootstrap_at
@@ -102,10 +97,9 @@ async def test_initial_read_samples_server_clock_before_maintenance(monkeypatch)
         events.append("bootstrap")
         return {"observed_at": cursor.bootstrap_at}
 
-    monkeypatch.setattr(notification_state_storage, "_prune_if_due", prune)
     monkeypatch.setattr(notification_state_storage, "_bootstrap", bootstrap)
 
     page = await read_notification_state(Pool(), user_id="owner", cursor_value=None, limit=200)
 
     assert page["observed_at"] == bootstrap_at
-    assert events == ["clock", "prune", "transaction", "timeout", "snapshot", "bootstrap"]
+    assert events == ["clock", "transaction", "timeout", "snapshot", "bootstrap"]
