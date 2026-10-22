@@ -99,8 +99,7 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     )
     assert script.get_revision(_HEAD).down_revision == "0096_snapshot_title_context"
     assert (
-        script.get_revision("0096_snapshot_title_context").down_revision
-        == "0095_memory_retention"
+        script.get_revision("0096_snapshot_title_context").down_revision == "0095_memory_retention"
     )
     assert script.get_revision("0095_memory_retention").down_revision == "0094_thread_message_pages"
     assert script.get_revision("0094_thread_message_pages").down_revision == "0093_recent_requests"
