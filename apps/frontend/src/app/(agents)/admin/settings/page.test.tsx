@@ -1570,9 +1570,7 @@ describe('global limits', () => {
     renderSettings('Sandbox');
     const maximum = await screen.findByLabelText('Maximum archive bytes');
     openAdvancedForField(maximum);
-    fireEvent.change(maximum, {
-      target: { value: '1073741824' },
-    });
+    fireEvent.change(maximum, { target: { value: '1073741824' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
 
     expect(await screen.findByRole('status')).toHaveTextContent('Sandbox archive settings saved.');
