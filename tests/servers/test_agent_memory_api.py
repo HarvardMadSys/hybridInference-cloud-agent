@@ -123,6 +123,34 @@ async def test_owner_writes_reach_the_repository_with_normalized_content(app):
     repository.clear_memories.assert_awaited_once_with("owner-1", "owner/api")
 
 
+async def test_archive_cursor_is_forwarded_with_authenticated_scope(app):
+    repository = app.state.repository
+    repository.list_memories.side_effect = None
+    repository.list_memories.return_value = {
+        "repo": "owner/api",
+        "enabled": True,
+        "memories": [],
+        "archived": [],
+        "archived_next_cursor": "next-page",
+    }
+    cursor = "2026-10-13T00:00:00+00:00|m1"
+    async with client(app) as http:
+        response = await http.get(
+            PATH, params={"repo": "owner/api", "archive_cursor": cursor}, headers=headers()
+        )
+    assert response.status_code == 200
+    assert response.json()["archived_next_cursor"] == "next-page"
+    repository.list_memories.assert_awaited_once_with("owner-1", "owner/api", archive_cursor=cursor)
+
+
+async def test_malformed_archive_cursor_returns_validation_error_without_echo(app):
+    app.state.repository.list_memories.side_effect = ValueError("private invalid input")
+    async with client(app) as http:
+        response = await http.get(PATH, params={"archive_cursor": "invalid"}, headers=headers())
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid archive cursor"}
+
+
 @pytest.mark.parametrize(
     "body",
     [

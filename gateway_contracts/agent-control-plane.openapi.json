@@ -5935,6 +5935,17 @@
             "title": "Archived",
             "type": "array"
           },
+          "archived_next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived Next Cursor"
+          },
           "enabled": {
             "title": "Enabled",
             "type": "boolean"
@@ -34403,6 +34414,23 @@
                 }
               ],
               "title": "Repo"
+            }
+          },
+          {
+            "in": "query",
+            "name": "archive_cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Archive Cursor"
             }
           },
           {
