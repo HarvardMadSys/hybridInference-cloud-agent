@@ -846,6 +846,27 @@ async def test_retirement_blocks_new_claims_binding_registration_and_pin_but_ren
     assert await hosts.set_active_runner_host(host="machine")
 
 
+async def test_a_retirement_that_stopped_its_runners_cannot_reopen_the_host(store, hosts):
+    """Cancelling lifts the hold, and nothing would start the stopped runner again."""
+    repo = store.compute_resources
+    allocation_id, _node, _ = await resource(store, hosts)
+    op = await operation(repo, allocation_id)
+    await repo.begin_retirement(allocation_id=allocation_id, operation_id=op["id"])
+    assert await repo.checkpoint_operation(
+        **fence(op), step="checking_retention", result={"runners_stopping": True}
+    )
+    await repo.finish_operation(
+        **fence(op), state="blocked", step="checking_retention", message="unknown containers"
+    )
+
+    with pytest.raises(ValueError, match="operation_not_cancellable"):
+        await repo.cancel_operation(op["id"])
+
+    assert (await repo.get_operation(op["id"]))["state"] == "blocked"
+    assert (await repo.get_allocation(allocation_id))["desired_state"] == "absent"
+    assert not await hosts.set_active_runner_host(host="machine")
+
+
 async def test_stopped_retained_group_blocks_release_even_with_zero_slots(db, store, hosts):
     repo = store.compute_resources
     allocation_id, _node, _ = await resource(store, hosts)
