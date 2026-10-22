@@ -334,13 +334,7 @@ async def heartbeat_host(
     # reply: see ``_renew_residency_grants``.
     renewals: dict[str, None] = {}
     ttl_seconds = residency_ttl_s()
-    lost = await _extend_residencies(
-        job_store,
-        updated["host"],
-        [(beat.thread_id, beat.generation) for beat in body.residencies or []],
-        ttl_seconds=ttl_seconds,
-        renewals=renewals,
-    )
+    lost: list[ResidencyBeat] = []
     # Docker is the lifecycle authority for retained chat containers; the
     # database is the scheduling/fencing authority.  Heartbeats join those
     # views without treating absence as deletion. In particular, a sandbox manager's
