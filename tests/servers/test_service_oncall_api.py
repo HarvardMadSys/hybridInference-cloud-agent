@@ -134,6 +134,11 @@ class _FakeGateway:
     async def model_catalog_with_aliases(self, user_id: str) -> tuple[list[str], dict[str, str]]:
         return list(_TEST_MODELS), {}
 
+    async def model_catalog_bundle(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+        return list(_TEST_MODELS), {}, {}
+
     async def agent_access(self, user_id: str) -> dict[str, Any]:
         return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
 

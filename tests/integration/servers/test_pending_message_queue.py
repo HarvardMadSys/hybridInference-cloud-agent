@@ -96,6 +96,11 @@ class _Gateway:
     async def model_catalog_with_aliases(self, user_id: str) -> tuple[list[str], dict[str, str]]:
         return list(self.models), {}
 
+    async def model_catalog_bundle(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+        return list(self.models), {}, {m: list(v) for m, v in self.efforts.items()}
+
     async def model_reasoning_efforts(self, user_id: str) -> dict[str, list[str]]:
         return {model: list(levels) for model, levels in self.efforts.items()}
 
