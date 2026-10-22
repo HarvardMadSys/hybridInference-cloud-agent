@@ -2007,11 +2007,14 @@ are not restored after a change. Change it only when no retained group still
 needs a checkpoint from the previous bucket.
 
 A ready environment snapshot in the previous bucket is still offered to new
-groups. Loading it fails and the group installs in full; the failure is
-reported as `unavailable`, which neither retires the snapshot nor queues a new
-build. A failed load is not a use, so the snapshot stays on offer until 7 days
-after its last use, or until it is 25 days old if that comes first. Until then
-each new group of that environment pays for a failed download and a full
+groups. A host that already holds its image, because it built the snapshot or
+loaded it before the change, starts the group from that image without a
+download, and that counts as a use. On any other host, loading it fails and the
+group installs in full; the failure is reported as `unavailable`, which neither
+retires the snapshot nor queues a new build. A failed load is not a use, so the
+snapshot stays on offer until 7 days after its last use on any host, or until
+it is 25 days old if that comes first. Until then each new group of that
+environment on another host pays for a failed download and a full
 installation, unless its owner rebuilds the snapshot. Snapshot cleanup deletes
 objects in the current bucket only; those in the previous bucket are left to
 that bucket's lifecycle rule.
@@ -2019,23 +2022,71 @@ that bucket's lifecycle rule.
 Redeploy every host before changing the bucket. Only a host that advertises
 `sandbox-archive-destination-v1` can archive to a bucket other than
 `freeinference`, and the settings card names the others only once archives are
-enabled with another bucket. This read-only query lists them:
+enabled with another bucket. This read-only query lists them, leaving out
+removed (`disabled`) hosts as the card does:
 
 ```sql
-SELECT host
+SELECT host, status
 FROM agent_runner_hosts
-WHERE NOT capabilities ? 'sandbox-archive-destination-v1'
+WHERE status <> 'disabled'
+  AND NOT capabilities ? 'sandbox-archive-destination-v1'
 ORDER BY host;
 ```
 
 While archives are disabled, such a host is sent the policy with the default
-bucket, which writes nothing anywhere, and it keeps taking work. While they are
-enabled, it is sent no policy, and the card lists it as needing a redeploy.
-Until it is redeployed, its sandbox manager keeps the last policy it applied:
-it keeps archiving the groups it holds into the previous bucket, and the
-checkpoints it stores there are recorded, so a host that later restores one of
-those groups reads the new bucket and fails. With no confirmed revision, the
-host takes no work at all.
+bucket and keeps taking work. A disabled policy starts no new archive; a final
+already fenced under an earlier enabled revision still uploads under that
+revision. While archives are enabled, the host is sent no policy, and the card
+lists it as needing a redeploy. Until it is redeployed, its sandbox manager
+keeps the last policy it applied: it keeps archiving the groups it holds into
+the previous bucket, and the checkpoints it stores there are recorded, so a
+host that later restores one of those groups reads the new bucket and fails.
+With no confirmed revision, the host takes no work at all.
+
+Redeployed hosts write to the previous bucket for a while too. A stop that any
+host fenced before it applied the new revision finishes there: the sandbox
+manager pins the policy in force when it fences a stop, and stores that stop's
+final archive and checkpoint under it, also when it retries a failed final or,
+after a restart, recovers a pending one. The control plane records that
+checkpoint as the group's restore point, and a host that later has to download
+it to restore the group reads the new bucket and fails. If the previous bucket
+can no longer be written, such a final never completes. Nothing gives up on
+it: until the upload succeeds, its group refuses every start and every
+deletion, so its chats stay blocked.
+
+Keep the previous bucket writable by every host's workload identity, and by
+the saved access key if there is one, until every host reports the new
+revision and no final archive is pending. Such a final keeps the region, KMS
+key and bucket owner it was fenced with, so keep that KMS key usable as well. A
+final retried by the same sandbox manager signs with the access key in force
+when it was fenced, and one recovered after a restart with the access key saved
+now, so if the access key changes with the bucket, both keys need that access.
+
+Nothing in the database or on the admin pages shows a pending final: its group
+is recorded as `stopped`, like one whose final is stored. The sandbox manager
+logs `sandbox_final_archive_failed`, with the sandbox id and generation, each
+time a final fails, and keeps retrying a pending one, including after an
+offline host returns. A final still in progress logs nothing until it is
+stored or fails, within 12 minutes of its container stopping, and its
+checkpoint can take 12 minutes more. So wait until every host is online and
+has reported the new revision, then until no sandbox manager has logged that
+event for an hour.
+
+Nothing records which bucket a checkpoint is in either:
+`agent_sandbox_checkpoints` keeps its key and version, not its bucket. Treat
+every restore point captured before the end of that wait as stored in the
+previous bucket. A group gets one in the new bucket at its next clean stop;
+until then, a move to another host cannot restore it. This read-only query
+lists those groups, with the end of the wait as the cutoff:
+
+```sql
+SELECT g.id, g.host, g.state, c.captured_at
+FROM agent_sandboxes g
+JOIN agent_sandbox_checkpoints c ON c.id = g.restore_checkpoint_id
+WHERE c.captured_at < '<cutoff>'::timestamptz
+  AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
+ORDER BY g.host, c.captured_at;
+```
 
 A control plane older than this release refuses a stored bucket other than the
 default: its heartbeats and admin archive routes fail, and no turn is claimed.
