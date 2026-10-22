@@ -78,20 +78,57 @@ def _status_view(status_text: str) -> tuple[str, list[dict[str, str]]]:
     return branch, changes
 
 
-def _revision_commands(target: str) -> str:
+def _raw_changes(raw_text: str) -> list[dict[str, str]]:
+    """Decode base-relative ``--raw -z`` records."""
+    records = raw_text.split("\0")
+    changes: list[dict[str, str]] = []
+    index = 0
+    while index < len(records):
+        header = records[index]
+        index += 1
+        fields = header.split()
+        if len(fields) < 5 or not fields[0].startswith(":") or index >= len(records):
+            continue
+        status = fields[-1]
+        path = records[index]
+        index += 1
+        if status.startswith(("R", "C")):
+            if index >= len(records):
+                continue
+            path = records[index]
+            index += 1
+        changes.append({"code": f"{status[0]} ", "path": path})
+    return changes
+
+
+def _revision_commands(target: str, raw_tag: str, stat_tag: str) -> str:
     """Write a content-sensitive but patch-free fingerprint transcript."""
     return (
+        "git rev-parse --verify HEAD; revision_status=$?; "
         'revision_index="${TMPDIR:-/tmp}/hyi-browser-revision-index.$$"; '
         'rm -f "$revision_index"; '
-        f'GIT_INDEX_FILE="$revision_index" git read-tree {target}; revision_status=$?; '
+        f'GIT_INDEX_FILE="$revision_index" git read-tree {target}; read_tree_status=$?; '
+        '[ "$revision_status" -eq 0 ] && revision_status=$read_tree_status; '
+        f"printf '\n{raw_tag}\n'; "
         f'GIT_INDEX_FILE="$revision_index" git --no-pager diff --raw -z '
-        f"--no-ext-diff --no-textconv --ignore-submodules=dirty --submodule=short {target}; "
+        f"--no-ext-diff --no-textconv --ignore-submodules=dirty --submodule=short {target} HEAD; "
         "raw_status=$?; "
         '[ "$revision_status" -eq 0 ] && revision_status=$raw_status; '
+        f"printf '\n{stat_tag}\n'; "
         'GIT_INDEX_FILE="$revision_index" git ls-files -m -o --exclude-standard -z | '
-        "xargs -0 -r stat --printf='%n\\0%s\\0%y\\0%z\\0%i\\0' -- 2>/dev/null || :; "
+        "xargs -0 -r stat --printf='%n\\0%s\\0%y\\0%z\\0%i\\0%f\\0' -- 2>/dev/null || :; "
         'rm -f "$revision_index"; '
     )
+
+
+def _revision_parts(revision_text: str, raw_tag: str, stat_tag: str) -> tuple[str, str]:
+    head_text, separator, raw_and_stat = revision_text.partition(f"\n{raw_tag}\n")
+    if not separator:
+        raise ValueError("missing raw revision section")
+    raw_text, separator, stat_text = raw_and_stat.partition(f"\n{stat_tag}\n")
+    if not separator:
+        raise ValueError("missing filesystem revision section")
+    return f"{head_text}\0{raw_text}\0{stat_text}", raw_text
 
 
 def _revision(status_text: str, fingerprint: str) -> str:
@@ -114,12 +151,15 @@ def run_git_metadata(
     target = base_sha or "HEAD"
     marker = secrets.token_hex(16)
     revision_tag = f"__HYI_{marker}_REVISION__"
+    raw_tag = f"__HYI_{marker}_RAW__"
+    stat_tag = f"__HYI_{marker}_STAT__"
     status_tag = f"__HYI_{marker}_STATUS__"
     script = NEUTRALIZE_GIT_FILTERS + (
-        "git --no-pager status --porcelain=v1 --branch -z --ignore-submodules=dirty; "
+        "git --no-pager status --porcelain=v1 --branch -z "
+        "--untracked-files=all --ignore-submodules=dirty; "
         "status_status=$?; "
         f"printf '\n{revision_tag}\n'; "
-        + _revision_commands(target)
+        + _revision_commands(target, raw_tag, stat_tag)
         + "overall_status=$status_status; "
         '[ "$overall_status" -eq 0 ] && overall_status=$revision_status; '
         f"printf '\n{status_tag}%s\n' \"$overall_status\""
@@ -135,14 +175,27 @@ def run_git_metadata(
     status_text, separator, revision_and_status = stdout.partition(f"\n{revision_tag}\n")
     if not separator:
         raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    fingerprint, _, git_status_text = revision_and_status.rpartition(f"\n{status_tag}")
+    revision_text, status_separator, git_status_text = revision_and_status.rpartition(
+        f"\n{status_tag}"
+    )
+    if not status_separator:
+        raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
+    try:
+        fingerprint, raw_text = _revision_parts(revision_text, raw_tag, stat_tag)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=502, detail=stderr or "git workspace inspection failed"
+        ) from error
     try:
         git_status = int(git_status_text.strip().splitlines()[0])
     except (ValueError, IndexError):
         git_status = process_status
     if git_status != 0:
         raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    branch, changes = _status_view(status_text)
+    branch, worktree_changes = _status_view(status_text)
+    changes_by_path = {change["path"]: change for change in _raw_changes(raw_text)}
+    changes_by_path.update({change["path"]: change for change in worktree_changes})
+    changes = sorted(changes_by_path.values(), key=lambda change: change["path"])
     return {
         "available": True,
         "revision": _revision(status_text, fingerprint),
@@ -169,13 +222,18 @@ def run_git(
     target = base_sha or "HEAD"
     marker = secrets.token_hex(16)
     revision_tag = f"__HYI_{marker}_REVISION__"
+    raw_tag = f"__HYI_{marker}_RAW__"
+    stat_tag = f"__HYI_{marker}_STAT__"
     diff_tag = f"__HYI_{marker}_DIFF__"
     commits_tag = f"__HYI_{marker}_COMMITS__"
     status_tag = f"__HYI_{marker}_STATUS__"
     script = NEUTRALIZE_GIT_FILTERS + (
-        "git --no-pager status --porcelain=v1 --branch -z --ignore-submodules=dirty; "
+        "git --no-pager status --porcelain=v1 --branch -z "
+        "--untracked-files=all --ignore-submodules=dirty; "
         "status_status=$?; "
-        f"printf '\n{revision_tag}\n'; " + _revision_commands(target) + f"printf '\n{diff_tag}\n'; "
+        f"printf '\n{revision_tag}\n'; "
+        + _revision_commands(target, raw_tag, stat_tag)
+        + f"printf '\n{diff_tag}\n'; "
         'index_path="${TMPDIR:-/tmp}/hyi-browser-index.$$"; '
         'rm -f "$index_path"; trap \'rm -f "$index_path"\' EXIT; '
         f'GIT_INDEX_FILE="$index_path" git read-tree {target} && '
@@ -205,9 +263,15 @@ def run_git(
     status_text, separator, remainder = stdout.partition(f"\n{revision_tag}\n")
     if not separator:
         raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    fingerprint, separator, remainder = remainder.partition(f"\n{diff_tag}\n")
+    revision_text, separator, remainder = remainder.partition(f"\n{diff_tag}\n")
     if not separator:
         raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
+    try:
+        fingerprint, _raw_text = _revision_parts(revision_text, raw_tag, stat_tag)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=502, detail=stderr or "git workspace inspection failed"
+        ) from error
     patch, separator, commits_and_status = remainder.partition(f"\n{commits_tag}\n")
     if not separator:
         raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")

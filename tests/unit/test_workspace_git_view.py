@@ -162,6 +162,50 @@ def test_git_metadata_revision_changes_without_constructing_a_patch(backend, tmp
     assert "patch" not in second and "commits" not in second
 
 
+def test_git_metadata_reports_clean_committed_changes_from_the_pinned_base(backend, tmp_path):
+    repo = _repo(tmp_path / "ws")
+    base = _git("rev-parse", "HEAD", cwd=repo).strip()
+    (repo / "a.txt").write_text("two\n")
+    (repo / "new.txt").write_text("new\n")
+    _git("add", ".", cwd=repo)
+    _git("commit", "-q", "-m", "second", cwd=repo)
+    assert _git("status", "--porcelain", cwd=repo) == ""
+
+    metadata = _run_git_metadata(backend, repo, base)
+    full = _run_git(backend, repo, base)
+
+    assert metadata["changes"] == [
+        {"code": "M ", "path": "a.txt"},
+        {"code": "A ", "path": "new.txt"},
+    ]
+    assert metadata["change_count"] == 2
+    assert metadata["revision"] == full["revision"]
+    assert "patch" not in metadata and "commits" not in metadata
+    assert "-one\n+two\n" in full["patch"]
+    assert "+new\n" in full["patch"]
+
+
+def test_git_metadata_revision_changes_when_same_tree_history_is_rewritten(backend, tmp_path):
+    repo = _repo(tmp_path / "ws")
+    before_head = _git("rev-parse", "HEAD", cwd=repo).strip()
+    before_tree = _git("rev-parse", "HEAD^{tree}", cwd=repo).strip()
+    before = _run_git_metadata(backend, repo)
+
+    _git("commit", "--amend", "-q", "-m", "rewritten first", cwd=repo)
+
+    after_head = _git("rev-parse", "HEAD", cwd=repo).strip()
+    after_tree = _git("rev-parse", "HEAD^{tree}", cwd=repo).strip()
+    after = _run_git_metadata(backend, repo)
+    full = _run_git(backend, repo)
+
+    assert before_head != after_head
+    assert before_tree == after_tree
+    assert before["changes"] == after["changes"] == []
+    assert before["revision"] != after["revision"]
+    assert after["revision"] == full["revision"]
+    assert [commit["subject"] for commit in full["commits"]] == ["rewritten first"]
+
+
 def test_git_view_never_lazily_fetches_through_a_planted_promisor(backend, tmp_path):
     repo = _repo(tmp_path / "ws")
     upload_pack, upload_pack_ran = _planted(tmp_path, "upload-pack", "exit 1")
