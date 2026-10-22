@@ -141,6 +141,8 @@ class FakeDocker:
         self.before_rm: Any = None
         #: False models a Docker older than 28, which drops ``--gw-priority``.
         self.honours_gw_priority = True
+        #: Ids of networks that exist but that the daemon fails to inspect.
+        self.uninspectable: set[str] = set()
         self._ids = itertools.count(1)
         relays = self.add_network(config.relay_network, subnet="172.30.0.0/24", internal=True)
         for container_id, alias in (("relay-gateway", "agent-gateway"), ("relay-mcp", "agent-mcp")):
@@ -253,16 +255,20 @@ class FakeDocker:
         command = argv[1:3]
         if command == ["network", "inspect"]:
             # Like Docker: every network found is answered, and each one that
-            # is not is named on stderr with a non-zero exit.
+            # is not, or that the daemon fails to read, is named on stderr
+            # with a non-zero exit.
             found = [self.network(ref) for ref in argv[3:]]
-            payload = [self._network_json(network) for network in found if network is not None]
-            missing = [
+            readable = [net for net in found if net and net["Id"] not in self.uninspectable]
+            payload = [self._network_json(network) for network in readable]
+            errors = [
                 f"Error response from daemon: network {ref} not found"
-                for ref, network in zip(argv[3:], found, strict=True)
                 if network is None
+                else f"Error response from daemon: network {ref}: input/output error"
+                for ref, network in zip(argv[3:], found, strict=True)
+                if network is None or network["Id"] in self.uninspectable
             ]
-            if missing:
-                return subprocess.CompletedProcess(argv, 1, json.dumps(payload), "\n".join(missing))
+            if errors:
+                return subprocess.CompletedProcess(argv, 1, json.dumps(payload), "\n".join(errors))
             return self._ok(json.dumps(payload))
         if command == ["network", "create"]:
             return self._create_network(argv)
@@ -1796,6 +1802,44 @@ def test_prune_lists_only_this_namespace_and_inspects_its_bridges_together(monke
     assert not any(foreign["Id"] in argv for argv in docker.calls), "never read, never touched"
     assert all(docker.network(net["Id"]) is None for net in orphans)
     assert docker.network(foreign["Id"]) is not None
+
+
+def test_a_bridge_docker_cannot_inspect_leaves_the_others_to_be_pruned(monkeypatch, caplog):
+    """The bridges are inspected together, and one at a time when that fails.
+
+    Docker fails a whole inspection for one bridge it cannot read. That used to
+    end the pass before any bridge was examined, so a bridge that persistently
+    failed inspection left every leaked bridge on the host holding its subnet.
+    Now only that bridge is skipped, and logged, for the next pass.
+    """
+    manager, docker, _ = _world(monkeypatch)
+    unreadable, *orphans = (
+        _group_bridge(
+            manager,
+            docker,
+            _spec(thread=f"athr_gone{index}", sandbox=f"asbx_gone{index}"),
+            age_s=3600,
+            subnet=f"10.240.{20 + index}.0/29",
+        )[1]
+        for index in range(3)
+    )
+    docker.uninspectable.add(unreadable["Id"])
+    docker.calls.clear()
+
+    with caplog.at_level(logging.WARNING):
+        manager.prune_orphan_networks([])
+
+    assert docker.network(unreadable["Id"]) is not None, "left for the next pass"
+    assert all(docker.network(net["Id"]) is None for net in orphans)
+    refs = [net["Id"] for net in (unreadable, *orphans)]
+    inspections = [argv[3:] for argv in docker.calls if argv[1:3] == ["network", "inspect"]]
+    assert inspections[:4] == [refs, *([ref] for ref in refs)], "together, then one at a time"
+    failures = [
+        getattr(record, "network", None)
+        for record in caplog.records
+        if record.getMessage() == "chat_network_prune_failed"
+    ]
+    assert failures == [unreadable["Id"]]
 
 
 def test_prune_reads_whose_bridge_it_is_from_the_listing_it_is_given(monkeypatch):

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
-from cloud_agent_host.chat_sandbox_inspect import containers_by_ref, inspect_many
+from cloud_agent_host.chat_sandbox_inspect import containers_by_ref, inspect_each
 from cloud_agent_host.chat_sandbox_models import (
     CHAT_GENERATION_LABEL,
     CHAT_NAMESPACE_LABEL,
@@ -1188,11 +1188,11 @@ class ChatSandboxNetwork:
         """Remove stale owned bridges without racing a create or activation.
 
         Only this namespace's bridges are listed, and they are inspected
-        together. ``observed`` is the container listing the caller just took,
-        which says which bridge each retained container is on; without it,
-        each one is inspected here. A bridge that cannot be examined or removed
-        is logged and left for the next pass; it never keeps the others, or the
-        caller's reconciliation, from going on.
+        together, or one by one when that fails. ``observed``, the containers
+        the caller just listed, says which bridge each retained container is
+        on; without it, each one is inspected here. A bridge that cannot be
+        examined or removed is logged and left for the next pass; it never
+        keeps the others, or the caller's reconciliation, from going on.
         """
         result = self._containers._run(
             [
@@ -1209,13 +1209,13 @@ class ChatSandboxNetwork:
         )
         if result.returncode != 0:
             raise SandboxError("group network listing failed: " + result.stderr.strip()[:300])
-        try:
-            networks = inspect_many(
-                self._containers._run, self.backend.docker_binary, "network", result.stdout.split()
+        networks, unread = inspect_each(
+            self._containers._run, self.backend.docker_binary, "network", result.stdout.split()
+        )
+        for ref, exc in unread.items():
+            logger.warning(
+                "chat_network_prune_failed", extra={"network": ref, "detail": str(exc)[:300]}
             )
-        except SandboxError as exc:
-            logger.warning("chat_network_prune_failed", extra={"detail": str(exc)[:300]})
-            return
         by_identity = {(spec.sandbox_id, str(spec.generation)): spec for spec in specs}
         sandboxes = None if observed is None else {item.name: item for item in observed}
         prefix = self._network().interface_prefix

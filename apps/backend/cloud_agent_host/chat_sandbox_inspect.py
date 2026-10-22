@@ -38,27 +38,62 @@ def inspect_many(
     the rest and exits non-zero, saying which it did not find. Any other
     failure raises, as a failed inspection of a single object does.
     """
-    unique = list(dict.fromkeys(refs))
     found: builtins.list[dict[str, Any]] = []
-    for first in range(0, len(unique), INSPECT_BATCH):
-        batch = unique[first : first + INSPECT_BATCH]
-        result = run([docker_binary, kind, "inspect", *batch], timeout=30)
-        errors = [line.lower() for line in result.stderr.splitlines() if line.strip()]
-        only_missing = errors and all(
-            any(marker in line for marker in _NOT_FOUND)
-            and any(ref.lower() in line for ref in batch)
-            for line in errors
-        )
-        if result.returncode != 0 and not only_missing:
-            raise SandboxError(f"Docker {kind} inspect failed: " + result.stderr.strip()[:300])
-        try:
-            payload = json.loads(result.stdout or "[]")
-        except json.JSONDecodeError as exc:
-            raise SandboxError(f"Docker returned an invalid {kind} inspection") from exc
-        if not isinstance(payload, list) or not all(isinstance(raw, dict) for raw in payload):
-            raise SandboxError(f"Docker returned an invalid {kind} inspection")
-        found.extend(payload)
+    for batch in _batches(refs):
+        found.extend(_inspect_batch(run, docker_binary, kind, batch))
     return found
+
+
+def inspect_each(
+    run: Run, docker_binary: str, kind: str, refs: Sequence[str]
+) -> tuple[builtins.list[dict[str, Any]], dict[str, SandboxError]]:
+    """Inspect ``refs`` as :func:`inspect_many` does, but one that fails costs only itself.
+
+    Docker fails a whole batch for one object it cannot read, so a batch that
+    fails is inspected again one reference at a time. Returns what Docker
+    found, and why each reference that failed on its own did, keyed by it.
+    """
+    found: builtins.list[dict[str, Any]] = []
+    failed: dict[str, SandboxError] = {}
+    batches = _batches(refs)
+    while batches:
+        batch = batches.pop(0)
+        try:
+            found.extend(_inspect_batch(run, docker_binary, kind, batch))
+        except SandboxError as exc:
+            if len(batch) == 1:
+                failed[batch[0]] = exc
+            else:
+                # Next, in the same order: each of its references on its own.
+                batches[:0] = [[ref] for ref in batch]
+    return found, failed
+
+
+def _batches(refs: Sequence[str]) -> builtins.list[builtins.list[str]]:
+    """``refs`` without repeats, in groups of at most :data:`INSPECT_BATCH`."""
+    unique = list(dict.fromkeys(refs))
+    return [unique[first : first + INSPECT_BATCH] for first in range(0, len(unique), INSPECT_BATCH)]
+
+
+def _inspect_batch(
+    run: Run, docker_binary: str, kind: str, batch: Sequence[str]
+) -> builtins.list[dict[str, Any]]:
+    """Inspect ``batch`` in one Docker process, as :func:`inspect_many` describes."""
+    result = run([docker_binary, kind, "inspect", *batch], timeout=30)
+    errors = [line.lower() for line in result.stderr.splitlines() if line.strip()]
+    only_missing = errors and all(
+        any(marker in line for marker in _NOT_FOUND) and any(ref.lower() in line for ref in batch)
+        for line in errors
+    )
+    if result.returncode != 0 and not only_missing:
+        raise SandboxError(f"Docker {kind} inspect failed: " + result.stderr.strip()[:300])
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise SandboxError(f"Docker returned an invalid {kind} inspection") from exc
+    if not isinstance(payload, list) or not all(isinstance(raw, dict) for raw in payload):
+        raise SandboxError(f"Docker returned an invalid {kind} inspection")
+    return payload
 
 
 def containers_by_ref(
