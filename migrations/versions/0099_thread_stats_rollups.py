@@ -1,7 +1,7 @@
 """Persist versioned per-attempt inputs to the owner thread-stats summary.
 
-Revision ID: 0098_thread_stats_rollups
-Revises: 0097_admin_sandbox_deltas
+Revision ID: 0099_thread_stats_rollups
+Revises: 0098_measurement_counts
 
 The event ledger remains authoritative and append-only. This table is only a
 derived cache: the reader compares ``event_seq`` with the newest sequence in
@@ -12,8 +12,8 @@ locks historical event rows.
 
 from alembic import op
 
-revision = "0098_thread_stats_rollups"
-down_revision = "0097_admin_sandbox_deltas"
+revision = "0099_thread_stats_rollups"
+down_revision = "0098_measurement_counts"
 branch_labels = None
 depends_on = None
 

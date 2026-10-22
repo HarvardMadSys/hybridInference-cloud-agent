@@ -20,7 +20,7 @@ pytestmark = pytest.mark.dbtest
 _BEFORE = "0057_admin_sandbox_trajectory"
 _THIS = "0058_mcp_connector_invariant"
 _NEXT = "0059_counter_constraints"
-_HEAD = "0098_thread_stats_rollups"
+_HEAD = "0099_thread_stats_rollups"
 _OWNER = "user-owner"
 _OTHER = "user-other"
 _PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=UTC)
@@ -97,7 +97,10 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert script.get_revision("0088_sandbox_retry_budget").down_revision == (
         "0087_sandbox_deletion_attempts"
     )
-    assert script.get_revision(_HEAD).down_revision == "0097_admin_sandbox_deltas"
+    assert script.get_revision(_HEAD).down_revision == "0098_measurement_counts"
+    assert script.get_revision("0098_measurement_counts").down_revision == (
+        "0097_admin_sandbox_deltas"
+    )
     assert (
         script.get_revision("0097_admin_sandbox_deltas").down_revision
         == "0096_snapshot_title_context"
