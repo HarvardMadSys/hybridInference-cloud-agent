@@ -3707,7 +3707,7 @@ async def test_inventory_rows_carry_each_groups_latest_checkpoint(tmp_path):
         base_image="sha256:" + "b" * 64,
         runtime_id="claude-code",
         runtime_version=None,
-        object_key="key",
+        object_key="cloud-agent/sandbox/v2/" + "d" * 64 + "/g1/" + "c" * 32 + ".oci.tar",
         version_id="v1",
         sha256="e" * 64,
         size_bytes=10,
