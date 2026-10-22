@@ -265,8 +265,8 @@ class PostgresResidencyRepository:
                 process_generation,
             )
 
-    async def reap_expired_residencies(self) -> list[dict[str, Any]]:
-        """Mark every hot residency whose lease lapsed as ``none``.
+    async def reap_expired_residencies(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Mark a bounded page of expired hot residencies as ``none``.
 
         The control plane's unilateral half of the fence: the host may still
         be running the sandbox, but its generation no longer opens anything —
@@ -275,14 +275,23 @@ class PostgresResidencyRepository:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
+                WITH expired AS (
+                    SELECT m.thread_id, g.host
+                    FROM agent_thread_sandbox_memberships m
+                    JOIN agent_sandboxes g ON g.id = m.sandbox_id
+                    WHERE m.residency_status = 'hot'
+                      AND m.residency_lease_expires_at <= clock_timestamp()
+                    ORDER BY m.residency_lease_expires_at, m.thread_id
+                    LIMIT $1
+                    FOR UPDATE OF m SKIP LOCKED
+                )
                 UPDATE agent_thread_sandbox_memberships m
                 SET residency_status = 'none'
-                FROM agent_sandboxes g
-                WHERE m.residency_status = 'hot'
-                  AND m.residency_lease_expires_at <= clock_timestamp()
-                  AND g.id = m.sandbox_id
-                RETURNING m.thread_id, m.residency_generation AS generation, g.host,
+                FROM expired
+                WHERE m.thread_id = expired.thread_id
+                RETURNING m.thread_id, m.residency_generation AS generation, expired.host,
                           m.residency_grant_id AS grant_id
-                """
+                """,
+                limit,
             )
         return [dict(row) for row in rows]

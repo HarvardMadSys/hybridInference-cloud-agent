@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING, Any, Protocol
 
+from cloud_agent.application.grant_revocation import revoke_detached_grants
 from cloud_agent.application.send_now import recover_handoffs
 from cloud_agent.gateway import GatewayError
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
@@ -235,16 +236,8 @@ async def _revoke_dead_grants(store: GrantRepository, grants: Any) -> None:
     and not a retry every pass. ``GrantClient.revoke`` reports rather than
     raises for the same reason.
     """
-    for row in await store.take_revocable_grants():
-        if not await grants.revoke(row["grant_id"]):
-            logger.warning(
-                "agent_grant_not_revoked",
-                extra={
-                    "event": "agent_grant_not_revoked",
-                    "job_id": row["job_id"],
-                    "attempt_id": row["attempt_id"],
-                },
-            )
+    rows = await store.take_revocable_grants()
+    await revoke_detached_grants(grants, [row["grant_id"] for row in rows])
 
 
 async def _abandon_unrenewable_attempt(store: AttemptCommands, row: dict[str, Any]) -> bool:
@@ -533,9 +526,7 @@ async def _reap_lapsed_residencies(store: ResidencyRepository, grants: Any | Non
     )
     if grants is None:
         return
-    for row in lapsed:
-        if row.get("grant_id"):
-            await grants.revoke(row["grant_id"])
+    await revoke_detached_grants(grants, [row["grant_id"] for row in lapsed if row.get("grant_id")])
 
 
 async def _cleanup_reaped_shared_residencies(
