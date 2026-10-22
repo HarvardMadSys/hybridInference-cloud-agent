@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import HTTPException
 
 from cloud_agent.application.job_admission import (
+    model_catalog_unavailable,
     require_offered_effort,
     require_registered_runtime,
     require_resolvable_model,
@@ -29,6 +30,7 @@ from cloud_agent.application.job_admission import (
 )
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.schemas import RESET_REASONING_EFFORT
+from cloud_agent.visible_models import ModelCatalogUnavailable, agent_model_catalog_bundle
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -144,10 +146,19 @@ async def prepare_follow_up(
             )
     # A follow-up may switch models; the switched-to model gets the same
     # fail-fast as a fresh job. An omitted model inherits the parent's, which
-    # was validated when it was chosen.
+    # was validated when it was chosen. One catalog read serves both the
+    # model resolution and the effort check when both are needed (issue #781);
+    # the read happens lazily so an inherit-both follow-up pays none.
     canonical = None
+    catalog: tuple[list[str], dict[str, str], dict[str, list[str]]] | None = None
     if model:
-        canonical = await require_resolvable_model(model, gateway=gateway, user=user)
+        try:
+            catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
+        except ModelCatalogUnavailable:
+            raise model_catalog_unavailable() from None
+        canonical = await require_resolvable_model(
+            model, gateway=gateway, user=user, catalog=catalog
+        )
     # Effort is per turn, like the model, and inherits when omitted. Unlike the
     # model it needs a way *back*: null already means "no override, inherit", so
     # clearing an inherited effort takes the explicit reset sentinel. Validated
@@ -162,6 +173,7 @@ async def prepare_follow_up(
             model=canonical or parent["model"],
             gateway=gateway,
             user=user,
+            efforts=catalog[2] if catalog is not None else None,
         )
     try:
         # A temporary workspace has no repository to lose access to.
