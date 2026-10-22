@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-22 20:46+0000\n"
+"POT-Creation-Date: 2026-10-22 18:43-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -38,7 +38,7 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0102_admin_sandbox_marker_order`. The supported deployment scripts run "
+"`0103_terminal_resume_keyset`. The supported deployment scripts run "
 "migrations before replacing the API; every migration listed here is "
 "additive and safe under the running previous release unless it says "
 "otherwise. The few transitions that need stopped writers are listed in "
@@ -46,7 +46,7 @@ msgid ""
 "#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0102_admin_sandbox_marker_order`。官方支持的部署脚本会在替换 API "
+"`0103_terminal_resume_keyset`。官方支持的部署脚本会在替换 API "
 "之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数几个需要先停掉所有写入的迁移，列在[执行不向后兼容的迁移](operations.md"
 "#applying-migrations-that-are-not-backwards-compatible)里。"
 
@@ -135,6 +135,21 @@ msgid "What it changes"
 msgstr "改了什么"
 
 #: ../developer/upgrade-notes.md
+msgid "`0103_terminal_resume_keyset`"
+msgstr "`0103_terminal_resume_keyset`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Rebuilds the partial terminal-resume index on `(updated_at, id)`, "
+"matching the replay keyset so every bounded continuation seeks directly "
+"instead of sorting equal-time rows again. The online build does not block"
+" foreground writes and changes no row. A downgrade restores the preceding"
+" one-column index."
+msgstr ""
+"把终端恢复的部分索引重建为 `(updated_at, id)`，与重放所用的键集一致，使每个有界续页都能直接定位，"
+"不必再次排序时间相同的记录。在线构建不会阻塞前台写入，也不会改动任何行。降级会恢复之前的单列索引。"
+
+#: ../developer/upgrade-notes.md
 msgid "`0102_admin_sandbox_marker_order`"
 msgstr "`0102_admin_sandbox_marker_order`"
 
@@ -149,11 +164,9 @@ msgid ""
 "locked or rewritten, and the previous release's statements run unchanged "
 "under it. A downgrade restores the 0097 trigger."
 msgstr ""
-"替换修订 0097 的成员关系触发器：先锁住成员关系所属的沙箱组，再把这个沙箱组标记为已变更，"
-"和每次写入沙箱组时的顺序一致。在此之前，结算、放弃、结束、释放或回收一个轮次时，"
-"可能和同一沙箱组上的管理员终端检查或工作区启动互相死锁，Postgres "
-"会中止其中一个。只替换触发器函数：不锁表，也不重写任何表；上一个发布的语句不用改，"
-"照常在新函数下运行。降级会恢复 0097 的触发器。"
+"替换修订 0097 "
+"的成员关系触发器：先锁住成员关系所属的沙箱组，再把这个沙箱组标记为已变更，和每次写入沙箱组时的顺序一致。在此之前，结算、放弃、结束、释放或回收一个轮次时，可能和同一沙箱组上的管理员终端检查或工作区启动互相死锁，Postgres"
+" 会中止其中一个。只替换触发器函数：不锁表，也不重写任何表；上一个发布的语句不用改，照常在新函数下运行。降级会恢复 0097 的触发器。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0101_notification_state_deltas`"
@@ -684,7 +697,7 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:98
+#: ../developer/upgrade-notes.md:99
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
@@ -698,11 +711,11 @@ msgstr ""
 "之前已退役的旧迁移链，就无法直接升级；见[保留旧迁移链的数据库](operations.md#preserving-an-old-chain-"
 "database)。"
 
-#: ../developer/upgrade-notes.md:104
+#: ../developer/upgrade-notes.md:105
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:106
+#: ../developer/upgrade-notes.md:107
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"
