@@ -20,6 +20,7 @@ import httpx
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
+from cloud_agent_host.upload_import import forget_deleted_container_uploads
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -479,6 +480,7 @@ class SandboxDeletionBackupService:
                     identity.thread_id,
                     sandbox_id=recorded_sandbox_id,
                     container_id=identity.expected_container_id,
+                    on_absent=forget_deleted_container_uploads,
                 ):
                     raise SessionLeaseLost("sandbox discard target is no longer absent")
                 absent_sandbox_id = recorded_sandbox_id

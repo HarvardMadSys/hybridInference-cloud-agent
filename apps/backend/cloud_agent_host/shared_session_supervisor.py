@@ -67,6 +67,7 @@ from cloud_agent_host.resident_transport import (
 )
 from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
 from cloud_agent_host.sandbox_checkpoints import CheckpointArchiveInvalid, CheckpointRestore
+from cloud_agent_host.sandbox_deletion_fence import prove_admin_deletion_target_absent
 from cloud_agent_host.session_lifecycle import (
     DEFAULT_CHAT_IDLE_TIMEOUT_S,
     DEFAULT_SWEEP_INTERVAL_S,
@@ -75,6 +76,7 @@ from cloud_agent_host.session_lifecycle import (
     StaleStartFence,
 )
 from cloud_agent_host.shared_session_recovery import SharedSessionRecovery
+from cloud_agent_host.upload_import import forget_deleted_container_uploads
 from cloud_agent_shared.environment_snapshots import SNAPSHOT_LABEL, EnvironmentSnapshotRef
 from cloud_agent_shared.errors import SandboxArchiveBlocked
 from cloud_agent_shared.operation_profiling import (
@@ -2096,35 +2098,20 @@ class SharedChatSessionSupervisor:
         *,
         sandbox_id: str,
         container_id: str,
+        on_absent: Callable[[str], None] | None = None,
     ) -> bool:
-        """Prove a stale durable sandbox has no corresponding Docker object.
-
-        This is only the idempotent terminal case for an already-fenced admin
-        discard. A known membership, the original container under another
-        name, or any object occupying the group's stable name all mean the
-        target is not absent. Docker/protocol failures propagate and therefore
-        cannot be mistaken for successful deletion.
-        """
-        with self._lock:
-            # A registration creating or adopting the sandbox does so outside
-            # the lock and installs the group once Docker answers; until then
-            # only ``_creating`` says it is not absent.
-            if (
-                thread_id in self._members
-                or sandbox_id in self._groups
-                or sandbox_id in self._creating
-            ):
-                return False
-        container_name = ChatSandboxSpec.container_name_for(thread_id, sandbox_id)
-        if self._manager.inspect(container_name) is not None:
-            return False
-        absent = self._manager.inspect(container_id) is None
-        with self._lock:
-            return absent and not (
-                thread_id in self._members
-                or sandbox_id in self._groups
-                or sandbox_id in self._creating
-            )
+        """Prove a stale sandbox absent, optionally fencing an absence callback."""
+        return prove_admin_deletion_target_absent(
+            manager=self._manager,
+            condition=self._condition,
+            members=self._members,
+            groups=self._groups,
+            creating=self._creating,
+            thread_id=thread_id,
+            sandbox_id=sandbox_id,
+            container_id=container_id,
+            on_absent=on_absent,
+        )
 
     def acquire(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
@@ -4674,13 +4661,7 @@ class SharedChatSessionSupervisor:
                 self._condition.notify_all()
 
     def commit_archive(self, spec: ChatSandboxSpec, *, request_id: str, container_id: str) -> None:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
-        """Remove an exact stopped group after durable archive authorization.
-
-        The caller persists its verified commit receipt before invoking this
-        method. That receipt permits replay after a crash between Docker rm
-        and the final acknowledgment. An absent original is complete only if
-        its stable name is also absent; a replacement is always rejected.
-        """
+        """Remove a stopped group after durable authorization; cleanup is replayable."""
         with self._lock:
             group = self._groups.get(spec.sandbox_id)
             if group is not None:
@@ -4720,8 +4701,7 @@ class SharedChatSessionSupervisor:
                     group.idle_deadline = None
             if current is not None:
                 self._manager.remove_stopped_archived(spec, container_id=container_id)
-            # Both identities must be absent: a renamed original or a replacement
-            # at the stable name cannot satisfy a durable deletion receipt.
+            # A renamed original or stable-name replacement cannot prove deletion.
             original = self._manager.inspect(container_id)
             replacement = self._manager.inspect(spec.container_name)
             with self._lock:
@@ -4735,6 +4715,10 @@ class SharedChatSessionSupervisor:
                         raise SessionLeaseLost("sandbox archive request is stale")
                 if original is not None or replacement is not None:
                     raise RetainedChatLost("archived sandbox identity changed during deletion")
+            forget_deleted_container_uploads(spec.container_name)
+            with self._lock:
+                if check is not None:
+                    self._require_lifecycle_check_locked(check)
                 if group is not None:
                     for member in group.members.values():
                         member.context_status = "lost"
