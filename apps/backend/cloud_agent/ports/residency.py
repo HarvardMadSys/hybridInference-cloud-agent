@@ -9,7 +9,10 @@ operations it needs rather than on the whole persistence surface.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class ResidencyRepository(Protocol):
@@ -59,6 +62,23 @@ class ResidencyRepository(Protocol):
         """
         ...
 
+    async def heartbeat_residencies(
+        self,
+        *,
+        residencies: Sequence[tuple[str, int]],
+        ttl_seconds: float,
+        host: str | None = None,
+    ) -> dict[tuple[str, int], str]:
+        """Extend several residencies' leases at once, each as ``heartbeat_residency`` does.
+
+        Returns the grant id of every residency extended, by ``(thread_id,
+        generation)``; one missing from the answer was not extended. The
+        rows are locked in thread order, and a failure is raised, never
+        answered as "not extended": a host tears a sandbox down on that
+        answer.
+        """
+        ...
+
     async def release_residency(
         self, *, thread_id: str, generation: int, host: str | None = None
     ) -> str | None:
@@ -88,6 +108,18 @@ class ResidencyRepository(Protocol):
         have accepted the stopped/lost observation; checking any of these in
         Python would recreate the revoke-after-mint race this method exists to
         prevent.
+        """
+        ...
+
+    async def open_shared_residencies(
+        self, *, residencies: Sequence[tuple[str, str, int]]
+    ) -> set[tuple[str, str, int]]:
+        """Return which ``(sandbox_id, thread_id, generation)`` residencies are still open.
+
+        Open is the generation its member still holds, not yet released. A
+        closed one stays closed, so this rules a release out without a lock;
+        whether an open one may be released is
+        ``release_shared_residency_if_quiescent``'s to decide.
         """
         ...
 

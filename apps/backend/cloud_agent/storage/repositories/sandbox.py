@@ -41,10 +41,23 @@ from cloud_agent.storage._sql.sandbox import (
     quiet_idle_deadline,
     read_terminal_control_route,
 )
+from cloud_agent.storage._sql.sandbox_observations import (
+    MEMBERS_STOPPED_SQL,
+    observation_changes_nothing,
+    observed_groups,
+    record_observed_measurements,
+    record_running_container,
+    record_stopped_container,
+    stored_terminal_count,
+    write_observed_container,
+    write_reported_members,
+)
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     import asyncpg
 
 logger = get_logger(__name__)
@@ -2488,6 +2501,62 @@ class PostgresSandboxRepository:
             terminal_count=terminal_count,
         )
 
+    async def reconcile_thread_sandbox_observations(
+        self, *, host: str, observations: Sequence[Mapping[str, Any]]
+    ) -> list[str | None]:
+        """Reconcile every group one heartbeat reports, writing only what changed.
+
+        Each observation carries the arguments of
+        :meth:`reconcile_thread_sandbox_observation` but the host, and gets its
+        answer, in order. One that changes nothing, as one unlocked read finds
+        the groups, takes no lock and is answered ``None``
+        (:mod:`cloud_agent.storage._sql.sandbox_observations`). The rest are
+        reconciled one by one in fenced transactions of their own, and so is
+        any later sighting of a group in the same beat, which the read no
+        longer describes. A group the host did not report is not read.
+        """
+        if not observations:
+            return []
+        async with self._pool.acquire() as conn:
+            groups, members = await observed_groups(
+                conn, [str(observation["sandbox_id"]) for observation in observations]
+            )
+        results: list[str | None] = []
+        fenced: set[str] = set()
+        for observation in observations:
+            sandbox_id = str(observation["sandbox_id"])
+            if sandbox_id not in fenced and observation_changes_nothing(
+                observation,
+                host=host,
+                group=groups.get(sandbox_id),
+                members=members.get(sandbox_id, {}),
+            ):
+                results.append(None)
+                continue
+            fenced.add(sandbox_id)
+            results.append(
+                await self.reconcile_thread_sandbox_observation(host=host, **observation)
+            )
+        return results
+
+    async def recorded_sandbox_checkpoints(self, *, checkpoint_ids: Sequence[str]) -> set[str]:
+        """Return which of these checkpoint receipts are already recorded.
+
+        Read without locks. Hosts repeat their latest receipt on every beat
+        until the group is gone, and :meth:`record_sandbox_checkpoint` takes
+        the compute fence and the group's lock only to find a recorded id
+        changes nothing. A receipt is never removed but with its group, so one
+        this read finds stays recorded.
+        """
+        if not checkpoint_ids:
+            return set()
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id FROM agent_sandbox_checkpoints WHERE id = ANY($1::text[])",
+                list(checkpoint_ids),
+            )
+        return {row["id"] for row in rows}
+
     async def record_sandbox_checkpoint(
         self,
         *,
@@ -3063,7 +3132,7 @@ class PostgresSandboxRepository:
             attempt_id,
         )
 
-    async def _reconcile_shared_sandbox_observation(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+    async def _reconcile_shared_sandbox_observation(
         self,
         *,
         thread_id: str,
@@ -3121,80 +3190,19 @@ class PostgresSandboxRepository:
                 # claimed it confirms the recreated container. A container the
                 # restoring host reports before then is not yet the group's.
                 return None
-            await conn.execute(
-                """
-                UPDATE agent_sandboxes
-                SET container_id = COALESCE(container_id, $2),
-                    archived_at = CASE WHEN $3 THEN NULL ELSE archived_at END,
-                    updated_at = NOW()
-                WHERE id = $1
-                """,
-                sandbox_id,
-                container_id,
-                running,
+            # Each step writes only what changes the row locked here: a beat
+            # that repeats what is recorded rewrites nothing.
+            await write_observed_container(conn, group, container_id=container_id, running=running)
+            await record_observed_measurements(
+                conn,
+                group,
+                running=running,
+                terminal_count=terminal_count,
+                resource_usage=resource_usage,
+                terminals=self._record_terminal_observation,
+                resources=self._record_resource_observation,
             )
-            # Terminal observations fence administrator stops independently of
-            # optional monitoring. Resource failures must not roll back a fresh
-            # terminal count, and neither savepoint can lose lifecycle progress.
-            try:
-                async with conn.transaction():
-                    await self._record_terminal_observation(
-                        conn,
-                        sandbox_id=sandbox_id,
-                        running=running,
-                        terminal_count=terminal_count,
-                    )
-            except Exception:
-                logger.warning("sandbox_terminal_observation_unavailable", exc_info=True)
-            try:
-                async with conn.transaction():
-                    await self._record_resource_observation(
-                        conn,
-                        sandbox_id=sandbox_id,
-                        running=running,
-                        resource_usage=resource_usage,
-                    )
-            except Exception:
-                logger.warning("sandbox_resource_snapshot_unavailable", exc_info=True)
-            for member in members[:128]:
-                member_thread = str(member.get("thread_id") or "")
-                if not member_thread:
-                    continue
-                observed_activation = int(member.get("activation_generation") or 0)
-                observed_process = int(member.get("process_generation") or 0)
-                observed_residency = int(member.get("residency_generation") or 0)
-                resident_state = str(member.get("resident_state") or "stopped")
-                if resident_state not in {"stopped", "starting", "live", "restarting", "lost"}:
-                    continue
-                # A heartbeat may confirm an equal/newer local process state,
-                # but cannot move a durable activation fence backwards or
-                # overwrite a process belonging to a newer residency.
-                await conn.execute(
-                    """
-                    UPDATE agent_thread_sandbox_memberships
-                    SET process_generation = CASE
-                            WHEN native_state = 'lost' OR context_status = 'lost'
-                                THEN process_generation
-                            ELSE GREATEST(process_generation, $3)
-                        END,
-                        resident_state = CASE
-                            WHEN native_state = 'lost' OR context_status = 'lost'
-                                THEN 'lost'
-                            WHEN residency_generation <= $4
-                             AND process_generation <= $3
-                             AND activation_generation <= $2 THEN $5
-                            ELSE resident_state
-                        END,
-                        updated_at = NOW()
-                    WHERE thread_id = $1 AND sandbox_id = $6
-                    """,
-                    member_thread,
-                    observed_activation,
-                    observed_process,
-                    observed_residency,
-                    resident_state,
-                    sandbox_id,
-                )
+            await write_reported_members(conn, sandbox_id, members)
 
             active_member = await conn.fetchval(
                 """
@@ -3255,19 +3263,7 @@ class PostgresSandboxRepository:
                     running,
                 )
                 if recovered == "stopped":
-                    await conn.execute(
-                        """
-                        UPDATE agent_thread_sandbox_memberships
-                        SET resident_state = CASE
-                                WHEN native_state = 'lost' OR context_status = 'lost'
-                                    THEN 'lost'
-                                ELSE 'stopped'
-                            END,
-                            updated_at = NOW()
-                        WHERE sandbox_id = $1
-                        """,
-                        sandbox_id,
-                    )
+                    await conn.execute(MEMBERS_STOPPED_SQL, sandbox_id)
                 return None if recovered is None else str(recovered)
             if running and lost_only_group and not durable_activity:
                 row = await conn.fetchrow(
@@ -3279,85 +3275,25 @@ class PostgresSandboxRepository:
                         END,
                         idle_deadline = NULL, updated_at = NOW()
                     WHERE id = $1
+                      AND (state NOT IN ('lost', 'stopped_dirty', 'stopping')
+                           OR idle_deadline IS NOT NULL)
                     RETURNING state
                     """,
                     sandbox_id,
                 )
-                return None if row is None else str(row["state"])
+                # Unwritten, the group already stands where this would put it.
+                return str(group["state"] if row is None else row["state"])
             if running:
-                if group["stop_requested_at"] is not None:
-                    # A heartbeat is an observation of a still-running
-                    # container, not cancellation of an administrator's
-                    # request. Keep admission closed and retry the safe
-                    # host-side idle check on every subsequent heartbeat.
-                    return "stopping"
-                deadline_sql = "idle_deadline"
-                deadline_arg: float | None = None
-                if activity_active is True or durable_activity:
-                    deadline_sql = "NULL"
-                elif activity_active is False and idle_remaining_seconds is not None:
-                    deadline_sql = "clock_timestamp() + make_interval(secs => $2)"
-                    deadline_arg = idle_remaining_seconds
-                elif activity_active is None:
-                    # A sandbox manager reconstructed this running container without
-                    # its old monotonic clock. Give a group whose durable
-                    # deadline was cleared one bounded recovery window, but do
-                    # not refresh that window on every host heartbeat. Once a
-                    # real terminal/operation closes, the sandbox manager reports its
-                    # concrete decreasing remainder through the branch above.
-                    deadline_sql = (
-                        "COALESCE(idle_deadline, "
-                        "clock_timestamp() + make_interval(secs => idle_timeout_seconds))"
-                    )
-                # A running container has moved past any checkpoint of its
-                # last stop. Paths that start it fence first; this catches
-                # one that did not.
-                row = await conn.fetchrow(
-                    f"""
-                    UPDATE agent_sandboxes
-                    SET state = 'running', idle_deadline = {deadline_sql},
-                        restore_checkpoint_id = NULL, updated_at = NOW()
-                    WHERE id = $1
-                    RETURNING state
-                    """,
-                    *((sandbox_id, deadline_arg) if deadline_arg is not None else (sandbox_id,)),
+                return await record_running_container(
+                    conn,
+                    group,
+                    activity_active=activity_active,
+                    idle_remaining_seconds=idle_remaining_seconds,
+                    durable_activity=durable_activity,
                 )
-                return None if row is None else str(row["state"])
-
             if active_member:
                 return None
-            row = await conn.fetchrow(
-                """
-                UPDATE agent_sandboxes
-                SET state = 'stopped', idle_deadline = NULL,
-                    stop_requested_at = NULL, updated_at = NOW()
-                WHERE id = $1 AND (
-                    state IN ('stopped', 'stopping', 'stopped_dirty', 'lost')
-                    OR (state = 'running' AND idle_deadline IS NOT NULL
-                        AND idle_deadline <= clock_timestamp())
-                )
-                RETURNING state
-                """,
-                sandbox_id,
-            )
-            if row is None:
-                return None
-            await conn.execute(
-                """
-                UPDATE agent_thread_sandbox_memberships
-                SET resident_state = CASE
-                        WHEN native_state = 'lost' OR context_status = 'lost'
-                            THEN 'lost'
-                        ELSE 'stopped'
-                    END,
-                    updated_at = NOW()
-                WHERE sandbox_id = $1
-                """,
-                sandbox_id,
-            )
-            # A repeated stopped observation may still repair stale member
-            # state, but it does not ask the host to perform another stop.
-            return None if group["state"] == "stopped" else str(row["state"])
+            return await record_stopped_container(conn, group)
 
     @staticmethod
     async def _record_terminal_observation(
@@ -3368,11 +3304,7 @@ class PostgresSandboxRepository:
         terminal_count: int | None,
     ) -> None:
         """Persist current terminal safety data for an already fenced container."""
-        count = terminal_count if running else None
-        if count is not None and (
-            isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 4096
-        ):
-            count = None
+        count = stored_terminal_count(running, terminal_count)
         await conn.execute(
             """
             UPDATE agent_sandboxes
