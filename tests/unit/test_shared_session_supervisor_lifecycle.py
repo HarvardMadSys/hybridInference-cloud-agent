@@ -434,6 +434,113 @@ def test_absence_proof_rechecks_registration_after_slow_docker_reads(monkeypatch
     assert outcome == {"value": False}
 
 
+def test_absent_cleanup_fences_registration_until_callback_returns():
+    creation_started = threading.Event()
+
+    class Manager(_Manager):
+        def create(self, spec, *, facts=None, observer=None):
+            creation_started.set()
+            return super().create(spec, facts=facts, observer=observer)
+
+    manager = Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    cleanup_entered, release_cleanup = threading.Event(), threading.Event()
+
+    def cleanup(container_name):
+        assert container_name == spec.container_name
+        cleanup_entered.set()
+        assert release_cleanup.wait(timeout=_HELD_S)
+
+    deletion, deletion_outcome = _in_thread(
+        lambda: supervisor.admin_deletion_target_absent(
+            spec.thread_id,
+            sandbox_id=spec.sandbox_id,
+            container_id="container-shared",
+            on_absent=cleanup,
+        )
+    )
+    assert cleanup_entered.wait(timeout=_UNBLOCKED_S)
+    admission_started = threading.Event()
+
+    def register():
+        admission_started.set()
+        return supervisor.register_manifest(spec, _members())
+
+    registration, registration_outcome = _in_thread(register)
+    try:
+        assert admission_started.wait(timeout=_UNBLOCKED_S)
+        assert not creation_started.wait(timeout=0.1)
+        assert registration.is_alive()
+    finally:
+        release_cleanup.set()
+        deletion.join(timeout=_UNBLOCKED_S)
+        registration.join(timeout=_UNBLOCKED_S)
+
+    assert not deletion.is_alive()
+    assert not registration.is_alive()
+    assert deletion_outcome == {"value": True}
+    assert "error" not in registration_outcome
+    assert creation_started.is_set()
+    assert supervisor.owns(spec.thread_id)
+
+
+def test_deletion_retries_upload_receipt_cleanup_after_failure(monkeypatch):
+    from cloud_agent_host import shared_session_supervisor as supervisor_module
+
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+    manager.items[spec.container_name] = replace(
+        group.inspection, running=False, status=ChatSandboxStatus.STOPPED
+    )
+    retired = []
+
+    def require_stopped(owned_spec, *, container_id):
+        current = manager.items[owned_spec.container_name]
+        assert current.container_id == container_id
+        return current
+
+    def remove(owned_spec, *, container_id):
+        assert manager.items[owned_spec.container_name].container_id == container_id
+        manager.items.pop(owned_spec.container_name)
+
+    def retire(container_name):
+        retired.append(container_name)
+        if len(retired) == 1:
+            raise OSError("receipt directory sync failed")
+
+    monkeypatch.setattr(manager, "require_stopped_archive", require_stopped, raising=False)
+    monkeypatch.setattr(manager, "remove_stopped_archived", remove, raising=False)
+    monkeypatch.setattr(
+        supervisor_module,
+        "forget_deleted_container_uploads",
+        retire,
+    )
+    supervisor.begin_archive(
+        spec.thread_id,
+        request_id="delete-1",
+        generation=spec.generation,
+        container_id=group.inspection.container_id,
+    )
+
+    with pytest.raises(OSError, match="directory sync"):
+        supervisor.commit_archive(
+            spec, request_id="delete-1", container_id=group.inspection.container_id
+        )
+    assert supervisor._groups[spec.sandbox_id] is group
+    supervisor.commit_archive(
+        spec, request_id="delete-1", container_id=group.inspection.container_id
+    )
+    supervisor.commit_archive(
+        spec, request_id="delete-1", container_id=group.inspection.container_id
+    )
+
+    assert retired == [spec.container_name] * 3
+
+
 @pytest.mark.parametrize("replacement", ["stable_name", "renamed_original"])
 def test_deletion_proves_both_container_identities_absent_before_forgetting_group(
     monkeypatch, replacement
