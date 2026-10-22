@@ -4198,6 +4198,50 @@
         "title": "AgentGitCommit",
         "type": "object"
       },
+      "AgentGitWorkspaceMetadataResponse": {
+        "description": "Cheap status and revision data for invalidating an on-demand Git view.",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "branch": {
+            "default": "",
+            "title": "Branch",
+            "type": "string"
+          },
+          "change_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Change Count",
+            "type": "integer"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/AgentGitChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "title": "AgentGitWorkspaceMetadataResponse",
+        "type": "object"
+      },
       "AgentGitWorkspaceResponse": {
         "description": "Live diff, status, and commit data from the retained workspace.",
         "properties": {
@@ -4209,6 +4253,12 @@
             "default": "",
             "title": "Branch",
             "type": "string"
+          },
+          "change_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Change Count",
+            "type": "integer"
           },
           "changes": {
             "items": {
@@ -4228,6 +4278,18 @@
             "default": "",
             "title": "Patch",
             "type": "string"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
           }
         },
         "required": [
@@ -31307,6 +31369,62 @@
           }
         },
         "summary": "Get Agent Job Git Workspace"
+      }
+    },
+    "/v1/agent/jobs/{job_id}/git/metadata": {
+      "get": {
+        "description": "Read a cheap live-workspace revision and changed-path summary.",
+        "operationId": "get_agent_job_git_workspace_metadata_v1_agent_jobs__job_id__git_metadata_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGitWorkspaceMetadataResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Job Git Workspace Metadata"
       }
     },
     "/v1/agent/jobs/{job_id}/pin": {

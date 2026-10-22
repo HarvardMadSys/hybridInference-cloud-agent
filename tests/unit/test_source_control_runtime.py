@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import gc
 import logging
 import threading
+import weakref
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -416,6 +418,45 @@ async def test_saved_provider_settings_replace_credentials_and_close_retired_poo
     assert runtime.gitlab.client is None
     assert runtime.gitlab.load_status == "unavailable"
     await runtime.aclose()
+
+
+async def test_unused_rotated_generations_are_collectable_but_held_ones_still_work(
+    monkeypatch: pytest.MonkeyPatch, private_pem: str
+) -> None:
+    from cloud_agent import source_control_runtime
+
+    values = {"AGENT_GITHUB_APP_ID": "first", "AGENT_GITHUB_APP_PRIVATE_KEY": private_pem}
+    monkeypatch.setattr(source_control_runtime, "settings_environment", lambda: dict(values))
+    provider = GitHubAppProvider()
+    first = provider.get()
+    assert first is not None
+    async with first._http() as original_pool:
+        values["AGENT_GITHUB_APP_ID"] = "second"
+        provider.get()
+        await asyncio.sleep(0)
+        assert not original_pool.is_closed
+    assert original_pool.is_closed
+    async with first._http() as later_pool:
+        assert later_pool is not original_pool and not later_pool.is_closed
+    assert later_pool.is_closed
+
+    generations = []
+    for index in range(20):
+        previous = provider.get()
+        assert previous is not None
+        generations.append(weakref.ref(previous))
+        async with previous._http():
+            pass
+        values["AGENT_GITHUB_APP_ID"] = str(index)
+        provider.get()
+        del previous
+        # Retirement is scheduled thread-safely and closure gets its own task.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    gc.collect()
+    assert all(generation() is None for generation in generations)
+    assert list(provider._retired) == [first]
+    await provider.aclose()
 
 
 def test_failed_app_reload_uses_current_interval_setting(

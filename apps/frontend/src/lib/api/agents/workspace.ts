@@ -66,10 +66,16 @@ export async function getAgentJobFiles(jobId: string, path = ''): Promise<AgentJ
   return jsonOrThrow<AgentJobFilesApi>(resp);
 }
 
-export interface AgentGitWorkspaceApi {
+export interface AgentGitWorkspaceMetadataApi {
   available: boolean;
+  /** Opaque fingerprint of the base-relative workspace view. */
+  revision?: string | null;
   branch: string;
   changes: Array<{ code: string; path: string }>;
+  change_count?: number;
+}
+
+export interface AgentGitWorkspaceApi extends AgentGitWorkspaceMetadataApi {
   patch: string;
   commits: Array<{
     sha: string;
@@ -78,6 +84,15 @@ export interface AgentGitWorkspaceApi {
     author: string;
     authored_at: string;
   }>;
+}
+
+/** Read only the cheap revision and changed-path summary. */
+export async function getAgentJobGitMetadata(jobId: string): Promise<AgentGitWorkspaceMetadataApi> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/git/metadata`,
+  );
+  return jsonOrThrow<AgentGitWorkspaceMetadataApi>(resp);
 }
 
 /** Read Git status/diff/commits from the live workspace. */
