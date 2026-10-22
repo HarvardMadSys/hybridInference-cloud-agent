@@ -53,7 +53,7 @@ TEST_BASELINE = {
     "tests/integration/storage/test_host_pool_store.py": 3431,
     "tests/integration/storage/test_mcp_connection_store.py": 3182,
     "tests/servers/test_admin_compute.py": 2101,
-    "tests/servers/test_agent_jobs_api.py": 6331,
+    "tests/servers/test_agent_jobs_api.py": 6328,
     "tests/unit/test_agent_publish_worker.py": 2080,
     "tests/unit/test_agent_runner.py": 2735,
     "tests/unit/test_agent_sandbox_manager.py": 3957,

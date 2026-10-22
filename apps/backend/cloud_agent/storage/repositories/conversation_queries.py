@@ -12,7 +12,6 @@ import hashlib
 import json
 from typing import TYPE_CHECKING
 
-from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
 from cloud_agent.domain.thread_history import THREAD_PAGE_SIZE
 from cloud_agent.storage._sql.jobs import (
@@ -136,21 +135,6 @@ class PostgresConversationQueries:
         """Fetch one job by id."""
         async with self._pool.acquire() as conn:
             return await read_job(conn, job_id)
-
-    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
-        """Read only an owned job's state and publication URL for its event stream.
-
-        Stream admission checks the full job's ownership and visibility first.
-        Subsequent reads stay scoped to that owner without loading the prompt,
-        conversation configuration, or shared sandbox on each event wake-up.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT state, published_pr_url FROM agent_jobs WHERE id = $1 AND user_id = $2",
-                job_id,
-                user_id,
-            )
-        return JobStreamState(row["state"], row["published_pr_url"]) if row else None
 
     async def owner_changes(
         self, *, user_id: str, job_ids: list[str], thread_ids: list[str]

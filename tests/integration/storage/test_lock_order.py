@@ -640,6 +640,48 @@ async def test_an_event_append_picked_as_a_deadlock_victim_is_tried_again(pool, 
     assert [row["source_event_id"] for row in mirrored] == [event_id]
 
 
+async def test_an_event_append_waiting_past_lease_expiry_is_refused(pool, store: Storage):
+    """The lease clock is checked after the attempt row lock has been acquired."""
+    await _create_job(store)
+    claim = await _claim(store, worker_id="lease-wait", lease_ttl_seconds=60)
+    assert claim is not None
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_attempts SET lease_expires_at = "
+            "clock_timestamp() + INTERVAL '300 milliseconds' WHERE id = $1",
+            claim["attempt_id"],
+        )
+
+    append = None
+    async with pool.acquire() as holder:
+        try:
+            async with holder.transaction():
+                await holder.execute(
+                    "SELECT id FROM agent_attempts WHERE id = $1 FOR UPDATE",
+                    claim["attempt_id"],
+                )
+                append = asyncio.create_task(
+                    store.attempt_commands.append_event(
+                        attempt_id=claim["attempt_id"],
+                        lease_generation=claim["lease_generation"],
+                        event_type="message",
+                        payload={"text": "lease already expired"},
+                        event_seq=1,
+                    )
+                )
+                await _blocked_by(pool, await holder.fetchval("SELECT pg_backend_pid()"))
+                await asyncio.sleep(0.4)
+            assert await asyncio.wait_for(append, timeout=10) is None
+        finally:
+            await _settle(append)
+
+    async with pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM agent_job_events WHERE attempt_id = $1", claim["attempt_id"]
+        )
+    assert count == 0
+
+
 async def test_cancelling_a_turn_does_not_deadlock_with_its_streaming_reply(
     pool, store: Storage, monkeypatch
 ):

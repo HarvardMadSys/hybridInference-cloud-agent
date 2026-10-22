@@ -51,7 +51,6 @@ class Queries:
         self.events: list[dict[str, Any]] = []
         self.reads = 0
         self.full_job_reads = 0
-        self.state_reads = 0
         self.during_read: Any = None
 
     def store(self, text: str) -> None:
@@ -70,19 +69,18 @@ class Queries:
         self.full_job_reads += 1
         return dict(self.job) if job_id == JOB else None
 
-    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
-        self.state_reads += 1
+    async def job_stream_page(
+        self, *, job_id: str, user_id: str, after_id: int, limit: int
+    ) -> tuple[list[dict[str, Any]], JobStreamState] | None:
+        self.reads += 1
         if job_id != JOB or self.job["user_id"] != user_id:
             return None
-        return JobStreamState(self.job["state"], self.job["published_pr_url"])
-
-    async def list_events_after(self, *, job_id: str, after_id: int, limit: int) -> list[Any]:
-        self.reads += 1
         found = [event for event in self.events if event["id"] > after_id][:limit]
+        state = JobStreamState(self.job["state"], self.job["published_pr_url"])
         if self.during_read is not None:
             hook, self.during_read = self.during_read, None
             hook()
-        return found
+        return found, state
 
 
 class Request:
@@ -197,7 +195,7 @@ async def test_live_wakeups_reload_only_the_minimal_state_and_finish_with_the_cu
         "last_event_id": 3,
     }
     assert queries.full_job_reads == 1, "the full job is read only for stream admission"
-    assert queries.state_reads > 1, "live wakeups still read current state"
+    assert queries.reads > 1, "live wakeups read the page and current state together"
     await stream.aclose()
 
 

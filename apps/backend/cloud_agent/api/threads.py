@@ -295,9 +295,15 @@ async def stream_agent_job_events(  # noqa: C901 complexity baseline, #771
                 while True:
                     if await request.is_disconnected() or clock() >= closes_at:
                         return
-                    events = await job_store.execution_queries.list_events_after(
-                        job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
+                    page = await job_store.execution_queries.job_stream_page(
+                        job_id=job_id,
+                        user_id=user["user_id"],
+                        after_id=cursor,
+                        limit=_EVENT_PAGE_SIZE,
                     )
+                    if page is None:
+                        return
+                    events, stream_state = page
                     if events:
                         for event in events:
                             cursor = event["id"]
@@ -313,20 +319,21 @@ async def stream_agent_job_events(  # noqa: C901 complexity baseline, #771
                         yield ": keepalive\n\n"
                         last_frame = clock()
 
-                    stream_state = await job_store.conversation_queries.get_job_stream_state(
-                        job_id=job_id, user_id=user["user_id"]
-                    )
-                    if stream_state is None:
-                        return
                     if stream_state.state in TERMINAL_STATES:
                         # Drain to exhaustion before announcing the end. A
                         # single extra page is not enough: a client attaching
                         # to a finished job with more than two pages of backlog
                         # would see job_finished, close, and lose the rest.
                         while True:
-                            tail = await job_store.execution_queries.list_events_after(
-                                job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
+                            tail_page = await job_store.execution_queries.job_stream_page(
+                                job_id=job_id,
+                                user_id=user["user_id"],
+                                after_id=cursor,
+                                limit=_EVENT_PAGE_SIZE,
                             )
+                            if tail_page is None:
+                                return
+                            tail, stream_state = tail_page
                             if not tail:
                                 break
                             for event in tail:
