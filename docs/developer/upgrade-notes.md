@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0100_memory_archive_pages`. The supported deployment scripts run migrations
+`0101_notification_state_deltas`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -54,6 +54,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0101_notification_state_deltas` | Adds coalesced per-owner job/thread change markers, an active-job index, and a partial recent-terminal marker index. Notification clients bootstrap active and recent terminal work in bounded keyset pages from a request-time database clock baseline, then request bounded snapshot deltas; no historical jobs are backfilled or replayed. Markers age out lazily after 24 hours and stale cursors explicitly rebuild. The previous push stream remains available. A downgrade drops only derived state and restores push-only trigger behavior. |
 | `0100_memory_archive_pages` | Builds partial owner/scope indexes for active memories and archive cursor pages concurrently. Existing memory rows are unchanged. Online builds avoid blocking foreground writes; interrupted builds can be retried. Offline SQL uses ordinary index builds. Downgrade drops only these indexes. |
 | `0099_thread_stats_rollups` | Adds a derived, versioned per-attempt cache for owner thread statistics. Missing or stale attempts reduce their compact event projections in bounded 1,000-row pages; unchanged reads compare the newest indexed sequence and reuse the cache without transferring historical event rows. Event storage and the authoritative billing ledger are unchanged. A downgrade drops only this rebuildable cache. |
 | `0098_measurement_counts` | Backfills exact profiling counts into at most 64 counter shards per run and installs transactional accounting triggers. The historical scan holds a write-conflicting lock on measurements until migration commit; schedule this one-time write pause for the size of retained history. Raw samples and whole-run summaries are unchanged. Downgrade removes only counters and triggers. |
