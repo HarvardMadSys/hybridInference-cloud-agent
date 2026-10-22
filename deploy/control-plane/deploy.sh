@@ -300,11 +300,12 @@ ACTIVE_SERVICES="$(compose config --services)"
 wait_for() {
   local name="$1" url="$2" deadline=$((SECONDS + HEALTH_TIMEOUT))
   log "waiting for ${name} at ${url}"
-  while [ "${SECONDS}" -lt "${deadline}" ]; do
+  while :; do
     if curl -fsS --max-time 5 "${url}" >/dev/null 2>&1; then
       log "${name}: ok"
       return 0
     fi
+    [ "${SECONDS}" -lt "${deadline}" ] || break
     sleep 3
   done
   printf '[deploy] %s never became healthy; last 40 lines per service:\n' "${name}" >&2
