@@ -139,6 +139,9 @@ class AgentProject(BaseModel):
     last_activity_at: str | None = None
     pinned_count: int = 0
     pinned_at: str | None = None
+    # Opaque invalidation token, not a permission or pagination cursor.
+    refresh_token: str | None = None
+    membership_token: str | None = None
 
 
 class AgentProjectListResponse(BaseModel):

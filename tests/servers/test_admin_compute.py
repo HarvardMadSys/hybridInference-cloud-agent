@@ -1703,6 +1703,59 @@ async def test_impact_whitelists_scope_and_irreversible_release_disables_actions
 
 
 @pytest.mark.asyncio
+async def test_a_release_that_stopped_its_runners_shows_its_scan_and_cannot_be_cancelled(
+    compute_api,
+):
+    """Cancelling would reopen a Host whose runner nothing starts again."""
+    client, repo, _ = compute_api
+    _, operation = await allocation(client)
+    repo.operations[operation["id"]].update(
+        kind="retire",
+        state="blocked",
+        step="checking_retention",
+        result={
+            "runners_stopping": True,
+            "inventory": [
+                {
+                    "node_id": "node-1",
+                    "probes_removed": 2,
+                    "complete": True,
+                    "retained_containers": 0,
+                    "unknown_containers": True,
+                    "orphan_state": False,
+                    "blocked_reasons": ["unmanaged_containers_present", "Not A Code"],
+                    "address": "10.0.0.7",
+                },
+                "not a scan",
+            ],
+        },
+    )
+
+    observed = await client.get(f"/admin/agent/compute-operations/{operation['id']}", headers=ADMIN)
+
+    view = observed.json()["operation"]
+    assert view["allowed_actions"] == ["retry"]
+    # Known fields of the right type, reason codes only: never anything else
+    # a node's answer could carry.
+    assert view["result"]["inventory"] == [
+        {
+            "node_id": "node-1",
+            "probes_removed": 2,
+            "complete": True,
+            "retained_containers": 0,
+            "orphan_state": False,
+            "blocked_reasons": ["unmanaged_containers_present"],
+        }
+    ]
+    assert "10.0.0.7" not in observed.text
+    cancel = await client.post(
+        f"/admin/agent/compute-operations/{operation['id']}/cancel", headers=ADMIN, json={}
+    )
+    assert cancel.status_code == 409
+    assert repo.operations[operation["id"]]["state"] == "blocked"
+
+
+@pytest.mark.asyncio
 async def test_definite_pre_submit_autoscale_rejection_can_be_cancelled(compute_api):
     client, repo, _ = compute_api
     _, operation = await allocation(client)

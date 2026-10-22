@@ -90,7 +90,7 @@ if TYPE_CHECKING:
         SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
-    from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.environments import EnvironmentBindingRepository
 
 
 router = APIRouter(prefix="/v1/agent")
@@ -118,7 +118,11 @@ class _TurnsStorage(Protocol):
     session_fork: SessionForkRepository
     skills: SkillRepository
     source_control: SourceControlPort
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentBindingRepository:
+        """Environment persistence needed by this flow."""
+        ...
 
 
 def _require_store(store: _TurnsStorage | None) -> _TurnsStorage:

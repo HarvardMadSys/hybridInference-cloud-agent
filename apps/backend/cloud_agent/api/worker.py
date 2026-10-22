@@ -173,7 +173,7 @@ if TYPE_CHECKING:
         SshServerRepository,
     )
     from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
-    from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.environments import EnvironmentExecutionRepository
     from cloud_agent.sandbox_manager_client import SandboxManagerClient
 
 
@@ -263,13 +263,7 @@ logger = get_logger("cloud_agent.api.routes")
 
 
 class _WorkerStorage(Protocol):
-    """The capabilities the runner-facing surface reaches the store for.
-
-    ``attachments`` is here for the claim that tells a host how many uploads the
-    conversation carries, and for the two endpoints that hand them over.
-    ``pending_messages`` and ``skills`` are the finish's: a turn that ends sends
-    the owner's next waiting message, checked like any message.
-    """
+    """Capabilities reached by runner endpoints and their claim/finish helpers."""
 
     agent_memory: AgentMemoryRepository
     attachments: AttachmentRepository
@@ -288,7 +282,12 @@ class _WorkerStorage(Protocol):
     sandbox: SandboxRepository
     skills: SkillRepository
     source_control: SourceControlPort
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentExecutionRepository:
+        """Environment persistence needed by this flow."""
+        ...
+
     environment_snapshots: EnvironmentSnapshotRepository
     ssh_servers: SshServerRepository
 

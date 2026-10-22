@@ -120,9 +120,16 @@ export type {
   RunResourceSummaryApi,
   AgentAttemptSummaryApi,
   AgentAttemptTelemetryApi,
+  AgentTrajectoryAttemptTimingApi,
+  AgentTrajectoryJobTimingApi,
+  AgentTrajectoryTimingResponseApi,
 } from './agents/resources';
 
-export { getAgentAttemptTelemetry } from './agents/resources';
+export {
+  AGENT_TRAJECTORY_TIMING_BATCH_SIZE,
+  getAgentAttemptTelemetry,
+  getAgentTrajectoryTimings,
+} from './agents/resources';
 
 export type {
   AgentLedgerStatus,
