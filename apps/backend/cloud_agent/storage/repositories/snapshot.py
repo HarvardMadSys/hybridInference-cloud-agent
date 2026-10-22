@@ -29,7 +29,10 @@ from cloud_agent.storage._sql.sandbox import (
     group_is_quiet,
     quiet_idle_deadline,
 )
-from cloud_agent.storage._sql.snapshot_title_context import snapshot_title_context
+from cloud_agent.storage._sql.snapshot_title_context import (
+    claimed_title_context,
+    snapshot_title_context,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -869,6 +872,9 @@ class PostgresSnapshotRepository:
         this one back. A failed one does not. It is never claimed again, and
         this later one was cut from the same published base, so it carries
         the failed one's changes and supersedes it.
+
+        A snapshot captured with no title context, before 0096 or by the
+        release before it, gets one here (:func:`claimed_title_context`).
         """
         async with self._pool.acquire() as conn, conn.transaction():
             snapshot = await conn.fetchrow(
@@ -980,28 +986,13 @@ class PostgresSnapshotRepository:
                             "workspace_epoch": snapshot["workspace_epoch"],
                         },
                     )
-                title_context = load_json(snapshot["title_context"]) or {}
-                if not isinstance(title_context, dict):
-                    title_context = {}
-                stored_messages = title_context.get("messages")
-                session_messages = []
-                if isinstance(stored_messages, list):
-                    session_messages = [
-                        {
-                            key: message.get(key)
-                            for key in ("thread_id", "job_id", "role", "content")
-                        }
-                        for message in stored_messages
-                        if isinstance(message, dict)
-                    ]
-                stored_summaries = title_context.get("summaries")
-                session_summaries = []
-                if isinstance(stored_summaries, list):
-                    session_summaries = [
-                        summary["content"]
-                        for summary in stored_summaries
-                        if isinstance(summary, dict) and isinstance(summary.get("content"), str)
-                    ]
+                title = await claimed_title_context(
+                    conn,
+                    snapshot_id=int(snapshot["snapshot_id"]),
+                    sandbox_id=snapshot["sandbox_id"],
+                    workspace_epoch=int(snapshot["workspace_epoch"]),
+                    stored=snapshot["title_context"],
+                )
                 return {
                     "publication_kind": "shared_snapshot",
                     "snapshot_id": int(snapshot["snapshot_id"]),
@@ -1009,11 +1000,9 @@ class PostgresSnapshotRepository:
                     "sandbox_id": snapshot["sandbox_id"],
                     "workspace_epoch": int(snapshot["workspace_epoch"]),
                     "included_job_ids": load_json(snapshot["included_job_ids"]) or [],
-                    "session_summaries": session_summaries,
-                    "session_summary_count": title_context.get(
-                        "summary_count", len(session_summaries)
-                    ),
-                    "session_messages": session_messages,
+                    "session_summaries": title["session_summaries"],
+                    "session_summary_count": title["session_summary_count"],
+                    "session_messages": title["session_messages"],
                     "job_id": snapshot["id"],
                     "anchor_job_id": snapshot["id"],
                     "thread_id": snapshot["thread_id"],
