@@ -12,6 +12,11 @@ from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
 from cloud_agent.host_pool import HEARTBEAT_INTERVAL_S, MISSED_HEARTBEATS_BEFORE_OFFLINE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import integer_setting
+from cloud_agent.workers.terminal_replay import (
+    ReplayCursor,
+    TerminalReplayStore,
+    _reconcile_settled_terminals,
+)
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -34,14 +39,6 @@ if TYPE_CHECKING:
 #: log selection is on ``cloud_agent.app``, and a relocation must not move these
 #: records to a logger nobody watches.
 logger = get_logger("cloud_agent.app")
-
-
-class _SettledTerminals(Protocol):
-    """What reconciling a settled terminal reaches for."""
-
-    conversation_queries: ConversationQueries
-    host_pool: HostPoolRepository
-    sandbox: SandboxRepository
 
 
 class _GrantRenewal(Protocol):
@@ -166,49 +163,6 @@ GRANT_RENEWAL_PASS_DEADLINE_S = (GRANT_TTL_S - RENEWAL_INTERVAL_S) / 2
 #: must not hold the pass -- every other host's reaping and grant revocation
 #: -- for a whole request timeout per member.
 RESIDENCY_CLEANUP_TIMEOUT_S = 5.0
-
-
-async def _reconcile_settled_terminals(store: _SettledTerminals) -> None:
-    """Replay durable settled-terminal recovery markers after restarts.
-
-    The sandbox manager is resolved per job, because with a host pool there is no
-    "the" sandbox manager: each job's retained terminal lives on the machine that ran
-    it. A single env-configured client here would resume one host's terminals
-    and quietly report success for every other host's.
-    """
-    from cloud_agent.sandbox_manager_routing import (
-        hydrate_shared_sandbox_manager,
-        sandbox_manager_for_job,
-    )
-    from cloud_agent.terminal_coordination import resume_settled_terminal
-
-    for job_id in await store.sandbox.list_terminal_resumes_pending():
-        try:
-            job = await store.conversation_queries.get_job(job_id)
-            if job is None or job.get("thread_sandbox") is None:
-                # No retained group exists to resume (for example, a queued
-                # job cancelled before its first claim). This marker has no
-                # external side effect behind it and can be retired.
-                await store.sandbox.mark_terminal_resume_complete(job_id=job_id)
-                continue
-            sandbox_manager = await hydrate_shared_sandbox_manager(
-                job, await sandbox_manager_for_job(store.host_pool, job_id)
-            )
-            if await resume_settled_terminal(
-                str(job["thread_id"]),
-                job_id=job_id,
-                sandbox_manager=sandbox_manager,
-            ):
-                await store.sandbox.mark_terminal_resume_complete(job_id=job_id)
-        except Exception:
-            # One unavailable host must not prevent reconciliation of markers
-            # owned by every other host in this pass. The marker remains set,
-            # so this exact job is retried on the next pass.
-            logger.warning(
-                "Settled terminal reconciliation failed",
-                exc_info=True,
-                extra={"event": "agent_terminal_reconcile_failed", "job_id": job_id},
-            )
 
 
 async def _revoke_dead_grants(store: GrantRepository, grants: Any) -> None:
@@ -783,20 +737,18 @@ async def _recover_send_now_handoffs(store: _Reaping, *, interval_seconds: float
         await asyncio.sleep(interval_seconds)
 
 
-async def _replay_settled_terminals(store: _SettledTerminals, *, interval_seconds: float) -> None:
+async def _replay_settled_terminals(store: TerminalReplayStore, *, interval_seconds: float) -> None:
     """Replay settled-terminal markers without delaying attempt or grant safety passes.
 
-    Every marker is a round trip to the sandbox manager of the host that ran its turn,
-    and a marker stays set until that sandbox manager confirms. A host that stopped
-    answering therefore costs each of its markers a full request timeout on
-    every pass, and the turns the reaper ends because their host died are
-    among the ones that leave markers behind. Keeping this replay in its own
-    task prevents it from holding up lease reaping and grant renewal for the
-    whole pool.
+    A marker stays set until its owning sandbox manager confirms. The cursor
+    advances across dispatched candidates even when the bounded pass times
+    out, then wraps to retry failures. This task remains independent of lease
+    reaping and grant renewal, and owns all of its replay calls.
     """
+    cursor = ReplayCursor()
     while True:
         try:
-            await _reconcile_settled_terminals(store)
+            await _reconcile_settled_terminals(store, cursor=cursor)
         except Exception:
             logger.warning("Settled terminal reconciliation pass failed", exc_info=True)
         await asyncio.sleep(interval_seconds)
