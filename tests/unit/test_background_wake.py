@@ -222,6 +222,57 @@ async def test_one_pass_publishes_past_a_failure_and_retries_every_due_import(mo
         await _stop(task)
 
 
+async def test_slow_publication_does_not_hold_up_unrelated_claims_and_fanout_is_bounded(
+    monkeypatch,
+):
+    """One slow title/provider path must not serialize another sandbox's PR."""
+    monkeypatch.setattr(publish_worker, "_PUBLISH_CONCURRENCY", 2)
+    claims = [{"job_id": f"job-{index}", "snapshot_id": index} for index in range(6)]
+    slow_release = asyncio.Event()
+    slow_started = asyncio.Event()
+    completed: list[str] = []
+    active = 0
+    peak_active = 0
+
+    async def publish_claimed(store, job, **kwargs):
+        nonlocal active, peak_active
+        active += 1
+        peak_active = max(peak_active, active)
+        try:
+            if job["job_id"] == "job-0":
+                slow_started.set()
+                await slow_release.wait()
+            completed.append(job["job_id"])
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(publish_worker, "_publish_claimed", publish_claimed)
+    claim = AsyncMock(side_effect=lambda: claims.pop(0) if claims else None)
+    store = SimpleNamespace(snapshot=SimpleNamespace(claim_for_publish=claim))
+
+    publishing = asyncio.create_task(
+        publish_worker._publish_due(
+            store,  # type: ignore[arg-type]
+            credential=publish_worker.GitHubCredential("token"),
+            app_credentials=None,
+            base_branch="dev",
+        )
+    )
+    try:
+        await asyncio.wait_for(slow_started.wait(), timeout=AT_ONCE_S)
+        await _eventually(lambda: completed == [f"job-{index}" for index in range(1, 6)])
+        assert not publishing.done()
+        assert peak_active == 2
+        slow_release.set()
+        await asyncio.wait_for(publishing, timeout=AT_ONCE_S)
+    finally:
+        if not publishing.done():
+            await _stop(publishing)
+
+    assert completed == ["job-1", "job-2", "job-3", "job-4", "job-5", "job-0"]
+    assert claim.await_count >= 7
+
+
 @pytest.mark.parametrize("retry_kind", ["base_import", "snapshot_publish"])
 async def test_an_idle_publisher_looks_again_when_a_retry_is_due(monkeypatch, retry_kind):
     imported = AsyncMock()

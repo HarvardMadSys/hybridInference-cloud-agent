@@ -28,6 +28,7 @@ _INPUT_CHARS = 24000
 #: budget on calls the owner pays for, and the publisher's own title would be
 #: used anyway, on every publication attempt.
 _MAX_FRAGMENTS = 4
+_MAX_MESSAGES = 24
 _TOTAL_TIMEOUT_S = 60.0
 _TITLE_PROMPT = """Write one pull request title summarizing the completed work across the entire
 session. Consider all user requests, corrections, and assistant responses together. Describe the
@@ -83,6 +84,45 @@ def _normalize_title(value: str) -> str | None:
     return f"[agent] {title}"
 
 
+def _bounded_source(messages: Any, changed_files: list[str]) -> str | None:
+    """Serialize only the persisted title-context shape within its fixed cap.
+
+    Check raw strings before JSON escaping so an accidentally stale caller
+    cannot allocate a serialization proportional to an unbounded transcript.
+    Escaping may expand the accepted input, but that expansion is itself
+    bounded by this fixed raw-character budget and message count.
+    """
+    if not isinstance(messages, list) or len(messages) > _MAX_MESSAGES:
+        return None
+    limit = _INPUT_CHARS * _MAX_FRAGMENTS
+    raw_chars = 0
+    conversation: list[dict[str, str]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            return None
+        normalized: dict[str, str] = {}
+        for key in ("thread_id", "job_id", "role", "content"):
+            value = message.get(key)
+            if value is None and key in ("thread_id", "job_id"):
+                continue
+            if not isinstance(value, str):
+                return None
+            raw_chars += len(key) + len(value)
+            if raw_chars > limit:
+                return None
+            normalized[key] = value
+        conversation.append(normalized)
+    if not all(isinstance(path, str) for path in changed_files):
+        return None
+    raw_chars += sum(len(path) for path in changed_files)
+    if raw_chars > limit:
+        return None
+    source = json.dumps(
+        {"conversation": conversation, "changed_files": changed_files}, ensure_ascii=False
+    )
+    return source if len(source) <= limit else None
+
+
 async def generate_pr_title(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     job: dict[str, Any],
     changed_files: list[str],
@@ -90,15 +130,15 @@ async def generate_pr_title(  # noqa: C901, PLR0912, PLR0915 complexity baseline
     grants: GrantClient | None,
     client: httpx.AsyncClient | None = None,
 ) -> str | None:
-    """Read every captured user/assistant message; return None if inference fails.
+    """Read the snapshot's bounded user/assistant context; return None on failure.
 
-    Large transcripts are summarized in chunks and then combined, so earlier
-    messages and long responses are considered rather than sliced off. A
-    transcript longer than :data:`_MAX_FRAGMENTS` chunks returns None without
-    asking the model anything. The publication owns its own grant: it cannot
-    revive or revoke an Agent turn's credential, and it never renews this
-    bounded capability. Each try of a publication has its own, because each
-    try revokes the one it used.
+    The durable context retains the recent requests, corrections and completed
+    responses across snapshot epochs. Large accepted contexts are summarized
+    in chunks and then combined. Anything outside the fixed storage/input cap
+    returns None without asking the model anything. The publication owns its
+    own grant: it cannot revive or revoke an Agent turn's credential, and it
+    never renews this bounded capability. Each try has its own grant and
+    revokes the one it used.
     """
     base_url = (setting_env(ENV_BASE_URL) or "").strip().rstrip("/")
     model = job.get("model")
@@ -125,10 +165,8 @@ async def generate_pr_title(  # noqa: C901, PLR0912, PLR0915 complexity baseline
         return None
     grant_id = None
     try:
-        source = json.dumps(
-            {"conversation": messages, "changed_files": changed_files}, ensure_ascii=False
-        )
-        if len(source) > _INPUT_CHARS * _MAX_FRAGMENTS:
+        source = _bounded_source(messages, changed_files)
+        if source is None:
             fallback("conversation_too_long")
             return None
         async with asyncio.timeout(_TOTAL_TIMEOUT_S), contextlib.AsyncExitStack() as stack:

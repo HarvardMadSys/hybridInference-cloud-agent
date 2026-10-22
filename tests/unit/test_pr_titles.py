@@ -219,7 +219,9 @@ async def test_fragments_are_summarized_together_so_the_title_fits_the_budget(mo
     assert len(asked) == fragments
 
 
-async def test_a_session_too_long_to_summarize_in_the_budget_asks_the_model_nothing(caplog):
+async def test_a_session_too_long_to_summarize_in_the_budget_asks_the_model_nothing(
+    caplog, monkeypatch
+):
     """Past the fragments one round can summarize, the publisher's own title is used.
 
     A long session used to be summarized fragment after fragment until the
@@ -236,10 +238,19 @@ async def test_a_session_too_long_to_summarize_in_the_budget_asks_the_model_noth
 
     grants = _grants()
     job = {**_JOB, "session_messages": _session_of(pr_titles._MAX_FRAGMENTS + 1)}
+    serialized: list[object] = []
+    original_dumps = json.dumps
+
+    def observed_dumps(value, *args, **kwargs):
+        serialized.append(value)
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(pr_titles.json, "dumps", observed_dumps)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         title = await generate_pr_title(job, ["retry.py"], grants=grants, client=client)
 
     assert title is None
+    assert serialized == [], "the size guard runs before allocating the JSON source"
     assert requests == []
     grants.mint.assert_not_awaited()
     failures = [
