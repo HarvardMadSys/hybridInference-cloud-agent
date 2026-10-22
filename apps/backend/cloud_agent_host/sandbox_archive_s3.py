@@ -3,15 +3,17 @@
 The sandbox manager is the trust boundary for this module.  It may export an
 already-built ``tar.gz`` stream, but a sandbox never receives the S3 client or
 its workload credentials.  Object names are generated here instead of being
-accepted from a caller.  The API has no object-body read, restore, list, or
-delete operation; its only read is an exact-key metadata check after an
-immutable initial write loses an ``If-None-Match`` race.
+accepted from a caller, and a key read back or deleted is checked against
+them.  Nothing lists the bucket.  Object bodies are read only to restore a
+checkpoint or load an environment snapshot, at the version their record
+names, and the only delete removes an environment snapshot's object.
 
 ``boto3`` is imported only when an upload needs a default client.  Tests and
 other callers can inject the small protocol below.  A deployed sandbox manager uses a
 saved access key when the policy has one, and otherwise the SDK's ordinary
 workload-identity/default credential chain.  There is still no custom endpoint
-option: archive bytes go to the fixed AWS bucket.
+option: archive bytes go to the AWS bucket the policy names, under the fixed
+prefix.
 """
 
 from __future__ import annotations

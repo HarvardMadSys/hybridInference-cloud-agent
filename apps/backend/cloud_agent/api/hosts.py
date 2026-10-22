@@ -544,13 +544,14 @@ def _host_archive_settings(
 
     A host whose sandbox manager predates the bucket setting refuses any bucket
     but the default. A disabled policy is reduced to the default bucket for it:
-    it creates no S3 service, so nothing is written anywhere, and the host
-    confirms the revision and keeps taking work. An enabled one has no such
-    reduction, since archiving to the default would write somewhere the policy
-    does not say, so that host gets no policy. Until it is redeployed, its
-    sandbox manager keeps the last policy it applied and goes on archiving the
-    groups it holds, checkpoints included, into the previous bucket, and with
-    no confirmed revision the host takes no work at all.
+    it creates no S3 service and starts no new archive (a final already fenced
+    under an earlier enabled revision still uploads under that revision), and
+    the host confirms the revision and keeps taking work. An enabled one has no
+    such reduction, since archiving to the default would write somewhere the
+    policy does not say, so that host gets no policy. Until it is redeployed,
+    its sandbox manager keeps the last policy it applied and goes on archiving
+    the groups it holds, checkpoints included, into the previous bucket, and
+    with no confirmed revision the host takes no work at all.
     """
     settings = HostSandboxArchiveSettings.model_validate(values)
     if (

@@ -3454,8 +3454,8 @@ async def test_an_older_host_is_sent_a_disabled_policy_in_the_default_bucket(cli
 
     Its runner claims nothing until its manager confirms a revision, and that
     manager refuses any bucket but the default. A disabled policy creates no S3
-    service, so nothing is written anywhere: the host is sent it with the
-    default bucket, as an opt-out is reduced for a host without checkpoints.
+    service and starts no new archive, so the host is sent it with the default
+    bucket, as an opt-out is reduced for a host without checkpoints.
     """
     async_client, store = client
     credential = await _enroll(async_client, store)

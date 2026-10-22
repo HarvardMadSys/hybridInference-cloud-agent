@@ -14,10 +14,12 @@ on the wire, and only a host that advertises
 policy keys, and a policy without the key means the default.
 
 The bucket is part of the policy; the prefix inside it is not. Every key is
-derived from the fixed prefix, so moving archives to another bucket is a copy
-of that prefix. A bucket other than the default reaches only a host that
-advertises :data:`SANDBOX_ARCHIVE_DESTINATION_CAPABILITY`: an older sandbox
-manager refuses any other ``s3_uri``.
+derived from the fixed prefix, so it is the same in any bucket. A copy keeps
+the keys but not the object versions that checkpoints and snapshots are read
+back by, so those in a previous bucket are not restored. A bucket other than
+the default reaches only a host that advertises
+:data:`SANDBOX_ARCHIVE_DESTINATION_CAPABILITY`: an older sandbox manager
+refuses any other ``s3_uri``.
 """
 
 from __future__ import annotations
