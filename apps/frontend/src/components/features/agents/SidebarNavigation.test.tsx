@@ -64,6 +64,7 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentJobThread: api.thread,
   listAllAgentThreadEvents: api.events,
   getAgentJobGit: api.git,
+  getAgentJobGitMetadata: api.git,
   streamAgentJob: api.stream,
   archiveAgentJob: api.archive,
   deleteAgentSessions: api.deleteSessions,

@@ -29,6 +29,7 @@ import {
   getAgentConfig,
   getAgentJobFiles,
   getAgentJobGit,
+  getAgentJobGitMetadata,
   getAgentJobUsage,
   getAgentThreadStats,
   listAgentConversations,
@@ -204,6 +205,7 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentConfig: vi.fn(),
   getAgentJobFiles: vi.fn(),
   getAgentJobGit: vi.fn(),
+  getAgentJobGitMetadata: vi.fn(),
   getAgentJobUsage: vi.fn(),
   getAgentAttemptTelemetry: vi.fn(),
   getAgentTrajectoryTimings: vi.fn(),
@@ -1737,6 +1739,12 @@ describe('JobDetail', () => {
       path: '',
       kind: 'directory',
       entries: [],
+    });
+    vi.mocked(getAgentJobGitMetadata).mockReset().mockResolvedValue({
+      available: false,
+      branch: '',
+      changes: [],
+      change_count: 0,
     });
     vi.mocked(getAgentJobGit).mockReset();
     vi.mocked(getAgentJobGit).mockResolvedValue({

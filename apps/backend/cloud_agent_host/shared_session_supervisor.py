@@ -48,12 +48,10 @@ from cloud_agent_host.guest_observer import (
 from cloud_agent_host.member_resources import (
     MEMBER_WINDOW_SAMPLE_INTERVAL_MS,
     RUNNING_CHECKPOINT_INTERVAL_S,
-    CheckpointSchedule,
     MemberWindowHandle,
     MemberWindowSampler,
-    WindowAccumulator,
-    reduce_window,
 )
+from cloud_agent_host.member_window_census import MemberWindow, window_boot_id
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
     ResidentTransport,
@@ -69,6 +67,7 @@ from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,
     StaleStartFence,
 )
+from cloud_agent_host.shared_session_recovery import SharedSessionRecovery
 from cloud_agent_shared.environment_snapshots import SNAPSHOT_LABEL, EnvironmentSnapshotRef
 from cloud_agent_shared.errors import SandboxArchiveBlocked
 from cloud_agent_shared.operation_profiling import (
@@ -85,19 +84,6 @@ if TYPE_CHECKING:
 
     from cloud_agent_host.tool_windows import ToolMark, ToolMarkReader
     from cloud_agent_shared.sandbox_manager_wire import ContextStatus, ResidentState
-
-#: One window the census loop is about to sample, as it leaves the lock: the
-#: handle, its sampler, the census number, and the cursor and accumulator the
-#: journal read needs. Named because the hand-off is what lets the guest exec
-#: happen outside the lock, and a reader has to be able to see that the handle
-#: and the sampler are already known to be present while the other two are not.
-DueCensus = tuple[
-    MemberWindowHandle,
-    MemberWindowSampler,
-    int,
-    GuestObserverCursor | None,
-    WindowAccumulator | None,
-]
 
 logger = logging.getLogger(__name__)
 
@@ -320,6 +306,8 @@ class SharedSessionDescriptor:
     profiling_call_id: str | None = None
     profiling_recorded: bool = False
     profiling_truncated: bool = False
+    #: A lifecycle check or final archive is queued, running, or needs retry.
+    lifecycle_pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -431,31 +419,9 @@ class _Member:
     observer_cursor: GuestObserverCursor | None = None
     tool_mark_reader: ToolMarkReader | None = None
     #: The member execution window this activation opened, if any. It is
-    #: cleared with the cursor: a window belongs to exactly one activation,
-    #: and a restarting member must never resume another one's.
-    window: MemberWindowHandle | None = None
-    window_sampler: MemberWindowSampler | None = None
-    window_sequence: int = 0
-    #: The last ``report_seq`` this window handed out. It is separate from the
-    #: census counter because both keep moving: the sampler ticks while a
-    #: closing census is in flight, so a final report that derived its sequence
-    #: from the census counter could come out below a checkpoint that was
-    #: produced in between -- and the store rejects a lower sequence, which
-    #: would leave a normally completed turn stored as still collecting.
-    window_report_seq: int = 0
-    window_checkpoints: CheckpointSchedule | None = None
-    #: When this window's next census is due, on the supervisor's clock.
-    window_next_sample_mono: float = 0.0
-    #: This window's cumulative measurement, kept across journal reads so a
-    #: checkpoint describes the same counters the final report will.
-    window_accumulator: WindowAccumulator | None = None
-    #: The newest checkpoint the sampler produced and the turn has not
-    #: forwarded yet.
-    window_pending_checkpoint: dict[str, Any] | None = None
-    #: How far the window's journal has been read. Only the offset is kept:
-    #: the accumulator carries identity between slices, so retaining every byte
-    #: read would grow without bound and re-parse it all on each tick.
-    window_journal_offset: int = 0
+    #: dropped wherever the cursor is dropped: a window belongs to exactly one
+    #: activation, and a restarting member must never resume another one's.
+    window: MemberWindow | None = None
     turn_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -574,7 +540,6 @@ class SharedChatSessionSupervisor:
         native_forker: NativeForker | None = None,
         checkpoint_interval_s: float = RUNNING_CHECKPOINT_INTERVAL_S,
         window_sample_interval_s: float = MEMBER_WINDOW_SAMPLE_INTERVAL_MS / 1000,
-        window_checkpoint_hook: Callable[[str, dict[str, Any]], None] | None = None,
         stopped_archive_prepare_hook: StoppedArchivePrepareHook | None = None,
         stopped_archive_invalidate_hook: ArchiveInspectionHook | None = None,
         starting_archive_prepare_hook: ArchiveInspectionHook | None = None,
@@ -586,10 +551,6 @@ class SharedChatSessionSupervisor:
         if idle_timeout_s <= 0 or sweep_interval_s <= 0:
             raise ValueError("shared sandbox timeout values must be positive")
         self._checkpoint_interval_s = max(0.0, checkpoint_interval_s)
-        #: Called with (measurement_id, cumulative snapshot) while a turn is
-        #: still running, so a crash keeps the work measured up to the last
-        #: checkpoint. It must never raise into the turn.
-        self._window_checkpoint_hook = window_checkpoint_hook
         #: The census period. One second is what the summary reports and what
         #: a reader compares across turns, so the sampler owns it.
         self._sample_interval_s = window_sample_interval_s if window_sample_interval_s > 0 else 1.0
@@ -633,6 +594,7 @@ class SharedChatSessionSupervisor:
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._stop = threading.Event()
+        self._recovery = SharedSessionRecovery(self)
         self._thread: threading.Thread | None = None
         #: How long the pre-prompt archive waits for a concurrent bridge check
         #: or workspace request to finish before it reports the group busy.
@@ -775,6 +737,7 @@ class SharedChatSessionSupervisor:
         # Reconciliation may synchronously upload a final archive.  Do not
         # retain the supervisor-wide metadata lock while that bounded I/O is
         # in flight: unrelated status calls must remain responsive.
+        self._recovery.start()
         self.reconcile()
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -809,6 +772,7 @@ class SharedChatSessionSupervisor:
         for thread in threads:
             if thread is not None:
                 thread.join()
+        self._recovery.quiesce()
         with self._lock:
             self._thread = None
             self._sampler_thread = None
@@ -849,10 +813,6 @@ class SharedChatSessionSupervisor:
                     member.observer_cursor = None
                     member.tool_mark_reader = None
                     member.window = None
-                    member.window_sampler = None
-                    member.window_checkpoints = None
-                    member.window_accumulator = None
-                    member.window_journal_offset = 0
                     if member.resident_state == "live":
                         member.resident_state = "restarting"
         for transport in transports:
@@ -1411,7 +1371,9 @@ class SharedChatSessionSupervisor:
                 group.starting = False
                 self._condition.notify_all()
 
-    def reconcile(self) -> builtins.list[SharedSessionDescriptor]:  # noqa: PLR0912, PLR0915 complexity baseline, #771
+    def reconcile(
+        self, *, background_recovery: bool = False
+    ) -> builtins.list[SharedSessionDescriptor]:
         """Discover containers, fencing each group's slow recovery independently."""
         with self._lock:
             before = {
@@ -1494,29 +1456,13 @@ class SharedChatSessionSupervisor:
                     found.extend(self._descriptors(group))
                     continue
                 check = self._begin_lifecycle_check_locked(group)
-            reconciled: builtins.list[SharedSessionDescriptor] | None = None
-            try:
-                reconciled = self._reconcile_checked_group(
-                    check, inspection, discovered=discovered, read_marker=read_marker
-                )
-            except SandboxError as exc:
-                # Another call changed this group while its marker was read
-                # without the lock, or the group was lost while its recovery
-                # failed. It is reported as it stands and reconciled again by
-                # the next listing; it must not cost every other group on this
-                # host its listing.
-                logger.warning(
-                    "shared sandbox group was not reconciled",
-                    extra={
-                        "event": "shared_sandbox_reconcile_group_failed",
-                        "sandbox_id": spec.sandbox_id,
-                        "generation": spec.generation,
-                        "detail": str(exc)[:300],
-                    },
-                )
-            finally:
-                with self._lock:
-                    self._end_lifecycle_check_locked(check)
+            reconciled = self._recovery.reconcile(
+                check,
+                inspection,
+                discovered=discovered,
+                read_marker=read_marker,
+                background=background_recovery,
+            )
             with self._lock:
                 if reconciled is None:
                     if self._groups.get(spec.sandbox_id) is group:
@@ -2450,7 +2396,7 @@ class SharedChatSessionSupervisor:
                 truncated=recorder is not None and recorder.stopped_early(),
             )
 
-    def start_turn(  # noqa: PLR0912, PLR0915 complexity baseline, #771
+    def start_turn(  # noqa: PLR0915 complexity baseline, #771
         self,
         thread_id: str,
         token: str,
@@ -2553,12 +2499,7 @@ class SharedChatSessionSupervisor:
                 reasoning_effort=reasoning_effort,
             )
         except Exception:
-            if window is not None and window_sampler is not None:
-                with contextlib.suppress(Exception):
-                    window_sampler.close(window)
-            if observer_cursor is not None:
-                with contextlib.suppress(Exception):
-                    self._manager.finish_guest_observation(group.spec, observer_cursor)
+            self._close_unadmitted(group.spec, window, window_sampler, observer_cursor)
             member.turn_lock.release()
             raise
         admitted = False
@@ -2582,39 +2523,21 @@ class SharedChatSessionSupervisor:
                 member.activation_processes = activation_processes
                 member.observer_cursor = observer_cursor
                 member.tool_mark_reader = tool_mark_reader
-                member.window = window
-                member.window_sampler = window_sampler
-                member.window_sequence = 0
-                member.window_accumulator = (
-                    WindowAccumulator(
-                        uid=window.uid,
-                        measurement_id=window.measurement_id,
-                        opened_guest_mono_ns=(getattr(observer_cursor, "guest_mono_ns", 0) or 0),
-                        boot_id=self._window_boot_id(group.spec, observer_cursor),
+                member.window = (
+                    MemberWindow.opened(
+                        window,
+                        window_sampler,
+                        cursor=observer_cursor,
+                        boot_id=window_boot_id(self._manager, group.spec, observer_cursor),
+                        checkpoint_interval_s=self._checkpoint_interval_s,
                     )
-                    if window is not None
+                    if window is not None and window_sampler is not None
                     else None
-                )
-                member.window_next_sample_mono = 0.0
-                member.window_checkpoints = (
-                    CheckpointSchedule(interval_s=self._checkpoint_interval_s)
-                    if window is not None
-                    else None
-                )
-                # The journal read fence starts at the window's opening cursor,
-                # not at zero and not at where a previous window stopped: the
-                # observer may have rotated the journal before this window
-                # began, and a stale offset would sit behind that fence and
-                # silence every later census read for this member.
-                member.window_journal_offset = (
-                    getattr(observer_cursor, "offset", 0) or 0 if window is not None else 0
                 )
         if not admitted:
             with contextlib.suppress(Exception):
                 turn.interrupt()
-            if observer_cursor is not None:
-                with contextlib.suppress(Exception):
-                    self._manager.finish_guest_observation(group.spec, observer_cursor)
+            self._close_unadmitted(group.spec, window, window_sampler, observer_cursor)
             with contextlib.suppress(Exception):
                 self._manager.reap_member_processes_except(
                     group.spec,
@@ -2628,6 +2551,25 @@ class SharedChatSessionSupervisor:
         for pending in held_inputs:
             turn.inject(pending.text, message_id=pending.message_id)
         return turn
+
+    def _close_unadmitted(
+        self,
+        spec: ChatSandboxSpec,
+        window: MemberWindowHandle | None,
+        window_sampler: MemberWindowSampler | None,
+        observer_cursor: GuestObserverCursor | None,
+    ) -> None:
+        """Close what a turn opened before it was refused: its window, then its cursor.
+
+        The window is the cursor's counterpart, a registration the observer
+        still holds, and no turn is left to close either of them.
+        """
+        if window is not None and window_sampler is not None:
+            with contextlib.suppress(Exception):
+                window_sampler.close(window)
+        if observer_cursor is not None:
+            with contextlib.suppress(Exception):
+                self._manager.finish_guest_observation(spec, observer_cursor)
 
     def _take_held_inputs(self, thread_id: str, owner: str | None) -> list[PendingInput]:
         """Remove and return what was held for ``owner``'s turn; drop the rest."""
@@ -2658,14 +2600,13 @@ class SharedChatSessionSupervisor:
             observer_cursor = member.observer_cursor
             tool_mark_reader = member.tool_mark_reader
             window = member.window
-            window_sampler = member.window_sampler
-            window_sequence = member.window_sequence
+            closing_census = window.census_seq + 1 if window is not None else 0
         # The closing census is taken while the window is still open and
         # before the observation is read, so the last cycle lands inside the
         # journal slice the observation is about to freeze. Sampling after
         # that would measure activity the slice does not contain.
-        if window is not None and window_sampler is not None:
-            window_sampler.sample(window, window_sequence + 1)
+        if window is not None:
+            window.sampler.sample(window.handle, closing_census)
         observation = GuestObservation.unavailable("sandbox is not a Kata guest")
         if self._manager.backend.runtime == KATA_RUNTIME:
             finish_observation = getattr(self._manager, "finish_guest_observation", None)
@@ -2696,19 +2637,13 @@ class SharedChatSessionSupervisor:
                         str(exc),
                         source=GUEST_OBSERVER_SOURCE,
                     )
-        if window is None:
-            final_sequence = window_sequence + 1
-        else:
+        turn_resources: dict[str, Any] | None = None
+        if window is not None:
             with self._lock:
-                _, live_member = self._leased_member(thread_id, token)
-                live_member.window_report_seq += 1
-                final_sequence = live_member.window_report_seq
-        turn_resources = self._freeze_window(
-            window=window,
-            window_sampler=window_sampler,
-            observation=observation,
-            sequence=final_sequence,
-        )
+                self._leased_member(thread_id, token)
+                window.report_seq += 1
+                final_sequence = window.report_seq
+            turn_resources = window.freeze(observation, final_sequence)
         telemetry = SharedTurnTelemetry(
             observation=observation,
             tool_marks=(
@@ -2765,10 +2700,6 @@ class SharedChatSessionSupervisor:
                 member.observer_cursor = None
                 member.tool_mark_reader = None
                 member.window = None
-                member.window_sampler = None
-                member.window_checkpoints = None
-                member.window_accumulator = None
-                member.window_journal_offset = 0
                 transport = member.transport
                 if boundary_error is not None:
                     member.transport = None
@@ -2805,84 +2736,6 @@ class SharedChatSessionSupervisor:
             ) from boundary_error
         return telemetry
 
-    def _window_boot_id(self, spec: Any, cursor: Any) -> str:
-        """The boot every instance key in one window is stamped with.
-
-        The cursor carries it when the observer could report one. Falling back
-        to asking the manager keeps a window whose cursor predates that field --
-        or a guest that could not answer -- from keying every thread under an
-        empty boot, which would let two boots' task numbers collide.
-        """
-        from_cursor = getattr(cursor, "guest_boot_id", "") or ""
-        if from_cursor:
-            return from_cursor
-        read = getattr(self._manager, "guest_boot_id", None)
-        if read is None:
-            return ""
-        try:
-            return read(spec) or ""
-        except Exception:
-            return ""
-
-    def _freeze_window(
-        self,
-        *,
-        window: MemberWindowHandle | None,
-        window_sampler: MemberWindowSampler | None,
-        observation: GuestObservation,
-        sequence: int,
-    ) -> dict[str, Any] | None:
-        """Close the member window and reduce it into the reported snapshot.
-
-        Every failure here degrades to "not measured" rather than raising: a
-        turn whose resources could not be counted is still a turn that ran,
-        and observation must never be able to fail the user's work.
-        """
-        if window is None or window_sampler is None:
-            return None
-        if not window.baseline_taken:
-            # The opening census never landed, so this window has no baseline.
-            # Reducing it would report the member's whole session as this
-            # turn's work, which is exactly the attribution this design
-            # refuses to make.
-            with contextlib.suppress(Exception):
-                window_sampler.close(window)
-            return None
-        close_started = time.monotonic()
-        with contextlib.suppress(Exception):
-            window_sampler.close(window)
-        close_scan_ms = max(0, int((time.monotonic() - close_started) * 1000))
-        cursor = window.cursor
-        duration_ms = max(0, int((time.monotonic() - window.opened_host_mono) * 1000))
-        try:
-            snapshot = reduce_window(
-                uid=window.uid,
-                measurement_id=window.measurement_id,
-                boot_id=getattr(cursor, "guest_boot_id", "") or "",
-                samples=observation.window_samples,
-                journal_payload=observation.journal_payload,
-                opened_guest_mono_ns=getattr(cursor, "guest_mono_ns", 0) or 0,
-                lost_events=observation.lost_events,
-                state="final",
-                duration_ms=duration_ms,
-                report_seq=sequence,
-                open_scan_ms=window.open_scan_ms,
-                close_scan_ms=close_scan_ms,
-            )
-            snapshot["cpu"]["capacity_cores"] = window.cpu_capacity_cores
-            return snapshot
-        except Exception:
-            logger.warning(
-                "member window reduction failed for %s",
-                window.measurement_id,
-                extra={
-                    "event": "shared_member_window_reduce_failed",
-                    "measurement_id": window.measurement_id,
-                },
-                exc_info=True,
-            )
-            return None
-
     def sample_open_windows(self) -> int:
         """Take one census for every member window that is due for one.
 
@@ -2899,48 +2752,26 @@ class SharedChatSessionSupervisor:
         """
         sampled = 0
         now = time.monotonic()
+        # Each due census leaves the lock with its window, its number and the
+        # member's cursor, so the guest exec and the journal read happen
+        # outside it.
+        due: builtins.list[tuple[MemberWindow, int, GuestObserverCursor | None]] = []
         with self._lock:
-            members = [
-                member
-                for group in self._groups.values()
-                for member in group.members.values()
-                if member.window is not None
-                and member.window_sampler is not None
-                and member.window.baseline_taken
-            ]
-            due: builtins.list[DueCensus] = []
-            for member in members:
-                window = member.window
-                sampler = member.window_sampler
-                # The comprehension above already dropped a member without
-                # both. Re-reading them into locals is what carries that fact
-                # into the hand-off, so the census loop below works on a
-                # handle and a sampler rather than on two values a reader has
-                # to go back and prove are there.
-                if window is None or sampler is None:
-                    continue
-                if now < member.window_next_sample_mono:
-                    continue
-                member.window_next_sample_mono = now + sampler.interval_s
-                member.window_sequence += 1
-                due.append(
-                    (
-                        window,
-                        sampler,
-                        member.window_sequence,
-                        member.observer_cursor,
-                        member.window_accumulator,
-                    )
-                )
-        for window, sampler, sequence, cursor, accumulator in due:
+            for group in self._groups.values():
+                for member in group.members.values():
+                    window = member.window
+                    census = window.census_due(now) if window is not None else None
+                    if window is not None and census is not None:
+                        due.append((window, census, member.observer_cursor))
+        for window, census, cursor in due:
             with contextlib.suppress(Exception):
-                sampler.sample(window, sequence)
+                window.sampler.sample(window.handle, census)
             # Fold in whatever the census just wrote, so the running state and
             # any checkpoint built from it describe real cycles rather than an
             # empty reducer.
-            if accumulator is not None and cursor is not None:
+            if cursor is not None:
                 with contextlib.suppress(Exception):
-                    self._consume_window_journal(accumulator, cursor)
+                    self._consume_window_journal(window, cursor)
             sampled += 1
         # Reporting runs on the same clock as the census rather than on the
         # turn's event stream. A turn that spends a minute inside one silent
@@ -2955,15 +2786,20 @@ class SharedChatSessionSupervisor:
         The sampler thread produces checkpoints on its own clock; this is how
         the turn's event stream collects them. Taking is destructive so a
         checkpoint is forwarded once, but the window keeps producing new ones
-        whether or not anything ever asks.
+        whether or not anything ever asks. A checkpoint is only ever handed out
+        by the window that produced it: one left behind when its turn ended
+        goes with that window.
         """
         with self._lock:
             try:
                 _, member = self._leased_member(thread_id, self._lease_token_for(thread_id))
             except Exception:
                 return None
-            pending = member.window_pending_checkpoint
-            member.window_pending_checkpoint = None
+            window = member.window
+            if window is None:
+                return None
+            pending = window.pending_checkpoint
+            window.pending_checkpoint = None
             return pending
 
     def _lease_token_for(self, thread_id: str) -> str:
@@ -2976,11 +2812,10 @@ class SharedChatSessionSupervisor:
     def _report_due_checkpoints(self) -> None:
         """Produce a checkpoint for every window whose interval has elapsed.
 
-        The checkpoint is parked on the member for whoever forwards it, and the
-        optional hook is an extra observer rather than the delivery mechanism.
-        Gating this on a hook meant that a supervisor built without one -- which
-        is how the sandbox manager builds it -- produced no checkpoints at all, so a
-        crashed turn kept nothing.
+        The checkpoint is parked on the window for whoever forwards it. Nothing
+        else delivers it: the sandbox manager builds this supervisor with no
+        observer of its own, so a cadence that waited for one would leave a
+        crashed turn with nothing.
         """
         with self._lock:
             due = [
@@ -2988,30 +2823,15 @@ class SharedChatSessionSupervisor:
                 for group in self._groups.values()
                 for member in group.members.values()
                 if member.window is not None
-                and member.window_checkpoints is not None
                 and member.lease_token is not None
-                and member.window_checkpoints.due()
+                and member.window.checkpoints.due()
             ]
         for thread_id, token in due:
             with contextlib.suppress(Exception):
-                snapshot = self.checkpoint_running_window(thread_id, token)
-                if snapshot is None:
-                    continue
-                if self._window_checkpoint_hook is not None:
-                    with contextlib.suppress(Exception):
-                        self._window_checkpoint_hook(thread_id, snapshot)
+                self.checkpoint_running_window(thread_id, token)
 
-    def _consume_window_journal(
-        self,
-        accumulator: WindowAccumulator,
-        cursor: GuestObserverCursor,
-    ) -> int:
-        """Fold this window's journal, read so far, into its accumulator.
-
-        The slice read is the new tail only -- reading the whole journal once a
-        second for the length of a turn would be wasteful -- but it is handed
-        on top of what was read before, because identity has to be derived from
-        the whole history rather than from whichever slice a record landed in.
+    def _consume_window_journal(self, window: MemberWindow, cursor: GuestObserverCursor) -> int:
+        """Fold a still-open window's journal, read so far, into its accumulator.
 
         Read errors are swallowed by the caller: a census the host could not
         read back is a gap in the checkpoint, and the next tick tries again
@@ -3020,46 +2840,22 @@ class SharedChatSessionSupervisor:
         read = getattr(self._manager, "member_window_journal_delta", None)
         if read is None:
             return 0
-        member = self._member_with_accumulator(accumulator)
-        if member is None:
+        spec = self._spec_holding(window)
+        if spec is None:
             return 0
-        scoped = replace(cursor, offset=member.window_journal_offset)
-        payload, new_offset = read(self._group_spec_for(accumulator), scoped)
-        # A journal read can catch the observer mid-write, and the tail of such
-        # a read is half a record. Advancing past it would lose that cycle for
-        # good and leave nothing in the accounting to say so, so the offset
-        # stops at the last complete line and the partial tail is read again
-        # once the writer has finished it.
-        complete = payload.rfind(b"\n") + 1
-        member.window_journal_offset = new_offset - (len(payload) - complete)
-        return accumulator.consume(
-            payload[:complete],
-            boot_id=cursor.guest_boot_id,
-            upto_offset=member.window_journal_offset,
-        )
+        return window.consume_journal(read, spec, cursor)
 
-    def _member_with_accumulator(self, accumulator: WindowAccumulator) -> Any | None:
-        """The member owning one accumulator, or None once its window closed.
+    def _spec_holding(self, window: MemberWindow) -> Any | None:
+        """The sandbox whose member holds ``window``, or None once it was dropped.
 
-        One accumulator belongs to exactly one member at a time, so this takes
-        the single owner rather than iterating: a loop that returned on its
-        first pass would silently skip a second owner if that ever changed.
+        At most one member holds a window, so the first match is the only one.
         """
         with self._lock:
             for group in self._groups.values():
                 for member in group.members.values():
-                    if member.window_accumulator is accumulator:
-                        return member
-        return None
-
-    def _group_spec_for(self, accumulator: WindowAccumulator) -> Any:
-        """The sandbox spec owning one window's accumulator."""
-        with self._lock:
-            for group in self._groups.values():
-                for member in group.members.values():
-                    if member.window_accumulator is accumulator:
+                    if member.window is window:
                         return group.spec
-        raise SandboxError("member window accumulator has no sandbox")
+        return None
 
     def _sample_loop(self) -> None:
         """Census every open window once a second until the supervisor stops."""
@@ -3080,11 +2876,6 @@ class SharedChatSessionSupervisor:
         report. The censuses themselves are taken by
         :meth:`sample_open_windows` on their own clock, so this only decides
         when to upload.
-
-        The snapshot carries the counters this window has been credited with
-        so far. It is built from the member's running reducer rather than a
-        fresh one, so a checkpoint describes the same measurement the final
-        report will, with the window still open.
         """
         with self._lock:
             try:
@@ -3092,63 +2883,32 @@ class SharedChatSessionSupervisor:
             except Exception:
                 return None
             window = member.window
-            window_sampler = member.window_sampler
-            schedule = member.window_checkpoints
             cursor = member.observer_cursor
-            if window is None or window_sampler is None or schedule is None:
+            report_seq = window.checkpoint_seq() if window is not None else None
+            if window is None or report_seq is None:
                 return None
-            if not window.baseline_taken or not schedule.due():
-                return None
-            schedule.mark_sent()
-            member.window_report_seq += 1
-            report_seq = member.window_report_seq
-            boot_id = getattr(cursor, "guest_boot_id", "") or ""
-            opened = getattr(cursor, "guest_mono_ns", 0) or 0
-            accumulator = member.window_accumulator
         try:
-            duration_ms = max(0, int((time.monotonic() - window.opened_host_mono) * 1000))
-            if accumulator is not None:
-                # The same counters the final report will carry, with the
-                # window still open: a crash keeps everything measured so far.
-                #
-                # Without a cursor there is no journal fence to read from, so
-                # the checkpoint reports what the accumulator already holds.
-                # Calling through anyway raised inside the suppression below,
-                # which read as a fold that happened rather than one that was
-                # never possible.
-                if cursor is not None:
-                    with contextlib.suppress(Exception):
-                        self._consume_window_journal(accumulator, cursor)
-                snapshot = accumulator.snapshot(
-                    state="collecting",
-                    duration_ms=duration_ms,
-                    report_seq=report_seq,
-                    open_scan_ms=window.open_scan_ms,
-                )
-            else:
-                snapshot = reduce_window(
-                    uid=window.uid,
-                    measurement_id=window.measurement_id,
-                    boot_id=boot_id,
-                    samples=(),
-                    opened_guest_mono_ns=opened,
-                    state="collecting",
-                    duration_ms=duration_ms,
-                    report_seq=report_seq,
-                    open_scan_ms=window.open_scan_ms,
-                )
-            snapshot["cpu"]["capacity_cores"] = window.cpu_capacity_cores
+            duration_ms = window.duration_ms()
+            # The same counters the final report will carry, with the window
+            # still open: a crash keeps everything measured so far.
+            #
+            # Without a cursor there is no journal fence to read from, so the
+            # checkpoint reports what the accumulator already holds. Calling
+            # through anyway raised inside the suppression below, which read as
+            # a fold that happened rather than one that was never possible.
+            if cursor is not None:
+                with contextlib.suppress(Exception):
+                    self._consume_window_journal(window, cursor)
+            snapshot = window.collecting_snapshot(report_seq, duration_ms=duration_ms)
             with self._lock:
-                group = self._members.get(thread_id)
-                if group is not None and thread_id in group.members:
-                    group.members[thread_id].window_pending_checkpoint = snapshot
+                window.pending_checkpoint = snapshot
         except Exception:
             logger.warning(
                 "member window checkpoint failed for %s",
-                window.measurement_id,
+                window.handle.measurement_id,
                 extra={
                     "event": "shared_member_window_checkpoint_failed",
-                    "measurement_id": window.measurement_id,
+                    "measurement_id": window.handle.measurement_id,
                 },
                 exc_info=True,
             )
@@ -3463,6 +3223,7 @@ class SharedChatSessionSupervisor:
             member.activation_processes = None
             member.observer_cursor = None
             member.tool_mark_reader = None
+            member.window = None
             member.lease_token = None
             member.lease_owner = None
             # Teardown owns the member now, so a stale acknowledgement must not
@@ -3528,7 +3289,6 @@ class SharedChatSessionSupervisor:
             # when there is no turn left to own it.
             orphaned_observer_cursor = None
             orphaned_window = None
-            orphaned_window_sampler = None
             if turn is None:
                 orphaned_observer_cursor = member.observer_cursor
                 member.observer_cursor = None
@@ -3538,11 +3298,7 @@ class SharedChatSessionSupervisor:
                 # the only place that can, and leaving it open would keep
                 # measuring a member that is no longer running a turn.
                 orphaned_window = member.window
-                orphaned_window_sampler = member.window_sampler
                 member.window = None
-                member.window_sampler = None
-                member.window_checkpoints = None
-                member.window_journal_offset = 0
             member.transport = None
             member.residency_generation = 0
             member.resident_state = "restarting" if member.native_session_id else "stopped"
@@ -3552,9 +3308,8 @@ class SharedChatSessionSupervisor:
         if transport is not None:
             with contextlib.suppress(Exception):
                 transport.close()
-        if orphaned_window is not None and orphaned_window_sampler is not None:
-            with contextlib.suppress(Exception):
-                orphaned_window_sampler.close(orphaned_window)
+        if orphaned_window is not None:
+            orphaned_window.close()
         if orphaned_observer_cursor is not None:
             with contextlib.suppress(Exception):
                 self._manager.finish_guest_observation(group.spec, orphaned_observer_cursor)
@@ -4498,9 +4253,9 @@ class SharedChatSessionSupervisor:
                 stale_transport.close()
         return descriptor
 
-    def list(self) -> builtins.list[SharedSessionDescriptor]:
-        """Return one observation per known membership."""
-        self.reconcile()
+    def list(self, *, background_recovery: bool = False) -> builtins.list[SharedSessionDescriptor]:
+        """Observe memberships; HTTP readers queue slow lifecycle recovery."""
+        self.reconcile(background_recovery=background_recovery)
         stale_transports: builtins.list[ResidentTransport[DialectRuntime]] = []
         with self._lock:
             for group in self._groups.values():
@@ -4756,6 +4511,7 @@ class SharedChatSessionSupervisor:
                     member.activation_processes = None
                     member.observer_cursor = None
                     member.tool_mark_reader = None
+                    member.window = None
                     member.lease_token = None
                     member.lease_owner = None
                     member.resident_state = "lost" if reason == "lost" else "stopped"
@@ -5457,6 +5213,12 @@ class SharedChatSessionSupervisor:
             docker_status=group.inspection.status.value,
             running=group.inspection.running,
             group_busy=not SharedChatSessionSupervisor._is_quiescent(group),
+            lifecycle_pending=(
+                group.lifecycle_check is not None
+                or group.stopping
+                or group.stop_archive_pending
+                or group.orphan_finalization_pending
+            ),
             busy=member.lease_token is not None or member.current_turn is not None,
             terminal_count=sum(
                 1 for owner in group.terminal_tokens.values() if owner == member.thread_id

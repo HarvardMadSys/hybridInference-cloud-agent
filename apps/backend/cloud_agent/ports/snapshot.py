@@ -15,8 +15,8 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 
-class SnapshotRepository(Protocol):
-    """Port: sandbox snapshots -- capture, publication, and base import."""
+class SnapshotRequestRepository(Protocol):
+    """Owner requests that open a workspace publication."""
 
     async def request_snapshot_publication(self, *, thread_id: str, user_id: str) -> dict[str, Any]:
         """Open the next snapshot of a conversation's workspace for its owner.
@@ -26,6 +26,10 @@ class SnapshotRepository(Protocol):
         as ``{"snapshot_id", "state", "requested"}``, or ``{"error": code}``.
         """
         ...
+
+
+class SnapshotCaptureRepository(Protocol):
+    """Capture scheduling, host receipts, and capture recovery."""
 
     async def claim_due_sandbox_snapshot(self) -> dict[str, Any] | None:
         """Fence one quiescent shared workspace for bounded patch capture.
@@ -97,11 +101,17 @@ class SnapshotRepository(Protocol):
         """
         ...
 
-    async def reap_stalled_sandbox_snapshot_captures(
-        self, *, stall_seconds: float = 300.0
-    ) -> list[int]:
-        """Return abandoned CAPTURING claims to the retryable pending queue."""
+    async def next_snapshot_retry_due(self) -> datetime | None:
+        """When the earliest capture handed back for a retry may be claimed again.
+
+        ``None`` when none waits. Everything else that makes a capture due is
+        announced by a notification.
+        """
         ...
+
+
+class SnapshotPublicationRepository(Protocol):
+    """Publication claims, retries, and durable outcomes."""
 
     async def claim_for_publish(self) -> dict[str, Any] | None:
         """Take one immutable shared-workspace snapshot.
@@ -186,6 +196,18 @@ class SnapshotRepository(Protocol):
         """
         ...
 
+    async def next_snapshot_publish_retry_due(self) -> datetime | None:
+        """When the earliest deferred publication may be claimed again.
+
+        ``None`` when no captured snapshot waits for a future retry. Capture
+        completion announces other publication work through a notification.
+        """
+        ...
+
+
+class SnapshotBaseImportRepository(Protocol):
+    """Published-base import scheduling and receipts."""
+
     async def pending_snapshot_base_import(self) -> dict[str, Any] | None:
         """Return one published group commit whose object import is pending."""
         ...
@@ -225,22 +247,6 @@ class SnapshotRepository(Protocol):
         """
         ...
 
-    async def next_snapshot_retry_due(self) -> datetime | None:
-        """When the earliest capture handed back for a retry may be claimed again.
-
-        ``None`` when none waits. Everything else that makes a capture due is
-        announced by a notification.
-        """
-        ...
-
-    async def next_snapshot_publish_retry_due(self) -> datetime | None:
-        """When the earliest deferred publication may be claimed again.
-
-        ``None`` when no captured snapshot waits for a future retry. Capture
-        completion announces other publication work through a notification.
-        """
-        ...
-
     async def next_base_import_retry_due(self) -> datetime | None:
         """When the earliest failed base import may be retried.
 
@@ -249,6 +255,33 @@ class SnapshotRepository(Protocol):
         """
         ...
 
+
+class SnapshotReapingRepository(Protocol):
+    """Recovery of abandoned capture and publication claims."""
+
+    async def reap_stalled_sandbox_snapshot_captures(
+        self, *, stall_seconds: float = 300.0
+    ) -> list[int]:
+        """Return abandoned CAPTURING claims to the retryable pending queue."""
+        ...
+
     async def reap_stalled_snapshot_publishes(self, *, stall_seconds: float = 900.0) -> list[int]:
         """Fail ambiguous shared publishes without changing Agent turn state."""
         ...
+
+
+class SnapshotPublishWorkerRepository(
+    SnapshotPublicationRepository, SnapshotBaseImportRepository, Protocol
+):
+    """Publication and base-import operations driven by one worker."""
+
+
+class SnapshotRepository(
+    SnapshotRequestRepository,
+    SnapshotCaptureRepository,
+    SnapshotPublicationRepository,
+    SnapshotBaseImportRepository,
+    SnapshotReapingRepository,
+    Protocol,
+):
+    """The composed durable snapshot state machine exposed by assembly."""

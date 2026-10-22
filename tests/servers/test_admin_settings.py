@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import admin_settings
 from cloud_agent.app import install_admin_no_store
-from cloud_agent.source_control import SourceControlError
+from cloud_agent.settings import SettingsEncryptionError
 
 ADMIN = {"Authorization": "Bearer test-settings-admin"}
 SECRET = "private-settings-credential"
@@ -269,7 +269,7 @@ async def test_secret_encryption_failure_is_safe_and_does_not_write(
     client, repository, audit, _, applied = settings_api
 
     def unavailable(values):
-        raise SourceControlError(SECRET)
+        raise SettingsEncryptionError(SECRET)
 
     monkeypatch.setattr(admin_settings.settings, "encode_changes", unavailable)
     response = await client.put(
@@ -289,7 +289,7 @@ async def test_settings_require_database(settings_api) -> None:
     assert response.headers["cache-control"] == "no-store"
 
 
-@pytest.mark.parametrize("error_type", [SourceControlError, ValueError])
+@pytest.mark.parametrize("error_type", [SettingsEncryptionError, ValueError])
 async def test_unreadable_stored_configuration_returns_a_safe_error(
     settings_api, monkeypatch, error_type
 ) -> None:

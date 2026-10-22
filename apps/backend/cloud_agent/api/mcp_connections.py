@@ -41,6 +41,8 @@ from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_current_user, get_storage
 from cloud_agent.api.mcp_connections_shared import (
     _bad_request,
+    _capability_payload,
+    _capability_view,
     _conflict,
     _McpConnectionsStorage,
     _not_found,
@@ -53,6 +55,7 @@ from cloud_agent.api.mcp_thread_bindings import (
     ReplaceBindingsRequest,
     router as thread_bindings_router,
 )
+from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import config_import, github_oauth, launch, oauth
 from cloud_agent.mcp.errors import (
@@ -90,12 +93,6 @@ from cloud_agent.mcp.registry import (
     resolve_connection,
 )
 from cloud_agent.settings import setting_env
-from cloud_agent.source_control import SourceControlError
-
-# Imported at runtime, not only for typing: FastAPI resolves every route
-# handler's annotations to build its dependency graph, so moving this behind
-# ``TYPE_CHECKING`` turns an import-time warning into a startup failure.
-
 
 logger = get_logger(__name__)
 
@@ -538,17 +535,6 @@ async def _view(store: _McpConnectionsStorage, row: Mapping[str, Any]) -> Connec
     )
 
 
-def _capability_view(entry: Mapping[str, Any], kind: CapabilityKind) -> dict[str, Any]:
-    """Render one discovered capability for the selection dialog."""
-    return {
-        "kind": kind.value,
-        "name": str(entry.get("name") or ""),
-        "description": str(entry.get("description") or ""),
-        "input_schema": entry.get("input_schema"),
-        "annotations": entry.get("annotations") or {},
-    }
-
-
 #: Where each capability kind is kept in a stored snapshot, in display order.
 _SNAPSHOT_SURFACES: tuple[tuple[str, CapabilityKind], ...] = (
     ("tools", CapabilityKind.TOOL),
@@ -980,7 +966,7 @@ async def _diagnose(
             key=key,
             capability_revision=resolved.connection.capability_revision + 1,
         )
-    except (HostError, McpRegistryError, SourceControlError) as exc:
+    except (HostError, McpRegistryError, CredentialCipherError) as exc:
         kind = getattr(exc, "kind", ConnectionErrorKind.UNREACHABLE.value)
         await record_status(ConnectionStatus.ERROR.value, kind, str(exc))
         return TestResult(ok=False, error_kind=kind, message=str(exc))
@@ -1023,16 +1009,6 @@ async def _diagnose(
     )
 
 
-def _capability_payload(capability: Any) -> dict[str, Any]:
-    """The stored form of one capability."""
-    return {
-        "name": capability.name,
-        "description": capability.description,
-        "input_schema": capability.input_schema,
-        "annotations": dict(capability.annotations),
-    }
-
-
 # --------------------------------------------------------------------------
 # OAuth
 # --------------------------------------------------------------------------
@@ -1065,7 +1041,7 @@ async def authorize_connection(  # noqa: C901, PLR0912, PLR0915 complexity basel
         if body.client_secret:
             try:
                 secret_ciphertext = oauth_cipher().encrypt(body.client_secret)
-            except SourceControlError as exc:
+            except CredentialCipherError as exc:
                 raise _no_encryption_key() from exc
         stored = await job_store.mcp.set_mcp_client_registration(
             connection_id=connection_id,
@@ -1127,9 +1103,12 @@ async def authorize_connection(  # noqa: C901, PLR0912, PLR0915 complexity basel
         if managed_client:
             # Never send the shared secret to an endpoint supplied by discovery.
             if (
-                metadata.issuer != "https://github.com/login/oauth"
-                or metadata.authorization_endpoint != "https://github.com/login/oauth/authorize"
-                or metadata.token_endpoint != "https://github.com/login/oauth/access_token"
+                not github_oauth.is_managed(
+                    issuer=metadata.issuer,
+                    token_endpoint=metadata.token_endpoint,
+                    resource=connection.config.url,
+                )
+                or metadata.authorization_endpoint != github_oauth.AUTHORIZATION_ENDPOINT
             ):
                 raise oauth.OAuthError("GitHub returned unexpected sign-in endpoints.")
             client_id, secret = managed_client
@@ -1149,10 +1128,7 @@ async def authorize_connection(  # noqa: C901, PLR0912, PLR0915 complexity basel
                     }
                 },
             )
-        if (
-            github_endpoint
-            and metadata.token_endpoint == "https://github.com/login/oauth/access_token"
-        ):
+        if github_endpoint and metadata.token_endpoint == github_oauth.TOKEN_ENDPOINT:
             # GitHub omits this field from metadata (RFC default: Basic), but
             # documents client_secret in the form body for both app types.
             metadata = replace(
@@ -1430,12 +1406,11 @@ async def oauth_callback(  # noqa: PLR0912 complexity baseline, #771
                 "this authorization expired, was already used, or was started by another account"
             ),
         )
-    uses_github_client = (
-        flow["issuer"] == github_oauth.ISSUER
-        and flow["token_endpoint"] == github_oauth.TOKEN_ENDPOINT
-        and urlsplit(str(flow["redirect_uri"])).path.endswith("/v1/agent/mcp/oauth/callback/github")
-        and github_oauth.is_endpoint(str(flow["resource"]))
-    )
+    uses_github_client = github_oauth.is_managed(
+        issuer=flow["issuer"],
+        token_endpoint=flow["token_endpoint"],
+        resource=str(flow["resource"]),
+    ) and urlsplit(str(flow["redirect_uri"])).path.endswith("/v1/agent/mcp/oauth/callback/github")
     managed_github = provider == "github" and uses_github_client
     if str(flow["connection_id"]) != str(provider) and not managed_github:
         # A state minted for one connection cannot complete another's flow.
@@ -1461,7 +1436,7 @@ async def oauth_callback(  # noqa: PLR0912 complexity baseline, #771
     cipher = oauth_cipher()
     try:
         verifier = cipher.decrypt(str(flow["code_verifier_ciphertext"]))
-    except SourceControlError:
+    except CredentialCipherError:
         return _callback_redirect(provider, ok=False, message="this flow could not be read")
 
     from cloud_agent.mcp.transports import TransportError
@@ -2038,7 +2013,7 @@ def _static_credential(
     config["hint"] = f"{secret[:2]}{secret[-2:]}" if len(secret) > 4 else ""
     try:
         ciphertext = mcp_cipher().encrypt(secret)
-    except SourceControlError as exc:
+    except CredentialCipherError as exc:
         raise _no_encryption_key() from exc
     return ciphertext, config
 
@@ -2077,7 +2052,7 @@ def _sealed_launch_spec(
         return None
     try:
         cipher = mcp_cipher()
-    except SourceControlError as exc:
+    except CredentialCipherError as exc:
         raise _no_encryption_key() from exc
     stored = {str(key): str(value) for key, value in (spec.get("env_secrets") or {}).items()}
     for name in wanted:

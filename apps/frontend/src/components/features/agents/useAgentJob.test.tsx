@@ -7,7 +7,7 @@ import type { ReactNode } from 'react';
 
 import {
   getAgentJob,
-  getAgentJobGit,
+  getAgentJobGitMetadata,
   getAgentJobThread,
   listAllAgentThreadEvents,
   streamAgentJob,
@@ -31,7 +31,7 @@ import { AgentReadProvider } from './AgentReadProvider';
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentJob: vi.fn(),
-  getAgentJobGit: vi.fn(),
+  getAgentJobGitMetadata: vi.fn(),
   getAgentJobThread: vi.fn(),
   listAllAgentThreadEvents: vi.fn(),
   streamAgentJob: vi.fn(),
@@ -39,9 +39,9 @@ vi.mock('@/lib/api/agents', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(getAgentJobGit).mockResolvedValue({
+  vi.mocked(getAgentJobGitMetadata).mockResolvedValue({
     available: false,
-  } as Awaited<ReturnType<typeof getAgentJobGit>>);
+  } as Awaited<ReturnType<typeof getAgentJobGitMetadata>>);
 });
 
 afterEach(() => {
@@ -102,6 +102,24 @@ describe('useAgentJob history-to-stream handoff', () => {
     vi.mocked(listAllAgentThreadEvents).mockResolvedValue(history);
     vi.mocked(streamAgentJob).mockImplementation(stayOpen);
   }
+
+  it('loads changed paths from metadata without fetching the full Git view', async () => {
+    const job = { ...running(), state: 'succeeded' } as AgentJobApi;
+    serve(job, []);
+    vi.mocked(getAgentJobGitMetadata).mockResolvedValue({
+      available: true,
+      revision: 'a'.repeat(64),
+      branch: 'agent/work',
+      changes: [{ code: ' M', path: 'src/app.ts' }],
+      change_count: 1,
+    });
+
+    const { result } = renderHook(() => useAgentJob(job.id));
+
+    await waitFor(() => expect(result.current.job?.diffFiles).toEqual(['src/app.ts']));
+    expect(result.current.job?.diffFileDetails).toEqual([]);
+    expect(getAgentJobGitMetadata).toHaveBeenCalledTimes(1);
+  });
 
   it('shows durable replies before activity finishes and keeps them through partial pages', async () => {
     const previous = { ...running('previous-job'), state: 'succeeded', turn_no: 1 } as AgentJobApi;
