@@ -37,19 +37,18 @@ async def read_notification_state(
         async with conn.transaction(isolation="repeatable_read"):
             await conn.execute("SET LOCAL statement_timeout = '5s'")
             if cursor is None:
-                observed_at, snapshot = await conn.fetchrow(
+                bootstrap_at, snapshot = await conn.fetchrow(
                     "SELECT NOW(),pg_current_snapshot()::text"
                 )
                 cursor = NotificationStateCursor(
                     scope=notification_scope(user_id, limit),
                     database_snapshot=snapshot,
                     bootstrap=True,
-                    bootstrap_at=observed_at,
+                    bootstrap_at=bootstrap_at,
                 )
-                return await _bootstrap(conn, cursor, user_id, limit, observed_at)
+                return await _bootstrap(conn, cursor, user_id, limit)
             if cursor.bootstrap:
-                observed_at = await conn.fetchval("SELECT NOW()")
-                return await _bootstrap(conn, cursor, user_id, limit, observed_at)
+                return await _bootstrap(conn, cursor, user_id, limit)
             return await _changes(conn, cursor, user_id, limit)
 
 
@@ -92,7 +91,6 @@ async def _bootstrap(
     cursor: NotificationStateCursor,
     user_id: str,
     limit: int,
-    observed_at: Any,
 ) -> dict[str, Any]:
     rows = await conn.fetch(
         """
@@ -138,6 +136,11 @@ async def _bootstrap(
         scope=cursor.scope,
         database_snapshot=cursor.database_snapshot,
     )
+    # The browser subtracts the request's monotonic elapsed duration from this
+    # database-clock sample. Sampling after page materialization keeps database
+    # work out of the inferred pre-enable window, so old completions cannot be
+    # replayed merely because the bootstrap query was slow.
+    observed_at = await conn.fetchval("SELECT clock_timestamp()")
     return {
         "mode": "snapshot",
         "jobs": [_job(row) for row in page],

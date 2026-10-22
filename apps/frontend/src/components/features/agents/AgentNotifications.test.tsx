@@ -154,7 +154,12 @@ describe('owner-wide agent notifications', () => {
     const pending = deferred<AgentNotificationStateApi>();
     list.mockReturnValueOnce(pending.promise);
     await mount({ ...preferences, questions: false });
-    const older = job({ id: 'older', state: 'succeeded', finished_at: '2026-10-11T12:59:00Z' });
+    const older = job({
+      id: 'older',
+      state: 'succeeded',
+      // This would replay if the one-second bootstrap query were subtracted twice.
+      finished_at: '2026-10-11T12:59:59.500Z',
+    });
     await act(async () => vi.advanceTimersByTimeAsync(1_000));
     const terminal = job({ state: 'succeeded', finished_at: '2026-10-11T13:00:00.500Z' });
     await act(async () =>
