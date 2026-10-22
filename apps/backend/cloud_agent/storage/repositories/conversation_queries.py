@@ -14,16 +14,15 @@ from typing import TYPE_CHECKING
 
 from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
+from cloud_agent.domain.thread_history import THREAD_PAGE_SIZE
 from cloud_agent.storage._sql.jobs import (
     CONVERSATION_STATE_SQL,
     JOB_SELECT,
-    JOB_SUMMARY_SELECT,
     QUALIFIED_JOB_SUMMARY_COLUMNS,
     SESSION_DELETE_BLOCK_SQL,
     read_job,
 )
-from cloud_agent.storage._sql.pending_messages import list_pending_messages
-from cloud_agent.storage._sql.rows import job_row_to_dict, sandbox_row_to_dict
+from cloud_agent.storage._sql.rows import job_row_to_dict
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.storage._sql.sessions import (
     decode_conversation_cursor,
@@ -32,6 +31,7 @@ from cloud_agent.storage._sql.sessions import (
     session_cursor_scope,
     session_query,
 )
+from cloud_agent.storage._sql.thread_history import read_message_chunk, read_thread_page
 
 if TYPE_CHECKING:
     from typing import Any
@@ -79,72 +79,47 @@ class PostgresConversationQueries:
             "sync_cursor": cursor,
         }
 
-    async def get_thread_for_job(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
-        """Return the conversation containing an owned job.
-
-        With its turns and transcript, and with the messages still waiting to
-        become turns (``pending_messages``, in send order) and why the queue is
-        not moving by itself (``queue_paused_reason``), read together.
-        """
+    async def get_thread_for_job(
+        self,
+        *,
+        job_id: str,
+        user_id: str,
+        cursor: str | None = None,
+        after: str | None = None,
+        limit: int = THREAD_PAGE_SIZE,
+        anchor: bool = False,
+    ) -> dict[str, Any] | None:
+        """Return a bounded, prompt-first page of an owned, undeleted conversation."""
         async with self._pool.acquire() as conn:
-            thread = await conn.fetchrow(
-                """
-                SELECT t.id, t.repo, t.title, t.created_at, t.updated_at,
-                       t.pinned_at, t.archived_at, t.queue_paused_reason
-                FROM agent_threads t
-                JOIN agent_jobs j ON j.thread_id = t.id
-                WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL
-                """,
-                job_id,
-                user_id,
+            return await read_thread_page(
+                conn,
+                job_id=job_id,
+                user_id=user_id,
+                cursor=cursor,
+                after=after,
+                limit=limit,
+                anchor=anchor,
             )
-            if thread is None:
-                return None
-            messages = await conn.fetch(
-                """
-                SELECT m.id, m.role, m.content, m.job_id, m.created_at, m.mid_turn
-                FROM agent_thread_messages m
-                JOIN agent_jobs j ON j.id = m.job_id
-                WHERE m.thread_id = $1
-                -- A turn opens with its prompt; a message the owner sent into
-                -- the running turn reads where it was sent, among the replies.
-                ORDER BY j.turn_no,
-                         CASE WHEN m.role = 'user' AND NOT m.mid_turn THEN 0 ELSE 1 END,
-                         m.id
-                """,
-                thread["id"],
+
+    async def get_thread_message_chunk(
+        self,
+        *,
+        job_id: str,
+        user_id: str,
+        message_id: int,
+        offset: int,
+        limit: int,
+    ) -> dict[str, Any] | None:
+        """Read a bounded content slice without exposing another owner's message."""
+        async with self._pool.acquire() as conn:
+            return await read_message_chunk(
+                conn,
+                job_id=job_id,
+                user_id=user_id,
+                message_id=message_id,
+                offset=offset,
+                limit=limit,
             )
-            jobs = await conn.fetch(
-                f"{JOB_SUMMARY_SELECT} WHERE j.thread_id = $1 ORDER BY j.turn_no",
-                thread["id"],
-            )
-            sandbox = await conn.fetchrow(
-                f"SELECT s.* FROM {THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
-                thread["id"],
-            )
-            job_rows = [job_row_to_dict(job) for job in jobs]
-            for job in job_rows:
-                job["title"] = thread["title"]
-                job["pinned_at"] = thread["pinned_at"]
-                job["archived_at"] = thread["archived_at"]
-                if sandbox is not None:
-                    job["thread_sandbox"] = sandbox_row_to_dict(sandbox)
-            # Read with the turns, on the same connection: the page renders the
-            # queue beside the transcript, and a message that became a turn has
-            # to disappear from one in the same read that shows it in the other.
-            pending = await list_pending_messages(conn, thread["id"])
-        return {
-            "id": thread["id"],
-            "repo": thread["repo"],
-            "title": thread["title"],
-            "created_at": thread["created_at"],
-            "updated_at": thread["updated_at"],
-            "archived_at": thread["archived_at"],
-            "messages": [dict(message) for message in messages],
-            "jobs": job_rows,
-            "pending_messages": pending,
-            "queue_paused_reason": thread["queue_paused_reason"],
-        }
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         """Fetch one job by id."""
