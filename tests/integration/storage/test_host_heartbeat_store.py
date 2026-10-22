@@ -197,14 +197,21 @@ async def _enrolled(store) -> None:
 
 
 async def _beat(store, retained: list[dict[str, Any]], *, grants: Any = None) -> Any:
-    """One heartbeat through the real handler and the real store."""
-    return await hosts.heartbeat_host(
+    """One heartbeat through the real handler and the real store.
+
+    Grant renewals and revocations run after the reply is sent, so the tasks
+    the handler leaves for then run here once it returns, as a request's do.
+    """
+    background = BackgroundTasks()
+    reply = await hosts.heartbeat_host(
         HostHeartbeatRequest.model_validate({"retained_sandboxes": retained}),
-        background_tasks=BackgroundTasks(),
+        background_tasks=background,
         host={"host": HOST, "credential_hash": CREDENTIAL},
         store=store,
         grants=grants,
     )
+    await background()
+    return reply
 
 
 # -- observations that change nothing ------------------------------------------
