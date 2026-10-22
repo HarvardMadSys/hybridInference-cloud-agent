@@ -16,7 +16,7 @@ import json
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.responses import StreamingResponse
 
 from cloud_agent.api._job_views import (
@@ -24,13 +24,13 @@ from cloud_agent.api._job_views import (
     _SAFE_EVENT_TYPE,
     _event_response,
     _iso,
-    _job_response,
-    _pending_response,
 )
 from cloud_agent.api._owner_auth import OWNER_STREAM_MAX_S, _owned_job, require_agent_owner
 from cloud_agent.api._stream_slots import STREAM_SLOTS
+from cloud_agent.api._thread_history import message_response, thread_response
 from cloud_agent.api.deps import get_job_event_signal, get_storage, require_store
 from cloud_agent.domain.execution import TERMINAL_STATES
+from cloud_agent.domain.thread_history import THREAD_DETAIL_CHARS, THREAD_PAGE_MAX, THREAD_PAGE_SIZE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
     AgentJobEventsResponse,
@@ -107,46 +107,65 @@ def _sse_frame(event: dict[str, Any]) -> str:
 @router.get("/jobs/{job_id}/thread", response_model=AgentThreadResponse)
 async def get_agent_thread(
     job_id: str,
+    cursor: str | None = Query(None, max_length=512, description="Continue toward older history."),
+    after: str | None = Query(
+        None, max_length=512, description="Read newer history from sync_cursor."
+    ),
+    limit: int = Query(THREAD_PAGE_SIZE, ge=1, le=THREAD_PAGE_MAX),
+    anchor: bool = Query(
+        False, description="Start at the selected job instead of the newest turn."
+    ),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _ThreadsStorage | None = Depends(get_storage),
 ) -> AgentThreadResponse:
-    """Return the durable conversation containing one of the caller's jobs."""
+    """Return a bounded recent history page; follow cursors for explicit backfill.
+
+    Version 2 retains the message/job arrays and chronological order. Wide
+    messages are explicit previews with a chunked detail endpoint. Queue
+    snapshots advertise completeness; the dedicated queue endpoint is unchanged.
+    """
     job_store = _require_store(store)
-    # get_thread_for_job is scoped to the caller's own, undeleted job and
-    # answers the 404 itself; a whole-job fetch ahead of it would be spent
-    # on a row only its user id is read from.
-    thread = await job_store.conversation_queries.get_thread_for_job(
-        job_id=job_id, user_id=user["user_id"]
-    )
+    try:
+        thread = await job_store.conversation_queries.get_thread_for_job(
+            job_id=job_id,
+            user_id=user["user_id"],
+            cursor=cursor,
+            after=after,
+            limit=limit,
+            anchor=anchor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if thread is None:
         raise HTTPException(
             status_code=404,
             detail={"error": {"type": "not_found", "message": f"No thread for {job_id}"}},
         )
-    return AgentThreadResponse(
-        thread_id=thread["id"],
-        repo=thread["repo"],
-        title=thread["title"],
-        messages=[
-            AgentThreadMessageResponse(
-                id=message["id"],
-                role=message["role"],
-                content=message["content"],
-                job_id=message["job_id"],
-                created_at=_iso(message["created_at"]),
-                mid_turn=bool(message.get("mid_turn")),
-            )
-            for message in thread["messages"]
-        ],
-        jobs=[_job_response(job) for job in thread["jobs"]],
-        created_at=_iso(thread["created_at"]),
-        updated_at=_iso(thread["updated_at"]),
-        archived_at=_iso(thread.get("archived_at")),
-        pending_messages=[
-            _pending_response(message) for message in thread.get("pending_messages") or []
-        ],
-        queue_paused_reason=thread.get("queue_paused_reason"),
+    return thread_response(thread)
+
+
+@router.get(
+    "/jobs/{job_id}/thread/messages/{message_id}", response_model=AgentThreadMessageResponse
+)
+async def get_agent_thread_message(
+    job_id: str,
+    message_id: int = Path(..., ge=1, le=2**63 - 1),
+    offset: int = Query(0, ge=0, le=2**31 - 2),
+    limit: int = Query(THREAD_DETAIL_CHARS, ge=1, le=THREAD_DETAIL_CHARS),
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _ThreadsStorage | None = Depends(get_storage),
+) -> AgentThreadMessageResponse:
+    """Read one message in bounded Unicode-character chunks, scoped to its owner."""
+    message = await _require_store(store).conversation_queries.get_thread_message_chunk(
+        job_id=job_id,
+        user_id=user["user_id"],
+        message_id=message_id,
+        offset=offset,
+        limit=limit,
     )
+    if message is None:
+        raise HTTPException(status_code=404, detail="Thread message not found")
+    return message_response(message, offset)
 
 
 @router.get("/jobs/{job_id}/thread/stats", response_model=AgentThreadStatsResponse)

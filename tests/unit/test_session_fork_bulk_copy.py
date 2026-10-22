@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from cloud_agent.storage.repositories.session_fork import PostgresSessionForkRepository
 
@@ -142,11 +141,10 @@ async def test_finalize_session_fork_batches_a_thousand_turns_and_preserves_line
     connection = _Connection(operation=operation, turns=turns, messages=messages)
     repository = PostgresSessionForkRepository(cast("Any", _Pool(connection)))
     copied_anchor = {"id": "copied-anchor"}
-    repository._queries = cast(
-        "Any", SimpleNamespace(get_job=AsyncMock(return_value=copied_anchor))
-    )
+    read_job = AsyncMock(return_value=copied_anchor)
 
-    assert await repository.finalize_session_fork(operation_id=operation["id"]) == copied_anchor
+    with patch("cloud_agent.storage.repositories.session_fork.read_job", read_job):
+        assert await repository.finalize_session_fork(operation_id=operation["id"]) == copied_anchor
 
     # Four locked reads, two history reads, two driver batches and five fixed
     # finalization statements: the connection-await count does not grow with
@@ -205,4 +203,4 @@ async def test_finalize_session_fork_batches_a_thousand_turns_and_preserves_line
         "created-1000",
         False,
     )
-    repository._queries.get_job.assert_awaited_once_with(copied_turns[-1][0])  # type: ignore[attr-defined]
+    read_job.assert_awaited_once_with(connection, copied_turns[-1][0])

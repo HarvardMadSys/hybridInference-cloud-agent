@@ -15,10 +15,10 @@ import { archiveAgentJob, deleteAgentSessions, pinAgentJob, unpinAgentJob } from
 import { APIError } from '@/lib/utils/errors';
 import { useAgentReads } from './AgentReadProvider';
 import { ArchiveDeleteDialog, SESSION_ERROR_KEYS } from './ArchiveControls';
-import { latestJob } from './conversationJob';
 import { createProjectRefreshTracker } from './sidebarProjectRefresh';
 import { createSidebarReadQueue } from './sidebarReadQueue';
 import { sidebarFolders } from './sidebarFolders';
+import { readConversationSelection } from './threadHistory';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from './agentPush';
 import { changesSidebarRows, SIDEBAR_ACTIVITY_REFRESH_MS } from './sidebarRecordChanges';
@@ -232,10 +232,9 @@ export function AgentsSidebar({
       ].includes(id)
     )
       return;
-    Promise.all([reads.getAgentJob(id), reads.getAgentJobThread(id)])
-      .then(([job, thread]) => {
+    readConversationSelection(reads, id)
+      .then(({ job, thread, latest }) => {
         if (cancelled || generation !== sessionGeneration.current) return;
-        const latest = latestJob([job, ...(thread?.jobs ?? [])]) ?? job;
         const row = conversationRow({
           job: latest,
           title: thread?.title ?? job.title ?? job.task_prompt.split('\n')[0],

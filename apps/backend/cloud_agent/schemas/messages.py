@@ -16,6 +16,10 @@ class AgentThreadMessageResponse(BaseModel):
     id: int
     role: str
     content: str
+    content_truncated: bool = False
+    content_length: int | None = None
+    next_offset: int | None = None
+    turn_no: int | None = None
     job_id: str
     created_at: str | None = None
     mid_turn: bool = Field(
