@@ -84,7 +84,6 @@
     {
       "files": [
         "src/components/features/agents/environment/EnvironmentManager.tsx",
-        "src/components/features/agents/useConversationList.ts",
         "src/components/features/settings/UsageSettings.tsx"
       ],
       "rules": {
@@ -351,7 +350,7 @@
     {
       "files": ["src/components/features/agents/trajectorySteps.ts"],
       "rules": {
-        "complexity": ["error", 117]
+        "complexity": ["error", 115]
       }
     },
     {
@@ -426,7 +425,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1014
+            "max": 1005
           }
         ]
       }
@@ -514,7 +513,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1007
+            "max": 1005
           }
         ]
       }

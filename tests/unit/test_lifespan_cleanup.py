@@ -542,6 +542,8 @@ async def test_successful_shutdown_keeps_its_order(
         for name in expected_tasks:
             task = getattr(prepared.app.state, name)
             assert task is not None and not task.done()
+            # Held, so the event loop cannot collect a running loop.
+            assert task in lifespan_module._BACKGROUND_TASKS
         absent = [name for name in _EXPECTED_SHUTDOWN_TASKS if name not in expected_tasks]
         assert all(getattr(prepared.app.state, name) is None for name in absent)
 
@@ -920,3 +922,17 @@ async def test_the_renewal_task_and_the_heartbeat_share_one_renewal_schedule(
         assert handed["schedule"] is schedule
         assert handed["grants"] is prepared.app.state.grants
         assert get_renewal_schedule(SimpleNamespace(app=prepared.app)) is schedule
+
+
+async def test_a_task_shutdown_would_not_stop_is_never_started() -> None:
+    """Every background task has a place in the shutdown order, or it does not start."""
+    app = FastAPI()
+
+    async def loop() -> None:
+        await asyncio.Event().wait()
+
+    work = loop()
+    with pytest.raises(ValueError, match="shutdown order"):
+        lifespan_module._spawn(app, "unlisted_task", work)
+    assert work.cr_frame is None
+    assert not hasattr(app.state, "unlisted_task")

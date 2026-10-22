@@ -28,13 +28,12 @@ BASELINE = {
     "apps/backend/cloud_agent/application/compute_reconcile.py": 2264,
     "apps/backend/cloud_agent/api/mcp_connections.py": 2245,
     "apps/backend/cloud_agent/storage/repositories/attempt_commands.py": 2041,
-    "apps/backend/cloud_agent/storage/repositories/environments.py": 1996,
     "apps/backend/cloud_agent/storage/repositories/mcp.py": 1974,
+    "apps/backend/cloud_agent/storage/repositories/environments.py": 1941,
     "apps/backend/cloud_agent/api/mcp_relay.py": 1801,
     "apps/backend/cloud_agent/storage/repositories/snapshot.py": 1701,
-    "apps/backend/cloud_agent_host/host_capacity.py": 1640,
+    "apps/backend/cloud_agent_host/host_capacity.py": 1636,
     "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1595,
-    "apps/backend/cloud_agent/providers/compute/host_bootstrap.py": 1578,
     "apps/backend/cloud_agent_host/sandbox_checkpoints.py": 1563,
 }
 

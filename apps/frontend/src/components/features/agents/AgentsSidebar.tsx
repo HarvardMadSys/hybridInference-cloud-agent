@@ -22,6 +22,7 @@ import { changesSidebarRows, SIDEBAR_ACTIVITY_REFRESH_MS } from './sidebarRecord
 import { GettingStarted } from './GettingStarted';
 import { PaneResizer } from './PaneResizer';
 import { useAgentProjects } from './useAgentJobs';
+import { useSidebarBackgroundRefresh } from './useSidebarBackgroundRefresh';
 import { announcePaneResize, useResizablePane } from './useResizablePane';
 import { useSidebarPreferences, manualOrder, moveBefore } from './sidebarPreferences';
 import { SidebarViewMenu } from './SidebarViewMenu';
@@ -94,25 +95,11 @@ export function AgentsSidebar({
     error: projectsError,
     reload: reloadProjects,
   } = useAgentProjects(false, active);
-  const backgroundRefreshPending = useRef(false);
-  const refreshInBackground = useCallback(() => {
-    if (!active || document.visibilityState === 'hidden') {
-      backgroundRefreshPending.current = true;
-      return;
-    }
-    backgroundRefreshPending.current = false;
-    reload();
-    reloadProjects();
-  }, [active, reload, reloadProjects]);
-
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState !== 'hidden' && backgroundRefreshPending.current)
-        refreshInBackground();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [refreshInBackground]);
+  const { refreshInBackground, reorderInBackground, activityMoved } = useSidebarBackgroundRefresh(
+    active,
+    reload,
+    reloadProjects,
+  );
 
   const [selected, setSelected] = useState<{
     path: string;
@@ -138,12 +125,14 @@ export function AgentsSidebar({
   const list = useConversationList({
     userId,
     refresh,
+    reorder: activityMoved,
     pinned: false,
     enabled: active && !searching && preferences.group === 'flat',
   });
   const pinnedList = useConversationList({
     userId,
     refresh,
+    reorder: activityMoved,
     pinned: true,
     enabled: active && !searching,
   });
@@ -177,6 +166,7 @@ export function AgentsSidebar({
     enabled: active && searching && debounced === query.trim(),
     userId,
     refresh,
+    reorder: activityMoved,
   });
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(query.trim()), 250);
@@ -285,7 +275,7 @@ export function AgentsSidebar({
       // once per window, however many replies land in it.
       activityRefresh.current ??= setTimeout(() => {
         activityRefresh.current = null;
-        refreshInBackground();
+        reorderInBackground();
       }, SIDEBAR_ACTIVITY_REFRESH_MS);
     });
     return () => {
@@ -293,7 +283,7 @@ export function AgentsSidebar({
       if (activityRefresh.current) clearTimeout(activityRefresh.current);
       activityRefresh.current = null;
     };
-  }, [active, pushedRecords, refreshInBackground]);
+  }, [active, pushedRecords, refreshInBackground, reorderInBackground]);
   const pushLive = useAgentPushLive();
   const hasActiveProjects = projects.some((project) => project.active_count > 0);
   useEffect(() => {
@@ -931,6 +921,7 @@ export function AgentsSidebar({
                   selected={current?.job.repo === folder.repo ? current : undefined}
                   userId={userId}
                   refresh={refresh}
+                  activityMoved={activityMoved}
                   {...actions}
                   hiddenThreads={hiddenThreads}
                   pinUpdates={pinUpdates}

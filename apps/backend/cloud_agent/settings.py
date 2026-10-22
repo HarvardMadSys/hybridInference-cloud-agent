@@ -14,13 +14,21 @@ import os
 import threading
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.domain_cipher import settings_root_key
 from cloud_agent.setting_definition import (
     MINIMUM_CREDENTIAL_BYTES as MINIMUM_CREDENTIAL_BYTES,
     Setting,
     SettingsRevisionConflict as SettingsRevisionConflict,
     SettingTooShort,
     SettingValue,
+    _github_install_url,
+    _gitlab_redirect_uri,
+    _grant_base_path,
+    _issuer,
     _numeric,
+    _s3_bucket,
+    _s3_prefix,
+    _s3_region,
 )
 from cloud_agent_shared.sandbox_manager_compat import (
     manager_env,
@@ -51,6 +59,10 @@ SETTINGS: tuple[Setting, ...] = (
         choices=("text", "json"),
         description="Text or structured JSON output. Applies to the control plane's own log handler without a restart.",
     ),
+    # Generous enough for a busy gateway, bounded because a control plane
+    # blocked on a lookup is a control plane that has stopped scheduling. It
+    # also bounds one usage page as a whole, from waiting for a slot to the
+    # last byte of the body.
     _numeric(
         "gateway_request_timeout_s", "Gateway request timeout (seconds)", "Gateway", 10.0, 0.1, 300
     ),
@@ -62,6 +74,8 @@ SETTINGS: tuple[Setting, ...] = (
         0.1,
         300,
     ),
+    # Seconds between attempts to load an App that failed. Also the Retry-After
+    # a caller refused in the meantime is given.
     _numeric(
         "github_reload_interval_s",
         "GitHub configuration retry interval (seconds)",
@@ -70,6 +84,10 @@ SETTINGS: tuple[Setting, ...] = (
         1,
         3600,
     ),
+    # How long one user's repository answer is reused. Entitlement is asked on
+    # every workspace file read and terminal open; a minute keeps those off
+    # GitHub while bounding how long a revoked permission still reads as
+    # granted.
     _numeric(
         "github_repository_cache_s",
         "GitHub repository cache duration (seconds)",
@@ -102,6 +120,9 @@ SETTINGS: tuple[Setting, ...] = (
         0.1,
         3600,
     ),
+    # The longest an idle publisher that is told about new work sleeps. It
+    # wakes sooner for a notification or the earliest publication/base import
+    # retry.
     _numeric(
         "publish_idle_seconds",
         "Publication idle check interval (seconds)",
@@ -122,6 +143,7 @@ SETTINGS: tuple[Setting, ...] = (
         "MCP",
         "https://registry.modelcontextprotocol.io",
         url=True,
+        https_only=True,
     ),
     _numeric(
         "mcp_catalog_sync_seconds",
@@ -158,6 +180,10 @@ SETTINGS: tuple[Setting, ...] = (
         0.1,
         300,
     ),
+    # An MCP call is a tool call: it can be a repository search or an issue
+    # fetch, and it is not a token stream. Generous, but bounded: a sandbox
+    # waiting on a hung upstream is a job burning its wall-clock timeout for
+    # nothing.
     _numeric("mcp_request_timeout_s", "MCP request timeout (seconds)", "MCP", 120.0, 0.1, 300),
     _numeric("mcp_connect_timeout_s", "MCP connection timeout (seconds)", "MCP", 10.0, 0.1, 300),
     _numeric("mcp_metadata_timeout_s", "MCP metadata timeout (seconds)", "MCP", 20.0, 0.1, 300),
@@ -240,6 +266,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_WEB_CONTACT_URL",
         url=True,
+        mailto=True,
         description=(
             "Where users reach the operators: a support page, or mailto: and one address. "
             "Linked as Contact us from the account menu's Help. Empty hides the link."
@@ -268,6 +295,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_CLOUDLAB_API_URL",
         url=True,
+        https_only=True,
         description=(
             "CloudLab's Portal API: https://boss.emulab.net:43794. The portal's web address, "
             "www.cloudlab.us, does not serve it. Empty disables CloudLab. Applies to "
@@ -281,6 +309,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_COMPUTE_REGISTRATION_URL",
         url=True,
+        https_only=True,
     ),
     _numeric(
         "compute.poll_seconds", "Compute scheduling interval (seconds)", "Compute", 30, 5, 300
@@ -293,7 +322,15 @@ SETTINGS: tuple[Setting, ...] = (
         30,
         300,
     ),
-    Setting("gateway_base_url", "Gateway API URL", "Gateway", "", env="GATEWAY_BASE_URL", url=True),
+    Setting(
+        "gateway_base_url",
+        "Gateway API URL",
+        "Gateway",
+        "",
+        env="GATEWAY_BASE_URL",
+        url=True,
+        https_unless_private=True,
+    ),
     Setting(
         "gateway_dispatch_token",
         "Gateway dispatch token",
@@ -311,6 +348,7 @@ SETTINGS: tuple[Setting, ...] = (
         "Gateway",
         "/internal/agent-grants",
         env="GATEWAY_GRANT_BASE_PATH",
+        check=_grant_base_path,
     ),
     Setting(
         "gateway_grant_binding_id",
@@ -326,6 +364,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="GATEWAY_AUTHORIZE_URL",
         url=True,
+        https_unless_private=True,
     ),
     Setting(
         "session_redirect_uri",
@@ -376,6 +415,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_GITHUB_APP_INSTALL_URL",
         url=True,
+        check=_github_install_url,
         description="An https://github.com URL, normally https://github.com/apps/<app-slug>/installations/new.",
     ),
     Setting(
@@ -408,6 +448,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_GITLAB_OAUTH_REDIRECT_URI",
         url=True,
+        check=_gitlab_redirect_uri,
         description="The exact callback registered with GitLab. HTTPS, except http://localhost for development.",
     ),
     Setting(
@@ -487,6 +528,11 @@ SETTINGS: tuple[Setting, ...] = (
         minimum_bytes_new_values_only=True,
         description="A random credential of at least 32 bytes, the same value the alert relay sends. Empty opens nothing.",
     ),
+    # How long a residency's lease lives between beats (design §7) and, since
+    # the lease and the thread-attributed grant are renewed by the same beat
+    # and revoked together (retained-session design §§3 and 6), the cap on how
+    # long an idle resident process keeps a live credential after its host goes
+    # quiet.
     _numeric(
         "residency_ttl_s",
         "Residency lease duration (seconds)",
@@ -514,7 +560,12 @@ SETTINGS: tuple[Setting, ...] = (
     _numeric(
         "ledger_refresh_timeout_s", "Usage refresh timeout (seconds)", "Operations", 15.0, 1, 120
     ),
+    # The longest an idle usage collector waits on its wake-up before looking
+    # anyway.
     _numeric("ledger_idle_s", "Usage idle check interval (seconds)", "Operations", 30.0, 1, 300),
+    # The longest an idle coordinator that is told about new work sleeps. It
+    # wakes sooner for a notification or the earliest capture retry; this is
+    # for what announces nothing, such as a capture the reaper found stalled.
     _numeric(
         "snapshot_idle_s", "Snapshot idle check interval (seconds)", "Operations", 30.0, 1, 300
     ),
@@ -546,6 +597,9 @@ SETTINGS: tuple[Setting, ...] = (
         20971520,
     ),
     _numeric("attachments.max_files", "Maximum upload file count", "Attachments", 50, 1, 50),
+    # Abandoned staged uploads count against staging quota until collected.
+    # Pending-message and job-claimed rows are kept by the repository
+    # predicate.
     _numeric(
         "attachments.staged_retention_hours",
         "Abandoned upload retention (hours)",
@@ -555,6 +609,10 @@ SETTINGS: tuple[Setting, ...] = (
         8760,
         description="Remove uploads this old only when no job or pending message holds them. Changes apply on the next maintenance pass.",
     ),
+    # Everything one owner's uploads keep in the database, staged or attached
+    # to a conversation that still exists. Attached bytes stay until the
+    # conversation is deleted, so the per-turn bounds alone would let one
+    # account grow the shared database without end.
     _numeric(
         "attachments.max_user_bytes",
         "Maximum stored upload bytes per user",
@@ -578,11 +636,24 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     _numeric("skills.max_selected", "Maximum selected skills", "Skills", 16, 1, 16),
     _numeric("skills.max_library", "Maximum library skills", "Skills", 100, 1, 100),
+    # How recently an active goal with no pending obligation must have moved
+    # for the recovery sweep to assume a consumer is still about to act on it.
+    # Long enough to cover a decision in flight, short enough that a goal
+    # nothing is working on is noticed rather than re-armed for ever.
     _numeric("goals.arm_after_seconds", "Goal activation delay (seconds)", "Goals", 60.0, 1, 3600),
+    # How long an active goal may sit with no queued or running turn and no
+    # pending wakeup before the recovery sweep pauses it. This is a backstop
+    # for a path that forgot to schedule, not a mechanism: every ordinary way a
+    # goal stops being able to continue pauses it where and when it happens.
     _numeric(
         "goals.stalled_after_seconds", "Goal stall timeout (seconds)", "Goals", 900.0, 60, 86400
     ),
+    # How many times a wakeup may fail on temporary scheduling infrastructure
+    # before the goal is paused with scheduling_failed rather than retried
+    # forever behind a green "active" badge.
     _numeric("goals.max_wakeup_attempts", "Maximum goal wakeup attempts", "Goals", 5, 1, 100),
+    # The first backoff step; each retry doubles it up to
+    # goals.wakeup_backoff_max_seconds.
     _numeric(
         "goals.wakeup_backoff_seconds", "Goal wakeup retry delay (seconds)", "Goals", 5.0, 0.1, 300
     ),
@@ -624,6 +695,11 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Sandbox archives",
         "",
         env="AGENT_SANDBOX_ARCHIVE_S3_BUCKET",
+        check=_s3_bucket,
+        hint=(
+            "Use a bucket name such as freeinference; set cloud-agent/sandbox "
+            "in Sandbox archive S3 prefix."
+        ),
         description="Enter a bucket name, or paste an S3 URI such as s3://freeinference/cloud-agent/sandbox to save the bucket and prefix together. Required for sandbox deletion; the completed archive is verified before removal. Empty disables deletion.",
     ),
     Setting(
@@ -632,6 +708,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Sandbox archives",
         "",
         env="AGENT_SANDBOX_ARCHIVE_S3_REGION",
+        check=_s3_region,
         description="Optional AWS region. Empty uses the control plane's standard AWS SDK configuration.",
     ),
     Setting(
@@ -641,6 +718,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_SANDBOX_ARCHIVE_S3_ENDPOINT",
         url=True,
+        https_only=True,
         description="Optional HTTPS S3-compatible endpoint supporting conditional PUT and full-object SHA-256 checksums. Empty uses AWS S3.",
     ),
     Setting(
@@ -649,6 +727,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Sandbox archives",
         "sandbox-archives",
         env="AGENT_SANDBOX_ARCHIVE_S3_PREFIX",
+        check=_s3_prefix,
         description="Object key prefix for new deletion requests. Each request has an immutable object; completed receipts retain their original bucket and key.",
     ),
     Setting(
@@ -675,6 +754,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Sign-in",
         "",
         env="GATEWAY_ISSUER",
+        check=_issuer,
         description="Exact issuer signed by the Gateway. Once this database is bound, it cannot be changed here.",
     ),
     Setting(
@@ -684,6 +764,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "",
         env="GATEWAY_JWKS_URL",
         url=True,
+        https_unless_private=True,
     ),
     Setting(
         "session_signing_secret",
@@ -856,11 +937,7 @@ _revision = -1
 def _cipher(key: str) -> Any:
     from cloud_agent.source_control import SourceControlCipher, SourceControlError
 
-    secret = (
-        os.environ.get("AGENT_SETTINGS_ENCRYPTION_KEY")
-        or os.environ.get("AGENT_SESSION_SECRET")
-        or ""
-    )
+    secret = settings_root_key()
     if len(secret.encode()) < 32:
         raise SourceControlError(
             "A settings encryption key of at least 32 bytes is required to store secret settings"
@@ -1206,11 +1283,7 @@ def setup_status(values: Mapping[str, SettingValue]) -> dict[str, Any]:
                 "missing": missing,
             }
         )
-    root_key = (
-        os.environ.get("AGENT_SETTINGS_ENCRYPTION_KEY")
-        or os.environ.get("AGENT_SESSION_SECRET")
-        or ""
-    )
+    root_key = settings_root_key()
     bootstrap_missing = []
     if len(root_key.encode()) < 32:
         bootstrap_missing.append(

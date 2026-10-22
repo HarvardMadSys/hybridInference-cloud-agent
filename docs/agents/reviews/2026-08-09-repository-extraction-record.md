@@ -6,7 +6,7 @@
 > it deliberately left open — see "Deferred behaviour register" and "Open
 > decisions". It is no longer a live task list.
 >
-> The rules that governed the move are retired; [AGENTS.md](AGENTS.md) § 5 says
+> The rules that governed the move are retired; [AGENTS.md](../../../AGENTS.md) § 5 says
 > which of them are permanent. The "Landed here" table at the bottom is the
 > answer to "what is actually done" — the plan describes intent, this describes
 > reality.
@@ -410,7 +410,7 @@ snapshot — `main` is a fast-forward mirror of `dev`
 (`.github/workflows/sync-main.yml`), so which branch a router is on moves under
 the claim. `info.x-source` is now a historical "written from" marker; the current
 status, and what to do when the gateway changes a router, is in
-[`gateway_contracts/README.md`](gateway_contracts/README.md).
+[`gateway_contracts/README.md`](../../../gateway_contracts/README.md).
 
 `tests/unit/test_contracts.py` goes past C8's stated acceptance ("YAMLs lint").
 It also checks every cited consumer test exists — two plausible-looking test

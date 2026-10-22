@@ -14,25 +14,23 @@ refuses any mount): the copy travels with the chat when its layer is archived
 or restored, and the host can drop its download without breaking the chat.
 
 The files come from the host's own runtime image through a stopped,
-networkless source container — the same path the Kilo runtime takes — and are
-activated only if every one is root-owned and writable by root alone, so no
-member can change the CLI another member runs.
+networkless source container (``tree_copy``, which the Kilo runtime uses
+too), and are activated only if every one is root-owned and writable by root
+alone, so no member can change the CLI another member runs.
 """
 
 from __future__ import annotations
 
 import secrets
-import subprocess
-from typing import TYPE_CHECKING, BinaryIO, cast
+from typing import TYPE_CHECKING
 
 from cloud_agent_host.runtime_images import (
-    SOURCE_LABEL,
-    WORK_LABEL,
     discover,
     image_id,
     short_id,
 )
 from cloud_agent_host.sandbox import runtime_bin_dir
+from cloud_agent_host.tree_copy import has_root_marker, staged_tree
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 
@@ -107,87 +105,18 @@ def ensure_downloaded_runtime(
     if version in manager.backend.image_menu().get(runtime_id, []):
         return
     prefix = runtime_bin_dir(runtime_id, version).removesuffix("/bin")
-    marker = f"{prefix}/{MARKER}"
-    present = manager.exec_capture(
-        spec,
-        [
-            "/bin/sh",
-            "-c",
-            'test "$(stat -c %u:%a "$1")" = 0:644 && test "$(cat "$1")" = "$2"',
-            "sh",
-            marker,
-            version,
-        ],
-        workdir="/",
-        timeout_s=20,
-        user_uid=0,
-        user_gid=0,
-    )
-    if present.returncode == 0:
+    if has_root_marker(manager, spec, f"{prefix}/{MARKER}", version):
         return
-
-    docker = manager.backend.docker_binary
-    current = manager._require(spec)
-    source = manager._run(
-        [
-            docker,
-            "create",
-            "--network",
-            "none",
-            # Not install work, whatever the image says. A version kept by an
-            # earlier release carries the work label of the container it was
-            # committed from, and a runner restarting during this copy removes
-            # every container that has it (``RuntimeDownloads``).
-            "--label",
-            f"{WORK_LABEL}=",
-            # A copy source, so one this process dies before removing is
-            # removed once it is too old to be a copy still running.
-            "--label",
-            f"{SOURCE_LABEL}={manager.backend.sandbox_namespace}",
-            "--entrypoint",
-            "/bin/true",
-            _source_image(manager, runtime_id, version),
-        ],
-        timeout=60,
-    )
-    if source.returncode != 0:
-        raise SandboxError(f"could not read the downloaded {runtime_id} {version}")
-    source_id = source.stdout.strip()
     stage = f"/opt/runtimes/{runtime_id}/.install-{secrets.token_hex(8)}"
-    try:
-        made = manager.exec_capture(
-            spec,
-            ["mkdir", "-m", "0755", stage],
-            workdir="/",
-            timeout_s=20,
-            user_uid=0,
-            user_gid=0,
-        )
-        if made.returncode != 0:
-            raise SandboxError(f"could not prepare {runtime_id} {version} in this chat")
-        # Streamed, not buffered: a CLI is a few hundred megabytes. Root
-        # ownership stays in Docker's archive the whole way.
-        reader = subprocess.Popen(
-            [docker, "cp", f"{source_id}:{prefix}", "-"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-        try:
-            copied = manager._run_bytes(
-                [docker, "cp", "-", f"{current.container_id}:{stage}"],
-                timeout=_COPY_TIMEOUT_S,
-                stdin=cast("BinaryIO", reader.stdout),
-            )
-        finally:
-            if reader.stdout is not None:
-                reader.stdout.close()
-            try:
-                read = reader.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                reader.kill()
-                read = -1
-        if read != 0 or copied.returncode != 0:
-            raise SandboxError(f"could not copy {runtime_id} {version} into this chat")
+    with staged_tree(
+        manager,
+        spec,
+        image=lambda: _source_image(manager, runtime_id, version),
+        source=prefix,
+        stage=stage,
+        what=f"{runtime_id} {version}",
+        copy_timeout_s=_COPY_TIMEOUT_S,
+    ):
         activated = manager.exec_capture(
             spec,
             ["/usr/bin/python3", "-I", "-c", _ACTIVATE, stage, prefix, version, MARKER],
@@ -202,8 +131,3 @@ def ensure_downloaded_runtime(
             raise SandboxError(
                 f"could not activate {runtime_id} {version} in this chat: " + detail.strip()[-300:]
             )
-    finally:
-        manager.exec_capture(
-            spec, ["rm", "-rf", stage], workdir="/", timeout_s=60, user_uid=0, user_gid=0
-        )
-        manager._run([docker, "rm", source_id], timeout=30)

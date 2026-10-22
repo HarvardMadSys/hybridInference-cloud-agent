@@ -36,7 +36,7 @@ nothing. That is the correct failure, but it is a failure, not a working path.
 **Re-keying invalidates every token in flight.** That is a cutover concern, not
 a bug: an attempt holding a token signed by the old root is an attempt from
 before the migration, and it must not keep writing to the new store. Drain
-before cutover; see MIGRATION.md.
+before cutover; see the repository extraction record.
 """
 
 from __future__ import annotations

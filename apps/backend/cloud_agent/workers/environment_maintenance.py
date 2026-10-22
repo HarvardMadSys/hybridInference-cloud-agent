@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
-if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
-from cloud_agent.logging_utils import get_logger
-
-logger = get_logger("cloud_agent.app")
+from cloud_agent.workers.periodic import run_every, run_pass
 
 
 class _EnvironmentMaintenance(Protocol):
@@ -29,34 +23,6 @@ ENVIRONMENT_MAINTENANCE_INTERVAL_S = 30.0
 ENVIRONMENT_MAINTENANCE_DEADLINE_S = ENVIRONMENT_MAINTENANCE_INTERVAL_S
 
 
-async def _run_pass(
-    name: str,
-    operation: Callable[[], Awaitable[None]],
-    *,
-    deadline_seconds: float,
-) -> None:
-    display_name = name.replace("_", " ").capitalize()
-    try:
-        async with asyncio.timeout(deadline_seconds):
-            await operation()
-    except TimeoutError:
-        logger.warning(
-            "%s maintenance sweep timed out",
-            display_name,
-            extra={
-                "event": f"agent_{name}_maintenance_timeout",
-                "deadline_seconds": deadline_seconds,
-            },
-        )
-    except Exception:
-        logger.warning(
-            "%s maintenance sweep failed",
-            display_name,
-            exc_info=True,
-            extra={"event": f"agent_{name}_maintenance_failed"},
-        )
-
-
 async def run_environment_maintenance(
     environments: _EnvironmentMaintenance,
     snapshots: _SnapshotMaintenance,
@@ -71,15 +37,21 @@ async def run_environment_maintenance(
     snapshot query cannot suppress environment-run cleanup. Neither can delay
     attempt lease recovery, and both remain cancellable at shutdown.
     """
-    while True:
-        await asyncio.sleep(interval_seconds)
-        await _run_pass(
-            "environment",
+
+    async def expire_runs() -> None:
+        await run_pass(
             environments.maintain_environments,
             deadline_seconds=deadline_seconds,
+            description="Environment maintenance sweep",
+            event="agent_environment_maintenance",
         )
-        await _run_pass(
-            "environment_snapshot",
+
+    async def retire_snapshots() -> None:
+        await run_pass(
             snapshots.maintain,
             deadline_seconds=deadline_seconds,
+            description="Environment snapshot maintenance sweep",
+            event="agent_environment_snapshot_maintenance",
         )
+
+    await run_every(interval_seconds, expire_runs, retire_snapshots)

@@ -1424,7 +1424,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
 
     async def get_thread_for_job(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         job = self.jobs.get(job_id)
-        if job is None or job["user_id"] != user_id:
+        # The real read joins the thread and refuses a deleted conversation.
+        if job is None or job["user_id"] != user_id or job.get("deleted_at") is not None:
             return None
         thread_id = job["thread_id"]
         jobs = sorted(
@@ -1457,7 +1458,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
 
     async def thread_stats_inputs(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         job = self.jobs.get(job_id)
-        if job is None or job["user_id"] != user_id:
+        # The real read joins the thread and refuses a deleted conversation.
+        if job is None or job["user_id"] != user_id or job.get("deleted_at") is not None:
             return None
         thread_id = job["thread_id"]
         thread_jobs = sorted(
@@ -1521,7 +1523,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
     ) -> list[dict[str, Any]] | None:
         """Every event of the containing thread, labelled by turn."""
         job = self.jobs.get(job_id)
-        if job is None or job.get("user_id") != user_id:
+        # The real read joins the thread and refuses a deleted conversation.
+        if job is None or job.get("user_id") != user_id or job.get("deleted_at") is not None:
             return None
         thread_id = job.get("thread_id")
         turns = {
@@ -2139,6 +2142,12 @@ class _FakeGateway:
         """
         return list(_TEST_MODELS), dict(self.aliases)
 
+    async def model_catalog_bundle(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+        """The one-read admission bundle (issue #781): names, aliases, efforts."""
+        return list(_TEST_MODELS), dict(self.aliases), await self.model_reasoning_efforts(user_id)
+
     async def model_reasoning_efforts(self, user_id: str) -> dict[str, list[str]]:
         """Which models take a reasoning effort, and which values.
 
@@ -2625,6 +2634,39 @@ async def test_thread_stats_are_owner_scoped(client: AsyncClient, store: FakeSto
     assert response.status_code == 404
 
 
+async def test_thread_reads_answer_from_the_owner_scoped_query_alone(
+    client: AsyncClient, store: FakeStorage
+):
+    """Thread, stats, and event pages fence and serve in one owner-scoped read.
+
+    The query that serves each read is already scoped to the caller's own,
+    undeleted job, so a whole-job fetch before it — sandbox subqueries,
+    skill summaries, conversation state — buys the handler nothing: it
+    discards the row. Someone else's job and a missing one must stay one
+    indistinguishable 404.
+    """
+    job_id = await _create_job(client)
+    foreign_id = await _create_job(client)
+    store.jobs[foreign_id]["user_id"] = _OTHER
+    whole_job = store.conversation_queries.get_job
+    calls = {"whole_job": 0}
+
+    async def counting_get_job(job_id: str):
+        calls["whole_job"] += 1
+        return await whole_job(job_id)
+
+    store.conversation_queries.get_job = counting_get_job
+
+    for suffix in ("/thread", "/thread/stats", "/thread/events"):
+        owned = await client.get(f"/v1/agent/jobs/{job_id}{suffix}")
+        assert owned.status_code == 200, (suffix, owned.text)
+        foreign = await client.get(f"/v1/agent/jobs/{foreign_id}{suffix}")
+        assert foreign.status_code == 404, suffix
+        missing = await client.get(f"/v1/agent/jobs/ajob_missing{suffix}")
+        assert missing.status_code == 404, suffix
+    assert calls["whole_job"] == 0
+
+
 async def test_thread_stats_answer_a_thread_that_never_ran(client: AsyncClient):
     """A queued thread has no events yet and still renders a bar."""
     job_id = await _create_job(client)
@@ -2970,7 +3012,7 @@ async def test_create_fails_fast_on_a_model_this_deployment_cannot_serve(client:
 @pytest.mark.parametrize(
     ("read", "choices"),
     [
-        ("model_catalog_with_aliases", {}),
+        ("model_catalog_bundle", {}),
         ("model_reasoning_efforts", {"reasoning_effort": "high"}),
     ],
     ids=["model", "effort"],
@@ -3937,7 +3979,7 @@ async def test_expired_browser_jwt_is_not_reinterpreted_as_api_key(store: FakeSt
 # ``update_key_last_used``. The API-key branch was deleted on 2026-08-04 — it
 # had no producer here and never will — so the case has no subject left and
 # passed only because it injected the store production never has. Recorded in
-# MIGRATION.md's "Discarded tests" register, which also says where the property
+# the extraction record's "Discarded tests" register, which also says where the property
 # lives now: the gateway, which still authenticates API keys for its own
 # surfaces.
 
@@ -5945,7 +5987,7 @@ async def test_terminal_stream_drains_beyond_one_page(client: AsyncClient, store
 # The case below is its in-place replacement. The full record — the original's
 # four assertions, which three of them the replacement keeps verbatim, and why
 # "does not parse at all" is stronger than "parses with a narrow scope" — is
-# MIGRATION.md § Discarded tests → "`test_agent_jobs_api.py` — two cases E9
+# the extraction record § Discarded tests → "`test_agent_jobs_api.py` — two cases E9
 # replaced in place (E7/E8/E9)", case 1. Ratified 2026-08-04.
 
 
@@ -5985,7 +6027,7 @@ async def test_the_claim_hands_over_a_gateway_grant_not_a_minted_token(
 # The case below is its in-place replacement: same four endpoints, same
 # positive control, line-for-line identical otherwise. The full record — and
 # the note that ``_worker_claims``' 403 scope branch lost its only test with
-# the original — is MIGRATION.md § Discarded tests → "`test_agent_jobs_api.py`
+# the original — is the extraction record § Discarded tests → "`test_agent_jobs_api.py`
 # — two cases E9 replaced in place (E7/E8/E9)", case 2. Ratified 2026-08-04.
 
 
@@ -6029,7 +6071,7 @@ async def test_the_sandbox_grant_cannot_write_job_state(client: AsyncClient):
 # ``insufficient_scope`` on ``/v1/agent/jobs``) and, for the worker surface,
 # ``test_the_sandbox_grant_cannot_write_job_state`` (the in-place replacement
 # for ``test_sandbox_token_cannot_write_job_state``; 401 against the gateway
-# grant the sandbox now carries). Recorded in MIGRATION.md's discarded-test
+# grant the sandbox now carries). Recorded in the extraction record's discarded-test
 # register.
 
 
@@ -8319,7 +8361,7 @@ async def test_web_search_provider_enables_mcp_without_exposing_keys(
     monkeypatch.setattr(
         worker.web_search,
         "text_setting",
-        lambda key, fallback="": values.get(key, fallback),
+        lambda key: values[key],
     )
     created = await client.post("/v1/agent/jobs", json=_job_body(runtime=runtime))
     assert created.status_code == 201, created.text

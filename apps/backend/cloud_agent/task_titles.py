@@ -19,10 +19,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-TITLE_MAX_CHARS = 36
-_INPUT_MAX_CHARS = 4000
-_TIMEOUT_S = 10.0
-_TOTAL_TIMEOUT_S = 120.0
 # Five calls at most, including the initial one. A cold route can become ready
 # while the agent is starting; a later turn gets another chance if it does not.
 _RETRY_DELAYS_S = (0.0, 2.0, 5.0, 15.0, 30.0)
@@ -35,7 +31,7 @@ Return only one plain-text title on one line, without quotes, markdown, labels, 
 
 
 def _shorten_title(value: str) -> str:
-    max_chars = integer_setting("task_titles.max_chars", TITLE_MAX_CHARS)
+    max_chars = integer_setting("task_titles.max_chars")
     if len(value) <= max_chars:
         return value
     return value[: max_chars - 1].rstrip() + "…"
@@ -116,9 +112,9 @@ async def generate_thread_title(
     if not base_url or not sandbox_token or not model:
         return
     headers = {"Authorization": f"Bearer {sandbox_token}"}
-    request_timeout = number_setting("task_titles.timeout_seconds", _TIMEOUT_S)
-    total_timeout = number_setting("task_titles.total_timeout_seconds", _TOTAL_TIMEOUT_S)
-    max_attempts = integer_setting("task_titles.max_attempts", len(_RETRY_DELAYS_S))
+    request_timeout = number_setting("task_titles.timeout_seconds")
+    total_timeout = number_setting("task_titles.total_timeout_seconds")
+    max_attempts = integer_setting("task_titles.max_attempts")
     timeout = httpx.Timeout(request_timeout, connect=min(3.0, request_timeout))
     try:
         # Bound the entire background task as well as each request. Never keep
@@ -142,21 +138,17 @@ async def generate_thread_title(
                         {
                             "role": "system",
                             "content": _SYSTEM_PROMPT.format(
-                                title_max_chars=integer_setting(
-                                    "task_titles.max_chars", TITLE_MAX_CHARS
-                                )
+                                title_max_chars=integer_setting("task_titles.max_chars")
                             ),
                         },
                         {
                             "role": "user",
-                            "content": prompt[
-                                : integer_setting("task_titles.input_max_chars", _INPUT_MAX_CHARS)
-                            ],
+                            "content": prompt[: integer_setting("task_titles.input_max_chars")],
                         },
                     ],
                     "stream": False,
                     # Leave room for models whose budget includes reasoning.
-                    "max_tokens": integer_setting("task_titles.max_tokens", 256),
+                    "max_tokens": integer_setting("task_titles.max_tokens"),
                 }
                 try:
                     async with asyncio.timeout(request_timeout):

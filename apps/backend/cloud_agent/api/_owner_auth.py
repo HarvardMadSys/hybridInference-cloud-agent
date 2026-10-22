@@ -68,7 +68,7 @@ async def authenticate_agent_owner(
     key". A branch with no producer answers 503 in every real deployment while
     looking implemented, and invites a later reader to "fix" it by reaching
     back into the gateway's database — the coupling this split exists to
-    remove. Its ported test is recorded in MIGRATION.md's discarded register.
+    remove. Its ported test is recorded in the extraction record's discarded register.
     Restoring a programmatic owner credential means adding a gateway contract
     under ``gateway_contracts/``, not resurrecting this.
 

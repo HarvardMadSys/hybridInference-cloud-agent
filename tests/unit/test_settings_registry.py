@@ -331,6 +331,21 @@ def test_https_integrations_refuse_unusable_urls(key, url):
     assert "sensitive" not in str(cause.value)
 
 
+def test_a_url_policy_is_declared_only_on_url_settings():
+    """The HTTPS and mailto policies are checked as part of a URL's own check.
+
+    Declared on a setting that is not a URL, one would be ignored without a
+    word, and the value it was meant to restrict would be accepted as text.
+    """
+    misdeclared = [
+        definition.key
+        for definition in settings.SETTINGS
+        if (definition.https_only or definition.https_unless_private or definition.mailto)
+        and not definition.url
+    ]
+    assert misdeclared == []
+
+
 @pytest.mark.parametrize(
     ("key", "url"),
     [

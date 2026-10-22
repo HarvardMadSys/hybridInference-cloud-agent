@@ -8,6 +8,7 @@ hosts look for it. ``tests/external`` runs the same steps against real Docker.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import re
@@ -18,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host import runtime_downloads, runtime_images, runtime_install
+from cloud_agent_host import runtime_downloads, runtime_images, runtime_install, tree_copy
 from cloud_agent_host.chat_sandbox_models import (
     CHAT_NAMESPACE_LABEL,
     CHAT_RUNTIME_LABEL,
@@ -1043,6 +1044,8 @@ class FakeManager:
         return SimpleNamespace(returncode=0, stderr=b"")
 
     def _require(self, _spec):
+        # The real one is a ``docker container inspect``: recorded with Docker's other calls.
+        subprocess.run(["docker", "container", "inspect", "chat"], check=False)
         return SimpleNamespace(container_id="chat-container")
 
     def _run(self, argv, *, timeout):
@@ -1071,7 +1074,7 @@ def downloaded(monkeypatch):
         def wait(self, timeout=None):
             return 0
 
-    monkeypatch.setattr(runtime_install.subprocess, "Popen", Reader)
+    monkeypatch.setattr(tree_copy.subprocess, "Popen", Reader)
     return fake
 
 
@@ -1114,9 +1117,60 @@ def test_a_tree_that_is_not_root_owned_is_refused(downloaded):
     assert manager.runs[-1] == ["docker", "rm", "source-container"]
 
 
+def test_a_cleanup_that_fails_still_removes_the_source_and_hides_no_failure(downloaded):
+    """Removing the stage times out, as in a chat stopped mid-copy, and so does the source."""
+
+    class Stuck(FakeManager):
+        def exec_capture(self, spec, argv, **kwargs):
+            if argv[0] == "rm":
+                raise SandboxError("chat sandbox exec failed: timed out")
+            return super().exec_capture(spec, argv, **kwargs)
+
+        def _run(self, argv, *, timeout):
+            ran = super()._run(argv, timeout=timeout)
+            if argv[1] == "rm":
+                raise SandboxError("Docker lifecycle command failed: timed out")
+            return ran
+
+    manager = Stuck(activate_exit=1)
+    # The caller hears why the copy failed, not why its cleanup did…
+    with pytest.raises(SandboxError, match=r"could not activate claude-code 2\.1\.300"):
+        runtime_install.ensure_downloaded_runtime(manager, None, "claude-code", "2.1.300")
+    # …and the source is still removed after the stage could not be.
+    assert manager.runs[-1] == ["docker", "rm", "source-container"]
+
+
+def test_a_copy_that_cannot_start_fails_as_the_copy_and_still_cleans_up(downloaded, monkeypatch):
+    """A ``docker cp`` that cannot even start fails the copy, as one that exits non-zero does."""
+
+    def no_process(argv, **_kwargs):
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr(tree_copy.subprocess, "Popen", no_process)
+    manager = FakeManager()
+    with pytest.raises(SandboxError, match=r"could not copy claude-code 2\.1\.300 into this chat"):
+        runtime_install.ensure_downloaded_runtime(manager, None, "claude-code", "2.1.300")
+    assert manager.copies == []
+    assert manager.execs[-1][0][:2] == ["rm", "-rf"]
+    assert manager.runs[-1] == ["docker", "rm", "source-container"]
+
+
 def test_a_version_this_host_never_downloaded_says_how_to_fix_it(downloaded):
     with pytest.raises(SandboxError, match="update the agent again"):
         runtime_install.ensure_downloaded_runtime(FakeManager(), None, "claude-code", "2.1.301")
+
+
+def test_a_chat_gone_mid_call_says_so_before_any_image_is_looked_up(downloaded):
+    """Even for a version this host never downloaded: the chat is what went missing."""
+
+    class Gone(FakeManager):
+        def _require(self, spec):
+            super()._require(spec)
+            raise SandboxError("chat sandbox is missing")
+
+    with pytest.raises(SandboxError, match="chat sandbox is missing"):
+        runtime_install.ensure_downloaded_runtime(Gone(), None, "claude-code", "2.1.301")
+    assert downloaded.calls == [["container", "inspect", "chat"]]
 
 
 def test_a_runner_restarting_mid_copy_leaves_the_copy_alone(downloaded):

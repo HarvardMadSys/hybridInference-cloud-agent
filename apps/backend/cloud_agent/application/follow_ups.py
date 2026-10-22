@@ -21,14 +21,16 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import HTTPException
 
 from cloud_agent.application.job_admission import (
-    _require_offered_effort,
-    _require_registered_runtime,
-    _require_resolvable_model,
-    _resolve_attachment_selection,
-    _resolve_skill_selection,
+    model_catalog_unavailable,
+    require_offered_effort,
+    require_registered_runtime,
+    require_resolvable_model,
+    resolve_attachment_selection,
+    resolve_skill_selection,
 )
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.schemas import RESET_REASONING_EFFORT
+from cloud_agent.visible_models import ModelCatalogUnavailable, agent_model_catalog_bundle
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -127,7 +129,7 @@ async def prepare_follow_up(
     # working; a *different* runtime is refused rather than silently starting
     # a turn the thread's memory cannot follow.
     if runtime is not None:
-        _require_registered_runtime(runtime)
+        require_registered_runtime(runtime)
         if runtime != parent["runtime"]:
             raise HTTPException(
                 status_code=400,
@@ -144,10 +146,19 @@ async def prepare_follow_up(
             )
     # A follow-up may switch models; the switched-to model gets the same
     # fail-fast as a fresh job. An omitted model inherits the parent's, which
-    # was validated when it was chosen.
+    # was validated when it was chosen. One catalog read serves both the
+    # model resolution and the effort check when both are needed (issue #781);
+    # the read happens lazily so an inherit-both follow-up pays none.
     canonical = None
+    catalog: tuple[list[str], dict[str, str], dict[str, list[str]]] | None = None
     if model:
-        canonical = await _require_resolvable_model(model, gateway=gateway, user=user)
+        try:
+            catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
+        except ModelCatalogUnavailable:
+            raise model_catalog_unavailable() from None
+        canonical = await require_resolvable_model(
+            model, gateway=gateway, user=user, catalog=catalog
+        )
     # Effort is per turn, like the model, and inherits when omitted. Unlike the
     # model it needs a way *back*: null already means "no override, inherit", so
     # clearing an inherited effort takes the explicit reset sentinel. Validated
@@ -156,12 +167,13 @@ async def prepare_follow_up(
     effort: str | None = None
     reset_effort = reasoning_effort == RESET_REASONING_EFFORT
     if reasoning_effort is not None and not reset_effort:
-        effort = await _require_offered_effort(
+        effort = await require_offered_effort(
             reasoning_effort,
             runtime=parent["runtime"],
             model=canonical or parent["model"],
             gateway=gateway,
             user=user,
+            efforts=catalog[2] if catalog is not None else None,
         )
     try:
         # A temporary workspace has no repository to lose access to.
@@ -181,11 +193,11 @@ async def prepare_follow_up(
     # work. The runner receives only usable servers, resolved when it claims
     # this turn, and Tools retains each connection's diagnosis.
     skills = (
-        await _resolve_skill_selection(store.skills, user_id=user["user_id"], skill_ids=skill_ids)
+        await resolve_skill_selection(store.skills, user_id=user["user_id"], skill_ids=skill_ids)
         if skill_ids is not None
         else None
     )
-    attachments = await _resolve_attachment_selection(
+    attachments = await resolve_attachment_selection(
         store.attachments, user_id=user["user_id"], attachment_ids=attachment_ids
     )
     return PreparedFollowUp(

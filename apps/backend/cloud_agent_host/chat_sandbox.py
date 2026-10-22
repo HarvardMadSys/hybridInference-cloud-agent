@@ -112,6 +112,7 @@ from cloud_agent_host.guest_observer import (
     GuestObserverSnapshot,
 )
 from cloud_agent_host.guest_observer_locks import GuestObserverLocks
+from cloud_agent_host.install_locks import install_lock
 from cloud_agent_host.network_guard import GUARD_RECHECK_S
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
@@ -403,7 +404,6 @@ class ChatSandboxManager:
     def __init__(self, backend: ContainerBackend) -> None:
         self.backend = backend
         self._network_lifecycle = ChatSandboxNetwork(self)
-        self._member_reaper_lock = threading.Lock()
         # Multiple fork siblings may admit turns concurrently. Singleton
         # observer startup/rotation and its live cursors therefore need one
         # critical section per container; other containers do not wait on it.
@@ -1584,7 +1584,7 @@ class ChatSandboxManager:
 
     def ensure_member_process_reaper(self, spec: ChatSandboxSpec) -> None:
         """Install the immutable helper into retained pre-upgrade containers."""
-        with self._member_reaper_lock:
+        with install_lock(spec.container_name):
             probe = self.exec_capture(
                 spec,
                 [
@@ -1675,21 +1675,21 @@ class ChatSandboxManager:
         """Bring retained Kilo members onto the deployment's isolated runtime."""
         from cloud_agent_host.kilo_mcp import ensure_kilo_runtime
 
-        with self._member_reaper_lock:
+        with install_lock(spec.container_name):
             ensure_kilo_runtime(self, spec, version)
 
     def ensure_downloaded_runtime(self, spec: ChatSandboxSpec, runtime: str, version: str) -> None:
         """Copy a version downloaded after the image was built into this chat."""
         from cloud_agent_host.runtime_install import ensure_downloaded_runtime
 
-        with self._member_reaper_lock:
+        with install_lock(spec.container_name):
             ensure_downloaded_runtime(self, spec, runtime, version)
 
     def ensure_mcp_helpers(self, spec: ChatSandboxSpec, runtime: str) -> None:
         """Keep existing conversations on the same adapters as new conversations."""
         from cloud_agent_host.mcp_helpers import install_mcp_helpers
 
-        with self._member_reaper_lock:
+        with install_lock(spec.container_name):
             install_mcp_helpers(self, spec, runtime)
 
     def reap_member_processes(

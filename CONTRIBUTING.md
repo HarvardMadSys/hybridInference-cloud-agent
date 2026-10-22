@@ -25,8 +25,8 @@ becomes the commit subject on `dev`. `main` advances through the manual
 
 Treat every commit as public. Never commit secrets, tokens, or keys. Before
 submitting, use the [PR checklist](.github/pull_request_template.md) to review
-the diff. [MIGRATION.md](MIGRATION.md) documents the completed repository
-extraction. Its move-only restrictions are historical, but the service and
+the diff. The [repository extraction record](docs/agents/reviews/2026-08-09-repository-extraction-record.md)
+documents the completed repository extraction. Its move-only restrictions are historical, but the service and
 security boundaries in `AGENTS.md` still apply.
 
 ## Checks before review

@@ -9,12 +9,12 @@ from typing import Any
 import pytest
 
 from cloud_agent.attachments.models import (
-    MAX_ATTACHMENT_FILES,
     MAX_ATTACHMENT_PATH_LENGTH,
     MAX_THREAD_ATTACHMENT_BYTES,
     MAX_THREAD_ATTACHMENT_FILES,
     SANDBOX_UPLOAD_DIR,
     AttachmentError,
+    attachment_max_files,
     check_paths,
     check_thread_total,
     current_uploads,
@@ -360,9 +360,9 @@ def test_the_claim_measures_the_upload_archive_exactly(files: list[tuple[str, by
 
 def test_the_server_bounds_the_selection_as_well_as_the_browser() -> None:
     """A browser check is a convenience; this one is the boundary."""
-    check_selection([_row(i, f"{i}.txt") for i in range(MAX_ATTACHMENT_FILES)])
+    check_selection([_row(i, f"{i}.txt") for i in range(attachment_max_files())])
     with pytest.raises(AttachmentError):
-        check_selection([_row(i, f"{i}.txt") for i in range(MAX_ATTACHMENT_FILES + 1)])
+        check_selection([_row(i, f"{i}.txt") for i in range(attachment_max_files() + 1)])
     with pytest.raises(AttachmentError):
         check_selection([_row(1, "big", size=21 * 1024 * 1024)])
 

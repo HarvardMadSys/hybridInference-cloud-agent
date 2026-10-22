@@ -322,7 +322,14 @@ class HostNetworkGuard:
         self.docker_binary = docker_binary
         self._helper_image = helper_image
         self._run = run or _run
+        #: Held across every helper run and the record kept of it, so kernel
+        #: writes and what this guard remembers of them never interleave.
         self._lock = threading.RLock()
+        #: Guards ``_verified_at``, ``_held`` and ``_relays_written``, and is
+        #: never held across a helper: a check that a fresh verification or a
+        #: fresh relay record answers does not wait behind another bridge's
+        #: helper run. Taken after ``_lock`` when both are needed, never before.
+        self._state = threading.Lock()
         self._verified_at: float | None = None
         self._held: dict[str, _HeldRelays] = {}
         #: The SSH exceptions this guard last wrote for each bridge, with the
@@ -343,14 +350,17 @@ class HostNetworkGuard:
         Returns what the read-back showed each bridge holding, or ``None``
         when the last verification still stood and nothing was read.
         """
-        with self._lock:
-            now = time.monotonic()
-            if self._verified_at is not None and now - self._verified_at < max_age_s:
+        with self._state:
+            if self._verified_within(max_age_s):
                 return None
-            self._verified_at = None
-            # Remembered exceptions survive only if the read-back after this
-            # install shows them still held.
-            held, self._held = self._held, {}
+        with self._lock:
+            with self._state:
+                if self._verified_within(max_age_s):
+                    return None
+                self._verified_at = None
+                # Remembered exceptions survive only if the read-back after this
+                # install shows them still held.
+                held, self._held = self._held, {}
             rendered = render_ruleset(self.network)
             read_at = time.monotonic()
             listings = self._batch(
@@ -359,10 +369,15 @@ class HostNetworkGuard:
             self._verify(rendered, listings=listings[:-1])
             self._refuse_overlapping_pools(listing=listings[-1])
             self._refuse_overlapping_routes()
-            self._held = held
-            self._observe_relays(listings[: len(RELAY_FAMILIES)], read_at=read_at)
-            self._verified_at = time.monotonic()
+            with self._state:
+                self._held = held
+                self._observe_relays(listings[: len(RELAY_FAMILIES)], read_at=read_at)
+                self._verified_at = time.monotonic()
             return _read_exceptions(listings[: len(RELAY_FAMILIES)])
+
+    def _verified_within(self, max_age_s: float) -> bool:
+        """Whether the last verification is younger than ``max_age_s``; ``_state`` held."""
+        return self._verified_at is not None and time.monotonic() - self._verified_at < max_age_s
 
     def recheck(self) -> HeldExceptions | None:
         """Read this deployment's tables from the kernel now, and repair them if changed.
@@ -384,17 +399,27 @@ class HostNetworkGuard:
         :meth:`ensure` does: a table reinstalled here, or by another process
         since, holds none of the running groups' exceptions.
         """
-        with self._lock:
+        with self._state:
             verified_at = self._verified_at
+        if verified_at is None:
+            # An install under way clears the verification until its read-back.
+            # Wait for it, so this pass reads the table it leaves.
+            with self._lock, self._state:
+                verified_at = self._verified_at
         if verified_at is not None and time.monotonic() - verified_at < GUARD_RENEW_S:
             try:
                 read_at = time.monotonic()
                 listings = self._list_many(self._verification_reads())
                 self._verify(render_ruleset(self.network), listings=listings)
-                with self._lock:
+                with self._lock, self._state:
                     self._observe_relays(listings[: len(RELAY_FAMILIES)], read_at=read_at)
                 return _read_exceptions(listings[: len(RELAY_FAMILIES)])
             except NetworkGuardError as exc:
+                # Activations stop trusting the rules now, not once another
+                # bridge's helper lets the invalidation below take the lock.
+                with self._state:
+                    self._verified_at = None
+                    self._held = {}
                 logger.warning(
                     "network_guard_rules_changed",
                     extra={
@@ -408,7 +433,7 @@ class HostNetworkGuard:
 
     def invalidate(self) -> None:
         """Forget the last verification, so the next activation reads the kernel."""
-        with self._lock:
+        with self._lock, self._state:
             self._verified_at = None
             self._held = {}
 
@@ -427,9 +452,15 @@ class HostNetworkGuard:
         try:
             with self._lock:
                 self.ensure(max_age_s=GUARD_RENEW_S)
-                verified_at, image = self._verified_at, self._image()
+                with self._state:
+                    verified_at = self._verified_at
+                image = self._image()
         except Exception as exc:
             return {"error": str(exc) or type(exc).__name__}
+        if verified_at is None:
+            # The sweep found the tables changed after that check, which it
+            # may do without the helper lock, and stopped trusting them.
+            return {"error": "the sandbox network rules changed while the turn was handed over"}
         return {"verified_at": verified_at, "helper_image": image}
 
     def adopt(self, verification: object) -> None:
@@ -472,10 +503,11 @@ class HostNetworkGuard:
                 f"ago; a turn accepts a verification for {GUARD_RECHECK_S:.0f}s"
             )
         with self._lock:
-            self._verified_at = float(verified_at)
             self._helper_image = self._helper_image or image
-            # Nothing this guard remembers was read back with that verification.
-            self._held = {}
+            with self._state:
+                self._verified_at = float(verified_at)
+                # Nothing this guard remembers was read back with that verification.
+                self._held = {}
 
     def sync_relays(
         self,
@@ -493,24 +525,17 @@ class HostNetworkGuard:
         """
         self._require_own_bridge(bridge)
         wanted = frozenset((str(address), int(port)) for address, port in endpoints)
-        with self._lock:
-            held = self._held.pop(bridge, None)
-            now = time.monotonic()
-            self._relays_written.pop(bridge, None)
-            if (
-                network_id
-                and held is not None
-                and held.network_id == network_id
-                and held.endpoints == wanted
-                # Never trusted longer than the rules themselves are, nor
-                # longer than the sweep's reads of the kernel keep up.
-                and self._verified_at is not None
-                and now - self._verified_at < GUARD_RECHECK_S
-                and now - held.confirmed_at < HELD_RELAYS_TRUST_S
-            ):
-                self._held[bridge] = held
+        with self._state:
+            if self._relays_held(bridge, wanted, network_id):
                 self._relays_written[bridge] = wanted
                 return
+        with self._lock:
+            with self._state:
+                if self._relays_held(bridge, wanted, network_id):
+                    self._relays_written[bridge] = wanted
+                    return
+                self._held.pop(bridge, None)
+                self._relays_written.pop(bridge, None)
             written_at = time.monotonic()
             self._batch(
                 [],
@@ -521,9 +546,28 @@ class HostNetworkGuard:
                     "wanted": sorted([address, port] for address, port in wanted),
                 },
             )
-            self._relays_written[bridge] = wanted
-            if network_id:
-                self._held[bridge] = _HeldRelays(network_id, wanted, written_at)
+            with self._state:
+                self._relays_written[bridge] = wanted
+                if network_id:
+                    self._held[bridge] = _HeldRelays(network_id, wanted, written_at)
+
+    def _relays_held(
+        self, bridge: str, wanted: frozenset[tuple[str, int]], network_id: str | None
+    ) -> bool:
+        """Whether ``wanted`` is already this network's update, recently confirmed; ``_state`` held."""
+        held = self._held.get(bridge)
+        now = time.monotonic()
+        return bool(
+            network_id
+            and held is not None
+            and held.network_id == network_id
+            and held.endpoints == wanted
+            # Never trusted longer than the rules themselves are, nor
+            # longer than the sweep's reads of the kernel keep up.
+            and self._verified_at is not None
+            and now - self._verified_at < GUARD_RECHECK_S
+            and now - held.confirmed_at < HELD_RELAYS_TRUST_S
+        )
 
     def sync_ssh_targets(
         self,
@@ -553,7 +597,7 @@ class HostNetworkGuard:
 
     def written_relays(self, bridge: str) -> frozenset[tuple[str, int]] | None:
         """The relay exceptions this guard last wrote for one bridge, if any."""
-        with self._lock:
+        with self._state:
             return self._relays_written.get(bridge)
 
     def written_ssh_targets(self, bridge: str) -> tuple[str, frozenset[tuple[str, int]]] | None:
@@ -583,9 +627,10 @@ class HostNetworkGuard:
         """Drop every exception a removed bridge had, relays and SSH alike, in one helper."""
         self._require_own_bridge(bridge)
         with self._lock:
-            self._held.pop(bridge, None)
+            with self._state:
+                self._held.pop(bridge, None)
+                self._relays_written.pop(bridge, None)
             self._ssh_written.pop(bridge, None)
-            self._relays_written.pop(bridge, None)
             self._batch(
                 [],
                 relays={
@@ -792,7 +837,7 @@ class HostNetworkGuard:
         order, read starting at ``read_at``. An exception is confirmed only
         when every table holds exactly what was remembered for its bridge.
         Anything unreadable forgets everything, so the next update reads the
-        kernel itself.
+        kernel itself. The caller holds ``_lock`` and ``_state``.
         """
         try:
             per_family = [

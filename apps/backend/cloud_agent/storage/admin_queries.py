@@ -24,7 +24,7 @@ from cloud_agent.schemas import AttemptResources, ProcessObservation, ToolCallRe
 from cloud_agent.storage._sql.attempts import NEXT_ATTEMPT_START_SQL
 from cloud_agent.storage._sql.ledger import LEDGER_WINDOW_UNTIL_SQL
 from cloud_agent.storage._sql.rows import load_json
-from cloud_agent.thread_stats import _TOKEN_KEY_GROUPS
+from cloud_agent.thread_stats import TOKEN_KEY_GROUPS
 from cloud_agent_shared.turn_resources import summarize_run_resources
 
 if TYPE_CHECKING:
@@ -76,7 +76,7 @@ _RESOURCE_DERIVED_FIELDS = frozenset({"tool_calls", "processes", "turn_summary"}
 # Share exactly the spellings understood by the accounting implementation.
 # Values must also be numbers, so an arbitrary object hidden under a familiar
 # usage key cannot reach the application on a default metadata request.
-_USAGE_KEYS_SQL = ", ".join(f"'{key}'" for group in _TOKEN_KEY_GROUPS for key in group)
+_USAGE_KEYS_SQL = ", ".join(f"'{key}'" for group in TOKEN_KEY_GROUPS for key in group)
 _RESOURCE_FIELDS = tuple(
     key for key in AttemptResources.model_fields if key not in _RESOURCE_DERIVED_FIELDS
 )

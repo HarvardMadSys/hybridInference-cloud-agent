@@ -117,7 +117,9 @@ async def get_agent_thread(
 ) -> AgentThreadResponse:
     """Return the durable conversation containing one of the caller's jobs."""
     job_store = _require_store(store)
-    await _require_owned_job(job_store.conversation_queries, job_id, user)
+    # get_thread_for_job is scoped to the caller's own, undeleted job and
+    # answers the 404 itself; a whole-job fetch ahead of it would be spent
+    # on a row only its user id is read from.
     thread = await job_store.conversation_queries.get_thread_for_job(
         job_id=job_id, user_id=user["user_id"]
     )
@@ -165,7 +167,8 @@ async def get_agent_thread_stats(
     thread's runtime does not report come back ``null`` rather than zero.
     """
     job_store = _require_store(store)
-    await _require_owned_job(job_store.conversation_queries, job_id, user)
+    # thread_stats_inputs is scoped to the caller's own, undeleted job and
+    # answers the 404 itself; see get_agent_thread.
     inputs = await job_store.execution_queries.thread_stats_inputs(
         job_id=job_id, user_id=user["user_id"]
     )
@@ -192,7 +195,8 @@ async def list_agent_thread_events(
 ) -> AgentThreadEventsResponse:
     """Page every turn's event log, with payloads and turn labels intact."""
     job_store = _require_store(store)
-    await _require_owned_job(job_store.conversation_queries, job_id, user)
+    # list_thread_events_after is scoped to the caller's own, undeleted job
+    # and answers the 404 itself; see get_agent_thread.
     events = await job_store.execution_queries.list_thread_events_after(
         job_id=job_id, user_id=user["user_id"], after_id=after, limit=limit
     )

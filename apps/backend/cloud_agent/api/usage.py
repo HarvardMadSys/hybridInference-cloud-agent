@@ -166,8 +166,16 @@ async def get_job_usage(
 ) -> JobUsageResponse:
     """Read cached Gateway snapshots and runtime usage for the same job."""
     job_store = _require_store(store)
-    await _require_owned_job(job_store.conversation_queries, job_id, user)
-    return await _owner_usage(job_store, job_id=job_id, user_id=user["user_id"])
+    # The snapshot read is itself scoped to the caller's own, undeleted job:
+    # None covers another owner's job, a missing one, and a deleted
+    # conversation alike, and one 404 answers all three.
+    usage = await job_usage_response(job_store, job_id=job_id, user_id=user["user_id"])
+    if usage is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
+        )
+    return usage
 
 
 @router.post("/jobs/{job_id}/usage/refresh", response_model=JobUsageResponse)

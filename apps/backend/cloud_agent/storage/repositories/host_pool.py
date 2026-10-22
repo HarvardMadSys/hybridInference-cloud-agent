@@ -1550,7 +1550,7 @@ class PostgresHostPoolRepository:
                 """,
                 expected_deployment_sha,
                 KATA_RUNTIME,
-                number_setting("queue_alert_after_s", 600.0),
+                number_setting("queue_alert_after_s"),
                 archive_required,
                 archive_revision,
                 json.dumps([SANDBOX_ARCHIVE_CAPABILITY]),

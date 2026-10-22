@@ -33,7 +33,7 @@ from cloud_agent.api.deps import (
     get_storage,
     require_store,
 )
-from cloud_agent.application.job_admission import _create_job_as
+from cloud_agent.application.job_admission import create_job_as
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.entitlement import REPO_PATTERN
@@ -95,14 +95,14 @@ class _JobsStorage(Protocol):
     """The capabilities the job surface reaches the store for.
 
     Ten of them, and four are reached through a helper rather than spelled
-    here: `application.job_admission._create_job_as` is typed against
+    here: `application.job_admission.create_job_as` is typed against
     `_JobCreationStorage`, which names `attachments` among them.
 
     Four of these are reached through a helper rather than spelled here,
     and leaving them out is not a narrowing: `cancel_agent_job` hands the whole
     store (through `_resume_terminals_after_cancel`) to
     `_workspace_access._sandbox_manager_for_job`, and `create_agent_job`
-    hands it to `application.job_admission._create_job_as`, which is typed against
+    hands it to `application.job_admission.create_job_as`, which is typed against
     `_JobCreationStorage` (`conversation_commands`, `mcp`, `skills`,
     `source_control`). mypy says so at the call site, which is the point of
     declaring capabilities rather than trusting a reader to trace them.
@@ -169,7 +169,7 @@ async def create_agent_job(
     different content is a 409 ``idempotency_conflict``.
     """
     job_store = _require_store(store)
-    job = await _create_job_as(
+    job = await create_job_as(
         body,
         user,
         job_store=job_store,

@@ -76,14 +76,6 @@ class _Reaping(Protocol):
 REAP_INTERVAL_S = RENEWAL_INTERVAL_S
 
 
-MAX_ATTEMPTS = 3
-
-
-#: Abandoned staged uploads count against staging quota until collected.
-#: Pending-message and job-claimed rows are kept by the repository predicate.
-STAGED_UPLOAD_RETENTION_HOURS = 24
-
-
 #: The gateway refusals that are a verdict on the grant itself.
 #:
 #: Everything else it can say — a wrong dispatch token, an internal API it was
@@ -446,9 +438,7 @@ async def _renew_live_grants(
     # Each coroutine touches only its own grant's entry in `failures` and its
     # own id in `seen`, so the shared state needs no lock — the rows come from
     # one query and a grant id appears once.
-    limit = asyncio.Semaphore(
-        integer_setting("grant_renewal_concurrency", GRANT_RENEWAL_CONCURRENCY)
-    )
+    limit = asyncio.Semaphore(integer_setting("grant_renewal_concurrency"))
 
     async def _renew_bounded(row: dict[str, Any]) -> None:
         async with limit:
@@ -711,9 +701,7 @@ async def _run_attempt_reaper(  # noqa: C901, PLR0912, PLR0915 complexity baseli
         try:
             actions = await store.attempt_commands.reap_expired(
                 max_attempts=(
-                    max_attempts
-                    if max_attempts is not None
-                    else integer_setting("max_attempts", MAX_ATTEMPTS)
+                    max_attempts if max_attempts is not None else integer_setting("max_attempts")
                 )
             )
             await _cleanup_reaped_shared_residencies(store.host_pool, actions, grants)
@@ -797,7 +785,6 @@ async def _run_attempt_reaper(  # noqa: C901, PLR0912, PLR0915 complexity baseli
             await store.attachments.purge_stale_staged(
                 older_than_hours=integer_setting(
                     "attachments.staged_retention_hours",
-                    STAGED_UPLOAD_RETENTION_HOURS,
                 )
             )
         except Exception:

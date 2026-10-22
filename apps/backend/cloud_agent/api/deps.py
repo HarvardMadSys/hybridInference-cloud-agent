@@ -31,7 +31,7 @@ dependencies they asked for there. Three kinds arrive at this module:
   from inside this repository is to reach back into the gateway's database.
   Resolving a key to a user needs a gateway contract in ``gateway_contracts/`` and a
   ``GatewayClient`` method; until one exists the session is the only owner
-  credential. See MIGRATION.md's deferred register and its discarded-test row.
+  credential. See the extraction record's deferred register and its discarded-test row.
 
  - **One contract that did not come across, and is honest about it.**
    ``get_log_store`` named a gateway-side table (``api_logs``). Nothing in this
@@ -69,7 +69,6 @@ from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, setting_env
 from cloud_agent.source_control_runtime import (
-    RETRY_INTERVAL_S,
     GitHubAppState,
     LoadStatus,
     SourceControlRuntime,
@@ -229,9 +228,7 @@ def source_control_unavailable(provider: str) -> HTTPException:
                 "message": f"{name} is temporarily unavailable. Please try again shortly.",
             }
         },
-        headers={
-            "Retry-After": str(int(number_setting("github_reload_interval_s", RETRY_INTERVAL_S)))
-        },
+        headers={"Retry-After": str(int(number_setting("github_reload_interval_s")))},
     )
 
 

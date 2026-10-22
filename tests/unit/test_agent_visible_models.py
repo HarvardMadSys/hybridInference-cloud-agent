@@ -4,7 +4,7 @@ The source's four tests walked a fake route registry — role gates, alias
 resolution, unpublished/disabled/embedding exclusion, visibility-resolver
 overrides. **None of that behaviour lives here**; it stays in the
 gateway, which still owns the registry, and is covered there by
-``tests/unit/test_internal_lookups.py`` (see MIGRATION.md's manifest notes for
+``tests/unit/test_internal_lookups.py`` (see the extraction record's manifest notes for
 the case-by-case record).
 
 What this service can still get wrong is different, and is what these test:
@@ -23,6 +23,7 @@ from cloud_agent.gateway import GatewayClient, GatewayError
 from cloud_agent.visible_models import (
     ModelCatalogUnavailable,
     agent_canonical_model,
+    agent_model_catalog_bundle,
     agent_model_reasoning_efforts,
     agent_model_resolvable,
     agent_visible_models,
@@ -213,6 +214,11 @@ class _UnfilteredGateway:
     async def model_catalog_with_aliases(self, user_id: str) -> tuple[list[str], dict[str, str]]:
         return self._models, self._aliases
 
+    async def model_catalog_bundle(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+        return self._models, self._aliases, {}
+
 
 async def test_an_alias_for_a_model_outside_the_catalog_is_refused() -> None:
     """Even handed one directly, resolution refuses it."""
@@ -269,3 +275,43 @@ async def test_resolvable_accepts_an_alias_again() -> None:
     gateway = _client(_serves(_ALIASED))
 
     assert await agent_model_resolvable("legacy-name", gateway, user_id="user_1") is True
+
+
+async def test_the_admission_bundle_is_one_catalog_read() -> None:
+    """Issue #781: names, aliases, and effort domains come from one response.
+
+    A send path needs the alias table and the effort domains on every job
+    create, follow-up, and queued-message settle; two reads there were two
+    gateway round trips on the user-visible send path. The bundle makes one
+    response serve both, with the same filtering the dedicated readers apply.
+    """
+    payload = {
+        "models": CATALOG,
+        "aliases": {"legacy-name": CATALOG[0]},
+        "reasoning_efforts": {CATALOG[0]: ["high"]},
+    }
+    gateway = _client(_serves(payload))
+
+    models, aliases, efforts = await agent_model_catalog_bundle(gateway, user_id="user_1")
+    assert models == CATALOG
+    assert aliases == {"legacy-name": CATALOG[0]}
+    assert efforts == {CATALOG[0]: ["high"]}
+
+
+async def test_the_admission_bundle_omits_unreachable_models_efforts() -> None:
+    """Effort domains for models outside the catalog are dropped, as the
+    dedicated reader does — a table naming an unreachable model must not
+    resurrect it as offered."""
+    payload = {
+        "models": CATALOG,
+        "reasoning_efforts": {CATALOG[0]: ["high"], "admin-only-model": ["low"]},
+    }
+    gateway = _client(_serves(payload))
+
+    _models, _aliases, efforts = await agent_model_catalog_bundle(gateway, user_id="user_1")
+    assert efforts == {CATALOG[0]: ["high"]}
+
+
+async def test_an_unreadable_catalog_fails_the_bundle_closed() -> None:
+    with pytest.raises(ModelCatalogUnavailable):
+        await agent_model_catalog_bundle(_client(_serves({}, 503)), user_id="user_1")

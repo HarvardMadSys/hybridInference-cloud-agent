@@ -49,6 +49,13 @@ index:
     (Sphinx 9.1 binds `ChineseStemmer`, which nothing defines, and the search
     page then throws before it runs a query).
 
+**What fails and what warns.** A translation that renders wrong -- a block
+start, a structure mismatch, a broken search index -- fails on every page. A
+translation that is only *behind* its English -- fuzzy, stale or missing -- fails
+on the stable pages in :data:`STRICT_PAGES`, and is a warning elsewhere: those
+pages change with the code, the English fallback is correct, and a translator
+catches them up.
+
 Run it against the tree ``make docs`` produces::
 
     python scripts/check_docs_translations.py docs/build/html docs/developer/locale \\
@@ -112,8 +119,16 @@ def _po_entries(text: str) -> list[tuple[str, str, str]]:
 # no catalog and no translated twin to compare against.
 NON_PAGE_STEMS = {"genindex", "search", "py-modindex"}
 
+#: The pages whose translation must keep up with the English: the ones a
+#: newcomer reads first, which change rarely. Every other page's translation may
+#: trail its English, and the check reports that as a warning.
+STRICT_PAGES = frozenset({"index", "development", "code-structure", "security", "contributing"})
 
-def check_catalogs(locale_dir: Path) -> list[str]:
+#: A problem tied to one page: ``(page stem, message)``.
+PageProblem = tuple[str, str]
+
+
+def check_catalogs(locale_dir: Path) -> list[PageProblem]:
     """Report fuzzy entries, which Sphinx silently renders as English."""
     problems = []
     for po in sorted(locale_dir.rglob("*.po")):
@@ -122,26 +137,36 @@ def check_catalogs(locale_dir: Path) -> list[str]:
                 continue
             excerpt = " ".join(msgid.split())[:70]
             problems.append(
-                f"{po}: fuzzy entry renders as English -- {excerpt!r}\n"
-                f"    Update or delete the translation, then drop the `#, fuzzy` line."
+                (
+                    po.stem,
+                    f"{po}: fuzzy entry renders as English -- {excerpt!r}\n"
+                    f"    Update or delete the translation, then drop the `#, fuzzy` line.",
+                )
             )
     return problems
 
 
-def check_coverage(build_dir: Path, locale_dir: Path, languages: list[str]) -> list[str]:
-    """Report pages a language has no catalog for, which render fully in English."""
+def check_coverage(build_dir: Path, locale_dir: Path, languages: list[str]) -> list[PageProblem]:
+    """Report pages a language has no catalog for, which render fully in English.
+
+    A language with no catalogs at all is reported against ``index``, which
+    makes it a failure: no page of that language is translated.
+    """
     problems = []
     pages = {p.stem for p in build_dir.glob("*.html")} - NON_PAGE_STEMS
     for lang in languages:
         messages = locale_dir / lang / "LC_MESSAGES"
         if not messages.is_dir():
-            problems.append(f"{messages}: no catalogs for a language the site publishes")
+            problems.append(("index", f"{messages}: no catalogs for a language the site publishes"))
             continue
         have = {p.stem for p in messages.glob("*.po")}
         for page in sorted(pages - have):
             problems.append(
-                f"{messages}/{page}.po: missing, so the whole page renders in English\n"
-                f"    Run `make docs-translate DOCS_LANG={lang}`."
+                (
+                    page,
+                    f"{messages}/{page}.po: missing, so the whole page renders in English\n"
+                    f"    Run `make docs-translate DOCS_LANG={lang}`.",
+                )
             )
     return problems
 
@@ -172,7 +197,7 @@ def check_block_starts(locale_dir: Path) -> list[str]:
     return problems
 
 
-def check_staleness(gettext_dir: Path, locale_dir: Path, languages: list[str]) -> list[str]:
+def check_staleness(gettext_dir: Path, locale_dir: Path, languages: list[str]) -> list[PageProblem]:
     """Report source strings no catalog entry matches, which render in English."""
     problems = []
     for pot in sorted(gettext_dir.rglob("*.pot")):
@@ -185,9 +210,13 @@ def check_staleness(gettext_dir: Path, locale_dir: Path, languages: list[str]) -
             for msgid in sorted(wanted - have):
                 excerpt = " ".join(msgid.split())[:70]
                 problems.append(
-                    f"{po}: no entry for a string this page now contains, so it "
-                    f"renders in English -- {excerpt!r}\n"
-                    f"    Run `make docs-translate DOCS_LANG={lang}` and translate the new entry."
+                    (
+                        pot.stem,
+                        f"{po}: no entry for a string this page now contains, so it "
+                        f"renders in English -- {excerpt!r}\n"
+                        f"    Run `make docs-translate DOCS_LANG={lang}` and translate the "
+                        "new entry.",
+                    )
                 )
     return problems
 
@@ -282,7 +311,14 @@ def check_search_index(build_dir: Path, languages: list[str]) -> list[str]:
     return problems
 
 
-def main() -> int:
+def split_by_page(behind: list[PageProblem]) -> tuple[list[str], list[str]]:
+    """Separate failures, on :data:`STRICT_PAGES`, from warnings on every other page."""
+    problems = [message for page, message in behind if page in STRICT_PAGES]
+    warnings = [message for page, message in behind if page not in STRICT_PAGES]
+    return problems, warnings
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("build_dir", type=Path, help="root of the built site (English at its top)")
     parser.add_argument("locale_dir", type=Path, help="docs/developer/locale")
@@ -293,7 +329,7 @@ def main() -> int:
         "staleness check is skipped, and an English edit that was never merged "
         "into the catalogs goes unreported.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not args.build_dir.is_dir():
         print(f"error: {args.build_dir} does not exist -- run `make docs` first", file=sys.stderr)
@@ -314,22 +350,32 @@ def main() -> int:
         print("No translated language directories in the build; nothing to check.")
         return 0
 
-    problems = (
-        check_catalogs(args.locale_dir)
-        + check_block_starts(args.locale_dir)
-        + check_coverage(args.build_dir, args.locale_dir, languages)
-        + check_structure(args.build_dir, languages)
-        + check_search_index(args.build_dir, languages)
+    behind = check_catalogs(args.locale_dir) + check_coverage(
+        args.build_dir, args.locale_dir, languages
     )
     if args.gettext_dir and args.gettext_dir.is_dir():
-        problems += check_staleness(args.gettext_dir, args.locale_dir, languages)
+        behind += check_staleness(args.gettext_dir, args.locale_dir, languages)
     elif args.gettext_dir:
         print(
             f"error: {args.gettext_dir} does not exist -- run `make docs-gettext`",
             file=sys.stderr,
         )
         return 2
+    problems, warnings = split_by_page(behind)
+    problems += (
+        check_block_starts(args.locale_dir)
+        + check_structure(args.build_dir, languages)
+        + check_search_index(args.build_dir, languages)
+    )
 
+    if warnings:
+        print(
+            f"{len(warnings)} translation(s) behind their English on pages that may trail it:\n",
+            file=sys.stderr,
+        )
+        for warning in warnings:
+            print(f"  {warning}", file=sys.stderr)
+        print(file=sys.stderr)
     if problems:
         print(f"{len(problems)} translation problem(s):\n", file=sys.stderr)
         for problem in problems:
@@ -341,7 +387,10 @@ def main() -> int:
         return 1
 
     scope = "" if args.gettext_dir else " (staleness unchecked)"
-    print(f"Translations OK: {', '.join(languages)} match the English build{scope}.")
+    behind_note = (
+        f"; {len(warnings)} string(s) on other pages are behind, listed above" if warnings else ""
+    )
+    print(f"Translations OK: {', '.join(languages)} match the English build{scope}{behind_note}.")
     return 0
 
 

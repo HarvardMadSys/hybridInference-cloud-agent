@@ -14,10 +14,9 @@ from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, R
 from cloud_agent_host.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
 from cloud_agent_host.environment_preparation import (
     EnvironmentPreparation,
-    step_state,
+    run_step,
     write_setup_marker,
 )
-from cloud_agent_host.setup import run_setup
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
 from cloud_agent_shared.secret_redaction import SecretRedactor
@@ -93,7 +92,117 @@ def claim_and_execute(
         return True
 
 
-def execute_test(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+class _RunReporter:
+    """One environment run's reports to the control plane, and its heartbeat.
+
+    ``cancelled`` is this run's own cancellation. A refused report, a failed
+    heartbeat or the time limit ends this run only: the worker's stop is
+    copied into it, never set from it, or one cancelled run would stop every
+    later poll.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        run: dict[str, Any],
+        *,
+        redactor: SecretRedactor,
+        image_digest: str | None,
+        stop: threading.Event | None,
+    ) -> None:
+        self._client = client
+        self._path = f"/v1/agent/worker/environment-runs/{run['id']}"
+        self._generation = int(run["lease_generation"])
+        self._redactor = redactor
+        self._image_digest = image_digest
+        self._stop = stop
+        self.cancelled = threading.Event()
+        if stop is not None and stop.is_set():
+            self.cancelled.set()
+        self._steps: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._began = time.monotonic()
+        self._last_upload = 0.0
+        self._ended = threading.Event()
+        self._beat = threading.Thread(target=self._heartbeat, name="environment-test-heartbeat")
+
+    def start(self) -> None:
+        """Start the heartbeat."""
+        self._beat.start()
+
+    def end(self) -> None:
+        """Stop the heartbeat. Steps are still recorded, but no longer reported."""
+        self._ended.set()
+        self._beat.join(timeout=35)
+
+    def report(
+        self,
+        state: str = "running",
+        detail: str = "",
+        *,
+        cleanup_complete: bool = False,
+        snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        """Send the run's state and steps. A refusal (409) cancels the run."""
+        with self._lock:
+            payload = {
+                "generation": self._generation,
+                "state": state,
+                "steps": [dict(s) for s in self._steps],
+                "detail": self._redactor.text(detail)[-1000:],
+                "image_digest": self._image_digest,
+                "cleanup_complete": cleanup_complete,
+                **({"snapshot": snapshot} if snapshot is not None else {}),
+            }
+        answer = self._client.post(self._path, json=payload)
+        if answer.status_code == 409:
+            self.cancelled.set()
+        answer.raise_for_status()
+
+    def step(self, step: dict[str, Any]) -> None:
+        """Record a step's latest state, and report it at most twice a second while it runs."""
+        with self._lock:
+            prior = next(
+                (i for i, s in enumerate(self._steps) if s["phase"] == step["phase"]), None
+            )
+            if prior is None:
+                self._steps.append(dict(step))
+            else:
+                self._steps[prior] = dict(step)
+        now = time.monotonic()
+        if self._ended.is_set():
+            return
+        if step["state"] != "running" or now - self._last_upload >= 0.5:
+            try:
+                self.report()
+            except httpx.HTTPStatusError as exc:
+                # A refused report has cancelled the run. Raised from a
+                # running step's output, it would leave the step running:
+                # run_setup stops the script instead, so it ends cancelled.
+                if step["state"] != "running" or exc.response.status_code != 409:
+                    raise
+            self._last_upload = now
+
+    def _heartbeat(self) -> None:
+        beat_at = self._began + 10
+        # A short tick, so a closing worker cancels its run without waiting
+        # out the interval between reports.
+        while not self._ended.wait(0.25):
+            if self._stop is not None and self._stop.is_set():
+                self.cancelled.set()
+            if time.monotonic() < beat_at:
+                continue
+            beat_at = time.monotonic() + 10
+            if time.monotonic() - self._began >= 1800:
+                self.cancelled.set()
+            try:
+                self.report()
+            except (httpx.HTTPError, ValueError):
+                self.cancelled.set()
+                return
+
+
+def execute_test(
     *, client: Any, run: dict[str, Any], backend: Any, stop: threading.Event | None = None
 ) -> None:
     """Prepare exact source, install/start/verify, then remove the ephemeral group."""
@@ -106,67 +215,21 @@ def execute_test(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     # runtime values, and nothing they write may reach another workspace.
     prepared = bound.model_copy(update={"start_script": ""}) if prebuild else bound
     target = run.get("snapshot") if prebuild and isinstance(run.get("snapshot"), dict) else None
-    redactor = SecretRedactor(bound.secrets())
     manager = ChatSandboxManager(backend)
     spec = environment_run_spec(
         run["id"],
         int(run["lease_generation"]),
         backend.version_stamp().get("sandbox_image_digest"),
     )
-    # This run's own cancellation. A refused report, a failed heartbeat or the
-    # time limit ends this run only: the worker's stop is copied into it, never
-    # set from it, or one cancelled run would stop every later poll.
-    cancelled = threading.Event()
-    if stop is not None and stop.is_set():
-        cancelled.set()
-    heartbeat_stop = threading.Event()
-    steps: list[dict[str, Any]] = []
-    data_lock = threading.Lock()
-    path = f"/v1/agent/worker/environment-runs/{run['id']}"
-    began = time.monotonic()
-
-    def report(
-        state: str = "running",
-        detail: str = "",
-        *,
-        cleanup_complete: bool = False,
-        snapshot: dict[str, Any] | None = None,
-    ) -> None:
-        with data_lock:
-            payload = {
-                "generation": int(run["lease_generation"]),
-                "state": state,
-                "steps": [dict(s) for s in steps],
-                "detail": redactor.text(detail)[-1000:],
-                "image_digest": spec.sandbox_image_digest,
-                "cleanup_complete": cleanup_complete,
-                **({"snapshot": snapshot} if snapshot is not None else {}),
-            }
-        answer = client.post(path, json=payload)
-        if answer.status_code == 409:
-            cancelled.set()
-        answer.raise_for_status()
-
-    def heartbeat() -> None:
-        beat_at = began + 10
-        # A short tick, so a closing worker cancels its run without waiting
-        # out the interval between reports.
-        while not heartbeat_stop.wait(0.25):
-            if stop is not None and stop.is_set():
-                cancelled.set()
-            if time.monotonic() < beat_at:
-                continue
-            beat_at = time.monotonic() + 10
-            if time.monotonic() - began >= 1800:
-                cancelled.set()
-            try:
-                report()
-            except (httpx.HTTPError, ValueError):
-                cancelled.set()
-                return
-
-    beat = threading.Thread(target=heartbeat, name="environment-test-heartbeat")
-    beat.start()
+    reporter = _RunReporter(
+        client,
+        run,
+        redactor=SecretRedactor(bound.secrets()),
+        image_digest=spec.sandbox_image_digest,
+        stop=stop,
+    )
+    cancelled = reporter.cancelled
+    reporter.start()
     container_id = None
     source = None
     outcome = "failed"
@@ -199,62 +262,28 @@ def execute_test(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         source_sha = source.import_into(manager, spec)
         manager.prepare_shared_workspace(spec)
         retained = RetainedChatBackend(manager, spec)
-        last_upload = 0.0
-
-        def on_step(step: dict[str, Any]) -> None:
-            nonlocal last_upload
-            with data_lock:
-                prior = next((i for i, s in enumerate(steps) if s["phase"] == step["phase"]), None)
-                if prior is None:
-                    steps.append(dict(step))
-                else:
-                    steps[prior] = dict(step)
-            now = time.monotonic()
-            if heartbeat_stop.is_set():
-                return
-            if step["state"] != "running" or now - last_upload >= 0.5:
-                try:
-                    report()
-                except httpx.HTTPStatusError as exc:
-                    # A refused report has cancelled the run. Raised from a
-                    # running step's output, it would leave the step running:
-                    # run_setup stops the script instead, so it ends cancelled.
-                    if step["state"] != "running" or exc.response.status_code != 409:
-                        raise
-                last_upload = now
-
-        EnvironmentPreparation().prepare(retained, prepared, callback=on_step, cancel=cancelled)
+        EnvironmentPreparation().prepare(
+            retained, prepared, callback=reporter.step, cancel=cancelled
+        )
         if bound.verify_script and not prebuild:
             step: dict[str, Any] = {"phase": "verify", "state": "running", "output": ""}
-
-            def output(chunk: str) -> None:
-                step["output"] = (str(step["output"]) + chunk)[-65536:]
-                on_step(step)
-
-            started = time.monotonic()
-            result = run_setup(
+            result = run_step(
+                retained,
+                bound,
+                step,
                 script=bound.verify_script,
-                workdir="/workspace",
-                backend=retained,
-                env=bound.values("runtime"),
-                secrets=bound.secrets(),
+                values="runtime",
                 timeout_s=300,
-                on_output=output,
+                on_output=reporter.step,
                 cancel=cancelled,
-                phase="verify",
             )
-            step.update(
-                state=step_state(result, cancelled),
-                exit_code=result.exit_code,
-                duration_seconds=time.monotonic() - started,
-            )
-            on_step(step)
+            reporter.step(step)
             if result.exit_code:
                 raise RuntimeError(f"Verification failed ({result.exit_code})")
         if cancelled.is_set():
             raise RuntimeError("Environment test cancelled")
         if target is not None:
-            report(
+            reporter.report(
                 snapshot=_save_snapshot(
                     manager,
                     spec,
@@ -270,28 +299,38 @@ def execute_test(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     except Exception as exc:
         outcome, detail = ("cancelled" if cancelled.is_set() else "failed"), str(exc)
     finally:
-        heartbeat_stop.set()
-        beat.join(timeout=35)
+        reporter.end()
         if source is not None:
             source.discard()
-        cleanup_inspection = manager.inspect(spec.container_name)
-        if cleanup_inspection is not None:
-            container_id = cleanup_inspection.container_id
-            try:
-                manager.remove_environment_test(spec, container_id=container_id)
-            except Exception:
-                with contextlib.suppress(httpx.HTTPError):
-                    report("running", "Environment cleanup is pending")
-                return
-        if container_id:
-            key = __import__("hashlib").sha256(container_id.encode()).hexdigest()
-            root = EnvironmentPreparation().root
-            for suffix in (".json", ".lock"):
-                with contextlib.suppress(FileNotFoundError):
-                    (root / f"{key}{suffix}").unlink()
+        _remove_run(manager, spec, reporter, container_id, outcome, detail)
 
-        with contextlib.suppress(httpx.HTTPError):
-            report(outcome, detail, cleanup_complete=True)
+
+def _remove_run(
+    manager: ChatSandboxManager,
+    spec: ChatSandboxSpec,
+    reporter: _RunReporter,
+    container_id: str | None,
+    outcome: str,
+    detail: str,
+) -> None:
+    """Remove the run's container, then report its outcome with cleanup complete.
+
+    A container that cannot be removed is reported as cleanup pending instead,
+    and stays an orphan for the next poll to remove.
+    """
+    inspection = manager.inspect(spec.container_name)
+    if inspection is not None:
+        container_id = inspection.container_id
+        try:
+            manager.remove_environment_test(spec, container_id=container_id)
+        except Exception:
+            with contextlib.suppress(httpx.HTTPError):
+                reporter.report("running", "Environment cleanup is pending")
+            return
+    if container_id:
+        EnvironmentPreparation().forget(container_id)
+    with contextlib.suppress(httpx.HTTPError):
+        reporter.report(outcome, detail, cleanup_complete=True)
 
 
 def _save_snapshot(
