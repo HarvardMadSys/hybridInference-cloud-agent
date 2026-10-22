@@ -509,7 +509,7 @@ class HostHeartbeatResponse(_SandboxManagerWireNames):
         ),
     )
     sandbox_archive_settings: HostSandboxArchiveSettings | None = Field(
-        None,
+        ...,
         description=(
             "The archive policy this host should apply. Null for a host that cannot "
             "apply it: an enabled policy with a bucket other than the default goes "

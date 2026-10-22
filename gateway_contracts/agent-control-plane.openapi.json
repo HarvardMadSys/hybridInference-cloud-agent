@@ -11917,6 +11917,7 @@
         "required": [
           "host",
           "status",
+          "sandbox_archive_settings",
           "heartbeat_interval_seconds"
         ],
         "title": "HostHeartbeatResponse",
