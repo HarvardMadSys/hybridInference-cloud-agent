@@ -137,6 +137,10 @@ class _Manager:
         """The image already holds every version these tests launch."""
         self.runtimes_ensured = [*getattr(self, "runtimes_ensured", []), (runtime, version)]
 
+    @property
+    def network(self) -> _Manager:
+        return self
+
     def network_for(self, _spec: ChatSandboxSpec) -> str:
         return "agent-net"
 
@@ -4484,7 +4488,7 @@ def _archive_shutdown_group(
             # The controller reads the skipped marker and uploads nothing.
             events.append("archive:skipped")
             return
-        assert manager.network_for(_spec) in inspection.networks
+        assert manager.network.network_for(_spec) in inspection.networks
         events.append("archive")
 
     supervisor = SharedChatSessionSupervisor(
@@ -4549,24 +4553,6 @@ def _archive_shutdown_group(
 
         transport.close = close_transport  # type: ignore[method-assign]
     return manager, supervisor
-
-
-def test_shutdown_flushes_then_prepares_stops_archives_and_releases_bridge() -> None:
-    events: list[str] = []
-    manager, supervisor = _archive_shutdown_group(events=events)
-
-    supervisor.quiesce()
-    supervisor.stop_all_for_shutdown()
-
-    assert events == [
-        "transport.close:0",
-        "transport.close:1",
-        "prepare",
-        "stop:retain",
-        "archive",
-        "stop:release",
-    ]
-    assert manager.items[_spec().container_name].networks == ()
 
 
 def test_shutdown_flush_failure_skips_the_final_archive_and_finishes_the_stop() -> None:

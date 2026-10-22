@@ -707,10 +707,10 @@ def test_the_managers_host_rule_check_reads_the_kernel_every_time() -> None:
     nft = FakeNft()
     guard = _guard(nft)
     manager = ChatSandboxManager(SimpleNamespace(network_guard=lambda: guard))  # type: ignore[arg-type]
-    manager.verify_host_rules()
+    manager.network.verify_host_rules()
     nft.tables.clear()
 
-    manager.verify_host_rules()
+    manager.network.verify_host_rules()
 
     assert ("inet", guard.network.table) in nft.tables
 

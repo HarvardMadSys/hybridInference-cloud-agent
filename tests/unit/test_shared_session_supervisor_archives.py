@@ -17,6 +17,7 @@ from tests.unit.test_shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
     SimpleNamespace,
+    _archive_shutdown_group,
     _gated_inspect,
     _in_thread,
     _launch,
@@ -1939,3 +1940,21 @@ def test_abandon_leaves_a_turn_in_admission_its_own_member_lock():
     assert [type(error) for error in errors] == [SessionLeaseLost]
     assert member.turn_lock.locked() is False
     assert member.current_turn is None
+
+
+def test_shutdown_flushes_then_prepares_stops_archives_and_releases_bridge() -> None:
+    events: list[str] = []
+    manager, supervisor = _archive_shutdown_group(events=events)
+
+    supervisor.quiesce()
+    supervisor.stop_all_for_shutdown()
+
+    assert events == [
+        "transport.close:0",
+        "transport.close:1",
+        "prepare",
+        "stop:retain",
+        "archive",
+        "stop:release",
+    ]
+    assert manager.items[_spec().container_name].networks == ()

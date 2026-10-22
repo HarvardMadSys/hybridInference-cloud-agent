@@ -49,6 +49,7 @@ from cloud_agent_host.chat_sandbox_markers import (
     FINAL_ARCHIVE_MARKER_NAME,
     INITIAL_ARCHIVE_MARKER_ROOT,
 )
+from cloud_agent_host.chat_sandbox_network import ChatSandboxNetwork
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_ROOT,
@@ -371,23 +372,19 @@ def _plain_group_network(monkeypatch):
     (creation, relays, host exceptions, release, pruning, the in-guest check)
     is covered against a model of Docker in ``test_chat_group_network.py``.
     """
-    monkeypatch.setattr(ChatSandboxManager, "network_for", lambda _self, _spec: "agent-net")
-    monkeypatch.setattr(ChatSandboxManager, "require_host_rules", lambda _self: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "network_for", lambda _self, _spec: "agent-net")
+    monkeypatch.setattr(ChatSandboxNetwork, "require_host_rules", lambda _self: None)
     monkeypatch.setattr(
-        ChatSandboxManager,
+        ChatSandboxNetwork,
         "_require_group_network",
-        lambda self, spec, _current, *_snapshot: self._require(spec),
+        lambda self, spec, _current, *_snapshot: self._containers._require(spec),
     )
-    monkeypatch.setattr(ChatSandboxManager, "_sync_kata_guest_network", lambda *_args: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "_sync_kata_guest_network", lambda *_args: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "_verify_guest_network", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        ChatSandboxManager,
-        "_verify_guest_network",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        ChatSandboxManager,
+        ChatSandboxNetwork,
         "_release_sandbox_networks",
-        lambda self, spec, _current, *, expected_container_id: self._require_exact(
+        lambda self, spec, _current, *, expected_container_id: self._containers._require_exact(
             spec, expected_container_id
         ),
     )

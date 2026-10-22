@@ -25,6 +25,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxStatus,
     SandboxRestoreFailed,
 )
+from cloud_agent_host.chat_sandbox_network import ChatSandboxNetwork
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveDownloadError,
@@ -596,7 +597,7 @@ def test_a_container_that_fails_its_checks_once_created_is_removed_with_its_volu
     """
     spec = _moved_spec()
     manager = ChatSandboxManager(ContainerBackend(image="img"))
-    monkeypatch.setattr(ChatSandboxManager, "require_host_rules", lambda _self: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "require_host_rules", lambda _self: None)
     volume = [{"Type": "volume", "Name": "anonymous", "Destination": "/data"}]
     built = _stopped_container(spec, checkpoint_id=_CHECKPOINT, status="created", mounts=volume)
     daemon = _Daemon(None, created=built)
@@ -717,7 +718,7 @@ def test_a_restore_refused_once_created_leaves_neither_container_nor_image(monke
     """The container goes first, so Docker lets the image it ran go after it."""
     spec = _moved_spec()
     manager = ChatSandboxManager(ContainerBackend(image="img"))
-    monkeypatch.setattr(ChatSandboxManager, "require_host_rules", lambda _self: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "require_host_rules", lambda _self: None)
     volume = [{"Type": "volume", "Name": "anonymous", "Destination": "/data"}]
     built = _stopped_container(spec, checkpoint_id=_CHECKPOINT, status="created", mounts=volume)
     daemon = _Daemon(None, created=built)

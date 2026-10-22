@@ -22,9 +22,9 @@ TEST_LIMIT = 2000
 
 #: Line counts of the modules over the limit when it arrived.
 BASELINE = {
-    "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5381,
+    "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5380,
     "apps/backend/cloud_agent_host/runner.py": 4997,
-    "apps/backend/cloud_agent_host/chat_sandbox.py": 4194,
+    "apps/backend/cloud_agent_host/chat_sandbox.py": 4115,
     "apps/backend/cloud_agent_host/sandbox_manager.py": 4046,
     "apps/backend/cloud_agent/storage/repositories/compute_resources.py": 3856,
     "apps/backend/cloud_agent/storage/repositories/sandbox.py": 3480,
@@ -57,7 +57,7 @@ TEST_BASELINE = {
     "tests/unit/test_agent_publish_worker.py": 2080,
     "tests/unit/test_agent_runner.py": 2746,
     "tests/unit/test_agent_sandbox_manager.py": 3975,
-    "tests/unit/test_chat_sandbox.py": 3193,
+    "tests/unit/test_chat_sandbox.py": 3190,
     "tests/unit/test_compute_providers.py": 2002,
     "tests/unit/test_compute_reconcile.py": 2291,
     "tests/unit/test_deploy_config.py": 2081,
@@ -65,7 +65,7 @@ TEST_BASELINE = {
     "tests/unit/test_mcp_connections_api.py": 3079,
     "tests/unit/test_retained_deploy.py": 2261,
     "tests/unit/test_runner_host_service.py": 2939,
-    "tests/unit/test_shared_session_supervisor.py": 5376,
+    "tests/unit/test_shared_session_supervisor.py": 5362,
 }
 
 
