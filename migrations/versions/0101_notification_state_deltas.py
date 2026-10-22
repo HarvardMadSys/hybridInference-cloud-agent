@@ -1,15 +1,15 @@
 """Persist coalesced owner changes for incremental browser notifications.
 
-Revision ID: 0097_notification_state_deltas
-Revises: 0096_thread_stats_rollups
+Revision ID: 0101_notification_state_deltas
+Revises: 0100_memory_archive_pages
 """
 
 from __future__ import annotations
 
 from alembic import context, op
 
-revision = "0097_notification_state_deltas"
-down_revision = "0096_thread_stats_rollups"
+revision = "0101_notification_state_deltas"
+down_revision = "0100_memory_archive_pages"
 branch_labels = None
 depends_on = None
 
