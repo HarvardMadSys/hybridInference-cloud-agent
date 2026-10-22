@@ -20,10 +20,7 @@ compose() {
   LOCAL_HOST_SLOTS=$(local_host_slots)
   AGENT_DEPLOYMENT_SHA=$(local_deployment_sha)
   export LOCAL_SANDBOX_IMAGE LOCAL_HOST_SLOTS AGENT_DEPLOYMENT_SHA
-  manager_token=$(env_file_value AGENT_SANDBOX_MANAGER_TOKEN)
-  if [ -z "$manager_token" ]; then
-    manager_token=$(env_file_value AGENT_WORKSPACE_BROKER_TOKEN)
-  fi
+  manager_token=$(sandbox_manager_token)
   # Intentional word splitting: COMPOSE is either one command or `docker compose`.
   # shellcheck disable=SC2086
   AGENT_SANDBOX_MANAGER_TOKEN="$manager_token" \
@@ -209,10 +206,7 @@ upgrade_existing_env() {
   # checkout fail Compose interpolation after an update.
   edge_port=$(sed -n 's/^LOCAL_EDGE_PORT=//p' "$ENV_FILE" | tail -n 1)
   edge_port=${edge_port:-13002}
-  manager_token=$(env_file_value AGENT_SANDBOX_MANAGER_TOKEN)
-  if [ -z "$manager_token" ]; then
-    manager_token=$(env_file_value AGENT_WORKSPACE_BROKER_TOKEN)
-  fi
+  manager_token=$(sandbox_manager_token)
   if [ -z "$manager_token" ]; then
     manager_token=$(random_hex)
   fi
@@ -305,6 +299,21 @@ env_file_value() {
     value=$(sed -n "s/^${name}=//p" "$ENV_FILE" | tail -n 1)
   fi
   printf '%s' "$value"
+}
+
+# COMPAT(remove-after=2026-12-31): no deploy/local/.env.local sets
+# AGENT_WORKSPACE_BROKER_TOKEN without AGENT_SANDBOX_MANAGER_TOKEN, which
+# ensure_env adds beside it. Then read the current name only.
+sandbox_manager_token() {
+  token=$(env_file_value AGENT_SANDBOX_MANAGER_TOKEN)
+  if [ -z "$token" ]; then
+    token=$(env_file_value AGENT_WORKSPACE_BROKER_TOKEN)
+    # The name only: the value is the sandbox manager's credential.
+    if [ -n "$token" ]; then
+      echo "AGENT_WORKSPACE_BROKER_TOKEN is a former name for AGENT_SANDBOX_MANAGER_TOKEN; set that instead." >&2
+    fi
+  fi
+  printf '%s' "$token"
 }
 
 require_local_database_credentials() {

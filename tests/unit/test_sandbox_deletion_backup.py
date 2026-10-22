@@ -137,9 +137,9 @@ def _upload(service, identity, receipt, monkeypatch, *, status=200, handler=None
 
 
 def test_discard_removes_stopped_container_without_export_and_replays(archive_setup):
-    manager, supervisor, service, identity, _spec, _members = archive_setup
+    manager, supervisor, service, identity, spec, _members = archive_setup
     discard = replace(identity, request_id="discard-1", archive_key="")
-    result = service.discard(discard)
+    result = service.discard(discard, sandbox_id=spec.sandbox_id)
     assert result == {
         "request_id": "discard-1",
         "container_id": "container-1",
@@ -154,15 +154,15 @@ def test_discard_removes_stopped_container_without_export_and_replays(archive_se
     assert (directory / "discarded.json").exists()
     assert not (directory / "archive.tar").exists()
     (directory / "discarded.json").unlink()
-    assert service.discard(discard)["deleted"] is True
+    assert service.discard(discard, sandbox_id=spec.sandbox_id)["deleted"] is True
     assert manager.removals == 1
 
 
 def test_discard_refuses_a_request_that_already_prepared_an_archive(archive_setup):
-    manager, _supervisor, service, identity, _spec, _members = archive_setup
+    manager, _supervisor, service, identity, spec, _members = archive_setup
     service.prepare(identity)
     with pytest.raises(SessionLeaseLost, match="cannot be discarded"):
-        service.discard(replace(identity, archive_key=""))
+        service.discard(replace(identity, archive_key=""), sandbox_id=spec.sandbox_id)
     assert manager.removals == 0
     assert manager.exports == 1
 
@@ -172,13 +172,13 @@ def test_discard_refuses_a_request_that_already_prepared_an_archive(archive_setu
 def test_deletion_retry_checks_absence_after_status_marks_container_lost(
     archive_setup, monkeypatch, discard, remaining
 ):
-    manager, supervisor, service, identity, _spec, _members = archive_setup
+    manager, supervisor, service, identity, spec, _members = archive_setup
     original = manager.current
     if discard:
         identity = replace(identity, request_id="discard-1", archive_key="")
 
         def delete():
-            return service.discard(identity)
+            return service.discard(identity, sandbox_id=spec.sandbox_id)
 
     else:
         receipt = service.prepare(identity)
@@ -250,8 +250,7 @@ def test_discard_completes_stale_membership_after_proving_container_absent(archi
     with pytest.raises(SessionLeaseLost, match="identity changed"):
         restarted.discard(discard, sandbox_id="another-sandbox")
     assert not (directory / "discarded.json").exists()
-    # An older control-plane retry uses the identity in the durable record.
-    assert restarted.discard(discard) == result
+    assert restarted.discard(discard, sandbox_id=spec.sandbox_id) == result
     assert json.loads((directory / "discarded.json").read_text())["sandbox_id"] == spec.sandbox_id
 
 

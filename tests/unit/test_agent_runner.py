@@ -182,17 +182,12 @@ def test_shared_live_attestation_requires_every_pinned_runtime_and_helper(monkey
     assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == []
 
 
-def test_a_claim_names_protocol_v2_for_a_control_plane_older_than_this_release(monkeypatch):
-    """Hosts roll out before the API, so a replacement runner polls the old one.
-
-    That control plane refuses every claim without the image's shared-sandbox
-    protocol, which this image no longer labels. The runner states the v2 its
-    image would have declared, and only once its own checks have passed.
-    """
+def test_a_claim_without_the_fork_helper_attests_no_shared_capability(monkeypatch):
+    """The capabilities are stated only once the image's own checks have passed."""
     _configure_host(monkeypatch)
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
-    assert runner_mod._claim_attestation(backend)["shared_sandbox_protocol"] == "v2"
+    assert runner_mod._claim_attestation(backend)["runner_capabilities"]
 
     def without_fork_helper() -> dict:
         stamp = _stamp()
@@ -200,9 +195,7 @@ def test_a_claim_names_protocol_v2_for_a_control_plane_older_than_this_release(m
         return stamp
 
     monkeypatch.setattr(backend, "version_stamp", without_fork_helper)
-    refused = runner_mod._claim_attestation(backend)
-    assert refused["runner_capabilities"] == []
-    assert "shared_sandbox_protocol" not in refused
+    assert runner_mod._claim_attestation(backend)["runner_capabilities"] == []
 
 
 def test_shared_live_attestation_refuses_a_non_container_backend(monkeypatch):
@@ -915,11 +908,7 @@ def _probe_then_replace(control, supervisor, *, residency: dict) -> None:
 
 @pytest.mark.parametrize(
     ("residency", "opened_with"),
-    [
-        ({"mcp_credential": "amr.residency-12"}, "amr.residency-12"),
-        # A control plane from before residency credentials: this turn's own token.
-        ({}, "ajt.turn-token"),
-    ],
+    [({"mcp_credential": "amr.residency-12"}, "amr.residency-12")],
 )
 def test_a_live_probe_carries_no_mcp_credential_and_a_new_process_gets_one(
     monkeypatch, residency, opened_with
@@ -934,7 +923,7 @@ def test_a_live_probe_carries_no_mcp_credential_and_a_new_process_gets_one(
         configure=lambda control, supervisor, _finish: _probe_then_replace(
             control, supervisor, residency=residency
         ),
-        job_changes={"mcp_bindings": [":platform:memory"], "mcp_token": "ajt.turn-token"},
+        job_changes={"mcp_bindings": [":platform:memory"]},
     )
 
     assert result == 0
@@ -958,7 +947,7 @@ def test_a_turn_without_mcp_opens_its_process_with_no_mcp_credential(monkeypatch
         configure=lambda control, supervisor, _finish: _probe_then_replace(
             control, supervisor, residency={"mcp_credential": "amr.residency-12"}
         ),
-        job_changes={"mcp_bindings": [], "mcp_token": "ajt.turn-token"},
+        job_changes={"mcp_bindings": []},
     )
 
     opened = supervisor.ensure_shared_resident.mock_calls[-1].kwargs["launch"]

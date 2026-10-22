@@ -25,7 +25,13 @@ Names inherited from HybridInference remain in use.
 
 The service is named **Sandbox Manager** (`sandbox-manager` in Compose and
 `cloud_agent_host.sandbox_manager` in Python). Use `AGENT_SANDBOX_MANAGER_*`
-names for new deployments. Existing values remain accepted:
+names for new deployments. The previous names remain accepted until 2026-12-31.
+When one supplies a value, the host or local deployment script that reads it
+prints a warning naming the variable, never its value, and a Python service
+that reads one itself, as from a deployment profile's Host environment, logs
+`sandbox_manager_legacy_env`. The fallbacks in the Compose files themselves
+are silent, the control plane's among them, so check each deployment's `.env`
+for these names before then:
 
 | Current name | Previous name |
 | --- | --- |
@@ -44,13 +50,15 @@ invoking Compose. For a direct `docker compose` invocation, provide
 `AGENT_SANDBOX_MANAGER_TOKEN`; the recipe still refuses to render without it.
 
 Host activation drains and removes the old service before creating its
-replacement. Its old DNS alias and Python entry point remain available for
-mixed-version deployments. Saved credentials keep their existing encryption
-domain; no secret rotation or database migration is needed for this rename.
-The physical `broker_url` database column, old host wire fields, and telemetry
-producer ID remain compatibility details. New API fields and code use
-`sandbox_manager_url`; the UI displays **Sandbox Manager**, including for old
-measurement records.
+replacement. In the host and local Compose files the `sandbox-manager` service
+keeps `workspace-broker` as a network alias; the old
+`cloud_agent_host.workspace_broker` Python entry point is gone. Saved
+credentials keep their existing encryption domain; no secret rotation or
+database migration is needed for this rename. The physical `broker_url`
+database column, the `broker_url` field in which hosts of the previous release
+still report their address, and the telemetry producer ID remain compatibility
+details. New API fields and code use `sandbox_manager_url`; the UI displays
+**Sandbox Manager**, including for old measurement records.
 
 Durable archive markers and deletion receipts also keep their existing paths
 (`/var/lib/freeinference-broker` inside retained sandboxes and
@@ -338,7 +346,7 @@ relay reachability and connection target policy.
 | `AGENT_MCP_ALLOW_PLAIN_HTTP` | Whether a user-added MCP connection may use `http://` as well as `https://`. Off by default because the credential would travel in the clear. A deployment whose connector bridge is genuinely HTTP inside a private network turns it on deliberately; it is a separate variable from the private-target one because it is a separate risk. |
 | `AGENT_DEFAULT_MODEL` | *Optional legacy import.* The model a new task starts on when its owner has not chosen one — their pinned model in My Settings outranks it, and so does the model their last task used. A model this deployment's gateway does not offer to a user is skipped rather than forced, so a value that is wrong for someone cannot strand them: they are asked to choose instead. Defaults to `deepseek-v4-flash`, which is what the composer hardcoded before this setting existed. Empty means this deployment offers no default and every new owner picks. Imported once; after that, edit it in Admin Settings → Sandbox execution. |
 | `AGENT_MCP_SERVERS` | **Not operator-set — listed so nobody provisions it.** The name the runner publishes the relay endpoints under for the image-shipped wrappers, as one JSON object of `{alias: url}`. The wrappers merge it into the CLI config they already write, under whichever key their CLI spells MCP with, and add the token reference in that CLI's own syntax — which is not portable between them. A value put here by hand would point a sandbox at servers nobody connected. |
-| `AGENT_MCP_TOKEN` | **Not operator-set — listed so nobody provisions it.** The name the generated sandbox runtime config *references* (`${AGENT_MCP_TOKEN}`) for the relay credential the runner injects at launch: a chat process's residency credential, or a turn's own token. A value put here by hand would be a static tool credential shared by every job, which is the thing these scoped credentials exist to avoid. |
+| `AGENT_MCP_TOKEN` | **Not operator-set — listed so nobody provisions it.** The name the generated sandbox runtime config *references* (`${AGENT_MCP_TOKEN}`) for the relay credential the runner injects at launch: the chat process's residency credential. A value put here by hand would be a static tool credential shared by every job, which is the thing these scoped credentials exist to avoid. |
 
 ### Sandbox settings from the admin pages
 

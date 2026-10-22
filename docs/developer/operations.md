@@ -873,20 +873,18 @@ MCP calls pass through the control plane. The sandbox holds a scoped relay
 credential; upstream credentials stay outside it:
 
 ```text
-sandbox ──[residency or attempt mcp credential]──▶ MCP-only relay ──[owner credential]──▶ MCP server
+sandbox ──[residency mcp credential]──▶ MCP-only relay ──[owner credential]──▶ MCP server
 ```
 
 A chat member's CLI process serves several turns, so it holds its residency's
 credential (`amr.…`), returned when the residency is established. On every
 call the relay resolves it to the attempt of that chat running under that
-residency, then applies the same fence as a turn's own token: the attempt must
-be current and leased, its job running and not stopped, its host enrolled.
-Between turns, or once the residency rotates, expires or is released, the
-credential authorizes nothing. A follow-up whose MCP servers did not change
-therefore keeps the live process; adding or removing a connection still
-restarts it, because a CLI reads its servers once at start. A process started
-with a turn's own token (from a control plane that predates residency
-credentials) restarts at the next turn, as before.
+residency, then fences that attempt: it must be current and leased, its job
+running and not stopped, its host enrolled. Between turns, or once the
+residency rotates, expires or is released, the credential authorizes nothing.
+A follow-up whose MCP servers did not change therefore keeps the live process;
+adding or removing a connection still restarts it, because a CLI reads its
+servers once at start.
 
 Each request keeps the attempt and residency generation captured at authentication.
 After waiting for OAuth, an approval or an upstream session, the relay checks

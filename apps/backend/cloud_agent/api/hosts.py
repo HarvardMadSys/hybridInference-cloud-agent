@@ -274,7 +274,7 @@ async def register_host(
 
 
 @router.post("/heartbeat", response_model=HostHeartbeatResponse)
-async def heartbeat_host(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+async def heartbeat_host(  # noqa: C901, PLR0912 complexity baseline, #771
     body: HostHeartbeatRequest,
     background_tasks: BackgroundTasks,
     host: dict[str, Any] = Depends(authenticate_host),
@@ -325,32 +325,15 @@ async def heartbeat_host(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #
         # mid-request. Refusing is right: this credential now names nothing,
         # and the residencies below must not be extended on its word.
         raise _unauthorized("This host credential is no longer valid.")
-    # Residency beats ride the host heartbeat (design §7): one wire message
-    # says "I am here" and "these sandboxes are still mine", generation-scoped
-    # so a beat from a taken-over residency extends nothing — it comes back in
-    # residencies_lost and the host tears that sandbox down.
+    # A live retained member's residency rides the host heartbeat (design §7),
+    # generation-scoped so a beat from a taken-over residency extends nothing:
+    # it comes back in residencies_lost, with its generation echoed so a stale
+    # answer cannot kill a successor, and the host tears that member down.
     lost: list[ResidencyBeat] = []
     # The grants of every residency this beat extends, once each, renewed after
     # the reply: see ``_renew_residency_grants``.
     renewals: dict[str, None] = {}
     revocations: list[str] = []
-    for residency_beat in body.residencies or []:
-        extended = await job_store.residency.heartbeat_residency(
-            thread_id=residency_beat.thread_id,
-            generation=residency_beat.generation,
-            host=updated["host"],
-            ttl_seconds=residency_ttl_s(),
-        )
-        if extended:
-            # The credential lives exactly as long as the residency_beat: the residency_beat
-            # that extends the lease extends the grant.
-            renewals[extended] = None
-        if extended is None:
-            # Echo the generation back (review finding 5): a residency_beat carrying
-            # gen N can be answered after the host re-established gen N+1,
-            # and a thread-id-only loss would let the stale answer kill the
-            # successor. The host drops only on an exact generation match.
-            lost.append(residency_beat)
     # Docker is the lifecycle authority for retained chat containers; the
     # database is the scheduling/fencing authority.  Heartbeats join those
     # views without treating absence as deletion. In particular, a sandbox manager's

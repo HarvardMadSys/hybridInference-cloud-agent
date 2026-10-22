@@ -2687,6 +2687,32 @@ async def test_legacy_host_residency_mutations_are_not_executable(residency_clie
     assert grants.revoked == []
 
 
+def _live_group(*members: tuple[str, int]) -> dict[str, Any]:
+    """One running retained group whose members are live on these residencies."""
+    return {
+        "thread_id": members[0][0],
+        "sandbox_id": "asbx_1",
+        "container_id": "0123456789abcdef",
+        "generation": 3,
+        "activation_generation": 7,
+        "running": True,
+        "activity_active": True,
+        "idle_remaining_seconds": 1799.5,
+        "shared_live": True,
+        "members": [
+            {
+                "thread_id": thread_id,
+                "native_session_id": f"native-{slot}",
+                "process_generation": 2,
+                "residency_generation": generation,
+                "resident_state": "live",
+                "resident_slot_id": slot,
+            }
+            for slot, (thread_id, generation) in enumerate(members)
+        ],
+    }
+
+
 async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_client):
     client, store, grants = residency_client
     credential = await _enroll(client, store)
@@ -2699,10 +2725,8 @@ async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_clie
     response = await client.post(
         "/v1/agent/host/heartbeat",
         json={
-            "residencies": [
-                {"thread_id": "th-linked", "generation": 1},
-                {"thread_id": "th-grantless", "generation": 1},
-                {"thread_id": "th-lost", "generation": 3},
+            "retained_sandboxes": [
+                _live_group(("th-linked", 1), ("th-grantless", 1), ("th-lost", 3))
             ]
         },
         headers={"Authorization": f"Bearer {credential}"},
@@ -2714,7 +2738,7 @@ async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_clie
 
 
 async def test_a_slow_gateway_does_not_hold_the_heartbeat_reply():
-    """Renewals run after the reply, together, and once per grant.
+    """Renewals run after the reply, and together.
 
     A host's heartbeat times out at 15 s, and each renewal may take the
     gateway's full request timeout. Awaited one by one before the reply, two
@@ -2746,37 +2770,7 @@ async def test_a_slow_gateway_does_not_hold_the_heartbeat_reply():
     store.beat_answers = {("th-1", 1): "agr-1", ("th-2", 1): "agr-2"}
     grants = GatedGrants(expected=2)
     body = HostHeartbeatRequest.model_validate(
-        {
-            "residencies": [
-                {"thread_id": "th-1", "generation": 1},
-                {"thread_id": "th-2", "generation": 1},
-            ],
-            # The same member again, as a live member of its retained group:
-            # one extended residency is one renewal, however it was reported.
-            "retained_sandboxes": [
-                {
-                    "thread_id": "th-1",
-                    "sandbox_id": "asbx_1",
-                    "container_id": "0123456789abcdef",
-                    "generation": 3,
-                    "activation_generation": 7,
-                    "running": True,
-                    "activity_active": True,
-                    "idle_remaining_seconds": 1799.5,
-                    "shared_live": True,
-                    "members": [
-                        {
-                            "thread_id": "th-1",
-                            "native_session_id": "native-1",
-                            "process_generation": 2,
-                            "residency_generation": 1,
-                            "resident_state": "live",
-                            "resident_slot_id": 0,
-                        }
-                    ],
-                }
-            ],
-        }
+        {"retained_sandboxes": [_live_group(("th-1", 1), ("th-2", 1))]}
     )
     background = BackgroundTasks()
 

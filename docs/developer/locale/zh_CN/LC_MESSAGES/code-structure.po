@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-21 04:54+0000\n"
+"POT-Creation-Date: 2026-10-22 06:00+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -13,7 +13,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.10.3\n"
+"Generated-By: Babel 2.18.0\n"
 
 #: ../developer/code-structure.md:1
 msgid "Code structure"
@@ -331,14 +331,14 @@ msgid "Teams, members, invitations, and join requests"
 msgstr "团队、成员、邀请和加入申请"
 
 #: ../developer/code-structure.md
-msgid "`_host_reports`, `_sandbox_manager_wire`, `_prompts`"
+msgid "`_host_reports`, `_prompts`"
 msgstr ""
 
 #: ../developer/code-structure.md
 msgid ""
-"Private helpers: bounds for host and worker reports, Sandbox Manager "
-"field-name compatibility, and the prompt text rule"
-msgstr "私有辅助模块：主机和 worker 上报内容的上下限、Sandbox Manager 字段名兼容，以及提示词文本规则"
+"Private helpers: bounds for host and worker reports, and the prompt text "
+"rule"
+msgstr "私有辅助模块：主机和 worker 上报内容的上下限，以及提示词文本规则"
 
 #: ../developer/code-structure.md:100
 msgid ""

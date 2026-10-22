@@ -7035,19 +7035,6 @@
             "title": "Active",
             "type": "boolean"
           },
-          "broker_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "deprecated": true,
-            "description": "Compatibility alias for sandbox_manager_url.",
-            "title": "Broker Url"
-          },
           "capabilities": {
             "description": "What this machine can run. A job may only go to a host declaring all of it.",
             "items": {
@@ -12213,22 +12200,6 @@
             "description": "Physical server name for admin grouping only; never a scheduling or credential identity.",
             "title": "Physical Host"
           },
-          "residencies": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/ResidencyBeat"
-                },
-                "maxItems": 128,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The hot sandboxes this host still holds, generation-scoped. Each listed residency's lease is extended; one that no longer holds its generation comes back in residencies_lost and the host tears that sandbox down (design §7).",
-            "title": "Residencies"
-          },
           "retained_sandboxes": {
             "anyOf": [
               {
@@ -12434,19 +12405,6 @@
       "HostHeartbeatResponse": {
         "description": "What the control plane thinks of this host after the heartbeat.",
         "properties": {
-          "broker_error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "deprecated": true,
-            "description": "Compatibility alias for sandbox_manager_error.",
-            "title": "Broker Error"
-          },
           "heartbeat_interval_seconds": {
             "description": "How often to report in. Missing three consecutive intervals is what moves a host to offline.",
             "title": "Heartbeat Interval Seconds",
@@ -12624,19 +12582,6 @@
       "HostRegisterResponse": {
         "description": "The host's identity and the credential it authenticates with.",
         "properties": {
-          "broker_error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "deprecated": true,
-            "description": "Compatibility alias for sandbox_manager_error.",
-            "title": "Broker Error"
-          },
           "credential": {
             "description": "Long-lived host credential. Shown once; only its hash is stored. Revoking the host clears that hash and the credential dies.",
             "title": "Credential",
@@ -12691,7 +12636,7 @@
           },
           "mcp_credential": {
             "default": "",
-            "description": "The MCP relay credential for this residency's process. It names the residency, not this attempt, so the process keeps it for every later turn it serves. Empty from a control plane that predates it; the host then uses the turn's own MCP token.",
+            "description": "The MCP relay credential for this residency's process, and the only one the host gives it. It names the residency, not this attempt, so the process keeps it for every later turn it serves.",
             "title": "Mcp Credential",
             "type": "string"
           },
@@ -20016,7 +19961,7 @@
           },
           "mcp_token": {
             "default": "",
-            "description": "The sandbox's *second* credential, for this service's MCP relay. Scoped `mcp`, so it opens the relay and nothing else — not the worker surface, and not the gateway. The relay's address is the claiming host's own, the one its network rules admit; the claim names none.",
+            "description": "Deprecated, and used by no host: each member's CLI reaches this service's MCP relay with its residency's `mcp_credential` from the sandbox residency route. This attempt-scoped credential is scoped `mcp`, so it opens that relay and nothing else.",
             "title": "Mcp Token",
             "type": "string"
           },

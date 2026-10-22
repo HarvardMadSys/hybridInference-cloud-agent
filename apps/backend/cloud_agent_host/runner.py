@@ -1377,15 +1377,6 @@ def _claim_attestation(
         stamp["sandbox_archive_settings_applied_revision"] = (
             sandbox_archive_settings_applied_revision
         )
-    if stamp["runner_capabilities"]:
-        # For a control plane older than this release. Hosts roll out before
-        # the API, so a replacement runner polls that API for a while, and it
-        # refuses every claim that does not name the image's shared-sandbox
-        # protocol. This image has no such label. Its "v2" meant a fork
-        # helper that takes an anchor, which the capabilities above already
-        # required. This control plane reads nothing from it. Remove once
-        # every deployment's control plane is at least this release.
-        stamp["shared_sandbox_protocol"] = "v2"
     return stamp
 
 
@@ -2900,21 +2891,17 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             credential = str(residency.get("credential") or "")
             if not credential:
                 raise SandboxError("control plane returned no shared residency credential")
+            # The residency's: this process serves later turns' tools without a restart.
+            mcp_credential = str(residency.get("mcp_credential") or "") if job.mcp_bindings else ""
+            if job.mcp_bindings and not mcp_credential:
+                raise SandboxError("control plane returned no shared residency MCP credential")
             grant_model = residency.get("model")
             if grant_model not in {None, job.model}:
                 raise SandboxError("shared residency grant model does not match this turn")
             launch = replace(
                 launch,
                 credential=credential,
-                # The residency's MCP credential lets this process serve later
-                # turns' tools without a restart. A control plane that predates
-                # it sends none; the turn's own token then works for this turn,
-                # and the next one restarts the process as it always did.
-                mcp_credential=(
-                    str(residency.get("mcp_credential") or "") or job.mcp_token
-                    if job.mcp_bindings
-                    else ""
-                ),
+                mcp_credential=mcp_credential,
                 residency_generation=int(residency["generation"]),
             )
             resident_call = operation_profiling.expect_fragment(
@@ -4898,16 +4885,13 @@ def build_parser() -> argparse.ArgumentParser:
     # default while both shapes are deployed.
     parser.add_argument(
         "--base-url",
-        default=(
-            os.environ.get("AGENT_CONTROL_PLANE_URL")
-            or os.environ.get("AGENT_GATEWAY_URL")
-            or os.environ.get("FREEINFERENCE_BASE_URL", "")
-        ),
+        default=os.environ.get("AGENT_CONTROL_PLANE_URL")
+        or os.environ.get("AGENT_GATEWAY_URL", ""),
         help="Control plane: claim, heartbeat, events, lifecycle, terminals.",
     )
     parser.add_argument(
         "--gateway-url",
-        default=os.environ.get("AGENT_GATEWAY_URL") or os.environ.get("FREEINFERENCE_BASE_URL", ""),
+        default=os.environ.get("AGENT_GATEWAY_URL", ""),
         help="Inference gateway, as the sandbox reaches it. Model calls only.",
     )
     parser.add_argument("--worker-id", default=default_worker_id())
