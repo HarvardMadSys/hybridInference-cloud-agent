@@ -25,13 +25,14 @@ import math
 import re
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
 
 import httpx
 import jwt
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting
@@ -218,6 +219,35 @@ class AppConfig:
     client_id: str = ""
     client_secret: str = ""
 
+    # Lazily parsed PEM (issue #772). ``object.__setattr__`` because the
+    # dataclass is frozen; the memo lives and dies with this instance, so a
+    # config rebuilt after a settings change parses its own key.
+    _parsed_key: Any = field(default=None, compare=False, repr=False)
+
+    def signing_key(self) -> Any:
+        """Return the parsed private key, parsing the PEM at most once.
+
+        ``jwt.encode`` re-validates the RSA key on every call when handed the
+        PEM string (~43 ms measured against ~0.7 ms with a parsed key), and
+        that cost lands synchronously on the event loop on the claim path —
+        every conversation claim mints an installation token (issue #772).
+        The memo lives on this object, not in module state: a config is
+        replaced wholesale when settings change, so a rotated key can never
+        be served from a memo computed for an earlier one. A parse failure
+        raises :class:`GitHubAppError` here, where it is a configuration
+        problem, rather than inside the signature call.
+        """
+        if self._parsed_key is None:
+            try:
+                object.__setattr__(
+                    self,
+                    "_parsed_key",
+                    load_pem_private_key(self.private_key.encode(), password=None),
+                )
+            except Exception as exc:
+                raise GitHubAppError(f"could not parse the App private key: {exc}") from exc
+        return self._parsed_key
+
     @classmethod
     def from_env(cls, env: dict[str, str]) -> AppConfig | None:
         """Build from environment, or None when the App is not configured.
@@ -259,9 +289,14 @@ def build_app_jwt(config: AppConfig, *, now: int | None = None) -> str:
                 "exp": issued + _JWT_TTL_S,
                 "iss": config.app_id,
             },
-            config.private_key,
+            # The parsed key, not the PEM string: PyJWT re-validates the RSA
+            # key on every call when handed PEM (~43 ms vs ~0.7 ms), and this
+            # runs on the event loop on the claim path (issue #772).
+            config.signing_key(),
             algorithm="RS256",
         )
+    except GitHubAppError:
+        raise
     except Exception as exc:
         raise GitHubAppError(f"could not sign the App JWT: {exc}") from exc
 
