@@ -26,7 +26,7 @@ from cloud_agent.schemas import (
 
 if TYPE_CHECKING:
     from cloud_agent.ports import AttemptCommands
-    from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.environments import EnvironmentWorkspaceRepository
 
 router = APIRouter(prefix="/v1/agent", route_class=HostBodyLimitRoute)
 
@@ -35,7 +35,11 @@ class _EventStorage(Protocol):
     """The capabilities an event upload reaches the store for."""
 
     attempt_commands: AttemptCommands
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentWorkspaceRepository:
+        """Where an environment's preparation receipt is recorded."""
+        ...
 
 
 @router.post("/worker/jobs/{job_id}/events", response_model=WorkerEventResponse, status_code=201)

@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cloud_agent.storage._sql.goals import PAUSE_GOALS_SQL
+from cloud_agent.storage._sql.rows import job_row_to_dict
+from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 
 if TYPE_CHECKING:
     from typing import Any
@@ -102,6 +104,22 @@ SKILL_SUMMARY_SQL = """CASE WHEN j.skills IS NULL THEN NULL ELSE COALESCE(
     '[]'::jsonb) END AS skills"""
 QUALIFIED_JOB_SUMMARY_COLUMNS = QUALIFIED_JOB_COLUMNS.replace("j.skills", SKILL_SUMMARY_SQL)
 JOB_SUMMARY_SELECT = JOB_SELECT.replace(QUALIFIED_JOB_COLUMNS, QUALIFIED_JOB_SUMMARY_COLUMNS)
+
+
+async def read_job(conn: Any, job_id: str) -> dict[str, Any] | None:
+    """Read one job on a caller-owned connection."""
+    row = await conn.fetchrow(
+        f"""
+        SELECT {QUALIFIED_JOB_SUMMARY_COLUMNS}, t.title, t.title_source, t.pinned_at,
+               t.archived_at, t.deleted_at, to_jsonb(s) AS thread_sandbox
+        FROM agent_jobs j
+        LEFT JOIN agent_threads t ON t.id = j.thread_id
+        LEFT JOIN {THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
+        WHERE j.id = $1
+        """,
+        job_id,
+    )
+    return job_row_to_dict(row) if row else None
 
 
 # Permanent deletion hides a chat from its owner whether or not it is archived

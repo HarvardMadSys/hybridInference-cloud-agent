@@ -20,7 +20,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
-from deploy.release import acceptance as ac, release_manifest as rm
+from deploy.release import acceptance as ac
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 COMPOSE = REPO_ROOT / "deploy/control-plane/docker-compose.yml"
@@ -52,10 +52,8 @@ def result(log: str, returncode: int = 1) -> subprocess.CompletedProcess[str]:
 
 
 def test_the_variants_are_the_ones_a_release_carries() -> None:
-    """One table per repository, or a deployment serves a path its image does not."""
-    assert {variant: base for variant, (base, _) in ac.VARIANTS.items()} == {
-        name: path for path, name in rm.WEB_VARIANTS.items()
-    }
+    """Pin the deployed contract independently of the catalog projection."""
+    assert ac.VARIANTS == {"root": ("", "/api"), "agents": ("/agents", "/agents/api")}
 
 
 @pytest.mark.parametrize(

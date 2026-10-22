@@ -19,7 +19,6 @@ opens every other host's sandbox manager.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import ipaddress
 import socket
 import time
@@ -33,9 +32,12 @@ from cloud_agent.sandbox_manager_client import (
     SandboxManagerClient,
     SandboxManagerError,
 )
+from cloud_agent.sandbox_manager_pool import SandboxManagerPoolLease
 from cloud_agent.settings import setting_env
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from cloud_agent.ports import HostPoolRepository
 
 logger = get_logger(__name__)
@@ -255,6 +257,9 @@ def sandbox_manager_configuration_error(host: dict[str, Any] | None) -> str | No
 #: already produced. What this removes is the TCP connect in front of a sandbox manager
 #: the row had already named.
 _POOLS: dict[str, tuple[str, httpx.AsyncClient]] = {}
+_POOL_LEASES: dict[httpx.AsyncClient, SandboxManagerPoolLease] = {}
+SANDBOX_MANAGER_POOL_IDLE_S = 600.0
+_NEXT_POOL_SWEEP = 0.0
 
 
 #: Closes in flight for pools a moved host left behind. Held so the garbage
@@ -271,21 +276,54 @@ def _retire(pool: httpx.AsyncClient) -> None:
     sockets until it is used again, so a replaced pool that is never closed
     keeps them until the process ends; this is what stops that.
     """
+    lease = _POOL_LEASES.pop(pool, None)
+    if lease is not None:
+        lease.retired = True
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:  # pragma: no cover - every caller is async today
         return
-    task = loop.create_task(pool.aclose())
+    task = loop.create_task(lease.aclose() if lease is not None else pool.aclose())
     _RETIRING.add(task)
     task.add_done_callback(_RETIRING.discard)
 
 
+def retire_sandbox_manager_hosts(hosts: Iterable[str]) -> None:
+    """Forget removed hosts immediately, draining requests already in flight."""
+    for host in hosts:
+        _PROBE_CACHE.pop(host, None)
+        cached = _POOLS.pop(host, None)
+        if cached is not None:
+            _retire(cached[1])
+
+
+def sweep_sandbox_manager_clients() -> None:
+    """Reclaim idle pools even when another process handled host removal."""
+    global _NEXT_POOL_SWEEP
+    now = time.monotonic()
+    if now < _NEXT_POOL_SWEEP:
+        return
+    _NEXT_POOL_SWEEP = now + 60
+    stale = [
+        host
+        for host, (_, pool) in _POOLS.items()
+        if (lease := _POOL_LEASES[pool]).active == 0
+        and now - lease.last_used >= SANDBOX_MANAGER_POOL_IDLE_S
+    ]
+    retire_sandbox_manager_hosts(stale)
+    for host, (expires, _) in list(_PROBE_CACHE.items()):
+        if expires <= now:
+            _PROBE_CACHE.pop(host, None)
+
+
 def _pool_for(host: str, url: str) -> httpx.AsyncClient:
     """Return this host's pool, replacing it when the host moved."""
+    sweep_sandbox_manager_clients()
     existing = _POOLS.get(host)
     if existing is not None:
         cached_url, pool = existing
         if cached_url == url and not pool.is_closed:
+            _POOL_LEASES[pool].last_used = time.monotonic()
             return pool
         # The address changed, or shutdown closed the pool under us. Either
         # way the old one is unusable and must not be left holding sockets.
@@ -294,6 +332,7 @@ def _pool_for(host: str, url: str) -> httpx.AsyncClient:
     # No default timeout: every borrowed call passes its own, because the
     # deadlines differ per operation and one client cannot carry them all.
     pool = httpx.AsyncClient()
+    _POOL_LEASES[pool] = SandboxManagerPoolLease(pool)
     _POOLS[host] = (url, pool)
     return pool
 
@@ -305,12 +344,11 @@ async def close_sandbox_manager_clients() -> None:
     already going away, and a sandbox manager that has stopped answering must not turn
     shutdown into a traceback.
     """
+    global _NEXT_POOL_SWEEP
+    retire_sandbox_manager_hosts(list(_POOLS))
+    _PROBE_CACHE.clear()
+    _NEXT_POOL_SWEEP = 0.0
     retiring = list(_RETIRING)
-    pools = [pool for _, pool in _POOLS.values()]
-    _POOLS.clear()
-    for pool in pools:
-        with contextlib.suppress(Exception):
-            await pool.aclose()
     if retiring:
         await asyncio.gather(*retiring, return_exceptions=True)
 
@@ -343,7 +381,8 @@ def _client_for(host: dict[str, Any]) -> SandboxManagerClient | None:
         # connection per call is what it had before, and that is better than a
         # dictionary keyed on whatever happened to be in the row.
         return SandboxManagerClient(url, token)
-    return SandboxManagerClient(url, token, client=_pool_for(name, url))
+    pool = _pool_for(name, url)
+    return SandboxManagerClient(url, token, client=pool, borrow=_POOL_LEASES[pool].borrow)
 
 
 def sandbox_manager_for_host(host: dict[str, Any]) -> SandboxManagerClient | None:
@@ -496,5 +535,7 @@ async def probe_sandbox_manager(
         _PROBE_CACHE.pop(host, None)
         return f"{type(exc).__name__}: {exc} ({url})"
 
-    _PROBE_CACHE[host] = (now + SANDBOX_MANAGER_PROBE_INTERVAL_S, url)
+    current = _POOLS.get(host)
+    if current is not None and current[1] is client._client:
+        _PROBE_CACHE[host] = (now + SANDBOX_MANAGER_PROBE_INTERVAL_S, url)
     return None

@@ -28,6 +28,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_grant_client, get_renewal_schedule, get_storage
+from cloud_agent.application.grant_revocation import revoke_detached_grants
 from cloud_agent.grants import (
     RenewalSchedule,  # noqa: TC001 — FastAPI resolves annotations at runtime.
 )
@@ -360,7 +361,9 @@ async def heartbeat_host(
         observations=[_sandbox_observation(retained) for retained in retained_rows],
     )
     await _record_checkpoints(job_store, updated["host"], retained_rows)
-    await _release_stopped_residencies(job_store, updated["host"], retained_rows, grants)
+    revocations = await _release_stopped_residencies(
+        job_store, updated["host"], retained_rows, grants
+    )
     # Starting/restarting is a bounded launch window. Renew only a process that
     # has proved itself LIVE.
     live = [
@@ -376,6 +379,8 @@ async def heartbeat_host(
         if beat not in lost:
             lost.append(beat)
     retained_stops = await _due_retained_stops(job_store, updated["host"], retained_rows)
+    if revocations:
+        background_tasks.add_task(revoke_detached_grants, grants, revocations)
     if renewals and grants is not None:
         background_tasks.add_task(_renew_residency_grants, grants, list(renewals), schedule)
     # The answer is made of the policy the beat's own write read, under the
@@ -475,14 +480,15 @@ async def _extend_residencies(
 
 async def _release_stopped_residencies(
     store: _HostsStorage, host: str, retained_rows: list[RetainedSandboxBeat], grants: Any
-) -> None:
-    """Release and revoke the residencies of members with no process to use them.
+) -> list[str]:
+    """Release the residencies of members with no process to use them; return their grants.
 
     A stopped group has no process that can legitimately use a residency
-    credential, nor a stopped or lost member of a running one. Release and
-    revoke it instead of renewing it forever; the database fences this against
+    credential, nor a stopped or lost member of a running one. Release it
+    instead of renewing it forever; the database fences this against
     concurrent starts. Most were released on an earlier beat, so one read
-    finds the generations still open, and only those are offered.
+    finds the generations still open, and only those are offered. The caller
+    revokes the returned grants after the reply (``revoke_detached_grants``).
     """
     quiescent = [
         (retained, member)
@@ -492,13 +498,14 @@ async def _release_stopped_residencies(
         and (not retained.running or member.resident_state in {"stopped", "lost"})
     ]
     if not quiescent:
-        return
+        return []
     still_open = await store.residency.open_shared_residencies(
         residencies=[
             (retained.sandbox_id, member.thread_id, member.residency_generation)
             for retained, member in quiescent
         ]
     )
+    revocations: list[str] = []
     for retained, member in quiescent:
         if (retained.sandbox_id, member.thread_id, member.residency_generation) not in still_open:
             continue
@@ -510,8 +517,8 @@ async def _release_stopped_residencies(
             sandbox_id=retained.sandbox_id,
         )
         if released and grants is not None:
-            with contextlib.suppress(Exception):
-                await grants.revoke(released)
+            revocations.append(released)
+    return revocations
 
 
 async def _due_retained_stops(

@@ -34,6 +34,7 @@ from cloud_agent.api._body_limits import (
     payload_too_large,
     read_bounded_body,
 )
+from cloud_agent.api._sensitive_routes import no_store, no_store_exception
 from cloud_agent.api._workspace_access import (
     _workspace_id,
     _workspace_not_ready,
@@ -172,7 +173,7 @@ if TYPE_CHECKING:
         SshServerRepository,
     )
     from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
-    from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.environments import EnvironmentExecutionRepository
     from cloud_agent.sandbox_manager_client import SandboxManagerClient
 
 
@@ -230,25 +231,24 @@ class _BoundedTurnResourcesRoute(HostBodyLimitRoute):
                 response = await handler(request)
             except RequestValidationError:
                 # Missing fields otherwise repeat the entire input per error.
-                # A fixed response also keeps malformed reports out of logs
-                # and avoids returning any caller-supplied telemetry content.
-                return JSONResponse(
-                    status_code=422,
-                    content={
-                        "detail": {
-                            "error": {
-                                "type": "invalid_request",
-                                "message": "Invalid turn resource snapshot.",
+                # A fixed response keeps malformed reports and their content out of logs.
+                return no_store(
+                    JSONResponse(
+                        status_code=422,
+                        content={
+                            "detail": {
+                                "error": {
+                                    "type": "invalid_request",
+                                    "message": "Invalid turn resource snapshot.",
+                                }
                             }
-                        }
-                    },
-                    headers={"Cache-Control": "no-store"},
+                        },
+                    )
                 )
             except HTTPException as exc:
-                exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+                no_store_exception(exc)
                 raise
-            response.headers["Cache-Control"] = "no-store"
-            return response
+            return no_store(response)
 
         return bounded_handler
 
@@ -262,13 +262,7 @@ logger = get_logger("cloud_agent.api.routes")
 
 
 class _WorkerStorage(Protocol):
-    """The capabilities the runner-facing surface reaches the store for.
-
-    ``attachments`` is here for the claim that tells a host how many uploads the
-    conversation carries, and for the two endpoints that hand them over.
-    ``pending_messages`` and ``skills`` are the finish's: a turn that ends sends
-    the owner's next waiting message, checked like any message.
-    """
+    """Capabilities reached by runner endpoints and their claim/finish helpers."""
 
     agent_memory: AgentMemoryRepository
     attachments: AttachmentRepository
@@ -287,7 +281,12 @@ class _WorkerStorage(Protocol):
     sandbox: SandboxRepository
     skills: SkillRepository
     source_control: SourceControlPort
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentExecutionRepository:
+        """Environment persistence needed by this flow."""
+        ...
+
     environment_snapshots: EnvironmentSnapshotRepository
     ssh_servers: SshServerRepository
 

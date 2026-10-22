@@ -123,8 +123,8 @@ class ResidencyRepository(Protocol):
         """
         ...
 
-    async def reap_expired_residencies(self) -> list[dict[str, Any]]:
-        """Mark every hot residency whose lease lapsed as ``none``.
+    async def reap_expired_residencies(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Mark a bounded page of expired hot residencies as ``none``.
 
         The control plane's unilateral half of the fence: the host may still
         be running the sandbox, but its generation no longer opens anything —

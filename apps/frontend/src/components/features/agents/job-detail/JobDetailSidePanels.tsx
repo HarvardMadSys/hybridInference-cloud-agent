@@ -145,6 +145,7 @@ function WorkspacePanelsView({
             jobId={job.id}
             repo={job.repo}
             onTerminal={() => onSelect('terminal')}
+            visible={open}
           />
         )}
       </div>

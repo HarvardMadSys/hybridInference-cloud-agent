@@ -318,6 +318,12 @@ class SandboxRepository(Protocol):
         """Clear durable recovery state after the sandbox manager confirms a resume."""
         ...
 
+    async def terminal_resume_page(
+        self, *, after: tuple[datetime, str] | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Page pending jobs' current routing and shared manifest after a stable cursor."""
+        ...
+
     async def reserve_thread_sandbox(
         self,
         *,

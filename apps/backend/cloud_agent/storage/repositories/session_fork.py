@@ -14,7 +14,7 @@ from cloud_agent.domain.execution import CANCELLED, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.ids import new_job_id, new_session_fork_id, new_thread_id
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
 from cloud_agent.storage._sql.hosts import DELETED_GROUP_STATES, refuse_start_on_revoked_host
-from cloud_agent.storage._sql.jobs import JOB_SELECT
+from cloud_agent.storage._sql.jobs import JOB_SELECT, read_job
 from cloud_agent.storage._sql.mcp_residency import mint_residency_sql
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import (
@@ -23,7 +23,6 @@ from cloud_agent.storage._sql.sandbox import (
     THREAD_SANDBOX_SOURCE,
     quiet_idle_deadline,
 )
-from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.repositories.goals import new_goal_id
 
 if TYPE_CHECKING:
@@ -34,16 +33,8 @@ class PostgresSessionForkRepository:
     """Forking a retained chat: prepare, materialize, finalize, reap."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
-        """Wrap the pool the control plane already owns.
-
-        A finalized fork answers with the child turn it just made, and that
-        read is ``PostgresConversationQueries.get_job`` -- the same call it
-        made when both lived on one class, over the same pool, and after this
-        class's transaction has already committed. Held as a peer rather than
-        reimplemented, so there is still one statement behind it.
-        """
+        """Wrap the pool the control plane already owns."""
         self._pool = pool
-        self._queries = PostgresConversationQueries(pool)
 
     async def prepare_session_fork(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
@@ -809,46 +800,55 @@ class PostgresSessionForkRepository:
                 )
                 copied: dict[str, str] = {}
                 previous_copy: str | None = None
+                copied_turn_rows: list[tuple[Any, ...]] = []
                 for turn in turns:
                     copy_id = new_job_id()
                     copied[str(turn["id"])] = copy_id
-                    await conn.execute(
-                        """
-                        INSERT INTO agent_jobs (
-                            id, thread_id, parent_job_id, turn_no, native_turn_no, user_id,
-                            base_sha, task_prompt, runtime, model, reasoning_effort, state,
-                            published_pr_url, published_commit_sha, detail, metadata,
-                            fork_source_job_id, skills, created_at, updated_at
-                        ) VALUES (
-                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                            $13, $14, $15, $16::jsonb, $17, $18::jsonb,
-                            clock_timestamp(), clock_timestamp()
+                    copied_turn_rows.append(
+                        (
+                            copy_id,
+                            operation["target_thread_id"],
+                            previous_copy,
+                            turn["turn_no"],
+                            turn["native_turn_no"],
+                            operation["user_id"],
+                            turn["base_sha"],
+                            turn["task_prompt"],
+                            turn["runtime"],
+                            turn["model"],
+                            turn["reasoning_effort"],
+                            turn["state"] if turn["state"] in TERMINAL_STATES else CANCELLED,
+                            turn["published_pr_url"],
+                            turn["published_commit_sha"],
+                            turn["detail"],
+                            json.dumps(load_json(turn["metadata"]))
+                            if turn["metadata"] is not None
+                            else None,
+                            turn["id"],
+                            json.dumps(load_json(turn["skills"]))
+                            if turn["skills"] is not None
+                            else None,
                         )
-                        """,
-                        copy_id,
-                        operation["target_thread_id"],
-                        previous_copy,
-                        turn["turn_no"],
-                        turn["native_turn_no"],
-                        operation["user_id"],
-                        turn["base_sha"],
-                        turn["task_prompt"],
-                        turn["runtime"],
-                        turn["model"],
-                        turn["reasoning_effort"],
-                        turn["state"] if turn["state"] in TERMINAL_STATES else CANCELLED,
-                        turn["published_pr_url"],
-                        turn["published_commit_sha"],
-                        turn["detail"],
-                        json.dumps(load_json(turn["metadata"]))
-                        if turn["metadata"] is not None
-                        else None,
-                        turn["id"],
-                        json.dumps(load_json(turn["skills"]))
-                        if turn["skills"] is not None
-                        else None,
                     )
                     previous_copy = copy_id
+                # This is a driver batch, not a set-based SQL statement.
+                # asyncpg may stream or flush it internally, but finalization
+                # no longer awaits one protocol exchange for every copied turn.
+                await conn.executemany(
+                    """
+                    INSERT INTO agent_jobs (
+                        id, thread_id, parent_job_id, turn_no, native_turn_no, user_id,
+                        base_sha, task_prompt, runtime, model, reasoning_effort, state,
+                        published_pr_url, published_commit_sha, detail, metadata,
+                        fork_source_job_id, skills, created_at, updated_at
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                        $13, $14, $15, $16::jsonb, $17, $18::jsonb,
+                        clock_timestamp(), clock_timestamp()
+                    )
+                    """,
+                    copied_turn_rows,
+                )
                 await conn.executemany(
                     """
                     INSERT INTO agent_thread_messages
@@ -942,7 +942,10 @@ class PostgresSessionForkRepository:
                 )
             else:
                 return None
-        return None if anchor_id is None else await self._queries.get_job(anchor_id)
+        if anchor_id is None:
+            return None
+        async with self._pool.acquire() as conn:
+            return await read_job(conn, anchor_id)
 
     async def reap_stalled_session_forks(
         self, *, stall_seconds: float = 900.0

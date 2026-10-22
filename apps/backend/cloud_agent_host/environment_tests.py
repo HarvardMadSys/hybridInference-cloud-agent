@@ -13,6 +13,7 @@ import httpx
 from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, RetainedChatBackend
 from cloud_agent_host.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
 from cloud_agent_host.environment_preparation import (
+    RUNNING_PROGRESS_INTERVAL_S,
     EnvironmentPreparation,
     run_step,
     write_setup_marker,
@@ -25,6 +26,7 @@ from cloud_agent_shared.secret_redaction import SecretRedactor
 #: Snapshot ids per question to the control plane; one Sandbox Manager delete
 #: request takes as many.
 _RETIRED_IMAGES_BATCH = 100
+_HEARTBEAT_INTERVAL_S = 10.0
 
 
 def environment_run_spec(run_id: str, generation: int, image_digest: str | None) -> ChatSandboxSpec:
@@ -138,8 +140,10 @@ class _RunReporter:
             self.cancelled.set()
         self._steps: list[dict[str, Any]] = []
         self._lock = threading.Lock()
+        self._report_lock = threading.Lock()
         self._began = time.monotonic()
-        self._last_upload = 0.0
+        self._last_reported_at = self._began
+        self._running_progress_reported = False
         self._ended = threading.Event()
         self._beat = threading.Thread(target=self._heartbeat, name="environment-test-heartbeat")
 
@@ -159,22 +163,29 @@ class _RunReporter:
         *,
         cleanup_complete: bool = False,
         snapshot: dict[str, Any] | None = None,
-    ) -> None:
-        """Send the run's state and steps. A refusal (409) cancels the run."""
-        with self._lock:
-            payload = {
-                "generation": self._generation,
-                "state": state,
-                "steps": [dict(s) for s in self._steps],
-                "detail": self._redactor.text(detail)[-1000:],
-                "image_digest": self._image_digest,
-                "cleanup_complete": cleanup_complete,
-                **({"snapshot": snapshot} if snapshot is not None else {}),
-            }
-        answer = self._client.post(self._path, json=payload)
-        if answer.status_code == 409:
-            self.cancelled.set()
-        answer.raise_for_status()
+        minimum_interval_s: float | None = None,
+    ) -> bool:
+        """Send one fenced update, coalescing only non-terminal running reports."""
+        with self._report_lock:
+            now = time.monotonic()
+            if minimum_interval_s is not None and now - self._last_reported_at < minimum_interval_s:
+                return False
+            with self._lock:
+                payload = {
+                    "generation": self._generation,
+                    "state": state,
+                    "steps": [dict(s) for s in self._steps],
+                    "detail": self._redactor.text(detail)[-1000:],
+                    "image_digest": self._image_digest,
+                    "cleanup_complete": cleanup_complete,
+                    **({"snapshot": snapshot} if snapshot is not None else {}),
+                }
+            answer = self._client.post(self._path, json=payload)
+            if answer.status_code == 409:
+                self.cancelled.set()
+            answer.raise_for_status()
+            self._last_reported_at = time.monotonic()
+            return True
 
     def step(self, step: dict[str, Any]) -> None:
         """Record a step's latest state, and report it at most twice a second while it runs."""
@@ -186,34 +197,37 @@ class _RunReporter:
                 self._steps.append(dict(step))
             else:
                 self._steps[prior] = dict(step)
-        now = time.monotonic()
         if self._ended.is_set():
             return
-        if step["state"] != "running" or now - self._last_upload >= 0.5:
-            try:
-                self.report()
-            except httpx.HTTPStatusError as exc:
-                # A refused report has cancelled the run. Raised from a
-                # running step's output, it would leave the step running:
-                # run_setup stops the script instead, so it ends cancelled.
-                if step["state"] != "running" or exc.response.status_code != 409:
-                    raise
-            self._last_upload = now
+        try:
+            sent = self.report(
+                minimum_interval_s=(
+                    RUNNING_PROGRESS_INTERVAL_S
+                    if step["state"] == "running" and self._running_progress_reported
+                    else None
+                )
+            )
+            if sent and step["state"] == "running":
+                self._running_progress_reported = True
+        except httpx.HTTPStatusError as exc:
+            # A refused report has cancelled the run. Raised from a
+            # running step's output, it would leave the step running:
+            # run_setup stops the script instead, so it ends cancelled.
+            if step["state"] != "running" or exc.response.status_code != 409:
+                raise
 
     def _heartbeat(self) -> None:
-        beat_at = self._began + 10
         # A short tick, so a closing worker cancels its run without waiting
         # out the interval between reports.
         while not self._ended.wait(0.25):
             if self._stop is not None and self._stop.is_set():
                 self.cancelled.set()
-            if time.monotonic() < beat_at:
-                continue
-            beat_at = time.monotonic() + 10
             if time.monotonic() - self._began >= 1800:
                 self.cancelled.set()
             try:
-                self.report()
+                # Every progress report renews the same lease. Send a
+                # heartbeat only when no more recent update already did so.
+                self.report(minimum_interval_s=_HEARTBEAT_INTERVAL_S)
             except (httpx.HTTPError, ValueError):
                 self.cancelled.set()
                 return

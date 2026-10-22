@@ -606,6 +606,35 @@ def test_a_cancelled_environment_run_leaves_the_worker_polling(monkeypatch, tmp_
     assert len(claims) == 2
 
 
+def test_chatty_environment_progress_reports_are_coalesced(monkeypatch, tmp_path):
+    """Running output renews the lease without posting every output chunk."""
+    now = [100.0]
+    monkeypatch.setattr(environment_tests.time, "monotonic", lambda: now[0])
+
+    def prepare(callback, _cancel):
+        for index in range(12):
+            now[0] += 1
+            callback(
+                {
+                    "phase": "setup",
+                    "state": "running",
+                    "output": f"line {index}",
+                }
+            )
+
+    worker, _, reports = _environment_worker(monkeypatch, tmp_path, prepare, 200)
+    worker.poll("credential")
+    worker._thread.join(5)
+    worker.close()
+
+    progress = [report for report in reports if report["state"] == "running" and report["steps"]]
+    assert [report["steps"][0]["output"] for report in progress] == [
+        "line 0",
+        "line 5",
+        "line 10",
+    ]
+
+
 def test_closing_the_environment_worker_still_cancels_its_run(monkeypatch, tmp_path):
     started = threading.Event()
 

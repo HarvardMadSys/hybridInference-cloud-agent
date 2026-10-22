@@ -239,3 +239,97 @@ async def test_a_stored_metadata_address_gets_no_client(sandbox_manager_pools, m
 
     assert sandbox_manager_routing._client_for(_row("host-a", "http://169.254.169.254:80")) is None
     assert not sandbox_manager_routing._POOLS
+
+
+async def test_removed_hosts_release_pool_and_probe_entries(sandbox_manager_pools) -> None:
+    pools = []
+    for index in range(50):
+        name = f"host-{index}"
+        client = sandbox_manager_routing._client_for(_row(name, "http://manager:9000"))
+        pools.append(client._client)
+        sandbox_manager_routing._PROBE_CACHE[name] = (float("inf"), "http://manager:9000")
+
+    sandbox_manager_routing.retire_sandbox_manager_hosts(f"host-{index}" for index in range(50))
+    await asyncio.gather(*sandbox_manager_routing._RETIRING)
+
+    assert not sandbox_manager_routing._POOLS
+    assert not sandbox_manager_routing._PROBE_CACHE
+    assert not sandbox_manager_routing._POOL_LEASES
+    assert all(pool.is_closed for pool in pools)
+
+
+async def test_retirement_drains_a_borrower_and_reregistration_gets_a_new_pool(
+    sandbox_manager_pools,
+) -> None:
+    row = _row("host-a", "http://manager:9000")
+    old = sandbox_manager_routing._client_for(row)
+    async with old._http(3) as borrowed:
+        sandbox_manager_routing.retire_sandbox_manager_hosts(["host-a"])
+        await asyncio.sleep(0)
+        assert not borrowed.is_closed
+        replacement = sandbox_manager_routing._client_for(row)
+        assert replacement._client is not borrowed
+        with pytest.raises(sandbox_manager_routing.SandboxManagerError, match="retired"):
+            async with old._http(3):
+                pytest.fail("a retired pool accepted another borrower")
+
+    await asyncio.gather(*sandbox_manager_routing._RETIRING)
+    assert borrowed.is_closed
+    assert not replacement._client.is_closed
+
+
+async def test_idle_sweep_expires_missed_removals_but_keeps_active_requests(
+    sandbox_manager_pools,
+    monkeypatch,
+) -> None:
+    idle = sandbox_manager_routing._client_for(_row("idle", "http://idle:9000"))
+    active = sandbox_manager_routing._client_for(_row("active", "http://active:9000"))
+    now = sandbox_manager_routing.time.monotonic()
+    sandbox_manager_routing._PROBE_CACHE["orphan"] = (now + 60, "http://gone:9000")
+    async with active._http(3):
+        monkeypatch.setattr(sandbox_manager_routing.time, "monotonic", lambda: now + 601)
+        sandbox_manager_routing.sweep_sandbox_manager_clients()
+        await asyncio.gather(*sandbox_manager_routing._RETIRING)
+        assert idle._client.is_closed
+        assert not active._client.is_closed
+        assert set(sandbox_manager_routing._POOLS) == {"active"}
+        assert not sandbox_manager_routing._PROBE_CACHE
+
+
+@pytest.mark.parametrize(
+    "outcome, retired", [("ok", True), ("draining", False), ("moving_out", False)]
+)
+async def test_host_removal_retires_only_after_completion(monkeypatch, outcome, retired) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from cloud_agent.application.host_commands import HostCommands
+
+    retirement = Mock()
+    monkeypatch.setattr(
+        "cloud_agent.application.host_commands.retire_sandbox_manager_hosts", retirement
+    )
+    await HostCommands(SimpleNamespace(remove_host=AsyncMock(return_value=outcome))).remove(
+        host="host-a"
+    )
+    assert retirement.call_args_list == ([((["host-a"],), {})] if retired else [])
+
+
+async def test_reaper_retires_completed_host_removals(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from cloud_agent.workers.attempts import _reap_offline_hosts
+
+    retirement = Mock()
+    sweep = Mock()
+    monkeypatch.setattr(sandbox_manager_routing, "retire_sandbox_manager_hosts", retirement)
+    monkeypatch.setattr(sandbox_manager_routing, "sweep_sandbox_manager_clients", sweep)
+    await _reap_offline_hosts(
+        SimpleNamespace(
+            reap_offline_hosts=AsyncMock(return_value=[]),
+            finish_host_removals=AsyncMock(return_value=["gone"]),
+        )
+    )
+    retirement.assert_called_once_with(["gone"])
+    sweep.assert_called_once_with()

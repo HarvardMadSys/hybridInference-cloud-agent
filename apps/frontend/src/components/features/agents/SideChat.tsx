@@ -16,6 +16,7 @@ import {
   ComposerSendButton,
 } from './ConversationComposer';
 import { HistoryTurn } from './ChatMessages';
+import { ThreadHistoryButton } from './ThreadHistoryButton';
 import { codeReviewFixPrompt } from './codeReview';
 import { LiveAgentStatus } from './LiveAgentStatus';
 import { describeConversationTurns } from './conversationTurnNavigation';
@@ -84,6 +85,7 @@ function SideChatContent({
   const {
     job,
     threadJobs,
+    history,
     loading,
     error: loadError,
     reload,
@@ -427,6 +429,7 @@ function SideChatContent({
           className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-none [overflow-anchor:none] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/40"
         >
           <div className="flex-1 px-5 pt-3">
+            <ThreadHistoryButton history={history} />
             {active && turns.map((turn) => <HistoryTurn key={turn.key} turn={turn} busy={false} />)}
             {turns.length && current && ownerRunNote(current) ? (
               <p className="py-2 text-xs text-gray-500 dark:text-gray-400">
