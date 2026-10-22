@@ -54,6 +54,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from cloud_agent import memory_tool, web_search
 from cloud_agent.agent_memory import MemoryTask
 from cloud_agent.api.deps import get_mcp_decision_signal, get_storage
+from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol
 from cloud_agent.mcp.authorization import decide, visible_capabilities
@@ -88,7 +89,6 @@ from cloud_agent.mcp.resources import (
     split_resource_uri,
 )
 from cloud_agent.mcp.runtime import get_host as _host
-from cloud_agent.source_control import SourceControlError
 from cloud_agent.tokens import (
     SCOPE_MCP,
     InvalidAgentToken,
@@ -895,7 +895,7 @@ def _protect_arguments(arguments: Any) -> str | None:
 
     try:
         return invocation_cipher().encrypt(encode_arguments(arguments))
-    except SourceControlError:
+    except CredentialCipherError:
         # Without a key the platform cannot hold the body. The call is still
         # held -- the owner can approve it by name -- but the arguments will not
         # be shown, which is worse than useless for a write, so this is logged.
