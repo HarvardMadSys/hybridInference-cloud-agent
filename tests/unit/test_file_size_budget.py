@@ -55,7 +55,7 @@ TEST_BASELINE = {
     "tests/servers/test_admin_compute.py": 2101,
     "tests/servers/test_agent_jobs_api.py": 6331,
     "tests/unit/test_agent_publish_worker.py": 2080,
-    "tests/unit/test_agent_runner.py": 2735,
+    "tests/unit/test_agent_runner.py": 2650,
     "tests/unit/test_agent_sandbox_manager.py": 3957,
     "tests/unit/test_chat_sandbox.py": 3190,
     "tests/unit/test_compute_providers.py": 2002,
