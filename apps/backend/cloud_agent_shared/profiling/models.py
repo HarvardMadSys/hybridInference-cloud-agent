@@ -6,6 +6,7 @@ from collections.abc import Mapping  # noqa: TC003 -- public dataclass type intr
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime  # noqa: TC003 -- public dataclass type introspection
+from types import MappingProxyType
 from typing import Any, Literal
 
 from .clock import clock
@@ -19,13 +20,88 @@ from .schema import (
 
 
 @dataclass(frozen=True)
-class ProfilingRun:
-    """A bounded, explicitly scoped profiling experiment.
+class AdmissionInstance:
+    """One producer instance's immutable contribution to a run budget."""
 
-    ``deadline_mono`` is derived from ``expires_at`` when the descriptor is
+    instance: str
+    max_operations: int
+
+    def to_payload(self) -> dict[str, Any]:
+        """Return the catalogue and handoff representation."""
+        return {"instance": self.instance, "max_operations": self.max_operations}
+
+
+@dataclass(frozen=True)
+class RunManifest:
+    """The canonical immutable identity of one profiling experiment.
+
+    The object owns the normalized vocabulary shared by local selection,
+    handoffs, records, and catalogue registration. Its nested values are
+    immutable too: callers cannot mutate a target or admission after a
+    measurement has retained the manifest.
+    """
+
+    run_id: str
+    operations: frozenset[str]
+    expires_at: datetime | None
+    max_operations: int
+    continuous: bool = False
+    target: Mapping[str, str] = field(default_factory=dict)
+    config_version: int = 1
+    admission_instances: tuple[AdmissionInstance, ...] = ()
+    #: Who rooted this run: a static deployment descriptor or an administrator.
+    source: str = SOURCE_ENVIRONMENT
+
+    def __post_init__(self) -> None:
+        """Freeze caller-owned collections at the normalization boundary."""
+        object.__setattr__(self, "operations", frozenset(self.operations))
+        object.__setattr__(
+            self,
+            "target",
+            MappingProxyType(
+                dict(sorted((str(key), str(value)) for key, value in self.target.items()))
+            ),
+        )
+        object.__setattr__(self, "admission_instances", tuple(self.admission_instances))
+
+    def _wire_identity(self) -> dict[str, Any]:
+        """Return the fields shared by the catalogue and handoff projections."""
+        payload: dict[str, Any] = {
+            "run_id": self.run_id,
+            "operations": sorted(self.operations),
+            "target": dict(self.target),
+            "config_version": self.config_version,
+            "max_operations": self.max_operations,
+        }
+        if self.expires_at is not None:
+            payload["expires_at"] = self.expires_at.isoformat()
+        elif self.continuous:
+            payload.update(expires_at=None, continuous=True)
+        return payload
+
+    def to_handoff_payload(self, *, control_revision: int) -> dict[str, Any]:
+        """Project this identity into the nested process-handoff format."""
+        payload = self._wire_identity()
+        payload.update(control_revision=control_revision, source=self.source)
+        return payload
+
+    def to_catalogue_payload(self) -> dict[str, Any] | None:
+        """Project this identity into the trusted storage catalogue format."""
+        if self.expires_at is None and not self.continuous:
+            return None
+        payload = self._wire_identity()
+        payload["admission_instances"] = [item.to_payload() for item in self.admission_instances]
+        return payload
+
+
+@dataclass(frozen=True)
+class ProfilingRun:
+    """A manifest plus the process-local deadline that enforces it.
+
+    ``deadline_mono`` is derived from ``manifest.expires_at`` when the descriptor is
     first read, so a process restart or a wall-clock jump cannot extend a run.
 
-    ``expires_at_utc`` is the configured instant itself, and it is a different
+    The manifest's absolute expiry is the configured instant itself, and it is a different
     value from ``deadline_mono`` in every way that matters downstream: it is
     what the experiment *is*, so a stored manifest is identified by it, while
     the monotonic deadline is what this process enforces locally. A consumer
@@ -33,20 +109,58 @@ class ProfilingRun:
     reconstructing the configuration from a measurement of it.
     """
 
-    run_id: str
-    operations: frozenset[str]
-    expires_at: str
-    expires_at_utc: datetime | None
+    manifest: RunManifest
     deadline_mono: float
-    max_operations: int
-    continuous: bool = False
-    target: Mapping[str, str] = field(default_factory=dict)
-    config_version: int = 1
-    admission_instances: tuple[Mapping[str, Any], ...] = ()
-    #: Who rooted this run: a static deployment descriptor or an administrator.
-    #: It travels into every measurement, so a record says which control source
-    #: produced it rather than leaving a reader to infer it from a run id.
-    source: str = SOURCE_ENVIRONMENT
+
+    @property
+    def run_id(self) -> str:
+        """Return the manifest's run id."""
+        return self.manifest.run_id
+
+    @property
+    def operations(self) -> frozenset[str]:
+        """Return the operations selected by the manifest."""
+        return self.manifest.operations
+
+    @property
+    def expires_at(self) -> str:
+        """Return the normalized configured expiry for compatibility."""
+        return self.manifest.expires_at.isoformat() if self.manifest.expires_at else ""
+
+    @property
+    def expires_at_utc(self) -> datetime | None:
+        """Return the configured absolute expiry."""
+        return self.manifest.expires_at
+
+    @property
+    def max_operations(self) -> int:
+        """Return the local admission budget."""
+        return self.manifest.max_operations
+
+    @property
+    def continuous(self) -> bool:
+        """Return whether the run has no time or sample limit."""
+        return self.manifest.continuous
+
+    @property
+    def target(self) -> Mapping[str, str]:
+        """Return the immutable target mapping."""
+        return self.manifest.target
+
+    @property
+    def config_version(self) -> int:
+        """Return the immutable manifest version."""
+        return self.manifest.config_version
+
+    @property
+    def admission_instances(self) -> tuple[AdmissionInstance, ...]:
+        """Return the immutable admission instances."""
+        return self.manifest.admission_instances
+
+    @property
+    def source(self) -> str:
+        """Return the control source that rooted the run."""
+        return self.manifest.source
 
 
 @dataclass(frozen=True)
@@ -118,7 +232,9 @@ class Measurement:
     """Mutable timing state for one selected root operation."""
 
     operation: str
-    run_id: str
+    #: The exact immutable experiment snapshot that selected this measurement.
+    #: It is retained once, rather than unpacked into parallel ``run_*`` fields.
+    run_manifest: RunManifest
     measurement_id: str
     started_mono_ns: int
     #: The experiment's own monotonic deadline, and the only thing that ends
@@ -132,21 +248,6 @@ class Measurement:
     #: was handed belongs to the configuration they hold, and so a record says
     #: which version of the switch produced it.
     control_revision: int = 0
-    #: The immutable experiment this measurement belongs to. Copied at
-    #: selection rather than re-read later, because "later" may be another
-    #: experiment: an in-flight record, its manifest and its delivery must keep
-    #: naming the run that selected them no matter what the deployment is
-    #: configured to do now.
-    run_operations: frozenset[str] = frozenset()
-    run_target: Mapping[str, str] = field(default_factory=dict)
-    run_max_operations: int = 0
-    run_continuous: bool = False
-    run_config_version: int = 1
-    #: Which control source selected this measurement. A reader can then tell a
-    #: legacy static-descriptor experiment from an administrator's, which is
-    #: what makes "this old run has no control state" an answer rather than a
-    #: guess.
-    run_source: str = SOURCE_ENVIRONMENT
     #: Producer that rooted this operation: the runner for an attempt startup,
     #: the control plane for a file or terminal request. It names the record's
     #: owner and the source of its local milestones. Declared among the
@@ -157,13 +258,6 @@ class Measurement:
     #: How far these boundaries reach. Empty means the root never stated it,
     #: and the record then claims no coverage rather than assuming the widest.
     coverage_scope: str = ""
-    #: The run's configured absolute expiry. This is the experiment's identity
-    #: for storage, not a measurement of how long is left: a producer that
-    #: derived it from its own clock would be stating a different experiment.
-    run_expires_at: datetime | None = None
-    #: Admission instances that actually enforced this root selection. A
-    #: child inherits the parent's entry rather than claiming its own budget.
-    run_admission_instances: tuple[Mapping[str, Any], ...] = ()
     facts: dict[str, Any] = field(default_factory=dict)
     spans: list[_SpanRecord] = field(default_factory=list)
     marks: list[tuple[str, int]] = field(default_factory=list)
@@ -230,6 +324,51 @@ class Measurement:
     reserved: bool = True
     selected: bool = True
     finished: bool = False
+
+    @property
+    def run_id(self) -> str:
+        """Return the retained manifest's run id."""
+        return self.run_manifest.run_id
+
+    @property
+    def run_operations(self) -> frozenset[str]:
+        """Compatibility view of the retained manifest's operations."""
+        return self.run_manifest.operations
+
+    @property
+    def run_target(self) -> Mapping[str, str]:
+        """Compatibility view of the retained immutable target."""
+        return self.run_manifest.target
+
+    @property
+    def run_max_operations(self) -> int:
+        """Compatibility view of the retained manifest budget."""
+        return self.run_manifest.max_operations
+
+    @property
+    def run_continuous(self) -> bool:
+        """Compatibility view of the retained continuous flag."""
+        return self.run_manifest.continuous
+
+    @property
+    def run_config_version(self) -> int:
+        """Compatibility view of the retained manifest version."""
+        return self.run_manifest.config_version
+
+    @property
+    def run_source(self) -> str:
+        """Compatibility view of the retained control source."""
+        return self.run_manifest.source
+
+    @property
+    def run_expires_at(self) -> datetime | None:
+        """Compatibility view of the retained configured expiry."""
+        return self.run_manifest.expires_at
+
+    @property
+    def run_admission_instances(self) -> tuple[AdmissionInstance, ...]:
+        """Compatibility view of the retained admission instances."""
+        return self.run_manifest.admission_instances
 
     def offset_us(self, mono_ns: int | None = None) -> int:
         """Return microseconds since this measurement started."""

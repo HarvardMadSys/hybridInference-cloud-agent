@@ -60,6 +60,7 @@ from cloud_agent_shared.operation_profiling import (
     MODE_DISABLED,
     MODE_ENVIRONMENT,
     RUN_ID_PATTERN,
+    SOURCE_ADMIN,
     TARGET_KEYS,
     ControlState,
     ProfilingRun,
@@ -221,14 +222,16 @@ def _parse_run_payload(value: Any) -> ProfilingRun | None:
     if not isinstance(raw_operations, list) or not raw_operations:
         return None
     operations = [str(item)[:MAX_DETAIL_CHARS] for item in raw_operations[:MAX_OPERATIONS]]
-    target: dict[str, str] = {}
+    target: dict[str, str | int] = {}
     raw_target = value.get("target")
     if isinstance(raw_target, Mapping):
         for key, item in list(raw_target.items())[:MAX_TARGET_FIELDS]:
             name = str(key)
             if name not in TARGET_KEYS:
                 return None
-            target[name] = str(item)[:MAX_DETAIL_CHARS]
+            if not isinstance(item, (str, int)) or isinstance(item, bool) or not str(item).strip():
+                return None
+            target[name] = str(item)[:MAX_DETAIL_CHARS] if isinstance(item, str) else item
     expires_at = value.get("expires_at")
     if isinstance(expires_at, datetime):
         expires_at_text = expires_at.astimezone(UTC).isoformat()
@@ -238,8 +241,8 @@ def _parse_run_payload(value: Any) -> ProfilingRun | None:
         "run_id": run_id,
         "operations": operations,
         "expires_at": expires_at_text,
-        "config_version": _bounded_int(value.get("config_version")) or 1,
-        "max_operations": _bounded_int(value.get("max_operations")) or 100,
+        "config_version": value.get("config_version", 1),
+        "max_operations": value.get("max_operations", 100),
         "target": target,
         "admission_instances": [],
     }
@@ -248,7 +251,11 @@ def _parse_run_payload(value: Any) -> ProfilingRun | None:
             return None
         descriptor.update(continuous=True, expires_at=value.get("expires_at"), max_operations=0)
     try:
-        return parse_run(json.dumps(descriptor), allow_continuous=True)
+        return parse_run(
+            json.dumps(descriptor),
+            allow_continuous=True,
+            source=SOURCE_ADMIN,
+        )
     except ValueError:
         return None
 
