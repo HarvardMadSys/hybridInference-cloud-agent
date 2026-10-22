@@ -1,26 +1,23 @@
 'use client';
 
 import Link from 'next/link';
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { conversationHref } from '@/lib/api/adminConversations';
 import { getAdminSandboxes, type AdminSandboxState } from '@/lib/api/adminSandboxes';
 import { getErrorMessage } from '@/lib/utils/errors';
 
-import { accessDenied, ago, BUTTON, dateTime, ErrorNotice } from '../runs/shared';
+import { accessDenied, BUTTON, dateTime, ErrorNotice } from '../runs/shared';
+import { finiteMetric, formatBytes, formatCpu, type SandboxObservation } from './present';
 import {
-  finiteMetric,
-  formatBytes,
-  formatCpu,
-  formatDiskLimit,
-  formatDuration,
-  formatRate,
-  sampleFreshness,
-  summarizeSandboxes,
-  type SandboxObservation,
-} from './present';
-import { SandboxManagement } from './SandboxManagement';
-import { BatchSandboxManagement } from './BatchSandboxManagement';
+  FleetSummary,
+  ResourceCell,
+  ResourceSampleAge,
+  SandboxAgeCell,
+  SandboxDetails,
+  LiveSandboxManagement,
+  LiveBatchSandboxManagement,
+} from './SandboxLiveValues';
 import {
   defaultSortDirection,
   selectSandboxes,
@@ -31,7 +28,6 @@ import {
 } from './inventory';
 
 const REFRESH_MS = 30_000;
-const STALE_HEARTBEAT_MS = 90_000;
 const STATE_OPTIONS: { value: AdminSandboxState | 'all'; label: string }[] = [
   { value: 'running', label: 'Running' },
   { value: 'all', label: 'All states' },
@@ -68,7 +64,6 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [batchBusy, setBatchBusy] = useState(false);
   const batchBusyRef = useRef(false);
-  const [nowMs, setNowMs] = useState(() => performance.now());
   const denyAccess = useCallback(() => {
     setSnapshot(null);
     setDenied(true);
@@ -86,11 +81,6 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
   }, []);
   const completedBatch = useCallback((ids: string[]) => {
     setSelectedIds((current) => new Set([...current].filter((id) => !ids.includes(id))));
-  }, []);
-
-  useEffect(() => {
-    const timer = setInterval(() => setNowMs(performance.now()), 1_000);
-    return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -194,14 +184,14 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
     });
   }, [visibleSandboxes]);
 
-  function selectSandbox(id: string, checked: boolean) {
+  const selectSandbox = useCallback((id: string, checked: boolean) => {
     setSelectedIds((current) => {
       const next = new Set(current);
       if (checked) next.add(id);
       else next.delete(id);
       return next;
     });
-  }
+  }, []);
 
   function selectAllVisible(checked: boolean) {
     setSelectedIds(
@@ -403,15 +393,9 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
           {stateFilter === 'running' ? 'running sandboxes…' : 'sandboxes…'}
         </p>
       )}
-      {snapshot && (
-        <FleetSummary
-          sandboxes={snapshot.sandboxes.filter(({ sandbox }) => sandbox.state === 'running')}
-          nowMs={nowMs}
-        />
-      )}
-      <BatchSandboxManagement
+      {snapshot && <FleetSummary sandboxes={snapshot.sandboxes} />}
+      <LiveBatchSandboxManagement
         selected={selectedSandboxes}
-        nowMs={nowMs}
         onDenied={denyAccess}
         onChanged={stopped}
         onCompleted={completedBatch}
@@ -432,8 +416,6 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
             sort={sort}
             onSort={sortBy}
             autoRefresh={autoRefresh}
-            now={Date.parse(snapshot.observedAt) + Math.max(0, nowMs - snapshot.appliedAtMs)}
-            nowMs={nowMs}
             onDenied={denyAccess}
             onChanged={stopped}
             selectedIds={selectedIds}
@@ -446,53 +428,11 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
   );
 }
 
-function FleetSummary({ sandboxes, nowMs }: { sandboxes: SandboxObservation[]; nowMs: number }) {
-  const summary = summarizeSandboxes(sandboxes, nowMs);
-  const cards = [
-    { label: 'Running sandboxes', value: summary.sandboxCount },
-    { label: 'Active turns', value: summary.activeTurns },
-    { label: 'Sessions', value: summary.sessions },
-    { label: 'Hosts', value: summary.hosts },
-    {
-      label: 'Measured CPU',
-      value: formatCpu(summary.cpuCoverage > 0 ? summary.cpuCores : null),
-      coverage: summary.cpuCoverage,
-    },
-    {
-      label: 'Measured memory',
-      value: formatBytes(summary.memoryCoverage > 0 ? summary.memoryBytes : null),
-      coverage: summary.memoryCoverage,
-    },
-  ];
-  return (
-    <dl
-      aria-label="Sandbox fleet summary"
-      className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6"
-    >
-      {cards.map(({ label, value, coverage }) => (
-        <div key={label} className="ui-card p-4">
-          <dt className="text-xs text-muted">{label}</dt>
-          <dd className="mt-1 text-lg font-semibold tabular-nums text-gray-900 dark:text-gray-100">
-            {value}
-          </dd>
-          {coverage !== undefined && (
-            <dd className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              {coverage} / {summary.sandboxCount} sandboxes · fresh samples only
-            </dd>
-          )}
-        </div>
-      ))}
-    </dl>
-  );
-}
-
 function SandboxesTable({
   sandboxes,
   sort,
   onSort,
   autoRefresh,
-  now,
-  nowMs,
   onDenied,
   onChanged,
   selectedIds,
@@ -504,8 +444,6 @@ function SandboxesTable({
   sort: SandboxSort;
   onSort: (key: SandboxSortKey) => void;
   autoRefresh: boolean;
-  now: number;
-  nowMs: number;
   onDenied: () => void;
   onChanged: () => void;
   selectedIds: Set<string>;
@@ -587,8 +525,6 @@ function SandboxesTable({
               key={observation.sandbox.id}
               observation={observation}
               autoRefresh={autoRefresh}
-              now={now}
-              nowMs={nowMs}
               onDenied={onDenied}
               onChanged={onChanged}
               selected={selectedIds.has(observation.sandbox.id)}
@@ -602,11 +538,9 @@ function SandboxesTable({
   );
 }
 
-function SandboxRow({
+function SandboxRowView({
   observation,
   autoRefresh,
-  now,
-  nowMs,
   onDenied,
   onChanged,
   selected,
@@ -615,8 +549,6 @@ function SandboxRow({
 }: {
   observation: SandboxObservation;
   autoRefresh: boolean;
-  now: number;
-  nowMs: number;
   onDenied: () => void;
   onChanged: () => void;
   selected: boolean;
@@ -624,11 +556,8 @@ function SandboxRow({
   onSelect: (id: string, checked: boolean) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const { sandbox, observedAtMs } = observation;
+  const { sandbox } = observation;
   const usage = sandbox.resource_usage;
-  const freshness = sampleFreshness(sandbox, observedAtMs, nowMs);
-  const heartbeat = Date.parse(sandbox.host_last_heartbeat_at ?? '');
-  const stale = Number.isFinite(heartbeat) && now - heartbeat > STALE_HEARTBEAT_MS;
   const name = sandbox.title ?? sandbox.origin_thread_id;
   const parsedQuota = sandbox.cpu_limit.trim() ? Number(sandbox.cpu_limit) : NaN;
   const cpuQuota = finiteMetric(parsedQuota);
@@ -737,31 +666,17 @@ function SandboxRow({
               ? `${formatBytes(usage?.memory_limit_bytes)} reported limit`
               : `${sandbox.memory_limit} configured`}
           </span>
-          {usage && (
-            <span
-              className={`mt-1 block whitespace-nowrap ${freshness.stale ? 'text-amber-700 dark:text-amber-400' : 'text-gray-500 dark:text-gray-400'}`}
-            >
-              {freshness.stale ? 'Stale sample' : 'Sample'} · {formatDuration(freshness.ageSeconds)}{' '}
-              old
-            </span>
-          )}
+          {usage && <ResourceSampleAge observation={observation} />}
         </td>
         <td className="px-3 py-3 tabular-nums text-gray-700 dark:text-gray-200">
           {sandbox.member_count}
         </td>
-        <td
-          className="whitespace-nowrap px-3 py-3 text-xs text-gray-500 dark:text-gray-400"
-          title={dateTime(sandbox.last_activity_at)}
-        >
-          {ago(sandbox.last_activity_at, now)}
-        </td>
-        <td
-          className="whitespace-nowrap px-3 py-3 text-xs text-gray-500 dark:text-gray-400"
-          title={dateTime(sandbox.host_last_heartbeat_at)}
-        >
-          {Number.isFinite(heartbeat) ? ago(sandbox.host_last_heartbeat_at, now) : 'Unknown'}
-          {stale && <span className="mt-1 block text-amber-700 dark:text-amber-400">Stale</span>}
-        </td>
+        <SandboxAgeCell observation={observation} value={sandbox.last_activity_at} />
+        <SandboxAgeCell
+          observation={observation}
+          value={sandbox.host_last_heartbeat_at}
+          heartbeat
+        />
         <td className="px-3 py-3">
           <div className="flex flex-col items-start gap-2">
             <Link
@@ -795,16 +710,10 @@ function SandboxRow({
               >
                 View origin session
               </Link>
-              <SandboxDetails
-                id={`${detailId}-resources`}
-                observation={observation}
-                now={now}
-                nowMs={nowMs}
-              />
-              <SandboxManagement
+              <SandboxDetails id={`${detailId}-resources`} observation={observation} />
+              <LiveSandboxManagement
                 sandboxId={sandbox.id}
                 autoRefresh={autoRefresh}
-                nowMs={nowMs}
                 onDenied={onDenied}
                 onChanged={onChanged}
               />
@@ -816,150 +725,4 @@ function SandboxRow({
   );
 }
 
-function ResourceCell({
-  value,
-  limit,
-  formatted,
-  label,
-}: {
-  value: number | null | undefined;
-  limit: number | null | undefined;
-  formatted: string;
-  label: string;
-}) {
-  const amount = finiteMetric(value);
-  const ceiling = finiteMetric(limit);
-  return (
-    <div>
-      <span className="whitespace-nowrap font-medium tabular-nums text-gray-900 dark:text-gray-100">
-        {formatted}
-      </span>
-      {amount !== null && ceiling !== null && ceiling > 0 && (
-        <>
-          <meter
-            min={0}
-            max={ceiling}
-            value={Math.min(amount, ceiling)}
-            aria-label={label}
-            className="mt-1 block h-2 w-24 accent-blue-600"
-          />
-          <span className="mt-1 block tabular-nums text-gray-500 dark:text-gray-400">
-            {Math.round((amount / ceiling) * 100)}% of limit
-          </span>
-        </>
-      )}
-    </div>
-  );
-}
-
-function SandboxDetails({
-  id,
-  observation,
-  now,
-  nowMs,
-}: {
-  id: string;
-  observation: SandboxObservation;
-  now: number;
-  nowMs: number;
-}) {
-  const { sandbox, observedAtMs } = observation;
-  const usage = sandbox.resource_usage;
-  const freshness = sampleFreshness(sandbox, observedAtMs, nowMs);
-  const serverNow = observation.serverObservedAt
-    ? Date.parse(observation.serverObservedAt) + Math.max(0, nowMs - observedAtMs)
-    : now;
-  const terminalObservedAt = Date.parse(
-    sandbox.terminal_count_observed_at ?? sandbox.host_last_heartbeat_at ?? '',
-  );
-  const terminalStale =
-    Number.isFinite(terminalObservedAt) && serverNow - terminalObservedAt > STALE_HEARTBEAT_MS;
-  const terminals = finiteMetric(sandbox.terminal_count);
-  const created = Date.parse(sandbox.created_at);
-  const cpuWindow = finiteMetric(usage?.cpu_window_seconds);
-  const stats = [
-    [
-      'Network received',
-      `${formatBytes(usage?.net_rx_bytes)} total · ${formatRate(usage?.net_rx_bytes_per_second)}`,
-    ],
-    [
-      'Network sent',
-      `${formatBytes(usage?.net_tx_bytes)} total · ${formatRate(usage?.net_tx_bytes_per_second)}`,
-    ],
-    [
-      'Disk read',
-      `${formatBytes(usage?.io_read_bytes)} total · ${formatRate(usage?.io_read_bytes_per_second)}`,
-    ],
-    [
-      'Disk written',
-      `${formatBytes(usage?.io_write_bytes)} total · ${formatRate(usage?.io_write_bytes_per_second)}`,
-    ],
-    ['Processes', finiteMetric(usage?.pids) ?? 'Unavailable'],
-    [
-      'CPU measurement window',
-      cpuWindow === null
-        ? 'Unavailable'
-        : `${cpuWindow.toLocaleString('en-US', { maximumFractionDigits: 3 })}s`,
-    ],
-    [
-      'Sample age',
-      usage
-        ? `${formatDuration(freshness.ageSeconds)}${freshness.stale ? ' · Stale' : ' · Fresh'}`
-        : 'Unavailable',
-    ],
-    ['Sampled at', dateTime(usage?.sampled_at)],
-    ['Received at', dateTime(usage?.received_at)],
-    [
-      'Sandbox age',
-      Number.isFinite(created)
-        ? formatDuration(Math.max(0, serverNow - created) / 1000)
-        : 'Unavailable',
-    ],
-    [
-      'Sessions / capacity',
-      `${sandbox.member_count} / ${finiteMetric(sandbox.resident_slot_capacity) ?? 'Unavailable'}`,
-    ],
-    [
-      'Terminals',
-      terminals === null
-        ? 'Unknown'
-        : `${terminals}${terminalStale ? ' · Stale count' : Number.isFinite(terminalObservedAt) ? '' : ' · Freshness unknown'}`,
-    ],
-    ['Active operations', finiteMetric(sandbox.active_operation_count) ?? 'Unavailable'],
-    ['Snapshot', sandbox.snapshot_state || 'Unavailable'],
-    ['Idle timeout', dateTime(sandbox.idle_deadline)],
-    ['Last activity', dateTime(sandbox.last_activity_at)],
-    ['Execution profile', sandbox.execution_profile],
-    [
-      'Configured limits',
-      `${sandbox.cpu_limit} CPU · ${sandbox.memory_limit} memory · ${formatDiskLimit(sandbox.disk_limit_mib)}`,
-    ],
-    ['Reported memory limit', formatBytes(usage?.memory_limit_bytes)],
-    ['Container ID', sandbox.container_id ?? 'Unavailable'],
-  ];
-  return (
-    <div
-      id={id}
-      role="region"
-      aria-label={`Stats for ${sandbox.title ?? sandbox.origin_thread_id}`}
-    >
-      <p
-        className={`mb-3 text-xs ${usage && freshness.stale ? 'text-amber-700 dark:text-amber-400' : 'text-gray-500 dark:text-gray-400'}`}
-      >
-        {usage
-          ? `Container metrics from Docker stats${freshness.stale ? ' · stale values are excluded from fleet totals' : ''}. Network and disk I/O are cumulative counters, with rates from consecutive samples.`
-          : 'Resource usage is unavailable until the host reports a container sample.'}
-      </p>
-      <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
-        {stats.map(([label, value]) => (
-          <div key={label}>
-            <dt className="text-xs text-muted">{label}</dt>
-            <dd className="mt-1 break-words text-xs tabular-nums text-gray-900 dark:text-gray-100">
-              {value}
-            </dd>
-          </div>
-        ))}
-      </dl>
-    </div>
-  );
-}
+const SandboxRow = memo(SandboxRowView);
