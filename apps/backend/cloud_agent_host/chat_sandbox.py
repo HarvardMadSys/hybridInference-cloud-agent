@@ -41,6 +41,13 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host import chat_sandbox_markers as markers
 from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines, text_chunks
+from cloud_agent_host.chat_sandbox_exec import (
+    ProvenContainers,
+    checked_exec,
+    exec_target,
+    spawn_target,
+)
+from cloud_agent_host.chat_sandbox_inspect import container_inspection, inspect_many
 from cloud_agent_host.chat_sandbox_markers import (
     FINAL_ARCHIVE_MARKER_MAX_BYTES,
     FINAL_ARCHIVE_MARKER_NAME,
@@ -414,6 +421,9 @@ class ChatSandboxManager:
         # guest running and must prove it before reusing it.
         self._unproven_guests: set[str] = set()
         self._unproven_guests_lock = threading.Lock()
+        # What each spec's last start or network proof verified, which a
+        # bounded exec then enters by id (cloud_agent_host.chat_sandbox_exec).
+        self._proven = ProvenContainers()
 
     # ── the group network ──────────────────────────────────────────────
     #
@@ -484,9 +494,13 @@ class ChatSandboxManager:
             spec, current, expected_container_id=expected_container_id
         )
 
-    def prune_orphan_networks(self, specs: builtins.list[ChatSandboxSpec]) -> None:
+    def prune_orphan_networks(
+        self,
+        specs: builtins.list[ChatSandboxSpec],
+        observed: Sequence[ChatSandboxInspection] | None = None,
+    ) -> None:
         """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.prune_orphan_networks(specs)
+        return self._network_lifecycle.prune_orphan_networks(specs, observed)
 
     def _require_group_network(
         self,
@@ -708,6 +722,7 @@ class ChatSandboxManager:
             # `docker start`, and that is what classifies the path.
             self._verify_identity(existing, spec)
             return existing
+        self._proven.forget(spec)
         command = self.build_create_command(
             spec,
             image=image,
@@ -805,6 +820,7 @@ class ChatSandboxManager:
             raise SandboxError(
                 "superseded chat sandbox could not be removed: " + removed.stderr.strip()[:300]
             )
+        self._proven.forget(spec)
         checkpoint_id = labels.get(CHAT_CHECKPOINT_LABEL)
         if checkpoint_id and checkpoint_id != keep_checkpoint:
             self.remove_checkpoint_image(spec, checkpoint_id)
@@ -970,6 +986,7 @@ class ChatSandboxManager:
         result = self._run([self.backend.docker_binary, "rm", container_id], timeout=120)
         if result.returncode:
             raise SandboxError("Environment test cleanup failed")
+        self._proven.forget(spec)
 
     def remove_stopped_archived(self, spec: ChatSandboxSpec, *, container_id: str) -> None:
         """Remove only a verified archive's exact stopped container, without force."""
@@ -982,6 +999,7 @@ class ChatSandboxManager:
             raise SandboxError("archived sandbox removal failed")
         if self.inspect(container_id) is not None:
             raise SandboxError("archived sandbox still exists after removal")
+        self._proven.forget(spec)
         # Remove first, without force: a start after the stopped fence makes
         # Docker refuse removal. Generic stop/network release before rm could
         # stop a newly running original and discard post-backup writes.
@@ -1043,44 +1061,10 @@ class ChatSandboxManager:
                 return None
             raise SandboxError("chat sandbox inspect failed: " + result.stderr.strip()[:300])
         try:
-            payload = json.loads(result.stdout)
-            raw = payload[0]
-            config = raw.get("Config") or {}
-            labels = config.get("Labels") or {}
-            mounts = raw.get("Mounts") or []
-            state = raw.get("State") or {}
-            network_settings = (raw.get("NetworkSettings") or {}).get("Networks") or {}
-            networks = network_settings.keys()
-            status = self._status(state)
-            inspection = ChatSandboxInspection(
-                container_id=str(raw["Id"]),
-                name=str(raw.get("Name") or "").removeprefix("/"),
-                status=status,
-                running=bool(state.get("Running")),
-                # Config.Image is the exact reference passed to ``docker
-                # create``. ``Image`` is Docker's resolved local layer id and
-                # cannot be compared directly with a registry repo digest.
-                image=str(config.get("Image") or raw.get("Image") or ""),
-                labels={str(key): str(value) for key, value in labels.items()},
-                mounts=tuple(dict(mount) for mount in mounts),
-                networks=tuple(sorted(str(network) for network in networks)),
-                network_ids=tuple(
-                    sorted(
-                        (
-                            str(network),
-                            str((endpoint or {}).get("NetworkID") or ""),
-                        )
-                        for network, endpoint in network_settings.items()
-                    )
-                ),
-                sandbox_runtime=str((raw.get("HostConfig") or {}).get("Runtime") or ""),
-                tmpfs=tuple(
-                    sorted(str(path) for path in (raw.get("HostConfig") or {}).get("Tmpfs") or {})
-                ),
-                started_at=str(state.get("StartedAt") or ""),
-            )
-        except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raw = json.loads(result.stdout)[0]
+        except (IndexError, KeyError, TypeError, json.JSONDecodeError) as exc:
             raise SandboxError("Docker returned an invalid chat sandbox inspection") from exc
+        inspection = container_inspection(raw)
         if verify_mounts:
             self._verify_mounts(inspection)
         return inspection
@@ -1095,7 +1079,11 @@ class ChatSandboxManager:
         return inspection.labels.get(CHAT_NAMESPACE_LABEL) == self.backend.sandbox_namespace
 
     def list(self) -> builtins.list[ChatSandboxInspection]:
-        """List retained containers owned by this deployment namespace."""
+        """List retained containers owned by this deployment namespace.
+
+        The owned ones are inspected together, in as few Docker processes as
+        :func:`inspect_many` needs, rather than one process per container.
+        """
         result = self._run(
             [
                 self.backend.docker_binary,
@@ -1116,7 +1104,7 @@ class ChatSandboxManager:
         )
         if result.returncode != 0:
             raise SandboxError("chat sandbox listing failed: " + result.stderr.strip()[:300])
-        found: builtins.list[ChatSandboxInspection] = []
+        owned: builtins.list[str] = []
         for line in result.stdout.splitlines():
             try:
                 row = json.loads(line)
@@ -1131,13 +1119,15 @@ class ChatSandboxManager:
             # Read ownership from ls before making a per-container RPC: a
             # wedged foreign Kata shim can block even docker inspect. A probe
             # belongs to the process running it and is never a chat to adopt.
-            if namespace != self.backend.sandbox_namespace or probe:
-                continue
+            if namespace == self.backend.sandbox_namespace and not probe:
+                owned.append(container_id)
+        found: builtins.list[ChatSandboxInspection] = []
+        for raw in inspect_many(self._run, self.backend.docker_binary, "container", owned):
             # A foreign namespace cannot make this sandbox manager fail startup by
             # carrying policy-invalid mounts. Apply this stack's mount fence
             # only after ownership is established.
-            item = self.inspect(container_id, verify_mounts=False)
-            if item is not None and self._belongs_to_namespace(item):
+            item = container_inspection(raw)
+            if self._belongs_to_namespace(item):
                 self._verify_mounts(item)
                 if not item.labels.get(ENVIRONMENT_TEST_LABEL):
                     found.append(item)
@@ -1188,7 +1178,7 @@ class ChatSandboxManager:
                 )
             with substage(observer, "guest_network_sync"):
                 self._sync_kata_guest_network(spec, current, network_snapshot.addresses)
-            return current
+            return self._proven.record(spec, current)
         if current.status is ChatSandboxStatus.PAUSED:
             raise SandboxError("a paused chat sandbox is not a valid stopped activation")
         if current.status is ChatSandboxStatus.DEAD:
@@ -1282,7 +1272,7 @@ class ChatSandboxManager:
         verified = self._require(spec)
         if verified.container_id != container_id:
             raise RetainedChatLost("chat sandbox container identity changed during start")
-        return verified
+        return self._proven.record(spec, verified)
 
     def stop(
         self,
@@ -1388,6 +1378,7 @@ class ChatSandboxManager:
             )
         with substage(observer, "guest_network_sync"):
             self._sync_kata_guest_network(spec, current, snapshot.addresses)
+        self._proven.record(spec, current)
 
     def build_exec_command(
         self,
@@ -1459,9 +1450,7 @@ class ChatSandboxManager:
         process_pidfile: str | None = None,
     ) -> SandboxProcess:
         """Run an attached command inside the retained container."""
-        current = self._require(spec)
-        if not current.running:
-            raise SandboxError("chat sandbox must be started before exec")
+        current = spawn_target(self, spec)
         exec_argv = argv
         if process_pidfile is not None:
             self._validate_member_pidfile(spec, process_pidfile, user_uid=user_uid)
@@ -1494,6 +1483,7 @@ class ChatSandboxManager:
             interactive=live_input,
             user_uid=user_uid,
             user_gid=user_gid,
+            container_id=current.container_id,
         )
         process = subprocess.Popen(
             command,
@@ -2482,9 +2472,9 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         user_uid: int | None = None,
     ) -> TerminalProcess:
         """Attach a PTY to one shell without creating or killing a container."""
-        current = self._require(spec)
-        if not current.running:
-            raise SandboxError("chat sandbox must be started before terminal exec")
+        current = spawn_target(
+            self, spec, not_running="chat sandbox must be started before terminal exec"
+        )
         token = secrets.token_hex(16)
         if user_uid is not None:
             from cloud_agent_host.environment_process import (
@@ -2560,6 +2550,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             tty=True,
             user_uid=user_uid,
             user_gid=self.backend.gid if user_uid is not None else None,
+            container_id=current.container_id,
         )
         master_fd, slave_fd = os.openpty()
         try:
@@ -2658,14 +2649,12 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         reported as one: it is never presented as pure disk-read time, and
         splitting it further would need the exec'd helper to report its own
         sub-durations rather than a second exec to probe them.
+
+        ``expected_container_id`` fences an archive or lifecycle read on that
+        exact container, inspected first; otherwise a proven container is
+        entered by id without an inspection (:func:`exec_target`).
         """
-        current = (
-            self._require_exact(spec, expected_container_id)
-            if expected_container_id is not None
-            else self._require(spec)
-        )
-        if not current.running:
-            raise SandboxError("chat sandbox must be started before exec")
+        current, proven = exec_target(self, spec, expected_container_id)
         interactive = input_bytes is not None
         if self.backend.runtime == KATA_RUNTIME and not input_bytes:
             # Attaching and immediately closing an empty stdin can wedge the
@@ -2683,7 +2672,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         )
         try:
             with substage(observer, "exec"):
-                return subprocess.run(
+                result = subprocess.run(
                     command,
                     env=self.exec_client_env(env),
                     input=input_bytes,
@@ -2693,6 +2682,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                 )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SandboxError(f"chat sandbox exec failed: {exc}") from exc
+        return checked_exec(self, spec, proven, result)
 
     def pipe_member_exec(
         self,
@@ -2713,9 +2703,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         one inspected container. Returns ``(source, target)`` results carrying
         each command's bounded stderr tail; the target's stdout is discarded.
         """
-        current = self._require(spec)
-        if not current.running:
-            raise SandboxError("chat sandbox must be started before exec")
+        current, proven = exec_target(self, spec)
         commands = (
             self.build_exec_command(
                 spec,
@@ -2783,6 +2771,8 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             ):
                 stderr.seek(max(0, stderr.seek(0, os.SEEK_END) - 4096))
                 results.append(subprocess.CompletedProcess(command, code, b"", stderr.read()))
+        # Either exec that failed is explained as a lone exec's failure would be.
+        checked_exec(self, spec, proven, results[0] if results[0].returncode else results[1])
         return results[0], results[1]
 
     def _kata_privileged_exec(
@@ -2802,11 +2792,12 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         """
         if self.backend.runtime != KATA_RUNTIME:
             raise SandboxError("guest-root platform helpers require the Kata runtime")
-        current = self._require(spec)
+        not_running = "chat sandbox must be started before guest observation"
+        current, proven = exec_target(self, spec, not_running=None)
         if current.sandbox_runtime != KATA_RUNTIME:
             raise SandboxError("guest-root platform helpers require an inspected Kata container")
-        if not current.running:
-            raise SandboxError("chat sandbox must be started before guest observation")
+        if proven is None and not current.running:
+            raise SandboxError(not_running)
         command = [self.backend.docker_binary, "exec"]
         if detach:
             command.append("--detach")
@@ -2819,7 +2810,8 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             current.container_id,
             *argv,
         ]
-        return self._run(command, timeout=timeout_s)
+        result = self._run(command, timeout=timeout_s)
+        return checked_exec(self, spec, proven, result, not_running=not_running)
 
     def probe_guest_observer(self) -> str | None:
         """Prove the guest kernel, retained exec isolation and real eBPF delivery.
@@ -3941,18 +3933,6 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             raise RetainedChatLost("chat sandbox container identity changed")
         self._verify_identity(current, spec, require_name=False)
         return current
-
-    @staticmethod
-    def _status(state: dict[str, Any]) -> ChatSandboxStatus:
-        if bool(state.get("Paused")):
-            return ChatSandboxStatus.PAUSED
-        raw = str(state.get("Status") or "").lower()
-        if raw == "exited":
-            return ChatSandboxStatus.STOPPED
-        try:
-            return ChatSandboxStatus(raw)
-        except ValueError:
-            return ChatSandboxStatus.UNKNOWN
 
     @staticmethod
     def _verify_mounts(inspection: ChatSandboxInspection) -> None:

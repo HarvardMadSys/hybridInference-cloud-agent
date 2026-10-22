@@ -96,6 +96,7 @@ class _Manager:
         self.host_rule_renewals = 0
         self.host_rule_renewal_failures = 0
         self.pruned_specs: list[ChatSandboxSpec] = []
+        self.pruned_observed: list[ChatSandboxInspection] | None = None
         self.process_baseline: tuple[tuple[int, int], ...] = ((41, 400),)
         self.initial_archive_marker: bytes | None = None
 
@@ -245,8 +246,11 @@ class _Manager:
         self.items[spec.container_name] = current
         return current
 
-    def prune_orphan_networks(self, specs: list[ChatSandboxSpec]) -> None:
+    def prune_orphan_networks(
+        self, specs: list[ChatSandboxSpec], observed: list[ChatSandboxInspection] | None = None
+    ) -> None:
         self.pruned_specs = specs
+        self.pruned_observed = observed
 
     def renew_host_rules(self) -> None:
         self.host_rule_renewals += 1
@@ -2491,6 +2495,16 @@ def _running_group(*, stopped_archive_hook=None) -> tuple[_Manager, SharedChatSe
         expected_container_id="container-shared",
     )
     return manager, supervisor
+
+
+def test_reconcile_hands_the_network_prune_the_listing_it_just_read():
+    """Whose bridge each retained container is on comes from that listing, not a re-read."""
+    manager, supervisor = _running_group()
+
+    supervisor.reconcile()
+
+    assert manager.pruned_specs == [_spec()]
+    assert manager.pruned_observed == manager.list()
 
 
 def test_a_host_that_cannot_show_its_rules_stops_every_running_group():

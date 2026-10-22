@@ -26,6 +26,7 @@ import re
 import socket
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -42,6 +43,7 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_NETWORK_SERVICES_LABEL,
     CHAT_NULL_NETWORK,
     CHAT_OFFLINE_DNS,
+    CHAT_SANDBOX_LABEL,
     RELAY_GATEWAY_PRIORITY,
     ChatSandboxInspection,
     ChatSandboxManager,
@@ -250,10 +252,18 @@ class FakeDocker:
         self.calls.append(list(argv))
         command = argv[1:3]
         if command == ["network", "inspect"]:
-            network = self.network(argv[3])
-            if network is None:
-                return self._fail("Error response from daemon: network not found")
-            return self._ok(json.dumps([self._network_json(network)]))
+            # Like Docker: every network found is answered, and each one that
+            # is not is named on stderr with a non-zero exit.
+            found = [self.network(ref) for ref in argv[3:]]
+            payload = [self._network_json(network) for network in found if network is not None]
+            missing = [
+                f"Error response from daemon: network {ref} not found"
+                for ref, network in zip(argv[3:], found, strict=True)
+                if network is None
+            ]
+            if missing:
+                return subprocess.CompletedProcess(argv, 1, json.dumps(payload), "\n".join(missing))
+            return self._ok(json.dumps(payload))
         if command == ["network", "create"]:
             return self._create_network(argv)
         if command == ["network", "connect"]:
@@ -293,13 +303,17 @@ class FakeDocker:
             del self.networks[network["Id"]]
             return self._ok("")
         if command == ["network", "ls"]:
-            label = argv[argv.index("--filter") + 1].removeprefix("label=")
-            key, _, value = label.partition("=")
+            # Docker requires every label filter to match.
+            wanted = [
+                argv[index + 1].removeprefix("label=").partition("=")
+                for index, value in enumerate(argv)
+                if value == "--filter"
+            ]
             return self._ok(
                 "\n".join(
                     network["Id"]
                     for network in self.networks.values()
-                    if network["Labels"].get(key) == value
+                    if all(network["Labels"].get(key) == value for key, _, value in wanted)
                 )
             )
         if command == ["container", "inspect"]:
@@ -1324,6 +1338,14 @@ class _KataExecDocker(FakeDocker):
         if argv[1] == "exec":
             self.calls.append(list(argv))
             return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[1:3] == ["container", "ls"]:
+            self.calls.append(list(argv))
+            rows = [
+                {"id": container["Id"], "namespace": labels[CHAT_NAMESPACE_LABEL], "probe": ""}
+                for container in self.containers.values()
+                if (labels := container["labels"]).get(CHAT_SANDBOX_LABEL) == "true"
+            ]
+            return subprocess.CompletedProcess(argv, 0, "\n".join(map(json.dumps, rows)), "")
         return super().__call__(argv, **kwargs)
 
     def _container_json(self, container: dict[str, Any]) -> dict[str, Any]:
@@ -1333,13 +1355,14 @@ class _KataExecDocker(FakeDocker):
         return raw
 
 
-def _hot_kata_workspace(monkeypatch):
+def _hot_kata_workspace(monkeypatch, *, stopped_groups: int = 0):
     """A running Kata group on its bridge, behind the real supervisor and endpoints.
 
     ``docker.calls`` records every Docker CLI process a request starts: the
     lifecycle's own calls, and the execs that go through subprocess, which
     run a short local process in their place. ``proofs`` records each group
     network proof, the one a start makes of a running container included.
+    ``stopped_groups`` more groups are retained, stopped, each with a bridge.
     """
     config = _config()
     backend = ContainerBackend(
@@ -1401,6 +1424,30 @@ def _hot_kata_workspace(monkeypatch):
         ],
         expected_container_id="sandbox-container",
     )
+    # Hot: the turn that activated the group already started and proved it.
+    manager.start(spec, expected_container_id="sandbox-container")
+    for index in range(stopped_groups):
+        other = replace(spec, thread_id=f"athr_stopped{index}", sandbox_id=f"asbx_stopped{index}")
+        docker.add_container(
+            f"stopped-container-{index}",
+            name=other.container_name,
+            labels={**other.docker_labels(), CHAT_NAMESPACE_LABEL: _NAMESPACE},
+            image="sha256:image-pinned",
+        )
+        manager._network_lifecycle._ensure_group_network(other)
+        supervisor.register_manifest(
+            other,
+            [
+                SharedMemberManifest(
+                    thread_id=other.thread_id,
+                    native_session_id=f"native-stopped{index}",
+                    context_status="live",
+                    resident_slot_id=0,
+                    last_settled_job_id=f"ajob_stopped{index}",
+                )
+            ],
+            expected_container_id=f"stopped-container-{index}",
+        )
     proofs: list[ChatSandboxSpec] = []
     prove = manager._require_group_network
 
@@ -1421,7 +1468,7 @@ def _hot_kata_workspace(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kind", "processes"),
-    [("files", 14), ("git", 14), ("terminal", 14), ("environment", 13)],
+    [("files", 12), ("git", 13), ("terminal", 13), ("environment", 12)],
 )
 async def test_a_workspace_request_proves_a_hot_group_network_once(monkeypatch, kind, processes):
     """Admission proves the bridge, and nothing on the way to the work proves it again.
@@ -1429,7 +1476,10 @@ async def test_a_workspace_request_proves_a_hot_group_network_once(monkeypatch, 
     A request used to prove it two or three times: the start its admission
     makes, the endpoint's own check, and a spawned command's check. On a hot
     Kata group that was 27 Docker CLI processes for a file read, 39 for a Git
-    view, 27 for a terminal and 26 for a ready environment.
+    view, 27 for a terminal and 26 for a ready environment. One proof made it
+    14, 14, 14 and 13; entering the proven container by id, with no inspection
+    before each bounded exec, makes it 12, 13, 13 and 12. A spawn still
+    inspects first.
     """
     app, docker, proofs = _hot_kata_workspace(monkeypatch)
     headers = {"X-Agent-Workspace-Token": "secret"}
@@ -1461,6 +1511,33 @@ async def test_a_workspace_request_proves_a_hot_group_network_once(monkeypatch, 
     guest_syncs = [argv for argv in measured if argv[1] == "exec" and "--privileged" in argv]
     assert len(guest_syncs) == 1, "the guest's relay names are written once"
     assert len(measured) == processes
+
+
+@pytest.mark.asyncio
+async def test_a_heartbeat_listing_reads_every_group_in_four_processes(monkeypatch):
+    """One listing and one batched inspection each, for the containers and their bridges.
+
+    It was a process per container, per bridge, and once more per bridge whose
+    group the listing named: 17 for these five groups, and growing with every
+    group retained on the host until the heartbeat's timeout dropped them.
+    """
+    app, docker, _proofs = _hot_kata_workspace(monkeypatch, stopped_groups=4)
+    headers = {"X-Agent-Workspace-Token": "secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox-manager"
+    ) as client:
+        settled = await client.get("/sandboxes", headers=headers)
+        docker.calls.clear()
+        listed = await client.get("/sandboxes", headers=headers)
+
+    assert settled.status_code == listed.status_code == 200
+    assert len(listed.json()["sandboxes"]) == 5
+    assert [argv[1:3] for argv in docker.calls] == [
+        ["container", "ls"],
+        ["container", "inspect"],
+        ["network", "ls"],
+        ["network", "inspect"],
+    ]
 
 
 # ── a table the sweep reinstalls ──────────────────────────────────────
@@ -1688,6 +1765,52 @@ def test_prune_reports_but_never_touches_legacy_or_foreign_networks(monkeypatch,
     assert docker.network(legacy["Id"]) is not None
     assert docker.network(foreign["Id"]) is not None
     assert "chat_legacy_network_found" in caplog.text
+
+
+def test_prune_lists_only_this_namespace_and_inspects_its_bridges_together(monkeypatch):
+    manager, docker, _ = _world(monkeypatch)
+    orphans = [
+        _group_bridge(
+            manager,
+            docker,
+            _spec(thread=f"athr_gone{index}", sandbox=f"asbx_gone{index}"),
+            age_s=3600,
+            subnet=f"10.240.{20 + index}.0/29",
+        )[1]
+        for index in range(2)
+    ]
+    foreign = docker.add_network(
+        "freeinference-chat-net-foreign",
+        subnet="10.240.30.0/29",
+        labels={CHAT_NETWORK_LABEL: "true", CHAT_NAMESPACE_LABEL: "sibling-stack"},
+        age_s=3600,
+    )
+    docker.calls.clear()
+
+    manager.prune_orphan_networks([])
+
+    listing = next(argv for argv in docker.calls if argv[1:3] == ["network", "ls"])
+    assert f"label={CHAT_NAMESPACE_LABEL}={_NAMESPACE}" in listing
+    inspections = [argv for argv in docker.calls if argv[1:3] == ["network", "inspect"]]
+    assert inspections[0] == ["docker", "network", "inspect", *(net["Id"] for net in orphans)]
+    assert not any(foreign["Id"] in argv for argv in docker.calls), "never read, never touched"
+    assert all(docker.network(net["Id"]) is None for net in orphans)
+    assert docker.network(foreign["Id"]) is not None
+
+
+def test_prune_reads_whose_bridge_it_is_from_the_listing_it_is_given(monkeypatch):
+    manager, docker, _ = _world(monkeypatch)
+    live_spec = _spec()
+    docker.add_sandbox(live_spec, running=True)
+    live, live_network = _group_bridge(manager, docker, live_spec, age_s=3600)
+    docker.connect(live_network["Id"], "sandbox-container", [])
+    listed = [manager._require(live_spec)]
+    docker.calls.clear()
+
+    manager.prune_orphan_networks([live_spec], listed)
+
+    assert docker.network(live) is not None, "the live bridge of a retained chat stays"
+    assert not any(argv[1:3] == ["container", "inspect"] for argv in docker.calls)
 
 
 def test_a_running_environment_runs_bridge_is_not_an_orphan(monkeypatch, caplog):

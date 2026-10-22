@@ -1409,7 +1409,7 @@ class SharedChatSessionSupervisor:
             }
         found: builtins.list[SharedSessionDescriptor] = []
         specs: builtins.list[ChatSandboxSpec] = []
-        for inspection in self._manager.list():
+        for inspection in (listed := self._manager.list()):
             if inspection.labels.get(CHAT_SHARED_LABEL) != "true":
                 continue
             spec = self._spec_from_inspection(inspection)
@@ -1515,7 +1515,7 @@ class SharedChatSessionSupervisor:
                 found.extend(
                     replace(item, group_busy=not self._is_quiescent(group)) for item in reconciled
                 )
-        self._manager.prune_orphan_networks(specs)
+        self._manager.prune_orphan_networks(specs, listed)
         return found
 
     def _reconcile_checked_group(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
