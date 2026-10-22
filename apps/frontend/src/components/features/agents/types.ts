@@ -151,6 +151,11 @@ export interface DiffLine {
   text: string;
 }
 
+export interface AgentWorkspaceGitChange {
+  code: string;
+  path: string;
+}
+
 export interface AgentDiffFile {
   path: string;
   add: number;
@@ -373,6 +378,14 @@ export interface AgentJob {
   diffFiles: string[];
   /** Whether the current shared workspace diff was actually readable. */
   workspaceDiffAvailable?: boolean;
+  /** Cheap changed-path data loaded without constructing the full patch. */
+  workspaceGitChanges?: AgentWorkspaceGitChange[];
+  /** Opaque base-relative workspace fingerprint used by the full-view cache. */
+  workspaceGitRevision?: string;
+  /** The cheap metadata request is still in flight; defer a full Git read. */
+  workspaceGitMetadataPending?: boolean;
+  /** False when the retained workspace is not materialized. */
+  workspaceGitAvailable?: boolean;
   diffFileDetails?: AgentDiffFile[];
   diffStat?: { add: number; del: number };
   gates: AgentGate[];

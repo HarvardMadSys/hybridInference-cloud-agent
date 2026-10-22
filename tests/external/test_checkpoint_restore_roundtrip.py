@@ -186,7 +186,11 @@ def test_a_restored_chat_starts_on_its_new_host_with_its_files(docker_ready, cle
         return SandboxArchiveReceipt(
             phase="checkpoint",
             bucket="bucket",
-            key=f"cloud-agent/sandbox/v2/{sandbox_id}/g{generation}/{checkpoint_id}.oci.tar",
+            key=(
+                "cloud-agent/sandbox/v2/"
+                f"{hashlib.sha256(sandbox_id.encode()).hexdigest()}"
+                f"/g{generation}/{checkpoint_id}.oci.tar"
+            ),
             size=size,
             sha256=sha256,
             etag="etag",

@@ -21,12 +21,8 @@ from fastapi import HTTPException
 from cloud_agent_host import chat_sandbox
 from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
-from cloud_agent_host.sandbox_manager import (
-    _GIT_VIEW_ENV,
-    _NEUTRALIZE_GIT_FILTERS,
-    _run_git,
-    _run_sandbox,
-)
+from cloud_agent_host.sandbox_manager import _run_git, _run_git_metadata, _run_sandbox
+from cloud_agent_host.workspace_git import GIT_VIEW_ENV, NEUTRALIZE_GIT_FILTERS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -122,15 +118,92 @@ def test_git_view_runs_no_command_the_workspace_config_names(backend, tmp_path):
     (repo / "a.txt").write_text("two\n")
     (repo / "new.txt").write_text("new\n")
 
+    metadata = _run_git_metadata(backend, repo)
     view = _run_git(backend, repo)
 
     ran = [m.name for m in (fsmonitor_ran, hook_ran, clean_ran, gpg_ran) if m.exists()]
     assert ran == []
-    assert view["branch"] == "main"
+    assert metadata["branch"] == view["branch"] == "main"
+    assert metadata["revision"] == view["revision"]
+    assert metadata["change_count"] == len(view["changes"]) == 3
+    assert "patch" not in metadata and "commits" not in metadata
     assert {"code": " M", "path": "a.txt"} in view["changes"]
     assert "-one\n+two\n" in view["patch"]
     assert "+new\n" in view["patch"]
     assert [commit["subject"] for commit in view["commits"]] == ["first"]
+
+
+def test_git_metadata_reports_a_rename_destination_as_a_readable_path(backend, tmp_path):
+    repo = _repo(tmp_path / "ws")
+    _git("mv", "a.txt", "renamed file.txt", cwd=repo)
+
+    metadata = _run_git_metadata(backend, repo)
+
+    assert metadata["changes"] == [{"code": "R ", "path": "renamed file.txt"}]
+
+
+def test_git_metadata_revision_changes_without_constructing_a_patch(backend, tmp_path):
+    repo = _repo(tmp_path / "ws")
+    clean = _run_git_metadata(backend, repo)
+    (repo / "a.txt").write_text("two\n")
+    (repo / "new.txt").write_text("new\n")
+    first = _run_git_metadata(backend, repo)
+    # Keep the same status rows and byte sizes. The revision still follows the
+    # workspace content-sensitive filesystem fingerprint.
+    (repo / "a.txt").write_text("six\n")
+    (repo / "new.txt").write_text("old\n")
+    second = _run_git_metadata(backend, repo)
+    full = _run_git(backend, repo)
+
+    assert len({clean["revision"], first["revision"], second["revision"]}) == 3
+    assert first["changes"] == second["changes"] == full["changes"]
+    assert second["revision"] == full["revision"]
+    assert second["change_count"] == len(second["changes"]) == 2
+    assert "patch" not in second and "commits" not in second
+
+
+def test_git_metadata_reports_clean_committed_changes_from_the_pinned_base(backend, tmp_path):
+    repo = _repo(tmp_path / "ws")
+    base = _git("rev-parse", "HEAD", cwd=repo).strip()
+    (repo / "a.txt").write_text("two\n")
+    (repo / "new.txt").write_text("new\n")
+    _git("add", ".", cwd=repo)
+    _git("commit", "-q", "-m", "second", cwd=repo)
+    assert _git("status", "--porcelain", cwd=repo) == ""
+
+    metadata = _run_git_metadata(backend, repo, base)
+    full = _run_git(backend, repo, base)
+
+    assert metadata["changes"] == [
+        {"code": "M ", "path": "a.txt"},
+        {"code": "A ", "path": "new.txt"},
+    ]
+    assert metadata["change_count"] == 2
+    assert metadata["revision"] == full["revision"]
+    assert "patch" not in metadata and "commits" not in metadata
+    assert "-one\n+two\n" in full["patch"]
+    assert "+new\n" in full["patch"]
+
+
+def test_git_metadata_revision_changes_when_same_tree_history_is_rewritten(backend, tmp_path):
+    repo = _repo(tmp_path / "ws")
+    before_head = _git("rev-parse", "HEAD", cwd=repo).strip()
+    before_tree = _git("rev-parse", "HEAD^{tree}", cwd=repo).strip()
+    before = _run_git_metadata(backend, repo)
+
+    _git("commit", "--amend", "-q", "-m", "rewritten first", cwd=repo)
+
+    after_head = _git("rev-parse", "HEAD", cwd=repo).strip()
+    after_tree = _git("rev-parse", "HEAD^{tree}", cwd=repo).strip()
+    after = _run_git_metadata(backend, repo)
+    full = _run_git(backend, repo)
+
+    assert before_head != after_head
+    assert before_tree == after_tree
+    assert before["changes"] == after["changes"] == []
+    assert before["revision"] != after["revision"]
+    assert after["revision"] == full["revision"]
+    assert [commit["subject"] for commit in full["commits"]] == ["rewritten first"]
 
 
 def test_git_view_never_lazily_fetches_through_a_planted_promisor(backend, tmp_path):
@@ -198,8 +271,8 @@ def test_only_git_lfs_own_filter_survives_the_neutralized_config(backend, tmp_pa
     status, stdout, _stderr = _run_sandbox(
         backend,
         workdir=repo,
-        script=_NEUTRALIZE_GIT_FILTERS + report,
-        env=dict(_GIT_VIEW_ENV),
+        script=NEUTRALIZE_GIT_FILTERS + report,
+        env=dict(GIT_VIEW_ENV),
         timeout_s=30,
     )
 
@@ -245,6 +318,7 @@ def test_git_view_patch_still_carries_every_kind_of_change(backend, tmp_path):
     ]
     assert f"-Subproject commit {recorded}\n+Subproject commit {moved}\n" in view["patch"]
     assert {"code": " M", "path": "sub"} in view["changes"]
+    assert {"code": "??", "path": "line\nbreak"} in view["changes"]
 
 
 @pytest.mark.parametrize("scope", ["repository", "global"])

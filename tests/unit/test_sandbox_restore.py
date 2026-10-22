@@ -419,9 +419,17 @@ def test_a_failed_load_is_a_failed_restore(tmp_path):
         )
 
 
-def test_a_restore_needs_a_pullable_base_image():
+def test_a_restore_needs_a_pullable_base_image(tmp_path):
+    invalid = _restore().model_copy(update={"base_image": "cloud-agent-sandbox@sha256:" + "a" * 64})
+
     with pytest.raises(SandboxCheckpointError, match="pullable"):
-        replace(_restore(), base_image="cloud-agent-sandbox@sha256:" + "a" * 64)
+        _capture(tmp_path, _Docker(present=set())).restore(
+            "asbx_shared",
+            invalid,
+            download=_serve(_checkpoint_archive()),
+            max_bytes=10**6,
+            deadline=1e3,
+        )
 
 
 # -- the container a restore creates ------------------------------------------

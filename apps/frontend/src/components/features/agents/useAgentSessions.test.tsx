@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import {
   getAgentJob,
-  getAgentJobGit,
+  getAgentJobGitMetadata,
   getAgentJobThread,
   listAllAgentThreadEvents,
   listAgentProjects,
@@ -17,7 +17,7 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentJob: vi.fn(),
   getAgentJobThread: vi.fn(),
   listAllAgentThreadEvents: vi.fn(),
-  getAgentJobGit: vi.fn(),
+  getAgentJobGitMetadata: vi.fn(),
 }));
 
 function job(id: string): AgentJobApi {
@@ -45,7 +45,7 @@ beforeEach(() => {
     messages: [],
   });
   vi.mocked(listAllAgentThreadEvents).mockResolvedValue([]);
-  vi.mocked(getAgentJobGit).mockRejectedValue(new Error('No workspace'));
+  vi.mocked(getAgentJobGitMetadata).mockRejectedValue(new Error('No workspace'));
 });
 
 afterEach(() => {
@@ -55,33 +55,24 @@ afterEach(() => {
 
 describe('session mutations across active history caches', () => {
   it.each([{ title: 'Renamed task' }, { pinnedAt: '2026-09-10T00:00:00Z' }])(
-    'refetches the workspace diff after a settled task metadata change: %j',
+    'refetches workspace metadata after a settled task metadata change: %j',
     async (change) => {
       const settled = job('first');
       vi.mocked(getAgentJob).mockResolvedValue(settled);
-      const patch = [
-        'diff --git a/example.py b/example.py',
-        '--- a/example.py',
-        '+++ b/example.py',
-        '@@ -1 +1 @@',
-        '-before',
-        '+after',
-      ].join('\n');
-      vi.mocked(getAgentJobGit).mockResolvedValue({
+      vi.mocked(getAgentJobGitMetadata).mockResolvedValue({
         available: true,
+        revision: 'a'.repeat(64),
         branch: 'agent/first',
-        changes: [],
-        patch,
-        commits: [],
+        changes: [{ code: ' M', path: 'example.py' }],
+        change_count: 1,
       });
       const { result } = renderHook(() => useAgentJob('first'));
       await waitFor(() => expect(result.current.job?.diffFiles).toEqual(['example.py']));
-      const originalDiff = result.current.job?.diffFileDetails;
       act(() => announceAgentSessionsChanged({ threadIds: ['thread-first'], ...change }));
       await waitFor(() => expect(getAgentJob).toHaveBeenCalledTimes(2));
       await waitFor(() => expect(result.current.loading).toBe(false));
-      expect(result.current.job?.diffFileDetails).toEqual(originalDiff);
-      expect(getAgentJobGit).toHaveBeenCalledTimes(2);
+      expect(result.current.job?.diffFileDetails).toEqual([]);
+      expect(getAgentJobGitMetadata).toHaveBeenCalledTimes(2);
     },
   );
 

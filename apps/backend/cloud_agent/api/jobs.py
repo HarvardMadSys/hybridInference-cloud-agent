@@ -80,7 +80,7 @@ if TYPE_CHECKING:
         PendingMessageRepository,
         SandboxRepository,
         SkillRepository,
-        SnapshotRepository,
+        SnapshotRequestRepository,
         SourceControlRepository as SourceControlPort,
     )
     from cloud_agent.source_control_runtime import GitHubAppSource
@@ -125,7 +125,12 @@ class _JobsStorage(Protocol):
     pending_messages: PendingMessageRepository
     sandbox: SandboxRepository
     skills: SkillRepository
-    snapshot: SnapshotRepository
+
+    @property
+    def snapshot(self) -> SnapshotRequestRepository:
+        """Snapshot persistence needed by this flow."""
+        ...
+
     source_control: SourceControlPort
 
 
