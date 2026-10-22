@@ -1082,6 +1082,21 @@ async def test_a_heartbeat_can_update_capacity_and_version(client):
     assert store.rows["runner-a"]["sandbox_manager_url"] == "http://sandbox-manager-a:8092"
 
 
+async def test_a_heartbeat_still_takes_the_address_as_broker_url(client):
+    """Hosts of the previous release send that name; the alias is dated."""
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"broker_url": "http://sandbox-manager-a:8092"},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert store.rows["runner-a"]["sandbox_manager_url"] == "http://sandbox-manager-a:8092"
+
+
 async def test_a_heartbeat_carries_the_version_stamp_to_the_admin_page(client):
     """What runs on a host — runtime, image, CLI versions — is heartbeat-borne.
 
@@ -2738,7 +2753,7 @@ async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_clie
 
 
 async def test_a_slow_gateway_does_not_hold_the_heartbeat_reply():
-    """Renewals run after the reply, together, and once per grant.
+    """Renewals run after the reply, and together.
 
     A host's heartbeat times out at 15 s, and each renewal may take the
     gateway's full request timeout. Awaited one by one before the reply, two

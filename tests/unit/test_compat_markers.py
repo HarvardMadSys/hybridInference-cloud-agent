@@ -6,7 +6,10 @@ rolling-deploy shim left to itself stays forever. Each one is marked
     # COMPAT(remove-after=YYYY-MM-DD): <what makes it removable>
 
 and the second test below fails once that date has passed: remove the shim,
-or move the date with the reason it must stay.
+or move the date with the reason it must stay. Every text file under the
+scanned roots is read, whatever its name, and a line that says COMPAT in any
+case is taken for a marker, so one written any other way is reported rather
+than skipped.
 """
 
 from __future__ import annotations
@@ -19,19 +22,30 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 SCANNED = ("apps/backend", "apps/frontend/src", "deploy", "scripts", "migrations")
-SUFFIXES = {".py", ".ts", ".tsx", ".sh", ".yml", ".yaml"}
-MARKER = re.compile(r"COMPAT\(remove-after=(?P<date>[0-9-]+)\): \S")
+CANDIDATE = re.compile(r"\bCOMPAT\b", re.IGNORECASE)
+MARKER = re.compile(r"COMPAT\(remove-after=(?P<date>\d{4}-\d{2}-\d{2})\): \S")
 
 
-def _marker_lines() -> list[tuple[str, str]]:
+def _text(path: Path) -> str | None:
+    """The file's text, or None for a binary file."""
+    data = path.read_bytes()
+    if b"\0" in data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _marker_lines(repo: Path = REPO) -> list[tuple[str, str]]:
     found = []
     for root in SCANNED:
-        for path in sorted((REPO / root).rglob("*")):
-            if path.suffix not in SUFFIXES or "node_modules" in path.parts:
+        for path in sorted((repo / root).rglob("*")):
+            if not path.is_file() or "node_modules" in path.parts:
                 continue
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                if "COMPAT(" in line:
-                    found.append((f"{path.relative_to(REPO)}:{number}", line.strip()))
+            for number, line in enumerate((_text(path) or "").splitlines(), 1):
+                if CANDIDATE.search(line):
+                    found.append((f"{path.relative_to(repo)}:{number}", line.strip()))
     return found
 
 
@@ -66,9 +80,39 @@ def test_no_compatibility_code_outlives_its_date() -> None:
         ("# COMPAT(remove-after=2026-11-30): every host sends it.", True),
         ("// COMPAT(remove-after=2026-11-30): every host sends it.", True),
         ("# COMPAT(remove-after=2026-13-01): no such month.", False),
+        # Python reads this as 2026-11-30, but it is not the convention's form.
+        ("# COMPAT(remove-after=20261130): every host sends it.", False),
         ("# COMPAT(remove-after=2026-11-30):", False),
         ("# COMPAT: someday.", False),
+        ("# compat(remove-after=2026-11-30): every host sends it.", False),
+        ("# COMPAT (remove-after=2026-11-30): every host sends it.", False),
     ],
 )
-def test_the_marker_needs_a_real_date_and_a_reason(line: str, valid: bool) -> None:
+def test_any_spelling_of_the_marker_is_found_and_only_one_is_valid(
+    tmp_path: Path, line: str, valid: bool
+) -> None:
+    (tmp_path / "deploy").mkdir()
+    (tmp_path / "deploy/shim.sh").write_text(f"#!/bin/sh\n{line}\n")
+
+    assert _marker_lines(tmp_path) == [("deploy/shim.sh:2", line)]
     assert (_removal_date(line) is not None) is valid
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "apps/backend/cloud_agent/shim.py",
+        "deploy/sandbox/Dockerfile.agent-sandbox",
+        "deploy/host/.env.example",
+        "deploy/sandbox/member-process-reaper",
+    ],
+)
+def test_every_text_file_is_read_whatever_its_name_and_no_binary_one(
+    tmp_path: Path, name: str
+) -> None:
+    path = tmp_path / name
+    path.parent.mkdir(parents=True)
+    path.write_text("# COMPAT(remove-after=2026-11-30): every host sends it.\n")
+    (path.parent / "shim.cpython-312.pyc").write_bytes(b"\0\xffCOMPAT(remove-after=never)")
+
+    assert [place for place, _line in _marker_lines(tmp_path)] == [f"{name}:1"]
