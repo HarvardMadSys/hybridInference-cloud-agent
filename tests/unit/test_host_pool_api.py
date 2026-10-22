@@ -95,6 +95,11 @@ class FakeHostPoolStore(AllCapabilities):
         self.fail_beats = False
         #: The stored archive policy does not decode, as a hand-edited row may not.
         self.archive_settings_undecodable = False
+        #: Nor the global settings, or the agent version selection and updates.
+        self.host_settings_undecodable = False
+        self.runtime_policy_undecodable = False
+        #: How many times a heartbeat tried to switch new chats to an update.
+        self.activation_attempts = 0
         #: ``(sandbox_id, thread_id, generation)`` residencies already released.
         self.closed_residencies: set[tuple[str, str, int]] = set()
         self.release_answer: str | None = None
@@ -269,17 +274,23 @@ class FakeHostPoolStore(AllCapabilities):
                 capacity=capacity,
                 sample_age_ms=capacity_sample_age_ms,
             )
-        # What the store reads off the policy row in the same statement.
+        # What the store reads off the policy row in the same statement: a
+        # part that does not decode is None.
+        runtime = not self.runtime_policy_undecodable
         return {
             **row,
             "runner_policy": {
-                "host_settings": dict(self.global_settings),
+                "host_settings": (
+                    None if self.host_settings_undecodable else dict(self.global_settings)
+                ),
                 "sandbox_archive_settings": (
                     None if self.archive_settings_undecodable else dict(self.archive_settings)
                 ),
-                "runtime_download_targets": self._download_targets(),
-                "runtime_upgrade_waiting": any(
-                    not target.get("activated_at") for target in self.runtime_upgrades.values()
+                "runtime_download_targets": self._download_targets() if runtime else None,
+                "runtime_upgrade_waiting": (
+                    any(not target.get("activated_at") for target in self.runtime_upgrades.values())
+                    if runtime
+                    else None
                 ),
             },
         }
@@ -457,9 +468,13 @@ class FakeHostPoolStore(AllCapabilities):
         return rows, self.active_host, dict(self.runtime_versions), datetime.now(UTC)
 
     async def host_settings(self) -> dict[str, Any]:
+        if self.host_settings_undecodable:
+            raise TypeError("host settings: dictionary update sequence element #0 has length 1")
         return dict(self.global_settings)
 
     async def runtime_download_targets(self) -> list[dict[str, str]]:
+        if self.runtime_policy_undecodable:
+            raise TypeError("agent versions: dictionary update sequence element #0 has length 1")
         return self._download_targets()
 
     def _download_targets(self) -> list[dict[str, str]]:
@@ -469,6 +484,9 @@ class FakeHostPoolStore(AllCapabilities):
         ]
 
     async def activate_ready_runtime_upgrades(self) -> list[str]:
+        self.activation_attempts += 1
+        if self.runtime_policy_undecodable:
+            raise AttributeError("'list' object has no attribute 'values'")
         # The store's decision: every online, enrolled host offers the version.
         menus = [
             row.get("runtime_versions_available") or {}
@@ -3064,19 +3082,33 @@ async def test_host_heartbeat_reconciles_exact_retained_docker_observations(resi
     ]
 
 
-async def test_an_archive_policy_that_does_not_decode_fails_only_the_answer(residency_client):
-    """The beat's own work is done before an undecodable archive policy fails it.
+@pytest.mark.parametrize(
+    ("part", "error", "message"),
+    [
+        ("archive_settings", SandboxArchivePolicyError, "region is required"),
+        ("host_settings", TypeError, "host settings"),
+        ("runtime_policy", TypeError, "agent versions"),
+    ],
+)
+async def test_a_policy_that_does_not_decode_fails_only_the_answer(
+    residency_client, part: str, error: type[Exception], message: str
+):
+    """The beat's own work is done before a policy part that does not decode fails it.
 
-    The heartbeat now reads the policy in its own write. A stored policy that
-    does not decode used to fail only the answer, once the beat had extended
-    its residencies and reconciled its observations, and it still does.
+    The heartbeat now reads the policy in its own write. A stored archive
+    policy, set of global settings or record of agent versions that does not
+    decode used to fail only the answer, with the error of its own read, once
+    the beat had extended its residencies and reconciled its observations,
+    and it still does. A beat that cannot read whether an agent update waits
+    still tries to switch one, which reads the updates itself, as every beat
+    did then.
     """
     client, store, _grants = residency_client
     credential = await _enroll(client, store)
-    store.archive_settings_undecodable = True
+    setattr(store, f"{part}_undecodable", True)
     store.beat_answers = {("th-1", 1): ""}
 
-    with pytest.raises(SandboxArchivePolicyError):
+    with pytest.raises(error, match=message):
         await client.post(
             "/v1/agent/host/heartbeat",
             json={
@@ -3098,6 +3130,38 @@ async def test_an_archive_policy_that_does_not_decode_fails_only_the_answer(resi
 
     assert store.beat_batches[0] == [("th-1", 1)]
     assert [observation["sandbox_id"] for observation in store.sandbox_observations] == ["asbx_1"]
+    # No update waits in the others, and this beat's read cannot say.
+    assert store.activation_attempts == (1 if part == "runtime_policy" else 0)
+
+
+@pytest.mark.parametrize(
+    ("part", "error"),
+    [("archive_settings", SandboxArchivePolicyError), ("host_settings", TypeError)],
+)
+async def test_a_policy_that_does_not_decode_still_lets_the_beat_switch_an_update(
+    client, part: str, error: type[Exception]
+):
+    """The agent update a beat completes switches before the policy fails the answer.
+
+    Until the beat read the policy itself, the switch came before the answer
+    read the policy, and a part that did not decode failed only the answer.
+    Reading the part again first kept every waiting update from switching for
+    as long as it stayed broken.
+    """
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    store.runtime_upgrades["claude-code"] = dict(_TARGET)
+    setattr(store, f"{part}_undecodable", True)
+
+    with pytest.raises(error):
+        await async_client.post(
+            "/v1/agent/host/heartbeat",
+            json={"runtime_versions_available": {"claude-code": ["2.1.220", "2.1.300"]}},
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+
+    assert store.runtime_versions == {"claude-code": "2.1.300"}
+    assert store.runtime_upgrades["claude-code"]["activated_at"]
 
 
 async def test_host_heartbeat_forwards_optional_container_telemetry(residency_client):

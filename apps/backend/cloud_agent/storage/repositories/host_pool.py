@@ -564,11 +564,11 @@ class PostgresHostPoolRepository:
         Returns:
             The updated host row, or ``None`` when the host no longer exists
             or no longer holds ``credential_hash``. The row also carries
-            ``runner_policy``: what the heartbeat answer needs of the
-            deployment's policy, from the read that share-locks it. The global
+            ``runner_policy``, what the heartbeat answer needs of the policy
+            read that share-locks it (``heartbeat_policy``): the global
             ``host_settings``, the ``sandbox_archive_settings``, the
-            ``runtime_download_targets`` and whether an agent update is
-            waiting to switch (``runtime_upgrade_waiting``).
+            ``runtime_download_targets`` and ``runtime_upgrade_waiting``, each
+            ``None`` when its stored value does not decode.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             # Match the admin writer's lock order: policy before host. Once
