@@ -55,6 +55,7 @@ from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.model_preference import ModelPreferenceView
 from cloud_agent.storage.repositories.conversation_commands import _goal_round_metadata
 from cloud_agent.storage.repositories.goals import _pause_detail
+from cloud_agent.thread_stats import summarize_thread
 from cloud_agent.tokens import mint_worker_token, parse_residency_mcp_token
 
 pytestmark = pytest.mark.asyncio
@@ -1465,7 +1466,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "queue_paused_reason": self.queue_paused.get(thread_id),
         }
 
-    async def thread_stats_inputs(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
+    async def thread_stats(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         job = self.jobs.get(job_id)
         # The real read joins the thread and refuses a deleted conversation.
         if job is None or job["user_id"] != user_id or job.get("deleted_at") is not None:
@@ -1476,16 +1477,14 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             key=lambda item: item["turn_no"],
         )
         job_ids = [item["id"] for item in thread_jobs]
+        attempts = [{"job_id": item["id"], "started_at": None} for item in thread_jobs]
+        events = [event for event in self.events if event["job_id"] in set(job_ids)]
+        # This stand-in stamps no clocks (``append_event`` stores
+        # ``created_at: None``), so timings are zero; the reducer's arithmetic
+        # is pinned by ``tests/unit/test_thread_stats.py``.
         return {
             "thread_id": thread_id,
-            "job_ids": job_ids,
-            # This stand-in stamps no clocks (``append_event`` stores
-            # ``created_at: None``), so the timings come back zero here and
-            # the arithmetic is pinned by ``tests/unit/test_thread_stats.py``
-            # instead. What this fake is for is the HTTP contract: ownership,
-            # shape, and the counts that need no clock.
-            "attempts": [{"job_id": item["id"], "started_at": None} for item in thread_jobs],
-            "events": [event for event in self.events if event["job_id"] in set(job_ids)],
+            "stats": summarize_thread(job_ids=job_ids, attempts=attempts, events=events),
         }
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:

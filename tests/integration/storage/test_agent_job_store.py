@@ -25,7 +25,6 @@ from tests.support.migrations import apply_migrations
 from cloud_agent.mcp.registry import binding_from_row
 from cloud_agent.schemas import WorkerEventRequest
 from cloud_agent.storage.assembly import Storage
-from cloud_agent.thread_stats import summarize_thread
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
@@ -124,6 +123,7 @@ async def _create_job(store: Storage, **overrides) -> dict:
 
 
 async def test_thread_stats_keep_output_presence_when_omitting_long_transcripts(
+    pool,
     store: Storage,
 ):
     """Exercise the SQL projection that previously bypassed false-zero detection."""
@@ -141,18 +141,21 @@ async def test_thread_stats_keep_output_presence_when_omitting_long_transcripts(
                 "usage": {"input_tokens": 100, "output_tokens": 0},
             },
         )
-    inputs = await store.execution_queries.thread_stats_inputs(
-        job_id=job["id"], user_id=job["user_id"]
-    )
-    assert inputs is not None
-    assert [event["payload"]["has_text"] for event in inputs["events"]] == [False, True]
-    assert all("text" not in event["payload"] for event in inputs["events"])
-    stats = summarize_thread(
-        job_ids=inputs["job_ids"], attempts=inputs["attempts"], events=inputs["events"]
-    )
+    result = await store.execution_queries.thread_stats(job_id=job["id"], user_id=job["user_id"])
+    assert result is not None
+    stats = result["stats"]
     assert stats.input_tokens == 100
     assert stats.output_tokens is None
     assert stats.output_tokens_per_second is None
+    async with pool.acquire() as conn:
+        encoded = await conn.fetchval(
+            "SELECT rollup::text FROM agent_attempt_thread_stats WHERE attempt_id = $1",
+            claim["attempt_id"],
+        )
+    cached = json.loads(encoded)
+    assert cached["produced_text"] is True
+    assert "long answer" not in encoded
+    assert len(encoded) < 512
 
 
 async def test_bounded_event_stays_bounded_in_postgres_and_marks_the_assistant_message(
@@ -7038,10 +7041,7 @@ async def test_session_mutations_are_atomic_owner_scoped_and_irreversible(pool, 
         await store.execution_queries.list_thread_events_after(job_id=mine["id"], user_id="user-1")
         is None
     )
-    assert (
-        await store.execution_queries.thread_stats_inputs(job_id=mine["id"], user_id="user-1")
-        is None
-    )
+    assert await store.execution_queries.thread_stats(job_id=mine["id"], user_id="user-1") is None
     assert (
         await store.conversation_commands.set_thread_archived(
             job_id=mine["id"], user_id="user-1", archived=False
