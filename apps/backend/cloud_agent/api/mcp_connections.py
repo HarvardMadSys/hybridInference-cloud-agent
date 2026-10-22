@@ -94,11 +94,6 @@ from cloud_agent.mcp.registry import (
 from cloud_agent.settings import setting_env
 from cloud_agent.source_control import SourceControlError
 
-# Imported at runtime, not only for typing: FastAPI resolves every route
-# handler's annotations to build its dependency graph, so moving this behind
-# ``TYPE_CHECKING`` turns an import-time warning into a startup failure.
-
-
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1/agent/mcp", tags=["agent-mcp"])
@@ -1133,10 +1128,7 @@ async def authorize_connection(  # noqa: C901, PLR0912, PLR0915 complexity basel
                     }
                 },
             )
-        if (
-            github_endpoint
-            and metadata.token_endpoint == "https://github.com/login/oauth/access_token"
-        ):
+        if github_endpoint and metadata.token_endpoint == github_oauth.TOKEN_ENDPOINT:
             # GitHub omits this field from metadata (RFC default: Basic), but
             # documents client_secret in the form body for both app types.
             metadata = replace(
