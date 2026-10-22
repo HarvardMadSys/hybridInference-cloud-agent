@@ -8897,3 +8897,47 @@ def test_a_turn_refused_at_admission_closes_the_window_it_opened():
         "close",
     ]
     assert ("observe-finish", MEMBER_UID_BASE) in manager.events
+
+
+def test_a_group_stop_drops_the_window_of_a_running_turn():
+    """Stopping a group drops each running turn's window with its cursor.
+
+    The stop detaches every member's turn and observer cursor. A window it left
+    on the member was censused on every later tick, against a container that
+    had stopped.
+    """
+    manager = _Manager()
+    supervisor, lease = _windowed_supervisor(manager)
+    supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+
+    supervisor.stop_if_idle("athr_source", generation=1, reason="orphaned_attempt")
+    manager.events.clear()
+
+    assert supervisor.sample_open_windows() == 0
+    assert [event for event in manager.events if event[0] == "member-window"] == []
+
+
+def test_abandon_drops_the_window_when_normal_turn_cleanup_fails(monkeypatch):
+    """An abandon that detaches the turn itself drops its window with its cursor.
+
+    ``complete_turn`` drops the window with the turn. When it fails, abandon's
+    own teardown detaches the turn and its cursor, and a window it left on the
+    member was censused on every later tick for a member running nothing.
+    """
+    manager = _Manager()
+    supervisor, lease = _windowed_supervisor(manager)
+    supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(supervisor, "complete_turn", fail_cleanup)
+    supervisor.abandon("athr_source", lease.token, lost=False)
+    manager.events.clear()
+
+    assert supervisor.sample_open_windows() == 0
+    assert [event for event in manager.events if event[0] == "member-window"] == []

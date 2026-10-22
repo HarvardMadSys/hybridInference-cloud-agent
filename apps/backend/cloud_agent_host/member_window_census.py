@@ -1,12 +1,12 @@
 """One member execution window, as the shared-session supervisor holds it.
 
 A window belongs to exactly one activation: it opens on the turn's observation
-fence and closes with the turn. Everything the supervisor keeps for it lives
+fence and ends with the turn. Everything the supervisor keeps for it lives
 here -- the handle and the sampler that drives it, the running accumulator and
 how far the journal has been read into it, the census and report sequences, the
 checkpoint cadence, and the checkpoint waiting to be forwarded. Dropping the
-window is therefore one assignment, and nothing of one window can outlive it
-into the next.
+window is therefore one assignment, made wherever the supervisor drops the
+turn's observer cursor, so nothing it keeps for one window reaches the next.
 
 The supervisor keeps the lock, the member lookup and the turn boundary; this
 module answers only for the window itself.

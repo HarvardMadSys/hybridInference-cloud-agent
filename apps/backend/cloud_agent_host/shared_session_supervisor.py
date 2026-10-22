@@ -416,8 +416,8 @@ class _Member:
     observer_cursor: GuestObserverCursor | None = None
     tool_mark_reader: ToolMarkReader | None = None
     #: The member execution window this activation opened, if any. It is
-    #: cleared with the cursor: a window belongs to exactly one activation,
-    #: and a restarting member must never resume another one's.
+    #: dropped wherever the cursor is dropped: a window belongs to exactly one
+    #: activation, and a restarting member must never resume another one's.
     window: MemberWindow | None = None
     turn_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -2854,11 +2854,9 @@ class SharedChatSessionSupervisor:
         return window.consume_journal(read, spec, cursor)
 
     def _spec_holding(self, window: MemberWindow) -> Any | None:
-        """The sandbox whose member holds ``window``, or None once it closed.
+        """The sandbox whose member holds ``window``, or None once it was dropped.
 
-        One window belongs to exactly one member at a time, so this takes the
-        single owner rather than iterating: a loop that returned on its first
-        pass would silently skip a second owner if that ever changed.
+        At most one member holds a window, so the first match is the only one.
         """
         with self._lock:
             for group in self._groups.values():
@@ -3233,6 +3231,7 @@ class SharedChatSessionSupervisor:
             member.activation_processes = None
             member.observer_cursor = None
             member.tool_mark_reader = None
+            member.window = None
             member.lease_token = None
             member.lease_owner = None
             # Teardown owns the member now, so a stale acknowledgement must not
@@ -4520,6 +4519,7 @@ class SharedChatSessionSupervisor:
                     member.activation_processes = None
                     member.observer_cursor = None
                     member.tool_mark_reader = None
+                    member.window = None
                     member.lease_token = None
                     member.lease_owner = None
                     member.resident_state = "lost" if reason == "lost" else "stopped"
