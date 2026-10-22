@@ -111,6 +111,7 @@ from cloud_agent_host.shared_session_supervisor import (
 )
 from cloud_agent_host.tool_windows import ToolWindowTracker, attribute, tool_time_ms
 from cloud_agent_host.workspace_download import write_workspace_download
+from cloud_agent_shared.git.base_bundle_stream import BASE_BUNDLE_STREAM_CAPABILITY
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,
     SANDBOX_MANAGER_SETTING_KEYS,
@@ -2576,6 +2577,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 ENVIRONMENT_CAPABILITY,
                 ENVIRONMENT_INFERENCE_CAPABILITY,
                 SSH_ACCESS_CAPABILITY,
+                BASE_BUNDLE_STREAM_CAPABILITY,
                 *(
                     [ENVIRONMENT_SNAPSHOT_CAPABILITY]
                     if getattr(archive_controller, "snapshots_available", False)

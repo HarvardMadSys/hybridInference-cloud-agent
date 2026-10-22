@@ -78,6 +78,8 @@ from cloud_agent_host.shared_session_supervisor import (
 from cloud_agent_host.tool_windows import ToolMark
 from cloud_agent_shared.git.base_bundle_stream import (
     BASE_BUNDLE_CONTENT_TYPE,
+    BASE_BUNDLE_STREAM_CAPABILITY,
+    LEGACY_BASE_BUNDLE_CONTENT_TYPE,
     encode_base_bundle_metadata,
 )
 from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values
@@ -958,6 +960,7 @@ async def test_health_and_sandbox_inventory_are_authenticated_and_shared_only():
 
     assert denied.status_code == 401
     assert health.json()["ok"] is True
+    assert BASE_BUNDLE_STREAM_CAPABILITY in health.json()["capabilities"]
     rows = listed.json()["sandboxes"]
     assert len(rows) == 1
     assert rows[0]["shared_live"] is True
@@ -1691,6 +1694,48 @@ async def test_shared_registration_snapshot_and_base_import_keep_identity():
 
 
 @pytest.mark.asyncio
+async def test_base_import_accepts_old_control_plane_json_during_rollout():
+    """A new host incrementally accepts the exact previous JSON request."""
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    bundle = b"legacy-trusted-git-bundle"
+    commit_sha = "b" * 40
+    legacy = json.dumps(
+        {
+            **_identity(),
+            "snapshot_id": 9,
+            "commit_sha": commit_sha,
+            "bundle_b64": base64.b64encode(bundle).decode("ascii"),
+        },
+        separators=(",", ":"),
+    ).encode("ascii")
+    marker = legacy.index(b',"bundle_b64":"')
+
+    async def old_request():
+        # TCP/ASGI chunks need not preserve the old client's JSON field boundary.
+        yield legacy[: marker + 5]
+        yield legacy[marker + 5 : marker + 19]
+        yield legacy[marker + 19 : -3]
+        yield legacy[-3:]
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        imported = await client.post(
+            "/shared-sandboxes/athr_source/import-base",
+            headers={
+                "X-Agent-Workspace-Token": "sandbox-manager-secret",
+                "Content-Type": LEGACY_BASE_BUNDLE_CONTENT_TYPE,
+            },
+            content=old_request(),
+        )
+
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["workspace_head_preserved"] is True
+    assert supervisor.imports[0][:2] == (bundle, commit_sha)
+
+
+@pytest.mark.asyncio
 async def test_base_import_refuses_over_limit_before_consuming_the_stream_tail(monkeypatch):
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
@@ -1715,6 +1760,43 @@ async def test_base_import_refuses_over_limit_before_consuming_the_stream_tail(m
             headers={
                 "X-Agent-Workspace-Token": "sandbox-manager-secret",
                 "Content-Type": BASE_BUNDLE_CONTENT_TYPE,
+            },
+            content=oversized(),
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "base bundle exceeds the import limit"
+    assert consumed_tail is False
+    assert supervisor.imports == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_base_import_refuses_over_limit_before_consuming_the_tail(monkeypatch):
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    metadata = json.dumps(
+        {**_identity(), "snapshot_id": 9, "commit_sha": "b" * 40},
+        separators=(",", ":"),
+    ).encode("ascii")
+    prefix = metadata[:-1] + b',"bundle_b64":"'
+    monkeypatch.setattr(base_bundle_request_mod, "DEFAULT_MAX_BASE_BUNDLE_BYTES", 8)
+    consumed_tail = False
+
+    async def oversized():
+        nonlocal consumed_tail
+        yield prefix
+        yield base64.b64encode(b"123456789")
+        consumed_tail = True
+        yield b'"}'
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.post(
+            "/shared-sandboxes/athr_source/import-base",
+            headers={
+                "X-Agent-Workspace-Token": "sandbox-manager-secret",
+                "Content-Type": LEGACY_BASE_BUNDLE_CONTENT_TYPE,
             },
             content=oversized(),
         )

@@ -79,7 +79,7 @@ if TYPE_CHECKING:
         SnapshotRepository,
         SourceControlRepository,
     )
-    from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.environments import EnvironmentBindingRepository
     from cloud_agent.publisher import PublishResult
     from cloud_agent.source_control_runtime import GitHubAppSource
     from cloud_agent.workers.background_wake import BackgroundWake
@@ -96,16 +96,16 @@ class PublishStorage(Protocol):
     snapshot: SnapshotRepository
     host_pool: HostPoolRepository
     source_control: SourceControlRepository
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentBindingRepository:
+        """Environment persistence needed by this flow."""
+        ...
 
 
 logger = get_logger(__name__)
 
 GITHUB_API = "https://api.github.com"
-POLL_INTERVAL_S = 15.0
-#: The longest an idle publisher that is told about new work sleeps. It wakes
-#: sooner for a notification or the earliest publication/base import retry.
-PUBLISH_IDLE_S = 30.0
 #: Refresh a live publication claim frequently enough that several sequential
 #: provider/git calls at their 300-second maximum cannot resemble a crashed
 #: publisher to the 900-second reaper.
@@ -324,7 +324,7 @@ async def create_draft_pull_request(
     change before it can merge, so this must never open a ready-for-review PR.
     """
     async with httpx.AsyncClient(
-        timeout=timeout_s if timeout_s is not None else number_setting("publish_pr_timeout_s", 30.0)
+        timeout=timeout_s if timeout_s is not None else number_setting("publish_pr_timeout_s")
     ) as client:
         response = await client.post(
             f"{credential.api_base}/repos/{repo}/pulls",
@@ -389,7 +389,7 @@ async def ensure_draft_pull_request(
     """
     headers = _github_headers(credential)
     endpoint = f"{credential.api_base}/repos/{repo}/pulls"
-    async with httpx.AsyncClient(timeout=number_setting("publish_pr_timeout_s", 30.0)) as client:
+    async with httpx.AsyncClient(timeout=number_setting("publish_pr_timeout_s")) as client:
         response = await client.get(
             endpoint,
             headers=headers,
@@ -1200,7 +1200,7 @@ async def publish_loop(
         poll_seconds = (
             interval_seconds
             if interval_seconds is not None
-            else number_setting("publish_poll_seconds", POLL_INTERVAL_S)
+            else number_setting("publish_poll_seconds")
         )
         if wake is None:
             await asyncio.sleep(poll_seconds)
@@ -1250,7 +1250,7 @@ async def publish_loop(
 
 async def _next_look_s(store: PublishStorage) -> float:
     """How long the publisher may sleep before it looks for work again."""
-    idle_s = number_setting("publish_idle_seconds", PUBLISH_IDLE_S)
+    idle_s = number_setting("publish_idle_seconds")
     with contextlib.suppress(Exception):
         due = await store.snapshot.next_base_import_retry_due()
         if due is not None:

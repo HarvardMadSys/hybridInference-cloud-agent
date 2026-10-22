@@ -2,8 +2,8 @@
 
 An artifact deployment has no checkout. It has images pinned by digest, a
 manifest that names them, and this archive — so the archive has to carry the
-Compose files, the two deploy scripts, the protocol file and the two helpers
-that turn a manifest into a rendered Compose file and an environment fragment.
+Compose files, the deploy scripts, the protocol file, the release renderers,
+and the host's standalone storage-attestation executable.
 What it must not carry is source: the Dockerfiles are absent on purpose, because
 an image that can be built on the host is an image that can disagree with the
 digest the manifest pinned.
@@ -68,6 +68,7 @@ RECIPE_FILES: tuple[str, ...] = (
     "deploy/control-plane/pgadmin-entrypoint.py",
     "deploy/host/deploy.sh",
     "deploy/host/sandbox_host.sh",
+    "deploy/host/storage_attestation.py",
     "deploy/host/docker-compose.sandbox.yml",
     "deploy/host/agent-gateway-tunnel.sh",
     "deploy/host/setup_kata_runtime.sh",

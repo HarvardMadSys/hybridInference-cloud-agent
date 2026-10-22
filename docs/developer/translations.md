@@ -38,9 +38,17 @@ and ignored.
 
 Run `make docs-translate` and translate the entries it adds or marks
 `#, fuzzy`, then delete the `#, fuzzy` line and any obsolete `#~` entries.
-`make docs-verify` fails until every English string has a current
-translation. If you cannot translate a change yourself, say so in the pull
-request; a reviewer who can will add it.
+
+`make docs-verify` fails while a string on a stable page has no entry in its
+catalog or a fuzzy one. The stable pages are the home page, the developer
+guide, the code structure page, and the security and contributing pages, which
+include the root `SECURITY.md` and `CONTRIBUTING.md`. On every other page such a
+string is reported as a warning and renders in English until someone translates
+it, because those pages change with the code. Translate them as well when you
+can; if you cannot, say so in the pull request, and a reviewer who can will add
+it. No page catches an entry left empty, which renders in English too, so
+translate every entry `make docs-translate` adds. A translation that renders
+wrong, rather than one that is only behind, fails on every page.
 
 ## Chinese style
 

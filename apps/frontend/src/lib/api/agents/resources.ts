@@ -3,6 +3,9 @@ import { config } from '@/config/env';
 
 const API_BASE = config.apiBase;
 
+/** The control plane's hard bound for one trajectory timing request. */
+export const AGENT_TRAJECTORY_TIMING_BATCH_SIZE = 100;
+
 /** One tool call's timing and attributable resource evidence. */
 export interface ToolCallResourcesApi {
   call_seq: number;
@@ -259,6 +262,35 @@ export interface AgentAttemptTelemetryApi extends AgentAttemptSummaryApi {
    * summary is one of the attempt's resources, not a sibling of them.
    */
   resources: AttemptResourcesApi | null;
+}
+
+/** Compact attempt timing for a trajectory; heavy tool/process rows stay lazy. */
+export interface AgentTrajectoryAttemptTimingApi extends AgentAttemptSummaryApi {
+  tool_time_ms: number | null;
+  tool_calls_truncated: boolean;
+  tool_timing_exact: boolean;
+}
+
+export interface AgentTrajectoryJobTimingApi {
+  job_id: string;
+  attempts: AgentTrajectoryAttemptTimingApi[];
+}
+
+export interface AgentTrajectoryTimingResponseApi {
+  jobs: AgentTrajectoryJobTimingApi[];
+}
+
+export async function getAgentTrajectoryTimings(
+  jobIds: string[],
+  signal?: AbortSignal,
+): Promise<AgentTrajectoryTimingResponseApi> {
+  const resp = await fetchWithAuth(API_BASE, '/v1/agent/jobs/trajectory-telemetry', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_ids: jobIds }),
+    signal,
+  });
+  return jsonOrThrow<AgentTrajectoryTimingResponseApi>(resp);
 }
 
 export async function getAgentAttemptTelemetry(

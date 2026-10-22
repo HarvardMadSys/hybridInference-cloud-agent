@@ -48,11 +48,17 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+if __package__:
+    from . import artifact_catalog
+else:  # direct execution from the release directory
+    import artifact_catalog
+
 if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -94,36 +100,60 @@ class Role:
     variants: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class SmokeCase:
+    """An artifact identity bound to the behavior that must really start it."""
+
+    role: str
+    variant: str | None
+    start: Callable[..., list[str]]
+
+
+def _role_platform(role: str) -> str:
+    platforms = {entry.platform for entry in artifact_catalog.artifacts() if entry.role == role}
+    if len(platforms) != 1:
+        raise artifact_catalog.CatalogError(
+            f"smoke role {role!r} needs exactly one native platform; found {sorted(platforms)}"
+        )
+    return next(iter(platforms))
+
+
+def _role_variants(role: str) -> tuple[str, ...]:
+    return tuple(
+        entry.variant or "" for entry in artifact_catalog.artifacts() if entry.role == role
+    )
+
+
 ROLES: dict[str, Role] = {
     "control": Role(
         name="control",
-        arch="linux/arm64",
+        arch=_role_platform("control"),
         proves="it migrates a real database and answers /healthz",
         does_not_prove="that the gateway contract works; that needs a gateway",
     ),
     "web": Role(
         name="web",
-        arch="linux/arm64",
+        arch=_role_platform("web"),
         proves="it serves its sign-in page under its own mount prefix, with the identity "
         "read at runtime",
         does_not_prove="sign-in end to end; that needs the control plane and the gateway",
-        variants=("root", "agents"),
+        variants=_role_variants("web"),
     ),
     "runner": Role(
         name="runner",
-        arch="linux/amd64",
+        arch=_role_platform("runner"),
         proves="its modules import and the Docker CLI it shells out to is present",
         does_not_prove="that it can claim work; that needs a host, a socket and a credential",
     ),
     "sandbox": Role(
         name="sandbox",
-        arch="linux/amd64",
+        arch=_role_platform("sandbox"),
         proves="every Agent CLI reports the version its own image label claims",
         does_not_prove="isolation; that needs Kata and a real job",
     ),
     "tunnel": Role(
         name="tunnel",
-        arch="linux/amd64",
+        arch=_role_platform("tunnel"),
         proves="the entrypoint runs and refuses an unreachable peer loudly",
         does_not_prove="a working hop; that needs the far end",
     ),
@@ -355,7 +385,7 @@ def verify_web(image: str, *, variant: str, suffix: str, keep: bool) -> list[str
     moved that read to the server, and this is the container-level proof that it
     stayed moved.
     """
-    base_path = {"root": "", "agents": "/agents"}[variant]
+    base_path = artifact_catalog.artifact_for("web", variant).base_path or ""
     container = Container.for_run(f"web-{variant}", suffix)
     try:
         container.start(
@@ -714,7 +744,7 @@ def verify_identity(image: str, role: str, variant: str | None, revision: str | 
     evidence.append(f"artifact role label says {role}")
 
     if variant is not None:
-        expected_path = {"root": "", "agents": "/agents"}[variant]
+        expected_path = artifact_catalog.artifact_for(role, variant).base_path
         declared_path = labels.get("io.hybridinference.artifact.base_path")
         if declared_path != expected_path:
             raise SmokeFailure(
@@ -737,6 +767,19 @@ def verify_identity(image: str, role: str, variant: str | None, revision: str | 
     return evidence
 
 
+# Deliberately independent of the catalog: adding a cell does not acquire a
+# passing smoke merely because the producer and validator read the same data.
+# A new key must bind to real behavior here.
+SMOKE_CASES: dict[str, SmokeCase] = {
+    "control": SmokeCase("control", None, verify_control),
+    "web-root": SmokeCase("web", "root", partial(verify_web, variant="root")),
+    "web-agents": SmokeCase("web", "agents", partial(verify_web, variant="agents")),
+    "runner": SmokeCase("runner", None, verify_runner),
+    "sandbox": SmokeCase("sandbox", None, verify_sandbox),
+    "tunnel": SmokeCase("tunnel", None, verify_tunnel),
+}
+
+
 def verify(
     role: str,
     variant: str | None,
@@ -748,22 +791,24 @@ def verify(
     """Run one artifact's start check and return what it proved."""
     if role not in ROLES:
         raise SmokeFailure(f"unknown role {role!r}; this check knows {sorted(ROLES)}")
-
-    identity = verify_identity(image, role, variant, revision)
     if role == "web":
         if variant not in ROLES["web"].variants:
             raise SmokeFailure(f"web needs --variant, one of {list(ROLES['web'].variants)}")
-        started = verify_web(image, variant=variant or "", suffix=suffix, keep=keep)
-    elif role == "control":
-        started = verify_control(image, suffix=suffix, keep=keep)
-    elif role == "runner":
-        started = verify_runner(image, suffix=suffix, keep=keep)
-    elif role == "sandbox":
-        started = verify_sandbox(image, suffix=suffix, keep=keep)
-    elif role == "tunnel":
-        started = verify_tunnel(image, suffix=suffix, keep=keep)
-    else:
-        raise SmokeFailure(f"role {role!r} is declared but has no check")
+    elif variant is not None:
+        raise SmokeFailure(f"role {role!r} does not have variant {variant!r}")
+    try:
+        target = artifact_catalog.artifact_for(role, variant)
+    except artifact_catalog.CatalogError as error:
+        raise SmokeFailure(str(error)) from error
+    case = SMOKE_CASES.get(target.smoke_key)
+    if case is None or (case.role, case.variant) != (role, variant):
+        raise SmokeFailure(
+            f"artifact {target.name!r} uses smoke key {target.smoke_key!r}, but no reviewed "
+            "behavior check owns it"
+        )
+
+    identity = verify_identity(image, role, variant, revision)
+    started = case.start(image, suffix=suffix, keep=keep)
     return [*identity, *started]
 
 

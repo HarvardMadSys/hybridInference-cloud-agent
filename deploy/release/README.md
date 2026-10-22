@@ -12,10 +12,27 @@ own reviewed lock. The manifest, in turn, pins the recipe archive and images.
 
 | File | Purpose |
 |---|---|
+| [artifact_catalog.json](artifact_catalog.json) | One dependency-free source for build cells, native platforms, web mount/API variants, runner labels, and smoke keys. |
 | [manifest.schema.json](manifest.schema.json) | Published manifest schema; consumers validate against it. |
 | [release_manifest.py](release_manifest.py) | Generates a complete manifest from build records. |
+| [generate_artifact_contracts.py](generate_artifact_contracts.py) | Deterministically projects the catalog into the published schema vocabulary/cardinality and publication matrix. |
 | [build_recipe.py](build_recipe.py) | Packages the explicit recipe file list into a deterministic archive. |
 | [release_env.py](release_env.py), [artifact_compose.py](artifact_compose.py) | Validate release configuration and render digest-bound deployment inputs. |
+
+After editing catalog metadata, regenerate and check its reviewed projections:
+
+```bash
+python3 deploy/release/generate_artifact_contracts.py --write
+python3 deploy/release/generate_artifact_contracts.py --check
+```
+
+Manifest-visible changes (role, variant, base path, platform, or cell
+cardinality) are locked by `manifest_contract.artifact_shape_sha256`. Review
+their compatibility and schema-version impact, then acknowledge that decision
+explicitly with `--write --accept-contract-change`; ordinary generation will
+refuse to bless it. Behavior remains independent: a new catalog cell still
+needs a Dockerfile, a real case in `smoke.py`, deployment integration, and an
+independent contract fixture when compatibility changes.
 
 ## What the generator checks, and what it deliberately does not
 

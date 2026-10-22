@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 
 BASE_BUNDLE_CONTENT_TYPE: Final = "application/vnd.cloud-agent.base-bundle"
+BASE_BUNDLE_STREAM_CAPABILITY: Final = "base-bundle-stream-v1"
+LEGACY_BASE_BUNDLE_CONTENT_TYPE: Final = "application/json"
 MAX_BASE_BUNDLE_METADATA_BYTES: Final = 16 * 1024 * 1024
 BASE_BUNDLE_STREAM_CHUNK_BYTES: Final = 1024 * 1024
 _MAGIC: Final = b"CAB1"
@@ -47,7 +49,9 @@ def decode_base_bundle_header(header: bytes) -> int:
 __all__ = [
     "BASE_BUNDLE_CONTENT_TYPE",
     "BASE_BUNDLE_FRAME_HEADER_BYTES",
+    "BASE_BUNDLE_STREAM_CAPABILITY",
     "BASE_BUNDLE_STREAM_CHUNK_BYTES",
+    "LEGACY_BASE_BUNDLE_CONTENT_TYPE",
     "MAX_BASE_BUNDLE_METADATA_BYTES",
     "decode_base_bundle_header",
     "encode_base_bundle_metadata",

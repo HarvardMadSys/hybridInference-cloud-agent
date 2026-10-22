@@ -11,6 +11,7 @@ import tempfile
 import pytest
 
 from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_shared.git import source_archive as source_archive_module
 from cloud_agent_shared.git.source_archive import build_base_bundle, build_source_archive
 
 
@@ -102,6 +103,47 @@ def test_source_archive_refuses_tar_overhead_past_the_limit(tmp_path):
 
     with pytest.raises(SandboxError, match=r"source archive exceeds .* size limit"):
         _archive(root, max_bytes=file_bytes + 1)
+
+
+def test_source_archive_stops_streaming_at_the_entry_limit(tmp_path, monkeypatch):
+    root = _checkout(tmp_path)
+    paths = [root / ".git", root / ".git" / "config", root / "src"]
+
+    def entries(_root):
+        yield from paths
+        raise AssertionError("the tree walk continued after the entry limit")
+
+    monkeypatch.setattr(source_archive_module, "_entries", entries)
+
+    with pytest.raises(SandboxError, match="more than 2 entries"):
+        _archive(root, max_entries=2)
+
+
+def test_source_archive_bounds_the_disk_manifest(tmp_path):
+    root = _checkout(tmp_path)
+
+    with pytest.raises(SandboxError, match=r"manifest exceeds .* metadata limit"):
+        _archive(root, max_manifest_bytes=4)
+
+
+def test_source_archive_does_not_retain_written_tar_members(tmp_path, monkeypatch):
+    root = _checkout(tmp_path)
+    for index in range(100):
+        (root / f"file-{index:03}.txt").write_text("content")
+    retained = 0
+    addfile = tarfile.TarFile.addfile
+
+    def tracked_addfile(archive, *args, **kwargs):
+        nonlocal retained
+        result = addfile(archive, *args, **kwargs)
+        retained = max(retained, len(archive.members))
+        return result
+
+    monkeypatch.setattr(tarfile.TarFile, "addfile", tracked_addfile)
+
+    _archive(root)
+
+    assert retained == 1
 
 
 def test_source_archive_streams_into_a_real_file(tmp_path):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import json
 from contextlib import asynccontextmanager
@@ -21,7 +22,10 @@ from cloud_agent_shared.environment import (
 )
 from cloud_agent_shared.git.base_bundle_stream import (
     BASE_BUNDLE_CONTENT_TYPE,
+    BASE_BUNDLE_STREAM_CAPABILITY,
     BASE_BUNDLE_STREAM_CHUNK_BYTES,
+    LEGACY_BASE_BUNDLE_CONTENT_TYPE,
+    MAX_BASE_BUNDLE_METADATA_BYTES,
     encode_base_bundle_metadata,
 )
 from cloud_agent_shared.operation_profiling import (
@@ -34,7 +38,8 @@ from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER
 from cloud_agent_shared.storable_text import storable_json
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Callable, Mapping
+    from contextlib import AbstractAsyncContextManager
     from typing import BinaryIO
 
 
@@ -55,6 +60,7 @@ MAX_SANDBOX_MANAGER_CONTENT_BYTES = 32 * 1024 * 1024
 MAX_SANDBOX_MANAGER_CONTROL_BYTES = 16 * 1024 * 1024
 #: The route suffixes whose replies are workspace content.
 _CONTENT_ROUTES = frozenset({"files", "git", "snapshot"})
+_LEGACY_BASE_BUNDLE_SUFFIX = b'"}'
 
 
 def _rewind_and_size(bundle: BinaryIO) -> int:
@@ -72,6 +78,34 @@ async def _base_bundle_body(prefix: bytes, bundle: BinaryIO) -> AsyncIterator[by
         yield prefix
         while chunk := await asyncio.to_thread(bundle.read, BASE_BUNDLE_STREAM_CHUNK_BYTES):
             yield chunk
+    finally:
+        bundle.seek(0)
+
+
+def _legacy_base_bundle_prefix(metadata: Mapping[str, Any]) -> bytes:
+    """Encode the bounded prefix emitted by the previous JSON transport."""
+    encoded = json.dumps(metadata, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    if not encoded or len(encoded) > MAX_BASE_BUNDLE_METADATA_BYTES:
+        raise ValueError("base bundle metadata exceeds the transport limit")
+    separator = b"" if encoded == b"{}" else b","
+    return encoded[:-1] + separator + b'"bundle_b64":"'
+
+
+async def _legacy_base_bundle_body(prefix: bytes, bundle: BinaryIO) -> AsyncIterator[bytes]:
+    """Stream valid legacy JSON without materializing its base64 value."""
+    carry = b""
+    bundle.seek(0)
+    try:
+        yield prefix
+        while chunk := await asyncio.to_thread(bundle.read, BASE_BUNDLE_STREAM_CHUNK_BYTES):
+            payload = carry + chunk
+            complete = len(payload) - (len(payload) % 3)
+            if complete:
+                yield base64.b64encode(payload[:complete])
+            carry = payload[complete:]
+        if carry:
+            yield base64.b64encode(carry)
+        yield _LEGACY_BASE_BUNDLE_SUFFIX
     finally:
         bundle.seek(0)
 
@@ -170,7 +204,12 @@ class SandboxManagerClient:
     """Talk to the sandbox manager without exposing its credential to the browser."""
 
     def __init__(
-        self, base_url: str, token: str, *, client: httpx.AsyncClient | None = None
+        self,
+        base_url: str,
+        token: str,
+        *,
+        client: httpx.AsyncClient | None = None,
+        borrow: Callable[[], AbstractAsyncContextManager[httpx.AsyncClient]] | None = None,
     ) -> None:
         """Address one sandbox manager.
 
@@ -182,10 +221,13 @@ class SandboxManagerClient:
                 keystroke — so the pool cannot live on the instance; the
                 caller keeps it, keyed by ``base_url``, and closes it. Without
                 one, each call opens and closes its own connection as before.
+            borrow: Optional request lease that drains the shared pool safely
+                when its host is removed or changes address.
         """
         self._base_url = base_url.rstrip("/")
         self._headers = {"X-Agent-Workspace-Token": token, **IDENTITY_ENCODING_HEADERS}
         self._client = client
+        self._borrow = borrow
 
     def with_start_seq(self, start_seq: int | None) -> SandboxManagerClient:
         """This client, naming the start fence its caller's request took.
@@ -214,6 +256,10 @@ class SandboxManagerClient:
         needs ``read=None`` and it hands its client to the caller to close,
         neither of which a shared pool can offer.
         """
+        if self._borrow is not None:
+            async with self._borrow() as client:
+                yield client
+            return
         if self._client is not None:
             yield self._client
             return
@@ -360,17 +406,12 @@ class SandboxManagerClient:
             invalid="The shared chat supervisor returned invalid data.",
         )
 
-    async def require_environment_capability(self, environment: Any = None) -> list[str]:
-        """Require the capabilities from the actual authenticated broker replica.
-
-        Owner inference credentials need a broker that keeps them from the CLI.
-        Return all declared capabilities so callers only send supported fields.
-        The answer is read under the same ceiling as every other reply: the
-        host chooses how much it sends, on the claim path among others.
-        """
-        required = {ENVIRONMENT_CAPABILITY}
-        if environment is not None and uses_inference_names(environment):
-            required.add(ENVIRONMENT_INFERENCE_CAPABILITY)
+    async def _sandbox_manager_capabilities(
+        self,
+        *,
+        unavailable: str = "Sandbox manager capability is unavailable",
+    ) -> list[str]:
+        """Read bounded capabilities from the actual authenticated broker replica."""
         try:
             async with self._http(5) as client:
                 status_code, body = await self._exchange(
@@ -384,11 +425,23 @@ class SandboxManagerClient:
             answer = _json_object(body) if status_code < 400 and body is not None else None
             if answer is None:
                 raise ValueError("the sandbox manager gave no capability answer")
-            capabilities = [str(c) for c in answer.get("capabilities", [])]
+            return [str(c) for c in answer.get("capabilities", [])]
         except (httpx.HTTPError, ValueError, AttributeError, TypeError):
-            raise SandboxManagerError(
-                503, "Sandbox manager environment capability is unavailable"
-            ) from None
+            raise SandboxManagerError(503, unavailable) from None
+
+    async def require_environment_capability(self, environment: Any = None) -> list[str]:
+        """Require environment support and return every declared capability.
+
+        Owner inference credentials need a broker that keeps them from the CLI.
+        The complete answer also lets callers send only optional fields and
+        wire formats that the authenticated broker replica supports.
+        """
+        required = {ENVIRONMENT_CAPABILITY}
+        if environment is not None and uses_inference_names(environment):
+            required.add(ENVIRONMENT_INFERENCE_CAPABILITY)
+        capabilities = await self._sandbox_manager_capabilities(
+            unavailable="Sandbox manager environment capability is unavailable"
+        )
         if not required <= set(capabilities):
             raise SandboxManagerError(
                 503, "Sandbox manager must be upgraded for environment configuration"
@@ -937,24 +990,36 @@ class SandboxManagerClient:
         commit_sha: str,
         bundle: BinaryIO,
     ) -> dict[str, Any]:
-        """Stream trusted commit objects without changing workspace state."""
+        """Stream trusted commit objects in the authenticated host's wire format."""
         metadata = {
             **identity_from_row(snapshot, members=snapshot["members"]),
             "snapshot_id": snapshot["snapshot_id"],
             "commit_sha": commit_sha,
         }
-        prefix = encode_base_bundle_metadata(metadata)
         size = _rewind_and_size(bundle)
         if size <= 0:
             raise ValueError("base bundle must be non-empty")
+        capabilities = await self._sandbox_manager_capabilities()
+        if BASE_BUNDLE_STREAM_CAPABILITY in capabilities:
+            prefix = encode_base_bundle_metadata(metadata)
+            content = _base_bundle_body(prefix, bundle)
+            content_type = BASE_BUNDLE_CONTENT_TYPE
+            content_length = len(prefix) + size
+        else:
+            # One rolling-upgrade window: old hosts accept only JSON, but the
+            # new control plane still emits its base64 value incrementally.
+            prefix = _legacy_base_bundle_prefix(metadata)
+            content = _legacy_base_bundle_body(prefix, bundle)
+            content_type = LEGACY_BASE_BUNDLE_CONTENT_TYPE
+            content_length = len(prefix) + 4 * ((size + 2) // 3) + len(_LEGACY_BASE_BUNDLE_SUFFIX)
         return await self._shared_sandbox_request(
             "POST",
             str(snapshot["origin_thread_id"]),
             "import-base",
-            content=_base_bundle_body(prefix, bundle),
+            content=content,
             headers={
-                "Content-Type": BASE_BUNDLE_CONTENT_TYPE,
-                "Content-Length": str(len(prefix) + size),
+                "Content-Type": content_type,
+                "Content-Length": str(content_length),
             },
             timeout=360,
         )

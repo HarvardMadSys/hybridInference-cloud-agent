@@ -163,8 +163,8 @@ class GoalRepository(Protocol):
           waiting on anything, or whose conversation has gone idle with no
           wakeup at all. The decision is made again.
         * ``stalled`` — an ``active`` goal with nothing queued, running or
-          pending for longer than :data:`STALLED_AFTER_S`. No path can explain
-          it, so it is paused and said so.
+          pending for longer than the ``goals.stalled_after_seconds`` setting.
+          No path can explain it, so it is paused and said so.
 
         Returns the thread ids by shape, for the caller's log line.
         """

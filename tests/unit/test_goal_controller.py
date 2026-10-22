@@ -22,11 +22,14 @@ from cloud_agent.goals.controller import (
     continue_after_finish,
     run_goal_wakeups,
 )
-from cloud_agent.goals.models import MAX_WAKEUP_ATTEMPTS
 from cloud_agent.goals.retry_policy import wakeup_backoff
+from cloud_agent.settings import integer_setting
 from cloud_agent.storage.repositories.goals import _action_columns
 
 pytestmark = pytest.mark.asyncio
+
+#: The registry default, which applies while no settings snapshot is loaded.
+MAX_WAKEUP_ATTEMPTS = integer_setting("goals.max_wakeup_attempts")
 
 THREAD_ID = "athr_1"
 GOAL_ID = "goal-1"

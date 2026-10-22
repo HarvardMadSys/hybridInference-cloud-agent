@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import io
 import json
@@ -19,7 +20,9 @@ from cloud_agent.sandbox_manager_client import (
 from cloud_agent_shared.git.base_bundle_stream import (
     BASE_BUNDLE_CONTENT_TYPE,
     BASE_BUNDLE_FRAME_HEADER_BYTES,
+    BASE_BUNDLE_STREAM_CAPABILITY,
     BASE_BUNDLE_STREAM_CHUNK_BYTES,
+    LEGACY_BASE_BUNDLE_CONTENT_TYPE,
     decode_base_bundle_header,
 )
 from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER
@@ -246,7 +249,11 @@ async def test_shared_snapshot_client_forwards_only_the_reviewed_identity(monkey
         calls.append((method, thread_id, action, json, headers, timeout, chunks))
         return {"ok": True}
 
+    async def capabilities():
+        return [BASE_BUNDLE_STREAM_CAPABILITY]
+
     monkeypatch.setattr(sandbox_manager, "_shared_sandbox_request", request)
+    monkeypatch.setattr(sandbox_manager, "_sandbox_manager_capabilities", capabilities)
     snapshot = _shared_snapshot()
 
     assert await sandbox_manager.capture_shared_snapshot(snapshot) == {"ok": True}
@@ -293,6 +300,9 @@ async def test_shared_base_import_streams_bounded_chunks_through_httpx():
     received_chunks: list[bytes] = []
 
     async def answer(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert request.url.path == "/health"
+            return httpx.Response(200, json={"capabilities": [BASE_BUNDLE_STREAM_CAPABILITY]})
         assert request.headers["Content-Type"] == BASE_BUNDLE_CONTENT_TYPE
         received_chunks.extend([chunk async for chunk in request.stream])
         return httpx.Response(200, json={"ok": True})
@@ -307,6 +317,44 @@ async def test_shared_base_import_streams_bounded_chunks_through_httpx():
     metadata_length = decode_base_bundle_header(frame[:BASE_BUNDLE_FRAME_HEADER_BYTES])
     metadata_end = BASE_BUNDLE_FRAME_HEADER_BYTES + metadata_length
     assert hashlib.sha256(frame[metadata_end:]).digest() == expected_digest
+    assert bundle.read_sizes and set(bundle.read_sizes) == {BASE_BUNDLE_STREAM_CHUNK_BYTES}
+    assert bundle.tell() == 0
+
+
+@pytest.mark.asyncio
+async def test_shared_base_import_streams_legacy_json_to_an_old_host():
+    """A new control plane negotiates the exact old JSON wire format."""
+
+    class RecordingBundle(io.BytesIO):
+        def __init__(self, payload: bytes) -> None:
+            super().__init__(payload)
+            self.read_sizes: list[int] = []
+
+        def read(self, size: int = -1) -> bytes:
+            self.read_sizes.append(size)
+            return super().read(size)
+
+    payload = b"legacy" * (BASE_BUNDLE_STREAM_CHUNK_BYTES // 6 + 5)
+    bundle = RecordingBundle(payload)
+    imported: dict = {}
+
+    async def answer(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"capabilities": ["environment-v1"]})
+        encoded = await request.aread()
+        assert request.headers["Content-Type"] == LEGACY_BASE_BUNDLE_CONTENT_TYPE
+        assert request.headers["Content-Length"] == str(len(encoded))
+        imported.update(json.loads(encoded))
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as http:
+        client = SandboxManagerClient("http://manager.test", "token", client=http)
+        assert await client.import_shared_base(
+            _shared_snapshot(), commit_sha="b" * 40, bundle=bundle
+        ) == {"ok": True}
+
+    assert imported["commit_sha"] == "b" * 40
+    assert base64.b64decode(imported["bundle_b64"], validate=True) == payload
     assert bundle.read_sizes and set(bundle.read_sizes) == {BASE_BUNDLE_STREAM_CHUNK_BYTES}
     assert bundle.tell() == 0
 

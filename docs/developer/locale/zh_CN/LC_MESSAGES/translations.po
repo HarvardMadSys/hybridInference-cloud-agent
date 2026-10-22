@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-17 05:54-0400\n"
+"POT-Creation-Date: 2026-10-21 23:29+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -65,20 +65,38 @@ msgstr "改了英文页面之后"
 #: ../developer/translations.md:39
 msgid ""
 "Run `make docs-translate` and translate the entries it adds or marks `#, "
-"fuzzy`, then delete the `#, fuzzy` line and any obsolete `#~` entries. "
-"`make docs-verify` fails until every English string has a current "
-"translation. If you cannot translate a change yourself, say so in the "
-"pull request; a reviewer who can will add it."
+"fuzzy`, then delete the `#, fuzzy` line and any obsolete `#~` entries."
 msgstr ""
 "运行 `make docs-translate`，把新增的条目和标成 `#, fuzzy` 的条目翻译好，再删掉 `#, fuzzy` "
-"这一行，以及所有作废的 `#~` 条目。只要还有一段英文没有对应的最新译文，`make docs-verify` "
-"就不会通过。如果你自己翻不了，就在 pull request 里说一声，由能翻的评审者补上。"
+"这一行，以及所有作废的 `#~` 条目。"
 
-#: ../developer/translations.md:45
+#: ../developer/translations.md:42
+msgid ""
+"`make docs-verify` fails while a string on a stable page has no entry in "
+"its catalog or a fuzzy one. The stable pages are the home page, the "
+"developer guide, the code structure page, and the security and "
+"contributing pages, which include the root `SECURITY.md` and "
+"`CONTRIBUTING.md`. On every other page such a string is reported as a "
+"warning and renders in English until someone translates it, because those"
+" pages change with the code. Translate them as well when you can; if you "
+"cannot, say so in the pull request, and a reviewer who can will add it. "
+"No page catches an entry left empty, which renders in English too, so "
+"translate every entry `make docs-translate` adds. A translation that "
+"renders wrong, rather than one that is only behind, fails on every page."
+msgstr ""
+"在稳定页面上，只要某段英文在 catalog 里没有对应的条目，或者对应的条目标成了 fuzzy，"
+"`make docs-verify` 就会失败。稳定页面是首页、开发者指南、代码结构，以及安全和贡献指南这两页，"
+"后两页引入的是根目录下的 `SECURITY.md` 和 `CONTRIBUTING.md`。"
+"其他页面会随代码一起变化，上面这样的段落只报成警告，在有人翻译之前显示英文。能翻的时候也把它们翻好；"
+"翻不了的话，就在 pull request 里说一声，由能翻的评审者补上。"
+"留空的条目在任何页面上都查不出来，同样会显示英文，所以 `make docs-translate` 新增的条目都要翻译。"
+"译文如果会显示错，而不只是落后，在任何页面上都会失败。"
+
+#: ../developer/translations.md:53
 msgid "Chinese style"
 msgstr "中文文风"
 
-#: ../developer/translations.md:47
+#: ../developer/translations.md:55
 msgid ""
 "Write the Chinese an experienced colleague would write to explain the "
 "page, not a sentence-by-sentence rendering of the English. Read the whole"
@@ -87,7 +105,7 @@ msgid ""
 "was written in."
 msgstr "要写成一位有经验的同事给你讲这一页时会说的中文，而不是把英文一句一句搬过来。先把整节读完，弄清楚它想告诉读者什么，再用中文把这件事说出来。理想的效果是，读者看不出这一页原本是用哪种语言写的。"
 
-#: ../developer/translations.md:52
+#: ../developer/translations.md:60
 msgid ""
 "**Keep every fact.** Natural is not looser: a condition, a number, a "
 "default, an order of steps or a warning in the English stays in the "
@@ -95,7 +113,7 @@ msgid ""
 " not give."
 msgstr "**事实一个都不能少。** 自然不等于随意：英文里的条件、数字、默认值、步骤顺序和警告，中文里都要有，语气也不能减弱。英文没说的解释，也不要自己加。"
 
-#: ../developer/translations.md:56
+#: ../developer/translations.md:64
 msgid ""
 "**Rebuild long sentences.** English hangs conditions and details off a "
 "noun in relative clauses; Chinese states the condition first and then the"
@@ -106,7 +124,7 @@ msgstr ""
 "**长句要拆开重组。** "
 "英文习惯用从句把条件和细节挂在名词后面；中文一般先说条件、再说结果，长句拆成几个短句。名词前面堆了一串\"的\"，通常就说明有个从句应该单独成句。"
 
-#: ../developer/translations.md:61
+#: ../developer/translations.md:69
 msgid ""
 "**Drop the pronouns and filler English needs.** Most *it*, *its* and "
 "*they* disappear in Chinese or become the noun they stand for. Leave out "
@@ -116,7 +134,7 @@ msgstr ""
 "**英文离不开的代词和虚词，中文大多可以省掉。** 英文里的 "
 "*it*、*its*、*they*，到了中文多半直接省略，或者换回它指代的名词。\"进行\"、每个名词前的\"一个\"、\"能够\"、\"从而\"，没有实际意思就别写。尽量用主动句，只有在被动本身就是重点时才用\"被\"。"
 
-#: ../developer/translations.md:66
+#: ../developer/translations.md:74
 msgid ""
 "**Translate the meaning, not the word.** *That exact host* is 这台主机, not "
 "那台确切的主机; *runs agents against a repository* is 处理仓库; *buys inference* is "
@@ -127,7 +145,7 @@ msgstr ""
 "against a repository* 是\"处理仓库\"；*buys inference* "
 "是\"调用模型\"。英文里的说法在中文里找不到对应时，就直接把意思讲明白。"
 
-#: ../developer/translations.md:71
+#: ../developer/translations.md:79
 msgid ""
 "**Talk to the reader.** Address the reader as 你 in instructions, and use "
 "请 sparingly. Spell out what to do in the order they will do it."
@@ -165,17 +183,17 @@ msgstr ""
 msgid "这样部署的就绪检查只会放行这一台正在排空的主机。"
 msgstr ""
 
-#: ../developer/translations.md:80
+#: ../developer/translations.md:88
 msgid "Chinese traps"
 msgstr "中文里的坑"
 
-#: ../developer/translations.md:82
+#: ../developer/translations.md:90
 msgid ""
 "The first three are silent: the build stays green and the page is wrong. "
 "The structural check in `make docs-verify` catches them."
 msgstr "前三个坑都不会报错：构建照样通过，页面却是错的。`make docs-verify` 里的结构检查能把它们揪出来。"
 
-#: ../developer/translations.md:85
+#: ../developer/translations.md:93
 msgid ""
 "**Keep code, link targets and markup exactly.** Inline code, URLs, link "
 "targets, anchors, environment variable names and command lines stay as "
@@ -186,7 +204,7 @@ msgstr ""
 "**代码、链接目标和标记一字不改。** "
 "行内代码、URL、链接目标、锚点、环境变量名和命令行都原样保留。链接只翻译显示的文字，目标绝不能动。检查会逐页比对译文和英文的行内代码与链接目标。"
 
-#: ../developer/translations.md:90
+#: ../developer/translations.md:98
 msgid ""
 "**A heading that starts with a number is dropped.** MyST reads `1. ` as a"
 " list marker, the structure no longer matches the source, and Sphinx "
@@ -195,7 +213,7 @@ msgstr ""
 "**以数字开头的标题会丢失。** MyST 会把 `1. ` 当成列表标记，结构和原文对不上，Sphinx "
 "就退回去显示英文标题。把句点转义即可：`msgstr \"1\\. 申请一个节点\"`。"
 
-#: ../developer/translations.md:94
+#: ../developer/translations.md:102
 msgid ""
 "**Emphasis next to Chinese punctuation.** A closing `**` preceded by a "
 "Chinese full stop and followed by a Chinese character is not recognised, "
@@ -208,7 +226,7 @@ msgstr ""
 "会直接显示出星号。把标点挪到加粗外面：`**术语**。后文`。加粗文字以代码或引号开头、结尾时也一样，``**`AGENT_TIMEOUT_S`**的默认值``"
 " 会出错，要加一个空格：``**`AGENT_TIMEOUT_S`** 的默认值``。"
 
-#: ../developer/translations.md:101
+#: ../developer/translations.md:109
 msgid ""
 "**A stale `.mo` masks your edits.** Sphinx skips recompiling when the "
 "`.mo` is newer than its `.po`. Before checking a build, run `find "
@@ -217,11 +235,11 @@ msgstr ""
 "**旧的 `.mo` 会让你的修改看不出效果。** 只要 `.mo` 比对应的 `.po` 新，Sphinx "
 "就不会重新编译。检查构建结果之前，先运行 `find docs/developer/locale -name '*.mo' -delete`。"
 
-#: ../developer/translations.md:105
+#: ../developer/translations.md:113
 msgid "Chinese terminology"
 msgstr "中文术语"
 
-#: ../developer/translations.md:107
+#: ../developer/translations.md:115
 msgid ""
 "Use the same Chinese for a term on every page. Product and component "
 "names, UI labels shown in bold, API fields, states and command names stay"
