@@ -22,7 +22,7 @@ class NotificationStateCursor(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    version: Literal[1] = 1
+    version: Literal[1, 2] = 2
     scope: str
     database_snapshot: str = Field(max_length=8192, pattern=r"^[0-9]+:[0-9]+:([0-9]+(,[0-9]+)*)?$")
     bootstrap: bool = False
@@ -33,6 +33,7 @@ class NotificationStateCursor(BaseModel):
         default=None, max_length=8192, pattern=r"^[0-9]+:[0-9]+:([0-9]+(,[0-9]+)*)?$"
     )
     after_kind: Literal["job", "thread"] | None = None
+    after_xid: int | None = Field(default=None, ge=1, lt=2**64, strict=True)
     after_id: str | None = Field(default=None, min_length=1, max_length=256)
 
     @field_validator("after_id")
@@ -51,7 +52,7 @@ class NotificationStateCursor(BaseModel):
         if self.bootstrap:
             if self.bootstrap_at is None or self.target_snapshot is not None:
                 raise ValueError("Invalid bootstrap cursor.")
-            if self.after_kind is not None:
+            if self.after_kind is not None or self.after_xid is not None:
                 raise ValueError("Invalid bootstrap position.")
             phase = self.bootstrap_phase or "active"
             if phase == "active" and self.after_changed_at is not None:
@@ -65,9 +66,18 @@ class NotificationStateCursor(BaseModel):
         ):
             raise ValueError("Invalid change cursor.")
         elif self.target_snapshot is None:
-            if self.after_kind is not None or self.after_id is not None:
+            if (
+                self.after_kind is not None
+                or self.after_xid is not None
+                or self.after_id is not None
+            ):
                 raise ValueError("Invalid change position.")
-        elif self.after_kind is None or self.after_id is None:
+        elif (
+            self.after_kind is None
+            or self.after_id is None
+            or (self.version == 1 and self.after_xid is not None)
+            or (self.version == 2 and self.after_xid is None)
+        ):
             raise ValueError("Invalid change position.")
         if self.bootstrap_at is not None and self.bootstrap_at.tzinfo is None:
             raise ValueError("Invalid bootstrap time.")

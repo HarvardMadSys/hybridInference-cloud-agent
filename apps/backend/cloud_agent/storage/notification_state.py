@@ -272,6 +272,151 @@ async def _bootstrap(
     return _bootstrap_result(cursor, page, recent_continuation)
 
 
+_CHANGE_KEYSET_CLAUSE = "AND (c.change_xid,c.entity_id)>($5::text::xid8,$6::text)"
+
+_LEGACY_CHANGE_PAGE_SQL = """
+    WITH changed AS MATERIALIZED (
+        SELECT kind,entity_id FROM agent_notification_changes
+        WHERE user_id=$1
+          AND change_xid>=pg_snapshot_xmax($2::text::pg_snapshot)
+          AND change_xid<pg_snapshot_xmax($5::text::pg_snapshot)
+          AND NOT change_xid=ANY(
+              ARRAY(SELECT pg_snapshot_xip($5::text::pg_snapshot))
+          )
+        UNION ALL
+        SELECT kind,entity_id FROM agent_notification_changes
+        WHERE user_id=$1
+          AND change_xid=ANY(ARRAY(SELECT pg_snapshot_xip($2::text::pg_snapshot)))
+          AND change_xid<pg_snapshot_xmax($5::text::pg_snapshot)
+          AND NOT change_xid=ANY(
+              ARRAY(SELECT pg_snapshot_xip($5::text::pg_snapshot))
+          )
+    )
+    SELECT NULL::text AS change_xid,kind,entity_id FROM changed
+    WHERE (kind,entity_id)>($3,$4)
+    ORDER BY kind,entity_id LIMIT $6
+"""
+
+
+def _legacy_change_page(cursor: NotificationStateCursor) -> bool:
+    """Finish a v1 continuation in the ordering that created its boundary."""
+    return cursor.version == 1 and cursor.target_snapshot is not None
+
+
+def _change_after_clauses(cursor: NotificationStateCursor) -> tuple[str, str]:
+    """Build kind-local keysets without nullable predicates in either index scan."""
+    if cursor.after_xid is None:
+        return "", ""
+    if cursor.after_kind == "job":
+        return _CHANGE_KEYSET_CLAUSE, ""
+    return "AND FALSE", _CHANGE_KEYSET_CLAUSE
+
+
+def _change_page_statement(cursor: NotificationStateCursor) -> str:
+    """Merge four independently bounded index scans into one owner page."""
+    job_after, thread_after = _change_after_clauses(cursor)
+    return f"""
+        WITH eligible_base_xids AS (
+            SELECT base_xid
+            FROM pg_snapshot_xip($2::text::pg_snapshot) AS base_xids(base_xid)
+            WHERE base_xid<pg_snapshot_xmax($3::text::pg_snapshot)
+            EXCEPT
+            SELECT target_xid
+            FROM pg_snapshot_xip($3::text::pg_snapshot) AS target_xids(target_xid)
+        )
+        SELECT changed.change_xid::text AS change_xid,changed.kind,changed.entity_id
+        FROM (
+            (
+                SELECT page.change_xid,page.kind,page.entity_id
+                FROM (
+                    SELECT base_xid FROM eligible_base_xids ORDER BY base_xid
+                ) AS eligible
+                CROSS JOIN LATERAL (
+                    SELECT c.change_xid,c.kind,c.entity_id
+                    FROM agent_notification_changes AS c
+                    WHERE c.user_id=$1 AND c.kind='job'
+                      AND c.change_xid=eligible.base_xid
+                      {job_after}
+                    ORDER BY c.entity_id LIMIT $4
+                ) AS page
+                ORDER BY eligible.base_xid,page.entity_id LIMIT $4
+            )
+            UNION ALL
+            (
+                SELECT c.change_xid,c.kind,c.entity_id
+                FROM agent_notification_changes AS c
+                WHERE c.user_id=$1 AND c.kind='job'
+                  AND c.change_xid>=pg_snapshot_xmax($2::text::pg_snapshot)
+                  AND c.change_xid<pg_snapshot_xmax($3::text::pg_snapshot)
+                  AND NOT c.change_xid=ANY(
+                      ARRAY(SELECT pg_snapshot_xip($3::text::pg_snapshot))
+                  )
+                  {job_after}
+                ORDER BY c.change_xid,c.entity_id LIMIT $4
+            )
+            UNION ALL
+            (
+                SELECT page.change_xid,page.kind,page.entity_id
+                FROM (
+                    SELECT base_xid FROM eligible_base_xids ORDER BY base_xid
+                ) AS eligible
+                CROSS JOIN LATERAL (
+                    SELECT c.change_xid,c.kind,c.entity_id
+                    FROM agent_notification_changes AS c
+                    WHERE c.user_id=$1 AND c.kind='thread'
+                      AND c.change_xid=eligible.base_xid
+                      {thread_after}
+                    ORDER BY c.entity_id LIMIT $4
+                ) AS page
+                ORDER BY eligible.base_xid,page.entity_id LIMIT $4
+            )
+            UNION ALL
+            (
+                SELECT c.change_xid,c.kind,c.entity_id
+                FROM agent_notification_changes AS c
+                WHERE c.user_id=$1 AND c.kind='thread'
+                  AND c.change_xid>=pg_snapshot_xmax($2::text::pg_snapshot)
+                  AND c.change_xid<pg_snapshot_xmax($3::text::pg_snapshot)
+                  AND NOT c.change_xid=ANY(
+                      ARRAY(SELECT pg_snapshot_xip($3::text::pg_snapshot))
+                  )
+                  {thread_after}
+                ORDER BY c.change_xid,c.entity_id LIMIT $4
+            )
+        ) AS changed
+        ORDER BY changed.kind,changed.change_xid,changed.entity_id LIMIT $4
+    """
+
+
+async def _change_rows(
+    conn: Any,
+    *,
+    cursor: NotificationStateCursor,
+    user_id: str,
+    target_snapshot: str,
+    scan_limit: int,
+) -> list[Any]:
+    if _legacy_change_page(cursor):
+        return await conn.fetch(
+            _LEGACY_CHANGE_PAGE_SQL,
+            user_id,
+            cursor.database_snapshot,
+            cursor.after_kind,
+            cursor.after_id,
+            target_snapshot,
+            scan_limit,
+        )
+    arguments: list[Any] = [
+        user_id,
+        cursor.database_snapshot,
+        target_snapshot,
+        scan_limit,
+    ]
+    if cursor.after_xid is not None:
+        arguments.extend((str(cursor.after_xid), cursor.after_id))
+    return await conn.fetch(_change_page_statement(cursor), *arguments)
+
+
 async def _changes(
     conn: Any,
     cursor: NotificationStateCursor,
@@ -302,35 +447,12 @@ async def _changes(
         }
 
     target = cursor.target_snapshot or metadata["snapshot"]
-    changes = await conn.fetch(
-        """
-        WITH changed AS MATERIALIZED (
-            SELECT kind,entity_id FROM agent_notification_changes
-            WHERE user_id=$1
-              AND change_xid>=pg_snapshot_xmax($2::text::pg_snapshot)
-              AND change_xid<pg_snapshot_xmax($5::text::pg_snapshot)
-              AND NOT change_xid=ANY(
-                  ARRAY(SELECT pg_snapshot_xip($5::text::pg_snapshot))
-              )
-            UNION ALL
-            SELECT kind,entity_id FROM agent_notification_changes
-            WHERE user_id=$1
-              AND change_xid=ANY(ARRAY(SELECT pg_snapshot_xip($2::text::pg_snapshot)))
-              AND change_xid<pg_snapshot_xmax($5::text::pg_snapshot)
-              AND NOT change_xid=ANY(
-                  ARRAY(SELECT pg_snapshot_xip($5::text::pg_snapshot))
-              )
-        )
-        SELECT kind,entity_id FROM changed
-        WHERE $3::text IS NULL OR (kind,entity_id)>($3,$4)
-        ORDER BY kind,entity_id LIMIT $6
-        """,
-        user_id,
-        cursor.database_snapshot,
-        cursor.after_kind,
-        cursor.after_id,
-        target,
-        limit + 1,
+    changes = await _change_rows(
+        conn,
+        cursor=cursor,
+        user_id=user_id,
+        target_snapshot=target,
+        scan_limit=limit + 1,
     )
     selected = changes[:limit]
     job_ids = [row["entity_id"] for row in selected if row["kind"] == "job"]
@@ -351,10 +473,13 @@ async def _changes(
     )
     present_jobs = {row["id"] for row in jobs}
     present_threads = {row["id"] for row in threads}
+    legacy_page = _legacy_change_page(cursor)
     continuation = cursor.model_copy(
         update={
+            "version": 1 if legacy_page else 2,
             "target_snapshot": target,
             "after_kind": selected[-1]["kind"] if selected else None,
+            "after_xid": (None if legacy_page or not selected else int(selected[-1]["change_xid"])),
             "after_id": selected[-1]["entity_id"] if selected else None,
         }
     )
@@ -369,7 +494,9 @@ async def _changes(
         "observed_at": metadata["observed_at"],
         "next_cursor": encode_cursor(continuation) if len(changes) > limit else None,
         "change_cursor": (
-            encode_cursor(NotificationStateCursor(scope=cursor.scope, database_snapshot=target))
+            encode_cursor(
+                NotificationStateCursor(version=2, scope=cursor.scope, database_snapshot=target)
+            )
             if len(changes) <= limit
             else None
         ),
