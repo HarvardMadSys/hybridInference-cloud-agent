@@ -93,7 +93,6 @@
     {
       "files": [
         "src/components/features/agents/environment/EnvironmentPicker.tsx",
-        "src/components/features/agents/job-detail/JobDetailSidePanels.tsx",
         "src/lib/api/agents/events.ts"
       ],
       "rules": {

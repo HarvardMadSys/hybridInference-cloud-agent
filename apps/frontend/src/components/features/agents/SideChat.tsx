@@ -31,11 +31,11 @@ import { useAgentJob } from './useAgentJobs';
 import { markConversationRead } from './useConversationReadState';
 import { useConversationScroll } from './useConversationScroll';
 import { usePendingMessages } from './usePendingMessages';
-import { useSideChatSession } from './useSideChatSession';
+import { useSideChatSession, type SideChatSource } from './useSideChatSession';
 import type { SideChatTab } from './useWorkspaceTabs';
 
 interface SideChatProps {
-  sourceJob: AgentJob;
+  sourceJob: SideChatSource & Pick<AgentJob, 'model' | 'reasoningEffort' | 'runtime'>;
   sourceJobs: AgentJobApi[];
   userId?: string;
   config: AgentConfigApi | null;

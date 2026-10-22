@@ -359,7 +359,7 @@ function ChangedList({
   selected,
   onOpen,
 }: {
-  job: AgentJob;
+  job: Pick<AgentJob, 'diffFiles' | 'diffFileDetails'>;
   selected: string | null;
   onOpen: (path: string) => void;
 }) {
@@ -593,7 +593,7 @@ export function WorkspaceFiles({
   requestedPath,
   requestToken,
 }: {
-  job: AgentJob;
+  job: Pick<AgentJob, 'id' | 'state' | 'diffFiles' | 'diffFileDetails'>;
   active: boolean;
   requestedPath?: string | null;
   /** Increment to reopen the same path after a new conversation action. */
