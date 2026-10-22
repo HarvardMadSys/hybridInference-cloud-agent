@@ -86,7 +86,7 @@ if TYPE_CHECKING:
     from cloud_agent.source_control_runtime import GitHubAppSource
 
 
-from cloud_agent.api.environments import CredentialSafeRoute
+from cloud_agent.api._environment_route_policy import EnvironmentSensitiveRoute
 
 router = APIRouter(prefix="/v1/agent")
 
@@ -836,5 +836,5 @@ router.add_api_route(
     methods=["POST"],
     response_model=AgentJobResponse,
     status_code=201,
-    route_class_override=CredentialSafeRoute,
+    route_class_override=EnvironmentSensitiveRoute,
 )
