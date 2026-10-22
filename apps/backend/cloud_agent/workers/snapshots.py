@@ -21,7 +21,7 @@ from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
 
 if TYPE_CHECKING:
     from cloud_agent.ports import HostPoolRepository, SnapshotRepository
-    from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.environments import EnvironmentBindingRepository
     from cloud_agent.workers.background_wake import BackgroundWake
 
 #: The moved loop keeps logging under the module it came from: the deployment's
@@ -35,10 +35,13 @@ class _SnapshotCapture(Protocol):
 
     host_pool: HostPoolRepository
     snapshot: SnapshotRepository
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentBindingRepository:
+        """Environment persistence needed by this flow."""
+        ...
 
 
-SNAPSHOT_CAPTURE_INTERVAL_S = 5.0
 #: The largest patch a snapshot receipt may carry. The broker captures it from
 #: Git output it stops at its command-output limit, and no host may set that
 #: above this setting's maximum, so an honest receipt never exceeds it. A
@@ -47,10 +50,6 @@ SNAPSHOT_CAPTURE_INTERVAL_S = 5.0
 MAX_SNAPSHOT_PATCH_BYTES = (
     HOST_SETTINGS_BY_KEY["workspace_command_output_max_mib"].maximum * 1024 * 1024
 )
-#: The longest an idle coordinator that is told about new work sleeps. It wakes
-#: sooner for a notification or the earliest capture retry; this is for what
-#: announces nothing, such as a capture the reaper found stalled.
-SNAPSHOT_IDLE_S = 30.0
 #: Why a capture whose base is missing still fails: only a commit one of the
 #: group's snapshots published can be fetched again, which the base a
 #: workspace started from usually is not.
@@ -187,7 +186,7 @@ async def _next_look_s(
     """How long the coordinator may sleep before it looks for a capture again."""
     if not wake.listening:
         return interval_seconds
-    idle_s = number_setting("snapshot_idle_s", SNAPSHOT_IDLE_S)
+    idle_s = number_setting("snapshot_idle_s")
     with contextlib.suppress(Exception):
         due = await store.snapshot.next_snapshot_retry_due()
         if due is not None:
@@ -215,7 +214,7 @@ async def coordinate_shared_snapshots(
         interval = (
             interval_seconds
             if interval_seconds is not None
-            else number_setting("snapshot_capture_interval_s", SNAPSHOT_CAPTURE_INTERVAL_S)
+            else number_setting("snapshot_capture_interval_s")
         )
         if wake is None:
             await asyncio.sleep(interval)

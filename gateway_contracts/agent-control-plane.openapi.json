@@ -6250,6 +6250,17 @@
             ],
             "title": "Last Activity At"
           },
+          "membership_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Membership Token"
+          },
           "pinned_at": {
             "anyOf": [
               {
@@ -6265,6 +6276,17 @@
             "default": 0,
             "title": "Pinned Count",
             "type": "integer"
+          },
+          "refresh_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refresh Token"
           },
           "repo": {
             "anyOf": [
@@ -8127,6 +8149,145 @@
           "timing_source"
         ],
         "title": "AgentThreadStatsResponse",
+        "type": "object"
+      },
+      "AgentTrajectoryAttemptTiming": {
+        "description": "Compact timing needed by the trajectory, without process/resource detail.",
+        "properties": {
+          "attempt_id": {
+            "title": "Attempt Id",
+            "type": "integer"
+          },
+          "attempt_no": {
+            "title": "Attempt No",
+            "type": "integer"
+          },
+          "context_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "new",
+                  "live",
+                  "restored",
+                  "lost"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Status"
+          },
+          "continuity_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Continuity Mode"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          },
+          "tool_calls_truncated": {
+            "default": false,
+            "title": "Tool Calls Truncated",
+            "type": "boolean"
+          },
+          "tool_time_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Time Ms"
+          },
+          "tool_timing_exact": {
+            "default": false,
+            "title": "Tool Timing Exact",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "attempt_id",
+          "attempt_no"
+        ],
+        "title": "AgentTrajectoryAttemptTiming",
+        "type": "object"
+      },
+      "AgentTrajectoryJobTiming": {
+        "description": "Attempt timing for one requested turn, including an empty queued turn.",
+        "properties": {
+          "attempts": {
+            "items": {
+              "$ref": "#/components/schemas/AgentTrajectoryAttemptTiming"
+            },
+            "title": "Attempts",
+            "type": "array"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "AgentTrajectoryJobTiming",
+        "type": "object"
+      },
+      "AgentTrajectoryTimingRequest": {
+        "description": "One bounded owner-scoped set of turns whose timing the trajectory needs.",
+        "properties": {
+          "job_ids": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[^\\x00]+$",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Job Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "job_ids"
+        ],
+        "title": "AgentTrajectoryTimingRequest",
+        "type": "object"
+      },
+      "AgentTrajectoryTimingResponse": {
+        "description": "Timing rows in the request's job order and each job's attempt order.",
+        "properties": {
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/AgentTrajectoryJobTiming"
+            },
+            "title": "Jobs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "jobs"
+        ],
+        "title": "AgentTrajectoryTimingResponse",
         "type": "object"
       },
       "AgentWorkspaceEntry": {
@@ -30274,6 +30435,63 @@
         "summary": "Create Agent Job"
       }
     },
+    "/v1/agent/jobs/trajectory-telemetry": {
+      "post": {
+        "description": "Read compact timing for a bounded set of the caller's turns.",
+        "operationId": "get_agent_trajectory_telemetry_v1_agent_jobs_trajectory_telemetry_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentTrajectoryTimingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTrajectoryTimingResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Trajectory Telemetry"
+      }
+    },
     "/v1/agent/jobs/{job_id}": {
       "get": {
         "description": "Fetch one of the caller's agent jobs, with what it has spent so far.",
@@ -40159,7 +40377,7 @@
     },
     "/v1/agent/worker/wait": {
       "post": {
-        "description": "Hold an idle host's request until there may be work, then answer.\n\nA host whose claim found nothing asks here instead of sleeping out its poll\ninterval, and claims again when this answers: at once if the token it\npasses is stale, when a job is queued, requeued or ends, or after\n``timeout_seconds`` regardless. The answer is the token for its next wait\nand never a job; the claim stays the only way to take one.\n\nEnrolled hosts only, like the claim it precedes. 404 where nothing listens\nfor work, which is also what a control plane predating this answers, so a\nhost treats both the same way and polls.",
+        "description": "Hold an idle host's request until there may be work, then answer.\n\nA host whose claim found nothing asks here instead of sleeping out its poll\ninterval, and claims again when this answers: at once if its token is stale,\nwhen a job it may take is queued, requeued or ends, or after ``timeout_seconds``.\nThe answer is the token for its next wait, never a job: only a claim takes one.\n\nEnrolled hosts only, like the claim it precedes. 404 where nothing listens\nfor work, which is also what a control plane predating this answers, so a\nhost treats both the same way and polls.",
         "operationId": "worker_wait_v1_agent_worker_wait_post",
         "parameters": [
           {

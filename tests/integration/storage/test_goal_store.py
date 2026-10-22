@@ -31,20 +31,24 @@ from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.goals.decision import GoalAction
 from cloud_agent.goals.models import (
-    MAX_WAKEUP_ATTEMPTS,
-    STALLED_AFTER_S,
-    WAKEUP_BACKOFF_MAX_S,
-    WAKEUP_BACKOFF_S,
     GoalConflict,
     GoalInput,
 )
 from cloud_agent.goals.report import GoalReportEnvelope
 from cloud_agent.goals.retry_policy import is_exhausted, wakeup_backoff
+from cloud_agent.settings import integer_setting, number_setting
 from cloud_agent.storage._sql.goals import arm_finish_wakeup
 from cloud_agent.storage.repositories.goal_wakeups import _WAKEUP_COLUMNS
 from cloud_agent.storage.repositories.goals import _arm
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
+
+#: The goal settings in effect: their registry defaults, since no test here
+#: loads a settings snapshot.
+MAX_WAKEUP_ATTEMPTS = integer_setting("goals.max_wakeup_attempts")
+STALLED_AFTER_S = number_setting("goals.stalled_after_seconds")
+WAKEUP_BACKOFF_S = number_setting("goals.wakeup_backoff_seconds")
+WAKEUP_BACKOFF_MAX_S = number_setting("goals.wakeup_backoff_max_seconds")
 
 #: The host the live-goal helper reserves its group on. A re-claim has to name
 #: the same one: a retained chat is hard-pinned to the machine that owns its
@@ -1541,7 +1545,6 @@ async def test_an_unloaded_github_app_leaves_the_goal_waiting_on_its_rows(
     becomes the next round once the App loads.
     """
     from cloud_agent.goals.controller import consume_wakeup, continue_after_finish, run_goal_wakeups
-    from cloud_agent.goals.models import MAX_WAKEUP_ATTEMPTS
     from cloud_agent.source_control_runtime import SourceControlUnavailable
 
     class RecoveringApp:

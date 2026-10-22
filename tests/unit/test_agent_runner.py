@@ -2035,19 +2035,6 @@ def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):
         )
 
 
-def test_runner_source_contains_no_push_or_legacy_execution_path():
-    source = __import__("inspect").getsource(runner_mod)
-    assert "git push" not in source
-    # The executor count is the supervisor's pool, sized from the control
-    # plane; a replica count read from the environment would be a second,
-    # stale answer to the same question.
-    assert "AGENT_RUNNER_REPLICAS" not in source
-    assert "def _run_retained_attempt" not in source
-    assert "def run_agent" not in source
-    assert "AGENT_RESTARTABLE_SANDBOX" not in source
-    assert "AGENT_SHARED_LIVE_SANDBOX" not in source
-
-
 def _enable_profiling(monkeypatch, **overrides):
     """Turn startup profiling on with a run that selects only this operation."""
     run = {

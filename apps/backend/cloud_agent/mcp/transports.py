@@ -80,11 +80,6 @@ from cloud_agent.mcp.protocol import (
 from cloud_agent.mcp.sse import SseDecoder, SseError
 from cloud_agent.settings import number_setting
 
-#: A tool call can be a repo-wide search; it is not a token stream. Bounded all
-#: the same, because a sandbox waiting on a hung upstream burns a job.
-DEFAULT_REQUEST_TIMEOUT = 120.0
-DEFAULT_CONNECT_TIMEOUT = 10.0
-
 #: The header carrying the negotiated protocol revision.
 PROTOCOL_VERSION_HEADER = "mcp-protocol-version"
 #: The header carrying a server-assigned session.
@@ -205,13 +200,13 @@ class RemoteTransportConfig:
 def _request_timeout(config: RemoteTransportConfig) -> float:
     if config.request_timeout is not None:
         return config.request_timeout
-    return number_setting("mcp_request_timeout_s", DEFAULT_REQUEST_TIMEOUT)
+    return number_setting("mcp_request_timeout_s")
 
 
 def _connect_timeout(config: RemoteTransportConfig) -> float:
     if config.connect_timeout is not None:
         return config.connect_timeout
-    return number_setting("mcp_connect_timeout_s", DEFAULT_CONNECT_TIMEOUT)
+    return number_setting("mcp_connect_timeout_s")
 
 
 def _http_timeout(config: RemoteTransportConfig) -> httpx.Timeout:
@@ -1365,9 +1360,7 @@ class HttpMetadataFetcher(MetadataFetcher):
             raise TransportError(f"{endpoint.host} could not be resolved: {exc}") from exc
         owned = self.client is None
         timeout = httpx.Timeout(
-            self.timeout
-            if self.timeout is not None
-            else number_setting("mcp_metadata_timeout_s", DEFAULT_CONNECT_TIMEOUT * 2)
+            self.timeout if self.timeout is not None else number_setting("mcp_metadata_timeout_s")
         )
         client = self.client or httpx.AsyncClient(
             timeout=timeout,
@@ -1423,8 +1416,6 @@ async def iter_sse(response: httpx.Response) -> AsyncIterator[Any]:
 
 
 __all__ = [
-    "DEFAULT_CONNECT_TIMEOUT",
-    "DEFAULT_REQUEST_TIMEOUT",
     "MAX_RESPONSE_BYTES",
     "PROTOCOL_VERSION_HEADER",
     "SESSION_ID_HEADER",

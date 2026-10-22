@@ -25,9 +25,14 @@ on both.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import pytest
 
 from cloud_agent.app import create_app, create_mcp_app
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 #: The relay's own prefix, and the liveness path a tunnel health check needs.
 _MCP_PREFIX = "/v1/agent/mcp"
@@ -185,7 +190,7 @@ def test_the_sandbox_tunnel_lands_on_the_relay_listener() -> None:
     )
 
 
-def test_the_relay_listener_runs_no_background_work() -> None:
+def test_the_relay_listener_runs_no_background_work(monkeypatch: pytest.MonkeyPatch) -> None:
     """The reaper and the publisher belong to exactly one process.
 
     Only visible once this is deployed as a second container against the same
@@ -195,22 +200,29 @@ def test_the_relay_listener_runs_no_background_work() -> None:
 
     Checked at the lifespan the application was *built with*, because that is
     the decision: `create_mcp_app` passing `background=True` would be invisible
-    in the route table, which is all the other tests here look at.
+    in the route table, which is all the other tests here look at. That the
+    flag keeps the loops from starting is asserted on the real lifespan, in
+    `test_source_control_runtime.py`.
     """
-    import inspect
+    from contextlib import asynccontextmanager
 
-    source = inspect.getsource(create_mcp_app)
-    assert "background=False" in source, (
+    from fastapi.testclient import TestClient
+
+    entered: list[dict[str, Any]] = []
+
+    @asynccontextmanager
+    async def lifespan(app: Any, **kwargs: Any) -> AsyncIterator[None]:
+        entered.append(kwargs)
+        yield
+
+    monkeypatch.setattr("cloud_agent.app.lifespan", lifespan)
+    with TestClient(create_mcp_app()):
+        pass
+
+    assert entered == [{"background": False}], (
         "the relay listener shares the control plane's lifespan and would "
         "start a second reaper and publisher against the same database"
     )
-
-    # And the parameter is real rather than accepted and ignored.
-    from cloud_agent.app import lifespan
-
-    assert "background" in inspect.signature(lifespan).parameters
-    body = inspect.getsource(lifespan)
-    assert "if background:" in body, "the flag is taken but never consulted"
 
 
 _DOCS_PATHS = ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect")

@@ -25,6 +25,7 @@ from cloud_agent.github_app import (
     UserTokens,
 )
 from cloud_agent.github_user_token import UserTokenUnavailable, user_access_token
+from cloud_agent.settings import number_setting
 from cloud_agent.source_control import SourceControlCipher
 
 _USER = "user-owner"
@@ -187,7 +188,7 @@ async def test_github_setting_flip_keeps_one_timeout_for_lease_and_http(monkeypa
     """A setting increase during claim applies only to the next refresh."""
     values = {"github_request_timeout_s": 20.0}
     monkeypatch.setattr(
-        github_app, "number_setting", lambda name, default=None: values.get(name, default)
+        github_app, "number_setting", lambda name: values.get(name, number_setting(name))
     )
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "test-source-control-key")
     request_timeouts: list[float] = []

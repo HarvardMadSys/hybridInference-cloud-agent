@@ -267,6 +267,18 @@ class HostBootstrap(Protocol):
         """
         ...
 
+    async def quiesce(
+        self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
+    ) -> int:
+        """Stop a releasing node's runner and remove the self-test sandboxes it left.
+
+        Only for a node being released: the runner stays stopped, so nothing
+        creates a container while the inventory reads Docker. The sandbox
+        manager and every other container keep running. Returns how many
+        self-test sandboxes were removed.
+        """
+        ...
+
     async def stage(
         self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
     ) -> BootstrapResult:

@@ -31,11 +31,6 @@ logger = get_logger(__name__)
 ENV_BASE_URL = "GATEWAY_BASE_URL"
 ENV_DISPATCH_TOKEN = "GATEWAY_GRANT_DISPATCH_TOKEN"
 
-#: Generous enough for a busy gateway, bounded because a control plane blocked
-#: on a lookup is a control plane that has stopped scheduling.
-_TIMEOUT_S = 10.0
-_CONNECT_TIMEOUT_S = 5.0
-
 
 class GatewayError(Exception):
     """The gateway could not answer, or answered unusably.
@@ -149,8 +144,8 @@ class GatewayClient:
             )
         headers = {"Authorization": f"Bearer {self._token}"}
         timeout = httpx.Timeout(
-            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
-            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+            number_setting("gateway_request_timeout_s"),
+            connect=number_setting("gateway_connect_timeout_s"),
         )
         try:
             if self._client is not None:
@@ -412,8 +407,8 @@ class GatewayClient:
             "redirect_uri": redirect_uri,
         }
         timeout = httpx.Timeout(
-            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
-            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+            number_setting("gateway_request_timeout_s"),
+            connect=number_setting("gateway_connect_timeout_s"),
         )
         path = "/v1/identity/token"
         try:

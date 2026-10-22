@@ -9,18 +9,22 @@ continuation, or a body nobody bounded. None of them may reach a browser.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
 
-from cloud_agent import grants as grants_module
+from cloud_agent import settings
 from cloud_agent.gateway import GatewayError
 from cloud_agent.grant_usage import MAX_REQUEST_PAGE_BYTES, GrantUsageRequestPage
 from cloud_agent.grants import GrantClient
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 SINCE = datetime(2026, 9, 11, 3, 20, tzinfo=UTC)
 UNTIL = SINCE + timedelta(minutes=1)
@@ -373,23 +377,34 @@ class _SlowBody(httpx.AsyncByteStream):
             await asyncio.sleep(self._delay)
 
 
-async def test_a_slow_drip_cannot_outlive_the_whole_deadline(monkeypatch) -> None:
+@contextlib.contextmanager
+def _request_deadline(seconds: float) -> Iterator[None]:
+    """Shorten the gateway request timeout, which also bounds a page as a whole."""
+    settings.apply_settings(
+        1_000_000, settings.encode_changes({"gateway_request_timeout_s": seconds})
+    )
+    try:
+        yield
+    finally:
+        settings.reset_settings()
+
+
+async def test_a_slow_drip_cannot_outlive_the_whole_deadline() -> None:
     """A per-operation timeout never fires on a body that always makes progress."""
-    monkeypatch.setattr(grants_module, "_REQUEST_PAGE_DEADLINE_S", 0.05)
     body = json.dumps(page_payload()).encode()
     half = len(body) // 2
 
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=_SlowBody([body[:half], body[half:]], 0.2))
 
-    with pytest.raises(GatewayError) as raised:
+    with _request_deadline(0.1), pytest.raises(GatewayError) as raised:
         await _client(handler).usage_requests(
             GRANT, since=SINCE, until=UNTIL, limit=50, external_job_id=JOB
         )
     assert raised.value.error_type == "usage_unavailable"
 
 
-async def test_the_deadline_covers_waiting_for_a_slot(monkeypatch) -> None:
+async def test_the_deadline_covers_waiting_for_a_slot() -> None:
     """Queueing behind other administrators is time this call also promised."""
     in_flight = 0
     release = asyncio.Event()
@@ -414,8 +429,7 @@ async def test_the_deadline_covers_waiting_for_a_slot(monkeypatch) -> None:
         await asyncio.sleep(0.01)
     assert in_flight == 4
 
-    monkeypatch.setattr(grants_module, "_REQUEST_PAGE_DEADLINE_S", 0.05)
-    with pytest.raises(GatewayError) as raised:
+    with _request_deadline(0.1), pytest.raises(GatewayError) as raised:
         await client.usage_requests(GRANT, since=SINCE, until=UNTIL, limit=50, external_job_id=JOB)
     assert raised.value.error_type == "usage_unavailable"
 

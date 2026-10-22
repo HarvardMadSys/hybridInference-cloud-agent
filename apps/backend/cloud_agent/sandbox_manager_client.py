@@ -29,7 +29,8 @@ from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER
 from cloud_agent_shared.storable_text import storable_json
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Callable, Mapping
+    from contextlib import AbstractAsyncContextManager
 
 
 SHARED_SESSION_FORK_TIMEOUT_S = 180.0
@@ -145,7 +146,12 @@ class SandboxManagerClient:
     """Talk to the sandbox manager without exposing its credential to the browser."""
 
     def __init__(
-        self, base_url: str, token: str, *, client: httpx.AsyncClient | None = None
+        self,
+        base_url: str,
+        token: str,
+        *,
+        client: httpx.AsyncClient | None = None,
+        borrow: Callable[[], AbstractAsyncContextManager[httpx.AsyncClient]] | None = None,
     ) -> None:
         """Address one sandbox manager.
 
@@ -157,10 +163,13 @@ class SandboxManagerClient:
                 keystroke — so the pool cannot live on the instance; the
                 caller keeps it, keyed by ``base_url``, and closes it. Without
                 one, each call opens and closes its own connection as before.
+            borrow: Optional request lease that drains the shared pool safely
+                when its host is removed or changes address.
         """
         self._base_url = base_url.rstrip("/")
         self._headers = {"X-Agent-Workspace-Token": token, **IDENTITY_ENCODING_HEADERS}
         self._client = client
+        self._borrow = borrow
 
     def with_start_seq(self, start_seq: int | None) -> SandboxManagerClient:
         """This client, naming the start fence its caller's request took.
@@ -189,6 +198,10 @@ class SandboxManagerClient:
         needs ``read=None`` and it hands its client to the caller to close,
         neither of which a shared pool can offer.
         """
+        if self._borrow is not None:
+            async with self._borrow() as client:
+                yield client
+            return
         if self._client is not None:
             yield self._client
             return

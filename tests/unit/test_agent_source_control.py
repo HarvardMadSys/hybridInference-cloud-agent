@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 import cloud_agent.source_control as source_control
+from cloud_agent.settings import number_setting
 from cloud_agent.source_control import (
     GitLabOAuthClient,
     GitLabOAuthConfig,
@@ -476,7 +477,7 @@ async def test_gitlab_refresh_pins_one_dynamic_timeout_for_lease_and_http(
     """A setting increase during claim cannot lengthen this refresh request."""
     values = {"gitlab_request_timeout_s": 20.0}
     monkeypatch.setattr(
-        source_control, "number_setting", lambda name, default=None: values.get(name, default)
+        source_control, "number_setting", lambda name: values.get(name, number_setting(name))
     )
     cipher = SourceControlCipher("server-secret")
     store = MemoryStore()

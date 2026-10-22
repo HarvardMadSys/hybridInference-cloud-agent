@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import httpx
 
 from cloud_agent import gateway, github_app, grants, publisher, source_control
+from cloud_agent.settings import number_setting
 
 
 async def test_existing_gateway_and_grant_clients_use_new_connection_settings(monkeypatch):
@@ -120,7 +121,7 @@ async def test_existing_gateway_and_grant_clients_use_new_timeout_settings(monke
     values = {"gateway_request_timeout_s": 10.0, "gateway_connect_timeout_s": 5.0}
     for module in (gateway, grants):
         monkeypatch.setattr(
-            module, "number_setting", lambda name, default=None: values.get(name, default)
+            module, "number_setting", lambda name: values.get(name, number_setting(name))
         )
     timeouts = []
 
@@ -146,7 +147,7 @@ async def test_provider_timeouts_update_existing_credentials_and_keep_explicit_o
     values = {"github_request_timeout_s": 30.0, "gitlab_request_timeout_s": 20.0}
     for module in (github_app, source_control):
         monkeypatch.setattr(
-            module, "number_setting", lambda name, default=None: values.get(name, default)
+            module, "number_setting", lambda name: values.get(name, number_setting(name))
         )
     implicit = github_app.GitHubAppCredentials(github_app.AppConfig("app", "unused-key"))
     explicit = github_app.GitHubAppCredentials(

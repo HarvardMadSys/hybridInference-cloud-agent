@@ -52,10 +52,10 @@ VERSION_LABEL = f"{LABEL}.version"
 #: Transient install and probe containers, so a runner restarted mid-download
 #: can remove what its predecessor left.
 WORK_LABEL = f"{LABEL}.work"
-#: The stopped container a chat copies a downloaded version out of
-#: (``runtime_install``). The copy removes it; one its process died before
-#: removing pins the version's image until the downloader removes it, once it
-#: is too old to belong to a copy still running.
+#: The stopped container a chat copies a tree out of (``tree_copy``): a
+#: downloaded version, or the deployment's Kilo build. The copy removes it;
+#: one its process died before removing pins its image until the downloader
+#: removes it, once it is too old to belong to a copy still running.
 SOURCE_LABEL = f"{LABEL}.source"
 
 #: How long a discovered menu is reused. Short: a version that finished

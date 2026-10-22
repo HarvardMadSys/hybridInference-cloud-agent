@@ -34,8 +34,8 @@ class Repository:
         self.values: dict[str, Any] = {}
         self.seeds = 0
 
-    async def read_settings(self):
-        return self.revision, self.values
+    async def read_settings(self, *, after_revision=-1):
+        return (self.revision, self.values) if self.revision > after_revision else (-1, {})
 
     async def seed_settings(self, values):
         self.seeds += 1
@@ -92,6 +92,44 @@ def test_stale_snapshots_do_not_revert_current_values():
     settings.apply_settings(3, {"site.app_name": "Current"})
     settings.apply_settings(2, {"site.app_name": "Old"})
     assert settings.text_setting("site.app_name") == "Current"
+
+
+def test_unchanged_and_stale_snapshots_do_not_decode_secrets(monkeypatch):
+    settings.apply_settings(3, {"site.app_name": "Current"})
+
+    def unexpected_decode(*_args):
+        pytest.fail("an already adopted revision must not be decoded again")
+
+    monkeypatch.setattr(settings, "_decode", unexpected_decode)
+    settings.apply_settings(3, {"oncall_dispatch_token": "invalid"})
+    settings.apply_settings(2, {"oncall_dispatch_token": "invalid"})
+    assert settings.text_setting("site.app_name") == "Current"
+
+
+async def test_synchronization_polls_from_last_successfully_adopted_revision(monkeypatch):
+    repository = Repository()
+    requested = []
+    snapshots = [
+        (2, {"oncall_dispatch_token": "plaintext"}),
+        (2, {"site.app_name": "Next"}),
+        (-1, {}),
+    ]
+
+    async def read(*, after_revision):
+        requested.append(after_revision)
+        return snapshots.pop(0)
+
+    async def tick(_delay):
+        if not snapshots:
+            raise asyncio.CancelledError
+
+    settings.apply_settings(1, {"site.app_name": "Current"})
+    monkeypatch.setattr(repository, "read_settings", read)
+    monkeypatch.setattr(settings.asyncio, "sleep", tick)
+    with pytest.raises(asyncio.CancelledError):
+        await settings.synchronize_settings(repository)
+    assert requested == [1, 1, 2]
+    assert settings.text_setting("site.app_name") == "Next"
 
 
 @pytest.mark.parametrize("value", [True, "5", float("inf"), float("nan"), 10**1000, -1])
@@ -329,6 +367,21 @@ def test_https_integrations_refuse_unusable_urls(key, url):
     with pytest.raises(ValueError) as cause:
         settings.encode_changes({key: url})
     assert "sensitive" not in str(cause.value)
+
+
+def test_a_url_policy_is_declared_only_on_url_settings():
+    """The HTTPS and mailto policies are checked as part of a URL's own check.
+
+    Declared on a setting that is not a URL, one would be ignored without a
+    word, and the value it was meant to restrict would be accepted as text.
+    """
+    misdeclared = [
+        definition.key
+        for definition in settings.SETTINGS
+        if (definition.https_only or definition.https_unless_private or definition.mailto)
+        and not definition.url
+    ]
+    assert misdeclared == []
 
 
 @pytest.mark.parametrize(

@@ -77,6 +77,8 @@ from cloud_agent_shared.runtime_downloads import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cloud_agent_host.runtime_images import RuntimeImage
+
 logger = logging.getLogger(__name__)
 
 #: The Docker network the fetch step runs on: it needs the registry and
@@ -96,8 +98,13 @@ _DOCKER_TIMEOUT_S = 120.0
 #: snapshot can make a while. The version a switch has just replaced can be
 #: the one such a chat was given.
 UNNEEDED_GRACE_S = 600.0
-#: How long the worker waits for an answer to wake it before it looks again.
+#: How long unresolved work waits before checking for a new sandbox image or
+#: a chat that stopped using a retired version.
 _POLL_S = 60.0
+#: A READY host has no work between target changes. The sandbox image has no
+#: change notification, so retain this infrequent audit as the upper bound for
+#: noticing a new base image without polling Docker every minute.
+_SETTLED_AUDIT_S = 15 * 60.0
 #: How old a chat's copy source must be before it counts as left behind, as
 #: Docker's ``until`` filter reads it (on the daemon's own clock). A copy
 #: streams for at most a few minutes (``runtime_install``).
@@ -300,11 +307,13 @@ class RuntimeDownloads:
             with contextlib.suppress(Exception):
                 self._on_change()
 
-    def _next(self, base_id: str) -> _Job | None:
+    def _next(self, base_id: str, inventory: list[RuntimeImage] | None = None) -> _Job | None:
         """The first target this host does not yet hold, settling the rest."""
         installed = {
             (image.runtime, image.version)
-            for image in discover(self._docker, self._namespace)
+            for image in (
+                discover(self._docker, self._namespace) if inventory is None else inventory
+            )
             if image.base == short_id(base_id)
         }
         menu = self._image_menu()
@@ -319,6 +328,54 @@ class RuntimeDownloads:
             return _Job(target, base_id)
         return None
 
+    def _poll_interval(self) -> float:
+        """Return the next audit bound without delaying unresolved work."""
+        with self._lock:
+            settled = (
+                bool(self._targets)
+                and not self._cleanup_due
+                and all(
+                    (report := self._reports.get(key)) is not None and report.state == READY
+                    for key in self._targets
+                )
+            )
+        return _SETTLED_AUDIT_S if settled else _POLL_S
+
+    def _reconcile(self) -> float:
+        """Run one reconciliation and return seconds until an unaided retry."""
+        with self._lock:
+            idle = not self._targets and not self._cleanup_due
+        if idle:
+            # Target changes wake the thread. Keep the bounded wait so stop
+            # and old callers that omit targets retain their prior behavior.
+            return _POLL_S
+
+        base_id = image_id(self._docker, self._image)
+        job = None
+        inventory: list[RuntimeImage] | None = None
+        inventory_fresh = False
+        if base_id is None:
+            with self._lock:
+                targets = list(self._targets.values())
+            for target in targets:
+                self._set(target, FAILED, 0, f"sandbox image {self._image} is not on this host")
+        else:
+            # This one listing settles targets and decides cleanup. A failed
+            # listing still has the old conservative meanings in each path:
+            # downloads see nothing installed; cleanup removes nothing.
+            inventory = discover_or_none(self._docker, self._namespace)
+            inventory_fresh = True
+            job = self._next(base_id, inventory or [])
+        if job is not None:
+            self._attempted[_key(job.target)] = (job.target.nonce, job.base_id)
+            self._download(job)
+            # A download changed the inventory, so cleanup must read it again.
+            self._clean_up()
+            return 0.0
+
+        self._clean_up(inventory, inventory_fresh=inventory_fresh)
+        return self._poll_interval()
+
     def _run(self) -> None:
         try:
             self._remove_leftovers()
@@ -329,37 +386,16 @@ class RuntimeDownloads:
             )
         while not self._stop.is_set():
             self._wake.clear()
-            with self._lock:
-                idle = not self._targets and not self._cleanup_due
-            if idle:
-                # Nothing to hold or remove: no reason to ask Docker anything
-                # until an answer changes the list, which wakes this thread.
-                self._wake.wait(_POLL_S)
-                continue
+            delay = _POLL_S
             try:
-                base_id = image_id(self._docker, self._image)
-                job = None
-                if base_id is None:
-                    with self._lock:
-                        targets = list(self._targets.values())
-                    for target in targets:
-                        self._set(
-                            target, FAILED, 0, f"sandbox image {self._image} is not on this host"
-                        )
-                else:
-                    job = self._next(base_id)
-                if job is not None:
-                    self._attempted[_key(job.target)] = (job.target.nonce, job.base_id)
-                    self._download(job)
-                    self._clean_up()
-                    continue
+                delay = self._reconcile()
             except Exception:
                 logger.exception(
                     "runtime download loop failed", extra={"event": "runtime_download_loop_error"}
                 )
-            # Nothing left to download.
-            self._clean_up()
-            self._wake.wait(_POLL_S)
+                self._clean_up()
+            if delay > 0:
+                self._wake.wait(delay)
 
     def _download(self, job: _Job) -> None:
         target = job.target
@@ -603,12 +639,19 @@ class RuntimeDownloads:
             ) and image.base != short_id(base_id):
                 self._docker_run(["rmi", image.ref])
 
-    def _clean_up(self) -> None:
+    def _clean_up(
+        self,
+        inventory: list[RuntimeImage] | None = None,
+        *,
+        inventory_fresh: bool = False,
+    ) -> None:
         """Remove what nothing needs; a failure is logged, never raised."""
         try:
             self._remove_left_behind_sources()
-            self._remove_unneeded()
+            self._remove_unneeded(inventory, inventory_fresh=inventory_fresh)
         except Exception:
+            with self._lock:
+                self._cleanup_due = True
             logger.exception(
                 "runtime download cleanup failed",
                 extra={"event": "runtime_download_cleanup_error"},
@@ -634,7 +677,12 @@ class RuntimeDownloads:
             ]
         )
 
-    def _remove_unneeded(self) -> None:
+    def _remove_unneeded(
+        self,
+        inventory: list[RuntimeImage] | None = None,
+        *,
+        inventory_fresh: bool = False,
+    ) -> None:
         """Remove the versions held here that nothing needs any more.
 
         A version is needed while the latest answer names it, or a chat
@@ -654,7 +702,7 @@ class RuntimeDownloads:
             # Time unneeded counts only while answers say what is needed.
             self._unneeded_since.clear()
             return
-        listed = discover_or_none(self._docker, self._namespace)
+        listed = inventory if inventory_fresh else discover_or_none(self._docker, self._namespace)
         if listed is None:
             # Docker could not say what this host holds, which is not holding
             # nothing: look again, though there may be nothing to download.

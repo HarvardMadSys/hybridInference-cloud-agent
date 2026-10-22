@@ -86,17 +86,19 @@ const POLL_INTERVAL_MS = 400;
 
 let nextPort = 3411;
 
-const VARIANTS = [
-  { name: 'web-root', basePath: '', apiUrl: '/api', foreignPaths: [] },
-  {
-    name: 'web-agents',
-    basePath: '/agents',
-    apiUrl: '/agents/api',
-    // Mounted under a prefix, the app must not answer at the bare path: that
-    // would be a second, unprefixed copy of the same routes.
-    foreignPaths: ['/login'],
-  },
-];
+const CATALOG = JSON.parse(
+  readFileSync(new URL('../../../deploy/release/artifact_catalog.json', import.meta.url), 'utf8'),
+);
+const VARIANTS = CATALOG.artifacts
+  .filter((artifact) => artifact.role === 'web')
+  .map((artifact) => ({
+    name: artifact.name,
+    basePath: artifact.base_path,
+    apiUrl: artifact.api_url,
+    // A mounted app must not answer at the bare path as a second copy.
+    foreignPaths: artifact.base_path ? ['/login'] : [],
+  }));
+if (VARIANTS.length === 0) throw new Error('Artifact catalog declares no web variants');
 
 function deployment(spec) {
   const gateway = new URL(spec.gatewayUrl);

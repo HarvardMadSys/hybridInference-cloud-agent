@@ -23,6 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, PlainTextResponse
 
 from cloud_agent.api._parameters import refuse_unstorable_parameters
+from cloud_agent.api._sensitive_routes import no_store
 from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.logging_utils import configure_process_logging, get_logger
 from cloud_agent_shared.storable_text import encodable_json
@@ -108,7 +109,7 @@ def install_admin_no_store(
             request.url.path == prefix or request.url.path.startswith(f"{prefix}/")
             for prefix in normalized
         ):
-            response.headers["Cache-Control"] = "no-store"
+            no_store(response)
         return response
 
     async def unexpected_with_no_store(request: Request, exc: Exception) -> Response:

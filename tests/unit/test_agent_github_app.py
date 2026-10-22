@@ -429,6 +429,26 @@ async def test_a_repository_s_installation_is_not_remembered_forever(config, mon
     assert len(lookups) == 2
 
 
+async def test_a_fresh_installation_lookup_bypasses_and_refreshes_the_cache(config):
+    """An authorization fence cannot trust the token minter's remembered id."""
+    installation_ids = iter((1, 2))
+    lookups: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        installation_id = next(installation_ids)
+        lookups.append(installation_id)
+        return httpx.Response(200, json={"id": installation_id})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        assert await credentials.installation_id_for("o/n") == 1
+        assert await credentials.installation_id_for("o/n") == 1
+        assert await credentials.installation_id_for("o/n", fresh=True) == 2
+        assert await credentials.installation_id_for("o/n") == 2
+
+    assert lookups == [1, 2]
+
+
 def test_private_key_never_appears_in_an_error(config):
     """A failure message must not carry the key it failed to use."""
     # Assembled rather than written out. A PEM header is a credential shape,
@@ -1105,6 +1125,67 @@ async def test_only_repositories_the_user_can_push_to_are_theirs(config):
     assert found[-1] == "acme/last"
 
 
+@pytest.mark.parametrize("push", [True, False])
+async def test_one_repository_permission_is_read_directly_as_the_user(config, push):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"permissions": {"pull": True, "push": push}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        allowed = await GitHubAppCredentials(config, client=client).user_can_push_repository(
+            "ghu_user", "acme/service"
+        )
+
+    assert allowed is push
+    [request] = requests
+    assert request.url.path == "/repos/acme/service"
+    assert request.headers["authorization"] == "Bearer ghu_user"
+
+
+@pytest.mark.parametrize("status", [403, 404])
+async def test_a_plain_targeted_permission_refusal_is_no_access(config, status):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status, json={}))
+    ) as client:
+        assert not await GitHubAppCredentials(config, client=client).user_can_push_repository(
+            "ghu_user", "acme/service"
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "body"),
+    [
+        (429, {}, {}),
+        (403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "0"}, {}),
+        (200, {}, {"permissions": {"pull": True}}),
+    ],
+)
+async def test_an_unsettled_targeted_permission_answer_is_an_outage(config, status, headers, body):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(status, headers=headers, json=body)
+        )
+    ) as client:
+        with pytest.raises(GitHubAppError):
+            await GitHubAppCredentials(config, client=client).user_can_push_repository(
+                "ghu_user", "acme/service"
+            )
+
+
+async def test_a_refused_token_during_a_targeted_permission_check_requires_reconnect(config):
+    from cloud_agent.github_app import UserAuthorizationRevoked
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(401, json={}))
+    ) as client:
+        with pytest.raises(UserAuthorizationRevoked):
+            await GitHubAppCredentials(config, client=client).user_can_push_repository(
+                "ghu_user", "acme/service"
+            )
+
+
 @pytest.mark.parametrize(("status", "expected"), [(404, []), (403, [])])
 async def test_an_installation_the_user_lost_contributes_nothing(config, status, expected):
     async with httpx.AsyncClient(
@@ -1186,17 +1267,42 @@ def test_a_users_repositories_are_remembered_for_a_minute_and_forgotten_on_chang
     monkeypatch.setattr(github_app.time, "monotonic", lambda: now[0])
     credentials = GitHubAppCredentials(config)
     credentials.remember_user_repositories("alice", (77,), ["acme/service"])
+    credentials.remember_user_installation_repositories("alice", 77, ["acme/service"])
+    credentials.remember_user_repository_permission("alice", 77, "Acme/Other", False)
 
     assert credentials.cached_user_repositories("alice", (77,)) == ["acme/service"]
+    assert credentials.cached_user_installation_repositories("alice", 77) == ["acme/service"]
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/other") is False
     # Another set of installations is another question.
     assert credentials.cached_user_repositories("alice", (77, 88)) is None
     assert credentials.cached_user_repositories("bob", (77,)) is None
     now[0] += 61
     assert credentials.cached_user_repositories("alice", (77,)) is None
+    assert credentials.cached_user_installation_repositories("alice", 77) is None
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/other") is None
 
     credentials.remember_user_repositories("alice", (77,), ["acme/service"])
+    credentials.remember_user_installation_repositories("alice", 77, ["acme/service"])
+    credentials.remember_user_repository_permission("alice", 77, "acme/other", True)
     credentials.forget_user("alice")
     assert credentials.cached_user_repositories("alice", (77,)) is None
+    assert credentials.cached_user_installation_repositories("alice", 77) is None
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/other") is None
+
+
+def test_targeted_repository_permission_cache_is_bounded(config, monkeypatch):
+    import cloud_agent.github_app as github_app
+
+    monkeypatch.setattr(github_app, "_USER_REPOSITORY_PERMISSIONS_MAX", 2)
+    credentials = GitHubAppCredentials(config)
+
+    credentials.remember_user_repository_permission("alice", 77, "acme/one", True)
+    credentials.remember_user_repository_permission("alice", 77, "acme/two", True)
+    credentials.remember_user_repository_permission("alice", 77, "acme/three", True)
+
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/one") is None
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/two") is True
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/three") is True
 
 
 @pytest.mark.parametrize("private", [True, False])

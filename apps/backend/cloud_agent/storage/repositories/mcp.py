@@ -10,6 +10,7 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.errors import McpConnectionCreateConflict
 from cloud_agent.mcp.models import Capability, CapabilityKind
 from cloud_agent.storage._sql.mcp import ensure_mcp_bindings, mcp_binding_row
+from cloud_agent.storage._sql.mcp_maintenance import ALLOW_GROUP_PAGE, pending_allow_groups
 from cloud_agent.storage._sql.mcp_residency import lock_mcp_residency, residency_fence_sql
 from cloud_agent.storage._sql.rows import load_json as _load_json
 
@@ -147,6 +148,7 @@ class PostgresMcpConnectionRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Use the control plane pool."""
         self._pool = pool
+        self._allow_after: tuple[str, int] | None = None
 
     @staticmethod
     async def _lock_connection(conn: Any, connection_id: int) -> bool:
@@ -1646,28 +1648,26 @@ class PostgresMcpConnectionRepository:
     ) -> int:
         """Persist remembered approvals after held calls leave the dispatch queue.
 
-        Intents live with their decisions, surviving client and process restarts.
-        The thread lock serializes permission edits; connection and binding locks
-        keep their fences stable. Eligible intents for one binding are merged
-        before moving its policy revision, preserving other rules and defaults.
+        Durable intents are merged under thread, connection and binding locks.
+        A cancelled pass resumes after its last attempted group.
         """
+        background = thread_id is None and connection_id is None
         async with self._pool.acquire() as conn:
-            groups = await conn.fetch(
-                """
-                SELECT DISTINCT thread_id, connection_id FROM agent_mcp_invocations
-                WHERE always_allow_status = 'pending'
-                  AND ($1::text IS NULL OR thread_id = $1)
-                  AND ($2::bigint IS NULL OR connection_id = $2)
-                ORDER BY thread_id, connection_id
-                """,
-                thread_id,
-                connection_id,
+            groups = await pending_allow_groups(
+                conn,
+                thread_id=thread_id,
+                connection_id=connection_id,
+                after=self._allow_after if background else None,
             )
         applied = 0
         for group in groups:
+            if background:
+                self._allow_after = (str(group["thread_id"]), int(group["connection_id"]))
             applied += await self._apply_mcp_allow_group(
                 str(group["thread_id"]), int(group["connection_id"])
             )
+        if background and len(groups) < ALLOW_GROUP_PAGE:
+            self._allow_after = None
         return applied
 
     async def _apply_mcp_allow_group(self, thread_id: str, connection_id: int) -> int:
