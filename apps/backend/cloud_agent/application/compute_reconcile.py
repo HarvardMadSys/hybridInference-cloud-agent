@@ -407,7 +407,8 @@ class ComputeReconciler:
         now = _now()
         observation_seconds = current_observation_seconds(self.commands.configuration)
         release = load_control_plane_host_release()
-        for row in await self.repository.list_allocations():
+        snapshot = await self.repository.scheduling_inventory()
+        for row in snapshot.allocations:
             if row.get("observed_state") == "terminated":
                 await self._lose_reclaimed_groups(row)
             if row.get("release_committed_at") or row.get("observed_state") in {
@@ -415,7 +416,7 @@ class ComputeReconciler:
                 "absent",
             }:
                 continue
-            operations = await self.repository.list_operations(allocation_id=row["id"])
+            operations = snapshot.operations.get(row["id"], [])
             if row.get("external_id"):
                 observed = _moment(row.get("observed_at"))
                 due = observed is None or (now - observed).total_seconds() >= observation_seconds
@@ -450,9 +451,7 @@ class ComputeReconciler:
                 seconds=renew_before
             ):
                 continue
-            lifecycle = await self.repository.list_operations(
-                allocation_id=row["id"], kinds=["extend", "rotate"]
-            )
+            lifecycle = snapshot.lifecycle_operations.get(row["id"], [])
             trigger = self.rotation.due(row, policy, lifecycle, now, expires)
             # A rollout already occupies this machine. Keep renewing the lease
             # it is still serving; do not start a node replacement beside it.

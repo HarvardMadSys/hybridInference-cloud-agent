@@ -20,10 +20,18 @@ import tempfile
 from typing import TYPE_CHECKING, Final
 
 from cloud_agent_shared.errors import SandboxError
+from cloud_agent_shared.git.source_cancellation import (
+    CancellableArchiveWriter,
+    check_source_stop,
+    checked_entries,
+    source_entries,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
     from typing import BinaryIO
+
+    from cloud_agent_shared.git.source_cancellation import StopSignal
 
 
 #: Counts the working tree *and* the fetched commit's Git objects, so the
@@ -51,34 +59,28 @@ _GIT_ENV = {
 }
 
 
-def _entries(root: pathlib.Path) -> Iterator[pathlib.Path]:
-    """Yield every entry without following symlinks or listing a whole directory."""
-    pending = [os.scandir(root)]
-    try:
-        while pending:
-            try:
-                entry = next(pending[-1])
-            except StopIteration:
-                pending.pop().close()
-                continue
-            path = pathlib.Path(entry.path)
-            yield path
-            if entry.is_dir(follow_symlinks=False):
-                pending.append(os.scandir(path))
-    finally:
-        for directory in pending:
-            directory.close()
+def _entries(root: pathlib.Path, *, stop: StopSignal | None = None) -> Iterator[pathlib.Path]:
+    """Yield every entry, checking cancellation even inside large directories."""
+    return source_entries(root, stop)
 
 
-def _manifest_paths(root: pathlib.Path, manifest: BinaryIO) -> Iterator[pathlib.Path]:
+def _manifest_paths(
+    root: pathlib.Path, manifest: BinaryIO, *, stop: StopSignal | None = None
+) -> Iterator[pathlib.Path]:
     """Replay the length-prefixed filesystem paths in a validated disk manifest."""
-    while header := manifest.read(_MANIFEST_LENGTH.size):
+    while True:
+        check_source_stop(stop)
+        header = manifest.read(_MANIFEST_LENGTH.size)
+        if not header:
+            return
         if len(header) != _MANIFEST_LENGTH.size:
             raise SandboxError("source checkout manifest is truncated")
         (length,) = _MANIFEST_LENGTH.unpack(header)
+        check_source_stop(stop)
         encoded = manifest.read(length)
         if len(encoded) != length:
             raise SandboxError("source checkout manifest is truncated")
+        check_source_stop(stop)
         yield root / os.fsdecode(encoded)
 
 
@@ -96,11 +98,13 @@ def _write_source_manifest(
     max_bytes: int,
     max_entries: int,
     max_manifest_bytes: int,
+    stop: StopSignal | None = None,
 ) -> None:
     """Validate one streamed tree walk and spool only its bounded path records."""
     estimated = 0
     manifest_bytes = 0
-    for entries, path in enumerate(_entries(root), start=1):
+    entry_paths = _entries(root) if stop is None else _entries(root, stop=stop)
+    for entries, path in enumerate(checked_entries(entry_paths, stop), start=1):
         if entries > max_entries:
             raise SandboxError(
                 f"source checkout has more than {max_entries:,} entries, which exceeds "
@@ -122,6 +126,7 @@ def _write_source_manifest(
                 f"source checkout manifest exceeds this host's "
                 f"{_human_size(max_manifest_bytes)} retained import metadata limit"
             )
+        check_source_stop(stop)
         manifest.write(_MANIFEST_LENGTH.pack(len(relative)))
         manifest.write(relative)
     # Measured to the end, not the first byte over: this tells the user that
@@ -131,6 +136,7 @@ def _write_source_manifest(
             f"source checkout ({_human_size(estimated)} including its Git objects) exceeds "
             f"this host's {_human_size(max_bytes)} retained import size limit"
         )
+    check_source_stop(stop)
     manifest.seek(0)
 
 
@@ -157,6 +163,7 @@ def _write_source_tar(
     uid: int,
     gid: int,
     max_bytes: int,
+    stop: StopSignal | None = None,
 ) -> int:
     """Replay the bounded manifest without retaining tar's write-only member index."""
     over_limit = SandboxError(
@@ -168,8 +175,11 @@ def _write_source_tar(
         return _normalize_source_member(member, uid=uid, gid=gid)
 
     try:
-        with tarfile.open(fileobj=out, mode="w", dereference=False) as archive:
-            for path in _manifest_paths(root, manifest):
+        with tarfile.open(
+            fileobj=CancellableArchiveWriter(out, stop), mode="w", dereference=False
+        ) as archive:
+            paths = _manifest_paths(root, manifest, stop=stop)
+            for path in checked_entries(paths, stop):
                 relative = path.relative_to(root).as_posix()
                 archive.add(path, arcname=relative, recursive=False, filter=normalize)
                 # A write-only source archive never reads TarFile's random-access index.
@@ -193,6 +203,7 @@ def build_source_archive(
     max_bytes: int = DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
     max_entries: int = DEFAULT_MAX_SOURCE_ARCHIVE_ENTRIES,
     max_manifest_bytes: int = DEFAULT_MAX_SOURCE_MANIFEST_BYTES,
+    stop: StopSignal | None = None,
 ) -> int:
     """Write a normalized tar of one prepared checkout to ``out``, complete or refuse.
 
@@ -202,6 +213,7 @@ def build_source_archive(
     metadata memory does not grow with repository entry count. Returns the bytes
     written. After a refusal ``out`` may hold a partial archive and must be discarded.
     """
+    check_source_stop(stop)
     root = pathlib.Path(workdir).resolve()
     if max_bytes <= 0:
         raise ValueError("source archive size limit must be positive")
@@ -220,8 +232,17 @@ def build_source_archive(
                 max_bytes=max_bytes,
                 max_entries=max_entries,
                 max_manifest_bytes=max_manifest_bytes,
+                stop=stop,
             )
-            return _write_source_tar(root, manifest, out, uid=uid, gid=gid, max_bytes=max_bytes)
+            return _write_source_tar(
+                root,
+                manifest,
+                out,
+                uid=uid,
+                gid=gid,
+                max_bytes=max_bytes,
+                stop=stop,
+            )
     except SandboxError:
         raise
     except OSError as exc:
