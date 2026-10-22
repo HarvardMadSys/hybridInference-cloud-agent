@@ -13,19 +13,12 @@ if TYPE_CHECKING:
 
     from cloud_agent.ports import ConversationQueries, McpConnectionRepository
 
-    class _McpConnectionsStorage(Protocol):
-        """The storage capabilities used by the MCP owner API."""
 
-        mcp: McpConnectionRepository
-        conversation_queries: ConversationQueries
+class _McpConnectionsStorage(Protocol):
+    """The storage capabilities used by the MCP owner API."""
 
-else:
-
-    class _McpConnectionsStorage(Protocol):
-        """The storage capabilities used by the MCP owner API."""
-
-        mcp: McpConnectionRepository
-        conversation_queries: ConversationQueries
+    mcp: McpConnectionRepository
+    conversation_queries: ConversationQueries
 
 
 def _conflict(message: str) -> HTTPException:

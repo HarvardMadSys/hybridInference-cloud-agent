@@ -55,9 +55,11 @@ from .profiling.measurement import (
     to_record as to_record,
 )
 from .profiling.models import (
+    AdmissionInstance as AdmissionInstance,
     ControlState as ControlState,
     Measurement as Measurement,
     ProfilingRun as ProfilingRun,
+    RunManifest as RunManifest,
 )
 from .profiling.policy import (
     PolicyProvider as PolicyProvider,
@@ -164,7 +166,7 @@ def finish(
     measurement.reserved = False
     if not measurement.selected:
         return
-    if measurement.run_target and not measurement.bound:
+    if measurement.run_manifest.target and not measurement.bound:
         # A scoped run reports only attempts whose scope was proved; emitting
         # an unbound measurement would claim a sample the run never selected.
         logger.warning(
@@ -234,10 +236,12 @@ __all__ = [
     "V3_RECORD_FIELDS",
     "V3_SPAN_FIELDS",
     "V3_STAGE_FIELDS",
+    "AdmissionInstance",
     "ControlState",
     "Measurement",
     "PolicyProvider",
     "ProfilingRun",
+    "RunManifest",
     "RuntimePolicyStore",
     "StageObserver",
     "StageRecorder",

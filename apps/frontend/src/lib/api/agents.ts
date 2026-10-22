@@ -150,9 +150,15 @@ export type {
   AgentJobSymlinkApi,
   AgentJobFilesApi,
   AgentGitWorkspaceApi,
+  AgentGitWorkspaceMetadataApi,
 } from './agents/workspace';
 
-export { getAgentJobFiles, getAgentJobGit, downloadAgentWorkspace } from './agents/workspace';
+export {
+  getAgentJobFiles,
+  getAgentJobGitMetadata,
+  getAgentJobGit,
+  downloadAgentWorkspace,
+} from './agents/workspace';
 
 export type {
   AgentTerminalApi,

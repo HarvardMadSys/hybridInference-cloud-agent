@@ -42,6 +42,7 @@ import {
 } from './trajectoryProtocol';
 import { agentLiveStatus } from './agentLiveStatus';
 import { projectKey } from '@/lib/temporaryWorkspace';
+import { workspaceGitProjection, type WorkspaceGitOptions } from './workspaceGitMetadata';
 
 /**
  * Preserve a server result as a per-turn display state.
@@ -515,12 +516,11 @@ function formatTokens(value: number | null): string {
   return String(value);
 }
 
-export interface AdaptOptions {
+export interface AdaptOptions extends WorkspaceGitOptions {
   events?: AgentJobEventApi[];
   threadEvents?: AgentThreadEventApi[];
   /** Keep complete durable replies visible while activity pages are still arriving. */
   historyLoading?: boolean;
-  patch?: string | null;
   thread?: AgentThreadApi | null;
 }
 
@@ -1508,7 +1508,7 @@ function adaptJob(
     events: renderedEvents,
     liveNote: liveStatus?.note,
     liveNoteStartedAt: liveStatus?.startedAt,
-    diffFiles: parsed.files,
+    ...workspaceGitProjection(parsed.files, options),
     workspaceDiffAvailable: typeof options.patch === 'string',
     diffFileDetails: parsed.details,
     diffStat: parsed.stat,

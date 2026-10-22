@@ -526,6 +526,22 @@ async def test_a_bounded_reply_still_decodes_and_errors_keep_their_detail():
 
 
 @pytest.mark.asyncio
+async def test_git_metadata_uses_the_bounded_private_git_route() -> None:
+    requests: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"available": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as http:
+        client = SandboxManagerClient("http://manager.test", "token", client=http)
+        await client.git_metadata("athr_one", base_sha="a" * 40)
+
+    assert requests[0].url.path == "/workspaces/athr_one/git"
+    assert dict(requests[0].url.params) == {"metadata": "true", "base_sha": "a" * 40}
+
+
+@pytest.mark.asyncio
 async def test_a_fenced_client_names_its_fence_on_every_workspace_request() -> None:
     seen: list[str | None] = []
 

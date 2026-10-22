@@ -405,9 +405,11 @@ def _build_request(row: Mapping[str, Any], *, cipher: SourceControlCipher) -> oa
             credentials is None
             or credentials[0] != settings.get("client_id")
             or not github_oauth.is_endpoint(str(row.get("url") or ""))
-            or not github_oauth.is_endpoint(str(row.get("resource") or ""))
-            or metadata.issuer != github_oauth.ISSUER
-            or metadata.token_endpoint != github_oauth.TOKEN_ENDPOINT
+            or not github_oauth.is_managed(
+                issuer=metadata.issuer,
+                token_endpoint=metadata.token_endpoint,
+                resource=str(row.get("resource") or ""),
+            )
         ):
             raise RefreshRefused("GitHub sign-in settings changed. Sign in with GitHub again.")
         client_secret = credentials[1]

@@ -24,7 +24,6 @@ import json
 import logging
 import os
 import time
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -127,8 +126,10 @@ def _run(
     }
     if continuous:
         descriptor.update(continuous=True, expires_at=None, max_operations=0)
-    return replace(
-        profiling.parse_run(json.dumps(descriptor), allow_continuous=True), source=source
+    return profiling.parse_run(
+        json.dumps(descriptor),
+        allow_continuous=True,
+        source=source,
     )
 
 
@@ -780,6 +781,79 @@ def test_a_continuation_cannot_widen_the_operations_it_was_given(monkeypatch):
     assert profiling.start_stage_recording(context, producer="broker") is not None
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"max_operations": 0},
+        {"config_version": 0},
+        {"target": {"host": None}},
+        {"target": {"host": True}},
+    ],
+)
+def test_a_malformed_inherited_manifest_fails_softly(monkeypatch, change):
+    """Inherited metadata rejects parser drift without failing business work."""
+    _measurement, context = _admin_context(monkeypatch)
+    malformed = json.loads(json.dumps(context))
+    malformed["run"].update(change)
+
+    assert profiling.attach_selection(malformed) is None
+    assert profiling.start_stage_recording(malformed, producer="broker") is None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"max_operations": 0},
+        {"config_version": 0},
+        {"target": {"host": None}},
+        {"target": {"host": True}},
+    ],
+)
+def test_every_producer_policy_adapter_rejects_the_same_invalid_values(change):
+    """Control, host, and sandbox-manager adapters cannot normalize drift apart."""
+    from cloud_agent.workers.profiling_control import _descriptor_for_run
+    from cloud_agent_host.profiling_policy import _parse_policy_run
+    from cloud_agent_host.sandbox_manager_profiling_policy import _parse_run_payload
+
+    descriptor = {
+        "run_id": RUN_A,
+        "operations": ["attempt.startup"],
+        "target": {"host": "host-a"},
+        "expires_at": _expiry(),
+        "config_version": 1,
+        "max_operations": 10,
+        **change,
+    }
+
+    assert _descriptor_for_run(descriptor) is None
+    assert _parse_policy_run(descriptor) is None
+    assert _parse_run_payload(descriptor) is None
+
+
+@pytest.mark.parametrize("value", ["h" * 201, int("9" * 201)])
+def test_the_sandbox_manager_bounds_string_and_integer_targets(value):
+    """Every accepted target kind crosses the message boundary at the same bound."""
+    from cloud_agent_host.sandbox_manager_profiling_policy import (
+        MAX_DETAIL_CHARS,
+        _parse_run_payload,
+    )
+
+    run = _parse_run_payload(
+        {
+            "run_id": RUN_A,
+            "operations": ["attempt.startup"],
+            "target": {"host": value},
+            "expires_at": _expiry(),
+            "config_version": 1,
+            "max_operations": 10,
+        }
+    )
+
+    assert run is not None
+    assert run.target["host"] == str(value)[:MAX_DETAIL_CHARS]
+    assert len(run.target["host"]) == MAX_DETAIL_CHARS
+
+
 def _admin_context(monkeypatch) -> tuple[Any, dict[str, Any]]:
     """One real Admin selection and the context a child would be handed."""
     run = _run(run_id=RUN_A, operations=("attempt.startup",), target={"host": "host-a"})
@@ -1079,6 +1153,11 @@ def test_handoff_carries_the_manifest_and_the_child_inherits_it(monkeypatch):
     assert child.run_config_version == 3
     assert child.run_expires_at == run.expires_at_utc
     assert child.run_admission_instances == measurement.run_admission_instances
+    assert child.run_manifest is not measurement.run_manifest
+    context["run"]["target"]["host"] = "host-b"
+    context["admission_instances"][0]["max_operations"] = 999
+    assert child.run_manifest.target == {"host": "host-a"}
+    assert child.run_manifest.admission_instances[0].max_operations == 7
     # The claim the parent already paid for is part of the startup being measured.
     assert child.started_mono_ns == measurement.started_mono_ns
     # The child did not take a slot, so discarding it must not return one.
@@ -1318,11 +1397,19 @@ def test_continuous_descriptor_requires_admin_and_explicit_null():
     }
     with pytest.raises(ValueError):
         profiling.parse_run(json.dumps(descriptor))
-    assert profiling.parse_run(json.dumps(descriptor), allow_continuous=True).continuous
+    assert profiling.parse_run(
+        json.dumps(descriptor),
+        allow_continuous=True,
+        source=profiling.SOURCE_ADMIN,
+    ).continuous
     for bad in (
         {k: v for k, v in descriptor.items() if k != "expires_at"},
         {**descriptor, "continuous": False},
         {**descriptor, "max_operations": 100},
     ):
         with pytest.raises(ValueError):
-            profiling.parse_run(json.dumps(bad), allow_continuous=True)
+            profiling.parse_run(
+                json.dumps(bad),
+                allow_continuous=True,
+                source=profiling.SOURCE_ADMIN,
+            )

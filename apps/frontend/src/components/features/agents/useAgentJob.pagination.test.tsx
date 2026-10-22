@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import {
   getAgentJob,
   getAgentJobGit,
+  getAgentJobGitMetadata,
   getAgentJobThread,
   listAllAgentThreadEvents,
   type AgentJobApi,
@@ -15,6 +16,7 @@ import { useAgentJob } from './useAgentJobs';
 vi.mock('@/lib/api/agents', () => ({
   getAgentJob: vi.fn(),
   getAgentJobGit: vi.fn(),
+  getAgentJobGitMetadata: vi.fn(),
   getAgentJobThread: vi.fn(),
   listAllAgentThreadEvents: vi.fn(),
   streamAgentJob: vi.fn(),
@@ -59,6 +61,7 @@ it('backfills on demand and retains older turns across the real hook reload life
   vi.mocked(getAgentJobGit).mockResolvedValue({ available: false } as Awaited<
     ReturnType<typeof getAgentJobGit>
   >);
+  vi.mocked(getAgentJobGitMetadata).mockRejectedValue(new Error('No workspace'));
   vi.mocked(listAllAgentThreadEvents).mockResolvedValue([]);
   vi.mocked(getAgentJobThread).mockImplementation(async (_id, options) => {
     if (options?.cursor) return page([1997, 1998], 'even-older');

@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
-def _held(job: dict, *, generation: int = 1, container_id: str = "container-a") -> dict:
+def _held(job: dict, *, generation: int = 1, container_id: str = "container-aa") -> dict:
     """One container as a host's Sandbox Manager lists it."""
     return {
         "sandbox_id": "asbx_restore",
@@ -337,7 +337,7 @@ async def test_an_authorization_recorded_first_stands_once_the_group_is_lost(poo
             "thread_id": job["thread_id"],
             "sandbox_id": "asbx_restore",
             "generation": 1,
-            "container_id": "container-a",
+            "container_id": "container-aa",
         }
     }
     assert await store.compute_resources.recorded_host_state(host="runner-c") == {
@@ -354,7 +354,7 @@ async def test_an_authorization_recorded_first_stands_once_the_group_is_lost(poo
         "runner-a",
         "asbx_restore",
         1,
-        "container-a",
+        "container-aa",
     )
 
 
@@ -627,7 +627,7 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
         {
             "request_id": superseded_removal_request_id("runner-a", old),
             "generation": 1,
-            "expected_container_id": "container-a",
+            "expected_container_id": "container-aa",
             "sandbox_id": "asbx_restore",
         }
     ] * (2 if answer_lost else 1)
