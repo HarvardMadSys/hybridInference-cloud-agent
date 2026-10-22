@@ -99,7 +99,20 @@ class RunManifest:
                 dict(sorted((str(key), str(value)) for key, value in self.target.items()))
             ),
         )
-        object.__setattr__(self, "admission_instances", tuple(self.admission_instances))
+        admissions: list[AdmissionInstance] = []
+        for item in self.admission_instances:
+            if isinstance(item, AdmissionInstance):
+                admissions.append(item)
+            elif isinstance(item, Mapping):
+                admissions.append(
+                    AdmissionInstance(
+                        instance=item["instance"],
+                        max_operations=item["max_operations"],
+                    )
+                )
+            else:
+                raise TypeError("admission_instances entries must be mappings")
+        object.__setattr__(self, "admission_instances", tuple(admissions))
 
     def _wire_identity(self) -> dict[str, Any]:
         """Return the fields shared by the catalogue and handoff projections."""

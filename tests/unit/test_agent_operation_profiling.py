@@ -1257,6 +1257,55 @@ def test_a_measurement_retains_one_deeply_immutable_run_snapshot(monkeypatch):
         measurement.run_manifest.admission_instances[0].max_operations = 99
 
 
+def test_direct_run_manifest_freezes_legacy_admission_mappings():
+    """Direct callers cannot retain mutable admission aliases."""
+    admission = {"instance": "runner-a", "max_operations": 7}
+    existing = profiling.AdmissionInstance(instance="manager-a", max_operations=11)
+    admissions = [admission, existing]
+    manifest = profiling.RunManifest(
+        run_id="run-1",
+        operations=frozenset({"attempt.startup"}),
+        expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        max_operations=7,
+        admission_instances=admissions,
+    )
+    projection = manifest.to_catalogue_payload()
+
+    admission["max_operations"] = 99
+    admissions.clear()
+
+    assert manifest.admission_instances == (
+        profiling.AdmissionInstance(instance="runner-a", max_operations=7),
+        existing,
+    )
+    assert manifest.admission_instances[1] is existing
+    assert projection == {
+        "run_id": "run-1",
+        "operations": ["attempt.startup"],
+        "target": {},
+        "config_version": 1,
+        "max_operations": 7,
+        "expires_at": "2030-01-01T00:00:00+00:00",
+        "admission_instances": [
+            {"instance": "runner-a", "max_operations": 7},
+            {"instance": "manager-a", "max_operations": 11},
+        ],
+    }
+    assert manifest.to_catalogue_payload() == projection
+
+
+def test_direct_run_manifest_rejects_non_mapping_admission_entries():
+    """Only the legacy mapping shape is accepted beside frozen entries."""
+    with pytest.raises(TypeError, match="admission_instances entries must be mappings"):
+        profiling.RunManifest(
+            run_id="run-1",
+            operations=frozenset({"attempt.startup"}),
+            expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+            max_operations=7,
+            admission_instances=[("runner-a", 7)],
+        )
+
+
 def test_the_default_off_path_does_not_read_a_clock(monkeypatch):
     """No run means no manifest allocation or timing work starts."""
 
