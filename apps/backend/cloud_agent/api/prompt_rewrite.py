@@ -25,12 +25,10 @@ async def rewrite_agent_prompt(
     gateway: Any = Depends(get_gateway_client),
     grants: Any = Depends(get_grant_client),
 ) -> PromptRewriteResponse:
-    """Ask clarifications or rewrite a draft using the selected model.
-
-    The completion opens a client of its own rather than borrowing the shared
-    pool: it holds its connection for the model's whole answer, and a burst of
-    rewrites must not leave owner admission and grant calls waiting for one.
-    """
+    """Ask clarifications or rewrite a draft using the selected model."""
+    # The completion opens a client of its own rather than borrowing the shared
+    # pool: it holds its connection for the model's whole answer, and a burst of
+    # rewrites must not leave owner admission and grant calls waiting for one.
     try:
         return await rewrite_prompt(body, user_id=user["user_id"], gateway=gateway, grants=grants)
     except PromptRewriteError as exc:
