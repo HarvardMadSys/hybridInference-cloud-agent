@@ -7,7 +7,7 @@ queued, requeued or ends (migration ``0029``), and the host claims again. The
 connection that hears it is the process's shared listener (``notifications``).
 
 A notification names the host when only that host can take the work: a
-retained conversation's turn runs where its group lives (migration ``0090``).
+retained conversation's turn runs where its group lives (migration ``0092``).
 Then only that host is woken, and every other host keeps waiting instead of
 spending a claim on work it cannot take. An empty one wakes every host.
 

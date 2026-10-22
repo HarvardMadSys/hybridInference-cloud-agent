@@ -14,7 +14,9 @@ so the same host is named for it.
 
 The payload only narrows who is woken first. A stopped group whose host has
 been silent a long time may be handed over to another host, and that host, like
-any host not woken, still claims when its wait times out.
+any host not woken, still claims when its wait times out. The name is read when
+the row's trigger fires, not at commit, so a later statement in the same
+transaction that moves the group does not change it.
 
 Revision ID: 0092_targeted_work_wakes
 Revises: 0091_env_queued_runs_index
