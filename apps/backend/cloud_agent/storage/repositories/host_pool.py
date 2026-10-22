@@ -1347,7 +1347,7 @@ class PostgresHostPoolRepository:
             )
 
             try:
-                archive_policy = SandboxArchivePolicy.from_mapping(stored_archive_settings(policy))
+                archive_policy = load_stored_archive_policy(stored_archive_settings(policy))
             except SandboxArchivePolicyError:
                 archive_policy = None
 
