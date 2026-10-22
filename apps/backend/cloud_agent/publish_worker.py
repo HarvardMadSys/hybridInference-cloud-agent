@@ -78,7 +78,7 @@ if TYPE_CHECKING:
         SnapshotRepository,
         SourceControlRepository,
     )
-    from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.environments import EnvironmentBindingRepository
     from cloud_agent.publisher import PublishResult
     from cloud_agent.source_control_runtime import GitHubAppSource
     from cloud_agent.workers.background_wake import BackgroundWake
@@ -95,7 +95,11 @@ class PublishStorage(Protocol):
     snapshot: SnapshotRepository
     host_pool: HostPoolRepository
     source_control: SourceControlRepository
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentBindingRepository:
+        """Environment persistence needed by this flow."""
+        ...
 
 
 logger = get_logger(__name__)
@@ -890,7 +894,22 @@ async def _publish_due(
                 return
             done, in_flight = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
-                await task
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # One unexpected publication failure must not cancel the
+                    # other claimed snapshots. The failed claim's heartbeat
+                    # has stopped, so its stalled-claim reaper can recover it.
+                    logger.warning(
+                        "agent_snapshot_publish_task_failed",
+                        extra={
+                            "event": "agent_snapshot_publish_task_failed",
+                            "task_name": task.get_name(),
+                        },
+                        exc_info=True,
+                    )
     finally:
         for task in in_flight:
             task.cancel()

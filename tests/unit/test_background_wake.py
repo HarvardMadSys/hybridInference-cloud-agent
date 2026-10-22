@@ -273,6 +273,63 @@ async def test_slow_publication_does_not_hold_up_unrelated_claims_and_fanout_is_
     assert claim.await_count >= 7
 
 
+async def test_a_crashed_publication_does_not_cancel_healthy_siblings(monkeypatch):
+    """An unexpected child failure is isolated to its own fenced claim."""
+    monkeypatch.setattr(publish_worker, "_PUBLISH_CONCURRENCY", 2)
+    claims = [
+        {"job_id": "crashes", "snapshot_id": 1},
+        {"job_id": "slow", "snapshot_id": 2},
+        {"job_id": "later", "snapshot_id": 3},
+    ]
+    slow_started = asyncio.Event()
+    slow_release = asyncio.Event()
+    completed: list[str] = []
+    cancelled: list[str] = []
+
+    async def publish_claimed(store, job, **kwargs):
+        if job["job_id"] == "crashes":
+            await slow_started.wait()
+            raise RuntimeError("unexpected storage failure")
+        if job["job_id"] == "slow":
+            slow_started.set()
+            try:
+                await slow_release.wait()
+            except asyncio.CancelledError:
+                cancelled.append(job["job_id"])
+                raise
+        completed.append(job["job_id"])
+
+    monkeypatch.setattr(publish_worker, "_publish_claimed", publish_claimed)
+    store = SimpleNamespace(
+        snapshot=SimpleNamespace(
+            claim_for_publish=AsyncMock(side_effect=lambda: claims.pop(0) if claims else None)
+        )
+    )
+    publishing = asyncio.create_task(
+        publish_worker._publish_due(
+            store,  # type: ignore[arg-type]
+            credential=publish_worker.GitHubCredential("token"),
+            app_credentials=None,
+            base_branch="dev",
+        )
+    )
+    try:
+        await _eventually(lambda: completed == ["later"])
+        assert not publishing.done()
+        assert cancelled == []
+        slow_release.set()
+        await asyncio.wait_for(publishing, timeout=AT_ONCE_S)
+    finally:
+        slow_release.set()
+        if not publishing.done():
+            await _stop(publishing)
+        else:
+            await asyncio.gather(publishing, return_exceptions=True)
+
+    assert completed == ["later", "slow"]
+    assert cancelled == []
+
+
 @pytest.mark.parametrize("retry_kind", ["base_import", "snapshot_publish"])
 async def test_an_idle_publisher_looks_again_when_a_retry_is_due(monkeypatch, retry_kind):
     imported = AsyncMock()

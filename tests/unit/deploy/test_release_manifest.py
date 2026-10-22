@@ -33,6 +33,7 @@ from cloud_agent_host import sandbox as host_sandbox
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA = json.loads((REPO_ROOT / "deploy/release/manifest.schema.json").read_text())
+V1_FIXTURE = REPO_ROOT / "tests/fixtures/release_manifest_v1.json"
 # Validate the unchanged schema once, then keep checking every manifest against
 # it. jsonschema.validate would repeat the full meta-schema check for each case.
 _SCHEMA_VALIDATOR_CLASS = jsonschema.validators.validator_for(SCHEMA)
@@ -119,6 +120,10 @@ def build(**overrides: Any) -> dict[str, Any]:
     return rm.build_manifest(**arguments)
 
 
+def contract_fixture() -> dict[str, Any]:
+    return json.loads(V1_FIXTURE.read_text())
+
+
 # ------------------------------------------------------------------ the shape
 
 
@@ -132,6 +137,13 @@ def test_a_complete_build_produces_a_manifest_the_schema_accepts() -> None:
         "root",
         "agents",
     }
+
+
+def test_the_published_v1_contract_fixture_remains_valid() -> None:
+    """A catalog-derived producer and schema cannot redefine history together."""
+    manifest = contract_fixture()
+    SCHEMA_VALIDATOR.validate(manifest)
+    assert manifest["schema_version"] == 1
 
 
 @pytest.mark.parametrize("missing", sorted(rm.EXPECTED_PLATFORMS))
@@ -403,7 +415,7 @@ def test_the_upgrade_instructions_name_the_revision_this_release_migrates_to(
     ],
 )
 def test_the_schema_rejects_a_tampered_manifest(tamper) -> None:
-    manifest = build()
+    manifest = contract_fixture()
     tamper(manifest)
     with pytest.raises(jsonschema.ValidationError):
         SCHEMA_VALIDATOR.validate(manifest)

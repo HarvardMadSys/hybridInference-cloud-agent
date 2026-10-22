@@ -1,7 +1,7 @@
 """Index bounded transcript pages in their existing prompt-first turn order.
 
-Revision ID: 0093_thread_message_pages
-Revises: 0092_targeted_work_wakes
+Revision ID: 0094_thread_message_pages
+Revises: 0093_recent_requests
 
 Online builds do not block message inserts. Retrying an interrupted build drops
 the invalid index first. Offline conversion runs inside a transaction and uses
@@ -10,8 +10,8 @@ a plain build. No stored message or ordering is changed.
 
 from alembic import context, op
 
-revision = "0093_thread_message_pages"
-down_revision = "0092_targeted_work_wakes"
+revision = "0094_thread_message_pages"
+down_revision = "0093_recent_requests"
 branch_labels = None
 depends_on = None
 

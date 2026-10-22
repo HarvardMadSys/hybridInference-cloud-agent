@@ -11,6 +11,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
+from cloud_agent_host.atomic_file import atomic_replace_bytes
 from cloud_agent_host.enrollment import credential_path
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.setup import run_setup
@@ -23,6 +24,13 @@ if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import RetainedChatBackend
     from cloud_agent_host.setup import SetupResult
     from cloud_agent_shared.environment import BoundEnvironment
+
+
+# Running output is useful for status, but a durable receipt is a recovery
+# checkpoint rather than a terminal stream. The status API polls on the same
+# order of cadence, while transitions and final output are still saved below
+# without delay.
+RUNNING_PROGRESS_INTERVAL_S = 5.0
 
 
 def step_state(result: SetupResult, cancel: threading.Event | None) -> str:
@@ -189,12 +197,13 @@ class EnvironmentPreparation:
                 receipt["steps"] = [s for s in receipt["steps"] if s.get("phase") != phase] + [step]
 
                 self._save(path, receipt)
-                last_saved = [0.0]
+                last_saved = [time.monotonic()]
 
                 def output(step: dict[str, Any], last_saved: list[float] = last_saved) -> None:
-                    if time.monotonic() - last_saved[0] > 0.5:
+                    now = time.monotonic()
+                    if now - last_saved[0] >= RUNNING_PROGRESS_INTERVAL_S:
                         self._save(path, receipt)
-                        last_saved[0] = time.monotonic()
+                        last_saved[0] = now
                     if callback:
                         callback(dict(step))
 
@@ -336,10 +345,11 @@ class EnvironmentPreparation:
 
     @staticmethod
     def _save(path: Path, receipt: dict[str, Any]) -> None:
-        temporary = path.with_suffix(f".{os.urandom(8).hex()}.tmp")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w") as stream:
-            json.dump(receipt, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        # The receipt follows scripts with side effects. Once replacement
+        # succeeds, a directory-sync error must not report the script as failed
+        # and invite a replay; attempt the sync without changing that outcome.
+        atomic_replace_bytes(
+            path,
+            json.dumps(receipt).encode(),
+            directory_sync="best_effort",
+        )

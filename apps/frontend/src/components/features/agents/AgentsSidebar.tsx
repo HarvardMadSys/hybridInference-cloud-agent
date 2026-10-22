@@ -15,6 +15,9 @@ import { archiveAgentJob, deleteAgentSessions, pinAgentJob, unpinAgentJob } from
 import { APIError } from '@/lib/utils/errors';
 import { useAgentReads } from './AgentReadProvider';
 import { ArchiveDeleteDialog, SESSION_ERROR_KEYS } from './ArchiveControls';
+import { createProjectRefreshTracker } from './sidebarProjectRefresh';
+import { createSidebarReadQueue } from './sidebarReadQueue';
+import { sidebarFolders } from './sidebarFolders';
 import { readConversationSelection } from './threadHistory';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from './agentPush';
@@ -136,6 +139,11 @@ export function AgentsSidebar({
     pinned: true,
     enabled: active && !searching,
   });
+  const { tracker: projectRefresh, read: readProjectPage } = useMemo(
+    () => ({ userId, tracker: createProjectRefreshTracker(), read: createSidebarReadQueue() }),
+    [userId],
+  );
+  projectRefresh.observe(projects, refresh, activityMoved);
   const [pinnedShown, setPinnedShown] = useState(15);
   const searchInput = useRef<HTMLInputElement>(null);
   const searchButton = useRef<HTMLButtonElement>(null);
@@ -364,32 +372,16 @@ export function AgentsSidebar({
   useEffect(() => {
     registerRows(pinnedList.rows, pinnedList.loadedRefresh);
   }, [pinnedList.rows, pinnedList.loadedRefresh, registerRows]);
-  const baseFolders = useMemo(() => {
-    const repos = new Map(projects.map((project) => [project.repo, project]));
-    for (const repo of preferences.addedProjects)
-      if (!repos.has(repo))
-        repos.set(repo, { repo, task_count: 0, active_count: 0, last_activity_at: null });
-    for (const row of preferences.group === 'flat' ? list.rows : [])
-      if (!repos.has(row.job.repo))
-        repos.set(row.job.repo, {
-          repo: row.job.repo,
-          task_count: 1,
-          active_count: 0,
-          last_activity_at: row.lastActivityAt,
-        });
-    if (activeRepo && !repos.has(activeRepo))
-      repos.set(activeRepo, {
-        repo: activeRepo,
-        task_count: 0,
-        active_count: 0,
-        last_activity_at: null,
-      });
-    return [...repos.values()].sort(
-      (a, b) =>
-        (Date.parse(b.pinned_at ?? '') || 0) - (Date.parse(a.pinned_at ?? '') || 0) ||
-        (Date.parse(b.last_activity_at ?? '') || 0) - (Date.parse(a.last_activity_at ?? '') || 0),
-    );
-  }, [projects, list.rows, activeRepo, preferences.group, preferences.addedProjects]);
+  const baseFolders = useMemo(
+    () =>
+      sidebarFolders(
+        projects,
+        preferences.addedProjects,
+        preferences.group === 'flat' ? list.rows : [],
+        activeRepo,
+      ),
+    [projects, list.rows, activeRepo, preferences.group, preferences.addedProjects],
+  );
   useEffect(() => {
     updatePreferences((old) => {
       if (!old.manualInitialized && old.order !== 'manual') return old;
@@ -919,8 +911,8 @@ export function AgentsSidebar({
                   enabled={active}
                   selected={current?.job.repo === folder.repo ? current : undefined}
                   userId={userId}
-                  refresh={refresh}
-                  activityMoved={activityMoved}
+                  {...projectRefresh.forRepo(folder.repo)}
+                  readPage={readProjectPage}
                   {...actions}
                   hiddenThreads={hiddenThreads}
                   pinUpdates={pinUpdates}

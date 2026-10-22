@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime  # noqa: TC003 — Pydantic resolves annotations at runtime.
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from cloud_agent_shared.shared_protocol import SHARED_MEMBER_ACCOUNTING_VERSION
+
+MAX_TRAJECTORY_TIMING_JOBS: Final = 100
+MAX_TRAJECTORY_TIMING_ATTEMPTS: Final = 2_000
 
 
 class ToolCallResources(BaseModel):
@@ -408,6 +411,42 @@ class AgentAttemptTelemetry(AgentAttemptSummary):
     """Measurements fetched for one selected execution attempt."""
 
     resources: AttemptResources | None = None
+
+
+class AgentTrajectoryTimingRequest(BaseModel):
+    """One bounded owner-scoped set of turns whose timing the trajectory needs."""
+
+    job_ids: list[Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[^\x00]+$")]] = (
+        Field(min_length=1, max_length=MAX_TRAJECTORY_TIMING_JOBS)
+    )
+
+    @model_validator(mode="after")
+    def unique_jobs(self) -> AgentTrajectoryTimingRequest:
+        """A repeated id is not another turn and must not multiply result rows."""
+        if len(set(self.job_ids)) != len(self.job_ids):
+            raise ValueError("job_ids must be unique")
+        return self
+
+
+class AgentTrajectoryAttemptTiming(AgentAttemptSummary):
+    """Compact timing needed by the trajectory, without process/resource detail."""
+
+    tool_time_ms: int | None = None
+    tool_calls_truncated: bool = False
+    tool_timing_exact: bool = False
+
+
+class AgentTrajectoryJobTiming(BaseModel):
+    """Attempt timing for one requested turn, including an empty queued turn."""
+
+    job_id: str
+    attempts: list[AgentTrajectoryAttemptTiming] = Field(default_factory=list)
+
+
+class AgentTrajectoryTimingResponse(BaseModel):
+    """Timing rows in the request's job order and each job's attempt order."""
+
+    jobs: list[AgentTrajectoryJobTiming]
 
 
 class WorkerToolCallResources(BaseModel):
