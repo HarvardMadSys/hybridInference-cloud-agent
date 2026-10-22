@@ -25,6 +25,13 @@ if TYPE_CHECKING:
     from cloud_agent_shared.environment import BoundEnvironment
 
 
+# Running output is useful for status, but a durable receipt is a recovery
+# checkpoint rather than a terminal stream. The status API polls on the same
+# order of cadence, while transitions and final output are still saved below
+# without delay.
+RUNNING_PROGRESS_INTERVAL_S = 5.0
+
+
 def step_state(result: SetupResult, cancel: threading.Event | None) -> str:
     """Name the state an environment script's finished step is recorded in.
 
@@ -189,12 +196,13 @@ class EnvironmentPreparation:
                 receipt["steps"] = [s for s in receipt["steps"] if s.get("phase") != phase] + [step]
 
                 self._save(path, receipt)
-                last_saved = [0.0]
+                last_saved = [time.monotonic()]
 
                 def output(step: dict[str, Any], last_saved: list[float] = last_saved) -> None:
-                    if time.monotonic() - last_saved[0] > 0.5:
+                    now = time.monotonic()
+                    if now - last_saved[0] >= RUNNING_PROGRESS_INTERVAL_S:
                         self._save(path, receipt)
-                        last_saved[0] = time.monotonic()
+                        last_saved[0] = now
                     if callback:
                         callback(dict(step))
 
