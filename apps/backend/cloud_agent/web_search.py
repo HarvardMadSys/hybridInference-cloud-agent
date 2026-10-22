@@ -279,10 +279,10 @@ class _ProviderConfig:
 
 def _provider_config() -> _ProviderConfig | None:
     """Resolve one provider from the current synchronized settings snapshot."""
-    selection = text_setting(PROVIDER_SETTING, "auto").strip().lower()
-    serper_key = text_setting(SERPER_API_KEY_SETTING, "").strip()
-    brave_key = text_setting(BRAVE_API_KEY_SETTING, "").strip()
-    parallel_key = text_setting(PARALLEL_API_KEY_SETTING, "").strip()
+    selection = text_setting(PROVIDER_SETTING).strip().lower()
+    serper_key = text_setting(SERPER_API_KEY_SETTING).strip()
+    brave_key = text_setting(BRAVE_API_KEY_SETTING).strip()
+    parallel_key = text_setting(PARALLEL_API_KEY_SETTING).strip()
 
     if selection == "serper":
         return (

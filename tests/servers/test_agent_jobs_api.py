@@ -8156,7 +8156,7 @@ async def test_web_search_provider_enables_mcp_without_exposing_keys(
     monkeypatch.setattr(
         worker.web_search,
         "text_setting",
-        lambda key, fallback="": values.get(key, fallback),
+        lambda key: values[key],
     )
     created = await client.post("/v1/agent/jobs", json=_job_body(runtime=runtime))
     assert created.status_code == 201, created.text

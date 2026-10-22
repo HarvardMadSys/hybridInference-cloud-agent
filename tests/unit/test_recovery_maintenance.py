@@ -8,12 +8,13 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent.application import pending_messages
+from cloud_agent.settings import integer_setting
 from cloud_agent.workers import attempts, recovery_maintenance
 
 
 def _reaper_store(attempt_reaped: asyncio.Event) -> SimpleNamespace:
     async def reap_expired(*, max_attempts: int) -> list[object]:
-        assert max_attempts == attempts.MAX_ATTEMPTS
+        assert max_attempts == integer_setting("max_attempts")
         attempt_reaped.set()
         return []
 

@@ -285,7 +285,7 @@ class GitLabOAuthClient:
         """Effective deadline used for the next provider request."""
         if self._timeout_override is not None:
             return self._timeout_override
-        return number_setting("gitlab_request_timeout_s", 20.0)
+        return number_setting("gitlab_request_timeout_s")
 
     @property
     def refresh_lease_seconds(self) -> int:

@@ -68,7 +68,6 @@ from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, setting_env
 from cloud_agent.source_control_runtime import (
-    RETRY_INTERVAL_S,
     GitHubAppState,
     LoadStatus,
     SourceControlRuntime,
@@ -211,9 +210,7 @@ def source_control_unavailable(provider: str) -> HTTPException:
                 "message": f"{name} is temporarily unavailable. Please try again shortly.",
             }
         },
-        headers={
-            "Retry-After": str(int(number_setting("github_reload_interval_s", RETRY_INTERVAL_S)))
-        },
+        headers={"Retry-After": str(int(number_setting("github_reload_interval_s")))},
     )
 
 

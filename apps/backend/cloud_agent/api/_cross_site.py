@@ -58,10 +58,6 @@ _TRUSTED_ORIGIN_SETTINGS = ("AGENT_WEB_BASE_URL", "AGENT_PGADMIN_PUBLIC_URL")
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
-#: ``api.session.ENV_COOKIE_SECURE``, named here to keep this module free of
-#: the session routes' imports.
-_COOKIE_SECURE_SETTING = "AGENT_SESSION_COOKIE_SECURE"
-
 
 def _origin(url: str) -> str | None:
     """Reduce a URL to the origin a browser would send for it, or ``None``."""
@@ -120,14 +116,8 @@ def first_party(headers: Headers) -> bool:
     # plain-HTTP page. The request's own scheme is not trustworthy behind a
     # TLS-terminating proxy, so a ``Secure`` cookie, which only an HTTPS
     # deployment holds, is what says the page must be HTTPS.
-    schemes = ("https",) if _session_cookie_is_secure() else ("https", "http")
+    schemes = ("https",) if identity.session_cookie_is_secure() else ("https", "http")
     return presented in {_origin(f"{scheme}://{host}") for scheme in schemes}
-
-
-def _session_cookie_is_secure() -> bool:
-    """Whether the session cookie carries ``Secure``, as ``api.session`` sets it."""
-    raw = (setting_env(_COOKIE_SECURE_SETTING) or "").strip().lower()
-    return raw not in ("0", "false", "no")
 
 
 def _carries_session(headers: Headers) -> bool:
