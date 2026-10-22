@@ -3582,9 +3582,12 @@ rules, not the host's.
   startup preflight install the tables and read them back — every chain, its
   hook and its rule count, the protected set, the registered pool — and any
   difference stops the runner claiming and the sandbox manager starting. Group network
-  work repeats the check and trusts a pass for 60 seconds. The sandbox manager's
-  sweep renews that pass after 45 seconds, whether or not a group runs, so a
-  start or wake never waits for the install and read-back itself.
+  work repeats the check and trusts a pass for 60 seconds. While anything of this
+  deployment runs — a group, one that is stopping, or an environment test or
+  prebuild — the sandbox manager's sweep renews that pass after 45 seconds, so a
+  start or wake never waits for the install and read-back itself. A host where
+  nothing runs starts no helper for it: the next start or wake renews a lapsed
+  pass before its group joins a bridge.
 - **Scoped to this deployment.** The tables recognise traffic by the bridge
   interface prefix. They never flush or edit another deployment's rules, so
   several deployments can share a host.
