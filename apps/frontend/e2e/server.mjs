@@ -80,8 +80,3 @@ app.child.once('exit', (code) => {
     process.exitCode = code ?? 1;
   });
 });
-for (const signal of ['SIGTERM', 'SIGINT']) {
-  process.once(signal, () => {
-    void stop().finally(() => process.exit(0));
-  });
-}

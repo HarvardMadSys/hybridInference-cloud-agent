@@ -11,6 +11,9 @@ export const STATIC_DIR = join(NEXT_DIR, 'static');
 
 const NEXT_BIN = join(WEB_ROOT, 'node_modules', 'next', 'dist', 'bin', 'next');
 const ARTIFACT_IDENTITY = join(NEXT_DIR, 'cloud-agent-web-variant.json');
+const STOP_GRACE_MS = 5_000;
+const FORCE_KILL_WAIT_MS = 1_000;
+const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM'];
 
 function identityOf(variant) {
   return {
@@ -101,11 +104,34 @@ export async function reservePort() {
   return address.port;
 }
 
+function waitForTermination(termination, timeoutMs) {
+  return new Promise((resolve) => {
+    let finished = false;
+    const finish = (terminated) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve(terminated);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref?.();
+    void termination.then(() => finish(true));
+  });
+}
+
 /** Start the staged production server. The caller owns its runtime environment. */
-export async function startStandalone({ env, captureOutput = false } = {}) {
-  const port = await reservePort();
+export async function startStandalone({
+  env,
+  captureOutput = false,
+  spawnProcess = spawn,
+  reserveServerPort = reservePort,
+  signalTarget = process,
+  stopGraceMs = STOP_GRACE_MS,
+  forceKillWaitMs = FORCE_KILL_WAIT_MS,
+} = {}) {
+  const port = await reserveServerPort();
   const logs = [];
-  const child = spawn(process.execPath, [STANDALONE_SERVER], {
+  const child = spawnProcess(process.execPath, [STANDALONE_SERVER], {
     cwd: STANDALONE_DIR,
     env: {
       ...(env ?? process.env),
@@ -119,27 +145,77 @@ export async function startStandalone({ env, captureOutput = false } = {}) {
     child.stdout.on('data', (chunk) => logs.push(String(chunk)));
     child.stderr.on('data', (chunk) => logs.push(String(chunk)));
   }
-  child.on('error', (error) => logs.push(`spawn error: ${error.message}`));
+  let terminated = child.exitCode !== null || child.signalCode !== null;
+  let resolveTermination;
+  const termination = new Promise((resolve) => {
+    resolveTermination = resolve;
+    if (terminated) resolve();
+  });
+  let removeSignalHandlers = () => {};
+  const markTerminated = () => {
+    if (terminated) return;
+    terminated = true;
+    removeSignalHandlers();
+    resolveTermination();
+  };
+  child.once('exit', markTerminated);
+  child.on('error', (error) => {
+    logs.push(`spawn error: ${error.message}`);
+    // A failed spawn has no exit event. Later ChildProcess errors do not prove
+    // that an already-running process has stopped.
+    if (child.pid === undefined) markTerminated();
+  });
 
-  let stopping = false;
-  return {
+  let stopPromise;
+  const server = {
     child,
     logs,
     port,
-    async stop() {
-      if (stopping || child.exitCode !== null || child.signalCode !== null) return;
-      stopping = true;
-      await new Promise((resolve) => {
-        const killTimer = setTimeout(() => child.kill('SIGKILL'), 5_000);
-        killTimer.unref();
-        child.once('exit', () => {
-          clearTimeout(killTimer);
-          resolve();
-        });
+    get terminated() {
+      return terminated;
+    },
+    stop() {
+      if (stopPromise) return stopPromise;
+      stopPromise = (async () => {
+        if (terminated) return;
         child.kill('SIGTERM');
-      });
+        if (await waitForTermination(termination, stopGraceMs)) return;
+        child.kill('SIGKILL');
+        if (await waitForTermination(termination, forceKillWaitMs)) return;
+        throw new Error(
+          `Production server did not exit after SIGKILL${logs.length ? `:\n${logs.join('')}` : ''}`,
+        );
+      })().finally(removeSignalHandlers);
+      return stopPromise;
     },
   };
+
+  let forwardedSignal = null;
+  const signalHandlers = new Map(
+    SHUTDOWN_SIGNALS.map((signal) => [
+      signal,
+      () => {
+        if (forwardedSignal) return;
+        forwardedSignal = signal;
+        void server.stop().then(
+          () => signalTarget.kill(signalTarget.pid, signal),
+          (error) => {
+            logs.push(`shutdown error: ${error.message}`);
+            signalTarget.kill(signalTarget.pid, signal);
+          },
+        );
+      },
+    ]),
+  );
+  removeSignalHandlers = () => {
+    for (const [signal, handler] of signalHandlers) {
+      signalTarget.removeListener(signal, handler);
+    }
+  };
+  for (const [signal, handler] of signalHandlers) signalTarget.once(signal, handler);
+  if (terminated) removeSignalHandlers();
+
+  return server;
 }
 
 export async function waitForResponse(
@@ -149,20 +225,44 @@ export async function waitForResponse(
   const deadline = Date.now() + timeoutMs;
   let lastError = 'no attempt made';
   while (Date.now() < deadline) {
-    if (server && (server.child.exitCode !== null || server.child.signalCode !== null)) {
+    if (
+      server &&
+      (server.terminated || server.child.exitCode !== null || server.child.signalCode !== null)
+    ) {
       throw new Error(
         `Production server exited before ${url} answered${server.logs.length ? `:\n${server.logs.join('')}` : ''}`,
       );
     }
+    const controller = new AbortController();
+    const attemptTimeoutMs = Math.max(1, deadline - Date.now());
+    const abortTimer = setTimeout(() => controller.abort(), attemptTimeoutMs);
+    abortTimer.unref?.();
+    let responseDiagnostic = null;
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: controller.signal });
       if (acceptResponse(response)) return response;
-      lastError = `answered ${response.status}`;
+      responseDiagnostic = `answered ${response.status}`;
+      lastError = responseDiagnostic;
       await response.arrayBuffer();
     } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
+      if (controller.signal.aborted) {
+        lastError = responseDiagnostic
+          ? `${responseDiagnostic}; response did not complete before the deadline`
+          : 'request did not complete before the deadline';
+      } else {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      clearTimeout(abortTimer);
     }
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    const remainingMs = deadline - Date.now();
+    if (remainingMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, remainingMs)));
+    }
   }
-  throw new Error(`${url} did not answer within ${timeoutMs}ms: ${lastError}`);
+  throw new Error(
+    `${url} did not answer within ${timeoutMs}ms: ${lastError}${
+      server?.logs.length ? `\n${server.logs.join('')}` : ''
+    }`,
+  );
 }
