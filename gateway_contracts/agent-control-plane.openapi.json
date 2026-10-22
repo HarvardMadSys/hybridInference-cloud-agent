@@ -2220,6 +2220,115 @@
         "title": "AdminSandboxDetail",
         "type": "object"
       },
+      "AdminSandboxHostObservation": {
+        "description": "One host heartbeat change, shared by all its sandbox rows.",
+        "properties": {
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "last_heartbeat_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Heartbeat At"
+          }
+        },
+        "required": [
+          "host"
+        ],
+        "title": "AdminSandboxHostObservation",
+        "type": "object"
+      },
+      "AdminSandboxInventoryPage": {
+        "description": "A snapshot page or bounded upserts/removals; counts belong to snapshots.",
+        "properties": {
+          "change_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Cursor"
+          },
+          "deleted_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deleted Ids",
+            "type": "array"
+          },
+          "hosts": {
+            "items": {
+              "$ref": "#/components/schemas/AdminSandboxHostObservation"
+            },
+            "title": "Hosts",
+            "type": "array"
+          },
+          "mode": {
+            "default": "snapshot",
+            "enum": [
+              "snapshot",
+              "delta"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "reset_required": {
+            "default": false,
+            "title": "Reset Required",
+            "type": "boolean"
+          },
+          "sandboxes": {
+            "items": {
+              "$ref": "#/components/schemas/AdminSandbox"
+            },
+            "title": "Sandboxes",
+            "type": "array"
+          },
+          "total_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Count"
+          }
+        },
+        "required": [
+          "observed_at"
+        ],
+        "title": "AdminSandboxInventoryPage",
+        "type": "object"
+      },
       "AdminSandboxList": {
         "description": "A bounded page of the current inventory, ordered by sandbox identity.",
         "properties": {
@@ -26238,7 +26347,7 @@
             "schema": {
               "anyOf": [
                 {
-                  "maxLength": 2048,
+                  "maxLength": 32768,
                   "type": "string"
                 },
                 {
@@ -26293,6 +26402,16 @@
             }
           },
           {
+            "in": "query",
+            "name": "sync",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Sync",
+              "type": "boolean"
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,
@@ -26314,7 +26433,15 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AdminSandboxList"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/AdminSandboxList"
+                    },
+                    {
+                      "$ref": "#/components/schemas/AdminSandboxInventoryPage"
+                    }
+                  ],
+                  "title": "Response List Admin Sandboxes Admin Agent Sandboxes Get"
                 }
               }
             },

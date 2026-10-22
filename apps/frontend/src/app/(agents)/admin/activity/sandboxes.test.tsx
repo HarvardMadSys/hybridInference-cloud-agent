@@ -167,14 +167,17 @@ describe('sandboxes in admin activity', () => {
     expect(screen.queryByText('Oct 1 – Oct 2')).not.toBeInTheDocument();
     expect(screen.getByLabelText('Sandbox state')).toHaveValue('running');
     expect(screen.getAllByRole('button', { name: 'Refresh' })).toHaveLength(1);
-    expect(getAdminSandboxes).toHaveBeenCalledWith({ limit: 200 }, expect.any(AbortSignal));
+    expect(getAdminSandboxes).toHaveBeenCalledWith(
+      { limit: 200, sync: true },
+      expect.any(AbortSignal),
+    );
     expect(getAdminConversations).toHaveBeenCalledTimes(1);
     expect(getAdminRuns).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByLabelText('Sandbox state'), { target: { value: 'all' } });
     await waitFor(() =>
       expect(getAdminSandboxes).toHaveBeenLastCalledWith(
-        { limit: 200, state: 'all' },
+        { limit: 200, state: 'all', sync: true },
         expect.any(AbortSignal),
       ),
     );
