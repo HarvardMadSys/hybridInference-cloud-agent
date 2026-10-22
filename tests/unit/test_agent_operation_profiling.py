@@ -11,6 +11,7 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta, timezone
 
@@ -1225,6 +1226,19 @@ def test_a_measurement_retains_one_deeply_immutable_run_snapshot(monkeypatch):
     assert measurement is not None
     assert measurement.run_manifest is run.manifest
     assert profiling.manifest_for_measurement(measurement) == profiling.manifest_for_run(run)
+    admission = measurement.run_admission_instances[0]
+    assert admission is run.admission_instances[0]
+    assert isinstance(admission, Mapping)
+    assert admission["instance"] == profiling.PRODUCER_INSTANCE_ID
+    assert admission["max_operations"] == 7
+    assert tuple(admission) == ("instance", "max_operations")
+    assert len(admission) == 2
+    assert dict(admission) == {
+        "instance": profiling.PRODUCER_INSTANCE_ID,
+        "max_operations": 7,
+    }
+    with pytest.raises(KeyError):
+        admission["unknown"]
     flattened = {
         "run_id",
         "run_operations",

@@ -222,7 +222,7 @@ def _parse_run_payload(value: Any) -> ProfilingRun | None:
     if not isinstance(raw_operations, list) or not raw_operations:
         return None
     operations = [str(item)[:MAX_DETAIL_CHARS] for item in raw_operations[:MAX_OPERATIONS]]
-    target: dict[str, str | int] = {}
+    target: dict[str, str] = {}
     raw_target = value.get("target")
     if isinstance(raw_target, Mapping):
         for key, item in list(raw_target.items())[:MAX_TARGET_FIELDS]:
@@ -231,7 +231,7 @@ def _parse_run_payload(value: Any) -> ProfilingRun | None:
                 return None
             if not isinstance(item, (str, int)) or isinstance(item, bool) or not str(item).strip():
                 return None
-            target[name] = str(item)[:MAX_DETAIL_CHARS] if isinstance(item, str) else item
+            target[name] = str(item)[:MAX_DETAIL_CHARS]
     expires_at = value.get("expires_at")
     if isinstance(expires_at, datetime):
         expires_at_text = expires_at.astimezone(UTC).isoformat()

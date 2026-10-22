@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping  # noqa: TC003 -- public dataclass type introspection
+from collections.abc import Mapping
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime  # noqa: TC003 -- public dataclass type introspection
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 from .clock import clock
 from .schema import (
@@ -20,11 +23,27 @@ from .schema import (
 
 
 @dataclass(frozen=True)
-class AdmissionInstance:
+class AdmissionInstance(Mapping[str, object]):
     """One producer instance's immutable contribution to a run budget."""
 
     instance: str
     max_operations: int
+
+    def __getitem__(self, key: str) -> object:
+        """Return one field through the legacy mapping interface."""
+        if key == "instance":
+            return self.instance
+        if key == "max_operations":
+            return self.max_operations
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        """Iterate fields in their stable wire order."""
+        return iter(("instance", "max_operations"))
+
+    def __len__(self) -> int:
+        """Return the fixed number of admission fields."""
+        return 2
 
     def to_payload(self) -> dict[str, Any]:
         """Return the catalogue and handoff representation."""

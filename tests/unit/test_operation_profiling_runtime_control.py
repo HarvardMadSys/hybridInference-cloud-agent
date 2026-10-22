@@ -830,6 +830,30 @@ def test_every_producer_policy_adapter_rejects_the_same_invalid_values(change):
     assert _parse_run_payload(descriptor) is None
 
 
+@pytest.mark.parametrize("value", ["h" * 201, int("9" * 201)])
+def test_the_sandbox_manager_bounds_string_and_integer_targets(value):
+    """Every accepted target kind crosses the message boundary at the same bound."""
+    from cloud_agent_host.sandbox_manager_profiling_policy import (
+        MAX_DETAIL_CHARS,
+        _parse_run_payload,
+    )
+
+    run = _parse_run_payload(
+        {
+            "run_id": RUN_A,
+            "operations": ["attempt.startup"],
+            "target": {"host": value},
+            "expires_at": _expiry(),
+            "config_version": 1,
+            "max_operations": 10,
+        }
+    )
+
+    assert run is not None
+    assert run.target["host"] == str(value)[:MAX_DETAIL_CHARS]
+    assert len(run.target["host"]) == MAX_DETAIL_CHARS
+
+
 def _admin_context(monkeypatch) -> tuple[Any, dict[str, Any]]:
     """One real Admin selection and the context a child would be handed."""
     run = _run(run_id=RUN_A, operations=("attempt.startup",), target={"host": "host-a"})
