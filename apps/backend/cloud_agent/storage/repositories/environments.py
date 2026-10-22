@@ -21,7 +21,7 @@ from cloud_agent.environments import (
     EnvironmentNotFound,
 )
 from cloud_agent.execution_profiles import default_execution_profile
-from cloud_agent.storage._sql import environment_runs
+from cloud_agent.storage._sql import environment_catalogue, environment_runs
 from cloud_agent.storage._sql.environment_claims import (
     claim_environment_run as claim_queued_run,
 )
@@ -431,31 +431,7 @@ class PostgresEnvironmentRepository:
         variables = await self._environment_stored_variables(
             conn, version["id"] if version else None
         )
-        document = _json(version["document"]) if version else EnvironmentScripts().model_dump()
-        team_id = row.get("team_id")
-        return {
-            "id": row["id"],
-            "repo": row["repo"],
-            "name": row["name"],
-            "team": {"id": team_id, "name": row.get("team_name") or ""} if team_id else None,
-            # A personal environment is its owner's; a team's, its owner's and admins'.
-            "can_edit": team_id is None or row.get("team_role") in _TEAM_EDITORS,
-            "revision": int(version["revision"] if version else 0),
-            **document,
-            "archived": row["archived_at"] is not None,
-            "updated_at": row["updated_at"],
-            "variables": [
-                {
-                    "name": v["name"],
-                    "secret": v["secret"],
-                    "phase": v["phase"],
-                    "value": None if v["secret"] else _cipher().decrypt(v["value_ciphertext"]),
-                    "is_set": True,
-                    "updated_at": v["updated_at"],
-                }
-                for v in variables
-            ],
-        }
+        return environment_catalogue.public_environment(row, version, variables, _cipher)
 
     async def list_environments(
         self, user_id: str, repo: str | None = None
@@ -477,28 +453,27 @@ class PostgresEnvironmentRepository:
                 user_id,
                 repo,
             )
-            result = []
-            for row in rows:
-                view = await self._environment_public(conn, row)
-                latest = await conn.fetchrow(
-                    "SELECT r.id,r.state,r.image_digest,r.base_sha,r.finished_at,v.revision,"
-                    "COALESCE(g.revision,0) AS global_revision FROM agent_environment_runs r "
-                    "JOIN agent_environment_bindings b ON b.id=r.binding_id "
-                    "JOIN agent_environment_versions v ON v.id=b.environment_version_id "
-                    "LEFT JOIN agent_environment_versions g ON g.id=b.global_version_id "
-                    "WHERE r.user_id=$1 AND v.environment_id=$2 AND r.purpose='test' ORDER BY r.created_at DESC LIMIT 1",
-                    user_id,
-                    row["id"],
-                )
-                result.append(
-                    {
-                        **view,
-                        "is_default": bool(row["is_default"]),
-                        "default_revision": row["default_revision"],
-                        "latest_test": dict(latest) if latest else None,
-                    }
-                )
-            return result
+            versions = await environment_catalogue.versions(conn, rows)
+            variables = await environment_catalogue.variables(
+                conn, [v["id"] for v in versions.values()]
+            )
+            latest = await environment_catalogue.latest_tests(
+                conn, user_id, [row["id"] for row in rows]
+            )
+            return [
+                {
+                    **environment_catalogue.public_environment(
+                        row,
+                        versions.get(row["id"]),
+                        variables.get(versions.get(row["id"], {}).get("id", ""), []),
+                        _cipher,
+                    ),
+                    "is_default": bool(row["is_default"]),
+                    "default_revision": row["default_revision"],
+                    "latest_test": latest.get(row["id"]),
+                }
+                for row in rows
+            ]
 
     async def current_setup_fingerprints(
         self, user_id: str, environment_ids: builtins.list[str]
@@ -519,10 +494,31 @@ class PostgresEnvironmentRepository:
                 user_id,
                 environment_ids,
             )
+            cached = self._fingerprints.copy()
+            missing = [
+                row
+                for row in rows
+                if (row["version_id"], None if row["team_id"] else global_id) not in cached
+                and _json(row["document"]).get("setup_script")
+            ]
+            needs_globals = global_id is not None and any(not row["team_id"] for row in missing)
+            variables = await environment_catalogue.variables(
+                conn,
+                [row["version_id"] for row in missing] + ([global_id] if needs_globals else []),
+            )
+            global_values: list[EnvironmentVariable] | None = []
+            if needs_globals:
+                try:
+                    global_values = self._environment_decode(variables.get(global_id, []))
+                except EnvironmentEncryptionError:
+                    global_values = None
             for row in rows:
                 # A team's installation does not depend on the member's globals.
                 scope = None if row["team_id"] else global_id
                 key = (row["version_id"], scope)
+                if key in cached:
+                    result[row["id"]] = cached[key]
+                    continue
                 if key not in self._fingerprints:
                     setup = _json(row["document"]).get("setup_script") or ""
                     try:
@@ -530,17 +526,11 @@ class PostgresEnvironmentRepository:
                             optional_setup_fingerprint(
                                 setup,
                                 merge_variables(
-                                    self._environment_decode(
-                                        await self._environment_stored_variables(conn, scope)
-                                    ),
-                                    self._environment_decode(
-                                        await self._environment_stored_variables(
-                                            conn, row["version_id"]
-                                        )
-                                    ),
+                                    [] if row["team_id"] else (global_values or []),
+                                    self._environment_decode(variables.get(row["version_id"], [])),
                                 ),
                             )
-                            if setup
+                            if setup and (row["team_id"] or global_values is not None)
                             else None
                         )
                     except EnvironmentEncryptionError:
