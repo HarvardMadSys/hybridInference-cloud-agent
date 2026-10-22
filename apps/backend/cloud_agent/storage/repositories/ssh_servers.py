@@ -421,7 +421,12 @@ class PostgresSshServerRepository:
         }
 
     async def running_groups_for_ssh_change(
-        self, *, thread_ids: list[str] | None = None, server_id: str | None = None
+        self,
+        *,
+        thread_ids: list[str] | None = None,
+        server_id: str | None = None,
+        after_sandbox_id: str | None = None,
+        limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Running groups an SSH change reaches: each group's host and the chats it is known by.
 
@@ -445,6 +450,7 @@ class PostgresSshServerRepository:
                        )
                 )
                 SELECT s.id AS sandbox_id, s.origin_thread_id, s.host,
+                       h.broker_url AS sandbox_manager_url,
                        (
                            SELECT m.thread_id
                            FROM agent_thread_sandbox_memberships m
@@ -457,9 +463,71 @@ class PostgresSshServerRepository:
                        ) AS resident_thread_id
                 FROM touched
                 JOIN agent_sandboxes s ON s.id = touched.sandbox_id AND s.state = 'running'
-                ORDER BY s.id
+                LEFT JOIN agent_runner_hosts h ON h.host = s.host
+                WHERE ($3::text IS NULL OR s.id > $3)
+                ORDER BY s.id LIMIT $4
                 """,
                 list(thread_ids or []),
                 server_id,
+                after_sandbox_id,
+                max(1, min(limit, 100)),
             )
         return [dict(row) for row in rows]
+
+    async def ssh_group_states(self, *, thread_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Read all requested groups in three queries, fencing before reading any state."""
+        if not thread_ids:
+            return {}
+        if len(thread_ids) > 100:
+            raise ValueError("SSH group batches may contain at most 100 origins")
+        slots: dict[str, dict[str, int | None]] = {origin: {origin: None} for origin in thread_ids}
+        sandboxes: dict[str, str] = {}
+        async with self._pool.acquire() as conn:
+            revisions = await conn.fetch(
+                "SELECT origin, nextval('agent_ssh_access_revision_seq') AS revision "
+                "FROM unnest($1::text[]) AS origins(origin)",
+                thread_ids,
+            )
+            memberships = await conn.fetch(
+                "SELECT mine.thread_id AS origin, member.thread_id, member.sandbox_id, "
+                "member.resident_slot_id FROM agent_thread_sandbox_memberships mine "
+                "JOIN agent_thread_sandbox_memberships member ON member.sandbox_id=mine.sandbox_id "
+                "WHERE mine.thread_id=ANY($1::text[])",
+                thread_ids,
+            )
+            for member in memberships:
+                origin = str(member["origin"])
+                sandboxes[origin] = str(member["sandbox_id"])
+                slots[origin][str(member["thread_id"])] = member["resident_slot_id"]
+            rows = await conn.fetch(
+                f"SELECT b.thread_id AS binding_thread_id, b.enabled AS binding_enabled, "
+                f"t.deleted_at AS thread_deleted_at, "
+                f"{', '.join(f's.{column.strip()}' for column in _COLUMNS.split(','))} "
+                "FROM agent_ssh_thread_bindings b JOIN agent_threads t ON t.id=b.thread_id "
+                "JOIN agent_ssh_servers s ON s.id=b.server_id AND s.user_id=t.user_id "
+                "WHERE b.thread_id=ANY($1::text[]) ORDER BY b.thread_id,s.name",
+                list({member for members in slots.values() for member in members}),
+            )
+        bound_members = {str(row["binding_thread_id"]) for row in rows}
+        servers: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            if (
+                row["binding_enabled"]
+                and row["thread_deleted_at"] is None
+                and row["status"] == "ready"
+                and row["archived_at"] is None
+                and row["private_key_ciphertext"] is not None
+            ):
+                servers.setdefault(str(row["binding_thread_id"]), []).append(_server(row))
+        return {
+            str(row["origin"]): {
+                "revision": int(row["revision"]),
+                "sandbox_id": sandboxes.get(str(row["origin"])),
+                "members": [
+                    {"thread_id": member, "slot_id": slot, "servers": servers.get(member, [])}
+                    for member, slot in slots[str(row["origin"])].items()
+                ],
+            }
+            for row in revisions
+            if not bound_members.isdisjoint(slots[str(row["origin"])])
+        }

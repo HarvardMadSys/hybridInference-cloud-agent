@@ -561,6 +561,21 @@ async def test_reconnecting_the_same_installation_replaces_rather_than_duplicate
     ]
 
 
+async def test_one_reconnect_deduplicates_its_bulk_grant_input(
+    store: PostgresSourceControlRepository,
+) -> None:
+    """The set-based UPSERT keeps the loop's last-answer-wins behavior."""
+    await _connect_github(
+        store,
+        installations=((7, "old"), (8, "other"), (7, "new")),
+    )
+
+    assert await store.list_repo_grants(user_id=_OWNER) == [
+        {"installation_id": 7, "account_login": "new"},
+        {"installation_id": 8, "account_login": "other"},
+    ]
+
+
 async def test_a_grant_may_name_no_account(store: PostgresSourceControlRepository) -> None:
     """An installation whose account could not be read is still a grant."""
     await _connect_github(store, installations=((9, None),))

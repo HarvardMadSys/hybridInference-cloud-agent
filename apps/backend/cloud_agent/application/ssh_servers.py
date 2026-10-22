@@ -63,6 +63,10 @@ _CHECK_TIMEOUT_S = 30
 #: What a check keeps of each output stream; a server sending more fails the check.
 _MAX_OUTPUT_BYTES = 64 * 1024
 _KEY_ORDER = {key_type: index for index, key_type in enumerate(HOST_KEY_TYPES)}
+_PUSH_BATCH_SIZE = 100
+_PUSH_CONCURRENCY = 8
+_PUSH_GROUP_TIMEOUT_S = 15.0
+_PUSH_PASS_TIMEOUT_S = 60.0
 
 
 class CheckFailed(Exception):
@@ -445,41 +449,92 @@ async def push_ssh_access(
     cannot be reached gets the state with its next turn.
     """
     try:
-        groups = await store.ssh_servers.running_groups_for_ssh_change(
-            thread_ids=thread_ids, server_id=server_id
-        )
         cipher = ssh_key_cipher()
+        async with asyncio.timeout(_PUSH_PASS_TIMEOUT_S):
+            await _push_ssh_batches(store, cipher, thread_ids=thread_ids, server_id=server_id)
+    except TimeoutError:
+        logger.warning("agent_ssh_push_deadline")
     except Exception:
         logger.warning("agent_ssh_push_lookup_failed", exc_info=True)
-        return
+
+
+async def _push_ssh_batches(
+    store: SshStorage,
+    cipher: SourceControlCipher,
+    *,
+    thread_ids: list[str] | None,
+    server_id: str | None,
+) -> None:
+    cursor = None
+    unavailable: set[str] = set()
+    semaphore = asyncio.Semaphore(_PUSH_CONCURRENCY)
+    while True:
+        groups = await store.ssh_servers.running_groups_for_ssh_change(
+            thread_ids=thread_ids,
+            server_id=server_id,
+            after_sandbox_id=cursor,
+            limit=_PUSH_BATCH_SIZE,
+        )
+        if not groups:
+            return
+        states = await store.ssh_servers.ssh_group_states(
+            thread_ids=[str(group["origin_thread_id"]) for group in groups]
+        )
+        by_host: dict[str, list[dict[str, Any]]] = {}
+        for group in groups:
+            by_host.setdefault(str(group["host"]), []).append(group)
+        async with asyncio.TaskGroup() as tasks:
+            for host, hosted in by_host.items():
+                tasks.create_task(
+                    _push_ssh_host(host, hosted, states, cipher, semaphore, unavailable)
+                )
+        if len(groups) < _PUSH_BATCH_SIZE:
+            return
+        cursor = str(groups[-1]["sandbox_id"])
+
+
+async def _push_ssh_host(
+    host: str,
+    groups: list[dict[str, Any]],
+    states: dict[str, dict[str, Any]],
+    cipher: SourceControlCipher,
+    semaphore: asyncio.Semaphore,
+    unavailable: set[str],
+) -> None:
     for group in groups:
+        if host in unavailable:
+            return
         try:
             origin = str(group["origin_thread_id"])
-            state = await store.ssh_servers.ssh_group_state(thread_id=origin)
+            state = states.get(origin)
             # Only the group's own state goes to it.
             if state is None or state["sandbox_id"] != group["sandbox_id"]:
                 continue
             access = build_ssh_access(state, cipher)
-            host = await store.host_pool.get_host(host=str(group["host"]))
-            client = None if host is None else sandbox_manager_for_host(host)
+            client = sandbox_manager_for_host(group)
             if client is None:
                 continue
             chats = [origin]
             if group.get("resident_thread_id"):
                 chats.append(str(group["resident_thread_id"]))
-            for chat in chats:
-                try:
-                    await client.sync_ssh_access(chat, access)
-                    break
-                except SandboxManagerError as exc:
-                    # A manager knows a group by the chats it was told of:
-                    # after a restart only the origin, from the container's
-                    # labels; then the chats holding slots, from each
-                    # manifest. An unknown chat is tried again through the
-                    # group's other chat. Any other answer stands.
-                    if exc.status_code != 404 or chat == chats[-1]:
-                        raise
-        except (SandboxManagerError, SourceControlError, httpx.HTTPError, ValueError) as exc:
+            async with semaphore, asyncio.timeout(_PUSH_GROUP_TIMEOUT_S):
+                for chat in chats:
+                    try:
+                        await client.sync_ssh_access(chat, access)
+                        break
+                    except SandboxManagerError as exc:
+                        # The origin may be absent from a post-restart manifest.
+                        if exc.status_code != 404 or chat == chats[-1]:
+                            raise
+        except (
+            SandboxManagerError,
+            SourceControlError,
+            httpx.HTTPError,
+            ValueError,
+            TimeoutError,
+        ) as exc:
+            if isinstance(exc, (httpx.HTTPError, TimeoutError)):
+                unavailable.add(host)
             logger.warning(
                 "agent_ssh_push_failed",
                 extra={

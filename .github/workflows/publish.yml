@@ -207,6 +207,7 @@ jobs:
           # The web image is built twice, and only here is either variant built
           # in CI: a mount prefix is resolved while the bundle is compiled, so
           # the two are different images and neither was verified before this.
+          # BEGIN GENERATED ARTIFACT MATRIX
           - name: control
             arch: arm64
             smoke_args: --role control
@@ -247,6 +248,7 @@ jobs:
             dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
+          # END GENERATED ARTIFACT MATRIX
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:

@@ -48,7 +48,7 @@ if TYPE_CHECKING:
         ResidencyRepository,
         SessionForkRepository,
     )
-    from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.environments import EnvironmentBindingRepository
 
 
 class _ForkMaterializationStorage(Protocol):
@@ -58,7 +58,11 @@ class _ForkMaterializationStorage(Protocol):
     host_pool: HostPoolRepository
     residency: ResidencyRepository
     session_fork: SessionForkRepository
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentBindingRepository:
+        """Environment persistence needed by this flow."""
+        ...
 
 
 # Keep a short recovery margin past the host request's deadline so a second API

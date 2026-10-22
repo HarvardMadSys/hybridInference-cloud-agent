@@ -1,5 +1,6 @@
 """Permission lookup outages remain closed and retryable without revoking access."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -85,6 +86,195 @@ async def test_complete_lookup_can_definitively_refuse_access(monkeypatch):
         )
 
 
+def _targeted_connection(monkeypatch, installation_ids, *, target_installation=1, allowed=True):
+    store = SimpleNamespace(
+        list_repo_grants=AsyncMock(
+            return_value=[
+                {"installation_id": installation_id} for installation_id in installation_ids
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        entitlement,
+        "user_access_token",
+        AsyncMock(return_value=SimpleNamespace(value="synthetic", ciphertext="synthetic-cipher")),
+    )
+    app = SimpleNamespace(
+        cached_user_repositories=lambda *args: None,
+        installation_id_for=AsyncMock(return_value=target_installation),
+        user_can_push_repository=AsyncMock(return_value=allowed),
+    )
+    return store, app
+
+
+@pytest.mark.asyncio
+async def test_one_target_does_not_enumerate_unrelated_installations(monkeypatch):
+    store, app = _targeted_connection(monkeypatch, range(1, 51))
+    app.writable_repositories_for_user = AsyncMock(
+        side_effect=AssertionError("single-target checks must not enumerate installations")
+    )
+
+    await entitlement.require_entitled_repo(
+        "owner/target", "user", store=store, app_credentials=app, env={}
+    )
+
+    app.installation_id_for.assert_awaited_once_with("owner/target", fresh=True)
+    app.user_can_push_repository.assert_awaited_once_with("synthetic", "owner/target")
+    app.writable_repositories_for_user.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_combined_list_cache_hit_remains_a_case_insensitive_positive_witness(monkeypatch):
+    """The existing short positive cache still avoids both targeted provider calls."""
+    store, app = _targeted_connection(monkeypatch, [1])
+    app.cached_user_repositories = lambda *_: ["OWNER/TARGET"]
+
+    await entitlement.require_entitled_repo(
+        "owner/target", "user", store=store, app_credentials=app, env={}
+    )
+
+    app.installation_id_for.assert_not_awaited()
+    app.user_can_push_repository.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_combined_list_cache_miss_falls_through_to_the_targeted_check(monkeypatch):
+    """A bounded picker snapshot cannot prove a repository is unauthorized."""
+    store, app = _targeted_connection(monkeypatch, [1])
+    app.cached_user_repositories = lambda *_: ["owner/another"]
+
+    await entitlement.require_entitled_repo(
+        "OWNER/TARGET", "user", store=store, app_credentials=app, env={}
+    )
+
+    app.installation_id_for.assert_awaited_once_with("OWNER/TARGET", fresh=True)
+    app.user_can_push_repository.assert_awaited_once_with("synthetic", "OWNER/TARGET")
+
+
+@pytest.mark.asyncio
+async def test_an_installation_list_cache_miss_falls_through_to_the_targeted_check(monkeypatch):
+    """A successful but capped installation listing is positive-only evidence."""
+    store, app = _targeted_connection(monkeypatch, [1])
+    app.cached_user_installation_repositories = lambda *_: ["owner/another"]
+
+    await entitlement.require_entitled_repo(
+        "owner/target", "user", store=store, app_credentials=app, env={}
+    )
+
+    app.user_can_push_repository.assert_awaited_once_with("synthetic", "owner/target")
+
+
+@pytest.mark.asyncio
+async def test_targeted_access_still_requires_the_saved_installation_grant(monkeypatch):
+    store, app = _targeted_connection(
+        monkeypatch, range(1, 51), target_installation=99, allowed=True
+    )
+    app.cached_user_repositories = lambda *_: ["owner/another"]
+
+    with pytest.raises(RepoNotAllowed):
+        await entitlement.require_entitled_repo(
+            "owner/target", "user", store=store, app_credentials=app, env={}
+        )
+
+    app.user_can_push_repository.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_new_installation_cannot_reuse_the_saved_old_installation_grant(monkeypatch):
+    """Uninstall/reinstall must require reconnect even while the old id is cached."""
+    store, app = _targeted_connection(monkeypatch, [1], target_installation=2, allowed=True)
+    app.cached_user_repositories = lambda *_: ["owner/another"]
+
+    with pytest.raises(RepoNotAllowed):
+        await entitlement.require_entitled_repo(
+            "owner/target", "user", store=store, app_credentials=app, env={}
+        )
+
+    app.installation_id_for.assert_awaited_once_with("owner/target", fresh=True)
+    app.user_can_push_repository.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_targeted_permission_outage_is_not_a_denial(monkeypatch):
+    store, app = _targeted_connection(monkeypatch, [1])
+    app.user_can_push_repository.side_effect = httpx.ConnectError("provider details stay private")
+
+    with pytest.raises(RepoAccessUnavailable):
+        await entitlement.require_entitled_repo(
+            "owner/target", "user", store=store, app_credentials=app, env={}
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_targeted_permission_refusal_is_definitive(monkeypatch):
+    store, app = _targeted_connection(monkeypatch, [1], allowed=False)
+
+    with pytest.raises(RepoNotAllowed):
+        await entitlement.require_entitled_repo(
+            "owner/target", "user", store=store, app_credentials=app, env={}
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_cached_targeted_permission_refusal_remains_definitive(monkeypatch):
+    store, app = _targeted_connection(monkeypatch, [1], allowed=True)
+    app.cached_user_repository_permission = lambda *_: False
+
+    with pytest.raises(RepoNotAllowed):
+        await entitlement.require_entitled_repo(
+            "owner/target", "user", store=store, app_credentials=app, env={}
+        )
+
+    app.user_can_push_repository.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_picker_installations_are_bounded_concurrent_and_cached_individually(monkeypatch):
+    grants = [{"installation_id": installation_id} for installation_id in range(1, 21)]
+    store = SimpleNamespace(list_repo_grants=AsyncMock(return_value=grants))
+    monkeypatch.setattr(
+        entitlement,
+        "user_access_token",
+        AsyncMock(return_value=SimpleNamespace(value="synthetic", ciphertext="synthetic-cipher")),
+    )
+    active = peak = 0
+    calls: list[int] = []
+    cache: dict[tuple[str, int], list[str]] = {}
+
+    async def repositories(_token, installation_id):
+        nonlocal active, peak
+        calls.append(installation_id)
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return [f"owner/r{installation_id}"]
+
+    app = SimpleNamespace(
+        cached_user_repositories=lambda *args: None,
+        remember_user_repositories=lambda *args: None,
+        cached_user_installation_repositories=lambda user_id, installation_id: cache.get(
+            (user_id, installation_id)
+        ),
+        remember_user_installation_repositories=lambda user_id, installation_id, names: (
+            cache.__setitem__((user_id, installation_id), list(names))
+        ),
+        writable_repositories_for_user=repositories,
+    )
+
+    found = await entitlement.repos_for_user("user", store=store, app_credentials=app, env={})
+
+    assert len(found) == 20
+    assert peak == entitlement._INSTALLATION_LOOKUP_CONCURRENCY
+    assert calls == list(range(1, 21))
+
+    store.list_repo_grants.return_value = [*grants, {"installation_id": 21}]
+    calls.clear()
+    found = await entitlement.repos_for_user("user", store=store, app_credentials=app, env={})
+    assert len(found) == 21
+    assert calls == [21]
+
+
 def _listed_connection(monkeypatch):
     """A user connected to one installation, whose listing GitHub answers."""
     monkeypatch.setattr(
@@ -119,24 +309,23 @@ async def test_a_rate_limited_listing_is_unavailable_and_not_remembered(monkeypa
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         app = GitHubAppCredentials(_APP, client=client)
-        with pytest.raises(RepoAccessUnavailable):
-            await entitlement.require_entitled_repo(
-                "owner/r0", "user", store=store, app_credentials=app, env={}
-            )
+        assert (
+            await entitlement.repos_for_user("user", store=store, app_credentials=app, env={}) == []
+        )
     assert app.cached_user_repositories("user", (77,)) is None
 
 
 @pytest.mark.asyncio
-async def test_a_plain_refusal_of_the_listing_is_still_no_access(monkeypatch):
+async def test_a_plain_refusal_of_the_picker_listing_is_cached_as_complete(monkeypatch):
     store = _listed_connection(monkeypatch)
     refused = httpx.Response(403, json={"message": "Resource not accessible by integration"})
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: refused)) as client:
         app = GitHubAppCredentials(_APP, client=client)
-        with pytest.raises(RepoNotAllowed):
-            await entitlement.require_entitled_repo(
-                "owner/r0", "user", store=store, app_credentials=app, env={}
-            )
+        assert (
+            await entitlement.repos_for_user("user", store=store, app_credentials=app, env={}) == []
+        )
     assert app.cached_user_repositories("user", (77,)) == []
+    assert app.cached_user_installation_repositories("user", 77) == []
 
 
 @pytest.mark.asyncio

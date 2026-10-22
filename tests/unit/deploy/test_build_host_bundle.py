@@ -62,6 +62,7 @@ def test_every_host_docker_build_input_is_available_at_the_source_root() -> None
                     f"{dockerfile} needs {source}, but SSH bootstrap could not build it"
                 )
     assert "deploy/host/kata_runtime_epoch.py" in content
+    assert "deploy/host/storage_attestation.py" in content
     assert "pyproject.toml" in content
     assert not any(name.startswith("recipe/") for name in content)
 
