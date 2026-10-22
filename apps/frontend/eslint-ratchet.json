@@ -10,10 +10,24 @@
   },
   "overrides": [
     {
-      "files": ["**/*.test.ts", "**/*.test.tsx", "**/__tests__/**", "e2e/**"],
+      "files": [
+        "**/*.{test,spec}.{js,jsx,ts,tsx,cjs,cjsx,cts,ctsx,mjs,mjsx,mts,mtsx}",
+        "e2e/**/*.{js,jsx,ts,tsx,cjs,cjsx,cts,ctsx,mjs,mjsx,mts,mtsx}"
+      ],
       "rules": {
-        "complexity": "off",
-        "max-lines": "off"
+        "complexity": "off"
+      }
+    },
+    {
+      "files": ["scripts/check-runtime-site-config.mjs"],
+      "rules": {
+        "complexity": ["error", 22],
+        "max-lines": [
+          "error",
+          {
+            "max": 950
+          }
+        ]
       }
     },
     {

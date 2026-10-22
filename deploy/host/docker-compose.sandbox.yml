@@ -152,6 +152,8 @@ services:
       # Bind the far host's docker bridge gateway, not 0.0.0.0: the audience is
       # the containers on that bridge, and a sandbox manager published to the LAN is one
       # shared token away from anyone on it.
+      # COMPAT(remove-after=2026-12-31): no host's .env sets an
+      # AGENT_BROKER_REVERSE_* name; check each deploy root's .env.
       TUNNEL_REVERSE_BIND: ${AGENT_SANDBOX_MANAGER_REVERSE_BIND:-${AGENT_BROKER_REVERSE_BIND:-}}
       TUNNEL_REVERSE_PORT: ${AGENT_SANDBOX_MANAGER_REVERSE_PORT:-${AGENT_BROKER_REVERSE_PORT:-}}
       TUNNEL_REVERSE_TARGET_HOST: ${AGENT_SANDBOX_MANAGER_REVERSE_TARGET_HOST:-${AGENT_BROKER_REVERSE_TARGET_HOST:-sandbox-manager}}
@@ -178,6 +180,8 @@ services:
     # Compose replaces or removes it. Keep a longer fallback than Docker's
     # default for direct Compose operations, but do not use it as the archive
     # lifecycle bound: multiple retained groups are finalized serially.
+    # COMPAT(remove-after=2026-12-31): no host's .env sets
+    # AGENT_BROKER_STOP_GRACE; check each deploy root's .env.
     stop_grace_period: ${AGENT_SANDBOX_MANAGER_STOP_GRACE:-${AGENT_BROKER_STOP_GRACE:-30s}}
     environment:
       # Both host processes read these, and neither was reachable from this
@@ -330,6 +334,8 @@ services:
       # network and cannot resolve `sandbox-manager`; the reverse forward is
       # its authenticated route back. A reported address with no tunnel behind
       # it is a 503 on every sandbox manager call.
+      # COMPAT(remove-after=2026-12-31): no host's .env sets
+      # AGENT_WORKSPACE_BROKER_ADVERTISE_URL; check each deploy root's .env.
       AGENT_SANDBOX_MANAGER_ADVERTISE_URL: ${AGENT_SANDBOX_MANAGER_ADVERTISE_URL:-${AGENT_WORKSPACE_BROKER_ADVERTISE_URL:-}}
       # Must match the sandbox manager service above. It is independent from the
       # enrollment-issued host credential used for heartbeat and claim.

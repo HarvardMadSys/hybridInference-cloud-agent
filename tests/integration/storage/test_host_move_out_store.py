@@ -77,7 +77,7 @@ async def test_the_sweep_stops_an_idle_group_and_hands_it_over_once_covered(pool
     job, group = await _settled_stopped_group(pool, store)
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE agent_sandboxes SET state = 'running', container_id = 'container-a' "
+            "UPDATE agent_sandboxes SET state = 'running', container_id = 'container-aa' "
             "WHERE id = $1",
             group["sandbox_id"],
         )
@@ -121,7 +121,7 @@ async def test_a_busy_group_on_a_host_moving_out_is_left_running(pool, store: St
     _, group = await _settled_stopped_group(pool, store)
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE agent_sandboxes SET state = 'running', container_id = 'container-a', "
+            "UPDATE agent_sandboxes SET state = 'running', container_id = 'container-aa', "
             "active_operation_count = 1 WHERE id = $1",
             group["sandbox_id"],
         )
@@ -131,7 +131,7 @@ async def test_a_busy_group_on_a_host_moving_out_is_left_running(pool, store: St
         await store.sandbox.request_move_out_stop(
             sandbox_id=group["sandbox_id"],
             generation=group["generation"],
-            container_id="container-a",
+            container_id="container-aa",
             actor_id="host-move-out",
         )
         == "busy"
@@ -231,7 +231,7 @@ async def _captures(pool, host: str = "runner-a") -> None:
 async def _running(pool, sandbox_id: str) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE agent_sandboxes SET state = 'running', container_id = 'container-a' "
+            "UPDATE agent_sandboxes SET state = 'running', container_id = 'container-aa' "
             "WHERE id = $1",
             sandbox_id,
         )
@@ -421,7 +421,7 @@ async def test_a_turn_claimed_before_the_removal_moves_out_the_group_it_starts(
     await _host(store, "runner-c", _RESTORE_HOST)
 
     removal = await store.host_pool.remove_host(host="runner-a")
-    await _run_claimed_turn(store, follow_up, claim, "runner-a", "container-a", job["base_sha"])
+    await _run_claimed_turn(store, follow_up, claim, "runner-a", "container-aa", job["base_sha"])
 
     # The group runs on the host now; revoking it would leave the group there.
     assert await store.host_pool.finish_host_removals() == []

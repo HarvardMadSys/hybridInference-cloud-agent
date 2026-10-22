@@ -1264,23 +1264,39 @@ def test_a_users_repositories_are_remembered_for_a_minute_and_forgotten_on_chang
     import cloud_agent.github_app as github_app
 
     now = [1000.0]
+    ttl = [60.0]
     monkeypatch.setattr(github_app.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(github_app, "number_setting", lambda _name: ttl[0])
     credentials = GitHubAppCredentials(config)
-    credentials.remember_user_repositories("alice", (77,), ["acme/service"])
-    credentials.remember_user_installation_repositories("alice", 77, ["acme/service"])
+    repositories = ["acme/service"]
+    credentials.remember_user_repositories("alice", (77,), repositories)
+    credentials.remember_user_installation_repositories("alice", 77, repositories)
     credentials.remember_user_repository_permission("alice", 77, "Acme/Other", False)
+    repositories.append("acme/mutated-after-store")
 
+    combined = credentials.cached_user_repositories("alice", (77,))
+    installation = credentials.cached_user_installation_repositories("alice", 77)
+    assert combined == ["acme/service"]
+    assert installation == ["acme/service"]
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/other") is False
+    combined.append("acme/mutated-after-read")
+    installation.append("acme/mutated-after-read")
     assert credentials.cached_user_repositories("alice", (77,)) == ["acme/service"]
     assert credentials.cached_user_installation_repositories("alice", 77) == ["acme/service"]
-    assert credentials.cached_user_repository_permission("alice", 77, "acme/other") is False
     # Another set of installations is another question.
     assert credentials.cached_user_repositories("alice", (77, 88)) is None
     assert credentials.cached_user_repositories("bob", (77,)) is None
-    now[0] += 61
+    # The current setting applies to existing entries; reads do not extend it.
+    now[0] += 30
+    ttl[0] = 20
     assert credentials.cached_user_repositories("alice", (77,)) is None
     assert credentials.cached_user_installation_repositories("alice", 77) is None
     assert credentials.cached_user_repository_permission("alice", 77, "acme/other") is None
+    assert len(credentials._user_repositories) == 0
+    assert len(credentials._user_installation_repositories) == 0
+    assert len(credentials._user_repository_permissions) == 0
 
+    ttl[0] = 60
     credentials.remember_user_repositories("alice", (77,), ["acme/service"])
     credentials.remember_user_installation_repositories("alice", 77, ["acme/service"])
     credentials.remember_user_repository_permission("alice", 77, "acme/other", True)
@@ -1296,13 +1312,54 @@ def test_targeted_repository_permission_cache_is_bounded(config, monkeypatch):
     monkeypatch.setattr(github_app, "_USER_REPOSITORY_PERMISSIONS_MAX", 2)
     credentials = GitHubAppCredentials(config)
 
-    credentials.remember_user_repository_permission("alice", 77, "acme/one", True)
+    credentials.remember_user_repository_permission("alice", 77, "Acme/One", False)
     credentials.remember_user_repository_permission("alice", 77, "acme/two", True)
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/ONE") is False
     credentials.remember_user_repository_permission("alice", 77, "acme/three", True)
 
-    assert credentials.cached_user_repository_permission("alice", 77, "acme/one") is None
-    assert credentials.cached_user_repository_permission("alice", 77, "acme/two") is True
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/one") is False
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/two") is None
     assert credentials.cached_user_repository_permission("alice", 77, "acme/three") is True
+
+
+async def test_repository_caches_bound_distinct_key_churn(config, monkeypatch):
+    import cloud_agent.github_app as github_app
+    from cloud_agent.github_cache import REPOSITORY_CACHE_SIZE
+
+    async def request(*args, **kwargs):
+        return {"id": 77}
+
+    assert github_app._USER_REPOSITORY_PERMISSIONS_MAX == 4096
+    monkeypatch.setattr(github_app, "_USER_REPOSITORY_PERMISSIONS_MAX", REPOSITORY_CACHE_SIZE)
+    credentials = GitHubAppCredentials(config)
+    monkeypatch.setattr(credentials, "_request", request)
+    for index in range(REPOSITORY_CACHE_SIZE + 10):
+        user_id = str(index)
+        repo = f"Owner/Repo-{index}"
+        await credentials.installation_id_for(repo)
+        credentials.remember_user_repositories(user_id, (77,), [repo])
+        credentials.remember_user_installation_repositories(user_id, 77, [repo])
+        credentials.remember_user_repository_permission(user_id, 77, repo, index % 2 == 0)
+    assert len(credentials._installations) == REPOSITORY_CACHE_SIZE
+    assert len(credentials._user_repositories) == REPOSITORY_CACHE_SIZE
+    assert len(credentials._user_installation_repositories) == REPOSITORY_CACHE_SIZE
+    assert len(credentials._user_repository_permissions) == REPOSITORY_CACHE_SIZE
+    assert credentials.cached_user_repositories("0", (77,)) is None
+    assert credentials.cached_user_installation_repositories("0", 77) is None
+    assert credentials.cached_user_repository_permission("0", 77, "owner/repo-0") is None
+    latest = str(REPOSITORY_CACHE_SIZE + 9)
+    answer = credentials.cached_user_repositories(latest, (77,))
+    assert answer == [f"Owner/Repo-{latest}"]
+    answer.clear()
+    assert credentials.cached_user_repositories(latest, (77,)) == [f"Owner/Repo-{latest}"]
+    assert credentials.cached_user_installation_repositories(latest, 77) == [f"Owner/Repo-{latest}"]
+    assert (
+        credentials.cached_user_repository_permission(latest, 77, f"owner/repo-{latest}") is False
+    )
+    credentials.forget_user(latest)
+    assert credentials.cached_user_repositories(latest, (77,)) is None
+    assert credentials.cached_user_installation_repositories(latest, 77) is None
+    assert credentials.cached_user_repository_permission(latest, 77, f"owner/repo-{latest}") is None
 
 
 @pytest.mark.parametrize("private", [True, False])

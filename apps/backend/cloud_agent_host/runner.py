@@ -145,7 +145,13 @@ from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorError,
 )
 from cloud_agent_host.setup import run_setup
+from cloud_agent_host.source_preparation import (
+    SOURCE_PREFETCH_JOIN_TIMEOUT_S,
+    read_tracked_lockfiles,
+    run_source_git,
+)
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
+from cloud_agent_host.upload_import import import_uploads as _import_uploads
 from cloud_agent_shared import operation_profiling, sandbox_archive_settings
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
@@ -153,17 +159,15 @@ from cloud_agent_shared.environment import (
 )
 from cloud_agent_shared.environment_snapshots import (
     ENVIRONMENT_SNAPSHOT_CAPABILITY,
-    MAX_LOCKFILES,
     EnvironmentSnapshotRef,
-    is_lockfile,
 )
 from cloud_agent_shared.git.patch_gate import branch_name_for
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
     build_base_bundle,
     build_source_archive,
-    build_upload_archive,
 )
+from cloud_agent_shared.git.source_cancellation import check_source_stop, checked_entries
 from cloud_agent_shared.git.temporary_workspace import (
     EMPTY_TREE_SHA,
     TEMPORARY_WORKSPACE_BASE_SHA,
@@ -630,9 +634,22 @@ def _run_git(
     cwd: str | None = None,
     env_extra: dict[str, str] | None = None,
     input_text: str | None = None,
+    stop: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one git command hermetically and return the completed process."""
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV, **(env_extra or {})}
+    if stop is not None:
+        result = run_source_git(
+            args,
+            cwd=cwd,
+            env=env,
+            timeout=_GIT_TIMEOUT_S,
+            stop=stop,
+            input_bytes=None if input_text is None else input_text.encode(),
+        )
+        return subprocess.CompletedProcess(
+            result.args, result.returncode, result.stdout.decode(), result.stderr.decode()
+        )
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -661,47 +678,16 @@ def _checkout_bytes(workdir: str) -> int:
     return total
 
 
-def tracked_lockfiles(workdir: str) -> dict[str, str] | None:
-    """Each tracked dependency manifest's Git object id, the snapshot match key.
-
-    Equal object ids mean byte-identical files, on the host checkout of a
-    snapshot's build and of a later task alike. ``None`` when Git cannot say,
-    or when a repository has more manifests than a snapshot records, so that it
-    is never matched.
-    """
-    # Bytes, not text: Git keeps each name as the bytes it was committed
-    # with, and ``-z`` prints them unquoted.
-    listed = subprocess.run(
-        ["git", "ls-files", "-s", "-z"],
-        cwd=workdir,
+def tracked_lockfiles(
+    workdir: str, *, stop: threading.Event | None = None
+) -> dict[str, str] | None:
+    """Each tracked manifest's object id, or ``None`` when Git cannot say."""
+    return read_tracked_lockfiles(
+        workdir,
         env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV},
-        capture_output=True,
         timeout=_GIT_TIMEOUT_S,
-        stdin=subprocess.DEVNULL,
-        check=False,
+        stop=stop,
     )
-    if listed.returncode != 0:
-        return None
-    found: dict[str, str] = {}
-    for entry in listed.stdout.split(b"\0"):
-        meta, _, raw = entry.partition(b"\t")
-        fields = meta.split()
-        if len(fields) != 3:
-            continue
-        try:
-            path = raw.decode()
-        except UnicodeDecodeError:
-            # A manifest whose own name is text may sit in a directory whose
-            # name is not; no receipt can record it, so Git cannot say.
-            if is_lockfile(raw.rpartition(b"/")[2].decode(errors="replace")):
-                return None
-            continue
-        if not is_lockfile(path):
-            continue
-        found[path] = fields[1].decode()
-        if len(found) > MAX_LOCKFILES:
-            return None
-    return found
 
 
 def _choose_environment_snapshot(
@@ -844,7 +830,9 @@ def _basic_credential(clone_token: str) -> str:
     return base64.b64encode(f"x-access-token:{clone_token}".encode()).decode()
 
 
-def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None:
+def _assert_no_credential_on_disk(
+    workdir: str, clone_token: str | None, *, stop: threading.Event | None = None
+) -> None:
     """Fail rather than mount a worktree that carries the clone credential.
 
     No repository credential may be stored in the source tree, which is about
@@ -864,7 +852,7 @@ def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None
         base64.b64encode(clone_token.encode()).decode().rstrip("="),
     )
     git_dir = pathlib.Path(workdir) / ".git"
-    for path in git_dir.rglob("*"):
+    for path in checked_entries(git_dir.rglob("*"), stop):
         # Object and pack files hold repository content, not our configuration,
         # and are compressed; skipping them keeps this check bounded.
         if not path.is_file() or path.is_symlink() or "objects" in path.parts:
@@ -928,12 +916,12 @@ def prepare_worktree(
         args: list[str], env_extra: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
         if max_bytes is None:
-            return _run_git(args, cwd=workdir, env_extra=env_extra)
+            return _run_git(args, cwd=workdir, env_extra=env_extra, stop=stop)
         return _run_git_within(
             args, cwd=workdir, max_bytes=max_bytes, env_extra=env_extra, stop=stop
         )
 
-    init = _run_git(["init", "--quiet", workdir])
+    init = _run_git(["init", "--quiet", workdir], stop=stop)
     if init.returncode != 0:
         raise WorktreeError(f"git init failed: {init.stderr.strip()[:200]}")
 
@@ -953,12 +941,12 @@ def prepare_worktree(
     if checkout.returncode != 0:
         raise WorktreeError(f"could not check out {ref}: {checkout.stderr.strip()[:200]}")
 
-    resolved = _run_git(["rev-parse", "HEAD"], cwd=workdir).stdout.strip()
-    _assert_no_credential_on_disk(workdir, clone_token)
+    resolved = _run_git(["rev-parse", "HEAD"], cwd=workdir, stop=stop).stdout.strip()
+    _assert_no_credential_on_disk(workdir, clone_token, stop=stop)
     return resolved or (base_sha or "")
 
 
-def prepare_temporary_worktree(*, workdir: str) -> str:
+def prepare_temporary_worktree(*, workdir: str, stop: threading.Event | None = None) -> str:
     """Start a temporary workspace in ``workdir`` and return its first commit.
 
     A temporary workspace has no repository, so nothing is fetched and no
@@ -976,7 +964,7 @@ def prepare_temporary_worktree(*, workdir: str) -> str:
         env_extra: dict[str, str] | None = None,
         input_text: str | None = None,
     ) -> str:
-        result = _run_git(args, cwd=workdir, env_extra=env_extra, input_text=input_text)
+        result = _run_git(args, cwd=workdir, env_extra=env_extra, input_text=input_text, stop=stop)
         if result.returncode != 0:
             raise WorktreeError(
                 f"could not start the temporary workspace: git {args[0]} failed: "
@@ -1056,10 +1044,12 @@ def source_import_max_bytes(env: dict[str, str] | None = None) -> int:
     return mib * 1024 * 1024
 
 
-def checkout_output_branch(workdir: str, branch_id: str) -> str:
+def checkout_output_branch(
+    workdir: str, branch_id: str, *, stop: threading.Event | None = None
+) -> str:
     """Put a fresh durable worktree on the publisher's local output branch."""
     branch = branch_name_for(branch_id)
-    switched = _run_git(["checkout", "--quiet", "-B", branch, "HEAD"], cwd=workdir)
+    switched = _run_git(["checkout", "--quiet", "-B", branch, "HEAD"], cwd=workdir, stop=stop)
     if switched.returncode != 0:
         raise WorktreeError(
             f"could not create workspace branch {branch}: {switched.stderr.strip()[:200]}"
@@ -1385,15 +1375,6 @@ def _claim_attestation(
         stamp["sandbox_archive_settings_applied_revision"] = (
             sandbox_archive_settings_applied_revision
         )
-    if stamp["runner_capabilities"]:
-        # For a control plane older than this release. Hosts roll out before
-        # the API, so a replacement runner polls that API for a while, and it
-        # refuses every claim that does not name the image's shared-sandbox
-        # protocol. This image has no such label. Its "v2" meant a fork
-        # helper that takes an anchor, which the capabilities above already
-        # required. This control plane reads nothing from it. Remove once
-        # every deployment's control plane is at least this release.
-        stamp["shared_sandbox_protocol"] = "v2"
     return stamp
 
 
@@ -1707,7 +1688,7 @@ class _SourcePrefetch:
 
     The thread is not a daemon: a turn that ends while the clone is still
     running waits for it at exit, so its temporary directory is always removed.
-    Discarding stops a clone still running, so that wait is short.
+    Discarding cancels Git and archive preparation before joining its cleanup.
     """
 
     def __init__(self, job: ClaimedJob, *, uid: int, gid: int, max_bytes: int | None) -> None:
@@ -1730,9 +1711,10 @@ class _SourcePrefetch:
         archive: Any = None
         try:
             with tempfile.TemporaryDirectory(prefix="freeinference-source-") as source:
+                check_source_stop(self._stop)
                 if self._job.repo is None:
                     # Nothing to clone and nothing to publish, so no output branch.
-                    base_sha = prepare_temporary_worktree(workdir=source)
+                    base_sha = prepare_temporary_worktree(workdir=source, stop=self._stop)
                 else:
                     base_sha = prepare_worktree(
                         workdir=source,
@@ -1743,8 +1725,11 @@ class _SourcePrefetch:
                         max_bytes=self._max_bytes,
                         stop=self._stop,
                     )
-                    checkout_output_branch(source, self._job.thread_id)
-                self._lockfiles = tracked_lockfiles(source)
+                    check_source_stop(self._stop)
+                    checkout_output_branch(source, self._job.thread_id, stop=self._stop)
+                check_source_stop(self._stop)
+                self._lockfiles = tracked_lockfiles(source, stop=self._stop)
+                check_source_stop(self._stop)
                 # Unnamed and outside the checkout: the archive is spooled to
                 # disk, not held in this process, and gone when it is closed,
                 # which import_into or discard does once the clone is done.
@@ -1757,6 +1742,7 @@ class _SourcePrefetch:
                     uid=self._uid,
                     gid=self._gid,
                     max_bytes=self._max_bytes,
+                    stop=self._stop,
                 )
                 archive.flush()
                 archive.seek(0)
@@ -1807,13 +1793,14 @@ class _SourcePrefetch:
         return self._base_sha
 
     def discard(self) -> None:
-        """Release the archive now, and stop a clone that is still running."""
+        """Cancel preparation and give its owner a bounded wait to clean up."""
         self._stop.set()
         with self._lock:
             self._discarded = True
             archive, self._archive = self._archive, None
         if archive is not None:
             archive.close()
+        self._thread.join(timeout=SOURCE_PREFETCH_JOIN_TIMEOUT_S)
 
 
 def _prefetch_retained_source(
@@ -1825,44 +1812,6 @@ def _prefetch_retained_source(
     host's own, for a turn started without the runner's settings.
     """
     return _SourcePrefetch(job, uid=uid, gid=gid, max_bytes=max_bytes)
-
-
-def _import_uploads(
-    *,
-    job: ClaimedJob,
-    control: ControlPlane,
-    manager: ChatSandboxManager,
-    spec: ChatSandboxSpec,
-    fresh_container: bool,
-) -> int:
-    """Place this conversation's uploaded files under ``/uploads``.
-
-    Always the whole thread's files, never a delta: the import overwrites the
-    same paths, so one code path serves a new container and a container that
-    gained a file this turn.
-
-    It runs when the container is new, or when this turn attached something.
-    A retained container already holds the earlier turns' files — ``/uploads``
-    is root-owned and read-only, so the sandbox cannot have removed them — and
-    re-fetching them on every follow-up would move the whole conversation's
-    bytes again to write what is already there.
-
-    The files never touch ``CHAT_WORKDIR``. The publish path stages the
-    workspace with ``git add -A -N``, so an upload written there would be
-    committed and appear in the draft pull request.
-    """
-    if job.thread_attachment_count <= 0:
-        return 0
-    if not fresh_container and job.turn_attachment_count <= 0:
-        return 0
-    files: list[tuple[str, bytes]] = []
-    for entry in control.list_attachments():
-        path, content = control.read_attachment(int(entry["id"]))
-        files.append((path, content))
-    if not files:
-        return 0
-    manager.import_archive(spec, CHAT_UPLOADS_DIR, build_upload_archive(files))
-    return len(files)
 
 
 def _import_retained_base(
@@ -1899,13 +1848,13 @@ def _import_retained_base(
             held = (parent.stdout.strip() or None) if parent.returncode == 0 else None
             if held and not _sandbox_has_commit(CHAT_WORKDIR, held, backend):
                 held = None
-        bundle = build_base_bundle(source, commit=resolved, prerequisite=held)
-        manager.import_base_bundle(
-            spec,
-            bundle,
-            commit=resolved,
-            env=dict(_SAFE_DIRECTORY_ENV),
-        )
+        with build_base_bundle(source, commit=resolved, prerequisite=held) as bundle:
+            manager.import_base_bundle(
+                spec,
+                bundle,
+                commit=resolved,
+                env=dict(_SAFE_DIRECTORY_ENV),
+            )
     return resolved
 
 
@@ -2762,6 +2711,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             # first-turn job can still add files of its own and must import the
             # thread's current attachment set before prompt admission.
             fresh_container=not has_context and not recovered_initial,
+            container_id=str(lease["container_id"]),
         )
         if imported_uploads:
             control.append_event(
@@ -2939,21 +2889,17 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             credential = str(residency.get("credential") or "")
             if not credential:
                 raise SandboxError("control plane returned no shared residency credential")
+            # The residency's: this process serves later turns' tools without a restart.
+            mcp_credential = str(residency.get("mcp_credential") or "") if job.mcp_bindings else ""
+            if job.mcp_bindings and not mcp_credential:
+                raise SandboxError("control plane returned no shared residency MCP credential")
             grant_model = residency.get("model")
             if grant_model not in {None, job.model}:
                 raise SandboxError("shared residency grant model does not match this turn")
             launch = replace(
                 launch,
                 credential=credential,
-                # The residency's MCP credential lets this process serve later
-                # turns' tools without a restart. A control plane that predates
-                # it sends none; the turn's own token then works for this turn,
-                # and the next one restarts the process as it always did.
-                mcp_credential=(
-                    str(residency.get("mcp_credential") or "") or job.mcp_token
-                    if job.mcp_bindings
-                    else ""
-                ),
+                mcp_credential=mcp_credential,
                 residency_generation=int(residency["generation"]),
             )
             resident_call = operation_profiling.expect_fragment(
@@ -4937,16 +4883,13 @@ def build_parser() -> argparse.ArgumentParser:
     # default while both shapes are deployed.
     parser.add_argument(
         "--base-url",
-        default=(
-            os.environ.get("AGENT_CONTROL_PLANE_URL")
-            or os.environ.get("AGENT_GATEWAY_URL")
-            or os.environ.get("FREEINFERENCE_BASE_URL", "")
-        ),
+        default=os.environ.get("AGENT_CONTROL_PLANE_URL")
+        or os.environ.get("AGENT_GATEWAY_URL", ""),
         help="Control plane: claim, heartbeat, events, lifecycle, terminals.",
     )
     parser.add_argument(
         "--gateway-url",
-        default=os.environ.get("AGENT_GATEWAY_URL") or os.environ.get("FREEINFERENCE_BASE_URL", ""),
+        default=os.environ.get("AGENT_GATEWAY_URL", ""),
         help="Inference gateway, as the sandbox reaches it. Model calls only.",
     )
     parser.add_argument("--worker-id", default=default_worker_id())

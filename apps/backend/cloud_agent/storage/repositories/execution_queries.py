@@ -7,16 +7,29 @@ they were; only the class holding them changed.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from cloud_agent.storage._sql.ledger import USAGE_EVENT_PAYLOAD_SQL
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
+from cloud_agent.thread_stats import (
+    ATTEMPT_ROLLUP_VERSION,
+    AttemptStatsAccumulator,
+    AttemptStatsRollup,
+    attempt_rollup_from_payload,
+    attempt_rollup_payload,
+    summarize_thread_rollups,
+)
 
 if TYPE_CHECKING:
     from typing import Any
 
     import asyncpg
+
+
+THREAD_STATS_EVENT_PAGE_SIZE = 1_000
 
 
 class PostgresExecutionQueries:
@@ -95,72 +108,73 @@ class PostgresExecutionQueries:
             )
         return [{**dict(row), "payload": load_json(row["payload"])} for row in rows]
 
-    async def thread_stats_inputs(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
-        """Return everything needed to summarize the thread containing a job.
+    async def thread_stats(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
+        """Return a thread summary, refreshing only attempts whose ledger grew.
 
-        The event rows come back with their bulky text fields stripped in
-        SQL: the summary reads identity, pairing and usage keys only, and a
-        long thread's transcript is megabytes we would otherwise pull across
-        the wire to throw away. Nothing is filtered by event type — wall
-        time is measured from a turn's first to last event, so a Tier-2
-        thread whose only events are ``raw`` still gets its duration.
-
-        :returns: ``None`` when the job does not exist or is not the
-            caller's, matching :meth:`get_thread_for_job`.
+        The existing ``(attempt_id, seq)`` index gives each attempt's newest
+        sequence without transferring an event row. A matching versioned
+        rollup is reusable; only a missing or stale attempt loads its compact
+        event projection. Late snapshot events invalidate the same way as
+        streamed events, without adding work to either insert path.
         """
         async with self._pool.acquire() as conn:
-            thread_id = await conn.fetchval(
-                "SELECT j.thread_id FROM agent_jobs j "
-                "JOIN agent_threads t ON t.id = j.thread_id "
-                "WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL",
+            rows = await conn.fetch(
+                """
+                /* thread_stats_rollups */
+                WITH owned AS MATERIALIZED (
+                    SELECT j.thread_id
+                    FROM agent_jobs j
+                    JOIN agent_threads t ON t.id = j.thread_id
+                    WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL
+                )
+                SELECT owned.thread_id,
+                       j.id AS job_id,
+                       a.id AS attempt_id,
+                       a.started_at,
+                       latest.event_seq,
+                       rollup.event_seq AS rollup_event_seq,
+                       rollup.reducer_version,
+                       rollup.rollup
+                FROM owned
+                JOIN agent_jobs j ON j.thread_id = owned.thread_id
+                LEFT JOIN agent_attempts a ON a.job_id = j.id
+                LEFT JOIN LATERAL (
+                    SELECT e.seq AS event_seq
+                    FROM agent_job_events e
+                    WHERE e.attempt_id = a.id
+                    ORDER BY e.seq DESC
+                    LIMIT 1
+                ) latest ON TRUE
+                LEFT JOIN agent_attempt_thread_stats rollup ON rollup.attempt_id = a.id
+                ORDER BY j.turn_no, a.id
+                """,
                 job_id,
                 user_id,
             )
-            if thread_id is None:
+            if not rows:
                 return None
-            jobs = await conn.fetch(
-                "SELECT id FROM agent_jobs WHERE thread_id = $1 ORDER BY turn_no",
-                thread_id,
-            )
-            attempts = await conn.fetch(
-                """
-                SELECT a.job_id, a.started_at
-                FROM agent_attempts a
-                JOIN agent_jobs j ON j.id = a.job_id
-                WHERE j.thread_id = $1
-                """,
-                thread_id,
-            )
-            events = await conn.fetch(
-                f"""
-                SELECT e.job_id,
-                       e.attempt_id,
-                       e.seq,
-                       e.event_type,
-                       e.created_at,
-                       {USAGE_EVENT_PAYLOAD_SQL} AS payload
-                FROM agent_job_events e
-                JOIN agent_jobs j ON j.id = e.job_id
-                WHERE j.thread_id = $1
-                ORDER BY e.attempt_id, e.seq
-                """,
-                thread_id,
-            )
-        return {
-            "thread_id": thread_id,
-            "job_ids": [row["id"] for row in jobs],
-            "attempts": [dict(row) for row in attempts],
-            "events": [
+            job_ids = list(dict.fromkeys(str(row["job_id"]) for row in rows))
+            attempts = [
                 {
-                    "job_id": row["job_id"],
-                    "attempt_id": row["attempt_id"],
-                    "seq": row["seq"],
-                    "event_type": row["event_type"],
-                    "created_at": row["created_at"],
-                    "payload": load_json(row["payload"]),
+                    "attempt_id": int(row["attempt_id"]),
+                    "job_id": str(row["job_id"]),
+                    "started_at": row["started_at"],
                 }
-                for row in events
-            ],
+                for row in rows
+                if row["attempt_id"] is not None
+            ]
+            rollups, stale = _partition_attempt_rollups(rows)
+            if stale:
+                refreshed = await _refresh_attempt_rollups(conn, stale)
+                rollups.extend(refreshed)
+                await _store_attempt_rollups(conn, stale, refreshed)
+        return {
+            "thread_id": str(rows[0]["thread_id"]),
+            "stats": summarize_thread_rollups(
+                job_ids=job_ids,
+                attempts=attempts,
+                rollups=rollups,
+            ),
         }
 
     async def job_attempts_telemetry(self, *, job_id: str) -> list[dict[str, Any]]:
@@ -420,3 +434,136 @@ class PostgresExecutionQueries:
             }
             for row in rows
         ]
+
+
+def _partition_attempt_rollups(
+    rows: list[Any],
+) -> tuple[list[AttemptStatsRollup], list[dict[str, Any]]]:
+    """Separate reusable cache rows from attempts whose sequence changed."""
+    cached: list[AttemptStatsRollup] = []
+    stale: list[dict[str, Any]] = []
+    for row in rows:
+        attempt_id = row["attempt_id"]
+        event_seq = row["event_seq"]
+        if attempt_id is None or event_seq is None:
+            continue
+        target: dict[str, Any] = {
+            "attempt_id": int(attempt_id),
+            "job_id": str(row["job_id"]),
+            "event_seq": int(event_seq),
+        }
+        if row["rollup_event_seq"] != event_seq or row["reducer_version"] != ATTEMPT_ROLLUP_VERSION:
+            stale.append(target)
+            continue
+        payload = load_json(row["rollup"])
+        if not isinstance(payload, Mapping):
+            stale.append(target)
+            continue
+        try:
+            cached.append(
+                attempt_rollup_from_payload(
+                    attempt_id=target["attempt_id"],
+                    job_id=target["job_id"],
+                    payload=payload,
+                )
+            )
+        except (TypeError, ValueError):
+            stale.append(target)
+    return cached, stale
+
+
+async def _refresh_attempt_rollups(
+    conn: Any, stale: list[dict[str, Any]]
+) -> list[AttemptStatsRollup]:
+    """Reduce stale attempts from fixed-sequence, bounded ordered pages."""
+    rollups: list[AttemptStatsRollup] = []
+    for target in stale:
+        accumulator = AttemptStatsAccumulator(
+            attempt_id=target["attempt_id"],
+            job_id=target["job_id"],
+        )
+        after_seq: int | None = None
+        while True:
+            events = await conn.fetch(
+                f"""
+                /* thread_stats_stale_events */
+                SELECT e.job_id,
+                       e.attempt_id,
+                       e.seq,
+                       e.event_type,
+                       e.created_at,
+                       {USAGE_EVENT_PAYLOAD_SQL} AS payload
+                FROM agent_job_events e
+                WHERE e.attempt_id = $1
+                  AND e.seq >= COALESCE($2::integer, -2147483648)
+                  AND ($2::integer IS NULL OR e.seq > $2)
+                  AND e.seq <= $3
+                ORDER BY e.seq
+                LIMIT $4
+                """,
+                target["attempt_id"],
+                after_seq,
+                target["event_seq"],
+                THREAD_STATS_EVENT_PAGE_SIZE,
+            )
+            if not events:
+                break
+            accumulator.extend(
+                {
+                    "job_id": row["job_id"],
+                    "attempt_id": row["attempt_id"],
+                    "seq": row["seq"],
+                    "event_type": row["event_type"],
+                    "created_at": row["created_at"],
+                    "payload": load_json(row["payload"]),
+                }
+                for row in events
+            )
+            page_end = int(events[-1]["seq"])
+            if after_seq is not None and page_end <= after_seq:
+                raise RuntimeError("thread stats event cursor did not advance")
+            after_seq = page_end
+            if len(events) < THREAD_STATS_EVENT_PAGE_SIZE or page_end >= target["event_seq"]:
+                break
+        rollups.append(accumulator.finish())
+    return rollups
+
+
+async def _store_attempt_rollups(
+    conn: Any,
+    stale: list[dict[str, Any]],
+    rollups: list[AttemptStatsRollup],
+) -> None:
+    """Persist refreshed attempts in one statement without regressing a newer cache."""
+    sequences = {target["attempt_id"]: target["event_seq"] for target in stale}
+    records = [
+        {
+            "attempt_id": rollup.attempt_id,
+            "event_seq": sequences[rollup.attempt_id],
+            "reducer_version": ATTEMPT_ROLLUP_VERSION,
+            "rollup": attempt_rollup_payload(rollup),
+        }
+        for rollup in rollups
+    ]
+    await conn.execute(
+        """
+        /* thread_stats_store_rollups */
+        INSERT INTO agent_attempt_thread_stats
+            (attempt_id, event_seq, reducer_version, rollup)
+        SELECT attempt_id, event_seq, reducer_version, rollup
+        FROM jsonb_to_recordset($1::jsonb)
+             AS refreshed(
+                 attempt_id bigint,
+                 event_seq integer,
+                 reducer_version integer,
+                 rollup jsonb
+             )
+        ON CONFLICT (attempt_id) DO UPDATE
+        SET event_seq = EXCLUDED.event_seq,
+            reducer_version = EXCLUDED.reducer_version,
+            rollup = EXCLUDED.rollup,
+            updated_at = NOW()
+        WHERE agent_attempt_thread_stats.event_seq <= EXCLUDED.event_seq
+        """,
+        json.dumps(records),
+    )

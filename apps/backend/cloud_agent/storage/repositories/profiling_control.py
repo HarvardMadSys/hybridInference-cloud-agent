@@ -408,7 +408,7 @@ class PostgresProfilingControlRepository:
             return int(
                 await conn.fetchval(
                     """
-                    SELECT COUNT(*) FROM agent_operation_measurements
+                    SELECT SUM(stored_count) FROM agent_operation_measurement_counts
                     WHERE profiling_run_id = $1
                     """,
                     run_id,

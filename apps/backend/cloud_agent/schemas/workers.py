@@ -22,6 +22,7 @@ from cloud_agent.schemas._host_reports import (
 from cloud_agent_shared.plugins import (
     SandboxPlugin,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
+from cloud_agent_shared.sandbox_restore import CheckpointRestore, RestoreFormatVersion
 from cloud_agent_shared.shared_protocol import ABANDON_DETAIL_MAX_CHARS
 from cloud_agent_shared.ssh_access import (
     SshAccess,  # noqa: TC001 — Pydantic resolves annotations at runtime.
@@ -154,16 +155,13 @@ class WorkerSandboxMember(BaseModel):
     fork_anchor_job_id: str | None = None
 
 
-class WorkerSandboxRestore(BaseModel):
+class WorkerSandboxRestore(CheckpointRestore):
     """The checkpoint a claimed cold group is recreated from."""
 
-    checkpoint_id: str = Field(pattern=r"^[0-9a-f]{32}$")
-    object_key: str = Field(min_length=1, max_length=1024)
-    version_id: str | None = Field(None, max_length=1024)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    size_bytes: int = Field(gt=0)
-    base_image: str = Field(min_length=1, max_length=512)
-    format_version: int = Field(ge=1)
+    # Claims have always required callers to state the version. Keep that
+    # published shape while the shared model also serves the manager's
+    # backwards-compatible default.
+    format_version: RestoreFormatVersion
 
 
 class WorkerThreadSandbox(BaseModel):
@@ -310,11 +308,10 @@ class WorkerClaimResponse(BaseModel):
     mcp_token: str = Field(
         "",
         description=(
-            "The sandbox's *second* credential, for this service's MCP relay. "
-            "Scoped `mcp`, so it opens the relay and nothing else — not the "
-            "worker surface, and not the gateway. The relay's address is the "
-            "claiming host's own, the one its network rules admit; the claim "
-            "names none."
+            "Deprecated, and used by no host: each member's CLI reaches this "
+            "service's MCP relay with its residency's `mcp_credential` from the "
+            "sandbox residency route. This attempt-scoped credential is scoped "
+            "`mcp`, so it opens that relay and nothing else."
         ),
     )
     clone_token: str | None = Field(

@@ -59,6 +59,7 @@ from cloud_agent.application.ssh_servers import (
 )
 from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
 from cloud_agent.attachments.selection import prompt_with_attachments
+from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATES
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import EnvironmentAccessRevoked, EnvironmentEncryptionError
@@ -123,7 +124,6 @@ from cloud_agent.schemas import (
     WorkerWaitResponse,
 )
 from cloud_agent.skills.selection import prompt_with_skills
-from cloud_agent.source_control import SourceControlError
 from cloud_agent.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
@@ -1011,25 +1011,24 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
             )
             if environment.required:
                 if ENVIRONMENT_CAPABILITY not in capabilities:
-                    raise SourceControlError("Host cannot execute environment configuration")
+                    raise SandboxManagerError(503, "Host cannot execute environment configuration")
                 if (
                     uses_inference_names(environment)
                     and ENVIRONMENT_INFERENCE_CAPABILITY not in capabilities
                 ):
-                    raise SourceControlError("Host cannot keep inference variables from the CLI")
-                from cloud_agent.sandbox_manager_client import SandboxManagerError
+                    raise SandboxManagerError(503, "Host cannot isolate inference variables")
                 from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
                 try:
                     broker = await sandbox_manager_for_job(job_store.host_pool, claim["id"])
                     if broker is None:
-                        raise SourceControlError("Sandbox manager is unavailable")
+                        raise SandboxManagerError(503, "Sandbox manager is unavailable")
                     await broker.require_environment_capability(environment)
                 except (SandboxManagerError, httpx.HTTPError):
-                    raise SourceControlError("Sandbox manager must be upgraded") from None
+                    raise SandboxManagerError(503, "Sandbox manager must be upgraded") from None
             else:
                 environment = None
-        except (SourceControlError, EnvironmentEncryptionError):
+        except (SandboxManagerError, EnvironmentEncryptionError):
             await job_store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
             raise HTTPException(
                 503, "Waiting for environment-capable host or available encryption"
@@ -1074,9 +1073,9 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         capabilities = attestation.runner_capabilities if attestation else []
         try:
             if SSH_ACCESS_CAPABILITY not in capabilities:
-                raise SourceControlError("Host cannot apply SSH access")
+                raise SandboxManagerError(503, "Host cannot apply SSH access")
             ssh_access = build_ssh_access(ssh_state, ssh_key_cipher())
-        except (SourceControlError, ValueError):
+        except (SandboxManagerError, CredentialCipherError, ValueError):
             await job_store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
             raise HTTPException(
                 503, "Waiting for an SSH-capable host or available encryption"
@@ -1099,14 +1098,10 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
     token = mint_worker_token(**fence, scope=SCOPE_FULL)
     sandbox_token = await _mint_sandbox_grant(job_store, grants, claim)
 
-    # The sandbox's *second* credential, and this one is ours to mint: MCP is
-    # served by this service's relay, against this service's registry and this
-    # service's attempt fence. Scoped `mcp` so it opens the relay and nothing
-    # else — not the worker surface, and certainly not the gateway.
-    #
-    # Two credentials rather than one because they authorize at two services
-    # now. A leak is bounded by whichever it was: the grant buys models it
-    # names, this buys tools the job asked for, and neither buys the other.
+    # COMPAT(remove-after=2026-11-30): no host reads the claim's mcp_token, as
+    # none since #974 does: each member's CLI reaches the MCP relay with its
+    # residency's mcp_credential. Then this attempt-scoped token, its claim
+    # field and the relay's SCOPE_MCP branch go together.
     mcp_token = mint_worker_token(**fence, scope=SCOPE_MCP)
     # A third credential, weaker than either: read-only, this repository only,
     # one hour. The runner needs it to check the repository out — a runner that
@@ -1256,7 +1251,7 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         thread_sandbox=claim.get("thread_sandbox"),
         worker_token=token,
         sandbox_token=sandbox_token,
-        mcp_token=mcp_token,
+        mcp_token=mcp_token,  # COMPAT(remove-after=2026-11-30): as at its mint above.
         clone_token=clone_token,
         github_token=github_token,
         # Aliases, because that is what the runtime config addresses: the relay

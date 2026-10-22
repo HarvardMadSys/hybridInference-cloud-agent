@@ -43,7 +43,6 @@ import socket
 import threading
 import uuid
 from collections.abc import Mapping
-from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -51,6 +50,7 @@ import httpx
 
 from cloud_agent_shared.operation_profiling import (
     MODE_ADMIN,
+    SOURCE_ADMIN,
     ControlState,
     ProfilingRun,
     budget_state,
@@ -410,9 +410,9 @@ def _parse_policy_run(run: Mapping[str, Any]) -> ProfilingRun | None:
         "expires_at": (
             expires_at.isoformat() if isinstance(expires_at, datetime) else str(expires_at or "")
         ),
-        "config_version": int(run.get("config_version") or 1),
-        "max_operations": int(run.get("max_operations") or 100),
-        "target": {str(key): str(value) for key, value in (run.get("target") or {}).items()},
+        "config_version": run.get("config_version", 1),
+        "max_operations": run.get("max_operations", 100),
+        "target": dict(run.get("target") or {}),
         "admission_instances": [],
     }
     if run.get("continuous") is True:
@@ -420,16 +420,17 @@ def _parse_policy_run(run: Mapping[str, Any]) -> ProfilingRun | None:
             return None
         descriptor.update(continuous=True, expires_at=run.get("expires_at"), max_operations=0)
     try:
-        parsed = parse_run(json.dumps(descriptor), allow_continuous=True)
+        return parse_run(
+            json.dumps(descriptor),
+            allow_continuous=True,
+            source=SOURCE_ADMIN,
+        )
     except ValueError:
         logger.warning(
             "agent_profiling_policy_descriptor_unusable",
             extra={"event": "agent_profiling_policy_descriptor_unusable"},
         )
         return None
-    # The source travels into every measurement this host produces, so a reader
-    # can tell an administrator's experiment from a static descriptor's.
-    return replace(parsed, source="admin")
 
 
 def _jitter_fraction() -> float:

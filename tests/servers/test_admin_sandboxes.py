@@ -12,6 +12,7 @@ from tests.unit.test_ledger_snapshots import END, START
 
 from cloud_agent import identity, sandbox_manager_routing
 from cloud_agent.admin_observability import encode_cursor
+from cloud_agent.admin_sandbox_inventory import SandboxInventoryCursor, inventory_scope
 from cloud_agent.admin_sandboxes import (
     SANDBOX_CURSOR_SCOPE,
     SandboxCursor,
@@ -217,16 +218,80 @@ def terminal_probe(setup, monkeypatch):
 
 
 @pytest.mark.parametrize("auth", ["missing", "invalid", "revoked"])
-async def test_listing_requires_current_admin_access(setup, auth):
+@pytest.mark.parametrize("sync", [False, True])
+async def test_listing_requires_current_admin_access(setup, auth, sync):
     app, queries, gateway = setup
     gateway.permissions = ["agent.use"]
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         headers = {"Authorization": "Bearer wrong"} if auth == "invalid" else {}
         if auth == "revoked":
             client.cookies.set(identity.SESSION_COOKIE, identity.mint_session(user_id="admin"))
-        response = await client.get(PREFIX, headers=headers)
+        response = await client.get(PREFIX, headers=headers, params={"sync": sync})
     assert response.status_code == (403 if auth == "revoked" else 401)
     queries.list_running.assert_not_awaited()
+
+
+async def test_inventory_sync_preserves_delta_fields_and_content_boundary(setup):
+    app, queries, _ = setup
+    queries.inventory = SimpleNamespace(
+        read=AsyncMock(
+            return_value={
+                "mode": "delta",
+                "sandboxes": [sandbox()],
+                "deleted_ids": ["gone"],
+                "hosts": [{"host": "runner-one", "last_heartbeat_at": END}],
+                "observed_at": END,
+                "change_cursor": "next-change",
+                "total_count": None,
+                "PRIVATE": "PRIVATE metadata",
+            }
+        )
+    )
+    cursor = SandboxInventoryCursor(
+        scope=inventory_scope("running", False, 100), database_snapshot="4:8:4"
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            PREFIX, headers=ADMIN, params={"sync": True, "cursor": encode_cursor(cursor)}
+        )
+        mismatched = await client.get(
+            PREFIX,
+            headers=ADMIN,
+            params={
+                "sync": True,
+                "cursor": encode_cursor(cursor),
+                "include_archived": True,
+            },
+        )
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["mode"] == "delta"
+    assert response.json()["deleted_ids"] == ["gone"]
+    assert response.json()["change_cursor"] == "next-change"
+    assert response.json()["hosts"][0]["host"] == "runner-one"
+    assert "private" not in response.text.lower()
+    assert mismatched.status_code == 422
+    queries.inventory.read.assert_awaited_once_with(
+        cursor=cursor, limit=100, state="running", include_archived=False
+    )
+
+
+async def test_inventory_sync_reports_expired_cursor_without_replaying_old_rows(setup):
+    app, queries, _ = setup
+    queries.inventory = SimpleNamespace(
+        read=AsyncMock(
+            return_value={
+                "sandboxes": [],
+                "observed_at": END,
+                "reset_required": True,
+            }
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(PREFIX, headers=ADMIN, params={"sync": True})
+    assert response.status_code == 200
+    assert response.json()["reset_required"] is True
+    assert response.json()["sandboxes"] == []
 
 
 @pytest.mark.parametrize("browser", [False, True])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -133,7 +134,7 @@ async def _settled_stopped_group(pool, store: Storage) -> tuple[dict, dict]:
     assert residency is not None
     fence = _fence(job, claim, sandbox)
     assert await store.sandbox.mark_thread_sandbox_running(
-        **fence, container_id="container-a", context_status="new"
+        **fence, container_id="container-aa", context_status="new"
     )
     assert await store.sandbox.admit_thread_sandbox_turn(
         **fence, residency_generation=residency["generation"], job_id=job["id"]
@@ -169,7 +170,7 @@ def _receipt(group: dict, job: dict, **changes: Any) -> dict[str, Any]:
         "checkpoint_id": "c" * 32,
         "sandbox_id": group["sandbox_id"],
         "generation": group["generation"],
-        "container_id": "container-a",
+        "container_id": "container-aa",
         "base_image": _BASE,
         "runtime_id": "claude-code",
         "object_key": "cloud-agent/sandbox/v2/" + "d" * 64 + "/g1/" + "c" * 32 + ".oci.tar",
@@ -405,7 +406,7 @@ async def _run_turn_and_stop(pool, store: Storage, parent: dict) -> dict:
     assert residency is not None
     fence = _fence(job, claim, sandbox)
     assert await store.sandbox.mark_thread_sandbox_running(
-        **fence, container_id="container-a", context_status="restored"
+        **fence, container_id="container-aa", context_status="restored"
     )
     assert await store.sandbox.admit_thread_sandbox_turn(
         **fence, residency_generation=residency["generation"], job_id=job["id"]
@@ -559,7 +560,7 @@ async def test_an_import_answered_by_the_old_host_after_the_restore_changes_noth
     # The publisher sends the base import to runner-a, which holds the group.
     sent = await store.snapshot.pending_snapshot_base_import()
     assert sent is not None
-    assert (sent["generation"], sent["container_id"]) == (1, "container-a")
+    assert (sent["generation"], sent["container_id"]) == (1, "container-aa")
 
     # Before runner-a answers, the chat goes on, runner-a is removed, and
     # runner-c restores the group from the checkpoint of its last stop.
@@ -601,8 +602,8 @@ async def test_an_import_answered_by_the_old_host_after_the_restore_changes_noth
     answered: list[int] = []
 
     class _OldHost:
-        async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
-            assert (row["generation"], row["container_id"]) == (1, "container-a")
+        async def import_shared_base(self, row, *, commit_sha: str, bundle):
+            assert (row["generation"], row["container_id"]) == (1, "container-aa")
             answered.append(row["generation"])
             return {"ok": True}
 
@@ -613,7 +614,7 @@ async def test_an_import_answered_by_the_old_host_after_the_restore_changes_noth
     monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", route)
 
     assert not await publish_worker._import_snapshot_base(
-        store, snapshot=sent, commit_sha=commit_sha, bundle=b"bundle"
+        store, snapshot=sent, commit_sha=commit_sha, bundle=io.BytesIO(b"bundle")
     )
     assert answered == [1]
 
@@ -649,7 +650,7 @@ async def test_a_stale_host_cannot_touch_a_rehomed_group(pool, store: Storage):
                 thread_id=job["thread_id"],
                 host="runner-a",
                 sandbox_id=group["sandbox_id"],
-                container_id="container-a",
+                container_id="container-aa",
                 sandbox_generation=1,
                 running=running,
             )
@@ -1229,7 +1230,7 @@ async def test_a_running_observation_drops_the_restore_point(pool, store: Storag
         thread_id=job["thread_id"],
         host="runner-a",
         sandbox_id=group["sandbox_id"],
-        container_id="container-a",
+        container_id="container-aa",
         sandbox_generation=1,
         running=True,
     )

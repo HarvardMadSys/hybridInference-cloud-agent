@@ -39,6 +39,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
+from weakref import WeakSet
 
 from cloud_agent.github_app import AppConfig, GitHubAppCredentials, GitHubAppError, build_app_jwt
 from cloud_agent.logging_utils import get_logger
@@ -165,7 +166,9 @@ class GitHubAppProvider:
         self._attempted_at: float | None = None
         self._unavailable_since: float | None = None
         self._closed = False
-        self._retired: list[GitHubAppCredentials] = []
+        # In-flight calls and scheduled pool closure own their generation.
+        # Track surviving consumers for shutdown without retaining old caches.
+        self._retired: WeakSet[GitHubAppCredentials] = WeakSet()
         # Requests resolve their dependencies on a thread pool, while the
         # publisher and the reaper ask from the event loop. One attempt at a
         # time; a caller that finds one in progress does not wait for it.
@@ -224,7 +227,7 @@ class GitHubAppProvider:
             previous, self._credentials = self._credentials, None
             if previous is not None:
                 previous.retire()
-                self._retired.append(previous)
+                self._retired.add(previous)
             self._env = env
             self._configured = bool((env.get(ENV_GITHUB_APP_ID) or "").strip())
             self._attempted_at = None
@@ -255,7 +258,7 @@ class GitHubAppProvider:
         credentials, self._credentials = self._credentials, None
         if credentials is not None:
             await credentials.aclose()
-        retired, self._retired = self._retired, []
+        retired, self._retired = list(self._retired), WeakSet()
         for previous in retired:
             await previous.aclose()
 

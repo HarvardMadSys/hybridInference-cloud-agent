@@ -22,6 +22,12 @@ def _archive(root, **kwargs) -> bytes:
     return out.getvalue()
 
 
+def _base_bundle(root, **kwargs) -> bytes:
+    with build_base_bundle(str(root), **kwargs) as bundle:
+        assert bundle.seekable()
+        return bundle.read()
+
+
 def _checkout(tmp_path):
     root = tmp_path / "checkout"
     (root / ".git").mkdir(parents=True)
@@ -180,7 +186,7 @@ def test_base_bundle_contains_exact_commit_and_is_bounded(tmp_path):
         text=True,
     ).stdout.strip()
 
-    payload = build_base_bundle(str(root), commit=commit)
+    payload = _base_bundle(root, commit=commit)
     bundle = tmp_path / "base.bundle"
     bundle.write_bytes(payload)
     listed = subprocess.run(
@@ -244,8 +250,8 @@ def test_base_bundle_after_a_prerequisite_carries_only_what_the_commit_adds(tmp_
     _git("commit", "--quiet", "-am", "change", cwd=root)
     commit = _git("rev-parse", "HEAD", cwd=root)
 
-    whole = build_base_bundle(str(root), commit=commit)
-    thin = build_base_bundle(str(root), commit=commit, prerequisite=base)
+    whole = _base_bundle(root, commit=commit)
+    thin = _base_bundle(root, commit=commit, prerequisite=base)
 
     assert len(whole) > 512 * 1024
     assert len(thin) < 4096

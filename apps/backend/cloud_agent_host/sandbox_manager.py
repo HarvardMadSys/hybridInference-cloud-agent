@@ -39,6 +39,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cloud_agent_host import sandbox_manager_profiling_policy
+from cloud_agent_host.base_bundle_request import bind_base_bundle_reader
 from cloud_agent_host.bounded_output import OutputPump
 from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
@@ -83,9 +84,7 @@ from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveConfigError
 from cloud_agent_host.sandbox_archives import safe_archive_error_type
 from cloud_agent_host.sandbox_checkpoints import (
     DEFAULT_CONTAINERD_CONTENT_DIR,
-    CheckpointRestore,
     SandboxCheckpointCapture,
-    SandboxCheckpointError,
     SandboxCheckpointStore,
 )
 from cloud_agent_host.sandbox_deletion_backup import (
@@ -110,7 +109,13 @@ from cloud_agent_host.shared_session_supervisor import (
 )
 from cloud_agent_host.tool_windows import ToolWindowTracker, attribute, tool_time_ms
 from cloud_agent_host.workspace_download import write_workspace_download
-from cloud_agent_shared.git.source_archive import DEFAULT_MAX_BASE_BUNDLE_BYTES
+from cloud_agent_host.workspace_git import (
+    COMMIT_SHA as _COMMIT_SHA,
+    GIT_VIEW_ENV as _GIT_VIEW_ENV,
+    run_git as _workspace_git,
+    run_git_metadata as _workspace_git_metadata,
+)
+from cloud_agent_shared.git.base_bundle_stream import BASE_BUNDLE_STREAM_CAPABILITY
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,
     SANDBOX_MANAGER_SETTING_KEYS,
@@ -127,7 +132,11 @@ from cloud_agent_shared.sandbox_manager_wire import (
     SharedMember,
     member_manifest,
 )
-from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER, parse_start_fence
+from cloud_agent_shared.sandbox_restore import (
+    START_FENCE_HEADER,
+    CheckpointRestore,
+    parse_start_fence,
+)
 from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
 from cloud_agent_shared.workspace_browser import (
     WorkspacePathError,
@@ -167,55 +176,6 @@ TERMINAL_STREAM_WAIT_S = 15.0
 #: lifecycle calls.
 MAX_WORKSPACE_COMMANDS = 16
 MAX_WORKSPACE_COMMANDS_PER_WORKSPACE = 4
-_COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
-#: The Git view, and the shared-workspace snapshot that is the same capture,
-#: runs as the group UID against a ``.git/config`` any member can write. Git
-#: reads that file as instructions to run commands, and the view needs none of
-#: them: the fsmonitor daemon, hooks (``read-tree`` and ``add`` write an
-#: index, which fires ``post-index-change``), the signature check ``git log``
-#: makes under ``log.showSignature``, and the transport a partial clone's lazy
-#: fetch opens for a missing object (``remote.*.uploadpack``,
-#: ``core.sshCommand``, a remote helper). ``GIT_CONFIG_COUNT`` is command-line
-#: configuration, which outranks the repository's own and reaches every Git
-#: process the script starts, submodule ones included. An empty
-#: ``GIT_ALLOW_PROTOCOL`` allows no transport, whatever ``protocol.*.allow``
-#: says.
-_GIT_VIEW_ENV = {
-    "GIT_CONFIG_COUNT": "3",
-    "GIT_CONFIG_KEY_0": "core.fsmonitor",
-    "GIT_CONFIG_VALUE_0": "",
-    "GIT_CONFIG_KEY_1": "core.hooksPath",
-    "GIT_CONFIG_VALUE_1": "/dev/null",
-    "GIT_CONFIG_KEY_2": "log.showSignature",
-    "GIT_CONFIG_VALUE_2": "false",
-    "GIT_ALLOW_PROTOCOL": "",
-}
-
-#: Filter drivers are named by the repository, so they cannot be listed ahead
-#: of time: this reads the names configured when the script starts and empties
-#: each one, after which Git compares the file as it is. git-lfs's own driver,
-#: exactly as ``git lfs install`` writes it, is kept, so a smudged LFS file
-#: still compares equal to its committed pointer; the LFS extensions that
-#: driver would run are emptied with the rest. ``required`` is emptied for
-#: every driver, so an emptied one fails nothing. A subsection name cannot hold
-#: a newline, so one name per line is exact. Writers are stopped for a
-#: snapshot; for the live view this reads what a member left behind.
-_NEUTRALIZE_GIT_FILTERS = """set -f; IFS='
-'; n="${GIT_CONFIG_COUNT:-0}"
-for key in $(git config --name-only --get-regexp '^(filter|lfs[.]extension)[.]'); do
-  value=$(git config --get "$key")
-  case "$key=$value" in
-    'filter.lfs.clean=git-lfs clean -- %f') continue ;;
-    'filter.lfs.smudge=git-lfs smudge -- %f'|'filter.lfs.smudge=git-lfs smudge --skip -- %f')
-      continue ;;
-    'filter.lfs.process=git-lfs filter-process'|'filter.lfs.process=git-lfs filter-process --skip')
-      continue ;;
-  esac
-  export "GIT_CONFIG_KEY_$n=$key" "GIT_CONFIG_VALUE_$n="
-  n=$((n + 1))
-done
-export GIT_CONFIG_COUNT="$n"; unset IFS; set +f
-"""
 
 
 class _EndpointLifecycleCalls:
@@ -417,19 +377,13 @@ class TerminalResizeRequest(BaseModel):
 
 
 class TerminalCoordinationRequest(BaseModel):
-    """Worker fence plus the protected turn owning one suspension token."""
+    """The protected turn owning one suspension token.
 
-    lease_generation: int = Field(..., ge=1)
-    # Optional only for a previous-generation control plane during a rolling
-    # deploy. Current callers always send it so concurrent fork siblings hold
-    # independent suspension tokens in their shared workspace.
-    job_id: str | None = Field(None, min_length=1, max_length=128)
+    Each turn holds a token of its own, so concurrent fork siblings in one
+    shared workspace never thaw each other's suspension.
+    """
 
-
-class TerminalSettledRequest(BaseModel):
-    """Release only the terminal suspension owned by one settled turn."""
-
-    job_id: str | None = Field(None, min_length=1, max_length=128)
+    job_id: str = Field(..., min_length=1, max_length=128)
 
 
 class SharedLeaseRequest(BaseModel):
@@ -514,9 +468,9 @@ class SandboxArchiveDiscardRequest(BaseModel):
 
     request_id: str = Field(..., min_length=1, max_length=128)
     generation: int = Field(..., ge=1)
-    # Optional during a rolling deployment. New control planes include this
-    # durable identity so the broker can safely prove an already-absent target.
-    sandbox_id: str | None = Field(None, min_length=1, max_length=256)
+    # The durable identity that lets the sandbox manager prove an
+    # already-absent target.
+    sandbox_id: str = Field(..., min_length=1, max_length=256)
     expected_container_id: str = Field(..., min_length=1, max_length=256)
 
 
@@ -537,22 +491,8 @@ class SandboxArchiveUploadRequest(SandboxArchiveCommitRequest):
     ] = Field(..., min_length=4, max_length=4)
 
 
-class SharedSandboxRestoreRequest(BaseModel):
+class SharedSandboxRestoreRequest(CheckpointRestore):
     """The control plane's record of a moved group's checkpoint."""
-
-    checkpoint_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
-    object_key: str = Field(..., min_length=1, max_length=1024)
-    version_id: str | None = Field(None, max_length=1024)
-    sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
-    size_bytes: int = Field(..., gt=0)
-    base_image: str = Field(..., min_length=1, max_length=512)
-    format_version: int = Field(1, ge=1)
-
-    def restore(self) -> CheckpointRestore:
-        try:
-            return CheckpointRestore(**self.model_dump())
-        except SandboxCheckpointError as exc:
-            raise ValueError(str(exc)) from exc
 
 
 class SharedSandboxIdentityRequest(SharedGroupIdentity):
@@ -688,7 +628,9 @@ class SharedBaseImportRequest(SharedSandboxIdentityRequest):
 
     snapshot_id: int = Field(..., ge=1)
     commit_sha: str = Field(..., min_length=7, max_length=64)
-    bundle_b64: str = Field(..., min_length=1)
+
+
+_read_base_bundle_request = bind_base_bundle_reader(SharedBaseImportRequest.model_validate_json)
 
 
 class SharedInitialArchiveRequest(SharedSandboxIdentityRequest):
@@ -1236,7 +1178,6 @@ class _TerminalManager:
         self._sessions: dict[str, dict[str, _TerminalSession]] = {}
         self._suspended_workspaces: set[str] = set()
         self._workspace_suspensions: dict[str, set[str]] = {}
-        self._workspace_generations: dict[str, int] = {}
         self._lock = threading.RLock()
         # One workspace's suspensions, resumptions and creations still run one
         # at a time, but under a lock of that workspace's own, kept only while
@@ -1310,7 +1251,6 @@ class _TerminalManager:
             self._sessions.clear()
             self._suspended_workspaces.clear()
             self._workspace_suspensions.clear()
-            self._workspace_generations.clear()
         for session in sessions:
             try:
                 session.close(mark_activity=False)
@@ -1558,35 +1498,11 @@ class _TerminalManager:
             unlist(candidate)
         return unlisted
 
-    @staticmethod
-    def _suspension_key(job_id: str | None) -> str:
-        """Map the rolling-compatibility request onto one reserved token."""
-        return job_id or "__legacy_control_plane__"
-
-    def suspend(
-        self,
-        workspace_id: str,
-        *,
-        lease_generation: int,
-        job_id: str | None = None,
-    ) -> dict[str, Any]:
+    def suspend(self, workspace_id: str, *, job_id: str) -> dict[str, Any]:
         """Freeze PTYs and retain one independent token per protected turn."""
         with self._serialized(workspace_id):
             with self._lock:
-                if job_id is None:
-                    # Previous control planes did not identify the turn.
-                    # Preserve their monotonic check only for that
-                    # compatibility token; current sibling turns must not
-                    # fence one another by their unrelated, per-job lease
-                    # generations.
-                    current_generation = self._workspace_generations.get(workspace_id, 0)
-                    if lease_generation < current_generation:
-                        raise HTTPException(
-                            status_code=409, detail="stale terminal workspace fence"
-                        )
-                    self._workspace_generations[workspace_id] = lease_generation
-                key = self._suspension_key(job_id)
-                self._workspace_suspensions.setdefault(workspace_id, set()).add(key)
+                self._workspace_suspensions.setdefault(workspace_id, set()).add(job_id)
                 # From here no terminal of this workspace takes input or opens.
                 self._suspended_workspaces.add(workspace_id)
                 sessions = list(self._sessions.get(workspace_id, {}).values())
@@ -1600,90 +1516,46 @@ class _TerminalManager:
                 ) from exc
         return {"ok": True, "suspended": len(sessions)}
 
-    def resume(
-        self,
-        workspace_id: str,
-        *,
-        lease_generation: int,
-        job_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Release one turn token and resume PTYs only after the last release."""
-        with self._serialized(workspace_id):
-            return self._resume_serialized(
-                workspace_id, lease_generation=lease_generation, job_id=job_id
-            )
+    def resume(self, workspace_id: str, *, job_id: str) -> dict[str, Any]:
+        """Release one turn token and resume PTYs only after the last release.
 
-    def _resume_serialized(
-        self,
-        workspace_id: str,
-        *,
-        lease_generation: int,
-        job_id: str | None,
-    ) -> dict[str, Any]:
-        """Resume under this workspace's own lock, which the caller holds."""
-        with self._lock:
-            if job_id is None:
-                current_generation = self._workspace_generations.get(workspace_id, 0)
-                if lease_generation < current_generation:
-                    raise HTTPException(status_code=409, detail="stale terminal workspace fence")
-                self._workspace_generations[workspace_id] = lease_generation
-            key = self._suspension_key(job_id)
-            suspensions = self._workspace_suspensions.get(workspace_id)
-            if not suspensions or key not in suspensions:
-                return {"ok": True, "resumed": 0}
-            suspensions.remove(key)
-            if suspensions:
-                return {"ok": True, "resumed": 0}
-            sessions = list(self._sessions.get(workspace_id, {}).values())
-        # The workspace stays fenced until every PTY has resumed: no terminal
-        # of it takes input or opens before then.
-        attempted: list[_TerminalSession] = []
-        try:
-            for session in sessions:
-                attempted.append(session)
-                session.resume()
-        except (SandboxError, OSError) as exc:
-            # Restore every PTY already resumed in this batch. A retry must
-            # see both the logical workspace fence and the actual processes
-            # suspended; otherwise one shell could mutate the shared tree
-            # inside a quiescent capture after a sibling's resume failed.
-            for session in attempted:
-                with contextlib.suppress(SandboxError, OSError):
-                    session.suspend()
-            with self._lock:
-                suspensions.add(key)
-            raise HTTPException(
-                status_code=503,
-                detail="terminal resume could not be confirmed; retry resume",
-            ) from exc
-        with self._lock:
-            self._workspace_suspensions.pop(workspace_id, None)
-            self._suspended_workspaces.discard(workspace_id)
-        return {"ok": True, "resumed": len(sessions)}
-
-    def resume_settled(
-        self,
-        workspace_id: str,
-        *,
-        job_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Release one settled turn without disturbing a concurrent sibling."""
-        # Generation is irrelevant for a terminal job. The reserved legacy
-        # token is the only state an old control plane may release; a new
-        # request names its job and therefore cannot thaw another member.
+        A token the turn does not hold is released as a no-op, so a settled
+        turn's release after its own resume, or a sibling's, thaws nothing.
+        """
         with self._serialized(workspace_id):
             with self._lock:
-                legacy_generation = max(1, self._workspace_generations.get(workspace_id, 0))
-            result = self._resume_serialized(
-                workspace_id,
-                lease_generation=legacy_generation,
-                job_id=job_id,
-            )
-            if job_id is None:
-                # Lease generations restart at one for the next platform job.
+                suspensions = self._workspace_suspensions.get(workspace_id)
+                if not suspensions or job_id not in suspensions:
+                    return {"ok": True, "resumed": 0}
+                suspensions.remove(job_id)
+                if suspensions:
+                    return {"ok": True, "resumed": 0}
+                sessions = list(self._sessions.get(workspace_id, {}).values())
+            # The workspace stays fenced until every PTY has resumed: no terminal
+            # of it takes input or opens before then.
+            attempted: list[_TerminalSession] = []
+            try:
+                for session in sessions:
+                    attempted.append(session)
+                    session.resume()
+            except (SandboxError, OSError) as exc:
+                # Restore every PTY already resumed in this batch. A retry must
+                # see both the logical workspace fence and the actual processes
+                # suspended; otherwise one shell could mutate the shared tree
+                # inside a quiescent capture after a sibling's resume failed.
+                for session in attempted:
+                    with contextlib.suppress(SandboxError, OSError):
+                        session.suspend()
                 with self._lock:
-                    self._workspace_generations.pop(workspace_id, None)
-            return result
+                    suspensions.add(job_id)
+                raise HTTPException(
+                    status_code=503,
+                    detail="terminal resume could not be confirmed; retry resume",
+                ) from exc
+            with self._lock:
+                self._workspace_suspensions.pop(workspace_id, None)
+                self._suspended_workspaces.discard(workspace_id)
+            return {"ok": True, "resumed": len(sessions)}
 
     def list(self, workspace_id: str) -> list[dict[str, Any]]:
         """List visible terminals for one workspace only."""
@@ -1962,106 +1834,33 @@ def _run_git(
     max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
     exact_patch: bool = False,
 ) -> dict[str, Any]:
-    if base_sha and not _COMMIT_SHA.fullmatch(base_sha):
-        raise HTTPException(status_code=400, detail="base SHA is not a commit hash")
-    target = base_sha or "HEAD"
-    marker = secrets.token_hex(16)
-    status_tag = f"__HYI_{marker}_STATUS__"
-    diff_tag = f"__HYI_{marker}_DIFF__"
-    commits_tag = f"__HYI_{marker}_COMMITS__"
-    # Whether a submodule is dirty is answered by running Git inside it, under
-    # that submodule's own configuration, which none of the overrides here
-    # can name. So only its checked-out commit is read: ``status`` and
-    # ``diff`` are told so, and ``add -A`` (which takes no such option) is
-    # kept off every submodule by pathspec; its entry already holds the
-    # target's commit. The patch loses only the ``-dirty`` mark, which
-    # ``git apply`` cannot use. ``--submodule=short`` keeps that one form
-    # whatever ``diff.submodule`` says, and starts no Git in a submodule.
-    # The browser reads each file's name from its ``a/`` and ``b/`` header,
-    # and the publisher applies a snapshot at ``-p1``, so the prefixes are
-    # named too: ``diff.noPrefix`` would leave a name with nothing to strip,
-    # and ``diff.mnemonicPrefix`` writes ``c/`` and ``w/``. Options on the
-    # command line outrank either, on every Git version. ``--no-color`` keeps
-    # the escape codes ``color.ui=always`` would write out of the same text,
-    # and ``--unified=3`` the context ``git apply`` will not apply without,
-    # which ``diff.context=0`` would leave out.
-    script = _NEUTRALIZE_GIT_FILTERS + (
-        "git --no-pager status --porcelain=v1 --branch --ignore-submodules=dirty; "
-        "status_status=$?; "
-        f"printf '\n{diff_tag}\n'; "
-        'index_path="${TMPDIR:-/tmp}/hyi-browser-index.$$"; '
-        'rm -f "$index_path"; trap \'rm -f "$index_path"\' EXIT; '
-        f'GIT_INDEX_FILE="$index_path" git read-tree {target} && '
-        "{ printf '.\\0'; GIT_INDEX_FILE=\"$index_path\" git ls-files -z --stage | "
-        "sed -z -n 's/^160000 [0-9a-f]* [0-3]\\t/:(exclude,literal)/p'; } | "
-        'GIT_INDEX_FILE="$index_path" git add -A -N --pathspec-from-file=- '
-        "--pathspec-file-nul >/dev/null 2>&1 && "
-        f'GIT_INDEX_FILE="$index_path" git --no-pager diff --no-ext-diff --no-textconv '
-        "--no-color --src-prefix=a/ --dst-prefix=b/ --unified=3 "
-        f"--ignore-submodules=dirty --submodule=short --binary {target}; diff_status=$?; "
-        f"printf '\n{commits_tag}\n'; "
-        "git --no-pager log -20 --pretty=format:'%H%x09%h%x09%s%x09%an%x09%aI'; "
-        "log_status=$?; overall_status=$status_status; "
-        '[ "$overall_status" -eq 0 ] && overall_status=$diff_status; '
-        '[ "$overall_status" -eq 0 ] && overall_status=$log_status; '
-        f"printf '\n{status_tag}%s\n' \"$overall_status\""
-    )
-    process_status, stdout, stderr = _run_sandbox(
+    return _workspace_git(
+        _run_sandbox,
         backend,
-        workdir=workdir,
-        script=script,
-        # Inspection must never take the shared index.lock: git status would
-        # otherwise refresh and rewrite /workspace/.git/index, failing an
-        # agent's or the runner's concurrent git add or commit.
-        env={**_GIT_VIEW_ENV, "GIT_OPTIONAL_LOCKS": "0"},
+        workdir,
+        base_sha,
+        timeout_s=timeout_s,
+        max_output_bytes=max_output_bytes,
+        exact_patch=exact_patch,
+    )
+
+
+def _run_git_metadata(
+    backend: SandboxBackend,
+    workdir: Path | str,
+    base_sha: str | None = None,
+    *,
+    timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S,
+    max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
+) -> dict[str, Any]:
+    return _workspace_git_metadata(
+        _run_sandbox,
+        backend,
+        workdir,
+        base_sha,
         timeout_s=timeout_s,
         max_output_bytes=max_output_bytes,
     )
-    status_text, separator, remainder = stdout.partition(f"\n{diff_tag}\n")
-    if not separator:
-        raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    patch, separator, commits_and_status = remainder.partition(f"\n{commits_tag}\n")
-    if not separator:
-        raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    commits_text, _, git_status_text = commits_and_status.rpartition(f"\n{status_tag}")
-    try:
-        git_status = int(git_status_text.strip().splitlines()[0])
-    except (ValueError, IndexError):
-        git_status = process_status
-    if git_status != 0:
-        raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    if exact_patch and "\ufffd" in patch:
-        # Command output is decoded with replacement, so a byte that is not
-        # UTF-8 arrives here as U+FFFD: a captured patch holding one would
-        # restore different bytes than the workspace holds. A file that really
-        # contains U+FFFD cannot be told apart from that and is refused too.
-        raise HTTPException(status_code=502, detail="workspace patch is not exact UTF-8 text")
-
-    status_lines = [line for line in status_text.splitlines() if line]
-    branch = ""
-    if status_lines and status_lines[0].startswith("## "):
-        branch = status_lines.pop(0)[3:].split("...", 1)[0]
-    changes = [{"code": line[:2], "path": line[3:]} for line in status_lines if len(line) >= 4]
-    commits = []
-    for line in commits_text.splitlines():
-        parts = line.split("\t", 4)
-        if len(parts) == 5:
-            commits.append(
-                {
-                    "sha": parts[0],
-                    "short_sha": parts[1],
-                    "subject": parts[2],
-                    "author": parts[3],
-                    "authored_at": parts[4],
-                }
-            )
-    return {
-        "available": True,
-        "branch": branch,
-        "changes": changes,
-        "patch": patch,
-        "commits": commits,
-    }
 
 
 def _terminal_sse_frame(event: _TerminalEvent) -> str:
@@ -2574,6 +2373,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 ENVIRONMENT_CAPABILITY,
                 ENVIRONMENT_INFERENCE_CAPABILITY,
                 SSH_ACCESS_CAPABILITY,
+                BASE_BUNDLE_STREAM_CAPABILITY,
                 *(
                     [ENVIRONMENT_SNAPSHOT_CAPABILITY]
                     if getattr(archive_controller, "snapshots_available", False)
@@ -2804,7 +2604,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 expected_container_id=body.expected_container_id,
                 profiling=body.profiling,
                 start_seq=body.start_seq,
-                restore=None if body.restore is None else body.restore.restore(),
+                restore=None if body.restore is None else body.restore.require_supported(),
                 **(
                     {"environment_snapshot": body.environment_snapshot}
                     if body.environment_snapshot is not None
@@ -3586,17 +3386,12 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     @app.post("/shared-sandboxes/{thread_id}/import-base")
     async def import_shared_workspace_base(
         thread_id: str,
-        body: SharedBaseImportRequest,
+        request: Request,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
         """Import a trusted publisher commit object without checkout/reset."""
         owner = require_shared_supervisor()
-        try:
-            bundle = base64.b64decode(body.bundle_b64, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise HTTPException(status_code=422, detail="base bundle is not valid base64") from exc
-        if len(bundle) > DEFAULT_MAX_BASE_BUNDLE_BYTES:
-            raise HTTPException(status_code=413, detail="base bundle exceeds the import limit")
+        body, bundle = await _read_base_bundle_request(request)
         try:
             await endpoint_calls.run(
                 owner.register_manifest,
@@ -3625,6 +3420,8 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 await endpoint_calls.run(owner.operation_closed, thread_id, token)
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc
+        finally:
+            bundle.close()
         return {
             "ok": True,
             "snapshot_id": body.snapshot_id,
@@ -3651,7 +3448,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         try:
             owner = require_shared_supervisor()
             shared_descriptors = (
-                await endpoint_calls.run(owner.list)
+                await endpoint_calls.run(owner.list, background_recovery=True)
                 if thread_id is None
                 else await endpoint_calls.run(owner.list_for_thread, thread_id)
             )
@@ -3971,12 +3768,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
         scope = await endpoint_calls.run(terminal_scope, workspace_id)
-        return await endpoint_calls.run(
-            terminals.suspend,
-            scope,
-            lease_generation=body.lease_generation,
-            job_id=body.job_id,
-        )
+        return await endpoint_calls.run(terminals.suspend, scope, job_id=body.job_id)
 
     @app.post("/workspaces/{workspace_id}/terminals/resume")
     async def resume_terminals(
@@ -3985,25 +3777,18 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
         scope = await endpoint_calls.run(terminal_scope, workspace_id)
-        return await endpoint_calls.run(
-            terminals.resume,
-            scope,
-            lease_generation=body.lease_generation,
-            job_id=body.job_id,
-        )
+        return await endpoint_calls.run(terminals.resume, scope, job_id=body.job_id)
 
     @app.post("/workspaces/{workspace_id}/terminals/resume-settled")
     async def resume_settled_terminals(
         workspace_id: str,
-        body: TerminalSettledRequest | None = None,
+        body: TerminalCoordinationRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
+        # A settled turn releases its own token like any other resume; a
+        # concurrent sibling's suspension stays in force.
         scope = await endpoint_calls.run(terminal_scope, workspace_id)
-        return await endpoint_calls.run(
-            terminals.resume_settled,
-            scope,
-            job_id=body.job_id if body is not None else None,
-        )
+        return await endpoint_calls.run(terminals.resume, scope, job_id=body.job_id)
 
     @app.get("/workspaces/{workspace_id}/terminals")
     async def list_terminals(
@@ -4121,11 +3906,13 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         workspace_id: str,
         request: Request,
         base_sha: str | None = Query(None, max_length=64),
+        metadata: bool = False,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
+        operation = _run_git_metadata if metadata else _run_git
         return await owner_command(
             workspace_id,
-            lambda retained, _call: _run_git(
+            lambda retained, _call: operation(
                 retained,
                 "/workspace",
                 base_sha,

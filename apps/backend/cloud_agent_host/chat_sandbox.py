@@ -39,7 +39,7 @@ import time
 import tty
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host import chat_sandbox_markers as markers
+from cloud_agent_host import chat_sandbox_markers as markers, chat_sandbox_writers as writers
 from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines, text_chunks
 from cloud_agent_host.chat_sandbox_markers import (
     FINAL_ARCHIVE_MARKER_MAX_BYTES,
@@ -50,6 +50,7 @@ from cloud_agent_host.chat_sandbox_markers import (
     SETUP_MARKER_MAX_BYTES,
 )
 from cloud_agent_host.chat_sandbox_models import (
+    ACTIVATION_TMPFS as ACTIVATION_TMPFS,
     CHAT_CHECKPOINT_LABEL as CHAT_CHECKPOINT_LABEL,
     CHAT_CONTAINER_PREFIX as CHAT_CONTAINER_PREFIX,
     CHAT_CPU_LIMIT_LABEL as CHAT_CPU_LIMIT_LABEL,
@@ -74,6 +75,7 @@ from cloud_agent_host.chat_sandbox_models import (
     CHAT_STOP_TIMEOUT_LABEL as CHAT_STOP_TIMEOUT_LABEL,
     CHAT_THREAD_LABEL as CHAT_THREAD_LABEL,
     ENVIRONMENT_TEST_LABEL as ENVIRONMENT_TEST_LABEL,
+    MEMBER_TMPFS_ROOT as MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE as MEMBER_UID_BASE,
     MEMBER_UID_LIMIT as MEMBER_UID_LIMIT,
     ArchiveExportTooLarge as ArchiveExportTooLarge,
@@ -123,6 +125,7 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
 )
 from cloud_agent_host.sandbox_checkpoints import checkpoint_image_reference
+from cloud_agent_host.stream_input import interactive_input, require_nonempty_rewindable
 from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
 from cloud_agent_shared.environment import (
     DOCKER_CLIENT_ENV as _DOCKER_CLIENT_ENV,
@@ -134,7 +137,7 @@ from cloud_agent_shared.operation_profiling import StageObserver, substage
 
 if TYPE_CHECKING:
     import builtins
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterator
     from typing import BinaryIO
 
     from _typeshed import SupportsWrite
@@ -188,12 +191,6 @@ SHARED_WORKSPACE_PERMISSIONS_SCRIPT = (
     '-o \\( -type f -uid "$me" -exec chmod g+rw -- {} + \\); '
     f"git -C {CHAT_WORKDIR} config core.sharedRepository group"
 )
-ACTIVATION_TMPFS = "/run/agent-activation"
-MEMBER_TMPFS_ROOT = "/run/agent-members"
-#: Seconds a shared-writer census may hold writers stopped before it gives up
-#: and resumes them itself. Its exec allows 20, which leaves that resume time to
-#: finish before the host stops waiting for the census's reply.
-_SHARED_WRITER_CENSUS_BUDGET_S = 10
 #: This module is a library boundary: it reports what it observed and
 #: leaves the decision to the caller, so a warning here is the only
 #: record an operator gets of a partially capable guest.
@@ -407,103 +404,18 @@ class ChatSandboxManager:
 
     # ── the group network ──────────────────────────────────────────────
     #
-    # Delegates preserve the manager surface. The network component owns the
-    # routable bridge per sandbox group, used by setup, the agent and every
-    # fork member alike, named from the group's identity and guarded on the
-    # host by the deployment's rule set (cloud_agent_shared.egress). Docker
-    # routes and masquerades it; the host's rules decide what it reaches. The
-    # only other endpoints on it are the two relays, copied from the relay
-    # network, and the host holds an exact exception for each of them.
+    # The network component owns the routable bridge per sandbox group, used
+    # by setup, the agent and every fork member alike, named from the group's
+    # identity and guarded on the host by the deployment's rule set
+    # (cloud_agent_shared.egress). Docker routes and masquerades it; the host's
+    # rules decide what it reaches. The only other endpoints on it are the two
+    # relays, copied from the relay network, and the host holds an exact
+    # exception for each of them.
 
-    def network_for(self, spec: ChatSandboxSpec) -> str:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.network_for(spec)
-
-    def relay_addresses(self, network: str) -> dict[str, str]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.relay_addresses(network)
-
-    def _sync_kata_guest_network(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        addresses: dict[str, str] | None = None,
-    ) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._sync_kata_guest_network(spec, current, addresses)
-
-    def sync_ssh_targets(self, spec: ChatSandboxSpec, endpoints: set[tuple[str, int]]) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.sync_ssh_targets(spec, endpoints)
-
-    def require_host_rules(self) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.require_host_rules()
-
-    def renew_host_rules(self) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.renew_host_rules()
-
-    def _release_owned_network(
-        self,
-        network_name: str,
-        spec: ChatSandboxSpec,
-        *,
-        only_if_sandbox_unattached: bool = False,
-        expected_network_id: str | None = None,
-        expected_container_id: str | None = None,
-    ) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._release_owned_network(
-            network_name,
-            spec,
-            only_if_sandbox_unattached=only_if_sandbox_unattached,
-            expected_network_id=expected_network_id,
-            expected_container_id=expected_container_id,
-        )
-
-    def _release_sandbox_networks(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        *,
-        expected_container_id: str | None = None,
-    ) -> ChatSandboxInspection:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._release_sandbox_networks(
-            spec, current, expected_container_id=expected_container_id
-        )
-
-    def prune_orphan_networks(self, specs: builtins.list[ChatSandboxSpec]) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.prune_orphan_networks(specs)
-
-    def _require_group_network(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        snapshot: _GroupNetworkSnapshot | None = None,
-    ) -> ChatSandboxInspection:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._require_group_network(spec, current, snapshot)
-
-    def _verify_guest_network(
-        self,
-        spec: ChatSandboxSpec,
-        *,
-        expected_container_id: str | None = None,
-        defer_network_release: bool = False,
-    ) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._verify_guest_network(
-            spec,
-            expected_container_id=expected_container_id,
-            defer_network_release=defer_network_release,
-        )
-
-    def verify_host_rules(self, running: Sequence[ChatSandboxSpec] = ()) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.verify_host_rules(running)
+    @property
+    def network(self) -> ChatSandboxNetwork:
+        """Expose the group-network lifecycle owner to host collaborators."""
+        return self._network_lifecycle
 
     def require_docker_data_root(self, expected: str) -> str:
         """Verify retained state is owned by the intended Docker data root.
@@ -690,7 +602,7 @@ class ChatSandboxManager:
         cannot show them refuses before any container exists.
         """
         with substage(observer, "host_rules"):
-            self.require_host_rules()
+            self._network_lifecycle.require_host_rules()
         existing = self.inspect(spec.container_name)
         if existing is not None:
             # Idempotent adoption, not a creation. No action is noted here:
@@ -980,7 +892,7 @@ class ChatSandboxManager:
             if network_name in {CHAT_NULL_NETWORK, CHAT_BOOTSTRAP_NETWORK}:
                 continue
             try:
-                self._release_owned_network(
+                self._network_lifecycle._release_owned_network(
                     network_name,
                     spec,
                     only_if_sandbox_unattached=True,
@@ -1146,8 +1058,8 @@ class ChatSandboxManager:
         """Start the exact stopped container and verify it reached RUNNING.
 
         A cold start is also where the network is proved from inside: nothing
-        from the repository runs in a guest that has not passed
-        :meth:`_verify_guest_network`. A start that fails after ``docker
+        from the repository runs in a guest that has not passed the network
+        lifecycle's in-guest check. A start that fails after ``docker
         start`` stops its guest again; a running guest whose proof never
         finished is proved before it is reused.
         """
@@ -1157,7 +1069,9 @@ class ChatSandboxManager:
             raise RetainedChatLost("chat sandbox container identity changed before start")
         network_snapshot = _GroupNetworkSnapshot()
         with substage(observer, "group_network"):
-            current = self._require_group_network(spec, current, network_snapshot)
+            current = self._network_lifecycle._require_group_network(
+                spec, current, network_snapshot
+            )
         if current.container_id != exact_container_id:
             raise RetainedChatLost("chat sandbox container identity changed during start")
         if current.running:
@@ -1177,7 +1091,9 @@ class ChatSandboxManager:
                     addresses=network_snapshot.addresses,
                 )
             with substage(observer, "guest_network_sync"):
-                self._sync_kata_guest_network(spec, current, network_snapshot.addresses)
+                self._network_lifecycle._sync_kata_guest_network(
+                    spec, current, network_snapshot.addresses
+                )
             return current
         if current.status is ChatSandboxStatus.PAUSED:
             raise SandboxError("a paused chat sandbox is not a valid stopped activation")
@@ -1235,9 +1151,9 @@ class ChatSandboxManager:
                     f"chat sandbox started into unexpected state {started.status.value!r}"
                 )
             with substage(observer, "guest_network_sync"):
-                self._sync_kata_guest_network(spec, started, addresses)
+                self._network_lifecycle._sync_kata_guest_network(spec, started, addresses)
             with substage(observer, "guest_network_check"):
-                self._verify_guest_network(
+                self._network_lifecycle._verify_guest_network(
                     spec,
                     expected_container_id=container_id,
                     defer_network_release=defer_network_release,
@@ -1337,7 +1253,7 @@ class ChatSandboxManager:
             raise RetainedChatLost("chat sandbox container identity changed during stop")
         if current.running:
             raise SandboxError("refusing to release networking from a running chat sandbox")
-        released = self._release_sandbox_networks(
+        released = self._network_lifecycle._release_sandbox_networks(
             spec,
             current,
             expected_container_id=expected_container_id,
@@ -1360,8 +1276,10 @@ class ChatSandboxManager:
         """
         snapshot = _GroupNetworkSnapshot()
         with substage(observer, "network_ensure"):
-            current = self._require_group_network(spec, self._require(spec), snapshot)
-        expected = self.network_for(spec)
+            current = self._network_lifecycle._require_group_network(
+                spec, self._require(spec), snapshot
+            )
+        expected = self._network_lifecycle.network_for(spec)
         if set(current.networks) != {expected}:
             raise SandboxError(
                 f"retained chat network is {list(current.networks)!r}, not its group "
@@ -1375,7 +1293,7 @@ class ChatSandboxManager:
                 "activated again before anything runs in it"
             )
         with substage(observer, "guest_network_sync"):
-            self._sync_kata_guest_network(spec, current, snapshot.addresses)
+            self._network_lifecycle._sync_kata_guest_network(spec, current, snapshot.addresses)
 
     def build_exec_command(
         self,
@@ -1947,57 +1865,9 @@ class ChatSandboxManager:
                 + result.stderr.decode("utf-8", "replace")[:300]
             )
 
-    @staticmethod
-    def _shared_writer_task_state_script() -> str:
-        """Classify a complete thread group, failing closed on census races.
-
-        A zombie group leader may still have live worker threads. Check every
-        task and match both surrounding thread counts. Exited nonleaders make
-        the census ambiguous: another task may replace them without changing
-        the count. Only a sole dead leader proves the group has exited.
-        """
-        return (
-            "writer_state() { proc=$1; seen=0; live=0; stopped=1; "
-            'threads=$(sed -n "s/^Threads:[[:space:]]*//p" "$proc/status" 2>/dev/null || :); '
-            'case "$threads" in ""|0|*[!0-9]*) printf "%s" unknown; return;; esac; '
-            'for task in "$proc"/task/[0-9]*; do '
-            'raw=$(cat "$task/stat" 2>/dev/null || :); fields=${raw##*) }; '
-            'state=$(set -- $fields; printf "%s" "${1:-}"); '
-            'case "$state" in Z|X|x) '
-            'if [ "${task##*/}" != "${proc##*/}" ]; then '
-            'printf "%s" unknown; return; fi;; T|t) live=1;; '
-            '"") printf "%s" unknown; return;; *) live=1; stopped=0;; esac; '
-            "seen=$((seen + 1)); done; "
-            'current_threads=$(sed -n "s/^Threads:[[:space:]]*//p" '
-            '"$proc/status" 2>/dev/null || :); '
-            'if [ "$threads" != "$seen" ] || [ "$current_threads" != "$seen" ]; then '
-            'printf "%s" unknown; elif [ "$live" = 0 ]; then '
-            'if [ "$seen" = 1 ]; then printf "%s" exited; else printf "%s" unknown; fi; '
-            'elif [ "$stopped" = 1 ]; then printf "%s" stopped; '
-            'else printf "%s" running; fi; }; '
-        )
-
     def _operation_writer_uids(self, spec: ChatSandboxSpec) -> builtins.list[int]:
         """Enumerate active operation identities without reading their environments."""
-        script = """import os
-# AGENT_OPERATION_UID_CENSUS
-uids=set()
-for name in os.listdir('/proc'):
- if not name.isdigit(): continue
- try: uids.add(os.stat('/proc/'+name).st_uid)
- except FileNotFoundError: pass
-print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or 31000<=uid<31064))
-"""
-        result = self.exec_capture(spec, ["python3", "-c", script], workdir="/", timeout_s=10)
-        if result.returncode:
-            raise SandboxError("Environment writer census could not be verified")
-        try:
-            uids = [int(value) for value in result.stdout.decode().split()]
-        except ValueError:
-            raise SandboxError("Invalid environment writer census") from None
-        if any(uid not in (*ENVIRONMENT_UIDS, *ACTION_UIDS) for uid in uids):
-            raise SandboxError("Unexpected environment writer identity")
-        return uids
+        return writers.operation_writer_uids(self, spec)
 
     def freeze_shared_writers(
         self,
@@ -2015,157 +1885,13 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         Git capture exec starts after this census and is the sole new writer;
         admissions remain blocked by the supervisor until thaw completes.
         """
-        if not re.fullmatch(r"[0-9a-f]{32}", token):
-            raise ValueError("snapshot freeze token is invalid")
-        unique_slots = sorted(set(slot_ids))
-        if any(slot < 0 or slot >= spec.resident_slot_capacity for slot in unique_slots):
-            raise ValueError("snapshot member slot is outside sandbox capacity")
-        if expected_container_id is not None:
-            self._require_exact(spec, expected_container_id)
-        manifest = f"{ACTIVATION_TMPFS}/snapshot-{token}.pids"
-        target_uids = [
-            self.backend.uid,
-            *self._operation_writer_uids(spec),
-            *(MEMBER_UID_BASE + slot for slot in unique_slots),
-        ]
-        # The container drops every capability.  Even UID 0 therefore cannot
-        # signal a process owned by a member UID; CAP_KILL is intentionally not
-        # added back.  Run one census as each identity instead.  Repeating the
-        # census until every observed process is stopped closes the race where
-        # an idle CLI background process forks while /proc is being scanned.
-        # Exclude only fully exited thread groups: a zombie leader can retain
-        # live workers, and the leader stays Z even when SIGSTOP stops them.
-        #
-        # A process already stopped when the census first sees it was stopped
-        # on purpose, such as an owner terminal the Sandbox Manager suspended.
-        # It counts as frozen but enters neither receipt, so neither the thaw
-        # nor recovery resumes it; the manifest marks it only so that the
-        # exact thaw census knows it.  Like any newly seen process it costs
-        # another round, since it may have forked while the round scanned,
-        # and seen running in a later round it is frozen as a writer.
-        #
-        # The host can lose a reply after its census stopped writers: the exec
-        # times out, or its transport fails while the guest carries on.  Once
-        # it has stopped anything, the census therefore gives up at its own
-        # deadline, well inside the exec timeout, and resumes through its trap.
-        # It also keeps its receipt in the identity's private tmpfs, naming
-        # itself first and recording each writer before stopping it, so that
-        # recovery resumes the processes its trap or the thaw would.  Resuming
-        # every stopped process of the identity instead would also wake ones
-        # stopped on purpose meanwhile, such as a suspended terminal.
-        script = self._shared_writer_task_state_script() + (
-            'set -eu; expected_uid="$1"; committed=0; receipt=""; already=""; receipt_file="$2"; '
-            "resume_receipt() { "
-            '[ "$committed" = 0 ] || return 0; '
-            "for item in $receipt; do pid=${item%%:*}; started=${item#*:}; "
-            'uid=$(stat -c %u "/proc/$pid" 2>/dev/null || :); '
-            'raw=$(cat "/proc/$pid/stat" 2>/dev/null || :); fields=${raw##*) }; '
-            'current=$(set -- $fields; printf "%s" "${20:-}"); '
-            '[ "$uid" = "$expected_uid" ] && [ "$current" = "$started" ] '
-            '&& kill -CONT "$pid" 2>/dev/null || :; done; }; '
-            "trap resume_receipt EXIT; trap 'exit 46' HUP INT TERM; round=0; "
-            "read -r now _ < /proc/uptime; deadline=$((${now%%.*} + $3)); "
-            'in_time() { read -r now _ < /proc/uptime; [ "${now%%.*}" -lt "$deadline" ]; }; '
-            'raw=$(cat "/proc/$$/stat"); fields=${raw##*) }; '
-            'started=$(set -- $fields; printf "%s" "${20:-}"); '
-            'printf "%s:%s\\n" "$$" "$started" > "$receipt_file"; '
-            "while :; do round=$((round + 1)); stable=1; "
-            'for proc in /proc/[0-9]*; do [ -z "$receipt" ] || in_time || exit 47; '
-            "pid=${proc##*/}; "
-            '[ "$pid" != 1 ] && [ "$pid" != "$$" ] || continue; '
-            'uid=$(stat -c %u "$proc" 2>/dev/null || :); '
-            '[ "$uid" = "$expected_uid" ] || continue; '
-            'raw=$(cat "$proc/stat" 2>/dev/null || :); fields=${raw##*) }; '
-            'state=$(writer_state "$proc"); [ "$state" != exited ] || continue; '
-            'started=$(set -- $fields; printf "%s" "${20:-}"); '
-            'case "$started" in ""|*[!0-9]*) continue;; esac; item="$pid:$started"; '
-            'case " $receipt " in *" $item "*) '
-            'case "$state" in stopped) ;; *) kill -STOP "$pid" 2>/dev/null || continue; '
-            'stable=0;; esac;; *) case "$state" in stopped) case " $already " in '
-            '*" $item "*) ;; *) already="$already $item"; stable=0;; esac;; '
-            '*) printf "%s\\n" "$item" >> "$receipt_file"; '
-            'kill -STOP "$pid" 2>/dev/null || continue; '
-            'receipt="$receipt $item"; stable=0;; esac;; esac; done; '
-            '[ "$stable" = 1 ] && break; [ "$round" -lt 64 ] || exit 45; done; '
-            '[ -z "$receipt" ] || in_time || exit 47; '
-            "for item in $receipt; do pid=${item%%:*}; started=${item#*:}; "
-            'printf "%s %s %s\\n" "$pid" "$expected_uid" "$started"; done; '
-            'for item in $already; do case " $receipt " in *" $item "*) continue;; esac; '
-            "pid=${item%%:*}; started=${item#*:}; "
-            'printf "%s %s %s stopped\\n" "$pid" "$expected_uid" "$started"; done; '
-            "committed=1"
+        return writers.freeze(
+            self,
+            spec,
+            slot_ids=slot_ids,
+            token=token,
+            expected_container_id=expected_container_id,
         )
-        frozen: builtins.list[tuple[int, int, int]] = []
-        already_stopped: builtins.list[tuple[int, int, int]] = []
-        try:
-            for uid in target_uids:
-                result = self.exec_capture(
-                    spec,
-                    [
-                        "/bin/sh",
-                        "-c",
-                        script,
-                        "sh",
-                        str(uid),
-                        self._writer_receipt_path(spec, uid, token),
-                        str(_SHARED_WRITER_CENSUS_BUDGET_S),
-                    ],
-                    workdir="/",
-                    timeout_s=20,
-                    user_uid=uid,
-                    user_gid=self.backend.gid,
-                    expected_container_id=expected_container_id,
-                )
-                if result.returncode != 0:
-                    raise SandboxError(
-                        "shared snapshot writer freeze failed: "
-                        + result.stderr.decode("utf-8", "replace")[:300]
-                    )
-                census_frozen, census_stopped = self._parse_frozen_processes(
-                    result.stdout, allowed_uids={uid}
-                )
-                frozen.extend(census_frozen)
-                already_stopped.extend(census_stopped)
-            census = [*frozen, *already_stopped]
-            if len({pid for pid, _uid, _started in census}) != len(census):
-                raise SandboxError("shared snapshot writer census returned a duplicate pid")
-            payload = self._encode_frozen_processes(frozen, already_stopped)
-            write_script = (
-                'set -eu; manifest="$1"; temporary="$manifest.tmp.$$"; umask 077; '
-                "trap 'rm -f -- \"$temporary\"' EXIT HUP INT TERM; "
-                'cat > "$temporary"; chmod 600 "$temporary"; mv "$temporary" "$manifest"; '
-                "trap - EXIT HUP INT TERM"
-            )
-            written = self.exec_capture(
-                spec,
-                ["/bin/sh", "-c", write_script, "sh", manifest],
-                workdir="/",
-                timeout_s=20,
-                input_bytes=payload,
-                user_uid=self.backend.uid,
-                user_gid=self.backend.gid,
-                expected_container_id=expected_container_id,
-            )
-            if written.returncode != 0:
-                raise SandboxError(
-                    "shared snapshot writer manifest failed: "
-                    + written.stderr.decode("utf-8", "replace")[:300]
-                )
-            if expected_container_id is not None:
-                self._require_exact(spec, expected_container_id)
-        except BaseException:
-            with contextlib.suppress(Exception):
-                self._resume_frozen_processes(
-                    spec,
-                    target_uids=target_uids,
-                    frozen=frozen,
-                    already_stopped=already_stopped,
-                    token=token,
-                    require_exact_census=False,
-                    expected_container_id=expected_container_id,
-                )
-            raise
-        return manifest
 
     def thaw_shared_writers(
         self,
@@ -2177,219 +1903,14 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         expected_container_id: str | None = None,
     ) -> None:
         """Resume exactly the frozen PID/start pairs and detect new writers."""
-        named = re.fullmatch(
-            rf"{re.escape(ACTIVATION_TMPFS)}/snapshot-([0-9a-f]{{32}})\.pids", manifest
-        )
-        if named is None:
-            raise ValueError("snapshot writer manifest path is invalid")
-        unique_slots = sorted(set(slot_ids))
-        if any(slot < 0 or slot >= spec.resident_slot_capacity for slot in unique_slots):
-            raise ValueError("snapshot member slot is outside sandbox capacity")
-        if expected_container_id is not None:
-            self._require_exact(spec, expected_container_id)
-        target_uids = [
-            self.backend.uid,
-            *self._operation_writer_uids(spec),
-            *(MEMBER_UID_BASE + slot for slot in unique_slots),
-        ]
-        read = self.exec_capture(
+        writers.thaw(
+            self,
             spec,
-            ["/bin/sh", "-c", 'cat -- "$1"', "sh", manifest],
-            workdir="/",
-            timeout_s=20,
-            user_uid=self.backend.uid,
-            user_gid=self.backend.gid,
+            slot_ids=slot_ids,
+            manifest=manifest,
+            require_exact_census=require_exact_census,
             expected_container_id=expected_container_id,
         )
-        if read.returncode != 0:
-            raise SandboxError(
-                "shared snapshot writer manifest is unavailable: "
-                + read.stderr.decode("utf-8", "replace")[:300]
-            )
-        frozen, already_stopped = self._parse_frozen_processes(
-            read.stdout, allowed_uids={*target_uids, *ENVIRONMENT_UIDS, *ACTION_UIDS}
-        )
-        target_uids = sorted({*target_uids, *(uid for _, uid, _ in [*frozen, *already_stopped])})
-        resume_error: BaseException | None = None
-        try:
-            self._resume_frozen_processes(
-                spec,
-                target_uids=target_uids,
-                frozen=frozen,
-                already_stopped=already_stopped,
-                token=named.group(1),
-                require_exact_census=require_exact_census,
-                expected_container_id=expected_container_id,
-            )
-        except BaseException as exc:
-            resume_error = exc
-        removed = self.exec_capture(
-            spec,
-            ["/bin/sh", "-c", 'rm -f -- "$1"', "sh", manifest],
-            workdir="/",
-            timeout_s=20,
-            user_uid=self.backend.uid,
-            user_gid=self.backend.gid,
-            expected_container_id=expected_container_id,
-        )
-        if resume_error is not None:
-            raise resume_error
-        if removed.returncode != 0:
-            raise SandboxError(
-                "shared snapshot writer manifest cleanup failed: "
-                + removed.stderr.decode("utf-8", "replace")[:300]
-            )
-        if expected_container_id is not None:
-            self._require_exact(spec, expected_container_id)
-
-    @staticmethod
-    def _parse_frozen_processes(
-        payload: bytes,
-        *,
-        allowed_uids: set[int],
-    ) -> tuple[builtins.list[tuple[int, int, int]], builtins.list[tuple[int, int, int]]]:
-        """Validate the private PID/start-time receipt before any signal.
-
-        Returns the processes the census stopped, then those it found already
-        stopped, which a trailing ``stopped`` marks and nothing may resume.
-        """
-        try:
-            text = payload.decode("ascii")
-        except UnicodeDecodeError as exc:
-            raise SandboxError("shared snapshot writer census is not ASCII") from exc
-        frozen: builtins.list[tuple[int, int, int]] = []
-        already_stopped: builtins.list[tuple[int, int, int]] = []
-        seen: set[int] = set()
-        for line in text.splitlines():
-            fields = line.split()
-            found_stopped = fields[3:] == ["stopped"]
-            if found_stopped:
-                fields.pop()
-            if len(fields) != 3 or any(
-                not field.isascii() or not field.isdigit() for field in fields
-            ):
-                raise SandboxError("shared snapshot writer census is malformed")
-            pid, uid, started = (int(field) for field in fields)
-            if pid <= 1 or started <= 0 or uid not in allowed_uids or pid in seen:
-                raise SandboxError("shared snapshot writer census is outside its identity fence")
-            seen.add(pid)
-            (already_stopped if found_stopped else frozen).append((pid, uid, started))
-        return frozen, already_stopped
-
-    @staticmethod
-    def _encode_frozen_processes(
-        frozen: builtins.list[tuple[int, int, int]],
-        already_stopped: builtins.list[tuple[int, int, int]],
-    ) -> bytes:
-        """Encode a deterministic, private manifest for the later thaw."""
-        lines = [f"{pid} {uid} {started}\n" for pid, uid, started in sorted(frozen)]
-        lines += [
-            f"{pid} {uid} {started} stopped\n" for pid, uid, started in sorted(already_stopped)
-        ]
-        return "".join(lines).encode("ascii")
-
-    def _writer_receipt_path(self, spec: ChatSandboxSpec, uid: int, token: str) -> str:
-        """Name one identity's census receipt in the tmpfs only it can write."""
-        if uid == self.backend.uid:
-            directory = ACTIVATION_TMPFS
-        elif uid in (*ENVIRONMENT_UIDS, *ACTION_UIDS):
-            directory = f"/run/agent-environments/{uid}"
-        elif 0 <= uid - MEMBER_UID_BASE < spec.resident_slot_capacity:
-            directory = f"{MEMBER_TMPFS_ROOT}/{uid - MEMBER_UID_BASE}"
-        else:
-            raise ValueError("snapshot writer identity has no private tmpfs")
-        return f"{directory}/snapshot-{token}.receipt"
-
-    def _resume_frozen_processes(
-        self,
-        spec: ChatSandboxSpec,
-        *,
-        target_uids: builtins.list[int],
-        frozen: builtins.list[tuple[int, int, int]],
-        already_stopped: builtins.list[tuple[int, int, int]],
-        token: str,
-        require_exact_census: bool,
-        expected_container_id: str | None = None,
-    ) -> None:
-        """Resume each receipt as its owner and report any changed census.
-
-        Each identity's guest-side census receipt is resumed too, then removed:
-        it is the only record of a census whose reply never reached the host.
-        The census it names first may still be running and would stop again
-        what this resumes, so it is killed and its exit awaited before anything
-        is resumed.  A process the census found already stopped is known to the
-        exact census, but never resumed.
-        """
-        by_uid = {
-            uid: [(pid, started) for pid, owner, started in frozen if owner == uid]
-            for uid in target_uids
-        }
-        script = self._shared_writer_task_state_script() + (
-            'set -u; exact="$1"; expected_uid="$2"; receipt_file="$3"; already="$4"; shift 4; '
-            'unknown=0; if [ "$exact" = 1 ]; then for proc in /proc/[0-9]*; do '
-            'pid=${proc##*/}; [ "$pid" != 1 ] && [ "$pid" != "$$" ] || continue; '
-            'uid=$(stat -c %u "$proc" 2>/dev/null || :); '
-            '[ "$uid" = "$expected_uid" ] || continue; '
-            'raw=$(cat "$proc/stat" 2>/dev/null || :); fields=${raw##*) }; '
-            'state=$(writer_state "$proc"); [ "$state" != exited ] || continue; '
-            'started=$(set -- $fields; printf "%s" "${20:-}"); found=0; '
-            'for item in "$@" $already; do [ "$item" = "$pid:$started" ] && found=1; done; '
-            '[ "$found" = 1 ] || unknown=1; done; fi; '
-            'census=""; [ ! -f "$receipt_file" ] || read -r census < "$receipt_file" || :; '
-            "pid=${census%%:*}; started=${census#*:}; attempt=0; "
-            'while [ -n "$census" ]; do '
-            'uid=$(stat -c %u "/proc/$pid" 2>/dev/null || :); '
-            'raw=$(cat "/proc/$pid/stat" 2>/dev/null || :); fields=${raw##*) }; '
-            'current=$(set -- $fields; printf "%s" "${20:-}"); '
-            '[ "$uid" = "$expected_uid" ] && [ "$current" = "$started" ] || break; '
-            '[ "$(writer_state "/proc/$pid")" != exited ] || break; '
-            'kill -KILL "$pid" 2>/dev/null || :; attempt=$((attempt + 1)); '
-            '[ "$attempt" -lt 100 ] || break; sleep 0.05; done; '
-            'if [ -f "$receipt_file" ]; then { read -r _ || :; while read -r item; do '
-            'case " $* " in *" $item "*) ;; *) set -- "$@" "$item";; esac; '
-            'done; } < "$receipt_file"; fi; '
-            'for item in "$@"; do pid=${item%%:*}; started=${item#*:}; '
-            'uid=$(stat -c %u "/proc/$pid" 2>/dev/null || :); '
-            'raw=$(cat "/proc/$pid/stat" 2>/dev/null || :); fields=${raw##*) }; '
-            'current=$(set -- $fields; printf "%s" "${20:-}"); '
-            '[ "$uid" = "$expected_uid" ] && [ "$current" = "$started" ] '
-            '&& kill -CONT "$pid" 2>/dev/null || :; done; '
-            'rm -f -- "$receipt_file"; [ "$unknown" = 0 ]'
-        )
-        errors: builtins.list[str] = []
-        for uid in target_uids:
-            expected = [f"{pid}:{started}" for pid, started in by_uid[uid]]
-            already = " ".join(
-                f"{pid}:{started}" for pid, owner, started in already_stopped if owner == uid
-            )
-            try:
-                result = self.exec_capture(
-                    spec,
-                    [
-                        "/bin/sh",
-                        "-c",
-                        script,
-                        "sh",
-                        "1" if require_exact_census else "0",
-                        str(uid),
-                        self._writer_receipt_path(spec, uid, token),
-                        already,
-                        *expected,
-                    ],
-                    workdir="/",
-                    timeout_s=20,
-                    user_uid=uid,
-                    user_gid=self.backend.gid,
-                    expected_container_id=expected_container_id,
-                )
-            except BaseException as exc:
-                errors.append(str(exc))
-                continue
-            if result.returncode != 0:
-                errors.append(result.stderr.decode("utf-8", "replace")[:300])
-        if errors:
-            detail = next((error for error in errors if error), "writer census changed")
-            raise SandboxError("shared snapshot writer census changed during capture: " + detail)
 
     def kill_member_process(
         self,
@@ -2644,6 +2165,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         workdir: str = CHAT_WORKDIR,
         timeout_s: float = 60,
         input_bytes: bytes | None = None,
+        stdin: BinaryIO | None = None,
         user_uid: int | None = None,
         user_gid: int | None = None,
         observer: StageObserver | None = None,
@@ -2664,11 +2186,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         )
         if not current.running:
             raise SandboxError("chat sandbox must be started before exec")
-        interactive = input_bytes is not None
-        if self.backend.runtime == KATA_RUNTIME and not input_bytes:
-            # Attaching and immediately closing an empty stdin can wedge the
-            # Kata shim. build_exec_command supplies /dev/null in this case.
-            interactive = False
+        interactive = interactive_input(input_bytes, stdin, self.backend.runtime == KATA_RUNTIME)
         command = self.build_exec_command(
             spec,
             argv,
@@ -2685,6 +2203,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                     command,
                     env=self.exec_client_env(env),
                     input=input_bytes,
+                    stdin=stdin,
                     capture_output=True,
                     timeout=timeout_s,
                     check=False,
@@ -3741,7 +3260,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
     def import_base_bundle(
         self,
         spec: ChatSandboxSpec,
-        bundle: bytes,
+        bundle: BinaryIO,
         *,
         commit: str,
         env: dict[str, str] | None = None,
@@ -3752,8 +3271,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         this command returns. ``git bundle unbundle`` adds objects only: it
         does not move HEAD, refs, the real index, or working-tree files.
         """
-        if not bundle:
-            raise ValueError("base bundle must be non-empty")
+        require_nonempty_rewindable(bundle)
         if not _FULL_OBJECT_ID.fullmatch(commit):
             raise ValueError("base bundle commit must be a full Git object id")
         script = (
@@ -3778,8 +3296,9 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             env={**(env or {}), "GIT_ALLOW_PROTOCOL": ""},
             workdir=CHAT_WORKDIR,
             timeout_s=300,
-            input_bytes=bundle,
+            stdin=bundle,
         )
+        bundle.seek(0)
         if result.returncode != 0:
             raise SandboxError(
                 "retained base bundle import failed: "

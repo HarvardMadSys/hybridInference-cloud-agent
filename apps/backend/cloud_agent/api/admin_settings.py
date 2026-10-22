@@ -16,7 +16,6 @@ from cloud_agent.api.deps import (
     verify_admin_access,
 )
 from cloud_agent.identity_namespace import IdentityNamespaceError
-from cloud_agent.source_control import SourceControlError
 
 if TYPE_CHECKING:
     from cloud_agent.ports import AuditRepository, SettingsRepository
@@ -61,7 +60,7 @@ async def read_settings(
     revision, encoded = await require_store(store).settings.read_settings()
     try:
         return settings.settings_response(revision, encoded)
-    except (SourceControlError, ValueError):
+    except (settings.SettingsEncryptionError, ValueError):
         raise HTTPException(
             status_code=503,
             detail="Settings cannot be loaded. Check persisted configuration and the server encryption key.",
@@ -94,7 +93,7 @@ async def update_settings(
         raise HTTPException(status_code=422, detail=str(exc)) from None
     except IdentityNamespaceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
-    except SourceControlError:
+    except settings.SettingsEncryptionError:
         raise HTTPException(
             status_code=503,
             detail="Settings secrets cannot be stored. Check the server encryption key.",
@@ -102,7 +101,7 @@ async def update_settings(
 
     try:
         settings.apply_settings(revision, encoded)
-    except SourceControlError:
+    except settings.SettingsEncryptionError:
         raise HTTPException(
             status_code=503,
             detail="Settings secrets cannot be loaded. Check the server encryption key.",

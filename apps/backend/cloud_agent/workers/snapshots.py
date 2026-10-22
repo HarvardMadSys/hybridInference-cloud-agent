@@ -20,7 +20,7 @@ from cloud_agent_shared.host_settings import HOST_SETTINGS_BY_KEY
 from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
 
 if TYPE_CHECKING:
-    from cloud_agent.ports import HostPoolRepository, SnapshotRepository
+    from cloud_agent.ports import HostPoolRepository, SnapshotCaptureRepository
     from cloud_agent.ports.environments import EnvironmentBindingRepository
     from cloud_agent.workers.background_wake import BackgroundWake
 
@@ -34,7 +34,11 @@ class _SnapshotCapture(Protocol):
     """Capturing a due shared-workspace snapshot, through its host's sandbox manager."""
 
     host_pool: HostPoolRepository
-    snapshot: SnapshotRepository
+
+    @property
+    def snapshot(self) -> SnapshotCaptureRepository:
+        """Snapshot persistence needed by this flow."""
+        ...
 
     @property
     def environments(self) -> EnvironmentBindingRepository:

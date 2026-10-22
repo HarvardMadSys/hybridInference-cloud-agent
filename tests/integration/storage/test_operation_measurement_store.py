@@ -25,14 +25,75 @@ from typing import Any
 import asyncpg
 import pytest
 import pytest_asyncio
+from scripts.convert_legacy_database_copy import migration_sql
 from tests.support.db import backdate_measurement_arrival, reset_agent_tables
-from tests.support.migrations import apply_migrations
+from tests.support.migrations import apply_migrations, downgrade_to
 
 from cloud_agent.storage.repositories.operation_measurements import (
     PostgresOperationMeasurementRepository,
 )
+from cloud_agent.storage.repositories.profiling_control import PostgresProfilingControlRepository
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
+
+
+async def test_exact_sharded_counts_ignore_retries_and_rollback(store):
+    counts = PostgresProfilingControlRepository(store.pool)
+    assert await counts.count_stored_measurements(run_id="run-1") == 0
+    measurement = _measurement()
+    results = await asyncio.gather(
+        *[store.record_operation_measurement(measurement=measurement) for _ in range(12)]
+    )
+    assert results.count("stored") == 1
+    assert await counts.count_stored_measurements(run_id="run-1") == 1
+    await asyncio.gather(
+        *[
+            store.record_operation_measurement(
+                measurement=_measurement(measurement_id=f"sample-{n}")
+            )
+            for n in range(128)
+        ]
+    )
+    assert await counts.count_stored_measurements(run_id="run-1") == 129
+
+    async with store.pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM agent_operation_measurement_counts") <= 64
+        transaction = conn.transaction()
+        await transaction.start()
+        await conn.execute("DELETE FROM agent_operation_measurements")
+        assert (
+            await conn.fetchval("SELECT sum(stored_count) FROM agent_operation_measurement_counts")
+            == 0
+        )
+        await transaction.rollback()
+    assert await counts.count_stored_measurements(run_id="run-1") == 129
+
+
+@pytest.mark.parametrize("offline", [False, True])
+async def test_count_migration_backfills_without_changing_exact_history(store, offline):
+    for n in range(3):
+        await store.record_operation_measurement(
+            measurement=_measurement(measurement_id=f"old-{n}")
+        )
+    before = await store.summarize_operation_measurements(run_id="run-1")
+    downgrade_to(_db_config(), "0092_targeted_work_wakes")
+    if offline:
+        # The legacy converter executes rendered SQL verbatim, without a
+        # driver parameter pass that could unescape doubled percent signs.
+        sql = migration_sql("0092_targeted_work_wakes:head")
+        async with store.pool.acquire() as conn, conn.transaction():
+            await conn.execute(sql)
+    else:
+        apply_migrations(_db_config())
+    counts = PostgresProfilingControlRepository(store.pool)
+    assert await counts.count_stored_measurements(run_id="run-1") == 3
+    assert await store.summarize_operation_measurements(run_id="run-1") == before
+    await store.record_operation_measurement(measurement=_measurement(measurement_id="new"))
+    assert await counts.count_stored_measurements(run_id="run-1") == 4
+    async with store.pool.acquire() as conn:
+        await conn.execute("DELETE FROM agent_operation_measurements WHERE measurement_id='new'")
+    assert await counts.count_stored_measurements(run_id="run-1") == 3
+
 
 _ALLOWED_TEST_DB_PATTERN = "_test_"
 

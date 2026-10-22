@@ -466,7 +466,7 @@ def test_every_probe_runs_under_the_runtime_jobs_will_use(monkeypatch):
         {"AGENT_SANDBOX_BACKEND": "kata", "AGENT_SANDBOX_IMAGE": "img:1", **_NET_ENV}
     )
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.ChatSandboxManager.relay_addresses",
+        "cloud_agent_host.chat_sandbox_network.ChatSandboxNetwork.relay_addresses",
         lambda self, network: {"agent-gateway": "10.2.0.2"},
     )
     calls = _probe_returns(monkeypatch, "ok")
