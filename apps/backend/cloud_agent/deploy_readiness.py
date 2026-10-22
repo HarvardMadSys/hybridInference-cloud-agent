@@ -112,6 +112,53 @@ def _host_rejection(
     return None
 
 
+def _placement_rows(
+    rows: list[dict[str, Any]],
+    rows_by_host: dict[str, dict[str, Any]],
+    *,
+    active_host: str | None,
+    draining_host: str | None,
+) -> list[dict[str, Any]]:
+    """The hosts that may place a new chat, and the draining host a rollout replaces."""
+    if active_host is not None:
+        # New chats stay on the pin. A rollout may still replace a different
+        # enrolled host. That host has to stay draining and idle, and the pin
+        # has to stay online at the same target commit. Treating the name
+        # difference as fatal made every control-plane release fail once
+        # placement moved to another server.
+        placement = [
+            row
+            for row in rows
+            if row.get("host") == active_host and not _follows_control_plane(row)
+        ]
+        add_draining = draining_host is not None and draining_host != active_host
+    else:
+        # With no pin, every online host advertising the current historical-
+        # fork surface may claim one of the new jobs this rollout enables.
+        # Proving only one of them would leave an older eligible host in the
+        # scheduler pool. A v1-only host cannot materialize a new sandbox;
+        # replica-local claim attestation admits it only for an existing group
+        # it owns. The retained-owner probe below still covers that case.
+        placement = [
+            row
+            for row in rows
+            if row.get("status") == HOST_ONLINE
+            and isinstance(row.get("capabilities"), list)
+            and SHARED_SANDBOX_CAPABILITY in row["capabilities"]
+            and NATIVE_FORK_AT_ANCHOR_CAPABILITY in row["capabilities"]
+            and not _follows_control_plane(row)
+        ]
+        # The all-claims deployment fence deliberately takes this host out
+        # of the online scheduler pool. Its explicit name is the narrow
+        # authority to include that one draining row in the barrier.
+        add_draining = draining_host is not None and all(
+            row.get("host") != draining_host for row in placement
+        )
+    if add_draining and draining_host in rows_by_host:
+        placement.append(rows_by_host[draining_host])
+    return placement
+
+
 async def shared_live_readiness(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     store: HostPoolRepository,
     *,
@@ -145,62 +192,25 @@ async def shared_live_readiness(  # noqa: C901, PLR0912, PLR0915 complexity base
     rows_by_host = {str(row.get("host")): row for row in rows if row.get("host")}
     if draining_host is not None and draining_host not in rows_by_host:
         return SharedLiveReadiness(False, f"draining host {draining_host!r} is not registered")
-    if active_host is not None:
-        if active_host not in rows_by_host:
-            return SharedLiveReadiness(False, f"pinned host {active_host!r} is not registered")
-        placement_rows = [
-            row
-            for row in rows
-            if row.get("host") == active_host and not _follows_control_plane(row)
-        ]
-        # New chats stay on the pin. A rollout may still replace a different
-        # enrolled host. That host has to stay draining and idle, and the pin
-        # has to stay online at the same target commit. Treating the name
-        # difference as fatal made every control-plane release fail once
-        # placement moved to another server.
-        if draining_host is not None and draining_host != active_host:
-            placement_rows.append(rows_by_host[draining_host])
-        if not placement_rows:
+    if active_host is not None and active_host not in rows_by_host:
+        return SharedLiveReadiness(False, f"pinned host {active_host!r} is not registered")
+    placement_rows = _placement_rows(
+        rows, rows_by_host, active_host=active_host, draining_host=draining_host
+    )
+    if not placement_rows:
+        if active_host is not None:
             return SharedLiveReadiness(
                 False,
                 f"pinned host {active_host!r} follows this release only after the control "
                 "plane runs it, and no draining host proves the target",
             )
-    else:
-        # With no pin, every online host advertising the current historical-
-        # fork surface may claim one of the new jobs this rollout enables.
-        # Proving only one of them would leave an older eligible host in the
-        # scheduler pool. A v1-only host cannot materialize a new sandbox;
-        # replica-local claim attestation admits it only for an existing group
-        # it owns. The retained-owner probe below still covers that case.
-        pool_rows = rows
-        placement_rows = [
-            row
-            for row in pool_rows
-            if row.get("status") == HOST_ONLINE
-            and isinstance(row.get("capabilities"), list)
-            and SHARED_SANDBOX_CAPABILITY in row["capabilities"]
-            and NATIVE_FORK_AT_ANCHOR_CAPABILITY in row["capabilities"]
-            and not _follows_control_plane(row)
+        reasons = [
+            f"{row.get('host') or 'unknown'!s}: "
+            f"{_host_rejection(row, not_before=not_before, expected_deployment_sha=expected_deployment_sha)}"
+            for row in rows
         ]
-        if draining_host is not None and all(
-            row.get("host") != draining_host for row in placement_rows
-        ):
-            # The all-claims deployment fence deliberately takes this host out
-            # of the online scheduler pool. Its explicit name is the narrow
-            # authority to include that one draining row in the barrier.
-            placement_rows.append(rows_by_host[draining_host])
-        if not placement_rows:
-            reasons = [
-                f"{row.get('host') or 'unknown'!s}: "
-                f"{_host_rejection(row, not_before=not_before, expected_deployment_sha=expected_deployment_sha)}"
-                for row in pool_rows
-            ]
-            detail = "; ".join(reasons) if reasons else "no host is registered"
-            return SharedLiveReadiness(
-                False,
-                f"host pool is not shared-live ready: {detail}",
-            )
+        detail = "; ".join(reasons) if reasons else "no host is registered"
+        return SharedLiveReadiness(False, f"host pool is not shared-live ready: {detail}")
 
     rejected: list[str] = []
     for row in placement_rows:
@@ -293,30 +303,12 @@ async def shared_live_readiness(  # noqa: C901, PLR0912, PLR0915 complexity base
             False,
             "host placement or retained ownership changed while sandbox managers were probed",
         )
-    if active_host is not None:
-        current_placement_names = {
-            str(row["host"])
-            for row in current_rows
-            if row.get("host") == active_host and not _follows_control_plane(row)
-        }
-        if (
-            draining_host is not None
-            and draining_host != active_host
-            and draining_host in current_by_host
-        ):
-            current_placement_names.add(draining_host)
-    else:
-        current_placement_names = {
-            str(row["host"])
-            for row in current_rows
-            if row.get("status") == HOST_ONLINE
-            and isinstance(row.get("capabilities"), list)
-            and SHARED_SANDBOX_CAPABILITY in row["capabilities"]
-            and NATIVE_FORK_AT_ANCHOR_CAPABILITY in row["capabilities"]
-            and not _follows_control_plane(row)
-        }
-        if draining_host is not None and draining_host in current_by_host:
-            current_placement_names.add(draining_host)
+    current_placement_names = {
+        str(row["host"])
+        for row in _placement_rows(
+            current_rows, current_by_host, active_host=active_host, draining_host=draining_host
+        )
+    }
     if current_placement_names != set(placement_host_names):
         return SharedLiveReadiness(
             False,

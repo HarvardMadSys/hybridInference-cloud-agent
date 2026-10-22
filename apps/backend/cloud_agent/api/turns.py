@@ -46,7 +46,7 @@ from cloud_agent.application.follow_ups import (
     sandbox_context_lost_error,
     session_archived_error,
 )
-from cloud_agent.application.job_admission import _idempotency_conflict
+from cloud_agent.application.job_admission import idempotency_conflict
 from cloud_agent.application.pending_messages import (
     prepared_head,
     settle_queue,
@@ -157,7 +157,7 @@ def _message_refused(result: dict[str, Any]) -> HTTPException:
     if error == "sandbox_context_lost":
         return sandbox_context_lost_error()
     if error == "client_request_conflict":
-        return _idempotency_conflict()
+        return idempotency_conflict()
     if error == "conversation_changed":
         return HTTPException(
             status_code=409,
@@ -487,7 +487,7 @@ async def submit_thread_message(
         )
         if replayed_job is not None:
             if replayed_job.get("error") == "client_request_conflict":
-                raise _idempotency_conflict()
+                raise idempotency_conflict()
             return AgentThreadMessageResult(
                 job=_job_response(
                     await _owned_job(job_store.conversation_queries, str(replayed_job["id"]), user)
@@ -498,7 +498,7 @@ async def submit_thread_message(
         )
         if replayed is not None:
             if replayed.get("error") == "client_request_conflict":
-                raise _idempotency_conflict()
+                raise idempotency_conflict()
             return AgentThreadMessageResult(pending=_pending_response(replayed["message"]))
     prepared = await prepare_follow_up(
         latest,

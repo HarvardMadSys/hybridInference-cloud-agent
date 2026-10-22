@@ -101,7 +101,7 @@ def model_catalog_unavailable() -> HTTPException:
     )
 
 
-async def _require_resolvable_model(
+async def require_resolvable_model(
     model: str,
     *,
     gateway: Any,
@@ -318,7 +318,7 @@ def _binding_alias(row: dict[str, Any]) -> str:
     return f"mcp{row['id']}"
 
 
-def _require_registered_runtime(runtime: str) -> None:
+def require_registered_runtime(runtime: str) -> None:
     """400 unless ``runtime`` names a registered harness.
 
     The registry is the trust boundary: what may run is what this
@@ -340,7 +340,7 @@ def _require_registered_runtime(runtime: str) -> None:
         )
 
 
-async def _require_offered_effort(
+async def require_offered_effort(
     effort: str | None,
     *,
     runtime: str,
@@ -413,7 +413,7 @@ async def _require_offered_effort(
     )
 
 
-async def _resolve_skill_selection(
+async def resolve_skill_selection(
     store: SkillRepository, *, user_id: str, skill_ids: list[int] | None
 ) -> list[dict[str, Any]] | None:
     """Resolve owned instruction snapshots before persisting a submission."""
@@ -434,7 +434,7 @@ def _attachment_selection_error(exc: AttachmentError) -> HTTPException:
     )
 
 
-async def _resolve_attachment_selection(
+async def resolve_attachment_selection(
     store: AttachmentRepository, *, user_id: str, attachment_ids: list[int] | None
 ) -> list[dict[str, Any]] | None:
     """Resolve staged uploads into the manifest a submission retains."""
@@ -539,7 +539,7 @@ async def _admit_repository(
     return base_sha
 
 
-async def _create_job_as(  # noqa: PLR0912 complexity baseline, #771
+async def create_job_as(  # noqa: PLR0912 complexity baseline, #771
     body: AgentJobCreate,
     user: dict[str, Any],
     *,
@@ -586,7 +586,7 @@ async def _create_job_as(  # noqa: PLR0912 complexity baseline, #771
         )
         if replayed is not None:
             if replayed.get("error") == "client_request_conflict":
-                raise _idempotency_conflict()
+                raise idempotency_conflict()
             return replayed
     # Fail here, not at claim time. An unregistered runtime used to travel all
     # the way into a queued row and burn a claim before anything noticed —
@@ -595,7 +595,7 @@ async def _create_job_as(  # noqa: PLR0912 complexity baseline, #771
     # The check lives in the helper rather than in the owner route because the
     # service door creates jobs through here too: a check only one door runs
     # is precisely the drift this extraction exists to prevent.
-    _require_registered_runtime(body.runtime)
+    require_registered_runtime(body.runtime)
     try:
         plugins = validate_sandbox_plugins(body.runtime, body.plugins or [])
     except ValueError as exc:
@@ -616,10 +616,10 @@ async def _create_job_as(  # noqa: PLR0912 complexity baseline, #771
         catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
     except ModelCatalogUnavailable:
         raise model_catalog_unavailable() from None
-    model = await _require_resolvable_model(body.model, gateway=gateway, user=user, catalog=catalog)
+    model = await require_resolvable_model(body.model, gateway=gateway, user=user, catalog=catalog)
     # Checked against the *resolved* model, not the requested spelling: the
     # domain belongs to the model the turn will actually call.
-    reasoning_effort = await _require_offered_effort(
+    reasoning_effort = await require_offered_effort(
         body.reasoning_effort,
         runtime=body.runtime,
         model=model,
@@ -671,10 +671,10 @@ async def _create_job_as(  # noqa: PLR0912 complexity baseline, #771
             status_code=503,
             detail={"error": {"type": "invalid_configuration", "message": str(exc)}},
         ) from exc
-    skills = await _resolve_skill_selection(
+    skills = await resolve_skill_selection(
         job_store.skills, user_id=user["user_id"], skill_ids=body.skill_ids
     )
-    attachments = await _resolve_attachment_selection(
+    attachments = await resolve_attachment_selection(
         job_store.attachments, user_id=user["user_id"], attachment_ids=body.attachment_ids
     )
     try:
@@ -735,7 +735,7 @@ async def _create_job_as(  # noqa: PLR0912 complexity baseline, #771
         # written, and the owner can attach the file again.
         raise _attachment_selection_error(exc) from exc
     if job.get("error") == "client_request_conflict":
-        raise _idempotency_conflict()
+        raise idempotency_conflict()
     logger.info(
         "agent_job_created",
         extra={"event": "agent_job_created", "job_id": job["id"], "runtime": body.runtime},
@@ -743,7 +743,8 @@ async def _create_job_as(  # noqa: PLR0912 complexity baseline, #771
     return job
 
 
-def _idempotency_conflict() -> HTTPException:
+def idempotency_conflict() -> HTTPException:
+    """The 409 for an Idempotency-Key reused with a different submission."""
     return HTTPException(
         status_code=409,
         detail={
