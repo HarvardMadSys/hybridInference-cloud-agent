@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -53,10 +54,14 @@ class Source:
         self.archives: list[Any] = []
         self.limits: list[int] = []
 
-    def prepare_worktree(self, *, workdir: str, **_kwargs: Any) -> str:
+    def prepare_worktree(self, *, workdir: str, stop=None, **_kwargs: Any) -> str:
         self.workdirs.append(workdir)
         self.started.set()
-        assert self.release.wait(5), "the test never let the clone finish"
+        deadline = time.monotonic() + 5
+        while not self.release.wait(0.01):
+            assert time.monotonic() < deadline, "the test never let the clone finish"
+            if stop is not None and stop.is_set():
+                raise WorktreeError("source clone was abandoned")
         if self.error is not None:
             raise self.error
         return _BASE
@@ -82,7 +87,7 @@ def _run_turn(
 ) -> SimpleNamespace:
     """Drive one shared turn with the clone scripted and everything else mocked."""
     monkeypatch.setattr(runner_mod, "prepare_worktree", source.prepare_worktree)
-    monkeypatch.setattr(runner_mod, "checkout_output_branch", lambda *_args: None)
+    monkeypatch.setattr(runner_mod, "checkout_output_branch", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runner_mod, "build_source_archive", source.build_source_archive)
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
@@ -222,7 +227,9 @@ def test_a_turn_that_stops_before_its_checkout_leaves_nothing_behind(
 
     assert turn.result == 2
     assert turn.imported == []
-    assert [archive.closed for archive in source.archives] == [True]
+    assert [archive.closed for archive in source.archives] == (
+        [True] if clone_finished_first else []
+    )
     assert not os.path.exists(source.workdirs[0])
 
 
@@ -239,7 +246,7 @@ def test_a_follow_up_clones_nothing(monkeypatch):
 def test_a_discarded_source_cannot_be_imported(monkeypatch):
     source = Source()
     monkeypatch.setattr(runner_mod, "prepare_worktree", source.prepare_worktree)
-    monkeypatch.setattr(runner_mod, "checkout_output_branch", lambda *_args: None)
+    monkeypatch.setattr(runner_mod, "checkout_output_branch", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runner_mod, "build_source_archive", source.build_source_archive)
     prefetch = runner_mod._prefetch_retained_source(job=_JOB, uid=1000, gid=1000, max_bytes=1)
     for thread in _prefetch_threads():
