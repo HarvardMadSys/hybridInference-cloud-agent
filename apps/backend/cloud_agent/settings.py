@@ -1080,9 +1080,11 @@ def apply_settings(revision: int, encoded: Mapping[str, Any]) -> None:
     """
     global _values, _revision
     problems: list[str] = []
-    values = _decode(encoded, problems)
     adopted = False
     with _lock:
+        if _values is not None and revision <= _revision:
+            return
+        values = _decode(encoded, problems)
         if revision >= _revision:
             adopted = revision != _revision
             logging_changed = _values is None or any(
@@ -1353,8 +1355,11 @@ async def synchronize_settings(repository: SettingsRepository) -> None:
     while True:
         await asyncio.sleep(5)
         try:
-            revision, encoded = await repository.read_settings()
-            apply_settings(revision, encoded)
+            with _lock:
+                current_revision = _revision
+            revision, encoded = await repository.read_settings(after_revision=current_revision)
+            if revision >= 0:
+                apply_settings(revision, encoded)
         except (ValueError, SourceControlError) as exc:
             # Raised by decoding the snapshot, and worded to name a setting
             # without its value; the type alone left nothing to act on.
