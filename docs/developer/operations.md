@@ -2094,13 +2094,14 @@ see [Restoring a removed host's sandboxes](#restoring-a-removed-hosts-sandboxes)
   file, terminal, Git or environment request, a Fork, a snapshot capture or a
   base import) advances the fence first and sends the value it took with the
   request itself: in its body, or for a workspace request in an
-  `X-Agent-Start-Seq` header. The Sandbox Manager labels a run only with the
-  fences of the requests it admitted to that run. Once the run stops, a
-  request at or below its label that would start the container again is
-  refused (409), and the control plane advances the fence and retries. A
-  running container clears the restore point too. A receipt covers its group
-  only while its fence is still current; receipts from sandbox managers that
-  predate restore carry none and never cover a group.
+  `X-Agent-Start-Seq` header. An open terminal's input, resize and close
+  cannot start the container, so they take no fence. The Sandbox Manager
+  labels a run only with the fences of the requests it admitted to that run.
+  Once the run stops, a request at or below its label that would start the
+  container again is refused (409), and the control plane advances the fence
+  and retries. A running container clears the restore point too. A receipt
+  covers its group only while its fence is still current; receipts from
+  sandbox managers that predate restore carry none and never cover a group.
 - The policy omits the default and carries only an opt-out
   (`checkpoints_enabled: false`), which is sent only to hosts that advertise
   `sandbox-checkpoints-v1`. Older sandbox managers parse the policy unchanged

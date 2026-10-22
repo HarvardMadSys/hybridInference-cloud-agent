@@ -10,7 +10,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from cloud_agent.storage._sql.hosts import refuse_start_on_revoked_host
+from cloud_agent.ports.sandbox import TerminalControlRoute
+from cloud_agent.storage._sql.hosts import (
+    JOB_HOST_SQL,
+    REVOKED_HOST_SQL,
+    UNDELETED_GROUP_SQL,
+    refuse_start_on_revoked_host,
+)
 from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS, RESTORE_RETRY_DELAYS_S
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
@@ -258,6 +264,31 @@ def quiet_idle_deadline(group: str, timeout: str, *, operations: int = 0) -> str
     END"""
 
 
+# Whether member ``m`` of group ``g`` lets its owner change the workspace: the
+# durable copy of the sandbox manager's in-memory terminal suspension. Nothing
+# is lost, nothing prepares, stops, deletes or forks the group, and a turn in
+# flight has published ``workspace_ready``.
+WORKSPACE_READY_SQL = f"""(
+    m.context_status <> 'lost'
+    AND m.native_state <> 'lost'
+    AND g.state NOT IN (
+        'provisioning', 'stopping', 'stopped_dirty', 'lost'
+    )
+    AND g.stop_requested_at IS NULL
+    AND {UNDELETED_GROUP_SQL}
+    AND m.fork_operation_id IS NULL
+    AND (
+        m.active_attempt_id IS NULL
+        OR EXISTS (
+            SELECT 1 FROM agent_attempts active
+            WHERE active.id = m.active_attempt_id
+              AND active.status = 'running'
+              AND active.lease_expires_at > clock_timestamp()
+              AND active.terminal_ready = TRUE
+        )
+    )
+)"""
+
 # SET-clause fragment for ``agent_sandboxes``: count one more start the
 # control plane let through and drop the restore point a start would make
 # stale. A checkpoint receipt covers the group only while the sequence it
@@ -302,6 +333,54 @@ async def fence_sandbox_start(conn: Any, sandbox_id: str) -> tuple[str, int | No
         sandbox_id,
     )
     return str(row["state"]), int(row["start_seq"])
+
+
+async def read_terminal_control_route(
+    conn: Any, *, job_id: str, user_id: str
+) -> TerminalControlRoute | None:
+    """Read what an attached terminal's input, resize or kill needs, in one statement.
+
+    The browser sends about one per keystroke. The general workspace path reads
+    the whole job with every sandbox subquery, then the thread's readiness,
+    then the job's host, and fences the group's start between them. This reads
+    the same answers from one row and writes nothing: ownership as ``owns_job``
+    decides it, readiness as :data:`WORKSPACE_READY_SQL` does, and the host
+    ``host_for_job`` routes to (:data:`JOB_HOST_SQL`). ``None`` when the job is
+    not this owner's or its conversation is deleted.
+    """
+    owner = JOB_HOST_SQL.format(attempt="a", group="g")
+    row = await conn.fetchrow(
+        f"""
+        SELECT j.thread_id, j.terminal_resume_pending, g.state AS group_state,
+               m.thread_id IS NOT NULL
+                   AND COALESCE({WORKSPACE_READY_SQL}, FALSE) AS workspace_ready,
+               {REVOKED_HOST_SQL.format(host="g.host")} AS host_revoked,
+               {owner} AS host, h.broker_url AS sandbox_manager_url
+        FROM agent_jobs j
+        LEFT JOIN agent_threads t ON t.id = j.thread_id
+        LEFT JOIN agent_thread_sandbox_memberships m ON m.thread_id = j.thread_id
+        LEFT JOIN agent_sandboxes g ON g.id = m.sandbox_id
+        LEFT JOIN agent_attempts a ON a.id = j.current_attempt_id
+        LEFT JOIN agent_runner_hosts h ON h.host = {owner}
+        WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL
+        """,
+        job_id,
+        user_id,
+    )
+    if row is None:
+        return None
+    return TerminalControlRoute(
+        thread_id=row["thread_id"],
+        workspace_ready=bool(row["workspace_ready"]),
+        terminal_resume_pending=bool(row["terminal_resume_pending"]),
+        group_state=row["group_state"],
+        host_revoked=bool(row["host_revoked"]),
+        host=(
+            None
+            if row["host"] is None
+            else {"host": row["host"], "sandbox_manager_url": row["sandbox_manager_url"]}
+        ),
+    )
 
 
 def restore_claim_due(attempts: str, failed_at: str) -> str:

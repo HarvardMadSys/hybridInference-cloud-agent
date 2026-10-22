@@ -48,7 +48,7 @@ from cloud_agent_host.resident_transport import (
     ResidentTransport,
     ResidentTransportFactory,
 )
-from cloud_agent_host.sandbox import KATA_RUNTIME, ProcessBackend, SandboxError
+from cloud_agent_host.sandbox import KATA_RUNTIME, ProcessBackend, SandboxError, TerminalProcess
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_manager import SharedSandboxIdentityRequest, create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost, StaleStartFence
@@ -59,6 +59,7 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedSessionLease,
     archive_failure_http_detail,
 )
+from cloud_agent_host.terminal_session import _TerminalSession
 from cloud_agent_host.tool_windows import ToolMark
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.errors import SandboxArchiveBlocked
@@ -2234,6 +2235,121 @@ async def test_a_group_changed_while_it_is_reconciled_does_not_fail_the_host_lis
     rows = {row.thread_id: row.context_status for row in supervisor.list()}
     assert rows == {"athr_source": "lost", "athr_peer": "lost", "athr_other": "live"}
     assert supervisor.stop_if_idle(other.thread_id, generation=other.generation).running is False
+
+
+class _Shell(TerminalProcess):
+    """An open interactive shell that records what the owner typed."""
+
+    def __init__(self) -> None:
+        self.inputs: list[bytes] = []
+        self.resizes: list[tuple[int, int]] = []
+        self._killed = threading.Event()
+
+    def chunks(self):
+        self._killed.wait(timeout=5)
+        yield from ()
+
+    def write(self, data: bytes) -> None:
+        self.inputs.append(data)
+
+    def resize(self, rows: int, cols: int) -> None:
+        self.resizes.append((rows, cols))
+
+    def poll(self) -> int | None:
+        return 0 if self._killed.is_set() else None
+
+    def kill(self) -> None:
+        self._killed.set()
+
+    def wait(self) -> int:
+        return 0
+
+
+def _counting_inspections(manager: _Manager) -> list[str]:
+    inspected: list[str] = []
+    inspect = manager.inspect
+
+    def counting(container_name: str) -> ChatSandboxInspection | None:
+        inspected.append(container_name)
+        return inspect(container_name)
+
+    manager.inspect = counting  # type: ignore[method-assign]
+    return inspected
+
+
+@pytest.mark.asyncio
+async def test_terminal_keystrokes_reach_the_shell_without_inspecting_the_container():
+    """The browser sends about one input per keystroke, and each inspected the container first.
+
+    That is a Docker CLI process in front of every echo. A keystroke reaches
+    only a terminal already open, so it needs only the member's group, from
+    memory. A container that died, or that its group lost, ended its
+    terminals with EOF, and they refuse the keystroke themselves. Listing the
+    terminals still observes the container.
+    """
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    inspected = _counting_inspections(manager)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="sandbox-manager-secret",
+        shared_session_supervisor=supervisor,
+    )
+    shell = _Shell()
+    session = _TerminalSession(
+        terminal_id="term_shell",
+        process=shell,
+        workdir=None,
+        rows=24,
+        cols=80,
+        now=time.monotonic(),
+    )
+    session.start()
+    app.state.terminal_manager._sessions["athr_source"] = {session.id: session}
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    # A Fork member's alias: the terminal lives in its group's origin namespace.
+    terminal = "/workspaces/athr_peer/terminals/term_shell"
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        wrote = await client.post(f"{terminal}/input", json={"data": "bHMK"}, headers=headers)
+        resized = await client.post(
+            f"{terminal}/resize", json={"rows": 30, "cols": 100}, headers=headers
+        )
+        stranger = await client.post(
+            "/workspaces/athr_stranger/terminals/term_shell/input",
+            json={"data": "bHMK"},
+            headers=headers,
+        )
+        inspected_by_keystrokes = list(inspected)
+        listed = await client.get("/workspaces/athr_peer/terminals", headers=headers)
+        inspected_by_listing = inspected[len(inspected_by_keystrokes) :]
+        original = manager.items[_spec().container_name]
+        manager.items[_spec().container_name] = replace(
+            original, container_id="container-replacement"
+        )
+        with pytest.raises(RetainedChatLost):
+            supervisor.status("athr_source")
+        # The original container is gone, and its Docker exec with it.
+        shell.kill()
+        deadline = time.monotonic() + 5
+        while not session.has_exited and time.monotonic() < deadline:
+            time.sleep(0.01)
+        lost = await client.post(f"{terminal}/input", json={"data": "bHMK"}, headers=headers)
+    session.close(mark_activity=False)
+
+    assert (wrote.status_code, resized.status_code) == (200, 200)
+    assert shell.inputs == [b"ls\n"]
+    assert shell.resizes == [(30, 100)]
+    assert stranger.status_code == 404
+    assert stranger.json()["detail"] == "shared chat workspace is not materialized"
+    assert inspected_by_keystrokes == []
+    assert listed.status_code == 200
+    assert [row["id"] for row in listed.json()["terminals"]] == ["term_shell"]
+    assert inspected_by_listing == [_spec().container_name]
+    assert lost.status_code == 409
+    assert lost.json()["detail"] == "terminal is not running"
 
 
 def test_status_blocks_an_externally_stopped_group_without_a_final_marker():

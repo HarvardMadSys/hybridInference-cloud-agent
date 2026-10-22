@@ -47,6 +47,7 @@ from cloud_agent.storage._sql.hosts import (
     HOST_CAPACITY_COLUMNS,
     HOST_COLUMNS,
     HOST_RETAINED_GROUP,
+    JOB_HOST_SQL,
     QUALIFIED_HOST_COLUMNS,
     lock_revocation_rows,
     release_late_covered_sandboxes,
@@ -1141,13 +1142,8 @@ class PostgresHostPoolRepository:
         return None if row is None else self._host_row_to_dict(row)
 
     async def host_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        """The job's running attempt's host, else its retained thread's durable host.
-
-        A finished attempt names where the turn ran, which is not where the
-        group is once a restore has moved it to another host; the group's own
-        host is. Only a thread without a group falls back to that attempt.
-        """
-        owner = "COALESCE(CASE WHEN a.status = 'running' THEN a.host_id END, s.host, a.host_id)"
+        """The host holding the job's workspace, by the rule of ``JOB_HOST_SQL``."""
+        owner = JOB_HOST_SQL.format(attempt="a", group="s")
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""

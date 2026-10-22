@@ -30,6 +30,29 @@ class DeletionFailureDecision:
         return self.recorded
 
 
+@dataclass(frozen=True, slots=True)
+class TerminalControlRoute:
+    """What an attached terminal's input, resize or kill needs, read at once.
+
+    The answers of the three reads the general workspace path makes for the
+    job's owner: the job itself, :meth:`SandboxRepository.thread_workspace_ready`,
+    and the host ``host_for_job`` names.
+    """
+
+    thread_id: str | None
+    #: Whether the chat's group lets its owner change the workspace now.
+    workspace_ready: bool
+    #: A settled turn's terminals still wait for the manager to resume them.
+    terminal_resume_pending: bool
+    #: The state of the chat's group; ``None`` when the chat has none.
+    group_state: str | None
+    #: Whether the group's host was removed from the pool.
+    host_revoked: bool
+    #: ``host`` and ``sandbox_manager_url``, as ``host_for_job`` returns them,
+    #: or ``None`` when the job names no host.
+    host: dict[str, Any] | None
+
+
 class SandboxRepository(Protocol):
     """Port: retained sandbox groups and the members that live in them."""
 
@@ -267,6 +290,18 @@ class SandboxRepository(Protocol):
         The sandbox manager's in-memory suspension is the immediate barrier. This
         durable copy closes sandbox-manager-restart and old-turn-URL gaps: an active
         attempt must have published ``workspace_ready``.
+        """
+        ...
+
+    async def terminal_control_route(
+        self, *, job_id: str, user_id: str
+    ) -> TerminalControlRoute | None:
+        """Read what an attached terminal's control call needs, in one statement.
+
+        ``None`` unless the job is this owner's and its conversation is not
+        deleted, as ``owns_job`` answers it. A read only: input, a resize and
+        a kill cannot start the container, so none of them takes the start
+        fence.
         """
         ...
 

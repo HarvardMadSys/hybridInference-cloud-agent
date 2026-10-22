@@ -18,7 +18,7 @@ from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.owner_usage import measured_interval, utc_day_shares
-from cloud_agent.ports.sandbox import DeletionFailureDecision
+from cloud_agent.ports.sandbox import DeletionFailureDecision, TerminalControlRoute
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.hosts import (
     DELETED_GROUP_STATES,
@@ -33,11 +33,13 @@ from cloud_agent.storage._sql.rows import load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import (
     FENCE_START_SQL,
     THREAD_SANDBOX_SOURCE,
+    WORKSPACE_READY_SQL,
     fence_sandbox_start,
     group_has_live_peer,
     group_is_quiet,
     member_turn_running,
     quiet_idle_deadline,
+    read_terminal_control_route,
 )
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS
@@ -1744,25 +1746,7 @@ class PostgresSandboxRepository:
         async with self._pool.acquire() as conn:
             ready = await conn.fetchval(
                 f"""
-                SELECT
-                    m.context_status <> 'lost'
-                    AND m.native_state <> 'lost'
-                    AND g.state NOT IN (
-                        'provisioning', 'stopping', 'stopped_dirty', 'lost'
-                    )
-                    AND g.stop_requested_at IS NULL
-                    AND {UNDELETED_GROUP_SQL}
-                    AND m.fork_operation_id IS NULL
-                    AND (
-                        m.active_attempt_id IS NULL
-                        OR EXISTS (
-                            SELECT 1 FROM agent_attempts a
-                            WHERE a.id = m.active_attempt_id
-                              AND a.status = 'running'
-                              AND a.lease_expires_at > clock_timestamp()
-                              AND a.terminal_ready = TRUE
-                        )
-                    )
+                SELECT {WORKSPACE_READY_SQL}
                 FROM agent_thread_sandbox_memberships m
                 JOIN agent_sandboxes g ON g.id = m.sandbox_id
                 WHERE m.thread_id = $1
@@ -1770,6 +1754,13 @@ class PostgresSandboxRepository:
                 thread_id,
             )
         return bool(ready)
+
+    async def terminal_control_route(
+        self, *, job_id: str, user_id: str
+    ) -> TerminalControlRoute | None:
+        """Read what an attached terminal's control call needs, in one statement."""
+        async with self._pool.acquire() as conn:
+            return await read_terminal_control_route(conn, job_id=job_id, user_id=user_id)
 
     async def fence_terminal_workspace(
         self,

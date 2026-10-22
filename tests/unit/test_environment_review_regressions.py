@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from tests.unit.test_agent_sandbox_manager import (
+    _RunningTerminalProcess,
     _SlowSpawner,
     _Spawner,
     _TerminalProcess,
@@ -239,6 +240,40 @@ def test_completed_action_is_not_reexecuted_after_reaping_or_broker_restart(tmp_
     again = restarted.create("workspace", "/workspace", **args)
     assert again["state"] == "exited"
     assert len(backend.processes) == 1
+
+
+def test_reading_an_expired_action_terminal_closes_it_and_returns_its_result(tmp_path):
+    """A keystroke leaves a terminal past its lifetime to the reaper; this read does not.
+
+    Closing an action's terminal is what records its result. Read without that
+    close, the run would answer that its result is unavailable.
+    """
+    receipts = ActionReceipts(tmp_path)
+    manager = _TerminalManager(
+        idle_ttl_s=30, hard_ttl_s=60, max_sessions=4, action_receipts=receipts
+    )
+    bound = BoundEnvironment(
+        binding_id="b", actions=[EnvironmentAction(id="deploy", name="Deploy", command="deploy")]
+    )
+    process = _RunningTerminalProcess()
+    created = manager.create(
+        "workspace",
+        "/workspace",
+        rows=24,
+        cols=80,
+        backend=_Spawner(process),
+        environment=bound,
+        action_id="deploy",
+        run_id="one-run",
+    )
+    manager._sessions["workspace"][created["id"]].created_at -= 120
+
+    output = manager.output("workspace", created["id"])
+
+    assert process.killed
+    assert "workspace" not in manager._sessions
+    assert output["state"] == "closed"
+    assert output == receipts.read("workspace", created["id"])
 
 
 def test_action_result_disk_failure_releases_activity_but_still_blocks_replay(
