@@ -1439,6 +1439,9 @@ def test_a_rejected_credential_stops_claiming_and_stays_down_until_stopped(servi
         return None
 
     monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    # Until the service builds its own, the last heartbeat is an earlier
+    # test's, which has stopped already.
+    monkeypatch.setattr(FakeHeartbeat, "last", None)
     served: list[int] = []
     thread = threading.Thread(
         target=lambda: served.append(
