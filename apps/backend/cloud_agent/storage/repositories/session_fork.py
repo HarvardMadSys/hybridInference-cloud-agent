@@ -14,7 +14,7 @@ from cloud_agent.domain.execution import CANCELLED, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.ids import new_job_id, new_session_fork_id, new_thread_id
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
 from cloud_agent.storage._sql.hosts import DELETED_GROUP_STATES, refuse_start_on_revoked_host
-from cloud_agent.storage._sql.jobs import JOB_SELECT
+from cloud_agent.storage._sql.jobs import JOB_SELECT, read_job
 from cloud_agent.storage._sql.mcp_residency import mint_residency_sql
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import (
@@ -23,7 +23,6 @@ from cloud_agent.storage._sql.sandbox import (
     THREAD_SANDBOX_SOURCE,
     quiet_idle_deadline,
 )
-from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.repositories.goals import new_goal_id
 
 if TYPE_CHECKING:
@@ -34,16 +33,8 @@ class PostgresSessionForkRepository:
     """Forking a retained chat: prepare, materialize, finalize, reap."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
-        """Wrap the pool the control plane already owns.
-
-        A finalized fork answers with the child turn it just made, and that
-        read is ``PostgresConversationQueries.get_job`` -- the same call it
-        made when both lived on one class, over the same pool, and after this
-        class's transaction has already committed. Held as a peer rather than
-        reimplemented, so there is still one statement behind it.
-        """
+        """Wrap the pool the control plane already owns."""
         self._pool = pool
-        self._queries = PostgresConversationQueries(pool)
 
     async def prepare_session_fork(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
@@ -942,7 +933,10 @@ class PostgresSessionForkRepository:
                 )
             else:
                 return None
-        return None if anchor_id is None else await self._queries.get_job(anchor_id)
+        if anchor_id is None:
+            return None
+        async with self._pool.acquire() as conn:
+            return await read_job(conn, anchor_id)
 
     async def reap_stalled_session_forks(
         self, *, stall_seconds: float = 900.0
