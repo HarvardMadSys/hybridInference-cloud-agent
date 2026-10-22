@@ -1,3 +1,4 @@
+import { mapThreadMessage } from './threadMessage';
 // Adapts the agent-jobs API shape to what the UI renders.
 //
 // The UI was designed against a richer mock than the API currently returns.
@@ -1128,17 +1129,6 @@ function toDisplayGoal(goal: NonNullable<AgentJobApi['goal']>): AgentGoal {
     ...(goal.pause_reason ? { pauseReason: goal.pause_reason } : {}),
     ...(goal.pause_detail ? { pauseDetail: goal.pause_detail } : {}),
     ...(goal.completion_basis ? { completionBasis: goal.completion_basis } : {}),
-  };
-}
-
-function mapThreadMessage(message: AgentThreadMessageApi) {
-  return {
-    id: message.id,
-    role: message.role,
-    content: message.content,
-    jobId: message.job_id,
-    createdAt: message.created_at,
-    ...(message.mid_turn ? { midTurn: true } : {}),
   };
 }
 

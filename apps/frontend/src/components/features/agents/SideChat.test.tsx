@@ -229,7 +229,9 @@ function props(active = true) {
   return { sourceJob: toDisplayJob(anchor), sourceJobs: [anchor], userId, config, active };
 }
 async function ready() {
-  await waitFor(() => expect(getAgentJobThread).toHaveBeenCalledWith('side-copy'));
+  await waitFor(() =>
+    expect(getAgentJobThread).toHaveBeenCalledWith('side-copy', { anchor: true }),
+  );
   await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
     target: { value: 'Why keep the files?' },

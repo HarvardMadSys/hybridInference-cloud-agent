@@ -120,6 +120,8 @@ export interface AgentThreadMessage {
   id: number;
   role: 'user' | 'assistant';
   content: string;
+  contentTruncated?: boolean;
+  nextOffset?: number | null;
   jobId: string;
   createdAt: string | null;
   /** Sent into the turn while it ran; not the turn's prompt. */

@@ -58,6 +58,7 @@ export {
   listAgentConversations,
   listAgentProjects,
   getAgentJobThread,
+  getAgentThreadMessage,
   getAgentThreadStats,
 } from './agents/threads';
 

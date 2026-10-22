@@ -5666,6 +5666,11 @@
             ],
             "title": "Thread Id"
           },
+          "thread_preview": {
+            "default": false,
+            "title": "Thread Preview",
+            "type": "boolean"
+          },
           "thread_revision": {
             "default": 0,
             "title": "Thread Revision",
@@ -7689,6 +7694,22 @@
             "title": "Content",
             "type": "string"
           },
+          "content_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Length"
+          },
+          "content_truncated": {
+            "default": false,
+            "title": "Content Truncated",
+            "type": "boolean"
+          },
           "created_at": {
             "anyOf": [
               {
@@ -7714,9 +7735,31 @@
             "title": "Mid Turn",
             "type": "boolean"
           },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
           "role": {
             "title": "Role",
             "type": "string"
+          },
+          "turn_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn No"
           }
         },
         "required": [
@@ -8015,6 +8058,22 @@
             ],
             "title": "Created At"
           },
+          "current_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Job Id"
+          },
+          "history_version": {
+            "default": 2,
+            "title": "History Version",
+            "type": "integer"
+          },
           "jobs": {
             "items": {
               "$ref": "#/components/schemas/AgentJobResponse"
@@ -8029,12 +8088,28 @@
             "title": "Messages",
             "type": "array"
           },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
           "pending_messages": {
             "items": {
               "$ref": "#/components/schemas/AgentPendingMessageResponse"
             },
             "title": "Pending Messages",
             "type": "array"
+          },
+          "pending_messages_complete": {
+            "default": true,
+            "title": "Pending Messages Complete",
+            "type": "boolean"
           },
           "queue_paused_reason": {
             "anyOf": [
@@ -8062,6 +8137,17 @@
               }
             ],
             "title": "Repo"
+          },
+          "sync_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sync Cursor"
           },
           "thread_id": {
             "title": "Thread Id",
@@ -31948,7 +32034,7 @@
     },
     "/v1/agent/jobs/{job_id}/thread": {
       "get": {
-        "description": "Return the durable conversation containing one of the caller's jobs.",
+        "description": "Return a bounded recent history page; follow cursors for explicit backfill.\n\nVersion 2 retains the message/job arrays and chronological order. Wide\nmessages are explicit previews with a chunked detail endpoint. Queue\nsnapshots advertise completeness; the dedicated queue endpoint is unchanged.",
         "operationId": "get_agent_thread_v1_agent_jobs__job_id__thread_get",
         "parameters": [
           {
@@ -31958,6 +32044,68 @@
             "schema": {
               "title": "Job Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Continue toward older history.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Continue toward older history.",
+              "title": "Cursor"
+            }
+          },
+          {
+            "description": "Read newer history from sync_cursor.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Read newer history from sync_cursor.",
+              "title": "After"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Start at the selected job instead of the newest turn.",
+            "in": "query",
+            "name": "anchor",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Start at the selected job instead of the newest turn.",
+              "title": "Anchor",
+              "type": "boolean"
             }
           },
           {
@@ -32415,6 +32563,97 @@
           }
         },
         "summary": "List Agent Thread Events"
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/messages/{message_id}": {
+      "get": {
+        "description": "Read one message in bounded Unicode-character chunks, scoped to its owner.",
+        "operationId": "get_agent_thread_message_v1_agent_jobs__job_id__thread_messages__message_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "title": "Message Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 2147483646,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 16384,
+              "maximum": 16384,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentThreadMessageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Thread Message"
       }
     },
     "/v1/agent/jobs/{job_id}/thread/stats": {
