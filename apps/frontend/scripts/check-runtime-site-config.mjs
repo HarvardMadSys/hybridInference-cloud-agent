@@ -67,24 +67,22 @@
 // Use --saved-config-only to check request-scoped caching against an existing
 // production build without rebuilding either variant.
 
-import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { join, resolve } from 'node:path';
-
-const WEB_ROOT = resolve(import.meta.dirname, '..');
-const NEXT_BIN = join(WEB_ROOT, 'node_modules', 'next', 'dist', 'bin', 'next');
-const NEXT_DIR = join(WEB_ROOT, '.next');
-const STANDALONE = join(NEXT_DIR, 'standalone');
-const SERVER = join(STANDALONE, 'server.js');
-const STATIC_DIR = join(NEXT_DIR, 'static');
+import { join } from 'node:path';
+import {
+  buildStandalone,
+  NEXT_DIR,
+  STANDALONE_DIR,
+  STATIC_DIR,
+  startStandalone,
+  waitForResponse,
+} from './standalone-harness.mjs';
 
 const SENTINEL = 'sentinel-runtime-config-must-not-leak';
 const STARTUP_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 400;
-
-let nextPort = 3411;
 
 const CATALOG = JSON.parse(
   readFileSync(new URL('../../../deploy/release/artifact_catalog.json', import.meta.url), 'utf8'),
@@ -97,7 +95,9 @@ const VARIANTS = CATALOG.artifacts
     apiUrl: artifact.api_url,
     // A mounted app must not answer at the bare path as a second copy.
     foreignPaths: artifact.base_path ? ['/login'] : [],
-  }));
+  }))
+  // Leave the root artifact in .next so the browser suite can reuse it.
+  .sort((left, right) => Number(left.basePath === '') - Number(right.basePath === ''));
 if (VARIANTS.length === 0) throw new Error('Artifact catalog declares no web variants');
 
 function deployment(spec) {
@@ -175,8 +175,6 @@ function fail(message) {
   console.error(`::error title=Runtime site config::${message}`);
   process.exit(1);
 }
-
-const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 function titleOf(html) {
   return firstMatch(html, /<title[^>]*>([^<]*)<\/title>/i);
@@ -335,14 +333,10 @@ function hashTree(root) {
  * artifact.
  */
 function artifactDigest() {
-  return `${hashTree(STANDALONE)}:${hashTree(STATIC_DIR)}`;
+  return `${hashTree(STANDALONE_DIR)}:${hashTree(STATIC_DIR)}`;
 }
 
 function buildVariant(variant) {
-  // A stale `.next` could serve the previous variant's inlined values, which
-  // is exactly the class of mistake this script exists to catch.
-  rmSync(NEXT_DIR, { recursive: true, force: true });
-
   const env = {
     ...process.env,
     NODE_ENV: 'production',
@@ -354,93 +348,37 @@ function buildVariant(variant) {
   for (const key of Object.keys(env)) {
     if (key.startsWith('AGENT_WEB_')) delete env[key];
   }
-
-  const result = spawnSync(process.execPath, [NEXT_BIN, 'build'], {
-    cwd: WEB_ROOT,
-    env,
-    encoding: 'utf8',
-  });
-  if (result.error) {
-    fail(`could not run \`next build\` for ${variant.name}: ${result.error.message}`);
+  try {
+    buildStandalone(variant, { env, stdio: 'pipe' });
+  } catch (error) {
+    fail(error.message);
   }
-  if (result.status !== 0) {
-    fail(
-      `\`next build\` failed for ${variant.name}:\n` +
-        `${(result.stdout ?? '') + (result.stderr ?? '')}`,
-    );
-  }
-
-  if (!existsSync(SERVER)) fail(`no standalone server at ${SERVER} after the build`);
-  // Mirror what the runtime image does: the static assets are emitted outside
-  // `.next/standalone` and have to be copied in.
-  rmSync(join(STANDALONE, '.next', 'static'), { recursive: true, force: true });
-  cpSync(STATIC_DIR, join(STANDALONE, '.next', 'static'), { recursive: true });
 }
 
-function startServer(env, port) {
+async function startServer(env) {
   // The deployment's identity is given, never inherited: a shell or CI job that
   // happens to export one of these must not decide what any render below shows.
   const inherited = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.startsWith('AGENT_WEB_')),
   );
-  const child = spawn(process.execPath, [SERVER], {
-    cwd: STANDALONE,
+  return startStandalone({
     env: {
       ...inherited,
-      NODE_ENV: 'production',
-      HOSTNAME: '127.0.0.1',
-      PORT: String(port),
       ...env,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    captureOutput: true,
   });
-
-  const logs = [];
-  child.stdout.on('data', (chunk) => logs.push(String(chunk)));
-  child.stderr.on('data', (chunk) => logs.push(String(chunk)));
-  child.on('error', (error) => logs.push(`spawn error: ${error.message}`));
-
-  return {
-    logs,
-    stop() {
-      return new Promise((done) => {
-        if (child.exitCode !== null || child.signalCode !== null) return done();
-        child.once('exit', () => done());
-        child.kill('SIGTERM');
-        setTimeout(() => child.kill('SIGKILL'), 5_000).unref();
-      });
-    },
-  };
-}
-
-/**
- * The first response the server gives, whatever its status.
- *
- * Any status means the process is up; the assertions decide whether the
- * status and body are right. Waiting only for 200 would turn a wrongly-built
- * variant into a timeout, which reads as a broken check rather than a broken
- * build.
- */
-async function waitForResponse(url) {
-  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
-  let lastError = 'no attempt made';
-  while (Date.now() < deadline) {
-    try {
-      return await fetch(url);
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      await sleep(POLL_INTERVAL_MS);
-    }
-  }
-  throw new Error(`${url} did not answer within ${STARTUP_TIMEOUT_MS}ms: ${lastError}`);
 }
 
 async function render(variant, env, suffix = '/login') {
-  const port = nextPort++;
-  const server = startServer(env, port);
+  const server = await startServer(env);
   try {
-    const url = `http://127.0.0.1:${port}${variant.basePath}${suffix}`;
-    const response = await waitForResponse(url);
+    const url = `http://127.0.0.1:${server.port}${variant.basePath}${suffix}`;
+    const response = await waitForResponse(url, {
+      server,
+      timeoutMs: STARTUP_TIMEOUT_MS,
+      pollIntervalMs: POLL_INTERVAL_MS,
+    });
     return { status: response.status, html: await response.text(), logs: server.logs.join('') };
   } finally {
     await server.stop();
@@ -448,10 +386,9 @@ async function render(variant, env, suffix = '/login') {
 }
 
 async function probePath(variant, path) {
-  const port = nextPort++;
-  const server = startServer(DEPLOYMENTS[0].env, port);
+  const server = await startServer(DEPLOYMENTS[0].env);
   try {
-    const response = await waitForResponse(`http://127.0.0.1:${port}${path}`);
+    const response = await waitForResponse(`http://127.0.0.1:${server.port}${path}`, { server });
     return response.status;
   } finally {
     await server.stop();
@@ -737,15 +674,11 @@ async function assertSavedConfigRequestScope(variant) {
   });
   await new Promise((done) => controlPlane.listen(0, '127.0.0.1', done));
 
-  const port = nextPort++;
-  const server = startServer(
-    {
-      ...DEPLOYMENTS[0].env,
-      AGENT_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlane.address().port}`,
-    },
-    port,
-  );
-  const url = `http://127.0.0.1:${port}${variant.basePath}/login`;
+  const server = await startServer({
+    ...DEPLOYMENTS[0].env,
+    AGENT_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlane.address().port}`,
+  });
+  const url = `http://127.0.0.1:${server.port}${variant.basePath}/login`;
 
   async function assertSnapshot(expected, label, bounded = false) {
     const before = reads;
@@ -786,7 +719,8 @@ async function assertSavedConfigRequestScope(variant) {
     );
     if (!chunk) throw new Error('No main-app chunk to check production server readiness');
     const asset = await waitForResponse(
-      `http://127.0.0.1:${port}${variant.basePath}/_next/static/chunks/${chunk}`,
+      `http://127.0.0.1:${server.port}${variant.basePath}/_next/static/chunks/${chunk}`,
+      { server },
     );
     await asset.arrayBuffer();
     if (asset.status !== 200 || reads !== 0) {
@@ -870,15 +804,14 @@ function assertStaticSecurityHeaders(where, headers) {
  * miss while every other one matches.
  */
 async function assertSecurityHeaders(variant) {
-  const port = nextPort++;
-  const server = startServer(DEPLOYMENTS[0].env, port);
-  const origin = `http://127.0.0.1:${port}`;
+  const server = await startServer(DEPLOYMENTS[0].env);
+  const origin = `http://127.0.0.1:${server.port}`;
   try {
     const nonces = new Set();
     let asset = null;
     for (const path of [variant.basePath || '/', `${variant.basePath}/login`]) {
       const where = `${variant.name} / security headers of ${path}`;
-      const response = await waitForResponse(`${origin}${path}`);
+      const response = await waitForResponse(`${origin}${path}`, { server });
       const html = await response.text();
       if (response.status !== 200) {
         fail(`${where}: answered ${response.status}\n${server.logs.join('')}`);
@@ -986,7 +919,7 @@ async function main() {
 
   // An illegal value must be refused. Reading it as "unset" is the silent
   // fallback this work removed, so a normal page is the failure.
-  const broken = await render(VARIANTS[0], {
+  const broken = await render(VARIANTS.at(-1), {
     ...DEPLOYMENTS[0].env,
     AGENT_WEB_STATUS_URL: 'not-a-url',
   });
@@ -999,7 +932,7 @@ async function main() {
 
   console.log(
     `Runtime site config: ${VARIANTS.length} variants, ${DEPLOYMENTS.length} configured ` +
-      `deployments, 1 unconfigured deployment, all correct.`,
+      'deployments, 1 unconfigured deployment, all correct.',
   );
 }
 

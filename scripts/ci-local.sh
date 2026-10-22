@@ -178,7 +178,7 @@ if [[ "$CI_TIER" == all || "$CI_TIER" == frontend ]]; then
   # Chromium's OS libraries must already be provisioned on shared test hosts.
   # Download only the locked browser; never run a privileged system install.
   run_check browser-install npx playwright install chromium
-  run_check browser npm run test:browser
+  run_check browser env CLOUD_AGENT_E2E_SKIP_BUILD=1 npm run test:browser
 fi
 
 printf '\n'
