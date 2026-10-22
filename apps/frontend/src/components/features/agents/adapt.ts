@@ -1,3 +1,4 @@
+import { mapThreadMessage } from './threadMessage';
 // Adapts the agent-jobs API shape to what the UI renders.
 //
 // The UI was designed against a richer mock than the API currently returns.
@@ -1131,17 +1132,6 @@ function toDisplayGoal(goal: NonNullable<AgentJobApi['goal']>): AgentGoal {
   };
 }
 
-function mapThreadMessage(message: AgentThreadMessageApi) {
-  return {
-    id: message.id,
-    role: message.role,
-    content: message.content,
-    jobId: message.job_id,
-    createdAt: message.created_at,
-    ...(message.mid_turn ? { midTurn: true } : {}),
-  };
-}
-
 /** Index a conversation once, rather than scanning its full log for each turn. */
 function groupByJob<T extends { job_id: string }>(rows: T[]): Map<string, T[]> {
   const groups = new Map<string, T[]>();
@@ -1487,9 +1477,10 @@ function adaptJob(
     // written out inline, every job got a `goalTurn` — including the ones whose
     // conversation has no goal at all — and "absent" stopped meaning anything.
     ...(storedGoalTurn(job) ? { goalTurn: storedGoalTurn(job) } : {}),
-    // Summed server-side from api_logs. Null there means no ledger is
-    // configured; 0 is the honest display for that, but the panel below reads
-    // `hasLedger` so it can say so rather than imply the job was free.
+    // Summed server-side from the grant ledger (issue #823: the same
+    // accounting the usage surface uses). Null there means no snapshot has
+    // answered yet; 0 is the honest display for that, but the panel below
+    // reads `hasLedger` so it can say so rather than imply the job was free.
     spentUsd: job.spent_usd ?? 0,
     hasLedger: job.spent_usd !== null,
     ...(job.continuity_mode ? { continuityMode: job.continuity_mode } : {}),

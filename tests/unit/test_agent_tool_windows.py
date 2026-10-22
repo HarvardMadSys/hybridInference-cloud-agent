@@ -79,6 +79,15 @@ def test_a_call_holding_one_reading_is_still_unmeasured():
     assert row["cpu_usec_exclusive"] is None
 
 
+def test_a_counter_that_went_backwards_reports_nothing():
+    """A cgroup replaced mid-call must not surface as a wild number."""
+    samples = [Sample(mono=0.0, cpu_usec=9_000), Sample(mono=1.0, cpu_usec=5)]
+    windows = [ToolWindow("t1", "Bash", opened_mono=0.0, closed_mono=1.0)]
+    (row,) = attribute(samples, windows)
+    assert row["sample_count"] == 2
+    assert row["cpu_usec_exclusive"] is None
+
+
 def test_parallel_calls_share_their_readings_and_none_of_them_is_exclusive():
     """The counters cannot separate concurrent calls, so neither claims them."""
     windows = [

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
 
 import cloud_agent.source_control as source_control
+from cloud_agent.settings import number_setting
 from cloud_agent.source_control import (
     GitLabOAuthClient,
     GitLabOAuthConfig,
@@ -56,7 +57,7 @@ class MemoryStore:
             or row["user_id"] != user_id
             or row["provider"] != provider
             or row["consumed"]
-            or row["expires_at"] <= datetime.now(timezone.utc)
+            or row["expires_at"] <= datetime.now(UTC)
         ):
             return None
         row["consumed"] = True
@@ -123,7 +124,7 @@ class MemoryStore:
             return None
         row = dict(self.row)
         if self.lease_held:
-            row["refresh_lease_expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=30)
+            row["refresh_lease_expires_at"] = datetime.now(UTC) + timedelta(seconds=30)
         else:
             row.setdefault("refresh_lease_expires_at", None)
         return row
@@ -189,7 +190,7 @@ async def test_oauth_state_expiry_and_provider_tampering_fail_closed() -> None:
         )
 
     persisted = next(iter(store.states.values()))
-    persisted["expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+    persisted["expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
     with pytest.raises(OAuthStateError):
         await consume_oauth_state(
             store,
@@ -288,7 +289,7 @@ async def test_gitlab_pkce_exchange_identity_projects_refresh_and_revoke() -> No
                 json={
                     "access_token": "access-two",
                     "refresh_token": "refresh-two",
-                    "created_at": datetime.now(timezone.utc).timestamp(),
+                    "created_at": datetime.now(UTC).timestamp(),
                     "expires_in": 7200,
                 },
             )
@@ -354,7 +355,7 @@ async def test_gitlab_pkce_exchange_identity_projects_refresh_and_revoke() -> No
         "refresh_lease_expires_at": None,
         "access_token_ciphertext": cipher.encrypt("access-one"),
         "refresh_token_ciphertext": cipher.encrypt("refresh-one"),
-        "expires_at": datetime.now(timezone.utc) - timedelta(seconds=1),
+        "expires_at": datetime.now(UTC) - timedelta(seconds=1),
     }
     store.gitlab_refresh_claim = {
         "refresh_generation": 1,
@@ -419,7 +420,7 @@ async def test_a_gitlab_token_outside_the_refresh_window_is_not_refreshed() -> N
         cipher=cipher,
         access="access-live",
         refresh="refresh-live",
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     token = await _gitlab_client(handler).access_token_for_connection(store, connection)
     assert token == "access-live"
@@ -436,7 +437,7 @@ async def test_gitlab_refresh_lease_outlasts_a_delayed_provider_timeout_override
         cipher=cipher,
         access="access-old",
         refresh="refresh-old",
-        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     store.row = connection
 
@@ -454,7 +455,7 @@ async def test_gitlab_refresh_lease_outlasts_a_delayed_provider_timeout_override
         return {
             "access_token": "access-new",
             "refresh_token": "refresh-new",
-            "created_at": datetime.now(timezone.utc).timestamp(),
+            "created_at": datetime.now(UTC).timestamp(),
             "expires_in": 7200,
         }
 
@@ -476,7 +477,7 @@ async def test_gitlab_refresh_pins_one_dynamic_timeout_for_lease_and_http(
     """A setting increase during claim cannot lengthen this refresh request."""
     values = {"gitlab_request_timeout_s": 20.0}
     monkeypatch.setattr(
-        source_control, "number_setting", lambda name, default=None: values.get(name, default)
+        source_control, "number_setting", lambda name: values.get(name, number_setting(name))
     )
     cipher = SourceControlCipher("server-secret")
     store = MemoryStore()
@@ -484,7 +485,7 @@ async def test_gitlab_refresh_pins_one_dynamic_timeout_for_lease_and_http(
         cipher=cipher,
         access="access-old",
         refresh="refresh-old",
-        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     store.row = connection
     store.after_claim = lambda: values.update(gitlab_request_timeout_s=300.0)
@@ -497,7 +498,7 @@ async def test_gitlab_refresh_pins_one_dynamic_timeout_for_lease_and_http(
             json={
                 "access_token": "access-new",
                 "refresh_token": "refresh-new",
-                "created_at": datetime.now(timezone.utc).timestamp(),
+                "created_at": datetime.now(UTC).timestamp(),
                 "expires_in": 7200,
             },
         )
@@ -518,7 +519,7 @@ async def test_a_gitlab_refresh_without_the_lease_uses_the_stored_token() -> Non
         cipher=cipher,
         access="access-current",
         refresh="refresh-current",
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+        expires_at=datetime.now(UTC) + timedelta(minutes=2),
     )
 
     def winner_lands() -> None:
@@ -533,7 +534,7 @@ async def test_a_gitlab_refresh_without_the_lease_uses_the_stored_token() -> Non
         cipher=cipher,
         access="access-stale",
         refresh="refresh-stale",
-        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     token = await _gitlab_client(handler).access_token_for_connection(store, expired)
     assert token == "access-current"
@@ -550,13 +551,13 @@ async def test_a_lost_gitlab_refresh_returns_the_replacement_not_its_own_token()
         cipher=cipher,
         access="access-a",
         refresh="refresh-a",
-        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     replacement = _connection(
         cipher=cipher,
         access="access-b",
         refresh="refresh-b",
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=2),
+        expires_at=datetime.now(UTC) + timedelta(hours=2),
     )
 
     def reconnect() -> None:
@@ -571,7 +572,7 @@ async def test_a_lost_gitlab_refresh_returns_the_replacement_not_its_own_token()
             json={
                 "access_token": "access-from-a",
                 "refresh_token": "refresh-from-a",
-                "created_at": datetime.now(timezone.utc).timestamp(),
+                "created_at": datetime.now(UTC).timestamp(),
                 "expires_in": 7200,
             },
         )
@@ -580,7 +581,7 @@ async def test_a_lost_gitlab_refresh_returns_the_replacement_not_its_own_token()
         cipher=cipher,
         access="access-a",
         refresh="refresh-a",
-        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     token = await _gitlab_client(handler).access_token_for_connection(store, expired)
     assert token == "access-b"
@@ -604,7 +605,7 @@ async def test_a_lost_gitlab_refresh_is_unavailable_when_nothing_valid_is_stored
         cipher=cipher,
         access="access-old",
         refresh="refresh-old",
-        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     store.row = connection
 
@@ -614,7 +615,7 @@ async def test_a_lost_gitlab_refresh_is_unavailable_when_nothing_valid_is_stored
             json={
                 "access_token": "access-refreshed",
                 "refresh_token": "refresh-refreshed",
-                "created_at": datetime.now(timezone.utc).timestamp(),
+                "created_at": datetime.now(UTC).timestamp(),
                 "expires_in": 7200,
             },
         )
@@ -637,7 +638,7 @@ async def test_a_gitlab_refresh_without_the_lease_is_unavailable_once_the_token_
         cipher=cipher,
         access="access-old",
         refresh="refresh-old",
-        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     store.row = connection
 

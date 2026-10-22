@@ -42,9 +42,9 @@ from cloud_agent.skills.models import SkillError
 from cloud_agent.skills.selection import resolve_skills
 from cloud_agent.visible_models import (
     ModelCatalogUnavailable,
-    agent_canonical_model,
+    agent_model_catalog_bundle,
     agent_model_reasoning_efforts,
-    agent_visible_models,
+    resolve_model_in_catalog,
 )
 from cloud_agent_shared.git.temporary_workspace import TEMPORARY_WORKSPACE_BASE_SHA
 from cloud_agent_shared.plugins import validate_sandbox_plugins
@@ -83,7 +83,7 @@ class _JobCreationStorage(Protocol):
     source_control: SourceControlPort
 
 
-def _model_catalog_unavailable() -> HTTPException:
+def model_catalog_unavailable() -> HTTPException:
     """503 while the gateway cannot say which models this owner may call.
 
     Not a 400: an outage is no verdict on the model or the effort, and a
@@ -101,11 +101,12 @@ def _model_catalog_unavailable() -> HTTPException:
     )
 
 
-async def _require_resolvable_model(
+async def require_resolvable_model(
     model: str,
     *,
     gateway: Any,
     user: dict[str, Any],
+    catalog: tuple[list[str], dict[str, str], dict[str, list[str]]] | None = None,
 ) -> str:
     """Resolve the requested model to its canonical id, or refuse the job.
 
@@ -120,14 +121,21 @@ async def _require_resolvable_model(
     `claude-3-opus-latest` produced a grant whose `allowed_models` matched
     nothing. The job was created, and died at its first inference call with a
     404 from a model that plainly exists.
+
+    ``catalog`` carries an already-read ``(models, aliases, efforts)`` bundle
+    (issue #781): the send path reads the catalog once and both admission
+    checks consume the same response. When omitted the catalog is read here,
+    which keeps direct callers working.
     """
-    try:
-        canonical = await agent_canonical_model(model, gateway, user_id=user["user_id"])
-    except ModelCatalogUnavailable:
-        raise _model_catalog_unavailable() from None
+    if catalog is None:
+        try:
+            catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
+        except ModelCatalogUnavailable:
+            raise model_catalog_unavailable() from None
+    models, aliases, _efforts = catalog
+    canonical = resolve_model_in_catalog(model, models, aliases)
     if canonical is not None:
         return canonical
-    visible = await agent_visible_models(gateway, user_id=user["user_id"])
     raise HTTPException(
         status_code=400,
         detail={
@@ -135,7 +143,7 @@ async def _require_resolvable_model(
                 "type": "model_not_available",
                 "message": (
                     f"Model {model!r} is not available to agent jobs on this deployment. "
-                    f"Available: {', '.join(visible[:20]) or 'none'}."
+                    f"Available: {', '.join(models[:20]) or 'none'}."
                 ),
             }
         },
@@ -310,7 +318,7 @@ def _binding_alias(row: dict[str, Any]) -> str:
     return f"mcp{row['id']}"
 
 
-def _require_registered_runtime(runtime: str) -> None:
+def require_registered_runtime(runtime: str) -> None:
     """400 unless ``runtime`` names a registered harness.
 
     The registry is the trust boundary: what may run is what this
@@ -332,13 +340,14 @@ def _require_registered_runtime(runtime: str) -> None:
         )
 
 
-async def _require_offered_effort(
+async def require_offered_effort(
     effort: str | None,
     *,
     runtime: str,
     model: str,
     gateway: Any,
     user: dict[str, Any],
+    efforts: dict[str, list[str]] | None = None,
 ) -> str | None:
     """400 unless ``effort`` is one this runtime *and* this model both accept.
 
@@ -354,6 +363,10 @@ async def _require_offered_effort(
         model: The canonical model id, already resolved.
         gateway: Client for the gateway's internal contracts.
         user: The authenticated owner.
+        efforts: An already-read ``{model_id: [values]}`` domain table
+            (issue #781): the send path reads the catalog once and both
+            admission checks consume the same response. When omitted the
+            catalog is read here, which keeps direct callers working.
 
     Returns:
         The value to store: ``None`` for Auto, else the validated level.
@@ -369,15 +382,16 @@ async def _require_offered_effort(
         # spellings are the same answer and neither is a 400.
         return None
     runtime_levels = runtime_reasoning_efforts().get(runtime, [])
-    try:
-        domains = await agent_model_reasoning_efforts(gateway, user_id=user["user_id"])
-    except ModelCatalogUnavailable:
-        raise _model_catalog_unavailable() from None
+    if efforts is None:
+        try:
+            efforts = await agent_model_reasoning_efforts(gateway, user_id=user["user_id"])
+        except ModelCatalogUnavailable:
+            raise model_catalog_unavailable() from None
     # The model's entry is read as a yes/no — does it take the parameter at
     # all — and not for its contents. Per-model domains were tried and
     # withdrawn: the providers' documented lists disagreed with what their
     # APIs accept, so the levels are this platform's and the same everywhere.
-    takes_effort = bool(domains.get(model))
+    takes_effort = bool(efforts.get(model))
     offered = (
         [level for level in PLATFORM_REASONING_EFFORTS if level in runtime_levels]
         if takes_effort
@@ -399,7 +413,7 @@ async def _require_offered_effort(
     )
 
 
-async def _resolve_skill_selection(
+async def resolve_skill_selection(
     store: SkillRepository, *, user_id: str, skill_ids: list[int] | None
 ) -> list[dict[str, Any]] | None:
     """Resolve owned instruction snapshots before persisting a submission."""
@@ -420,7 +434,7 @@ def _attachment_selection_error(exc: AttachmentError) -> HTTPException:
     )
 
 
-async def _resolve_attachment_selection(
+async def resolve_attachment_selection(
     store: AttachmentRepository, *, user_id: str, attachment_ids: list[int] | None
 ) -> list[dict[str, Any]] | None:
     """Resolve staged uploads into the manifest a submission retains."""
@@ -525,7 +539,7 @@ async def _admit_repository(
     return base_sha
 
 
-async def _create_job_as(
+async def create_job_as(  # noqa: PLR0912 complexity baseline, #771
     body: AgentJobCreate,
     user: dict[str, Any],
     *,
@@ -572,7 +586,7 @@ async def _create_job_as(
         )
         if replayed is not None:
             if replayed.get("error") == "client_request_conflict":
-                raise _idempotency_conflict()
+                raise idempotency_conflict()
             return replayed
     # Fail here, not at claim time. An unregistered runtime used to travel all
     # the way into a queued row and burn a claim before anything noticed —
@@ -581,7 +595,7 @@ async def _create_job_as(
     # The check lives in the helper rather than in the owner route because the
     # service door creates jobs through here too: a check only one door runs
     # is precisely the drift this extraction exists to prevent.
-    _require_registered_runtime(body.runtime)
+    require_registered_runtime(body.runtime)
     try:
         plugins = validate_sandbox_plugins(body.runtime, body.plugins or [])
     except ValueError as exc:
@@ -597,11 +611,21 @@ async def _create_job_as(
     # Canonical from here on. The grant the gateway mints names canonical
     # ids, so a job that stored the alias would carry a scope matching
     # nothing — created successfully, dead at its first inference call.
-    model = await _require_resolvable_model(body.model, gateway=gateway, user=user)
+    # One catalog read serves both admission checks (issue #781).
+    try:
+        catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
+    except ModelCatalogUnavailable:
+        raise model_catalog_unavailable() from None
+    model = await require_resolvable_model(body.model, gateway=gateway, user=user, catalog=catalog)
     # Checked against the *resolved* model, not the requested spelling: the
     # domain belongs to the model the turn will actually call.
-    reasoning_effort = await _require_offered_effort(
-        body.reasoning_effort, runtime=body.runtime, model=model, gateway=gateway, user=user
+    reasoning_effort = await require_offered_effort(
+        body.reasoning_effort,
+        runtime=body.runtime,
+        model=model,
+        gateway=gateway,
+        user=user,
+        efforts=catalog[2],
     )
     if body.repo is None:
         # A temporary workspace: there is no repository to be entitled to and no
@@ -647,10 +671,10 @@ async def _create_job_as(
             status_code=503,
             detail={"error": {"type": "invalid_configuration", "message": str(exc)}},
         ) from exc
-    skills = await _resolve_skill_selection(
+    skills = await resolve_skill_selection(
         job_store.skills, user_id=user["user_id"], skill_ids=body.skill_ids
     )
-    attachments = await _resolve_attachment_selection(
+    attachments = await resolve_attachment_selection(
         job_store.attachments, user_id=user["user_id"], attachment_ids=body.attachment_ids
     )
     try:
@@ -711,7 +735,7 @@ async def _create_job_as(
         # written, and the owner can attach the file again.
         raise _attachment_selection_error(exc) from exc
     if job.get("error") == "client_request_conflict":
-        raise _idempotency_conflict()
+        raise idempotency_conflict()
     logger.info(
         "agent_job_created",
         extra={"event": "agent_job_created", "job_id": job["id"], "runtime": body.runtime},
@@ -719,7 +743,8 @@ async def _create_job_as(
     return job
 
 
-def _idempotency_conflict() -> HTTPException:
+def idempotency_conflict() -> HTTPException:
+    """The 409 for an Idempotency-Key reused with a different submission."""
     return HTTPException(
         status_code=409,
         detail={

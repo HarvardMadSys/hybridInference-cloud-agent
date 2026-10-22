@@ -28,7 +28,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from cloud_agent_shared.operation_profiling import (
@@ -42,6 +42,12 @@ from cloud_agent_shared.operation_profiling import (
     RUN_ID_PATTERN,
     STARTUP_OPERATION,
     TARGET_KEYS,
+    V3_MILESTONE_FIELDS,
+    V3_OPERATIONS,
+    V3_OUTCOMES,
+    V3_RECORD_FIELDS,
+    V3_SPAN_FIELDS,
+    V3_STAGE_FIELDS,
 )
 
 #: Longest record accepted, in bytes. The collector's own ceilings bound the
@@ -94,84 +100,22 @@ ALLOWED_FACTS: Final = frozenset(
     }
 )
 
-#: The operations a stored record may name. A record for something else is a
-#: producer this deployment does not know, and its samples would land in a
-#: distribution that has no boundary version for them.
-KNOWN_OPERATIONS: Final = frozenset(
-    {
-        "attempt.startup",
-        "files.list",
-        "files.open",
-        "terminal.open",
-    }
-)
-
-#: Outcomes a record may report, mirroring the collector's vocabulary.
-KNOWN_OUTCOMES: Final = frozenset(
-    {
-        "dispatched",
-        "failed",
-        "cancelled",
-        "lease_lost",
-        "incomplete",
-        "completed",
-        "superseded",
-    }
-)
+#: The operations and outcomes understood for schema v3. These come from the
+#: producer's versioned vocabulary, while ``SUPPORTED_SCHEMA_VERSIONS`` above
+#: remains an independent rollout policy for this consumer.
+KNOWN_OPERATIONS: Final = V3_OPERATIONS
+KNOWN_OUTCOMES: Final = V3_OUTCOMES
 
 
-#: Every top-level field a stored record may carry. A record is reduced to
-#: these, so a producer cannot add a field this deployment does not know -- and
-#: the reduction is what keeps the promise that no prompt, file body or
-#: credential reaches the table, however a future producer names it.
-KNOWN_RECORD_KEYS: Final = frozenset(
+#: Top-level aliases accepted for compatibility but not emitted by the current
+#: producer. Keeping the extension visible here prevents an additive producer
+#: change from silently becoming an ingest trust-policy change.
+_COMPATIBILITY_RECORD_KEYS: Final = frozenset(
     {
-        "schema_version",
-        "measurement_id",
-        "interaction_id",
-        "profiling_run_id",
-        "operation",
         "request_kind",
-        "boundary_version",
-        "coverage_scope",
-        "start_boundary",
-        "end_boundary",
-        "producer",
-        "producer_instance_id",
-        "duration_us",
-        "outcome",
-        "collection_complete",
-        "end_to_end_complete",
-        "measurement_complete",
         "startup_path",
-        "startup_outcome",
-        "failure_stage",
-        "observed_at",
         "recorded_at",
-        "facts",
-        "stages",
-        "spans",
-        "milestones",
-        "missing_fragments",
-        "missing_producers",
-        "truncated_fragments",
-        "dropped_spans",
-        "truncated",
         "profiling_stopped",
-        "producers",
-        "timing_sources",
-        # Which clock domain the record's offsets are stated in. Identity, not
-        # decoration: offsets from two domains must never be compared.
-        "clock_domain_id",
-        "boundary_frozen",
-        "run_expires_at",
-        # Which control source rooted this measurement, and -- for a run an
-        # administrator started -- the deployment revision that authorized it.
-        # Both are identity rather than observation: a reader uses them to tell
-        # a static-descriptor experiment from a commanded one, and two
-        # experiments that happen to reuse a run id apart.
-        "run_source",
-        "control_revision",
         "container_action",
         "resident_action",
         "context_status",
@@ -182,33 +126,21 @@ KNOWN_RECORD_KEYS: Final = frozenset(
     }
 )
 
-#: Fields a *stage* or *span* may carry. A producer that puts a credential in
-#: a nested object is refused rather than having it silently dropped, because
-#: the two are different mistakes: an unknown top-level field is usually a
-#: newer producer, while an unknown nested one is usually something that
-#: should never have been serialized at all.
-KNOWN_SPAN_KEYS: Final = frozenset(
-    {
-        "span_id",
-        "parent_span_id",
-        "name",
-        "stage",
-        "ordinal",
-        "start_offset_us",
-        "duration_us",
-        "outcome",
-        "truncated",
-        "attributes",
-        "children",
-        "source",
-        "call_id",
-    }
-)
+#: Every top-level field a stored record may carry. A record is reduced to
+#: these, so a producer cannot add a field this deployment does not know -- and
+#: the reduction is what keeps the promise that no prompt, file body or
+#: credential reaches the table, however a future producer names it.
+KNOWN_RECORD_KEYS: Final = V3_RECORD_FIELDS | _COMPATIBILITY_RECORD_KEYS
 
-#: Fields a *milestone* may carry. A milestone is a named instant on the
-#: producer's own timeline, so it has neither a duration nor children -- the
-#: separate list is what stops a stage-shaped object being accepted here.
-KNOWN_MILESTONE_KEYS: Final = frozenset({"name", "offset_us", "source"})
+#: Nested shapes stay distinct. Stage attributes are an accepted compatibility
+#: extension and remain free-form and bounded; span identity fields can no
+#: longer appear in a stage, nor can stage-tree fields appear in a span.
+KNOWN_STAGE_KEYS: Final = V3_STAGE_FIELDS | {"attributes"}
+KNOWN_SPAN_KEYS: Final = V3_SPAN_FIELDS
+
+#: A milestone is a named instant on the producer's own timeline, so it has
+#: neither a duration nor children.
+KNOWN_MILESTONE_KEYS: Final = V3_MILESTONE_FIELDS
 
 #: Longest nesting a stage list may reach. A record is bounded in bytes too,
 #: but a deeply nested one can be small and still expensive to walk.
@@ -417,7 +349,7 @@ def _timestamp(record: Mapping[str, Any], key: str) -> datetime:
         raise MeasurementRejected(f"{key} is not an ISO-8601 timestamp") from exc
     if moment.tzinfo is None:
         raise MeasurementRejected(f"{key} has no timezone")
-    return moment.astimezone(timezone.utc)
+    return moment.astimezone(UTC)
 
 
 def sanitize_facts(facts: Any) -> dict[str, Any]:
@@ -559,7 +491,7 @@ def _contains_truncated(items: Any) -> bool:
     return False
 
 
-def _validate_completeness(
+def _validate_completeness(  # noqa: C901, PLR0912 complexity baseline, #771
     record: Mapping[str, Any],
     *,
     outcome: str,
@@ -612,7 +544,7 @@ def _validate_completeness(
         raise MeasurementRejected("collection_complete contradicts " + ", ".join(contradictory))
 
 
-def validate_measurement(
+def validate_measurement(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     record: Mapping[str, Any], *, owner: Owner | None = None
 ) -> StoredMeasurement:
     """Validate one producer record and return the row it becomes.
@@ -728,7 +660,7 @@ def validate_measurement(
     sanitized = dict(record)
     sanitized["facts"] = sanitize_facts(record.get("facts"))
     for key, allowed in (
-        ("stages", KNOWN_SPAN_KEYS),
+        ("stages", KNOWN_STAGE_KEYS),
         ("spans", KNOWN_SPAN_KEYS),
         ("milestones", KNOWN_MILESTONE_KEYS),
     ):
@@ -821,7 +753,7 @@ def require_record_matches_its_experiment(
         )
 
 
-def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:
+def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:  # noqa: C901, PLR0912 complexity baseline, #771
     """Validate an experiment manifest, and return what the catalogue stores.
 
     The boundaries are the collector's: a manifest this service would not have
@@ -907,6 +839,7 @@ __all__ = [
     "KNOWN_OUTCOMES",
     "KNOWN_RECORD_KEYS",
     "KNOWN_SPAN_KEYS",
+    "KNOWN_STAGE_KEYS",
     "MAX_RECORD_BYTES",
     "SUPPORTED_SCHEMA_VERSIONS",
     "MeasurementRejected",

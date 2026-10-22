@@ -23,8 +23,16 @@ from cloud_agent.domain.compute import (
     fingerprint as operation_fingerprint,
     move_out_window_seconds,
     provider_resource_absent,
+    retirement_cancellable,
 )
-from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
+from cloud_agent.ports.compute_resources import ComputeSchedulingSnapshot
+from cloud_agent.storage._sql import environment_runs
+from cloud_agent.storage._sql.compute_admission import lock_compute_entry
+from cloud_agent.storage._sql.compute_inventory import (
+    load_allocations,
+    load_hosts,
+    load_scheduling_operations,
+)
 from cloud_agent.storage._sql.hosts import (
     GROUP_TURN_CLAIMED_SQL,
     HANDED_OVER_GROUP_SQL,
@@ -632,7 +640,7 @@ class PostgresComputeResourceRepository:
         async with self._pool.acquire() as conn:
             return await self._allocation(conn, allocation_id)
 
-    async def remove_allocation(self, *, allocation_id: str, expected_revision: int) -> None:
+    async def remove_allocation(self, *, allocation_id: str, expected_revision: int) -> None:  # noqa: PLR0912, PLR0915 complexity baseline, #771
         """Forget an unused server and its inventory after rechecking dependencies.
 
         This performs no provider or filesystem action. A releasable resource
@@ -880,8 +888,8 @@ class PostgresComputeResourceRepository:
             result["hosts"] = [
                 dict(r)
                 for r in await conn.fetch(
-                    """SELECT h.host,h.status,h.compute_node_id,
-                (h.slots_used+(SELECT COUNT(*) FROM agent_environment_runs r WHERE r.host=h.host AND NOT r.cleanup_complete AND r.lease_expires_at>NOW() AND r.started_at>NOW()-INTERVAL '30 minutes')) AS slots_used,h.last_heartbeat_at,h.broker_url AS sandbox_manager_url,h.drain_fence_active,
+                    f"""SELECT h.host,h.status,h.compute_node_id,
+                (h.slots_used+{environment_runs.env_runs_holding_slots("h.host")}) AS slots_used,h.last_heartbeat_at,h.broker_url AS sandbox_manager_url,h.drain_fence_active,
                 (SELECT count(*) FROM agent_sandboxes g
                  WHERE g.host=h.host AND g.deletion_state<>'deleted') AS retained_groups
                 FROM agent_runner_hosts h JOIN agent_compute_nodes n ON n.id=h.compute_node_id
@@ -912,9 +920,23 @@ class PostgresComputeResourceRepository:
             self._pool.acquire() as conn,
             conn.transaction(isolation="repeatable_read", readonly=True),
         ):
-            ids = await conn.fetch("SELECT id FROM agent_compute_allocations ORDER BY created_at")
-            results = [await self._allocation(conn, r["id"]) for r in ids]
-            return [r for r in results if r is not None]
+            return await load_allocations(conn, _row)
+
+    async def scheduling_inventory(self) -> ComputeSchedulingSnapshot:
+        """Read the scheduler's allocation and operation views in six bulk queries."""
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            allocations = await load_allocations(conn, _row)
+            ids = [
+                row["id"]
+                for row in allocations
+                if not row.get("release_committed_at")
+                and row.get("observed_state") not in {"terminated", "absent"}
+            ]
+            operations, lifecycle = await load_scheduling_operations(conn, ids, _row)
+            return ComputeSchedulingSnapshot(allocations, operations, lifecycle)
 
     async def server_inventory(self) -> dict[str, Any]:
         """Read global placement and resource/Host distribution in one snapshot."""
@@ -922,35 +944,13 @@ class PostgresComputeResourceRepository:
             self._pool.acquire() as conn,
             conn.transaction(isolation="repeatable_read", readonly=True),
         ):
-            allocations = [
-                await self._allocation(conn, r["id"])
-                for r in await conn.fetch(
-                    "SELECT id FROM agent_compute_allocations ORDER BY created_at"
-                )
-            ]
-            hosts = [
-                dict(r)
-                for r in await conn.fetch("""SELECT h.host,h.status,h.drain_fence_active,
-                (h.removal_requested_at IS NOT NULL) AS removal_pending,h.compute_node_id,
-                n.allocation_id,(h.slots_used+(SELECT COUNT(*) FROM agent_environment_runs r WHERE r.host=h.host AND NOT r.cleanup_complete AND r.lease_expires_at>NOW() AND r.started_at>NOW()-INTERVAL '30 minutes')) AS slots_used,h.slots_total,h.slots_desired,h.last_heartbeat_at,
-                h.labels->>'physical_host' AS physical_host,h.broker_url AS sandbox_manager_url,
-                (SELECT count(*) FROM agent_sandboxes g
-                 WHERE g.host=h.host AND g.deletion_state<>'deleted') AS retained_groups
-                FROM agent_runner_hosts h LEFT JOIN agent_compute_nodes n ON n.id=h.compute_node_id
-                ORDER BY h.host""")
-            ]
-            for host in hosts:
-                new, claims = await host_compute_admission(conn, host["host"])
-                host["allows_new_groups"] = new
-                host["allows_claims"] = claims
-            return {
-                "allocations": allocations,
-                "hosts": hosts,
-                "active_host": await conn.fetchval(
-                    "SELECT active_host FROM agent_runner_policy WHERE id"
-                ),
-                "observed_at": await conn.fetchval("SELECT NOW()"),
-            }
+            allocations = await load_allocations(conn, _row)
+            hosts = await load_hosts(conn, allocations)
+            metadata = await conn.fetchrow(
+                "SELECT (SELECT active_host FROM agent_runner_policy WHERE id) AS active_host,"
+                " NOW() AS observed_at"
+            )
+            return {"allocations": allocations, "hosts": hosts, **dict(metadata)}
 
     @staticmethod
     def _autoscaling_policy_view(row: dict[str, Any]) -> dict[str, Any]:
@@ -1135,7 +1135,7 @@ class PostgresComputeResourceRepository:
             )
         return [row["deployment_profile"] for row in rows]
 
-    async def update_cloudlab_autoscaling(
+    async def update_cloudlab_autoscaling(  # noqa: PLR0912 complexity baseline, #771
         self,
         *,
         expected_revision: int,
@@ -1591,9 +1591,8 @@ class PostgresComputeResourceRepository:
             ):
                 raise ValueError("autoscaling_member_not_retirable")
             hosts = await conn.fetch(
-                """SELECT h.host,(h.slots_used+(SELECT COUNT(*) FROM agent_environment_runs r WHERE r.host=h.host AND NOT r.cleanup_complete AND r.lease_expires_at>NOW() AND r.started_at>NOW()-INTERVAL '30 minutes')) AS slots_used FROM agent_compute_nodes n
-                   JOIN agent_runner_hosts h ON h.compute_node_id=n.id
-                   WHERE n.allocation_id=$1 FOR UPDATE OF h""",
+                f"""SELECT h.host,(h.slots_used+{environment_runs.env_runs_holding_slots("h.host")}) AS slots_used
+                   FROM agent_compute_nodes n JOIN agent_runner_hosts h ON h.compute_node_id=n.id WHERE n.allocation_id=$1 FOR UPDATE OF h""",
                 allocation_id,
             )
             if len(hosts) != 1 or any(host["slots_used"] != 0 for host in hosts):
@@ -2061,27 +2060,6 @@ class PostgresComputeResourceRepository:
         if hosts:
             await release_covered_sandboxes(conn, hosts)
 
-    async def upsert_node(
-        self,
-        *,
-        allocation_id: str,
-        node: dict[str, Any],
-        operation_id: str | None = None,
-        generation: int | None = None,
-        worker_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Observe an immutable node identity without rebinding retained execution state."""
-        async with self._pool.acquire() as conn, conn.transaction():
-            await lock_compute_entry(conn, exclusive=True)
-            await self._fence(conn, operation_id, generation, worker_id, allocation_id)
-            allocation = await conn.fetchrow(
-                "SELECT desired_state FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
-                allocation_id,
-            )
-            if allocation is None or allocation["desired_state"] != "present":
-                raise ValueError("resource_retiring")
-            return await self._upsert_node(conn, allocation_id, node)
-
     async def _upsert_node(
         self, conn: Any, allocation_id: str, node: dict[str, Any]
     ) -> dict[str, Any]:
@@ -2501,7 +2479,7 @@ class PostgresComputeResourceRepository:
             )
             return True
 
-    async def apply_cloudlab_autoscaling_slot_target(
+    async def apply_cloudlab_autoscaling_slot_target(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         *,
         expected_revision: int,
@@ -3516,11 +3494,10 @@ class PostgresComputeResourceRepository:
             )
             return {**impact, "release_committed": True}
 
-    async def cancel_operation(self, operation_id: str) -> dict[str, Any]:
+    async def cancel_operation(self, operation_id: str) -> dict[str, Any]:  # noqa: C901, PLR0912 complexity baseline, #771
         """Cancel a safe pre-submit acquisition, retirement or rotation intent.
 
-        A rotation can be cancelled until the old node stops: its claim pause
-        is lifted and its replacement node, if any, is queued for release.
+        A retirement only until it stops its runners; a rotation until its old node stops.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn, exclusive=True)
@@ -3616,7 +3593,7 @@ class PostgresComputeResourceRepository:
                 return await self._cancel_rotation(conn, row)
             if (load_json(row["result"]) or {}).get("external_pending"):
                 raise ValueError("external_operation_unresolved")
-            if row["kind"] != "retire" or row["state"] not in ("pending", "waiting", "blocked"):
+            if not retirement_cancellable(row["kind"], row["state"], load_json(row["result"])):
                 raise ValueError("operation_not_cancellable")
             await conn.execute(
                 "DELETE FROM agent_host_admission_holds WHERE allocation_id=$1 AND purpose='retirement' AND source_id=$2",

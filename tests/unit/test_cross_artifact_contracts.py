@@ -29,9 +29,10 @@ import re
 
 import pytest
 
-from cloud_agent_host import member_resources, shared_protocol
+from cloud_agent_host import member_resources
 from cloud_agent_host.guest_observer import GUEST_OBSERVER_VERSION
 from cloud_agent_host.sandbox import SANDBOX_PATH
+from cloud_agent_shared import shared_protocol
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SANDBOX_DOCKERFILE = REPO_ROOT / "deploy" / "sandbox" / "Dockerfile.agent-sandbox"

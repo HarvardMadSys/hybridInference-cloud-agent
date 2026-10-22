@@ -91,7 +91,10 @@ async def rig(store, hosts, monkeypatch):
         secrets=ComputeSecretStore(store.compute_resources, key="x" * 32),
         configuration=ComputeConfiguration(profiles={profile.id: profile}),
     )
-    bootstrap = SimpleNamespace(inventory=AsyncMock(return_value=HostInventory(complete=True)))
+    bootstrap = SimpleNamespace(
+        inventory=AsyncMock(return_value=HostInventory(complete=True)),
+        quiesce=AsyncMock(return_value=0),
+    )
 
     async def deploy(node, profile, intent, token):
         assert token is not None

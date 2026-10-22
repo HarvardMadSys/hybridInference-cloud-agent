@@ -40,6 +40,7 @@ from cloud_agent_host.drivers import (
     TurnResult,
     get_driver,
 )
+from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION
 from cloud_agent_host.other_plugins import install_other_runtime_plugins
 from cloud_agent_host.plugins import install_claude_plugins
 from cloud_agent_host.runtimes import RuntimeMCPConfig
@@ -445,24 +446,12 @@ class ResidentTransportFactory:
                 )
             )
         if launch.native_session_id:
-            opener = getattr(driver, "launch_resident_live", None)
-            if opener is None:
-                raise DriverError(f"runtime {runtime_id!r} has no live resume transport")
-            session = opener(context, session_id=launch.native_session_id)
+            session = driver.launch_resident_live(context, session_id=launch.native_session_id)
         else:
-            opener = getattr(driver, "launch_live", None)
-            if opener is None:
-                raise DriverError(f"runtime {runtime_id!r} has no live session transport")
-            session = opener(context)
+            session = driver.launch_live(context)
         try:
-            ensure_started = getattr(session, "ensure_started", None)
-            if ensure_started is None:
-                raise DriverError(f"runtime {runtime_id!r} cannot prove resident readiness")
-            ensure_started(
-                model=launch.model,
-                reasoning_effort=launch.reasoning_effort,
-            )
-            if not bool(getattr(session, "process_alive", lambda: False)()):
+            session.ensure_started(model=launch.model, reasoning_effort=launch.reasoning_effort)
+            if not session.process_alive():
                 raise DriverError(f"runtime {runtime_id!r} resident process is not alive")
             return ResidentTransport(launch=launch, session=session)
         except Exception:
@@ -849,7 +838,9 @@ class ResidentTransportFactory:
                 if launch.mcp_server_ids or runtime_id in {"opencode", "kilo"}:
                     self._manager.ensure_mcp_helpers(spec, runtime_id)
                 if runtime_id == "kilo":
-                    self._manager.ensure_kilo_mcp_runtime(spec, launch.runtime_version or "7.4.17")
+                    self._manager.ensure_kilo_mcp_runtime(
+                        spec, launch.runtime_version or KILO_MCP_VERSION
+                    )
                 if runtime_id == "codex" and launch.mcp_server_ids:
                     self._manager.ensure_codex_mcp_policy(spec, launch.mcp_base_url)
                 reaped = True
@@ -891,7 +882,7 @@ class ResidentTransportFactory:
             ),
         )
 
-    def fork_native(
+    def fork_native(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         source: ResidentTransport[DialectRuntime],

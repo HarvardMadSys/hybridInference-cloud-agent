@@ -17,7 +17,14 @@ from cloud_agent.ports.compute_resources import ComputeResourceRepository
 from cloud_agent.ports.conversation_commands import ConversationCommands
 from cloud_agent.ports.conversation_queries import ConversationQueries
 from cloud_agent.ports.credential_queries import CredentialQueries
-from cloud_agent.ports.environments import EnvironmentRepository
+from cloud_agent.ports.environments import (
+    EnvironmentBindingRepository,
+    EnvironmentConfigurationRepository,
+    EnvironmentExecutionRepository,
+    EnvironmentRepository,
+    EnvironmentRunRepository,
+    EnvironmentWorkspaceRepository,
+)
 from cloud_agent.ports.execution_queries import ExecutionQueries
 from cloud_agent.ports.goal_wakeups import GoalWakeupRepository
 from cloud_agent.ports.goals import GoalRepository
@@ -27,6 +34,7 @@ from cloud_agent.ports.host_pool import HostPoolRepository
 from cloud_agent.ports.ledger import LedgerRepository
 from cloud_agent.ports.mcp import McpConnectionRepository
 from cloud_agent.ports.mcp_catalog import McpCatalogRepository
+from cloud_agent.ports.model_preferences import ModelPreferenceRepository
 from cloud_agent.ports.operation_measurements import (
     MeasurementWriteResult,
     OperationMeasurements,
@@ -58,7 +66,12 @@ __all__ = [
     "ConversationCommands",
     "ConversationQueries",
     "CredentialQueries",
+    "EnvironmentBindingRepository",
+    "EnvironmentConfigurationRepository",
+    "EnvironmentExecutionRepository",
     "EnvironmentRepository",
+    "EnvironmentRunRepository",
+    "EnvironmentWorkspaceRepository",
     "ExecutionQueries",
     "GoalRepository",
     "GoalWakeupRepository",
@@ -69,6 +82,7 @@ __all__ = [
     "McpCatalogRepository",
     "McpConnectionRepository",
     "MeasurementWriteResult",
+    "ModelPreferenceRepository",
     "OperationMeasurements",
     "OwnerUsageQueries",
     "PendingMessageRepository",

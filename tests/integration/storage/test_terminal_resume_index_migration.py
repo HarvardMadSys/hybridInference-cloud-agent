@@ -112,7 +112,8 @@ def _plan_nodes(node: dict[str, Any]) -> list[dict[str, Any]]:
     return [node, *(item for child in node.get("Plans", []) for item in _plan_nodes(child))]
 
 
-async def test_the_resume_replay_reads_only_the_marked_turns(store, pool):
+@pytest.mark.parametrize("routing", [False, True])
+async def test_the_resume_replay_reads_only_the_marked_turns(store, pool, routing):
     """The replay walks the marked turns oldest first, and reads nothing else."""
     await _seed_history(pool)
     captured: list[Any] = []
@@ -124,7 +125,12 @@ async def test_the_resume_replay_reads_only_the_marked_turns(store, pool):
         **_db_config(), min_size=1, max_size=1, init=capture_queries
     )
     try:
-        pending = await Storage(replay_pool).sandbox.list_terminal_resumes_pending()
+        sandbox = Storage(replay_pool).sandbox
+        pending = (
+            [row["id"] for row in await sandbox.terminal_resume_page()]
+            if routing
+            else await sandbox.list_terminal_resumes_pending()
+        )
     finally:
         await replay_pool.close()
     assert pending == _MARKED

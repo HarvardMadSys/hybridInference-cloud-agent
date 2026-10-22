@@ -13,6 +13,16 @@ from tests.integration.storage.test_host_pool_store import db as db, store as st
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
+async def test_revision_poll_returns_only_new_committed_snapshots(store):
+    assert await store.settings.read_settings(after_revision=-1) == (-1, {})
+    await store.settings.seed_settings({"limit": 20})
+    assert await store.settings.read_settings(after_revision=0) == (1, {"limit": 20})
+    assert await store.settings.read_settings(after_revision=1) == (-1, {})
+    await store.settings.update_settings({"limit": 21})
+    assert await store.settings.read_settings(after_revision=1) == (2, {"limit": 21})
+    assert await store.settings.read_settings(after_revision=3) == (-1, {})
+
+
 async def test_first_import_is_persisted_once_and_later_imports_preserve_admin_values(store):
     assert await store.settings.read_settings() == (-1, {})
     assert await store.settings.seed_settings({"limit": 20, "secret": "ciphertext"}) == (

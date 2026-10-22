@@ -26,6 +26,9 @@ from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepositor
 from cloud_agent.storage.repositories.ledger import PostgresLedgerRepository
 from cloud_agent.storage.repositories.mcp import PostgresMcpConnectionRepository
 from cloud_agent.storage.repositories.mcp_catalog import PostgresMcpCatalogRepository
+from cloud_agent.storage.repositories.model_preferences import (
+    PostgresModelPreferenceRepository,
+)
 from cloud_agent.storage.repositories.operation_measurements import (
     PostgresOperationMeasurementRepository,
 )
@@ -67,6 +70,7 @@ __all__ = [
     "PostgresLedgerRepository",
     "PostgresMcpCatalogRepository",
     "PostgresMcpConnectionRepository",
+    "PostgresModelPreferenceRepository",
     "PostgresOperationMeasurementRepository",
     "PostgresOwnerUsageRepository",
     "PostgresPendingMessageRepository",

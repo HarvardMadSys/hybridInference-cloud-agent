@@ -202,10 +202,6 @@ class _Stored:
         """Return the catalogue, newest first."""
         return list(self.runs.values())[:limit]
 
-    async def get_profiling_run(self, run_id: str):
-        """Return one experiment."""
-        return self.runs.get(run_id)
-
     async def list_operation_measurements(self, **kwargs):
         """Return a filtered page, newest first, honouring the cursor."""
         rows = [
@@ -296,6 +292,21 @@ async def test_one_file_read_travels_the_whole_chain(
     assert len(emitted) == 1
     record = emitted[0]
     assert record["measurement_id"] == block["measurement_id"]
+    assert record["schema_version"] == operation_profiling.SCHEMA_VERSION
+    assert record["operation"] in operation_profiling.V3_OPERATIONS
+    assert record["outcome"] in operation_profiling.V3_OUTCOMES
+    assert set(record) <= operation_profiling.V3_RECORD_FIELDS
+    assert record["milestones"]
+    assert all(
+        set(milestone) <= operation_profiling.V3_MILESTONE_FIELDS
+        for milestone in record["milestones"]
+    )
+    assert record["stages"]
+    for stage in record["stages"]:
+        assert set(stage) <= operation_profiling.V3_STAGE_FIELDS
+        assert all(
+            set(child) <= operation_profiling.V3_STAGE_FIELDS for child in stage.get("children", [])
+        )
 
     # 3. Delivery validates it and stores it under the job the credential names.
     stored = _validated(
@@ -350,6 +361,32 @@ async def test_one_file_read_travels_the_whole_chain(
     assert capability.runs[RUN_ID]["admission_instances"] == [
         {"instance": "cp-e2e", "max_operations": 10}
     ]
+
+
+def test_real_nested_spans_survive_the_producer_ingest_seam():
+    """The producer's nested span shape is part of the accepted v3 wire record."""
+    measurement = operation_profiling.start_operation(
+        operation="files.list",
+        producer="control-plane",
+        coverage_scope="server_request",
+    )
+    assert measurement is not None
+    assert operation_profiling.bind(measurement, sandbox_id="asbx_e2e")
+
+    with (
+        operation_profiling.span(measurement, "outer"),
+        operation_profiling.span(measurement, "inner"),
+    ):
+        pass
+
+    record = operation_profiling.frozen_record(measurement, "completed")
+    assert record is not None
+    assert all(set(span) <= operation_profiling.V3_SPAN_FIELDS for span in record["spans"])
+
+    stored = _validated(record, run=_manifest())
+    outer, inner = stored.record["spans"]
+    assert "parent_span_id" not in outer
+    assert inner["parent_span_id"] == outer["span_id"]
 
 
 async def test_the_chain_files_a_subdirectory_as_a_listing(

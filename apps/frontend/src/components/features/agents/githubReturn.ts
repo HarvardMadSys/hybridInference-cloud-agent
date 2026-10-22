@@ -23,7 +23,8 @@ export interface ComposerDraft {
   task: string;
   repo: string;
   runtime: string;
-  model: string;
+  /** Picked by the owner, never a model the server filled in; see TaskComposer. */
+  chosenModel: string;
 }
 
 function write(key: string, value: unknown): void {
@@ -89,7 +90,9 @@ export function peekComposerDraft(userId?: string): ComposerDraft | null {
     task: draft.task,
     repo: typeof draft.repo === 'string' ? draft.repo : '',
     runtime: typeof draft.runtime === 'string' ? draft.runtime : '',
-    model: typeof draft.model === 'string' ? draft.model : '',
+    // A receipt written before this field has only `model`, which could be a
+    // model the server filled in. It is ignored, so the server resolves again.
+    chosenModel: typeof draft.chosenModel === 'string' ? draft.chosenModel : '',
   };
 }
 

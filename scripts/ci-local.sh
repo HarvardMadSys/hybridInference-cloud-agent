@@ -91,7 +91,6 @@ fi
 if [[ "$CI_TIER" == all || "$CI_TIER" == backend ]]; then
   run_check ruff-format uv run --frozen ruff format --check .
   run_check ruff-lint uv run --frozen ruff check --no-fix .
-  run_check pydocstyle uv run --frozen pydocstyle apps/backend/cloud_agent apps/backend/cloud_agent_host apps/backend/cloud_agent_shared
   run_check mypy uv run --frozen mypy
   run_check pytest uv run --frozen pytest -n 4 --dist loadfile -q -m 'not external and not dbtest'
 fi
@@ -163,22 +162,7 @@ asyncio.run(main())
 PY
   rm -f "$CI_LOG_DIR/dbtest.xml"
   run_check dbtest uv run --frozen pytest -q -n 4 --dist loadfile -m dbtest --junitxml="$CI_LOG_DIR/dbtest.xml"
-  run_check dbtest-ran uv run --frozen python - "$CI_LOG_DIR/dbtest.xml" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-
-root = ET.parse(sys.argv[1]).getroot()
-cases = list(root.iter("testcase"))
-skipped = [
-    case.get("name")
-    for case in cases
-    for skip in case.findall("skipped")
-    if skip.get("type") == "pytest.skip"
-]
-print(f"dbtest: {len(cases)} collected, {len(skipped)} skipped")
-if len(cases) < 100 or skipped:
-    raise SystemExit("Database tier did not fully run; inspect dbtest.log and dbtest.xml")
-PY
+  run_check dbtest-ran uv run --frozen python scripts/ci_tests_ran.py --min 100 --running-skips-only "$CI_LOG_DIR/dbtest.xml"
 fi
 
 if [[ "$CI_TIER" == all || "$CI_TIER" == frontend ]]; then

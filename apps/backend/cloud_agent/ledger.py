@@ -38,12 +38,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 REFRESH_POLL_SECONDS = 2.0
-#: Longest an idle collector waits on its wake-up before looking anyway.
-LEDGER_IDLE_S = 30.0
 #: Shortest wait, so a schedule a moment in the past cannot spin the loop.
 REFRESH_MIN_WAIT_S = 0.05
-REFRESH_CONCURRENCY = 4
-REFRESH_TIMEOUT_SECONDS = 15.0
 #: A stored or derived report this service will not add to a total. One reason
 #: covers every rejection so the browser and the stored error stay content-free.
 INVALID_REPORT = "usage_invalid_response"
@@ -269,7 +265,7 @@ def _status(
     return "available"
 
 
-def summarize_ledger(rows: list[dict[str, Any]]) -> JobLedgerSummary:
+def summarize_ledger(rows: list[dict[str, Any]]) -> JobLedgerSummary:  # noqa: PLR0912, PLR0915 complexity baseline, #771
     """Sum snapshots without turning missing attempts or metrics into zeroes."""
     grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -426,7 +422,7 @@ async def refresh_ledger_entry(store: LedgerRepository, grants: Any, row: dict[s
         else:
             result = await asyncio.wait_for(
                 grants.usage(row["grant_id"], since=row["window_since"], until=row["window_until"]),
-                timeout=number_setting("ledger_refresh_timeout_s", REFRESH_TIMEOUT_SECONDS),
+                timeout=number_setting("ledger_refresh_timeout_s"),
             )
             report = result.model_dump(mode="json")
     except GatewayError as exc:
@@ -454,14 +450,14 @@ async def collect_usage_snapshots(
     Refill each slot as soon as its query completes, so a slow Gateway read
     does not hold up other jobs. With ``wake`` a collector with spare capacity
     waits for an attempt to stop or a refresh to be scheduled, and otherwise
-    until the earliest scheduled one is due,
-    never longer than ``LEDGER_IDLE_S``. Without it, or while nothing listens,
-    it looks every ``REFRESH_POLL_SECONDS``.
+    until the earliest scheduled one is due, never longer than the
+    ``ledger_idle_s`` setting. Without it, or while nothing listens, it looks
+    every ``REFRESH_POLL_SECONDS``.
     """
     inflight: set[asyncio.Task[None]] = set()
     try:
         while True:
-            concurrency = integer_setting("ledger_refresh_concurrency", REFRESH_CONCURRENCY)
+            concurrency = integer_setting("ledger_refresh_concurrency")
             try:
                 while len(inflight) < concurrency:
                     row = await store.claim_due_ledger_refresh()
@@ -480,9 +476,7 @@ async def collect_usage_snapshots(
                 if wake is not None:
                     # While nothing listens, look on the old short clock.
                     idle_s = (
-                        number_setting("ledger_idle_s", LEDGER_IDLE_S)
-                        if wake.listening
-                        else REFRESH_POLL_SECONDS
+                        number_setting("ledger_idle_s") if wake.listening else REFRESH_POLL_SECONDS
                     )
                     with contextlib.suppress(Exception):
                         due = await store.next_ledger_refresh_due()

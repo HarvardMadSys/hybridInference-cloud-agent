@@ -20,6 +20,7 @@ import {
   getAgentIntegrations,
   getAgentJob,
   getAgentAttemptTelemetry,
+  getAgentTrajectoryTimings,
   getAgentJobFiles,
   getAgentJobGit,
   getAgentJobUsage,
@@ -40,7 +41,6 @@ import {
   streamAgentJob,
   unpinAgentJob,
   writeAgentTerminalInput,
-  writeAgentJobFile,
 } from '../agents';
 import * as client from '../client';
 import { contractErrors } from './contract';
@@ -170,6 +170,25 @@ describe('agents api', () => {
       expect.any(String),
       '/v1/agent/jobs/job%2Fone/attempts/10/telemetry',
       { signal },
+    );
+  });
+
+  it('posts one bounded list for compact trajectory timing', async () => {
+    fetchWithAuth.mockResolvedValue(jsonResponse({ jobs: [] }));
+    const { signal } = new AbortController();
+
+    await expect(getAgentTrajectoryTimings(['job/one', 'job-two'], signal)).resolves.toEqual({
+      jobs: [],
+    });
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/jobs/trajectory-telemetry',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_ids: ['job/one', 'job-two'] }),
+        signal,
+      },
     );
   });
 
@@ -503,20 +522,6 @@ describe('agents api', () => {
     expect(fetchWithAuth).toHaveBeenCalledWith(
       expect.any(String),
       '/v1/agent/jobs/job%2Fone/files?path=src%2Fa%20file.ts',
-    );
-  });
-
-  it('writes a live workspace file with an encoded path', async () => {
-    fetchWithAuth.mockResolvedValue(
-      jsonResponse({ path: 'src/a file.ts', kind: 'file', content: 'updated' }),
-    );
-
-    await writeAgentJobFile('job/one', 'src/a file.ts', 'updated');
-
-    expect(fetchWithAuth).toHaveBeenCalledWith(
-      expect.any(String),
-      '/v1/agent/jobs/job%2Fone/files?path=src%2Fa%20file.ts',
-      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ content: 'updated' }) }),
     );
   });
 

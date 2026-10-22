@@ -5,11 +5,16 @@ from __future__ import annotations
 # ruff: noqa: F811 -- imported pytest fixtures remain parameters
 import asyncio
 import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 from tests.integration.storage.test_agent_job_store import pool, store  # noqa: F401
+from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.environments import EnvironmentConflict, EnvironmentNotFound
+from cloud_agent.storage._sql.environment_runs import env_run_holds_slot
+from cloud_agent.storage.assembly import Storage
 from cloud_agent_shared.environment import EnvironmentScripts, EnvironmentVariable
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -72,6 +77,38 @@ async def test_ciphertext_and_write_only_values_at_every_version(store, pool, mo
             revision=1,
             variables=[{"name": "TOKEN", "operation": "keep", "secret": False}],
         )
+
+
+@pytest.mark.parametrize("count", [1, 100])
+async def test_catalogue_bulk_reads_match_individual_environments(store, pool, monkeypatch, count):
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    await _save(
+        store,
+        repo=None,
+        name="Global",
+        variables=[{"name": "GLOBAL", "value": "g", "secret": False}],
+    )
+    expected = {}
+    for i in range(count):
+        env = await _save(
+            store,
+            name=f"Env {i:03d}",
+            variables=[
+                {"name": "PUBLIC", "value": str(i), "secret": False},
+                {"name": "SECRET", "value": f"secret-{i}", "secret": True},
+            ],
+        )
+        expected[env["id"]] = env
+    rows = await store.environments.list_environments("alice")
+    assert len(rows) == count
+    for row in rows:
+        assert {key: row[key] for key in expected[row["id"]]} == expected[row["id"]]
+    fingerprints = await store.environments.current_setup_fingerprints("alice", list(expected))
+    assert len(set(fingerprints.values())) == count
+    assert all(fingerprints.values())
+    assert (
+        await store.environments.current_setup_fingerprints("alice", list(expected)) == fingerprints
+    )
 
 
 async def test_new_messages_keep_bound_versions_after_rotation_and_global_edit(
@@ -606,6 +643,46 @@ async def test_expired_reservation_releases_capacity_but_fences_returning_host(
     )["id"] == next_run["id"]
 
 
+async def test_the_reaper_fails_a_run_at_the_instant_its_lease_ends(store, pool, monkeypatch):
+    """At the instant its lease ends a run holds no slot, and the reaper fails it.
+
+    One transaction keeps NOW() at that instant. A reaper that failed only the
+    leases that ended before it left the run running there, though it no longer
+    held a slot.
+    """
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    env = await _save(store)
+    run = await store.environments.create_environment_run(
+        "alice",
+        repo="org/repo",
+        base_sha="a" * 40,
+        selection={"environment_id": env["id"], "environment_id_provided": True},
+        key="boundary",
+    )
+    async with pool.acquire() as conn, conn.transaction():
+
+        @asynccontextmanager
+        async def borrow_connection():
+            yield conn
+
+        await conn.execute(
+            "UPDATE agent_environment_runs SET state='running',host='runner',lease_generation=1,"
+            "started_at=NOW(),lease_expires_at=NOW() WHERE id=$1",
+            run["id"],
+        )
+        reaper = Storage(SimpleNamespace(acquire=borrow_connection)).environments
+        await reaper.maintain_environments()
+        state = await conn.fetchval(
+            "SELECT state FROM agent_environment_runs WHERE id=$1", run["id"]
+        )
+        holding = await conn.fetchval(
+            f"SELECT COUNT(*) FROM agent_environment_runs WHERE id=$1 AND {env_run_holds_slot()}",
+            run["id"],
+        )
+    assert state == "failed"
+    assert holding == 0
+
+
 async def test_preflight_failure_releases_claim_without_decrypting_again(store, pool, monkeypatch):
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
     env = await _save(store, variables=[{"name": "TOKEN", "value": "private-example"}])
@@ -713,8 +790,8 @@ async def test_start_skip_only_consumes_requesting_chat_next_turn(store, pool, m
     assert not (
         await store.environments.environment_for_claim("alice", binding, first["id"])
     ).skip_start
-    second = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="alice", prompt="continue"
+    second = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="alice", prompt="continue"
     )
     assert (
         await store.environments.environment_for_claim("alice", binding, second["id"])
@@ -724,8 +801,8 @@ async def test_start_skip_only_consumes_requesting_chat_next_turn(store, pool, m
     ).skip_start
     async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET state='failed' WHERE id=$1", second["id"])
-    third = await store.conversation_commands.create_follow_up(
-        parent_job_id=second["id"], user_id="alice", prompt="again"
+    third = await append_follow_up(
+        pool, parent_job_id=second["id"], user_id="alice", prompt="again"
     )
     assert not (
         await store.environments.environment_for_claim("alice", binding, third["id"])

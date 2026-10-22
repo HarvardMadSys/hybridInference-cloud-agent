@@ -45,10 +45,9 @@ import asyncio
 import contextlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -64,27 +63,22 @@ from cloud_agent.mcp.host import (
     arguments_digest,
     encode_arguments,
 )
-from cloud_agent.mcp.http_body import (
-    IDENTITY_ENCODING_HEADERS,
-    iter_response_bytes,
-    require_identity_encoding,
-)
 from cloud_agent.mcp.invocations import MAX_HELD_ARGUMENTS_BYTES, deadline_for
 from cloud_agent.mcp.jsonrpc import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
     INVALID_REQUEST,
     MAX_MESSAGE_BYTES,
+    METHOD_NOT_FOUND,
     PARSE_ERROR,
 )
-from cloud_agent.mcp.models import CapabilityKind, McpServer, Transport
-from cloud_agent.mcp.net_policy import EndpointRejected, credential_headers, policy_from_environment
+from cloud_agent.mcp.models import CapabilityKind
+from cloud_agent.mcp.net_policy import policy_from_environment
 from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
 from cloud_agent.mcp.registry import (
     binding_from_row,
     invocation_cipher,
     resolve_connection,
-    server_for,
 )
 from cloud_agent.mcp.resources import (
     ResourceResolutionError,
@@ -94,18 +88,6 @@ from cloud_agent.mcp.resources import (
     split_resource_uri,
 )
 from cloud_agent.mcp.runtime import get_host as _host
-from cloud_agent.mcp.transports import TransportError, guard_target, pinned_transport
-from cloud_agent.mcp_proxy import (
-    MAX_BUFFERED_RESPONSE_BYTES,
-    METHOD_NOT_FOUND,
-    SseFilter,
-    UnreadableRequest,
-    canonical_request,
-    filter_json_body,
-    parse_request,
-    plan_request,
-)
-from cloud_agent.settings import number_setting
 from cloud_agent.source_control import SourceControlError
 from cloud_agent.tokens import (
     SCOPE_MCP,
@@ -116,7 +98,7 @@ from cloud_agent.tokens import (
 from cloud_agent_shared.shared_protocol import is_residency_mcp_credential
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterable, AsyncIterator
+    from collections.abc import AsyncIterator
 
     from cloud_agent.ports import (
         AgentMemoryRepository,
@@ -145,11 +127,6 @@ class _McpRelayStorage(Protocol):
 
 router = APIRouter(prefix="/v1/agent/mcp")
 
-# An MCP call is a tool call: it can be a repository search or an issue fetch,
-# and it is not a token stream. Generous, but bounded -- a sandbox waiting on a
-# hung upstream is a job burning its wall-clock timeout for nothing.
-_DEFAULT_UPSTREAM_TIMEOUT_S = 120.0
-_CONNECT_TIMEOUT_S = 10.0
 
 #: A held call waits for its owner's decision, which wakes it, and looks again
 #: at least this often anyway: its caller leaving, its attempt being superseded
@@ -159,39 +136,17 @@ _HOST_KEEPALIVE_S = 15.0
 #: How often it looks where nothing would wake it: no listener in this process,
 #: or the listening connection lost.
 _APPROVAL_POLL_S = 1.0
-#: How long a relayed server-to-client stream runs between checks that the
-#: session which opened it may still use it. The stream is one request that
-#: lasts as long as the server keeps writing, so the fence every other request
-#: meets on arrival is met again on this clock, whether or not the server sends.
-_STREAM_RECHECK_S = 5.0
 
-# Forwarded from the agent to the upstream. Everything else -- Authorization
-# above all, but equally Cookie, X-Forwarded-*, and whatever else the CLI or an
-# intermediary attaches -- is dropped: the upstream sees a request this control
-# plane made, carrying the owner's credential and nothing of the sandbox's.
-_FORWARD_TO_UPSTREAM = (
-    "accept",
-    "content-type",
-    "mcp-session-id",
-    "mcp-protocol-version",
-    "last-event-id",
-)
-
-# Returned from the upstream to the agent. Session id must survive for
-# streamable HTTP to work at all; the rest is this relay's to decide, and
-# Set-Cookie in particular must never reach a sandbox.
-_RETURN_TO_AGENT = ("content-type", "mcp-session-id", "mcp-protocol-version")
 
 _SSE_HEADERS = {
     "Cache-Control": "no-cache, no-transform",
     "X-Accel-Buffering": "no",
 }
 
-#: The largest request body either POST route reads or the per-connection route
-#: forwards: the bound every JSON-RPC frame in this service already has. It is
-#: enforced while bytes arrive, and again after canonical encoding, whose ASCII
-#: escapes can grow a UTF-8 body. The relay is one process every tenant shares;
-#: a body read whole before measurement has already cost what the bound saves.
+#: The largest request body the relay reads: the bound every JSON-RPC frame in
+#: this service already has. It is enforced on the declared length, and again
+#: while bytes arrive. The relay is one process every tenant shares; a body read
+#: whole before measurement has already cost what the bound saves.
 MAX_RELAY_BODY_BYTES = MAX_MESSAGE_BYTES
 
 #: The most messages one JSON-RPC batch may carry. Current MCP revisions do not
@@ -209,7 +164,6 @@ class Authorized:
     compile and authorize the wrong thing.
     """
 
-    server: McpServer
     job_id: str
     user_id: str
     thread_id: str
@@ -219,9 +173,8 @@ class Authorized:
     connection: Any
     snapshot: Any
     #: The decrypted upstream credential, or ``None`` for a connection that
-    #: authenticates by position or not at all. Carried because the merged host
-    #: dials the upstream itself; the per-connection route builds its header set
-    #: from the same value one field over and never reads this.
+    #: authenticates by position or not at all. Carried because the relay dials
+    #: the upstream itself.
     secret: str | None = None
     #: The attempt the credential was resolved to, and its lease: what every
     #: invocation record and fenced write of this request belongs to.
@@ -300,7 +253,7 @@ class _BodyRefused(Exception):
 
 
 def _require_body_size(size: int) -> None:
-    """Apply the same bound to the received and canonical request encodings."""
+    """Refuse a body whose declared or received size is over :data:`MAX_RELAY_BODY_BYTES`."""
     if size > MAX_RELAY_BODY_BYTES:
         raise _BodyRefused(413, f"An MCP request body is limited to {MAX_RELAY_BODY_BYTES} bytes.")
 
@@ -351,8 +304,7 @@ async def _authorize_fence(
     Split from the per-alias resolution below because the host endpoint serves
     every binding of one job from a single URL: it needs the fence once and the
     bindings many times, and re-reading the fence per tool would make a
-    revocation take effect at a different moment depending on which endpoint
-    asked.
+    revocation take effect at a different moment for each tool in one listing.
 
     """
     token = _bearer(authorization)
@@ -569,18 +521,7 @@ async def _resolve_binding(
         )
         raise _refused(503, "server_error", f"The {alias!r} MCP connection is not usable.")
     binding = binding_from_row(binding_row)
-    if binding.selection_pending and resolved.snapshot is not None:
-        # A migrated session advertises what the server offers and confirms
-        # every call, which is how it keeps working without inheriting an
-        # approval its owner never gave.
-        allowed = visible_capabilities(binding, resolved.snapshot.tools, CapabilityKind.TOOL)
-    else:
-        allowed = visible_capabilities(
-            binding, resolved.snapshot.tools if resolved.snapshot else (), CapabilityKind.TOOL
-        )
-    server = server_for(resolved, binding, tools=allowed)
     return Authorized(
-        server=server,
         job_id=job_id,
         user_id=identity["user_id"],
         thread_id=identity["thread_id"],
@@ -593,26 +534,6 @@ async def _resolve_binding(
         attempt_id=identity.get("attempt_id"),
         lease_generation=int(identity.get("lease_generation") or 0),
         residency_generation=identity.get("residency_generation"),
-    )
-
-
-async def _authorize(
-    alias: str,
-    authorization: str | None,
-    store: _McpRelayStorage | None,
-) -> Authorized:
-    """Resolve the token, the session's binding and the owner's connection."""
-    identity = await _authorize_fence(authorization, store)
-    if store is None:  # pragma: no cover - _authorize_fence refuses a missing store
-        raise _refused(
-            503, "invalid_request_error", "MCP is unavailable without a configured database."
-        )
-    return await _resolve_live_binding(
-        identity,
-        alias,
-        store,
-        attempt_id=identity["attempt_id"],
-        lease_generation=identity["lease_generation"],
     )
 
 
@@ -707,13 +628,12 @@ async def _decide_call(
 ) -> dict[str, Any] | None:
     """Decide one call, or return ``None`` when it may be dispatched.
 
-    The single decision point on this surface, for all three of them. The
-    per-connection route and the merged host route call it, and so do tools,
-    resources and prompts -- because two copies of an authorization rule is one
-    copy that will be forgotten, and the copy that gets forgotten is always the
-    newer one. ``kind`` selects the scope: a resource read is checked against
-    the resource rules, which is what stops it being a way to reach something
-    the session did not enable.
+    The single decision point on this surface: tools, resources and prompts all
+    call it, because two copies of an authorization rule is one copy that will
+    be forgotten, and the copy that gets forgotten is always the newer one.
+    ``kind`` selects the scope: a resource read is checked against the resource
+    rules, which is what stops it being a way to reach something the session
+    did not enable.
     """
     decision = decide(
         connection=authorized.connection,
@@ -797,7 +717,7 @@ async def _decide_call(
         authorization_epoch=authorized.connection.authorization_epoch,
         capability_revision=authorized.connection.capability_revision,
         policy_revision=authorized.binding.policy_revision,
-        expires_at=deadline_for(created_at=datetime.now(timezone.utc)).expires_at,
+        expires_at=deadline_for(created_at=datetime.now(UTC)).expires_at,
         **_residency_fence({"residency_generation": authorized.residency_generation}),
     )
     logger.info(
@@ -820,7 +740,7 @@ async def _decide_call(
     )
 
 
-async def _wait_for_approval(
+async def _wait_for_approval(  # noqa: PLR0912 complexity baseline, #771
     authorized: Authorized,
     store: _McpRelayStorage,
     *,
@@ -849,7 +769,7 @@ async def _wait_for_approval(
             while True:
                 if request is not None and await request.is_disconnected():
                     raise asyncio.CancelledError
-                if datetime.now(timezone.utc) >= invocation["expires_at"]:
+                if datetime.now(UTC) >= invocation["expires_at"]:
                     message = (
                         "MCP approval expired while waiting for the owner's decision; "
                         "this call was not sent to the server. Ask the owner to review "
@@ -897,7 +817,6 @@ async def _wait_for_approval(
                     if claimed is not None:
                         # OAuth may have refreshed while the user was deciding.
                         # Use the checked connection's current credential for dispatch.
-                        authorized.server = current.server
                         authorized.connection = current.connection
                         authorized.secret = current.secret
                         authorized.dispatches.append(
@@ -940,7 +859,7 @@ async def _until_decided(
 ) -> None:
     """Wait for the held call's decision, its expiry, or the next look anyway."""
     look = _APPROVAL_IDLE_S if signal is not None and signal.listening else _APPROVAL_POLL_S
-    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    remaining = (expires_at - datetime.now(UTC)).total_seconds()
     timeout_s = max(0.0, min(look, remaining))
     if signal is None or woken is None:
         await asyncio.sleep(timeout_s)
@@ -959,116 +878,6 @@ async def _finish_dispatches(
             status=status,
         )
     authorized.dispatches.clear()
-
-
-#: Methods that reach a capability, and what kind it is. The value is the
-#: params field that names it: a tool and a prompt by name, a resource by URI,
-#: because that is what the server itself uses as the identifier.
-_CAPABILITY_METHODS: dict[str, tuple[CapabilityKind, str]] = {
-    protocol.TOOLS_CALL: (CapabilityKind.TOOL, "name"),
-    protocol.RESOURCES_READ: (CapabilityKind.RESOURCE, "uri"),
-    protocol.RESOURCES_SUBSCRIBE: (CapabilityKind.RESOURCE, "uri"),
-    protocol.RESOURCES_UNSUBSCRIBE: (CapabilityKind.RESOURCE, "uri"),
-    protocol.PROMPTS_GET: (CapabilityKind.PROMPT, "name"),
-}
-
-#: Methods that reach no capability: housekeeping, and the catalogue reads whose
-#: *responses* are filtered down to the reachable set on the way back.
-_UNDECIDED_METHODS = frozenset(
-    {
-        protocol.INITIALIZE,
-        protocol.INITIALIZED,
-        protocol.PING,
-        protocol.TOOLS_LIST,
-        protocol.RESOURCES_LIST,
-        protocol.RESOURCES_TEMPLATES_LIST,
-        protocol.PROMPTS_LIST,
-    }
-)
-
-
-async def _capability_decision(
-    authorized: Authorized,
-    store: _McpRelayStorage,
-    body: bytes,
-    *,
-    attempt_id: int | None,
-    lease_generation: int,
-    request: Request | None = None,
-) -> Any | None:
-    """Decide one relayed body, or ``None`` to forward it.
-
-    Every method reaches this, not only ``tools/call``. The per-connection route
-    is a direct line to a user's server carrying that user's credential, so a
-    method that skips the decision is a way to reach something the session
-    turned off -- which is exactly what a proxy that authorized tools and
-    forwarded everything else did with ``resources/read`` and ``prompts/get``.
-
-    A method this deployment has no authorization story for is *refused*, not
-    forwarded. Forwarding it would be the same mistake in the other direction:
-    the platform would be proxying a capability it cannot reason about, with a
-    credential it is responsible for. Notifications are the exception, because
-    they ask for nothing and carry no reply.
-
-    A body that does not parse is refused for the same reason. "No method this
-    relay can see" is not "no call": an upstream that decodes the bytes more
-    leniently could find a ``tools/call`` in them that nothing here decided.
-    """
-    try:
-        document = parse_request(body)
-    except UnreadableRequest as exc:
-        return exc.reply()
-    payloads = document if isinstance(document, list) else [document]
-    for payload in payloads:
-        if not isinstance(payload, dict):
-            continue
-        method = str(payload.get("method") or "")
-        if not method or method in _UNDECIDED_METHODS or method.startswith("notifications/"):
-            continue
-        entry = _CAPABILITY_METHODS.get(method)
-        if entry is None:
-            return _error_reply(
-                payload.get("id"),
-                f"This deployment does not proxy {method!r}. It carries the calls it "
-                "can authorize; anything else is refused rather than forwarded.",
-            )
-        kind, key = entry
-        params = payload.get("params")
-        name = str(params.get(key) or "") if isinstance(params, dict) else ""
-        capability = next(
-            (
-                item
-                for item in (authorized.snapshot.of_kind(kind) if authorized.snapshot else ())
-                if item.name == name
-            ),
-            None,
-        )
-        arguments = params.get("arguments") if isinstance(params, dict) else None
-        if kind is CapabilityKind.RESOURCE:
-            if not isinstance(params, dict) or not isinstance(params.get(key), str) or not name:
-                return _error_reply(payload.get("id"), f"{method} needs a uri", INVALID_PARAMS)
-            try:
-                capability = resource_capability(authorized.snapshot, authorized.binding, name)
-            except ResourceResolutionError as exc:
-                return _error_reply(payload.get("id"), str(exc))
-            arguments = {"uri": name, "method": method}
-            if capability is not None:
-                kind, name = capability.kind, capability.name
-        held = await _decide_call(
-            authorized,
-            store,
-            name=name,
-            arguments=arguments,
-            capability=capability,
-            attempt_id=attempt_id,
-            lease_generation=lease_generation,
-            request_id=payload.get("id"),
-            kind=kind,
-            request=request,
-        )
-        if held is not None:
-            return held
-    return None
 
 
 def _held_arguments_fit(arguments: Any) -> bool:
@@ -1094,326 +903,6 @@ def _protect_arguments(arguments: Any) -> str | None:
         return None
 
 
-def _upstream_headers(request: Request, server: McpServer) -> dict[str, str]:
-    """Build the outbound header set: the agent's protocol, our credential.
-
-    Merged case-insensitively, which is not a nicety. HTTP header names are
-    case-insensitive but ``dict`` keys are not, and the forwarded set arrives
-    lowercased from Starlette while a registry writes ``Authorization`` the way
-    a human does. A naive ``update`` therefore keeps *both*, httpx sends both,
-    and the sandbox's own token rides along beside the credential meant to
-    replace it.
-    """
-    headers = {
-        key.lower(): value
-        for key, value in request.headers.items()
-        if key.lower() in _FORWARD_TO_UPSTREAM
-    }
-    # The registry always wins over anything the sandbox sent under the same
-    # name — now that the same name is actually recognized as the same name.
-    try:
-        safe_credentials = credential_headers(server.headers)
-    except EndpointRejected as exc:
-        raise _refused(
-            503, "server_error", "The MCP credential uses an invalid HTTP header."
-        ) from exc
-    headers.update({key.lower(): value for key, value in safe_credentials.items()})
-    headers.update(IDENTITY_ENCODING_HEADERS)
-    return headers
-
-
-def _response_headers(upstream: httpx.Response) -> dict[str, str]:
-    """Pick what may travel back to the sandbox."""
-    return {
-        key: value for key, value in upstream.headers.items() if key.lower() in _RETURN_TO_AGENT
-    }
-
-
-def build_upstream_client(request_timeout_s: float | None = None) -> httpx.AsyncClient:
-    """Build the client the proxy dials upstream with.
-
-    Redirects are not followed: a redirect would re-send this deployment's
-    credential to whatever host the response named.
-    """
-    return httpx.AsyncClient(
-        timeout=httpx.Timeout(
-            request_timeout_s
-            if request_timeout_s is not None
-            else number_setting("mcp_request_timeout_s", _DEFAULT_UPSTREAM_TIMEOUT_S),
-            connect=number_setting("mcp_connect_timeout_s", _CONNECT_TIMEOUT_S),
-        ),
-        follow_redirects=False,
-        headers=IDENTITY_ENCODING_HEADERS,
-        transport=pinned_transport(),
-    )
-
-
-async def _proxy(
-    request: Request,
-    *,
-    authorized: Authorized,
-    store: _McpRelayStorage,
-    method: str,
-    body: bytes = b"",
-) -> Any:
-    """Forward one request upstream and stream or filter the reply back.
-
-    The target is validated here, at the dial, and not only when the connection
-    was saved. A URL that was acceptable when it was typed may resolve somewhere
-    else now, and this route is the one that actually opens the socket -- a
-    check that lives only in the save path is a check the call path does not
-    have.
-    """
-    server, job_id = authorized.server, authorized.job_id
-    try:
-        await guard_target(server.url or "", policy_from_environment())
-    except TransportError as exc:
-        logger.warning(
-            "agent_mcp_relay_target_refused",
-            extra={
-                "event": "agent_mcp_relay_target_refused",
-                "job_id": job_id,
-                "connection_id": server.connection_id,
-                "detail": exc.kind,
-            },
-        )
-        raise _refused(
-            503,
-            "server_error",
-            f"The {server.name!r} MCP connection could not be reached: {exc}",
-        ) from exc
-    # DNS validation can wait too. Recheck before sending any caller-selected
-    # method, and record a claimed approval as unsent if the caller lost it.
-    try:
-        await _recheck_authorized(authorized, store)
-    except HTTPException:
-        await _finish_dispatches(authorized, store, status="failed")
-        raise
-    assert server.url is not None
-    headers = _upstream_headers(request, server)
-    if body:
-        # The body is this relay's own encoding of what it decided, so its type
-        # is too; a charset the sandbox named would describe other bytes.
-        headers["content-type"] = "application/json"
-    client = build_upstream_client(server.request_timeout_s)
-    upstream_request = client.build_request(
-        method,
-        server.url,
-        content=body or None,
-        headers=headers,
-    )
-    try:
-        upstream = await client.send(upstream_request, stream=True)
-    except httpx.HTTPError as exc:
-        await client.aclose()
-        logger.warning(
-            "agent_mcp_upstream_error",
-            extra={"event": "agent_mcp_upstream_error", "job_id": job_id, "server": server.name},
-        )
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": {
-                    "type": "server_error",
-                    "message": f"The {server.name!r} MCP server could not be reached.",
-                }
-            },
-        ) from exc
-
-    if upstream.status_code in (401, 403):
-        # The third way a connection dies, and the only one visible from here.
-        # Expiry and an unreadable credential are caught during resolution; an
-        # upstream that has simply stopped accepting a live-looking token can
-        # only be discovered by asking it. Attributed to the server, because
-        # unattributed it reads as the sandbox misbehaving when the truth is
-        # that this owner's connection needs re-authorizing — the shape the
-        # gateway's route learned after an hour of silent 401s
-        # (hybridInference#1199) and which came across with this surface.
-        #
-        # Logged, not converted: the status belongs to the agent's own request
-        # and rewriting it would hide a real answer from the CLI. Feeding this
-        # back into the connection's status, so Integrations says "connect it
-        # again" before the next job fails, needs a place to record it and
-        # belongs with the connect flow that writes the row.
-        logger.warning(
-            "agent_mcp_upstream_rejected_credential",
-            extra={
-                "event": "agent_mcp_upstream_rejected_credential",
-                "job_id": job_id,
-                "server": server.name,
-                "status": upstream.status_code,
-            },
-        )
-
-    content_type = upstream.headers.get("content-type", "")
-    try:
-        require_identity_encoding(upstream)
-    except httpx.DecodingError as exc:
-        await upstream.aclose()
-        await client.aclose()
-        raise _refused(
-            502,
-            "server_error",
-            "The MCP server sent a compressed response despite identity encoding.",
-        ) from exc
-    if content_type.startswith("text/event-stream"):
-        return StreamingResponse(
-            _stream_sse(upstream, client, server),
-            status_code=upstream.status_code,
-            headers={**_response_headers(upstream), **_SSE_HEADERS},
-            media_type=content_type,
-        )
-
-    try:
-        chunks: list[bytes] = []
-        total = 0
-        async for chunk in iter_response_bytes(upstream):
-            total += len(chunk)
-            if total > MAX_BUFFERED_RESPONSE_BYTES:
-                raise HTTPException(
-                    status_code=502,
-                    detail={
-                        "error": {
-                            "type": "server_error",
-                            "message": (
-                                f"The {server.name!r} MCP server returned more than "
-                                "this gateway will buffer for one reply."
-                            ),
-                        }
-                    },
-                )
-            chunks.append(chunk)
-    except httpx.HTTPError as exc:
-        # A server that stops answering mid-body is the same event as one that
-        # never answered, and it has to leave as the same 502: an unconverted
-        # transport error becomes a 500 whose message says nothing, and the
-        # caller cannot tell it from this service breaking.
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": {
-                    "type": "server_error",
-                    "message": f"The {server.name!r} MCP server stopped answering.",
-                }
-            },
-        ) from exc
-    finally:
-        await upstream.aclose()
-        await client.aclose()
-
-    payload = b"".join(chunks)
-    if content_type.startswith("application/json"):
-        payload = filter_json_body(payload, server)
-    return Response(
-        content=payload,
-        status_code=upstream.status_code,
-        headers=_response_headers(upstream),
-    )
-
-
-async def _stream_sse(
-    upstream: httpx.Response, client: httpx.AsyncClient, server: McpServer
-) -> AsyncIterator[bytes]:
-    """Relay an SSE reply, rewriting tool catalogues as they pass."""
-    sse = SseFilter(server)
-    try:
-        async for chunk in iter_response_bytes(upstream):
-            if out := sse.feed(chunk):
-                yield out
-        if tail := sse.flush():
-            yield tail
-    finally:
-        await upstream.aclose()
-        await client.aclose()
-
-
-async def _stream_still_authorized(authorized: Authorized, store: _McpRelayStorage) -> bool:
-    """Whether the session that opened a stream may still be sent what it carries.
-
-    The checks a held call makes before it is dispatched, without a credential
-    refresh: the turn's fence, then the binding and connection as they are now,
-    which must still be the ones the stream was opened under. A store that
-    cannot answer fails closed, like the fence: the caller can open the stream
-    again and be asked afresh.
-    """
-    try:
-        identity = await _recheck_fence(
-            {
-                "job_id": authorized.job_id,
-                "attempt_id": authorized.attempt_id,
-                "lease_generation": authorized.lease_generation,
-                "residency_generation": authorized.residency_generation,
-            },
-            store,
-        )
-        current = await _resolve_binding(
-            identity, authorized.alias, store, refresh_credentials=False
-        )
-    except Exception:
-        return False
-    return (
-        current.connection_id == authorized.connection_id
-        and current.binding == authorized.binding
-        and current.connection.config_revision == authorized.connection.config_revision
-        and current.connection.authorization_epoch == authorized.connection.authorization_epoch
-        and current.connection.capability_revision == authorized.connection.capability_revision
-    )
-
-
-async def _while_authorized(
-    stream: AsyncIterable[Any], authorized: Authorized, store: _McpRelayStorage
-) -> AsyncIterator[Any]:
-    """Relay a long-lived stream only while the session that opened it may use it.
-
-    Checked every :data:`_STREAM_RECHECK_S` whether or not the server is
-    writing: a quiet server's socket still carries the owner's credential, and
-    the request still holds a relay connection open. The read in flight is left
-    running across a check rather than cancelled and restarted, which would end
-    the stream it reads; it is cancelled only when the stream ends, which closes
-    the upstream response.
-    """
-    chunks = aiter(stream)
-
-    async def next_chunk() -> Any:
-        return await anext(chunks)
-
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _STREAM_RECHECK_S
-    pending: asyncio.Task[Any] | None = None
-    try:
-        while True:
-            if pending is None:
-                pending = asyncio.create_task(next_chunk())
-            await asyncio.wait({pending}, timeout=max(0.0, deadline - loop.time()))
-            if loop.time() >= deadline:
-                if not await _stream_still_authorized(authorized, store):
-                    logger.info(
-                        "agent_mcp_stream_closed_unauthorized",
-                        extra={
-                            "event": "agent_mcp_stream_closed_unauthorized",
-                            "job_id": authorized.job_id,
-                            "alias": authorized.alias,
-                        },
-                    )
-                    return
-                deadline = loop.time() + _STREAM_RECHECK_S
-            if not pending.done():
-                continue
-            done, pending = pending, None
-            try:
-                chunk = done.result()
-            except StopAsyncIteration:
-                return
-            yield chunk
-    finally:
-        if pending is not None and not pending.done():
-            pending.cancel()
-            await asyncio.gather(pending, return_exceptions=True)
-        closing = getattr(chunks, "aclose", None)
-        if closing is not None:
-            await closing()
-
-
 # --------------------------------------------------------------------------
 # The merged host endpoint
 # --------------------------------------------------------------------------
@@ -1421,19 +910,15 @@ async def _while_authorized(
 # One URL that presents every connection this job is bound to as a single MCP
 # server, with tool names namespaced by binding alias.
 #
-# The per-connection route above exists because a CLI can be pointed at one
-# server at a time. That is enough for the three CLIs whose MCP client the
-# platform configures directly, and not enough for a runtime whose MCP entries
-# are gated by a name-and-identity allowlist it cannot extend at run time: there
-# the *name* has to be knowable before the job starts, and a per-conversation
-# alias never is. One fixed name and one fixed URL is the shape that fits.
+# A runtime whose MCP entries are gated by a name-and-identity allowlist it
+# cannot extend at run time needs the *name* before the job starts, and a
+# per-conversation alias never is knowable then. One fixed name and one fixed
+# URL is the shape that fits every runtime.
 #
-# It is also the design's "relay as protocol host" step. The per-connection
-# route forwards JSON-RPC and lets the CLI own the protocol; here the platform
-# owns it -- it answers ``initialize``, merges the catalogues, routes a call by
-# its namespaced name and normalizes what comes back. Which is why the
-# authorization path is *shared* rather than reimplemented: the merged route is
-# a second door onto the same decision function, never a second decision.
+# It is the design's "relay as protocol host" step: the platform owns the
+# protocol -- it answers ``initialize``, merges the catalogues, routes a call by
+# its namespaced name and normalizes what comes back -- and every call goes
+# through the one decision function above.
 
 
 async def _host_catalogue(
@@ -1452,8 +937,7 @@ async def _host_catalogue(
     A binding that cannot be resolved is skipped rather than fatal. One
     disconnected server must not take the others out of the catalogue -- the
     agent would lose every tool it does have, which is a far worse failure than
-    the one that caused it. The per-connection route still refuses loudly for
-    the server that is actually broken.
+    the one that caused it.
 
     Routing is a lookup in this map, not a string split. An alias may itself
     contain the separator, so splitting would send ``a__b__tool`` to the wrong
@@ -1879,7 +1363,7 @@ async def _host_listing(
     )
 
 
-async def _host_fetch(
+async def _host_fetch(  # noqa: PLR0912 complexity baseline, #771
     payload: dict[str, Any],
     *,
     method: str,
@@ -1943,7 +1427,7 @@ async def _host_fetch(
         kind = capability.kind
     else:
         kind = CapabilityKind.PROMPT
-        catalogue = await _host_catalogue(identity, store, kind)
+        catalogue = await _host_catalogue(protocol.presenting(identity, key), store, kind)
         entry = catalogue.get(key)
         if entry is None:
             return _error_reply(
@@ -2208,7 +1692,7 @@ async def _host_call(
             authorization=authorization,
             stateless=stateless,
         )
-    catalogue = await _host_catalogue(identity, store)
+    catalogue = await _host_catalogue(protocol.presenting(identity, name), store)
     entry = catalogue.get(name)
     if entry is None:
         return _error_reply(
@@ -2284,13 +1768,7 @@ async def mcp_host_post(
     authorization: str | None = Header(None),
     store: _McpRelayStorage | None = Depends(get_storage),
 ) -> Any:
-    """Serve every connection of one job from a single MCP endpoint.
-
-    Registered on the bare prefix, which is why it cannot be shadowed: the
-    per-connection route is ``/{server_name}`` and needs a non-empty segment, so
-    there is no ordering to get wrong. A reserved alias would have needed one,
-    and a name a user could pick would have been a collision waiting to happen.
-    """
+    """Serve every connection of one job from a single MCP endpoint."""
     if store is None:
         raise _refused(
             503, "invalid_request_error", "MCP is unavailable without a configured database."
@@ -2318,154 +1796,6 @@ async def mcp_host_get() -> Any:
         ),
         status_code=405,
     )
-
-
-@router.post("/{server_name}")
-async def mcp_post(
-    server_name: str,
-    request: Request,
-    authorization: str | None = Header(None),
-    store: _McpRelayStorage | None = Depends(get_storage),
-) -> Any:
-    """Relay one MCP request, refusing tools the session's selection does not cover."""
-    try:
-        authorized = await _authorize(server_name, authorization, store)
-    except _BindingDisabled as exc:
-        # Keep the existing JSON-RPC refusal for disabled selections, including
-        # housekeeping requests, without resolving or refreshing credentials.
-        try:
-            payload = json.loads(await _read_body(request))
-        except (_BodyRefused, ValueError, RecursionError):
-            payload = None
-        request_id = payload.get("id") if isinstance(payload, dict) else None
-        return JSONResponse(_error_reply(request_id, str(exc.detail)))
-    assert store is not None
-    try:
-        document = _bounded_batch(parse_request(await _read_body(request)))
-        body = canonical_request(document)
-        # ASCII escapes can expand a body that fit as UTF-8. Refuse that before
-        # deciding any call, so it cannot be held or forwarded over the bound.
-        _require_body_size(len(body))
-    except _BodyRefused as exc:
-        return exc.response
-    except UnreadableRequest as exc:
-        # The merged endpoint's answer to the same body. Nothing below may see
-        # bytes other than the ones decided, so nothing below sees these.
-        return JSONResponse(exc.reply(), status_code=400)
-    # From here on the request *is* the parsed document: the decision, the
-    # allowlist and the upstream all read this one encoding of it.
-
-    await _recheck_authorized(authorized, store)
-
-    held = await _capability_decision(
-        authorized,
-        store,
-        body,
-        attempt_id=authorized.attempt_id,
-        lease_generation=authorized.lease_generation,
-        request=request,
-    )
-    if held is not None:
-        await _finish_dispatches(authorized, store, status="failed")
-        return JSONResponse(held, status_code=200)
-
-    server = authorized.server
-    plan = plan_request(body, server)
-    if plan.rejected:
-        logger.warning(
-            "agent_mcp_tool_blocked",
-            extra={
-                "event": "agent_mcp_tool_blocked",
-                "job_id": authorized.job_id,
-                "server": server.name,
-                "tools": list(plan.blocked_tools),
-            },
-        )
-        # 200 with a JSON-RPC error, which is what the protocol calls for: the
-        # HTTP hop succeeded and the *call* failed. Answering 403 here would
-        # look like a broken connection to the CLI and take the whole server
-        # down for the rest of the job.
-        await _finish_dispatches(authorized, store, status="failed")
-        return JSONResponse(plan.rejection, status_code=200)
-
-    try:
-        response = await _proxy(
-            request, authorized=authorized, store=store, method="POST", body=body
-        )
-    except BaseException:
-        await asyncio.shield(_finish_dispatches(authorized, store, status="outcome_unknown"))
-        raise
-    if isinstance(response, StreamingResponse) and authorized.dispatches:
-        original = response.body_iterator
-
-        async def observed_stream() -> AsyncIterator[Any]:
-            try:
-                async for chunk in original:
-                    yield chunk
-            except BaseException:
-                await asyncio.shield(
-                    _finish_dispatches(authorized, store, status="outcome_unknown")
-                )
-                raise
-            else:
-                await _finish_dispatches(authorized, store, status="completed")
-
-        response.body_iterator = observed_stream()
-    else:
-        await _finish_dispatches(
-            authorized, store, status="failed" if response.status_code >= 400 else "completed"
-        )
-    return response
-
-
-@router.get("/{server_name}")
-async def mcp_get(
-    server_name: str,
-    request: Request,
-    authorization: str | None = Header(None),
-    store: _McpRelayStorage | None = Depends(get_storage),
-) -> Any:
-    """Open the server-to-client stream for an established session.
-
-    The stream lasts as long as the server keeps it open, so it is relayed
-    only while the session that opened it is still authorized: the turn's
-    fence holds, and its binding and connection are the ones it was opened
-    under. The first check that fails ends it and closes the upstream.
-    """
-    authorized = await _authorize(server_name, authorization, store)
-    assert store is not None
-    if authorized.connection.config.transport is Transport.HTTP_SSE:
-        # A 2024-11-05 server's stream opens by announcing where its messages
-        # go, session included, and many such servers take messages on that
-        # session without the credential that opened it. Relayed, it would be
-        # the sandbox's way to the owner's server past every decision and fence
-        # here. This route cannot carry the session anyway, since it posts to
-        # the stream's own address; the merged endpoint speaks it itself.
-        return JSONResponse(
-            _error_reply(
-                None,
-                f"The {authorized.alias!r} MCP connection is a legacy SSE server, whose "
-                "stream this route cannot relay. Use the merged endpoint, /v1/agent/mcp.",
-            ),
-            status_code=405,
-        )
-    response = await _proxy(request, authorized=authorized, store=store, method="GET")
-    if isinstance(response, StreamingResponse):
-        response.body_iterator = _while_authorized(response.body_iterator, authorized, store)
-    return response
-
-
-@router.delete("/{server_name}")
-async def mcp_delete(
-    server_name: str,
-    request: Request,
-    authorization: str | None = Header(None),
-    store: _McpRelayStorage | None = Depends(get_storage),
-) -> Any:
-    """Terminate an MCP session."""
-    authorized = await _authorize(server_name, authorization, store)
-    assert store is not None
-    return await _proxy(request, authorized=authorized, store=store, method="DELETE")
 
 
 __all__ = ["router"]

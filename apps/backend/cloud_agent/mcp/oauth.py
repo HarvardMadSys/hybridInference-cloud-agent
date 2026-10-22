@@ -37,7 +37,7 @@ import hashlib
 import json
 import secrets
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -526,7 +526,7 @@ class OAuthFlow:
         """Whether this flow may no longer be completed."""
         if self.expires_at is None:
             return False
-        return datetime.now(timezone.utc) >= self.expires_at
+        return datetime.now(UTC) >= self.expires_at
 
     def authorization_url(self) -> str:
         """Build the URL the user's browser is sent to."""
@@ -632,7 +632,7 @@ class TokenSet:
         """Whether this token should be refreshed before the next use."""
         if self.expires_at is None:
             return False
-        current = now or datetime.now(timezone.utc)
+        current = now or datetime.now(UTC)
         return self.expires_at - margin <= current
 
 
@@ -644,7 +644,7 @@ def parse_token_response(payload: Mapping[str, Any], *, now: datetime | None = N
     expires_in = payload.get("expires_in")
     expires_at: datetime | None = None
     if isinstance(expires_in, (int, float)) and expires_in > 0:
-        current = now or datetime.now(timezone.utc)
+        current = now or datetime.now(UTC)
         expires_at = current + timedelta(seconds=float(expires_in))
     refresh = payload.get("refresh_token")
     scope = payload.get("scope")

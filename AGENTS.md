@@ -12,8 +12,8 @@ publishes results as pull requests.
 The extraction from the HybridInference monorepo
 (`HarvardMadSys/hybridInference`) is complete: production cut over on
 2026-08-07 and the gateway's own agent code was deleted on 2026-08-09.
-[MIGRATION.md](MIGRATION.md) records the split, its decisions, and deferred
-work. The extraction plan in the HybridInference repo
+[The repository extraction record](docs/agents/reviews/2026-08-09-repository-extraction-record.md)
+records the split, its decisions, and deferred work. The extraction plan in the HybridInference repo
 (`docs/agents/plans/2026-08-03-cloud-agent-repo-split.md`) is historical; new
 work tracks in this repository's issues and pull requests.
 
@@ -40,7 +40,7 @@ docs/{developer,user,agents}/  maintained guides, user notes, agent records
 Not every module is worth a line here; these are the ones a newcomer needs to
 find early. The control plane's database schema is **one baseline revision plus
 additive ones** (`migrations/versions/0001_schema_baseline.py` and on), not a
-long chain — `MIGRATION.md` § *Schema baseline rewrite* explains why, and
+long chain — the extraction record's § *Schema baseline rewrite* explains why, and
 `docs/developer/operations.md` § *Rebuilding the agent database* is the runbook for a
 database stamped with the chain that predates it.
 
@@ -96,14 +96,34 @@ locked dependencies with `npm ci`, then checks lint, formatting, types, tests,
 and build guards. `make setup-dev` installs backend dependencies only.
 
 The developer documentation site is published in English and Simplified
-Chinese, and CI fails while any English string lacks a current translation.
-When a change edits a page under `docs/developer/` or a root guide the site
-includes (`ENVIRONMENT.md`, `CONTRIBUTING.md`, `SECURITY.md`,
+Chinese. When a change edits a page under `docs/developer/` or a root guide the
+site includes (`ENVIRONMENT.md`, `CONTRIBUTING.md`, `SECURITY.md`,
 `deploy/local/README.md`, `deploy/release/README.md`,
 `gateway_contracts/README.md`), run `make docs-translate`, translate the
-entries it adds or marks fuzzy, and run `make docs-verify`.
+entries it adds or marks fuzzy, and run `make docs-verify`. On the stable
+pages (the home page, the developer guide, the code structure page, and the
+`SECURITY.md` and `CONTRIBUTING.md` the site includes), CI fails while a string
+has no catalog entry or a fuzzy one; on the other pages it warns. No page
+catches an entry left empty, which renders in English.
 [Translating the docs](docs/developer/translations.md) has the workflow and
 terminology.
+
+Complexity and size only ratchet down (#771). New code stays within the limits:
+backend functions within McCabe 15, 12 branches and 50 statements, backend
+modules within 1,500 lines, frontend functions within complexity 15 and frontend
+files within 800 lines. The backend limits cover `apps/backend` only, not
+tests, scripts, `deploy/` or migrations; the frontend limits skip
+`*.test.ts(x)`, `__tests__/` and `e2e/`.
+
+- A backend function over a limit today carries a `noqa` naming #771. Never add
+  one to new code. Once the function is back under, `make check` deletes the
+  `noqa` (ruff's `RUF100` fix).
+- Oversized backend modules are listed in `tests/unit/test_file_size_budget.py`
+  and may not grow. Lower an entry when its module shrinks.
+- `apps/frontend/eslint-ratchet.json` lists the frontend files over a limit,
+  each at its current value. ESLint applies a listed value to every function in
+  that file, so it lets a new function there go past 15; keep new functions
+  within 15 anyway. Lower an entry when its file improves.
 
 If `apps/frontend/node_modules` is absent, install it before reporting checks
 as blocked. From `apps/frontend`, run `npm ci`, `npm run type-check`, and

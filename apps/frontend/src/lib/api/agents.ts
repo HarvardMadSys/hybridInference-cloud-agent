@@ -2,7 +2,7 @@
 // Domain modules own their wire types and operations; internal modules import
 // those directly rather than depending on this facade.
 
-export type { AgentConfigApi, AgentMcpServerApi } from './agents/config';
+export type { AgentConfigApi } from './agents/config';
 
 export { getAgentConfig } from './agents/config';
 
@@ -58,6 +58,7 @@ export {
   listAgentConversations,
   listAgentProjects,
   getAgentJobThread,
+  getAgentThreadMessage,
   getAgentThreadStats,
 } from './agents/threads';
 
@@ -119,9 +120,16 @@ export type {
   RunResourceSummaryApi,
   AgentAttemptSummaryApi,
   AgentAttemptTelemetryApi,
+  AgentTrajectoryAttemptTimingApi,
+  AgentTrajectoryJobTimingApi,
+  AgentTrajectoryTimingResponseApi,
 } from './agents/resources';
 
-export { getAgentAttemptTelemetry } from './agents/resources';
+export {
+  AGENT_TRAJECTORY_TIMING_BATCH_SIZE,
+  getAgentAttemptTelemetry,
+  getAgentTrajectoryTimings,
+} from './agents/resources';
 
 export type {
   AgentLedgerStatus,
@@ -144,12 +152,7 @@ export type {
   AgentGitWorkspaceApi,
 } from './agents/workspace';
 
-export {
-  getAgentJobFiles,
-  writeAgentJobFile,
-  getAgentJobGit,
-  downloadAgentWorkspace,
-} from './agents/workspace';
+export { getAgentJobFiles, getAgentJobGit, downloadAgentWorkspace } from './agents/workspace';
 
 export type {
   AgentTerminalApi,

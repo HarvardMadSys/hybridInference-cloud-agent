@@ -31,8 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.logging_utils import get_logger
@@ -124,7 +123,7 @@ class ProfilingPolicyWorker:
 
     async def _refresh_once(self) -> float:
         """Read the control state once, publish it, and say when to read again."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         try:
             # The sweep first: it may end a lapsed experiment, and the snapshot
             # published below should describe the state after that rather than
@@ -198,7 +197,7 @@ class ProfilingPolicyWorker:
         """Sleep the interval, cut short by :meth:`wake`."""
         try:
             await asyncio.wait_for(self._wake.wait(), timeout=interval)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return
         self._wake.clear()
 
@@ -214,15 +213,15 @@ def _descriptor_for_run(run: Mapping[str, Any]) -> ProfilingRun | None:
     """
     expires_at = run.get("expires_at")
     if isinstance(expires_at, datetime):
-        expires_at_text = expires_at.astimezone(timezone.utc).isoformat()
+        expires_at_text = expires_at.astimezone(UTC).isoformat()
     else:
         expires_at_text = str(expires_at or "")
     descriptor: dict[str, Any] = {
         "run_id": str(run.get("run_id") or ""),
         "operations": [str(item) for item in run.get("operations") or ()],
         "expires_at": expires_at_text,
-        "config_version": int(run.get("config_version") or 1),
-        "max_operations": int(run.get("max_operations") or 100),
+        "config_version": run.get("config_version", 1),
+        "max_operations": run.get("max_operations", 100),
         "target": dict(run.get("target") or {}),
         "admission_instances": [dict(item) for item in run.get("admission_instances") or ()],
     }
@@ -231,13 +230,13 @@ def _descriptor_for_run(run: Mapping[str, Any]) -> ProfilingRun | None:
             return None
         descriptor.update(continuous=True, expires_at=run.get("expires_at"), max_operations=0)
     try:
-        parsed = parse_profile_run(json.dumps(descriptor), allow_continuous=True)
+        return parse_profile_run(
+            json.dumps(descriptor),
+            allow_continuous=True,
+            source=SOURCE_ADMIN,
+        )
     except Exception:
         return None
-    # The parsed descriptor states which control source rooted it. That travels
-    # into every measurement, so a reader can tell an administrator's
-    # experiment from one a deployment's static configuration described.
-    return replace(parsed, source=SOURCE_ADMIN)
 
 
 __all__ = [

@@ -71,6 +71,15 @@ def test_config_absent_is_none_not_an_error():
     assert AppConfig.from_env({"AGENT_GITHUB_APP_ID": "1"}) is None
 
 
+def _real_pem_load(*args, **kwargs):
+    """The unpatched cryptography parse, immune to the module shadowing the
+    editable install does (the .pth pins ``cloud_agent`` to whichever tree is
+    on sys.path first, so the tests patch PyJWT's own binding instead)."""
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    return load_pem_private_key(*args, **kwargs)
+
+
 def test_config_unescapes_a_pasted_key(keypair):
     """A key pasted into an env var arrives with literal \\n sequences."""
     private_pem, _ = keypair
@@ -103,6 +112,71 @@ def test_unusable_private_key_is_a_clear_error():
     """A malformed key must fail with a message, not a stack trace."""
     with pytest.raises(GitHubAppError):
         build_app_jwt(AppConfig(app_id="1", private_key="not a key"))
+
+
+def test_jwt_signing_parses_the_key_once(keypair, monkeypatch):
+    """Issue #772: the PEM must be parsed once per config, not per signature.
+
+    ``jwt.encode`` with a PEM string re-validates the RSA key on every call
+    (~43 ms measured, on the event loop, on the claim path); with a parsed
+    key object the same signature costs ~0.7 ms. The observable is PyJWT's
+    own parse entry point (``jwt.algorithms.load_pem_private_key``): at the
+    baseline every signature parses, so three signatures count three parses;
+    with the fix's memo the count stays at one. The memo lives on the config
+    object itself, which is replaced wholesale when settings change — so a
+    rotated key can never be served from a stale memo.
+    """
+    import jwt.algorithms
+
+    import cloud_agent.github_app as github_app_module
+
+    calls = 0
+
+    def counting_load(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _real_pem_load(*args, **kwargs)
+
+    # PyJWT's parse entry point, for the baseline where the PEM string still
+    # reaches jwt.encode, and the fix's own binding when present — so a
+    # regression that leaks the PEM back into jwt.encode raises the count
+    # even though the memo still fires.
+    monkeypatch.setattr(jwt.algorithms, "load_pem_private_key", counting_load)
+    if hasattr(github_app_module, "load_pem_private_key"):
+        monkeypatch.setattr(github_app_module, "load_pem_private_key", counting_load)
+
+    config = AppConfig(app_id="12345", private_key=keypair[0])
+    for i in range(3):
+        assert build_app_jwt(config, now=1_000_000 + i)
+    assert calls == 1
+
+
+def test_a_second_config_with_the_same_key_parses_again(keypair, monkeypatch):
+    """The memo is per config object, not global: two holders of the same PEM
+    each parse once, and a config rebuilt after a settings change cannot see
+    a memo computed for an earlier key."""
+    import jwt.algorithms
+
+    import cloud_agent.github_app as github_app_module
+
+    calls = 0
+
+    def counting_load(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _real_pem_load(*args, **kwargs)
+
+    # See test_jwt_signing_parses_the_key_once: hook both PyJWT's binding and,
+    # when present, the fix's module-level parse.
+    monkeypatch.setattr(jwt.algorithms, "load_pem_private_key", counting_load)
+    if hasattr(github_app_module, "load_pem_private_key"):
+        monkeypatch.setattr(github_app_module, "load_pem_private_key", counting_load)
+
+    first = AppConfig(app_id="12345", private_key=keypair[0])
+    second = AppConfig(app_id="12345", private_key=keypair[0])
+    assert build_app_jwt(first)
+    assert build_app_jwt(second)
+    assert calls == 2
 
 
 def test_user_authorization_uses_oauth_even_when_app_is_already_installed(config):
@@ -353,6 +427,26 @@ async def test_a_repository_s_installation_is_not_remembered_forever(config, mon
         assert await credentials.installation_id_for("o/n") == 1
 
     assert len(lookups) == 2
+
+
+async def test_a_fresh_installation_lookup_bypasses_and_refreshes_the_cache(config):
+    """An authorization fence cannot trust the token minter's remembered id."""
+    installation_ids = iter((1, 2))
+    lookups: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        installation_id = next(installation_ids)
+        lookups.append(installation_id)
+        return httpx.Response(200, json={"id": installation_id})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        assert await credentials.installation_id_for("o/n") == 1
+        assert await credentials.installation_id_for("o/n") == 1
+        assert await credentials.installation_id_for("o/n", fresh=True) == 2
+        assert await credentials.installation_id_for("o/n") == 2
+
+    assert lookups == [1, 2]
 
 
 def test_private_key_never_appears_in_an_error(config):
@@ -1031,6 +1125,67 @@ async def test_only_repositories_the_user_can_push_to_are_theirs(config):
     assert found[-1] == "acme/last"
 
 
+@pytest.mark.parametrize("push", [True, False])
+async def test_one_repository_permission_is_read_directly_as_the_user(config, push):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"permissions": {"pull": True, "push": push}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        allowed = await GitHubAppCredentials(config, client=client).user_can_push_repository(
+            "ghu_user", "acme/service"
+        )
+
+    assert allowed is push
+    [request] = requests
+    assert request.url.path == "/repos/acme/service"
+    assert request.headers["authorization"] == "Bearer ghu_user"
+
+
+@pytest.mark.parametrize("status", [403, 404])
+async def test_a_plain_targeted_permission_refusal_is_no_access(config, status):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status, json={}))
+    ) as client:
+        assert not await GitHubAppCredentials(config, client=client).user_can_push_repository(
+            "ghu_user", "acme/service"
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "body"),
+    [
+        (429, {}, {}),
+        (403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "0"}, {}),
+        (200, {}, {"permissions": {"pull": True}}),
+    ],
+)
+async def test_an_unsettled_targeted_permission_answer_is_an_outage(config, status, headers, body):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(status, headers=headers, json=body)
+        )
+    ) as client:
+        with pytest.raises(GitHubAppError):
+            await GitHubAppCredentials(config, client=client).user_can_push_repository(
+                "ghu_user", "acme/service"
+            )
+
+
+async def test_a_refused_token_during_a_targeted_permission_check_requires_reconnect(config):
+    from cloud_agent.github_app import UserAuthorizationRevoked
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(401, json={}))
+    ) as client:
+        with pytest.raises(UserAuthorizationRevoked):
+            await GitHubAppCredentials(config, client=client).user_can_push_repository(
+                "ghu_user", "acme/service"
+            )
+
+
 @pytest.mark.parametrize(("status", "expected"), [(404, []), (403, [])])
 async def test_an_installation_the_user_lost_contributes_nothing(config, status, expected):
     async with httpx.AsyncClient(
@@ -1112,17 +1267,42 @@ def test_a_users_repositories_are_remembered_for_a_minute_and_forgotten_on_chang
     monkeypatch.setattr(github_app.time, "monotonic", lambda: now[0])
     credentials = GitHubAppCredentials(config)
     credentials.remember_user_repositories("alice", (77,), ["acme/service"])
+    credentials.remember_user_installation_repositories("alice", 77, ["acme/service"])
+    credentials.remember_user_repository_permission("alice", 77, "Acme/Other", False)
 
     assert credentials.cached_user_repositories("alice", (77,)) == ["acme/service"]
+    assert credentials.cached_user_installation_repositories("alice", 77) == ["acme/service"]
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/other") is False
     # Another set of installations is another question.
     assert credentials.cached_user_repositories("alice", (77, 88)) is None
     assert credentials.cached_user_repositories("bob", (77,)) is None
     now[0] += 61
     assert credentials.cached_user_repositories("alice", (77,)) is None
+    assert credentials.cached_user_installation_repositories("alice", 77) is None
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/other") is None
 
     credentials.remember_user_repositories("alice", (77,), ["acme/service"])
+    credentials.remember_user_installation_repositories("alice", 77, ["acme/service"])
+    credentials.remember_user_repository_permission("alice", 77, "acme/other", True)
     credentials.forget_user("alice")
     assert credentials.cached_user_repositories("alice", (77,)) is None
+    assert credentials.cached_user_installation_repositories("alice", 77) is None
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/other") is None
+
+
+def test_targeted_repository_permission_cache_is_bounded(config, monkeypatch):
+    import cloud_agent.github_app as github_app
+
+    monkeypatch.setattr(github_app, "_USER_REPOSITORY_PERMISSIONS_MAX", 2)
+    credentials = GitHubAppCredentials(config)
+
+    credentials.remember_user_repository_permission("alice", 77, "acme/one", True)
+    credentials.remember_user_repository_permission("alice", 77, "acme/two", True)
+    credentials.remember_user_repository_permission("alice", 77, "acme/three", True)
+
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/one") is None
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/two") is True
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/three") is True
 
 
 @pytest.mark.parametrize("private", [True, False])

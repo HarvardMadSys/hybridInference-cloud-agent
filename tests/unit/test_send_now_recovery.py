@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from cloud_agent.application import send_now
+from cloud_agent.settings import integer_setting
 from cloud_agent.workers import attempts
 
 
@@ -118,7 +119,7 @@ async def test_hung_handoff_recovery_does_not_delay_attempt_reaping(monkeypatch)
             recovery_cancelled.set()
 
     async def reap_expired(*, max_attempts):
-        assert max_attempts == attempts.MAX_ATTEMPTS
+        assert max_attempts == integer_setting("max_attempts")
         attempt_reaped.set()
         return []
 

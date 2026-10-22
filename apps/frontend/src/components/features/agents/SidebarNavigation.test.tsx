@@ -90,7 +90,6 @@ import { SkillDialog } from './skills/SkillDialog';
 import { AgentReadProvider } from './AgentReadProvider';
 import { useAgentJob } from './useAgentJobs';
 import { ArchivedTasksView } from './ArchivedTasksView';
-import { announceConversationRestored } from './conversationEvents';
 import { DEFAULT_PREFERENCES, sidebarPreferencesKey } from './sidebarPreferences';
 import { SIDEBAR_ACTIVITY_REFRESH_MS } from './sidebarRecordChanges';
 import {
@@ -649,6 +648,33 @@ describe('sidebar navigation interactions', () => {
     });
     expect(api.projects).toHaveBeenCalledOnce();
     expect(api.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('reorders open search results once per window while only activity moves', async () => {
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    fireEvent.click(screen.getByRole('button', { name: 'Search tasks' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search tasks' }), {
+      target: { value: 'Task' },
+    });
+    const searched = expect.objectContaining({ q: 'Task' });
+    await waitFor(() => expect(api.list).toHaveBeenCalledWith(searched, expect.any(AbortSignal)));
+    vi.useFakeTimers();
+    const thread = { id: 'thread-a', title: 'Task a', title_source: 'manual' as const };
+    for (const revision of [1, 2]) {
+      await act(async () => {
+        receiveThreadChange({ ...thread, revision, updated_at: `2026-10-14T10:00:0${revision}Z` });
+        receiveJobChange({ id: 'a', thread_id: 'thread-a', revision, state: 'running' });
+        await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+      });
+      api.list.mockClear();
+    }
+
+    await act(async () => vi.advanceTimersByTimeAsync(SIDEBAR_ACTIVITY_REFRESH_MS));
+    expect(api.list).toHaveBeenCalledWith(
+      expect.objectContaining({ q: 'Task', limit: 50 }),
+      expect.any(AbortSignal),
+    );
   });
 
   it('refreshes a delayed automatic title after the conversation is idle', async () => {
@@ -1325,20 +1351,5 @@ describe('sidebar navigation interactions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close search' }));
     expect(await screen.findByRole('link', { name: 'Task old' })).toHaveAttribute('href', '/old');
     expect(old.last_activity_at).toBe('2025-01-01T00:00:00Z');
-  });
-  it('ignores restore invalidation from a different signed-in account', async () => {
-    render(<AgentsSidebar />);
-    await screen.findByText('Task a');
-    api.list.mockClear();
-    api.projects.mockClear();
-    act(() => announceConversationRestored({ threadId: 'thread-a', userId: 'bob' }));
-    expect(api.list).not.toHaveBeenCalled();
-    expect(api.projects).not.toHaveBeenCalled();
-    act(() => announceConversationRestored({ threadId: 'thread-a', userId: 'alice' }));
-    await waitFor(() => expect(api.projects).toHaveBeenCalledOnce());
-    expect(api.list).toHaveBeenCalledWith(
-      expect.objectContaining({ repo: 'owner/repo' }),
-      expect.any(AbortSignal),
-    );
   });
 });

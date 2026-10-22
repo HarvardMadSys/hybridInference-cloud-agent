@@ -16,6 +16,7 @@ from tests.integration.storage.test_agent_job_store import (
     pool as pool,
     store as store,
 )
+from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.goals.models import GoalInput
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
@@ -132,7 +133,7 @@ async def _settled_stopped_group(pool, store: Storage) -> tuple[dict, dict]:
     assert residency is not None
     fence = _fence(job, claim, sandbox)
     assert await store.sandbox.mark_thread_sandbox_running(
-        **fence, container_id="container-a", context_status="new"
+        **fence, container_id="container-aa", context_status="new"
     )
     assert await store.sandbox.admit_thread_sandbox_turn(
         **fence, residency_generation=residency["generation"], job_id=job["id"]
@@ -168,7 +169,7 @@ def _receipt(group: dict, job: dict, **changes: Any) -> dict[str, Any]:
         "checkpoint_id": "c" * 32,
         "sandbox_id": group["sandbox_id"],
         "generation": group["generation"],
-        "container_id": "container-a",
+        "container_id": "container-aa",
         "base_image": _BASE,
         "runtime_id": "claude-code",
         "object_key": "cloud-agent/sandbox/v2/" + "d" * 64 + "/g1/" + "c" * 32 + ".oci.tar",
@@ -233,8 +234,8 @@ async def _age_restore_failure(pool, seconds: float, sandbox_id: str = "asbx_res
 
 async def test_a_removed_hosts_covered_group_is_restored_on_another_host(pool, store: Storage):
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
 
@@ -288,8 +289,8 @@ async def test_a_removed_hosts_covered_group_is_restored_on_another_host(pool, s
 
 async def test_a_moved_group_is_reached_on_its_new_host_from_any_of_its_turns(pool, store: Storage):
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
@@ -334,10 +335,6 @@ async def _expiring_host(store: Storage, host: str, capabilities: list[str]) -> 
     )
     claimed = await repo.claim_operation(worker_id="fixture")
     assert claimed is not None and claimed["id"] == op["id"]
-    node = await repo.upsert_node(
-        allocation_id=op["allocation_id"],
-        node={"provider_node_id": "node-1", "instance_identity": request, "name": host},
-    )
     await repo.observe_allocation(
         allocation_id=op["allocation_id"],
         observation={
@@ -348,8 +345,10 @@ async def _expiring_host(store: Storage, host: str, capabilities: list[str]) -> 
             # takes no new group, but still claims follow-ups of its own.
             "expires_at": datetime.now(UTC) + timedelta(minutes=20),
             "scope_complete": True,
+            "nodes": [{"provider_node_id": "node-1", "instance_identity": request, "name": host}],
         },
     )
+    (node,) = (await repo.get_allocation(op["allocation_id"]))["nodes"]
     await repo.prepare_bootstrap_binding(node_id=node["id"], host=host, operation_id=op["id"])
     await _host(store, host, capabilities)
     assert await repo.clear_bootstrap_hold(node_id=node["id"], host=host, operation_id=op["id"])
@@ -364,8 +363,8 @@ async def _expiring_host(store: Storage, host: str, capabilities: list[str]) -> 
 
 async def test_a_host_that_may_take_no_new_group_does_not_restore_one(pool, store: Storage):
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
@@ -386,8 +385,8 @@ async def test_a_host_that_may_take_no_new_group_does_not_restore_one(pool, stor
 
 async def _run_turn_and_stop(pool, store: Storage, parent: dict) -> dict:
     """Run one more turn of the chat on ``runner-a`` and let its container stop."""
-    job = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="continue"
+    job = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id="user-1", prompt="continue"
     )
     assert job is not None
     claim = await _claim(store, "runner-a", _ARCHIVE_HOST)
@@ -406,7 +405,7 @@ async def _run_turn_and_stop(pool, store: Storage, parent: dict) -> dict:
     assert residency is not None
     fence = _fence(job, claim, sandbox)
     assert await store.sandbox.mark_thread_sandbox_running(
-        **fence, container_id="container-a", context_status="restored"
+        **fence, container_id="container-aa", context_status="restored"
     )
     assert await store.sandbox.admit_thread_sandbox_turn(
         **fence, residency_generation=residency["generation"], job_id=job["id"]
@@ -504,8 +503,8 @@ async def test_a_cold_groups_base_import_waits_for_the_restore(pool, store: Stor
     assert (await _state(pool))["state"] == "cold"
 
     await _host(store, "runner-c", _RESTORE_HOST)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=latest["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=latest["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     claim = await _claim(store, "runner-c", _RESTORE_HOST)
@@ -560,7 +559,7 @@ async def test_an_import_answered_by_the_old_host_after_the_restore_changes_noth
     # The publisher sends the base import to runner-a, which holds the group.
     sent = await store.snapshot.pending_snapshot_base_import()
     assert sent is not None
-    assert (sent["generation"], sent["container_id"]) == (1, "container-a")
+    assert (sent["generation"], sent["container_id"]) == (1, "container-aa")
 
     # Before runner-a answers, the chat goes on, runner-a is removed, and
     # runner-c restores the group from the checkpoint of its last stop.
@@ -585,8 +584,8 @@ async def test_an_import_answered_by_the_old_host_after_the_restore_changes_noth
     )
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
     await _host(store, "runner-c", _RESTORE_HOST)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=latest["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=latest["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     claim = await _claim(store, "runner-c", _RESTORE_HOST)
@@ -603,7 +602,7 @@ async def test_an_import_answered_by_the_old_host_after_the_restore_changes_noth
 
     class _OldHost:
         async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
-            assert (row["generation"], row["container_id"]) == (1, "container-a")
+            assert (row["generation"], row["container_id"]) == (1, "container-aa")
             answered.append(row["generation"])
             return {"ok": True}
 
@@ -638,9 +637,7 @@ async def test_an_import_answered_by_the_old_host_after_the_restore_changes_noth
 
 async def test_a_stale_host_cannot_touch_a_rehomed_group(pool, store: Storage):
     job, group = await _covered(pool, store)
-    await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
-    )
+    await append_follow_up(pool, parent_job_id=job["id"], user_id="user-1", prompt="continue")
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
     await _host(store, "runner-c", _RESTORE_HOST)
     assert await _claim(store, "runner-c", _RESTORE_HOST) is not None
@@ -652,7 +649,7 @@ async def test_a_stale_host_cannot_touch_a_rehomed_group(pool, store: Storage):
                 thread_id=job["thread_id"],
                 host="runner-a",
                 sandbox_id=group["sandbox_id"],
-                container_id="container-a",
+                container_id="container-aa",
                 sandbox_generation=1,
                 running=running,
             )
@@ -684,8 +681,8 @@ async def test_a_failed_restore_returns_to_the_checkpoint_until_attempts_run_out
     pool, store: Storage
 ):
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
@@ -737,14 +734,14 @@ async def test_a_group_its_restores_lost_fails_every_chats_queued_turns(pool, st
             sibling["user_id"],
             "asbx_restore",
         )
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
     assert (await _state(pool))["state"] == "cold"
-    waiting = await store.conversation_commands.create_follow_up(
-        parent_job_id=sibling["id"], user_id="user-1", prompt="try the sibling again"
+    waiting = await append_follow_up(
+        pool, parent_job_id=sibling["id"], user_id="user-1", prompt="try the sibling again"
     )
     assert waiting is not None and waiting.get("error") is None
     await _host(store, "runner-c", _RESTORE_HOST)
@@ -823,8 +820,8 @@ async def test_a_goal_round_its_last_restore_failed_under_pauses_its_goal(pool, 
 async def test_restore_failures_during_a_short_outage_do_not_lose_the_chat(pool, store: Storage):
     """Two minutes of a registry or S3 outage fail every restore tried in them."""
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
@@ -874,8 +871,8 @@ async def test_claims_handed_back_before_the_restore_began_spend_no_attempt(pool
     had read its checkpoint.
     """
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
@@ -930,8 +927,8 @@ async def test_claims_handed_back_before_the_restore_began_spend_no_attempt(pool
 async def test_a_claim_handed_back_after_its_host_reserved_the_group_counts(pool, store: Storage):
     """Once its host reserved the group, a restore may have begun, whatever ended it."""
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
@@ -964,8 +961,8 @@ async def test_a_claim_handed_back_after_its_host_reserved_the_group_counts(pool
 async def _moved_chat_after_one_failed_restore(pool, store: Storage) -> tuple[dict, dict]:
     """A moved chat whose one real restore failure has waited out its delay."""
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
@@ -1015,8 +1012,8 @@ async def test_turns_failed_before_their_host_reserved_the_group_spend_no_attemp
         member = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
         assert member is not None and member["context_status"] != "lost"
         # The owner's next message is claimed at once: no new wait started.
-        turn = await store.conversation_commands.create_follow_up(
-            parent_job_id=job["id"], user_id="user-1", prompt="try again"
+        turn = await append_follow_up(
+            pool, parent_job_id=job["id"], user_id="user-1", prompt="try again"
         )
         assert turn is not None
 
@@ -1072,8 +1069,8 @@ async def test_a_lease_that_lapses_before_its_host_reserved_the_group_spends_no_
 
 async def test_an_expired_restore_returns_the_group_and_requeues_the_turn(pool, store: Storage):
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
@@ -1111,8 +1108,8 @@ async def test_an_expired_restore_returns_the_group_and_requeues_the_turn(pool, 
 
 async def test_a_turn_finished_during_restore_keeps_the_context(pool, store: Storage):
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
@@ -1232,7 +1229,7 @@ async def test_a_running_observation_drops_the_restore_point(pool, store: Storag
         thread_id=job["thread_id"],
         host="runner-a",
         sandbox_id=group["sandbox_id"],
-        container_id="container-a",
+        container_id="container-aa",
         sandbox_generation=1,
         running=True,
     )
@@ -1423,8 +1420,8 @@ async def test_a_fork_that_waited_on_the_revocation_starts_nothing(pool, store: 
 
 async def test_forgetting_a_removed_host_leaves_its_cold_groups_restorable(pool, store: Storage):
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"

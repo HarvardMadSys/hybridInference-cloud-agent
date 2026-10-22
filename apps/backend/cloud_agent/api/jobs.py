@@ -12,7 +12,6 @@ has to move with it.
 
 from __future__ import annotations
 
-import contextlib
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
@@ -30,18 +29,19 @@ from cloud_agent.api._workspace_access import _sandbox_manager_for_job, _workspa
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
-    get_log_store,
     get_source_control,
     get_storage,
     require_store,
 )
-from cloud_agent.application.job_admission import _create_job_as
+from cloud_agent.application.job_admission import create_job_as
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.goals.models import GoalConflict
+from cloud_agent.ledger import JobLedgerSummary, summarize_job_ledger
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
+    MAX_TRAJECTORY_TIMING_ATTEMPTS,
     AgentAttemptTelemetry,
     AgentJobCancelResponse,
     AgentJobCreate,
@@ -52,6 +52,10 @@ from cloud_agent.schemas import (
     AgentThreadPublicationResponse,
     AgentThreadRenameRequest,
     AgentThreadRenameResponse,
+    AgentTrajectoryAttemptTiming,
+    AgentTrajectoryJobTiming,
+    AgentTrajectoryTimingRequest,
+    AgentTrajectoryTimingResponse,
     GoalClearedResponse,
     GoalRequest,
     GoalResponse,
@@ -71,6 +75,7 @@ if TYPE_CHECKING:
         ExecutionQueries,
         GoalRepository,
         HostPoolRepository,
+        LedgerRepository,
         McpConnectionRepository,
         PendingMessageRepository,
         SandboxRepository,
@@ -81,7 +86,7 @@ if TYPE_CHECKING:
     from cloud_agent.source_control_runtime import GitHubAppSource
 
 
-from cloud_agent.api.environments import CredentialSafeRoute
+from cloud_agent.api._environment_route_policy import EnvironmentSensitiveRoute
 
 router = APIRouter(prefix="/v1/agent")
 
@@ -95,14 +100,14 @@ class _JobsStorage(Protocol):
     """The capabilities the job surface reaches the store for.
 
     Ten of them, and four are reached through a helper rather than spelled
-    here: `application.job_admission._create_job_as` is typed against
+    here: `application.job_admission.create_job_as` is typed against
     `_JobCreationStorage`, which names `attachments` among them.
 
     Four of these are reached through a helper rather than spelled here,
     and leaving them out is not a narrowing: `cancel_agent_job` hands the whole
     store (through `_resume_terminals_after_cancel`) to
     `_workspace_access._sandbox_manager_for_job`, and `create_agent_job`
-    hands it to `application.job_admission._create_job_as`, which is typed against
+    hands it to `application.job_admission.create_job_as`, which is typed against
     `_JobCreationStorage` (`conversation_commands`, `mcp`, `skills`,
     `source_control`). mypy says so at the call site, which is the point of
     declaring capabilities rather than trusting a reader to trace them.
@@ -115,6 +120,7 @@ class _JobsStorage(Protocol):
     execution_queries: ExecutionQueries
     goals: GoalRepository
     host_pool: HostPoolRepository
+    ledger: LedgerRepository
     mcp: McpConnectionRepository
     pending_messages: PendingMessageRepository
     sandbox: SandboxRepository
@@ -128,26 +134,28 @@ def _require_store(store: _JobsStorage | None) -> _JobsStorage:
     return require_store(store)
 
 
-async def _job_usage(log_store: Any, job_id: str) -> dict[str, Any]:
-    """Read one job's spend and token totals from the billing ledger.
+def _job_usage_fields(summary: JobLedgerSummary) -> dict[str, Any]:
+    """Map one job's ledger summary onto the response's flat usage fields.
 
-    Deliberately the ledger and not the agent's own report: a run that
+    Deliberately the grant ledger and not the agent's own report: a run that
     misstates its usage — which is a thing models do — cannot change what the
-    owner is shown, and it is the same source the budget check already trusts.
-    Absent on a deployment with no log store, rather than a fabricated zero.
+    owner is shown. The same accounting the usage and admin surfaces use, so a
+    job means the same thing everywhere.
+
+    A snapshot that has not answered (``pending``, ``unavailable``) has no
+    totals, and the fields then stay ``None``: absent rather than a
+    fabricated zero that would read as "this job was free".
     """
-    usage: dict[str, Any] = {}
-    cost_getter = getattr(log_store, "get_agent_job_cost", None)
-    if cost_getter is not None:
-        with contextlib.suppress(Exception):
-            usage["spent_usd"] = await cost_getter(job_id)
-    usage_getter = getattr(log_store, "get_agent_job_usage", None)
-    if usage_getter is not None:
-        with contextlib.suppress(Exception):
-            totals = await usage_getter(job_id)
-            usage["tokens_in"] = int(totals.get("tokens_in", 0))
-            usage["tokens_out"] = int(totals.get("tokens_out", 0))
-            usage["model_calls"] = int(totals.get("calls", 0))
+    totals = summary.totals
+    if totals is None:
+        return {}
+    usage: dict[str, Any] = {
+        "tokens_in": totals.tokens_in,
+        "tokens_out": totals.tokens_out,
+        "model_calls": totals.calls,
+    }
+    if totals.spent_usd is not None:
+        usage["spent_usd"] = float(totals.spent_usd)
     return usage
 
 
@@ -166,7 +174,7 @@ async def create_agent_job(
     different content is a 409 ``idempotency_conflict``.
     """
     job_store = _require_store(store)
-    job = await _create_job_as(
+    job = await create_job_as(
         body,
         user,
         job_store=job_store,
@@ -201,13 +209,49 @@ async def list_agent_jobs(
     return AgentJobListResponse(jobs=[_job_response(job) for job in jobs])
 
 
+@router.post("/jobs/trajectory-telemetry", response_model=AgentTrajectoryTimingResponse)
+async def get_agent_trajectory_telemetry(
+    body: AgentTrajectoryTimingRequest,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _JobsStorage | None = Depends(get_storage),
+) -> AgentTrajectoryTimingResponse:
+    """Read compact timing for a bounded set of the caller's turns."""
+    job_store = _require_store(store)
+    result = await job_store.execution_queries.trajectory_timings(
+        job_ids=body.job_ids,
+        user_id=user["user_id"],
+        max_attempts=MAX_TRAJECTORY_TIMING_ATTEMPTS,
+    )
+    if result["owned_count"] != len(body.job_ids):
+        raise HTTPException(status_code=404, detail="Job not found")
+    if result["attempt_count"] > MAX_TRAJECTORY_TIMING_ATTEMPTS:
+        raise HTTPException(status_code=413, detail="Too many attempts in trajectory batch")
+    attempts_by_job: dict[str, list[AgentTrajectoryAttemptTiming]] = {
+        job_id: [] for job_id in body.job_ids
+    }
+    for timing in result["attempts"]:
+        attempts_by_job[timing["job_id"]].append(
+            AgentTrajectoryAttemptTiming(
+                **_attempt_summary_response(timing).model_dump(),
+                tool_time_ms=timing.get("tool_time_ms"),
+                tool_calls_truncated=bool(timing.get("tool_calls_truncated")),
+                tool_timing_exact=bool(timing.get("tool_timing_exact")),
+            )
+        )
+    return AgentTrajectoryTimingResponse(
+        jobs=[
+            AgentTrajectoryJobTiming(job_id=job_id, attempts=attempts_by_job[job_id])
+            for job_id in body.job_ids
+        ]
+    )
+
+
 @router.get("/jobs/{job_id}", response_model=AgentJobResponse)
 async def get_agent_job(
     job_id: str,
     include_resources: bool = Query(True),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _JobsStorage | None = Depends(get_storage),
-    log_store: Any | None = Depends(get_log_store),
 ) -> AgentJobResponse:
     """Fetch one of the caller's agent jobs, with what it has spent so far."""
     job_store = _require_store(store)
@@ -226,9 +270,13 @@ async def get_agent_job(
         telemetry = await job_store.execution_queries.job_turn_telemetry(
             job_id=job_id, attempt_id=attempt_telemetry[-1]["attempt_id"]
         )
+    summary = summarize_job_ledger(
+        ledger_rows=await job_store.ledger.ledger_rows_for_job(job_id=job_id),
+        terminal=job.get("state") in TERMINAL_STATES,
+    )
     return _job_response(
         job,
-        await _job_usage(log_store, job_id),
+        _job_usage_fields(summary),
         telemetry,
         attempt_telemetry,
     )
@@ -788,5 +836,5 @@ router.add_api_route(
     methods=["POST"],
     response_model=AgentJobResponse,
     status_code=201,
-    route_class_override=CredentialSafeRoute,
+    route_class_override=EnvironmentSensitiveRoute,
 )

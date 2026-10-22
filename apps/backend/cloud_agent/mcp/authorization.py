@@ -111,7 +111,7 @@ def _deny(
     )
 
 
-def decide(
+def decide(  # noqa: PLR0912 complexity baseline, #771
     *,
     connection: McpConnection | None,
     binding: ThreadBinding | None,

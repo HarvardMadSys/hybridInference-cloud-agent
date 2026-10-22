@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from tests.servers.test_mcp_relay_host import (
@@ -30,7 +30,7 @@ _HANG_GUARD_S = 10
 def _oauth(store):
     store.connections[7].update(
         auth_kind="oauth",
-        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
         refresh_token_ciphertext=mcp_cipher().encrypt("refresh-fixture"),
         issuer="http://127.0.0.1:9",
         resource="http://127.0.0.1:9/mcp",
@@ -88,7 +88,7 @@ async def test_a_healthy_tool_does_not_wait_for_another_connections_refresh(
 @pytest.mark.parametrize(
     "change", ["lease", "binding", "policy", "connection", "capability", "alias"]
 )
-@pytest.mark.parametrize("surface", ["tool", "prompt", "resource", "direct"])
+@pytest.mark.parametrize("surface", ["tool", "prompt", "resource"])
 async def test_changes_during_refresh_prevent_dispatch(
     client, store, host, monkeypatch, change, surface
 ):
@@ -101,7 +101,6 @@ async def test_changes_during_refresh_prevent_dispatch(
         "tool": _rpc("tools/call", name="github__get_issue", arguments={}),
         "prompt": _rpc("prompts/get", name="github__summarize", arguments={}),
         "resource": _rpc("resources/read", uri="mcp-resource://7/repo://notes"),
-        "direct": _rpc("tools/call", name="get_issue", arguments={}),
     }[surface]
     started = asyncio.Event()
     finish = asyncio.Event()
@@ -115,7 +114,7 @@ async def test_changes_during_refresh_prevent_dispatch(
     monkeypatch.setattr(mcp_relay, "ensure_fresh", refresh)
     task = asyncio.create_task(
         client.post(
-            "/v1/agent/mcp/github" if surface == "direct" else "/v1/agent/mcp",
+            "/v1/agent/mcp",
             json=request,
             headers=_auth(),
         )

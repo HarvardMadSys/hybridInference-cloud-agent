@@ -36,7 +36,7 @@ nothing. That is the correct failure, but it is a failure, not a working path.
 **Re-keying invalidates every token in flight.** That is a cutover concern, not
 a bug: an attempt holding a token signed by the old root is an attempt from
 before the migration, and it must not keep writing to the new store. Drain
-before cutover; see MIGRATION.md.
+before cutover; see the repository extraction record.
 """
 
 from __future__ import annotations
@@ -111,13 +111,14 @@ def _b64decode(value: str) -> bytes:
 # The two are deliberately not interchangeable, so a leaked MCP token buys no
 # inference and a leaked grant buys no tools.
 #
-# ``model`` is the sandbox's *previous* inference credential, kept while jobs
-# started before the cutover are still running. New attempts get a grant
-# instead. It is removed with the gateway's legacy MCP route at H4.
+# ``model`` was the sandbox's *previous* inference credential, kept only while
+# jobs started before the cutover were still running (issue #822). The H4
+# removal of the gateway's legacy MCP route (2026-08-09) ended the last use:
+# production mints only ``full`` and ``mcp`` (api/worker.py), model calls ride
+# the gateway's ``agr`` grant, and an old ``model`` token no longer parses.
 SCOPE_FULL = "full"
-SCOPE_MODEL = "model"
 SCOPE_MCP = "mcp"
-_VALID_SCOPES = (SCOPE_FULL, SCOPE_MODEL, SCOPE_MCP)
+_VALID_SCOPES = (SCOPE_FULL, SCOPE_MCP)
 
 # ``host`` is the third scope, and it is deliberately *not* in the tuple above.
 #

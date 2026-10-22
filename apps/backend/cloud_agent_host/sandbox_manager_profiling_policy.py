@@ -50,7 +50,7 @@ import json
 import logging
 import threading
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
@@ -60,19 +60,15 @@ from cloud_agent_shared.operation_profiling import (
     MODE_DISABLED,
     MODE_ENVIRONMENT,
     RUN_ID_PATTERN,
+    SOURCE_ADMIN,
     TARGET_KEYS,
     ControlState,
     ProfilingRun,
     parse_run,
     policy_store,
 )
-from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER
 
 logger = logging.getLogger(__name__)
-
-#: Producer name the sandbox manager reports under. Declared here because the policy
-#: endpoint is where the sandbox manager learns which experiment it may collect for.
-PRODUCER = SANDBOX_MANAGER_PRODUCER
 
 #: Bounds on an incoming policy message. It crosses a container boundary.
 MAX_OPERATIONS = 32
@@ -176,7 +172,7 @@ def apply_received_policy(payload: dict[str, Any]) -> dict[str, Any]:
             {
                 "revision": revision,
                 "run_id": run.run_id if run is not None else None,
-                "applied_at": datetime.now(timezone.utc).isoformat(),
+                "applied_at": datetime.now(UTC).isoformat(),
             }
         )
     return {**applied_state(), "accepted": True, "changed": True}
@@ -233,18 +229,20 @@ def _parse_run_payload(value: Any) -> ProfilingRun | None:
             name = str(key)
             if name not in TARGET_KEYS:
                 return None
+            if not isinstance(item, (str, int)) or isinstance(item, bool) or not str(item).strip():
+                return None
             target[name] = str(item)[:MAX_DETAIL_CHARS]
     expires_at = value.get("expires_at")
     if isinstance(expires_at, datetime):
-        expires_at_text = expires_at.astimezone(timezone.utc).isoformat()
+        expires_at_text = expires_at.astimezone(UTC).isoformat()
     else:
         expires_at_text = str(expires_at or "")
     descriptor = {
         "run_id": run_id,
         "operations": operations,
         "expires_at": expires_at_text,
-        "config_version": _bounded_int(value.get("config_version")) or 1,
-        "max_operations": _bounded_int(value.get("max_operations")) or 100,
+        "config_version": value.get("config_version", 1),
+        "max_operations": value.get("max_operations", 100),
         "target": target,
         "admission_instances": [],
     }
@@ -253,7 +251,11 @@ def _parse_run_payload(value: Any) -> ProfilingRun | None:
             return None
         descriptor.update(continuous=True, expires_at=value.get("expires_at"), max_operations=0)
     try:
-        return parse_run(json.dumps(descriptor), allow_continuous=True)
+        return parse_run(
+            json.dumps(descriptor),
+            allow_continuous=True,
+            source=SOURCE_ADMIN,
+        )
     except ValueError:
         return None
 
@@ -272,7 +274,6 @@ __all__ = [
     "MAX_ID_CHARS",
     "MAX_OPERATIONS",
     "MAX_TARGET_FIELDS",
-    "PRODUCER",
     "applied_state",
     "apply_received_policy",
     "install_policy_provider",

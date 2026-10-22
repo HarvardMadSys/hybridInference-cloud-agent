@@ -293,112 +293,6 @@
         "title": "AddServerRequest",
         "type": "object"
       },
-      "AdminActivity": {
-        "description": "An allowlisted event envelope; created_at is the receipt timestamp.",
-        "properties": {
-          "attempt_id": {
-            "title": "Attempt Id",
-            "type": "integer"
-          },
-          "attempt_no": {
-            "title": "Attempt No",
-            "type": "integer"
-          },
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
-          "event_type": {
-            "title": "Event Type",
-            "type": "string"
-          },
-          "has_content": {
-            "default": false,
-            "title": "Has Content",
-            "type": "boolean"
-          },
-          "id": {
-            "title": "Id",
-            "type": "integer"
-          },
-          "is_error": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Is Error"
-          },
-          "seq": {
-            "title": "Seq",
-            "type": "integer"
-          },
-          "tool_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Tool Name"
-          },
-          "tool_use_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Tool Use Id"
-          }
-        },
-        "required": [
-          "id",
-          "attempt_id",
-          "attempt_no",
-          "seq",
-          "event_type",
-          "created_at"
-        ],
-        "title": "AdminActivity",
-        "type": "object"
-      },
-      "AdminActivityPage": {
-        "description": "Events ordered within attempts, from a fixed upper event ID.",
-        "properties": {
-          "events": {
-            "items": {
-              "$ref": "#/components/schemas/AdminActivity"
-            },
-            "title": "Events",
-            "type": "array"
-          },
-          "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Next Cursor"
-          }
-        },
-        "required": [
-          "events"
-        ],
-        "title": "AdminActivityPage",
-        "type": "object"
-      },
       "AdminAttempt": {
         "description": "The execution identity needed to scope events and resource measurements.",
         "properties": {
@@ -1034,52 +928,6 @@
           "matches_filters"
         ],
         "title": "AdminConversationTurn",
-        "type": "object"
-      },
-      "AdminEventContent": {
-        "description": "One explicitly requested, audited and byte-bounded event payload.",
-        "properties": {
-          "attempt_id": {
-            "title": "Attempt Id",
-            "type": "integer"
-          },
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
-          "event_type": {
-            "title": "Event Type",
-            "type": "string"
-          },
-          "id": {
-            "title": "Id",
-            "type": "integer"
-          },
-          "payload": {
-            "additionalProperties": true,
-            "title": "Payload",
-            "type": "object"
-          },
-          "seq": {
-            "title": "Seq",
-            "type": "integer"
-          },
-          "truncated": {
-            "default": false,
-            "title": "Truncated",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "id",
-          "attempt_id",
-          "seq",
-          "event_type",
-          "created_at",
-          "payload"
-        ],
-        "title": "AdminEventContent",
         "type": "object"
       },
       "AdminLlmRequest": {
@@ -4110,6 +3958,18 @@
           "attachment_limits": {
             "$ref": "#/components/schemas/AttachmentLimits"
           },
+          "default_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The model a new task should start on, first available of: this owner's pin in My Settings, the model their newest turn used, the deployment default. Always one of `models`, so a retired model is never pre-selected. Null means none of the three resolves, or the catalog was unreadable — the composer then leaves its model control empty and asks, rather than choosing one for the owner.",
+            "title": "Default Model"
+          },
           "environment_limits": {
             "additionalProperties": true,
             "title": "Environment Limits",
@@ -5744,6 +5604,11 @@
             ],
             "title": "Thread Id"
           },
+          "thread_preview": {
+            "default": false,
+            "title": "Thread Preview",
+            "type": "boolean"
+          },
           "thread_revision": {
             "default": 0,
             "title": "Thread Revision",
@@ -6390,6 +6255,17 @@
             ],
             "title": "Last Activity At"
           },
+          "membership_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Membership Token"
+          },
           "pinned_at": {
             "anyOf": [
               {
@@ -6405,6 +6281,17 @@
             "default": 0,
             "title": "Pinned Count",
             "type": "integer"
+          },
+          "refresh_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refresh Token"
           },
           "repo": {
             "anyOf": [
@@ -7366,65 +7253,6 @@
         "title": "AgentSessionSelection",
         "type": "object"
       },
-      "AgentTerminalRequest": {
-        "description": "Execute one user-entered shell command in the workspace sandbox.",
-        "properties": {
-          "command": {
-            "maxLength": 8000,
-            "minLength": 1,
-            "title": "Command",
-            "type": "string"
-          },
-          "cwd": {
-            "default": "/workspace",
-            "maxLength": 4096,
-            "minLength": 1,
-            "title": "Cwd",
-            "type": "string"
-          },
-          "timeout_seconds": {
-            "default": 60.0,
-            "exclusiveMinimum": 0.0,
-            "maximum": 120.0,
-            "title": "Timeout Seconds",
-            "type": "number"
-          }
-        },
-        "required": [
-          "command"
-        ],
-        "title": "AgentTerminalRequest",
-        "type": "object"
-      },
-      "AgentTerminalResponse": {
-        "description": "Bounded output and resulting working directory for one command.",
-        "properties": {
-          "cwd": {
-            "title": "Cwd",
-            "type": "string"
-          },
-          "exit_code": {
-            "title": "Exit Code",
-            "type": "integer"
-          },
-          "output": {
-            "title": "Output",
-            "type": "string"
-          },
-          "stderr": {
-            "title": "Stderr",
-            "type": "string"
-          }
-        },
-        "required": [
-          "output",
-          "stderr",
-          "exit_code",
-          "cwd"
-        ],
-        "title": "AgentTerminalResponse",
-        "type": "object"
-      },
       "AgentTerminalSessionCreateRequest": {
         "description": "Open one interactive PTY after an agent run has settled.",
         "properties": {
@@ -7804,6 +7632,22 @@
             "title": "Content",
             "type": "string"
           },
+          "content_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Length"
+          },
+          "content_truncated": {
+            "default": false,
+            "title": "Content Truncated",
+            "type": "boolean"
+          },
           "created_at": {
             "anyOf": [
               {
@@ -7829,9 +7673,31 @@
             "title": "Mid Turn",
             "type": "boolean"
           },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
           "role": {
             "title": "Role",
             "type": "string"
+          },
+          "turn_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn No"
           }
         },
         "required": [
@@ -8130,6 +7996,22 @@
             ],
             "title": "Created At"
           },
+          "current_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Job Id"
+          },
+          "history_version": {
+            "default": 2,
+            "title": "History Version",
+            "type": "integer"
+          },
           "jobs": {
             "items": {
               "$ref": "#/components/schemas/AgentJobResponse"
@@ -8144,12 +8026,28 @@
             "title": "Messages",
             "type": "array"
           },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
           "pending_messages": {
             "items": {
               "$ref": "#/components/schemas/AgentPendingMessageResponse"
             },
             "title": "Pending Messages",
             "type": "array"
+          },
+          "pending_messages_complete": {
+            "default": true,
+            "title": "Pending Messages Complete",
+            "type": "boolean"
           },
           "queue_paused_reason": {
             "anyOf": [
@@ -8177,6 +8075,17 @@
               }
             ],
             "title": "Repo"
+          },
+          "sync_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sync Cursor"
           },
           "thread_id": {
             "title": "Thread Id",
@@ -8326,6 +8235,145 @@
           "timing_source"
         ],
         "title": "AgentThreadStatsResponse",
+        "type": "object"
+      },
+      "AgentTrajectoryAttemptTiming": {
+        "description": "Compact timing needed by the trajectory, without process/resource detail.",
+        "properties": {
+          "attempt_id": {
+            "title": "Attempt Id",
+            "type": "integer"
+          },
+          "attempt_no": {
+            "title": "Attempt No",
+            "type": "integer"
+          },
+          "context_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "new",
+                  "live",
+                  "restored",
+                  "lost"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Status"
+          },
+          "continuity_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Continuity Mode"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          },
+          "tool_calls_truncated": {
+            "default": false,
+            "title": "Tool Calls Truncated",
+            "type": "boolean"
+          },
+          "tool_time_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Time Ms"
+          },
+          "tool_timing_exact": {
+            "default": false,
+            "title": "Tool Timing Exact",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "attempt_id",
+          "attempt_no"
+        ],
+        "title": "AgentTrajectoryAttemptTiming",
+        "type": "object"
+      },
+      "AgentTrajectoryJobTiming": {
+        "description": "Attempt timing for one requested turn, including an empty queued turn.",
+        "properties": {
+          "attempts": {
+            "items": {
+              "$ref": "#/components/schemas/AgentTrajectoryAttemptTiming"
+            },
+            "title": "Attempts",
+            "type": "array"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "AgentTrajectoryJobTiming",
+        "type": "object"
+      },
+      "AgentTrajectoryTimingRequest": {
+        "description": "One bounded owner-scoped set of turns whose timing the trajectory needs.",
+        "properties": {
+          "job_ids": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[^\\x00]+$",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Job Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "job_ids"
+        ],
+        "title": "AgentTrajectoryTimingRequest",
+        "type": "object"
+      },
+      "AgentTrajectoryTimingResponse": {
+        "description": "Timing rows in the request's job order and each job's attempt order.",
+        "properties": {
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/AgentTrajectoryJobTiming"
+            },
+            "title": "Jobs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "jobs"
+        ],
+        "title": "AgentTrajectoryTimingResponse",
         "type": "object"
       },
       "AgentWorkspaceEntry": {
@@ -9065,21 +9113,6 @@
         "title": "AutomaticDeploymentSetup",
         "type": "object"
       },
-      "BindConnectorRequest": {
-        "additionalProperties": false,
-        "description": "Route one connection through one connector.",
-        "properties": {
-          "connection_id": {
-            "title": "Connection Id",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "connection_id"
-        ],
-        "title": "BindConnectorRequest",
-        "type": "object"
-      },
       "BindingRequest": {
         "additionalProperties": false,
         "description": "One connection's selection for a session.",
@@ -9780,86 +9813,6 @@
           }
         },
         "title": "ConnectionsResponse",
-        "type": "object"
-      },
-      "ConnectorView": {
-        "additionalProperties": false,
-        "description": "One connector, as its owner sees it. Never its registration secret.",
-        "properties": {
-          "connection_ids": {
-            "items": {
-              "type": "integer"
-            },
-            "title": "Connection Ids",
-            "type": "array"
-          },
-          "created_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Created At"
-          },
-          "id": {
-            "title": "Id",
-            "type": "integer"
-          },
-          "last_seen_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Last Seen At"
-          },
-          "mounts": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Mounts",
-            "type": "array"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "revoked_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Revoked At"
-          },
-          "runtime": {
-            "default": "unavailable",
-            "title": "Runtime",
-            "type": "string"
-          },
-          "status": {
-            "title": "Status",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "status"
-        ],
-        "title": "ConnectorView",
         "type": "object"
       },
       "ConversationUsage": {
@@ -13769,6 +13722,65 @@
         "title": "MessageRequestDetail",
         "type": "object"
       },
+      "ModelPreferenceResponse": {
+        "description": "The preference, resolved, beside the catalog it was resolved against.",
+        "properties": {
+          "default_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Model"
+          },
+          "deployment_default": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployment Default"
+          },
+          "effective_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Model"
+          },
+          "last_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Model"
+          },
+          "models": {
+            "description": "The models this owner may pin, in the gateway's order. Empty means the catalog could not be read, not that a pin has been retired.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          }
+        },
+        "title": "ModelPreferenceResponse",
+        "type": "object"
+      },
       "NodeRegistrationRequest": {
         "additionalProperties": false,
         "description": "A node's SSH host public keys and the token it was created with.",
@@ -14756,49 +14768,6 @@
           }
         },
         "title": "RebuildInput",
-        "type": "object"
-      },
-      "RegisterConnectorRequest": {
-        "additionalProperties": false,
-        "description": "Register one machine as this user's connector.",
-        "properties": {
-          "mounts": {
-            "items": {
-              "type": "string"
-            },
-            "maxItems": 32,
-            "title": "Mounts",
-            "type": "array"
-          },
-          "name": {
-            "maxLength": 120,
-            "minLength": 1,
-            "title": "Name",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name"
-        ],
-        "title": "RegisterConnectorRequest",
-        "type": "object"
-      },
-      "RegisterConnectorResponse": {
-        "description": "The connector, and the one time its registration secret is shown.",
-        "properties": {
-          "connector": {
-            "$ref": "#/components/schemas/ConnectorView"
-          },
-          "registration_secret": {
-            "title": "Registration Secret",
-            "type": "string"
-          }
-        },
-        "required": [
-          "connector",
-          "registration_secret"
-        ],
-        "title": "RegisterConnectorResponse",
         "type": "object"
       },
       "ReleaseHostDrainFenceRequest": {
@@ -18979,41 +18948,6 @@
         "title": "UpdateConnectionRequest",
         "type": "object"
       },
-      "UpdateConnectorRequest": {
-        "additionalProperties": false,
-        "description": "Rename a connector or change the resources it may reach.",
-        "properties": {
-          "mounts": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "maxItems": 32,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Mounts"
-          },
-          "name": {
-            "anyOf": [
-              {
-                "maxLength": 120,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Name"
-          }
-        },
-        "title": "UpdateConnectorRequest",
-        "type": "object"
-      },
       "UpdateMemory": {
         "additionalProperties": false,
         "description": "New text and scope for a memory, at the version the owner examined.",
@@ -19050,6 +18984,29 @@
           "expected_version"
         ],
         "title": "UpdateMemory",
+        "type": "object"
+      },
+      "UpdateModelPreference": {
+        "additionalProperties": false,
+        "description": "Pin a default model, or (``null``) go back to following the last used one.\n\nThe field is required rather than defaulting to ``None``: omitting it is a\nmalformed request, while sending ``null`` is the deliberate act of clearing\nthe pin. Treating the two alike would let a client clear a choice by\nforgetting to send one.",
+        "properties": {
+          "default_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Model"
+          }
+        },
+        "required": [
+          "default_model"
+        ],
+        "title": "UpdateModelPreference",
         "type": "object"
       },
       "UpdateProfile": {
@@ -25621,110 +25578,6 @@
         "summary": "Get Admin Run"
       }
     },
-    "/admin/agent/runs/{job_id}/activity": {
-      "get": {
-        "description": "Read runtime event envelopes, never treating messages as model requests.",
-        "operationId": "get_admin_activity_admin_agent_runs__job_id__activity_get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "job_id",
-            "required": true,
-            "schema": {
-              "maxLength": 256,
-              "title": "Job Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "attempt_id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "maximum": 9223372036854775807,
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Attempt Id"
-            }
-          },
-          {
-            "in": "query",
-            "name": "cursor",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "maxLength": 2048,
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Cursor"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "default": 100,
-              "maximum": 200,
-              "minimum": 1,
-              "title": "Limit",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AdminActivityPage"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Admin Activity"
-      }
-    },
     "/admin/agent/runs/{job_id}/attempts/{attempt_id}/resources": {
       "get": {
         "description": "Read measured resources for this execution identity, retaining gaps and scope.",
@@ -25791,74 +25644,6 @@
           }
         },
         "summary": "Get Admin Resources"
-      }
-    },
-    "/admin/agent/runs/{job_id}/events/{event_id}/content": {
-      "post": {
-        "description": "Reveal one bounded event only after its content access is durably audited.",
-        "operationId": "reveal_admin_event_content_admin_agent_runs__job_id__events__event_id__content_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "job_id",
-            "required": true,
-            "schema": {
-              "maxLength": 256,
-              "title": "Job Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "event_id",
-            "required": true,
-            "schema": {
-              "maximum": 9223372036854775807,
-              "minimum": 1,
-              "title": "Event Id",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AdminEventContent"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Reveal Admin Event Content"
       }
     },
     "/admin/agent/runs/{job_id}/llm-request-sources": {
@@ -30736,6 +30521,63 @@
         "summary": "Create Agent Job"
       }
     },
+    "/v1/agent/jobs/trajectory-telemetry": {
+      "post": {
+        "description": "Read compact timing for a bounded set of the caller's turns.",
+        "operationId": "get_agent_trajectory_telemetry_v1_agent_jobs_trajectory_telemetry_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentTrajectoryTimingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTrajectoryTimingResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Trajectory Telemetry"
+      }
+    },
     "/v1/agent/jobs/{job_id}": {
       "get": {
         "description": "Fetch one of the caller's agent jobs, with what it has spent so far.",
@@ -31658,72 +31500,6 @@
         "summary": "Stream Agent Job Events"
       }
     },
-    "/v1/agent/jobs/{job_id}/terminal": {
-      "post": {
-        "description": "Run an owner-entered command inside the retained chat sandbox.",
-        "operationId": "run_agent_job_terminal_command_v1_agent_jobs__job_id__terminal_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "job_id",
-            "required": true,
-            "schema": {
-              "title": "Job Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentTerminalRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentTerminalResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Run Agent Job Terminal Command"
-      }
-    },
     "/v1/agent/jobs/{job_id}/terminals": {
       "get": {
         "description": "List interactive terminals, including exited sessions kept for replay.",
@@ -32140,7 +31916,7 @@
     },
     "/v1/agent/jobs/{job_id}/thread": {
       "get": {
-        "description": "Return the durable conversation containing one of the caller's jobs.",
+        "description": "Return a bounded recent history page; follow cursors for explicit backfill.\n\nVersion 2 retains the message/job arrays and chronological order. Wide\nmessages are explicit previews with a chunked detail endpoint. Queue\nsnapshots advertise completeness; the dedicated queue endpoint is unchanged.",
         "operationId": "get_agent_thread_v1_agent_jobs__job_id__thread_get",
         "parameters": [
           {
@@ -32150,6 +31926,68 @@
             "schema": {
               "title": "Job Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Continue toward older history.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Continue toward older history.",
+              "title": "Cursor"
+            }
+          },
+          {
+            "description": "Read newer history from sync_cursor.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Read newer history from sync_cursor.",
+              "title": "After"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Start at the selected job instead of the newest turn.",
+            "in": "query",
+            "name": "anchor",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Start at the selected job instead of the newest turn.",
+              "title": "Anchor",
+              "type": "boolean"
             }
           },
           {
@@ -32607,6 +32445,97 @@
           }
         },
         "summary": "List Agent Thread Events"
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/messages/{message_id}": {
+      "get": {
+        "description": "Read one message in bounded Unicode-character chunks, scoped to its owner.",
+        "operationId": "get_agent_thread_message_v1_agent_jobs__job_id__thread_messages__message_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "title": "Message Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 2147483646,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 16384,
+              "maximum": 16384,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentThreadMessageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Thread Message"
       }
     },
     "/v1/agent/jobs/{job_id}/thread/stats": {
@@ -33484,65 +33413,6 @@
         ]
       }
     },
-    "/v1/agent/mcp/connections/{connection_id}/discover": {
-      "post": {
-        "description": "Alias for :func:`test_connection`, kept because the design names both.\n\nThey are the same operation: a discovery that does not handshake is not a\ndiscovery, and a test that does not read the catalogue cannot tell a\nworking server from one that will fail at its first tool call.",
-        "operationId": "discover_connection_v1_agent_mcp_connections__connection_id__discover_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "connection_id",
-            "required": true,
-            "schema": {
-              "title": "Connection Id",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TestResult"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Discover Connection",
-        "tags": [
-          "agent-mcp"
-        ]
-      }
-    },
     "/v1/agent/mcp/connections/{connection_id}/enabled": {
       "put": {
         "description": "Enable or pause a server across the owner's conversations.",
@@ -33735,367 +33605,6 @@
           }
         },
         "summary": "Test Connection",
-        "tags": [
-          "agent-mcp"
-        ]
-      }
-    },
-    "/v1/agent/mcp/connectors": {
-      "get": {
-        "description": "Every connector this user registered.",
-        "operationId": "list_connectors_v1_agent_mcp_connectors_get",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/ConnectorView"
-                  },
-                  "title": "Response List Connectors V1 Agent Mcp Connectors Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "List Connectors",
-        "tags": [
-          "agent-mcp"
-        ]
-      },
-      "post": {
-        "description": "Register one machine, returning the secret it will authenticate with.\n\nThe secret is hashed before it is stored and never returned again, which is\nthe same rule the connection credentials follow: a value that can be read\nback is a value that can be read back by somebody else.",
-        "operationId": "register_connector_v1_agent_mcp_connectors_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RegisterConnectorRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RegisterConnectorResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Register Connector",
-        "tags": [
-          "agent-mcp"
-        ]
-      }
-    },
-    "/v1/agent/mcp/connectors/{connector_id}": {
-      "delete": {
-        "description": "Revoke a connector and detach everything that routed through it.",
-        "operationId": "revoke_connector_v1_agent_mcp_connectors__connector_id__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "connector_id",
-            "required": true,
-            "schema": {
-              "title": "Connector Id",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Revoke Connector",
-        "tags": [
-          "agent-mcp"
-        ]
-      },
-      "patch": {
-        "description": "Rename a connector or change the resources it may reach.",
-        "operationId": "update_connector_v1_agent_mcp_connectors__connector_id__patch",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "connector_id",
-            "required": true,
-            "schema": {
-              "title": "Connector Id",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateConnectorRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConnectorView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update Connector",
-        "tags": [
-          "agent-mcp"
-        ]
-      }
-    },
-    "/v1/agent/mcp/connectors/{connector_id}/connections": {
-      "post": {
-        "description": "Route one connection through this connector.\n\nOnly a connection that runs on the user's own machine can be routed to it.\nA remote connection addressed through a connector would be a server the\nplatform could reach directly, sent the long way round -- and a\nmanaged-worker connection belongs to a worker that is not the user's.",
-        "operationId": "bind_connector_connection_v1_agent_mcp_connectors__connector_id__connections_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "connector_id",
-            "required": true,
-            "schema": {
-              "title": "Connector Id",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BindConnectorRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConnectorView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Bind Connector Connection",
-        "tags": [
-          "agent-mcp"
-        ]
-      }
-    },
-    "/v1/agent/mcp/connectors/{connector_id}/connections/{connection_id}": {
-      "delete": {
-        "description": "Stop serving one connection through this connector.",
-        "operationId": "unbind_connector_connection_v1_agent_mcp_connectors__connector_id__connections__connection_id__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "connector_id",
-            "required": true,
-            "schema": {
-              "title": "Connector Id",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "path",
-            "name": "connection_id",
-            "required": true,
-            "schema": {
-              "title": "Connection Id",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Unbind Connector Connection",
         "tags": [
           "agent-mcp"
         ]
@@ -34358,61 +33867,6 @@
           }
         },
         "summary": "Oauth Callback",
-        "tags": [
-          "agent-mcp"
-        ]
-      }
-    },
-    "/v1/agent/mcp/templates": {
-      "get": {
-        "description": "Presets that simplify adding a well-known server.\n\nA preset fills in a URL and a note. It never decides whether a connection\nis allowed, which is why this endpoint is a convenience rather than a\nregistry: adding a server with no template is the same code path.",
-        "operationId": "list_templates_v1_agent_mcp_templates_get",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "additionalProperties": true,
-                    "type": "object"
-                  },
-                  "title": "Response List Templates V1 Agent Mcp Templates Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "List Templates",
         "tags": [
           "agent-mcp"
         ]
@@ -35114,6 +34568,114 @@
         "summary": "Restore Memory",
         "tags": [
           "agent-memory"
+        ]
+      }
+    },
+    "/v1/agent/model-preference": {
+      "get": {
+        "description": "Read what a new task would start on, and where that came from.",
+        "operationId": "read_model_preference_v1_agent_model_preference_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPreferenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Model Preference",
+        "tags": [
+          "model-preference"
+        ]
+      },
+      "put": {
+        "description": "Pin the model a new task starts on, or go back to following the last one.\n\n``{\"default_model\": null}`` is a real choice, distinct from omitting the\nfield: it clears the pin. The field is required so a client cannot clear a\nchoice by forgetting to send one.",
+        "operationId": "save_model_preference_v1_agent_model_preference_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateModelPreference"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPreferenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Model Preference",
+        "tags": [
+          "model-preference"
         ]
       }
     },
@@ -41054,7 +40616,7 @@
     },
     "/v1/agent/worker/wait": {
       "post": {
-        "description": "Hold an idle host's request until there may be work, then answer.\n\nA host whose claim found nothing asks here instead of sleeping out its poll\ninterval, and claims again when this answers: at once if the token it\npasses is stale, when a job is queued, requeued or ends, or after\n``timeout_seconds`` regardless. The answer is the token for its next wait\nand never a job; the claim stays the only way to take one.\n\nEnrolled hosts only, like the claim it precedes. 404 where nothing listens\nfor work, which is also what a control plane predating this answers, so a\nhost treats both the same way and polls.",
+        "description": "Hold an idle host's request until there may be work, then answer.\n\nA host whose claim found nothing asks here instead of sleeping out its poll\ninterval, and claims again when this answers: at once if its token is stale,\nwhen a job it may take is queued, requeued or ends, or after ``timeout_seconds``.\nThe answer is the token for its next wait, never a job: only a claim takes one.\n\nEnrolled hosts only, like the claim it precedes. 404 where nothing listens\nfor work, which is also what a control plane predating this answers, so a\nhost treats both the same way and polls.",
         "operationId": "worker_wait_v1_agent_worker_wait_post",
         "parameters": [
           {

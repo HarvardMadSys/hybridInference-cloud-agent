@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentJobEventApi } from '@/lib/api/agents';
-import { filterTrajectory, preview, toSessionLog, toTrajectory } from './trajectory';
+import { boundedLine, preview, toSessionLog, toTrajectory } from './trajectory';
 
 function event(over: Partial<AgentJobEventApi> & { id: number }): AgentJobEventApi {
   return {
@@ -126,27 +126,6 @@ describe('preview', () => {
   });
 });
 
-describe('filterTrajectory', () => {
-  const rows = toTrajectory([
-    event({
-      id: 1,
-      event_type: 'tool_use',
-      payload: { id: 't1', name: 'Bash', detail: 'cargo build' },
-    }),
-    event({ id: 2, event_type: 'message', payload: { text: 'done' } }),
-  ]);
-
-  it('matches what the reader can actually see on the row', () => {
-    expect(filterTrajectory(rows, 'cargo').map((row) => row.id)).toEqual([1]);
-    expect(filterTrajectory(rows, 'BASH').map((row) => row.id)).toEqual([1]);
-    expect(filterTrajectory(rows, 'message').map((row) => row.id)).toEqual([2]);
-  });
-
-  it('returns everything for an empty query', () => {
-    expect(filterTrajectory(rows, '   ')).toHaveLength(2);
-  });
-});
-
 describe('toSessionLog', () => {
   it('exports the stored rows verbatim, one JSON object per line', () => {
     const events = [event({ id: 1 }), event({ id: 2, event_type: 'raw' })];
@@ -155,5 +134,15 @@ describe('toSessionLog', () => {
 
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[1]).event_type).toBe('raw');
+  });
+});
+
+describe('boundedLine', () => {
+  it('says when the line was cut, after which appended text cannot change it', () => {
+    expect(boundedLine('  a   b  ', 160)).toEqual({ text: 'a b', full: false });
+    const long = 'x'.repeat(170);
+    expect(boundedLine(long, 160)).toEqual({ text: `${'x'.repeat(159)}…`, full: true });
+    expect(boundedLine(`${long}   more`, 160).text).toBe(boundedLine(long, 160).text);
+    expect(preview(long, 160)).toBe(boundedLine(long, 160).text);
   });
 });

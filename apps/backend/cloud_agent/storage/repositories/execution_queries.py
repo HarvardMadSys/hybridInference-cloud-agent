@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cloud_agent.storage._sql.ledger import USAGE_EVENT_PAYLOAD_SQL, fetch_job_usage_inputs
+from cloud_agent.storage._sql.ledger import USAGE_EVENT_PAYLOAD_SQL
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 
@@ -45,6 +45,14 @@ class PostgresExecutionQueries:
         outputs to reconstruct the historical activity. The result is paged so
         a long thread is not pulled into memory in one response.
 
+        The page's ids are picked first (issue #810): the events of a thread
+        are interleaved with every other thread's in `agent_job_events`, so
+        ordering the full remaining scan fetched nearly every heap row to
+        keep the first page's worth. The materialized inner query stops at
+        the page boundary on the `(job_id, id)` index and only those rows'
+        payloads are fetched, making each page cost its own size rather than
+        the thread's remaining length.
+
         :returns: ``None`` when the job does not exist or is not the caller's,
             matching :meth:`get_thread_for_job`.
         """
@@ -60,6 +68,14 @@ class PostgresExecutionQueries:
                 return None
             rows = await conn.fetch(
                 """
+                WITH page AS MATERIALIZED (
+                    SELECT e.id
+                    FROM agent_job_events e
+                    JOIN agent_jobs j ON j.id = e.job_id
+                    WHERE j.thread_id = $1 AND e.id > $2
+                    ORDER BY e.id
+                    LIMIT $3
+                )
                 SELECT e.id,
                        e.job_id,
                        j.turn_no,
@@ -68,11 +84,10 @@ class PostgresExecutionQueries:
                        e.event_type,
                        e.payload,
                        e.created_at
-                FROM agent_job_events e
+                FROM page
+                JOIN agent_job_events e USING (id)
                 JOIN agent_jobs j ON j.id = e.job_id
-                WHERE j.thread_id = $1 AND e.id > $2
                 ORDER BY e.id
-                LIMIT $3
                 """,
                 thread_id,
                 after_id,
@@ -148,19 +163,6 @@ class PostgresExecutionQueries:
             ],
         }
 
-    async def job_usage_inputs(self, *, job_id: str) -> dict[str, Any]:
-        """Read runtime usage for this job's attempts, excluding sibling turns.
-
-        Keep the same compact payload projection as thread_stats_inputs so
-        output-presence detection and retry deduplication have identical
-        semantics when compared with this job's Gateway snapshots.
-        """
-        async with (
-            self._pool.acquire() as conn,
-            conn.transaction(isolation="repeatable_read", readonly=True),
-        ):
-            return await fetch_job_usage_inputs(conn, job_id)
-
     async def job_attempts_telemetry(self, *, job_id: str) -> list[dict[str, Any]]:
         """Read lightweight attempt summaries without tool or process rows."""
         async with self._pool.acquire() as conn:
@@ -175,6 +177,92 @@ class PostgresExecutionQueries:
                 job_id,
             )
             return [dict(row) for row in rows]
+
+    async def trajectory_timings(
+        self, *, job_ids: list[str], user_id: str, max_attempts: int
+    ) -> dict[str, Any]:
+        """Read aggregate timing for a bounded job batch in one statement.
+
+        The metadata row survives an empty attempt set, an authorization
+        mismatch and an oversized result. Callers can therefore distinguish
+        all three without another ownership/count query. Tool and process
+        detail stays on :meth:`job_turn_telemetry`; only exactness of the tool
+        timing aggregate is reduced here.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                WITH requested AS MATERIALIZED (
+                    SELECT job_id, position
+                    FROM unnest($1::text[]) WITH ORDINALITY AS request(job_id, position)
+                ),
+                owned AS MATERIALIZED (
+                    SELECT request.job_id, request.position
+                    FROM requested request
+                    JOIN agent_jobs job ON job.id = request.job_id
+                    JOIN agent_threads thread ON thread.id = job.thread_id
+                    WHERE job.user_id = $2 AND thread.deleted_at IS NULL
+                ),
+                attempts AS MATERIALIZED (
+                    SELECT owned.position, attempt.job_id,
+                           attempt.id AS attempt_id, attempt.attempt_no,
+                           attempt.continuity_mode, attempt.context_status,
+                           attempt.started_at, attempt.finished_at
+                    FROM owned
+                    JOIN agent_attempts attempt ON attempt.job_id = owned.job_id
+                ),
+                tools AS MATERIALIZED (
+                    SELECT call.attempt_id, COUNT(*) AS call_count,
+                           BOOL_AND(call.timing_source = 'exact') AS all_exact
+                    FROM attempts attempt
+                    JOIN agent_tool_call_resources call
+                        ON call.attempt_id = attempt.attempt_id
+                    GROUP BY call.attempt_id
+                ),
+                counts AS (
+                    SELECT (SELECT COUNT(*) FROM owned) AS owned_count,
+                           (SELECT COUNT(*) FROM attempts) AS attempt_count
+                )
+                SELECT counts.owned_count, counts.attempt_count,
+                       timing.position, timing.job_id,
+                       timing.attempt_id, timing.attempt_no,
+                       timing.continuity_mode, timing.context_status,
+                       timing.started_at, timing.finished_at,
+                       timing.tool_time_ms, timing.tool_calls_truncated,
+                       timing.tool_timing_exact
+                FROM counts
+                LEFT JOIN LATERAL (
+                    SELECT attempt.position, attempt.job_id,
+                           attempt.attempt_id, attempt.attempt_no,
+                           attempt.continuity_mode, attempt.context_status,
+                           attempt.started_at, attempt.finished_at,
+                           resources.tool_time_ms,
+                           COALESCE(resources.tool_calls_truncated, FALSE)
+                               AS tool_calls_truncated,
+                           COALESCE(tools.call_count > 0 AND tools.all_exact, FALSE)
+                               AS tool_timing_exact
+                    FROM attempts attempt
+                    LEFT JOIN agent_attempt_resources resources
+                        ON resources.attempt_id = attempt.attempt_id
+                    LEFT JOIN tools ON tools.attempt_id = attempt.attempt_id
+                    ORDER BY attempt.position, attempt.attempt_no, attempt.attempt_id
+                    LIMIT $3
+                ) timing ON counts.owned_count = cardinality($1)
+                    AND counts.attempt_count <= $3
+                ORDER BY timing.position NULLS LAST,
+                         timing.attempt_no NULLS LAST,
+                         timing.attempt_id NULLS LAST
+                """,
+                job_ids,
+                user_id,
+                max_attempts,
+            )
+        first = rows[0]
+        return {
+            "owned_count": int(first["owned_count"]),
+            "attempt_count": int(first["attempt_count"]),
+            "attempts": [dict(row) for row in rows if row["attempt_id"] is not None],
+        }
 
     async def get_attempt(self, *, job_id: str, attempt_id: int) -> dict[str, Any] | None:
         """Return one attempt of one job, by its exact id.

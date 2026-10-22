@@ -56,8 +56,6 @@ from cloud_agent.operation_measurement import (
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import (
     AgentGitWorkspaceResponse,
-    AgentTerminalRequest,
-    AgentTerminalResponse,
     AgentTerminalSessionCreateRequest,
     AgentTerminalSessionInputRequest,
     AgentTerminalSessionListResponse,
@@ -83,7 +81,7 @@ if TYPE_CHECKING:
         SandboxRepository,
         SourceControlRepository as SourceControlPort,
     )
-    from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.environments import EnvironmentBindingRepository
     from cloud_agent.sandbox_manager_client import SandboxManagerStream
 
 
@@ -103,7 +101,11 @@ class _WorkspaceStorage(Protocol):
     operation_measurements: OperationMeasurements
     sandbox: SandboxRepository
     source_control: SourceControlPort
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentBindingRepository:
+        """Environment persistence needed by this flow."""
+        ...
 
 
 def _require_store(store: _WorkspaceStorage | None) -> _WorkspaceStorage:
@@ -235,7 +237,7 @@ async def _terminal_owner_workspace(
 
 
 @router.get("/jobs/{job_id}/files", response_model=AgentWorkspaceResponse)
-async def get_agent_job_workspace_file(
+async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity baseline, #771
     job_id: str,
     request: Request,
     path: str = Query("", max_length=4096),
@@ -477,51 +479,6 @@ async def write_agent_job_workspace_file(
                         "message": "This retained workspace is not materialized.",
                     }
                 },
-            ) from exc
-        raise _sandbox_manager_http_error(exc) from exc
-
-
-@router.post("/jobs/{job_id}/terminal", response_model=AgentTerminalResponse)
-async def run_agent_job_terminal_command(
-    job_id: str,
-    body: AgentTerminalRequest,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _WorkspaceStorage | None = Depends(get_storage),
-    app_credentials: Any | None = Depends(get_agent_app_credentials),
-) -> AgentTerminalResponse:
-    """Run an owner-entered command inside the retained chat sandbox."""
-    job_store = _require_store(store)
-    job = await _owned_job(job_store.conversation_queries, job_id, user)
-    await _require_workspace_entitlement(
-        job=job, user=user, store=job_store, app_credentials=app_credentials
-    )
-    await _require_mutable_workspace_ready(job=job, store=job_store.sandbox)
-    sandbox_manager = await _sandbox_manager_for_job(job_store, job)
-    if sandbox_manager is None:
-        raise HTTPException(status_code=409, detail="This deployment has no live sandbox manager.")
-    environment = (
-        await job_store.environments.get_environment_binding(
-            user["user_id"], job["environment_binding_id"]
-        )
-        if job.get("environment_binding_id")
-        else None
-    )
-    if environment is not None and not environment.required:
-        environment = None
-    try:
-        result = await sandbox_manager.terminal(
-            _workspace_id(job),
-            command=body.command,
-            cwd=body.cwd,
-            timeout_seconds=body.timeout_seconds,
-            **({"environment": environment} if environment else {}),
-        )
-        return AgentTerminalResponse(**result)
-    except SandboxManagerError as exc:
-        if _workspace_not_materialized(exc):
-            raise HTTPException(
-                status_code=409,
-                detail="This retained terminal workspace is not materialized.",
             ) from exc
         raise _sandbox_manager_http_error(exc) from exc
 

@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from datetime import datetime
+
+
+@dataclass(frozen=True)
+class ComputeSchedulingSnapshot:
+    """One inventory snapshot and its independently bounded operation histories."""
+
+    allocations: list[dict[str, Any]]
+    operations: dict[str, list[dict[str, Any]]]
+    lifecycle_operations: dict[str, list[dict[str, Any]]]
 
 
 class ComputeResourceRepository(Protocol):
@@ -132,6 +142,10 @@ class ComputeResourceRepository(Protocol):
 
     async def list_allocations(self) -> list[dict[str, Any]]:
         """Read all managed inventory from one local snapshot."""
+        ...
+
+    async def scheduling_inventory(self) -> ComputeSchedulingSnapshot:
+        """Read allocations and both operation histories from one consistent snapshot."""
         ...
 
     async def server_inventory(self) -> dict[str, Any]:
@@ -277,18 +291,6 @@ class ComputeResourceRepository(Protocol):
         worker_id: str | None = None,
     ) -> dict[str, Any]:
         """Save a fenced observation, preserving a known deadline when renewal is unknown."""
-        ...
-
-    async def upsert_node(
-        self,
-        *,
-        allocation_id: str,
-        node: dict[str, Any],
-        operation_id: str | None = None,
-        generation: int | None = None,
-        worker_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Observe an immutable node identity without rebinding retained execution state."""
         ...
 
     async def create_node_registration(

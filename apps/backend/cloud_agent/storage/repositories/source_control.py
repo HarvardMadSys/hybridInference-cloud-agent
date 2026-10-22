@@ -85,23 +85,6 @@ class PostgresSourceControlRepository:
             finally:
                 await self._finish_lock_cleanup(conn, lock_key)
 
-    async def record_repo_grant(
-        self, *, user_id: str, installation_id: int, account_login: str | None = None
-    ) -> None:
-        """Record that this user may use this installation."""
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO agent_repo_grants (user_id, installation_id, account_login)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (user_id, installation_id)
-                DO UPDATE SET account_login = EXCLUDED.account_login
-                """,
-                user_id,
-                installation_id,
-                account_login,
-            )
-
     async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
         """Return the installations this user has connected."""
         async with self._pool.acquire() as conn:
@@ -177,7 +160,11 @@ class PostgresSourceControlRepository:
         # App uninstalled — stayed granted until someone disconnected it by
         # hand. Replacing them is what makes a reconnect mean what GitHub says
         # today, including when the user reconnects as another GitHub account.
-        installation_ids = [int(item["installation_id"]) for item in installations]
+        grants_by_id: dict[int, str | None] = {}
+        for item in installations:
+            grants_by_id[int(item["installation_id"])] = item.get("account_login")
+        installation_ids = list(grants_by_id)
+        account_logins = list(grants_by_id.values())
         async with self._acquire() as conn, conn.transaction():
             # A new token pair replaces the old outright, and any refresh in
             # flight for the old one loses its lease: the generation moves.
@@ -212,18 +199,20 @@ class PostgresSourceControlRepository:
                 user_id,
                 installation_ids,
             )
-            for item in installations:
-                await conn.execute(
-                    """
-                    INSERT INTO agent_repo_grants (user_id, installation_id, account_login)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (user_id, installation_id)
-                    DO UPDATE SET account_login = EXCLUDED.account_login
-                    """,
-                    user_id,
-                    int(item["installation_id"]),
-                    item.get("account_login"),
-                )
+            await conn.execute(
+                """
+                INSERT INTO agent_repo_grants (user_id, installation_id, account_login)
+                SELECT $1, row.installation_id, row.account_login
+                FROM UNNEST($2::bigint[], $3::text[]) WITH ORDINALITY
+                     AS row(installation_id, account_login, ordinal)
+                ORDER BY row.ordinal
+                ON CONFLICT (user_id, installation_id)
+                DO UPDATE SET account_login = EXCLUDED.account_login
+                """,
+                user_id,
+                installation_ids,
+                account_logins,
+            )
 
     async def get_github_account(self, *, user_id: str) -> dict[str, Any] | None:
         """Return the GitHub account this user connected, if any."""

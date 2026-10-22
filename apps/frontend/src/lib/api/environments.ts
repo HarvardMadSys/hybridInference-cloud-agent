@@ -136,9 +136,16 @@ export interface ActionRun {
   exit_code?: number | null;
   output: string;
 }
-async function call<T>(path: string, method = 'GET', body?: unknown, key?: string): Promise<T> {
+async function call<T>(
+  path: string,
+  method = 'GET',
+  body?: unknown,
+  key?: string,
+  signal?: AbortSignal,
+): Promise<T> {
   const response = await fetchWithAuth(config.apiBase, `/v1/agent/${path}`, {
     method,
+    signal,
     cache: 'no-store',
     headers: { 'Content-Type': 'application/json', ...(key ? { 'Idempotency-Key': key } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -303,8 +310,8 @@ export async function testEnvironment(
 export const getEnvironmentRun = (id: string) => call<EnvironmentRun>(`environment-runs/${id}`);
 export const cancelEnvironmentRun = (id: string) =>
   call<EnvironmentRun>(`environment-runs/${id}/cancel`, 'POST');
-export const getWorkspaceEnvironment = (jobId: string) =>
-  call<EnvironmentBinding>(`jobs/${jobId}/thread/environment`);
+export const getWorkspaceEnvironment = (jobId: string, signal?: AbortSignal) =>
+  call<EnvironmentBinding>(`jobs/${jobId}/thread/environment`, 'GET', undefined, undefined, signal);
 export const retryWorkspaceEnvironment = (jobId: string) =>
   call<unknown>(`jobs/${jobId}/thread/environment/retry`, 'POST');
 export const startEnvironmentAction = (jobId: string, actionId: string, key: string) =>
@@ -314,8 +321,8 @@ export const startEnvironmentAction = (jobId: string, actionId: string, key: str
     undefined,
     key,
   );
-export const getEnvironmentActionRun = (id: string) =>
-  call<ActionRun>(`environment-action-runs/${id}`);
+export const getEnvironmentActionRun = (id: string, signal?: AbortSignal) =>
+  call<ActionRun>(`environment-action-runs/${id}`, 'GET', undefined, undefined, signal);
 export const stopEnvironmentAction = (id: string) =>
   call<ActionRun>(`environment-action-runs/${id}/stop`, 'POST');
 

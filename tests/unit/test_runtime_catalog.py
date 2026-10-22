@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import subprocess
 import sys
 from typing import get_type_hints
@@ -15,8 +16,6 @@ def test_public_runtime_factory_annotations_remain_resolvable() -> None:
     expected = {
         runtimes.get_runtime: {"name": str, "return": runtimes.AgentRuntime},
         runtimes.registered_runtimes: {"return": list[str]},
-        runtimes.runtimes_supporting_mcp: {"return": list[str]},
-        runtimes.runtime_reasoning_efforts: {"return": dict[str, list[str]]},
         runtime_catalog.registered_runtimes: {"return": list[str]},
         runtime_catalog.runtimes_supporting_mcp: {"return": list[str]},
         runtime_catalog.runtime_reasoning_efforts: {"return": dict[str, list[str]]},
@@ -28,8 +27,6 @@ def test_public_runtime_factory_annotations_remain_resolvable() -> None:
 def test_shared_catalog_matches_the_host_registry() -> None:
     """Admission advertises the same IDs and capabilities the host can run."""
     assert runtime_catalog.registered_runtimes() == runtimes.registered_runtimes()
-    assert runtime_catalog.runtimes_supporting_mcp() == runtimes.runtimes_supporting_mcp()
-    assert runtime_catalog.runtime_reasoning_efforts() == runtimes.runtime_reasoning_efforts()
 
     definitions = runtime_catalog.RUNTIME_CATALOG
     assert len({definition.name for definition in definitions}) == len(definitions)
@@ -42,6 +39,13 @@ def test_shared_catalog_matches_the_host_registry() -> None:
 
 def test_discovery_returns_independent_mutable_projections() -> None:
     """A caller editing its response cannot change another job's admission."""
+    expected = copy.deepcopy(
+        (
+            runtime_catalog.registered_runtimes(),
+            runtime_catalog.runtimes_supporting_mcp(),
+            runtime_catalog.runtime_reasoning_efforts(),
+        )
+    )
     names = runtime_catalog.registered_runtimes()
     names.clear()
     mcp_names = runtime_catalog.runtimes_supporting_mcp()
@@ -50,9 +54,11 @@ def test_discovery_returns_independent_mutable_projections() -> None:
     efforts["claude-code"].clear()
     efforts.pop("codex")
 
-    assert runtime_catalog.registered_runtimes() == runtimes.registered_runtimes()
-    assert runtime_catalog.runtimes_supporting_mcp() == runtimes.runtimes_supporting_mcp()
-    assert runtime_catalog.runtime_reasoning_efforts() == runtimes.runtime_reasoning_efforts()
+    assert (
+        runtime_catalog.registered_runtimes(),
+        runtime_catalog.runtimes_supporting_mcp(),
+        runtime_catalog.runtime_reasoning_efforts(),
+    ) == expected
 
 
 def test_catalog_import_does_not_load_host_implementation() -> None:

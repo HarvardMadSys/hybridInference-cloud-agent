@@ -17,6 +17,8 @@ export type AgentJobApiState =
   | 'cancelled';
 
 export interface AgentJobApi {
+  /** History pages may omit large fields; the job detail remains complete. */
+  thread_preview?: boolean;
   skills?: SelectedSkillApi[];
   /** How this turn came to exist. `goal` turns are the platform's own rounds. */
   turn_source?: 'human' | 'goal';
@@ -66,8 +68,6 @@ export interface AgentJobApi {
   /** The same counter for the conversation's row: title, pin, archive. */
   thread_revision?: number;
   metadata: Record<string, unknown> | null;
-  /** Names only; optional so a pre-MCP deployment stays readable. */
-  mcp_servers?: string[];
   created_at: string | null;
   updated_at: string | null;
   pinned_at?: string | null;

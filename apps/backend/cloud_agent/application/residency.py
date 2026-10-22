@@ -16,7 +16,7 @@ import contextlib
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.settings import number_setting, setting_env
+from cloud_agent.settings import number_setting
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -28,12 +28,6 @@ if TYPE_CHECKING:
 logger = get_logger("cloud_agent.api.hosts")
 
 
-#: How long a residency's lease lives between beats (design §7) — and, since
-#: the lease and the thread-attributed grant are renewed by the same beat and
-#: revoked together (retained-session design §§3 and 6), the cap on how long an idle resident
-#: process keeps a live credential after its host goes quiet.
-RESIDENCY_TTL_S = 1800.0
-
 #: How long a chat deletion waits on the gateway and hosts after its commit,
 #: and how many released residencies it closes at once. A sandbox manager
 #: call alone may take a minute to time out; the host's residency heartbeat
@@ -44,8 +38,7 @@ RELEASED_RESIDENCY_CLOSE_CONCURRENCY = 16
 
 def residency_ttl_s() -> float:
     """Read the current lease duration for newly established or renewed residents."""
-    fallback = float(setting_env("AGENT_RESIDENCY_TTL_S") or RESIDENCY_TTL_S)
-    return number_setting("residency_ttl_s", fallback)
+    return number_setting("residency_ttl_s")
 
 
 async def _mint_residency_grant(

@@ -11,17 +11,16 @@ import zlib
 
 import pytest
 
-from cloud_agent_host.patch_gate import (
-    MAX_CHANGED_FILES,
-    MAX_PATCH_BYTES,
-    branch_name_for,
-    validate_patch,
-)
+from cloud_agent_shared.git import patch_gate
 from cloud_agent_shared.git.patch_gate import (
     MAX_BLOB_BYTES,
     MAX_CHANGED_BLOB_BYTES,
+    MAX_CHANGED_FILES,
+    MAX_PATCH_BYTES,
+    branch_name_for,
     scan_blob_secrets,
     validate_change_set,
+    validate_patch,
 )
 
 _CLEAN_PATCH = """diff --git a/src/app.py b/src/app.py
@@ -245,6 +244,49 @@ def test_file_count_limit_is_enforced():
     assert result.ok is False
     assert "over the 3 limit" in result.reason
     assert len(result.changed_files) == 5
+
+
+@pytest.mark.parametrize(
+    ("path_count", "with_diff_header", "expected_bytes"),
+    [
+        pytest.param(18_000, True, 990_000, id="diff-git"),
+        pytest.param(38_000, False, 988_000, id="traditional"),
+    ],
+)
+def test_near_limit_unique_path_collection_has_linear_comparison_work(
+    monkeypatch, path_count, with_diff_header, expected_bytes
+):
+    """A rejected patch near the byte cap must not spend quadratic work on paths."""
+    comparison_budget = 20 * path_count
+    comparisons = 0
+
+    class CountedPath(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other):
+            nonlocal comparisons
+            comparisons += 1
+            if comparisons > comparison_budget:
+                pytest.fail("changed-path collection exceeded its linear comparison budget")
+            return super().__eq__(other)
+
+    strip_prefix = patch_gate._strip_prefix
+
+    def counted_strip_prefix(path):
+        return CountedPath(strip_prefix(path))
+
+    monkeypatch.setattr(patch_gate, "_strip_prefix", counted_strip_prefix)
+    header_template = "--- a/{path}\n+++ b/{path}\n"
+    if with_diff_header:
+        header_template = "diff --git a/{path} b/{path}\n" + header_template
+    patch = "".join(header_template.format(path=f"{index:06x}") for index in range(path_count))
+
+    assert len(patch.encode()) == expected_bytes
+    result = validate_patch(patch)
+
+    assert result.changed_files == [f"{index:06x}" for index in range(path_count)]
+    assert result.violations == [f"patch touches {path_count} files, over the 200 limit"]
+    assert comparisons <= comparison_budget
 
 
 def test_default_file_limit_is_generous_enough_for_real_work():

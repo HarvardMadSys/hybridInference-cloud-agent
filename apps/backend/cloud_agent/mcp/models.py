@@ -649,32 +649,6 @@ class McpServer:
     launch: LaunchSpec | None = None
     connector_id: str | None = None
 
-    @property
-    def unfiltered(self) -> bool:
-        """Whether every tool this server exposes is reachable.
-
-        Always false. A connection's reachable set is its session binding's
-        decision, and an empty set means *nothing* rather than *everything* --
-        which is the opposite of the provider-catalogue model this replaced,
-        where an absent allowlist meant the whole tool surface. Keeping the
-        property, rather than deleting it, is what lets the filter below stay
-        readable while making the new answer unmissable: a server with no
-        allowed tools has no reachable tools.
-        """
-        return False
-
-    def allows_resource(self, uri: str) -> bool:
-        """Whether a resource read may reach this server."""
-        return uri in self.resources
-
-    def allows_prompt(self, name: str) -> bool:
-        """Whether a prompt fetch may reach this server."""
-        return name in self.prompts
-
-    def allows(self, tool: str) -> bool:
-        """Whether ``tool`` was allowed by this server's binding."""
-        return tool in self.tools
-
     def public(self) -> dict[str, Any]:
         """Render what a job owner may see: never the URL or the headers."""
         return {

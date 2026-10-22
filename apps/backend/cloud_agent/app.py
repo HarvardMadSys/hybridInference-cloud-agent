@@ -23,6 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, PlainTextResponse
 
 from cloud_agent.api._parameters import refuse_unstorable_parameters
+from cloud_agent.api._sensitive_routes import no_store
 from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.logging_utils import configure_process_logging, get_logger
 from cloud_agent_shared.storable_text import encodable_json
@@ -108,7 +109,7 @@ def install_admin_no_store(
             request.url.path == prefix or request.url.path.startswith(f"{prefix}/")
             for prefix in normalized
         ):
-            response.headers["Cache-Control"] = "no-store"
+            no_store(response)
         return response
 
     async def unexpected_with_no_store(request: Request, exc: Exception) -> Response:
@@ -151,7 +152,7 @@ def _api_docs() -> dict[str, Any]:
     return {} if enabled else _NO_DOCS
 
 
-def create_app() -> FastAPI:
+def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     """Build the control plane application."""
     configure_process_logging()
 
@@ -179,6 +180,7 @@ def create_app() -> FastAPI:
         host_profiling,
         hosts,
         mcp_connections,
+        model_preferences,
         owner_usage,
         routes,
         service_jobs,
@@ -254,6 +256,7 @@ def create_app() -> FastAPI:
     app.include_router(work_insights.router)
     app.include_router(agent_memory.router)
     app.include_router(user_profile.router)
+    app.include_router(model_preferences.router)
     app.include_router(teams.router)
     app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
@@ -300,6 +303,7 @@ def create_app() -> FastAPI:
             "/v1/agent/memories",
             "/v1/agent/insights",
             "/v1/agent/profile",
+            "/v1/agent/model-preference",
             "/v1/agent/conversations/read-receipts",
         ),
     )

@@ -30,7 +30,7 @@ def _configure(
     monkeypatch.setattr(
         web_search,
         "text_setting",
-        lambda key, fallback="": values.get(key, fallback),
+        lambda key: values[key],
     )
 
 

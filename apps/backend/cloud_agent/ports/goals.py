@@ -45,10 +45,6 @@ class GoalRepository(Protocol):
         """The id of the turn that is queued or running right now, if any."""
         ...
 
-    async def get_goal_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        """The goal of the conversation the job belongs to, or ``None``."""
-        ...
-
     async def get_thread_goal_state(self, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
         """A conversation's goal *and* its control version, owner-checked.
 
@@ -167,8 +163,8 @@ class GoalRepository(Protocol):
           waiting on anything, or whose conversation has gone idle with no
           wakeup at all. The decision is made again.
         * ``stalled`` — an ``active`` goal with nothing queued, running or
-          pending for longer than :data:`STALLED_AFTER_S`. No path can explain
-          it, so it is paused and said so.
+          pending for longer than the ``goals.stalled_after_seconds`` setting.
+          No path can explain it, so it is paused and said so.
 
         Returns the thread ids by shape, for the caller's log line.
         """

@@ -10,8 +10,8 @@ if TYPE_CHECKING:
     from cloud_agent_shared.environment import BoundEnvironment
 
 
-class EnvironmentRepository(Protocol):
-    """The configuration and execution queries exposed to application flows."""
+class EnvironmentConfigurationRepository(Protocol):
+    """Owned configuration, immutable history, defaults, and snapshot metadata."""
 
     async def list_environments(
         self, user_id: str, repo: str | None = None
@@ -79,6 +79,16 @@ class EnvironmentRepository(Protocol):
         """Create a new version from owned immutable history."""
         ...
 
+    async def current_setup_fingerprints(
+        self, user_id: str, environment_ids: builtins.list[str]
+    ) -> dict[str, str | None]:
+        """Each environment's current installation fingerprint, or ``None`` without setup."""
+        ...
+
+
+class EnvironmentBindingRepository(Protocol):
+    """Frozen bindings and the runtime views derived from them."""
+
     async def get_environment_binding(self, user_id: str, binding_id: str) -> BoundEnvironment:
         """Decrypt only a fixed authorized execution snapshot."""
         ...
@@ -109,6 +119,20 @@ class EnvironmentRepository(Protocol):
         """Read bound configuration, preparation facts and each action's latest run."""
         ...
 
+    async def redact_environment_steps(
+        self, user_id: str, binding_id: str, steps: builtins.list[dict[str, Any]]
+    ) -> builtins.list[dict[str, Any]]:
+        """Mask read-only host output using the exact immutable binding."""
+        ...
+
+    async def bind_current_environment(self, user_id: str, environment_id: str) -> tuple[str, str]:
+        """Freeze an environment's current configuration; return the binding and repository."""
+        ...
+
+
+class EnvironmentRunRepository(Protocol):
+    """Disposable environment-test scheduling, leases, and receipts."""
+
     async def find_environment_run(
         self, user_id: str, key: str, selection: dict[str, Any], ref: str | None
     ) -> dict[str, Any] | None:
@@ -123,12 +147,6 @@ class EnvironmentRepository(Protocol):
         detail: str = "Environment credentials or repository access are unavailable",
     ) -> bool:
         """Release a fenced test claim before any host execution starts."""
-        ...
-
-    async def redact_environment_steps(
-        self, user_id: str, binding_id: str, steps: builtins.list[dict[str, Any]]
-    ) -> builtins.list[dict[str, Any]]:
-        """Mask read-only host output using the exact immutable binding."""
         ...
 
     async def create_environment_run(
@@ -171,21 +189,15 @@ class EnvironmentRepository(Protocol):
         """Claim a queued test, or a prebuild for a snapshot-capable host."""
         ...
 
-    async def bind_current_environment(self, user_id: str, environment_id: str) -> tuple[str, str]:
-        """Freeze an environment's current configuration; return the binding and repository."""
-        ...
-
-    async def current_setup_fingerprints(
-        self, user_id: str, environment_ids: builtins.list[str]
-    ) -> dict[str, str | None]:
-        """Each environment's current installation fingerprint, or ``None`` without setup."""
-        ...
-
     async def update_environment_run(
         self, run_id: str, host: str, generation: int, update: dict[str, Any]
     ) -> bool:
         """Heartbeat or finish only the live matching test execution."""
         ...
+
+
+class EnvironmentWorkspaceRepository(Protocol):
+    """Retained-workspace actions and environment-preparation receipts."""
 
     async def create_environment_action_run(
         self, user_id: str, thread_id: str, binding_id: str, action_id: str, key: str
@@ -215,13 +227,18 @@ class EnvironmentRepository(Protocol):
         """Persist a lifecycle receipt only under the matching live attempt fence."""
         ...
 
-    async def save_environment_preparation(
-        self,
-        sandbox_id: str,
-        binding_id: str,
-        container_id: str,
-        boot_id: str,
-        steps: builtins.list[dict[str, Any]],
-    ) -> None:
-        """Persist preparation results using immutable binding and container identity."""
-        ...
+
+class EnvironmentExecutionRepository(
+    EnvironmentBindingRepository, EnvironmentWorkspaceRepository, Protocol
+):
+    """Binding and preparation operations used while executing a turn."""
+
+
+class EnvironmentRepository(
+    EnvironmentConfigurationRepository,
+    EnvironmentBindingRepository,
+    EnvironmentRunRepository,
+    EnvironmentWorkspaceRepository,
+    Protocol,
+):
+    """The composed environment capability used by assembly and the full API."""

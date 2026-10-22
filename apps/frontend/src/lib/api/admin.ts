@@ -443,14 +443,6 @@ export async function forgetAgentRunnerHost(host: string): Promise<AgentRunnerHo
   return jsonOrThrow<AgentRunnerHostPool>(resp);
 }
 
-/** Stop this host taking new work; let what it has finish. */
-export async function drainAgentRunnerHost(host: string): Promise<AgentRunnerHostPool> {
-  const resp = await fetchWithAuth(API_BASE, `${HOSTS}/${encodeURIComponent(host)}/drain`, {
-    method: 'POST',
-  });
-  return jsonOrThrow<AgentRunnerHostPool>(resp);
-}
-
 /** Put a drained host back to work; this also cancels a pending removal. */
 export async function undrainAgentRunnerHost(host: string): Promise<AgentRunnerHostPool> {
   const resp = await fetchWithAuth(API_BASE, `${HOSTS}/${encodeURIComponent(host)}/undrain`, {
@@ -462,7 +454,7 @@ export async function undrainAgentRunnerHost(host: string): Promise<AgentRunnerH
 /**
  * Advertised on the heartbeat by a runner that takes its limit from
  * `slots_desired`. Mirrors `HOST_CONCURRENCY_CAPABILITY` in
- * `cloud_agent_host/shared_protocol.py`; a host without it keeps the number it
+ * `cloud_agent_shared/shared_protocol.py`; a host without it keeps the number it
  * was deployed with until it is redeployed.
  */
 export const HOST_CONCURRENCY_CAPABILITY = 'host-concurrency-v1';

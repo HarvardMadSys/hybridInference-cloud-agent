@@ -35,7 +35,6 @@ import { codeReviewFixPrompt } from './codeReview';
 import { sideChatKeys } from './sideChatStorage';
 import { SideChat } from './SideChat';
 import { conversationReadStorageKey } from './useConversationReadState';
-import { sideChatStorageKey } from './useSideChatSession';
 import { answerThreadQuestion, listThreadQuestions } from '@/lib/api/questions';
 import type { SideChatTab } from './useWorkspaceTabs';
 import { deleteAttachment, uploadAttachment, type AttachmentApi } from '@/lib/api/attachments';
@@ -222,7 +221,9 @@ function props(active = true) {
   return { sourceJob: toDisplayJob(anchor), sourceJobs: [anchor], userId, config, active };
 }
 async function ready() {
-  await waitFor(() => expect(getAgentJobThread).toHaveBeenCalledWith('side-copy'));
+  await waitFor(() =>
+    expect(getAgentJobThread).toHaveBeenCalledWith('side-copy', { anchor: true }),
+  );
   await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
     target: { value: 'Why keep the files?' },
@@ -511,7 +512,7 @@ describe('Side Chat', () => {
     expect(screen.getByRole('textbox')).toHaveValue('Why keep the files?');
     expect(screen.queryByText('Later main question')).not.toBeInTheDocument();
     expect(forkAgentJob).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(localStorage.getItem(sideChatStorageKey(userId, 'main'))!)).toMatchObject({
+    expect(JSON.parse(localStorage.getItem(sideChatKeys(userId, 'main').session)!)).toMatchObject({
       anchorJobId: 'main-2',
       jobId: 'side-copy',
     });

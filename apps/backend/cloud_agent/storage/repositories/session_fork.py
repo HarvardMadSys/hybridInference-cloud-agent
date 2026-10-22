@@ -13,15 +13,16 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent.domain.execution import CANCELLED, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.ids import new_job_id, new_session_fork_id, new_thread_id
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
-from cloud_agent.storage._sql.hosts import refuse_start_on_revoked_host
-from cloud_agent.storage._sql.jobs import JOB_SELECT
+from cloud_agent.storage._sql.hosts import DELETED_GROUP_STATES, refuse_start_on_revoked_host
+from cloud_agent.storage._sql.jobs import JOB_SELECT, read_job
+from cloud_agent.storage._sql.mcp_residency import mint_residency_sql
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import (
     FENCE_START_SQL,
     NATIVE_FORK_CAPABLE,
     THREAD_SANDBOX_SOURCE,
+    quiet_idle_deadline,
 )
-from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.repositories.goals import new_goal_id
 
 if TYPE_CHECKING:
@@ -32,18 +33,10 @@ class PostgresSessionForkRepository:
     """Forking a retained chat: prepare, materialize, finalize, reap."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
-        """Wrap the pool the control plane already owns.
-
-        A finalized fork answers with the child turn it just made, and that
-        read is ``PostgresConversationQueries.get_job`` -- the same call it
-        made when both lived on one class, over the same pool, and after this
-        class's transaction has already committed. Held as a peer rather than
-        reimplemented, so there is still one statement behind it.
-        """
+        """Wrap the pool the control plane already owns."""
         self._pool = pool
-        self._queries = PostgresConversationQueries(pool)
 
-    async def prepare_session_fork(
+    async def prepare_session_fork(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         *,
         source_job_id: str,
@@ -151,7 +144,7 @@ class PostgresSessionForkRepository:
             )
             if row is None:
                 return {"error": "not_shared_live"}
-            if row["deletion_state"] in {"pending", "archived", "deleted"}:
+            if row["deletion_state"] in DELETED_GROUP_STATES:
                 return {"error": "sandbox_not_ready"}
             # ``native_fork_capable`` read the host before the group's lock was
             # this fork's, and a revocation may have held that lock. Read again
@@ -490,15 +483,9 @@ class PostgresSessionForkRepository:
                     current["residency_grant_id"] or operation[f"previous_{role}_grant_id"]
                 )
                 created = await conn.fetchrow(
-                    """
+                    f"""
                     UPDATE agent_thread_sandbox_memberships m
-                    SET residency_generation = m.residency_generation + 1,
-                        residency_status = 'hot',
-                        residency_lease_expires_at = clock_timestamp() + make_interval(secs => $3),
-                        residency_grant_id = NULL,
-                        residency_binding_id = NULL,
-                        residency_established_at = NOW(),
-                        residency_last_active_at = NOW(),
+                    SET {mint_residency_sql("$3")},
                         updated_at = NOW()
                     FROM agent_sandboxes g
                     WHERE m.thread_id = $1 AND m.sandbox_id = $2
@@ -763,7 +750,7 @@ class PostgresSessionForkRepository:
             if operation["state"] == "ready":
                 anchor_id = str(operation["target_anchor_job_id"] or "") or None
             elif operation["state"] == "materialized":
-                # Match create_follow_up's thread -> job -> membership lock
+                # Match insert_follow_up's thread -> job -> membership lock
                 # order. Locking the source job first here while a concurrent
                 # follow-up held the thread row produced a real PostgreSQL
                 # deadlock cycle (each transaction then waited for the other).
@@ -813,46 +800,55 @@ class PostgresSessionForkRepository:
                 )
                 copied: dict[str, str] = {}
                 previous_copy: str | None = None
+                copied_turn_rows: list[tuple[Any, ...]] = []
                 for turn in turns:
                     copy_id = new_job_id()
                     copied[str(turn["id"])] = copy_id
-                    await conn.execute(
-                        """
-                        INSERT INTO agent_jobs (
-                            id, thread_id, parent_job_id, turn_no, native_turn_no, user_id,
-                            base_sha, task_prompt, runtime, model, reasoning_effort, state,
-                            published_pr_url, published_commit_sha, detail, metadata,
-                            fork_source_job_id, skills, created_at, updated_at
-                        ) VALUES (
-                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                            $13, $14, $15, $16::jsonb, $17, $18::jsonb,
-                            clock_timestamp(), clock_timestamp()
+                    copied_turn_rows.append(
+                        (
+                            copy_id,
+                            operation["target_thread_id"],
+                            previous_copy,
+                            turn["turn_no"],
+                            turn["native_turn_no"],
+                            operation["user_id"],
+                            turn["base_sha"],
+                            turn["task_prompt"],
+                            turn["runtime"],
+                            turn["model"],
+                            turn["reasoning_effort"],
+                            turn["state"] if turn["state"] in TERMINAL_STATES else CANCELLED,
+                            turn["published_pr_url"],
+                            turn["published_commit_sha"],
+                            turn["detail"],
+                            json.dumps(load_json(turn["metadata"]))
+                            if turn["metadata"] is not None
+                            else None,
+                            turn["id"],
+                            json.dumps(load_json(turn["skills"]))
+                            if turn["skills"] is not None
+                            else None,
                         )
-                        """,
-                        copy_id,
-                        operation["target_thread_id"],
-                        previous_copy,
-                        turn["turn_no"],
-                        turn["native_turn_no"],
-                        operation["user_id"],
-                        turn["base_sha"],
-                        turn["task_prompt"],
-                        turn["runtime"],
-                        turn["model"],
-                        turn["reasoning_effort"],
-                        turn["state"] if turn["state"] in TERMINAL_STATES else CANCELLED,
-                        turn["published_pr_url"],
-                        turn["published_commit_sha"],
-                        turn["detail"],
-                        json.dumps(load_json(turn["metadata"]))
-                        if turn["metadata"] is not None
-                        else None,
-                        turn["id"],
-                        json.dumps(load_json(turn["skills"]))
-                        if turn["skills"] is not None
-                        else None,
                     )
                     previous_copy = copy_id
+                # This is a driver batch, not a set-based SQL statement.
+                # asyncpg may stream or flush it internally, but finalization
+                # no longer awaits one protocol exchange for every copied turn.
+                await conn.executemany(
+                    """
+                    INSERT INTO agent_jobs (
+                        id, thread_id, parent_job_id, turn_no, native_turn_no, user_id,
+                        base_sha, task_prompt, runtime, model, reasoning_effort, state,
+                        published_pr_url, published_commit_sha, detail, metadata,
+                        fork_source_job_id, skills, created_at, updated_at
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                        $13, $14, $15, $16::jsonb, $17, $18::jsonb,
+                        clock_timestamp(), clock_timestamp()
+                    )
+                    """,
+                    copied_turn_rows,
+                )
                 await conn.executemany(
                     """
                     INSERT INTO agent_thread_messages
@@ -934,20 +930,11 @@ class PostgresSessionForkRepository:
                     anchor_id,
                 )
                 await conn.execute(
-                    """
+                    f"""
                     UPDATE agent_sandboxes g
                     SET active_operation_count = GREATEST(active_operation_count - 1, 0),
                         last_activity_at = NOW(),
-                        idle_deadline = CASE
-                            WHEN active_operation_count = 1
-                             AND NOT EXISTS (
-                                SELECT 1 FROM agent_thread_sandbox_memberships m
-                                WHERE m.sandbox_id = g.id
-                                  AND m.active_attempt_id IS NOT NULL
-                             )
-                            THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
-                            ELSE NULL
-                        END,
+                        idle_deadline = {quiet_idle_deadline("g", "idle_timeout_seconds", operations=1)},
                         updated_at = NOW()
                     WHERE g.id = $1
                     """,
@@ -955,7 +942,10 @@ class PostgresSessionForkRepository:
                 )
             else:
                 return None
-        return None if anchor_id is None else await self._queries.get_job(anchor_id)
+        if anchor_id is None:
+            return None
+        async with self._pool.acquire() as conn:
+            return await read_job(conn, anchor_id)
 
     async def reap_stalled_session_forks(
         self, *, stall_seconds: float = 900.0
@@ -1035,19 +1025,10 @@ class PostgresSessionForkRepository:
                     changed["last_error"],
                 )
                 await conn.execute(
-                    """
+                    f"""
                     UPDATE agent_sandboxes g
                     SET active_operation_count = GREATEST(active_operation_count - 1, 0),
-                        idle_deadline = CASE
-                            WHEN active_operation_count = 1
-                             AND NOT EXISTS (
-                                SELECT 1 FROM agent_thread_sandbox_memberships m
-                                WHERE m.sandbox_id = g.id
-                                  AND m.active_attempt_id IS NOT NULL
-                             )
-                            THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
-                            ELSE NULL
-                        END,
+                        idle_deadline = {quiet_idle_deadline("g", "idle_timeout_seconds", operations=1)},
                         updated_at = NOW()
                     WHERE id = $1
                     """,

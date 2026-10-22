@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -25,6 +25,7 @@ from cloud_agent.github_app import (
     UserTokens,
 )
 from cloud_agent.github_user_token import UserTokenUnavailable, user_access_token
+from cloud_agent.settings import number_setting
 from cloud_agent.source_control import SourceControlCipher
 
 _USER = "user-owner"
@@ -52,9 +53,9 @@ class _App:
             raise UserAuthorizationRevoked("bad_refresh_token")
         return UserTokens(
             access_token="ghu_new",
-            access_expires_at=datetime.now(timezone.utc) + timedelta(hours=8),
+            access_expires_at=datetime.now(UTC) + timedelta(hours=8),
             refresh_token="ghr_new",
-            refresh_expires_at=datetime.now(timezone.utc) + timedelta(days=180),
+            refresh_expires_at=datetime.now(UTC) + timedelta(days=180),
         )
 
 
@@ -66,7 +67,7 @@ class _Store:
         self.row: dict[str, Any] | None = {
             "access_token_ciphertext": app.cipher.encrypt("ghu_old"),
             "access_expires_at": (
-                datetime.now(timezone.utc) + expires_in if expires_in is not None else None
+                datetime.now(UTC) + expires_in if expires_in is not None else None
             ),
             "refresh_token_ciphertext": app.cipher.encrypt("ghr_old"),
             "refresh_generation": 4,
@@ -187,7 +188,7 @@ async def test_github_setting_flip_keeps_one_timeout_for_lease_and_http(monkeypa
     """A setting increase during claim applies only to the next refresh."""
     values = {"github_request_timeout_s": 20.0}
     monkeypatch.setattr(
-        github_app, "number_setting", lambda name, default=None: values.get(name, default)
+        github_app, "number_setting", lambda name: values.get(name, number_setting(name))
     )
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "test-source-control-key")
     request_timeouts: list[float] = []
@@ -252,7 +253,7 @@ async def test_a_refresh_the_fence_rejects_is_not_returned(outcome: str):
             store.row["access_token_ciphertext"] = None
             return
         store.row["access_token_ciphertext"] = current
-        store.row["access_expires_at"] = datetime.now(timezone.utc) + timedelta(hours=8)
+        store.row["access_expires_at"] = datetime.now(UTC) + timedelta(hours=8)
 
     store.on_rejected_write = moved
 
@@ -289,7 +290,7 @@ async def test_a_caller_without_the_lease_waits_for_a_lapsed_token_to_be_renewed
     def other_caller_lands(store: _Store) -> None:
         if store.reads == 3:
             store.row["access_token_ciphertext"] = renewed
-            store.row["access_expires_at"] = datetime.now(timezone.utc) + timedelta(hours=8)
+            store.row["access_expires_at"] = datetime.now(UTC) + timedelta(hours=8)
 
     store.on_reread = other_caller_lands
 

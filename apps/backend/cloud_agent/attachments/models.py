@@ -20,8 +20,6 @@ if TYPE_CHECKING:
 #: than an object store this service does not have, so the ceiling is what
 #: keeps that decision defensible rather than merely convenient.
 MAX_ATTACHMENT_FILE_BYTES = 5 * 1024 * 1024
-MAX_ATTACHMENT_TOTAL_BYTES = 20 * 1024 * 1024
-MAX_ATTACHMENT_FILES = 50
 MAX_ATTACHMENT_PATH_LENGTH = 512
 MAX_CONTENT_TYPE_LENGTH = 255
 
@@ -35,11 +33,6 @@ MAX_CONTENT_TYPE_LENGTH = 255
 MAX_THREAD_ATTACHMENT_BYTES = DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES - 4 * 1024 * 1024
 MAX_THREAD_ATTACHMENT_FILES = 200
 
-#: Everything one owner's uploads keep in the database, staged or attached to a
-#: conversation that still exists. Attached bytes stay until the conversation
-#: is deleted, so the per-turn bounds alone would let one account grow the
-#: shared database without end.
-MAX_USER_ATTACHMENT_BYTES = 1024 * 1024 * 1024
 
 #: Where the sandbox sees them. Outside the worktree on purpose: the publish
 #: path stages the workspace with ``git add -A -N``, so an upload written into
@@ -80,22 +73,22 @@ class AttachmentLimits(BaseModel):
 
 def attachment_max_files() -> int:
     """Read the current staging and turn quota without caching an admin edit."""
-    return integer_setting("attachments.max_files", MAX_ATTACHMENT_FILES)
+    return integer_setting("attachments.max_files")
 
 
 def attachment_max_file_bytes() -> int:
     """Read the per-file upload limit; the schema retains its absolute ceiling."""
-    return integer_setting("attachments.max_file_bytes", MAX_ATTACHMENT_FILE_BYTES)
+    return integer_setting("attachments.max_file_bytes")
 
 
 def attachment_max_total_bytes() -> int:
     """Read the combined staging and turn byte quota."""
-    return integer_setting("attachments.max_total_bytes", MAX_ATTACHMENT_TOTAL_BYTES)
+    return integer_setting("attachments.max_total_bytes")
 
 
 def attachment_max_user_bytes() -> int:
     """Read the ceiling on everything one owner's uploads keep stored."""
-    return integer_setting("attachments.max_user_bytes", MAX_USER_ATTACHMENT_BYTES)
+    return integer_setting("attachments.max_user_bytes")
 
 
 def attachment_size_label(size: int) -> str:

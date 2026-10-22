@@ -3,7 +3,7 @@
 The dispatch used to choose between two authenticators: this service's session,
 and the gateway's ``api_keys`` table. **The API-key branch was deleted on
 2026-08-04** — it had no producer here and never will, so it answered 503 in
-every real deployment while looking implemented. See MIGRATION.md's deferred
+every real deployment while looking implemented. See the extraction record's deferred
 register for the ruling and its discarded-test row for the ported case that
 went with it.
 
@@ -59,11 +59,11 @@ async def client():
 
 
 def _worker_token() -> str:
-    from cloud_agent.tokens import SCOPE_MODEL, mint_worker_token
+    from cloud_agent.tokens import SCOPE_MCP, mint_worker_token
 
-    return mint_worker_token(
-        job_id="ajob_0001", attempt_id=1, lease_generation=1, scope=SCOPE_MODEL
-    )
+    # The sandbox's own credential — the one an escape would put on an owner
+    # route. It was ``SCOPE_MODEL`` before the cutover retired that scope.
+    return mint_worker_token(job_id="ajob_0001", attempt_id=1, lease_generation=1, scope=SCOPE_MCP)
 
 
 async def test_the_session_cookie_authenticates_the_owner(client: AsyncClient) -> None:

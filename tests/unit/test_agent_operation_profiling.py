@@ -11,7 +11,9 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from collections.abc import Mapping
+from dataclasses import FrozenInstanceError
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -67,7 +69,7 @@ def clock(monkeypatch):
 
 def _expiry(minutes: int = 60) -> str:
     """Return an ISO-8601 expiry that is still in the future."""
-    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+    return (datetime.now(UTC) + timedelta(minutes=minutes)).isoformat()
 
 
 def _enable(monkeypatch, **overrides) -> dict:
@@ -161,6 +163,27 @@ def test_switch_on_without_a_usable_run_stays_off(monkeypatch, caplog):
             # An unknown filter would silently never match, so it is refused
             # when the run is read rather than producing an empty experiment.
             "target": {"sandbxo_id": "typo"},
+        },
+        {
+            "run_id": "r",
+            "operations": ["attempt.startup"],
+            "expires_at": _expiry(),
+            "max_operations": 5,
+            "config_version": 0,
+        },
+        {
+            "run_id": "r",
+            "operations": ["attempt.startup"],
+            "expires_at": _expiry(),
+            "max_operations": 5,
+            "target": {"host": None},
+        },
+        {
+            "run_id": "r",
+            "operations": ["attempt.startup"],
+            "expires_at": _expiry(),
+            "max_operations": 5,
+            "target": {"host": True},
         },
     ],
 )
@@ -1192,6 +1215,109 @@ def test_the_parsed_run_preserves_manifest_identity_and_its_local_budget(monkeyp
     } in manifest["admission_instances"]
 
 
+def test_a_measurement_retains_one_deeply_immutable_run_snapshot(monkeypatch):
+    """Selection reuses one manifest instead of copying parallel mutable fields."""
+    _enable(monkeypatch, target={"host": "host-a"}, max_operations=7)
+    run = profiling.active_run()
+    assert run is not None
+
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+
+    assert measurement is not None
+    assert measurement.run_manifest is run.manifest
+    assert profiling.manifest_for_measurement(measurement) == profiling.manifest_for_run(run)
+    admission = measurement.run_admission_instances[0]
+    assert admission is run.admission_instances[0]
+    assert isinstance(admission, Mapping)
+    assert admission["instance"] == profiling.PRODUCER_INSTANCE_ID
+    assert admission["max_operations"] == 7
+    assert tuple(admission) == ("instance", "max_operations")
+    assert len(admission) == 2
+    assert dict(admission) == {
+        "instance": profiling.PRODUCER_INSTANCE_ID,
+        "max_operations": 7,
+    }
+    with pytest.raises(KeyError):
+        admission["unknown"]
+    flattened = {
+        "run_id",
+        "run_operations",
+        "run_target",
+        "run_max_operations",
+        "run_continuous",
+        "run_config_version",
+        "run_source",
+        "run_expires_at",
+        "run_admission_instances",
+    }
+    assert flattened.isdisjoint(profiling.Measurement.__dataclass_fields__)
+    with pytest.raises(TypeError):
+        measurement.run_manifest.target["host"] = "host-b"
+    with pytest.raises(FrozenInstanceError):
+        measurement.run_manifest.admission_instances[0].max_operations = 99
+
+
+def test_direct_run_manifest_freezes_legacy_admission_mappings():
+    """Direct callers cannot retain mutable admission aliases."""
+    admission = {"instance": "runner-a", "max_operations": 7}
+    existing = profiling.AdmissionInstance(instance="manager-a", max_operations=11)
+    admissions = [admission, existing]
+    manifest = profiling.RunManifest(
+        run_id="run-1",
+        operations=frozenset({"attempt.startup"}),
+        expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        max_operations=7,
+        admission_instances=admissions,
+    )
+    projection = manifest.to_catalogue_payload()
+
+    admission["max_operations"] = 99
+    admissions.clear()
+
+    assert manifest.admission_instances == (
+        profiling.AdmissionInstance(instance="runner-a", max_operations=7),
+        existing,
+    )
+    assert manifest.admission_instances[1] is existing
+    assert projection == {
+        "run_id": "run-1",
+        "operations": ["attempt.startup"],
+        "target": {},
+        "config_version": 1,
+        "max_operations": 7,
+        "expires_at": "2030-01-01T00:00:00+00:00",
+        "admission_instances": [
+            {"instance": "runner-a", "max_operations": 7},
+            {"instance": "manager-a", "max_operations": 11},
+        ],
+    }
+    assert manifest.to_catalogue_payload() == projection
+
+
+def test_direct_run_manifest_rejects_non_mapping_admission_entries():
+    """Only the legacy mapping shape is accepted beside frozen entries."""
+    with pytest.raises(TypeError, match="admission_instances entries must be mappings"):
+        profiling.RunManifest(
+            run_id="run-1",
+            operations=frozenset({"attempt.startup"}),
+            expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+            max_operations=7,
+            admission_instances=[("runner-a", 7)],
+        )
+
+
+def test_the_default_off_path_does_not_read_a_clock(monkeypatch):
+    """No run means no manifest allocation or timing work starts."""
+
+    class _NoClock:
+        def __getattr__(self, name):
+            raise AssertionError(f"off path read clock.{name}")
+
+    monkeypatch.setattr(profiling, "time", _NoClock())
+
+    assert profiling.start_operation(operation="attempt.startup", host="host-a") is None
+
+
 def test_a_child_inherits_the_parents_claim_span_and_admission(monkeypatch):
     """The child extends one startup; it does not invent a fresh budget owner."""
     _enable(monkeypatch, max_operations=7)
@@ -1643,7 +1769,7 @@ def test_a_measurement_carries_the_configured_expiry_not_its_own_clock(monkeypat
     """
     # The descriptor states one instant; everything else about the run is
     # derived from it.
-    configured = datetime.now(timezone.utc) + timedelta(minutes=30)
+    configured = datetime.now(UTC) + timedelta(minutes=30)
     descriptor = {
         "run_id": "run-1",
         "operations": ["attempt.startup"],
@@ -1677,7 +1803,7 @@ def test_the_same_instant_written_two_ways_is_one_expiry():
     # Whole seconds, because one of the three spellings carries no fractional
     # part -- comparing a microsecond-truncated copy with the original would be
     # testing the spelling rather than the instant.
-    moment = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(microsecond=0)
+    moment = (datetime.now(UTC) + timedelta(hours=1)).replace(microsecond=0)
     beijing = timezone(timedelta(hours=8))
 
     def descriptor(expires_at: str) -> dict[str, object]:

@@ -4,14 +4,11 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-import asyncpg
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
+from cloud_agent.api._environment_route_policy import EnvironmentSensitiveRoute
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._workspace_access import fence_workspace_start
 from cloud_agent.api.deps import (
@@ -24,10 +21,7 @@ from cloud_agent.api.deps import (
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import (
-    EnvironmentAccessRevoked,
-    EnvironmentBusy,
     EnvironmentConflict,
-    EnvironmentEncryptionError,
     EnvironmentForbidden,
     EnvironmentNotFound,
 )
@@ -37,7 +31,6 @@ from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
     MAX_IMPORT_BYTES,
     MIN_SECRET_CHARS,
-    EnvironmentInputError,
     EnvironmentScripts,
     VariableEdit,
     environment_payload,
@@ -47,93 +40,14 @@ from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABI
 from cloud_agent_shared.storable_text import storable_json
 
 
-class CredentialSafeRoute(APIRoute):
-    """Keep submitted secrets out of validation errors and generic failures."""
-
-    def get_route_handler(self) -> Any:
-        """Wrap environment inputs in safe, non-cacheable error responses."""
-        original = super().get_route_handler()
-
-        async def safe(request: Request) -> Response:
-            try:
-                response = await original(request)
-            except RequestValidationError as exc:
-                errors = []
-                for error in exc.errors():
-                    message = error["msg"]
-                    cause = error.get("ctx", {}).get("error")
-                    if isinstance(cause, EnvironmentInputError):
-                        message = str(cause)
-                    elif error["type"] in {"value_error", "assertion_error"}:
-                        message = "Invalid field value"
-                    errors.append({"loc": error["loc"], "type": error["type"], "msg": message})
-                detail: Any = errors
-                if any(
-                    "execution_profile is server-owned" in e.get("msg", "") for e in exc.errors()
-                ):
-                    detail = "execution_profile is server-owned"
-                response = JSONResponse(status_code=422, content={"detail": detail})
-            except HTTPException as exc:
-                response = JSONResponse(
-                    status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers
-                )
-            except EnvironmentNotFound:
-                response = JSONResponse(
-                    status_code=404, content={"detail": "Environment or run not found."}
-                )
-            except EnvironmentForbidden as exc:
-                response = JSONResponse(status_code=403, content={"detail": str(exc)})
-            except EnvironmentAccessRevoked as exc:
-                response = JSONResponse(status_code=409, content={"detail": str(exc)})
-            except SandboxManagerError as exc:
-                response = JSONResponse(
-                    status_code=exc.status_code, content={"detail": exc.message}
-                )
-            except asyncpg.UniqueViolationError:
-                response = JSONResponse(
-                    status_code=409,
-                    content={"detail": "Configuration conflicts with an existing object."},
-                )
-            except (EnvironmentConflict, EnvironmentBusy) as exc:
-                response = JSONResponse(
-                    status_code=409,
-                    content={
-                        "detail": str(exc),
-                        **(
-                            {"current_revision": exc.current_revision}
-                            if isinstance(exc, EnvironmentConflict)
-                            and exc.current_revision is not None
-                            else {}
-                        ),
-                    },
-                )
-            except EnvironmentEncryptionError:
-                response = JSONResponse(
-                    status_code=503,
-                    content={
-                        "detail": "Environment encryption is unavailable. Contact the deployment administrator."
-                    },
-                )
-            except ValidationError:
-                response = JSONResponse(
-                    status_code=422, content={"detail": "Invalid environment variable or script"}
-                )
-            except EnvironmentInputError as exc:
-                response = JSONResponse(status_code=422, content={"detail": str(exc)})
-            response.headers["Cache-Control"] = "no-store"
-            return response
-
-        return safe
-
-
-class _HostRoute(CredentialSafeRoute, HostBodyLimitRoute):
+class _HostRoute(EnvironmentSensitiveRoute, HostBodyLimitRoute):
     """A route hosts call: the host body ceiling first, then the safe error answers.
 
     Hosts reach these through their tunnel, where no edge limit applies.
     """
 
 
-router = APIRouter(prefix="/v1/agent", tags=["environments"], route_class=CredentialSafeRoute)
+router = APIRouter(prefix="/v1/agent", tags=["environments"], route_class=EnvironmentSensitiveRoute)
 # Included into ``router``, and so under its prefix, at the end of this module.
 _host_router = APIRouter(route_class=_HostRoute)
 

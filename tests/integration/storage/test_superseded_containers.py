@@ -30,9 +30,12 @@ from tests.integration.storage.test_sandbox_restore_store import (
     pool as pool,
     store as store,
 )
-from tests.unit.test_sandbox_archive import _Manager
+from tests.support.follow_ups import append_follow_up
+from tests.support.host_docker import Docker, probe, service as host_service
+from tests.unit.test_sandbox_deletion_backup import _Manager
 
 from cloud_agent.ports.external.compute_provider import ProviderReceipt
+from cloud_agent.ports.external.host_bootstrap import default_namespace
 from cloud_agent.providers.compute.host_bootstrap import SshHostBootstrap
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.storage._sql.hosts import (
@@ -41,8 +44,8 @@ from cloud_agent.storage._sql.hosts import (
     superseded_removal_request_id,
 )
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
-from cloud_agent_host.sandbox_archive import ArchiveIdentity, SandboxArchiveService
 from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointReceipt, SandboxCheckpointStore
+from cloud_agent_host.sandbox_deletion_backup import ArchiveIdentity, SandboxDeletionBackupService
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
@@ -55,7 +58,7 @@ if TYPE_CHECKING:
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
-def _held(job: dict, *, generation: int = 1, container_id: str = "container-a") -> dict:
+def _held(job: dict, *, generation: int = 1, container_id: str = "container-aa") -> dict:
     """One container as a host's Sandbox Manager lists it."""
     return {
         "sandbox_id": "asbx_restore",
@@ -80,8 +83,8 @@ async def _authorize(store: Storage, host: str, *held: dict) -> list[dict]:
 async def _handed_over(pool, store: Storage) -> tuple[dict, dict]:
     """A covered group whose host was removed, and the turn that will restore it."""
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
@@ -334,7 +337,7 @@ async def test_an_authorization_recorded_first_stands_once_the_group_is_lost(poo
             "thread_id": job["thread_id"],
             "sandbox_id": "asbx_restore",
             "generation": 1,
-            "container_id": "container-a",
+            "container_id": "container-aa",
         }
     }
     assert await store.compute_resources.recorded_host_state(host="runner-c") == {
@@ -351,7 +354,7 @@ async def test_an_authorization_recorded_first_stands_once_the_group_is_lost(poo
         "runner-a",
         "asbx_restore",
         1,
-        "container-a",
+        "container-aa",
     )
 
 
@@ -427,14 +430,15 @@ async def test_a_handed_over_group_without_a_restore_point_still_holds_its_machi
 
 
 class _Machine:
-    """Runs the shipped remote scripts as the node would: its files, no containers.
+    """Runs the shipped remote scripts as the node would: its files, its containers.
 
-    Only ``/var/lib`` maps to ``root``; Docker answers with nothing running.
+    Only ``/var/lib`` maps to ``root``; Docker answers from ``docker``.
     """
 
-    def __init__(self, root: Path, monkeypatch) -> None:
+    def __init__(self, root: Path, monkeypatch, docker: Docker | None = None) -> None:
         self.root = root
         self.monkeypatch = monkeypatch
+        self.docker = docker or Docker()
 
     async def run(self, connection, script: str, *, stdin=None, timeout: float = 30) -> str:
         argv = shlex.split(script)
@@ -452,13 +456,15 @@ class _Machine:
             local.setattr("sys.argv", ["remote", argv[5]])
             local.setattr("sys.stdin", io.StringIO((stdin or b"").decode()))
             local.setattr("shutil.which", lambda command: "/usr/bin/docker")
-            local.setattr("subprocess.check_output", lambda args, **kwargs: "")
+            local.setattr("subprocess.check_output", self.docker.check_output)
+            local.setattr("subprocess.check_call", self.docker.check_call)
             local.setattr("pathlib.Path", isolated_path)
-            exec(argv[4], {})
+            with contextlib.suppress(SystemExit):
+                exec(argv[4], {})
         return output.getvalue()
 
 
-def _host_manager(group: dict, archives: Path) -> tuple[_Manager, SandboxArchiveService]:
+def _host_manager(group: dict, archives: Path) -> tuple[_Manager, SandboxDeletionBackupService]:
     """``runner-a``'s Sandbox Manager, still holding the group's stopped container."""
     spec = ChatSandboxSpec(
         thread_id=group["origin_thread_id"],
@@ -480,7 +486,7 @@ def _host_manager(group: dict, archives: Path) -> tuple[_Manager, SandboxArchive
         ],
         expected_container_id=group["container_id"],
     )
-    return manager, SandboxArchiveService(supervisor, state_dir=archives)
+    return manager, SandboxDeletionBackupService(supervisor, state_dir=archives)
 
 
 async def _recorded_receipt(pool) -> SandboxCheckpointReceipt:
@@ -528,9 +534,19 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
     (archives.parent / "credential").write_text("persisted enrollment")
     SandboxCheckpointStore(archives / "checkpoints").save(await _recorded_receipt(pool))
     manager, service = _host_manager(old, archives)
-    r.bootstrap.inventory = SshHostBootstrap(
-        transport=_Machine(tmp_path / "machine", monkeypatch), resolver=AsyncMock()
-    ).inventory
+    # Its runner, refused since the Host was removed, keeps being restarted
+    # and has left one of its self-test sandboxes behind.
+    namespace = allocation.get("slot_namespace") or default_namespace(allocation["nodes"][0]["id"])
+    docker = Docker(
+        host_service("runner", namespace, "runner"),
+        host_service("sandbox-manager", namespace, "sandbox-manager"),
+        probe("self-test", namespace),
+    )
+    machine = SshHostBootstrap(
+        transport=_Machine(tmp_path / "machine", monkeypatch, docker), resolver=AsyncMock()
+    )
+    r.bootstrap.quiesce = machine.quiesce
+    r.bootstrap.inventory = machine.inventory
 
     def listed(host: str) -> list[dict]:
         return list(held.get(host, []))
@@ -598,6 +614,12 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
 
     assert retired["state"] == "succeeded", retired
     assert retired["result"]["superseded_removed"] == 1
+    assert retired["result"]["inventory"][0]["complete"] is True
+    # The runner stays stopped; only the sandbox manager is still up.
+    assert {name: c["running"] for name, c in docker.containers.items()} == {
+        "runner": False,
+        "sandbox-manager": True,
+    }
     assert (await r.repo.get_allocation(allocation["id"]))["release_committed_at"]
     r.provider.release.assert_awaited_once()
     sent = [call.args[1] for call in managers["runner-a"].discard_sandbox_deletion.await_args_list]
@@ -605,7 +627,7 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
         {
             "request_id": superseded_removal_request_id("runner-a", old),
             "generation": 1,
-            "expected_container_id": "container-a",
+            "expected_container_id": "container-aa",
             "sandbox_id": "asbx_restore",
         }
     ] * (2 if answer_lost else 1)

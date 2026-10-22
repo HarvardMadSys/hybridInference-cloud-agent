@@ -54,10 +54,9 @@ inventory reports itself unavailable rather than reporting the smaller count it
 managed to read, because a truncated container count looks exactly like a
 plausible one.
 
-The module depends on the standard library alone. The control plane imports its
-pure helpers (``cpu_busy_percent``, ``memory_usage``) to render the same
-percentages the runner reported, and a control-plane module may not drag in the
-sandbox stack to do it.
+The control plane never imports this module. It renders the percentages the
+runner reported with the helpers this module shares from
+:mod:`cloud_agent_shared.host_capacity`.
 """
 
 from __future__ import annotations
@@ -77,6 +76,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
+from cloud_agent_host.chat_sandbox_models import (
+    CHAT_NAMESPACE_LABEL,
+    CHAT_SANDBOX_ID_LABEL,
+    CHAT_SANDBOX_LABEL,
+)
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_shared.host_capacity import (
     CPU_MISSING_COUNTER_RESET,
@@ -160,14 +164,6 @@ DEFAULT_PROC_ROOT = "/run/host-metrics"
 PROC_STAT_FILE = "stat"
 PROC_MEMINFO_FILE = "meminfo"
 PROC_BOOT_ID_FILE = "boot_id"
-
-#: The immutable ownership label every chat container carries. Mirrored from
-#: ``cloud_agent_host.chat_sandbox`` rather than imported, so that the control
-#: plane can import this module without importing the sandbox stack; a test
-#: asserts the two agree.
-CHAT_SANDBOX_LABEL = "org.freeinference.chat-sandbox"
-CHAT_NAMESPACE_LABEL = "org.freeinference.sandbox-namespace"
-CHAT_SANDBOX_ID_LABEL = "org.freeinference.chat-sandbox-id"
 
 #: Docker's own state vocabulary, partitioned exactly as the design requires.
 RUNNING_STATE = "running"
@@ -929,7 +925,7 @@ def run_bounded_command(
     )
 
 
-def _drain_child(
+def _drain_child(  # noqa: C901, PLR0912 complexity baseline, #771
     child: subprocess.Popen[bytes],
     *,
     timeout_s: float,

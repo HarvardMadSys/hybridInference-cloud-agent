@@ -24,6 +24,7 @@ from tests.integration.storage.test_sandbox_restore_store import (
     pool as pool,
     store as store,
 )
+from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.execution_profiles import KATA_RUNTIME
 from cloud_agent.sandbox_manager_client import SandboxManagerError
@@ -53,8 +54,8 @@ async def _moving_out(pool, host: str = "runner-a", allocation_id: str = "leavin
 
 async def test_a_checkpoint_on_a_host_moving_out_hands_its_group_over_at_once(pool, store: Storage):
     job, group = await _settled_stopped_group(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     await _moving_out(pool)
@@ -76,7 +77,7 @@ async def test_the_sweep_stops_an_idle_group_and_hands_it_over_once_covered(pool
     job, group = await _settled_stopped_group(pool, store)
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE agent_sandboxes SET state = 'running', container_id = 'container-a' "
+            "UPDATE agent_sandboxes SET state = 'running', container_id = 'container-aa' "
             "WHERE id = $1",
             group["sandbox_id"],
         )
@@ -120,7 +121,7 @@ async def test_a_busy_group_on_a_host_moving_out_is_left_running(pool, store: St
     _, group = await _settled_stopped_group(pool, store)
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE agent_sandboxes SET state = 'running', container_id = 'container-a', "
+            "UPDATE agent_sandboxes SET state = 'running', container_id = 'container-aa', "
             "active_operation_count = 1 WHERE id = $1",
             group["sandbox_id"],
         )
@@ -130,7 +131,7 @@ async def test_a_busy_group_on_a_host_moving_out_is_left_running(pool, store: St
         await store.sandbox.request_move_out_stop(
             sandbox_id=group["sandbox_id"],
             generation=group["generation"],
-            container_id="container-a",
+            container_id="container-aa",
             actor_id="host-move-out",
         )
         == "busy"
@@ -141,8 +142,8 @@ async def test_a_busy_group_on_a_host_moving_out_is_left_running(pool, store: St
 async def test_a_host_never_restores_its_own_cold_group(pool, store: Storage):
     """It may still hold the old container under the group's stable name."""
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
     assert (await _state(pool))["state"] == "cold"
@@ -185,8 +186,8 @@ async def test_a_machine_the_provider_ended_hands_its_covered_groups_over(pool, 
 async def test_a_turn_claimed_before_the_hold_keeps_its_group(pool, store: Storage):
     """It reserves the group only after its claim; moving the group would end it."""
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     claim = await _claim(store, "runner-a", _ARCHIVE_HOST)
     assert claim is not None and claim["id"] == follow_up["id"]
@@ -201,8 +202,8 @@ async def test_a_turn_claimed_before_the_hold_keeps_its_group(pool, store: Stora
 
 async def test_a_checkpoint_after_a_claimed_turn_does_not_move_its_group(pool, store: Storage):
     job, group = await _settled_stopped_group(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     claim = await _claim(store, "runner-a", _ARCHIVE_HOST)
     assert claim is not None and claim["id"] == follow_up["id"]
@@ -230,7 +231,7 @@ async def _captures(pool, host: str = "runner-a") -> None:
 async def _running(pool, sandbox_id: str) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE agent_sandboxes SET state = 'running', container_id = 'container-a' "
+            "UPDATE agent_sandboxes SET state = 'running', container_id = 'container-aa' "
             "WHERE id = $1",
             sandbox_id,
         )
@@ -410,8 +411,8 @@ async def test_a_turn_claimed_before_the_removal_moves_out_the_group_it_starts(
 ):
     """The group's checkpoint covers it now, but the turn starts it before any revocation."""
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     claim = await _claim(store, "runner-a", _ARCHIVE_HOST)
@@ -420,7 +421,7 @@ async def test_a_turn_claimed_before_the_removal_moves_out_the_group_it_starts(
     await _host(store, "runner-c", _RESTORE_HOST)
 
     removal = await store.host_pool.remove_host(host="runner-a")
-    await _run_claimed_turn(store, follow_up, claim, "runner-a", "container-a", job["base_sha"])
+    await _run_claimed_turn(store, follow_up, claim, "runner-a", "container-aa", job["base_sha"])
 
     # The group runs on the host now; revoking it would leave the group there.
     assert await store.host_pool.finish_host_removals() == []
@@ -455,8 +456,8 @@ async def test_a_turn_claimed_before_the_removal_moves_out_the_group_it_starts(
 async def test_removing_a_host_while_it_restores_a_group_moves_that_group_out(pool, store: Storage):
     """A restoring group is not counted, yet it runs on the host once its turn ends."""
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
@@ -557,8 +558,8 @@ async def test_a_reclaimed_machines_uncovered_group_is_lost_once_its_host_is_sil
 ):
     """Its only Docker copy is gone; its queued turns get an answer instead of waiting."""
     job, group = await _settled_stopped_group(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     await _on_machine(pool, "ended", observed_state="terminated")
@@ -762,8 +763,8 @@ async def test_a_removed_hosts_covered_group_whose_deletion_failed_is_handed_ove
     """The claim still serves such a group, so its checkpoint must still move it."""
     job, _ = await _covered(pool, store)
     await _deletion_failed(store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
 
@@ -800,8 +801,8 @@ async def test_a_removal_moves_out_a_running_group_whose_deletion_failed(pool, s
 async def test_a_reclaimed_machine_loses_a_group_whose_deletion_failed(pool, store: Storage):
     job, group = await _settled_stopped_group(pool, store)
     await _deletion_failed(store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     await _on_machine(pool, "ended", observed_state="terminated")
@@ -869,8 +870,8 @@ async def test_a_reclaimed_machine_finishes_a_pending_discard_without_its_host(
 ):
     """The container went with the machine; the host the discard waits for never answers."""
     job, group = await _settled_stopped_group(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     await _request_discard(store)
@@ -981,8 +982,8 @@ async def _queue(store: Storage) -> tuple[int, int]:
 async def test_queue_health_reports_a_moved_groups_turn_no_host_can_restore(pool, store: Storage):
     """The Host the group left still serves, but never claims its own cold group."""
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     await _moving_out(pool)
@@ -1000,8 +1001,8 @@ async def test_queue_health_lets_any_restore_host_take_a_removed_hosts_cold_grou
 ):
     """The Host it left is gone, which strands nothing while another can restore it."""
     job, _ = await _covered(pool, store)
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    follow_up = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert await store.host_pool.remove_host(host="runner-a") == "ok"

@@ -21,8 +21,6 @@ export interface SideChatSession {
   reviewSent?: boolean;
 }
 type Status = 'preparing' | 'waiting' | 'ready' | 'error';
-export const sideChatStorageKey = (userId: string, threadId: string) =>
-  sideChatKeys(userId, threadId).session;
 
 function read(key: string): SideChatSession | null {
   const raw = localStorage.getItem(key);

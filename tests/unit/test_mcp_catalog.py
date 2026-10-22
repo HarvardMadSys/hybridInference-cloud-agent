@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import httpx
@@ -16,6 +16,7 @@ from cloud_agent.api.mcp_connections import router
 from cloud_agent.mcp.catalog import McpCatalog, catalog_entry, fetch_catalog
 from cloud_agent.mcp.config_import import parse_import
 from cloud_agent.ports.mcp_catalog import McpCatalogSave, McpCatalogSync
+from cloud_agent.settings import number_setting
 
 _REGISTRY = "https://registry.modelcontextprotocol.io"
 
@@ -47,7 +48,7 @@ def repository(snapshot, *, source: McpCatalogSync | None = None):
     authority = source or sync()
     repo.begin_mcp_catalog_sync.return_value = authority
     repo.save_mcp_catalog.return_value = McpCatalogSave(
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         authority.registry_url,
         authority.settings_revision,
     )
@@ -125,7 +126,7 @@ def test_recommended_view_uses_exact_publishers_and_current_order_on_cached_data
             entry("io.github.github/github-mcp-server", "GitHub"),
             entry("com.notion/mcp", "Notion", supported=False),
         ],
-        "synced_at": datetime.now(timezone.utc),
+        "synced_at": datetime.now(UTC),
     }
     first = catalog.search(limit=2, recommended=True)
     assert [e["name"] for e in first["entries"]] == [
@@ -325,7 +326,7 @@ async def test_malformed_records_and_nested_shapes_do_not_hide_valid_entries():
 async def test_failed_sync_keeps_durable_snapshot_and_does_not_publish_partial_results(failure):
     old = {
         "entries": [catalog_entry(record())],
-        "synced_at": datetime.now(timezone.utc) - timedelta(hours=3),
+        "synced_at": datetime.now(UTC) - timedelta(hours=3),
     }
     repo = repository(old)
 
@@ -351,7 +352,7 @@ async def test_failed_sync_keeps_durable_snapshot_and_does_not_publish_partial_r
 async def test_falsey_non_string_cursor_keeps_snapshot_and_restarts_scan(cursor):
     old = {
         "entries": [catalog_entry(record("com.example/old"))],
-        "synced_at": datetime.now(timezone.utc) - timedelta(hours=3),
+        "synced_at": datetime.now(UTC) - timedelta(hours=3),
     }
     repo = repository(old)
     requests = []
@@ -460,7 +461,7 @@ async def test_oversized_normalized_page_stops_before_processing_every_record(mo
 async def test_transient_page_failure_resumes_without_publishing_partial_results():
     old = {
         "entries": [catalog_entry(record("com.example/old"))],
-        "synced_at": datetime.now(timezone.utc) - timedelta(hours=3),
+        "synced_at": datetime.now(UTC) - timedelta(hours=3),
     }
     repo = repository(old)
     first_sync = sync(generation=1)
@@ -510,7 +511,7 @@ async def test_transient_page_failure_resumes_without_publishing_partial_results
 async def test_registry_change_discards_an_incomplete_checkpoint():
     old = {
         "entries": [catalog_entry(record("com.example/old"))],
-        "synced_at": datetime.now(timezone.utc) - timedelta(hours=3),
+        "synced_at": datetime.now(UTC) - timedelta(hours=3),
     }
     repo = repository(old)
     repo.load_mcp_catalog.return_value = old
@@ -557,12 +558,12 @@ async def test_registry_change_discards_an_incomplete_checkpoint():
 async def test_completed_fetch_retries_storage_commit_without_refetching():
     old = {
         "entries": [catalog_entry(record("com.example/old"))],
-        "synced_at": datetime.now(timezone.utc) - timedelta(hours=3),
+        "synced_at": datetime.now(UTC) - timedelta(hours=3),
     }
     repo = repository(old)
     repo.save_mcp_catalog.side_effect = [
         TimeoutError("database timeout"),
-        McpCatalogSave(datetime.now(timezone.utc), _REGISTRY, 1),
+        McpCatalogSave(datetime.now(UTC), _REGISTRY, 1),
     ]
     requests = []
 
@@ -589,11 +590,11 @@ async def test_completed_fetch_retries_storage_commit_without_refetching():
 async def test_rejected_older_write_exposes_the_durable_winner_not_the_local_scan():
     old = {
         "entries": [catalog_entry(record("com.example/old"))],
-        "synced_at": datetime.now(timezone.utc) - timedelta(hours=3),
+        "synced_at": datetime.now(UTC) - timedelta(hours=3),
     }
     winner = {
         "entries": [catalog_entry(record("com.example/winner"))],
-        "synced_at": datetime.now(timezone.utc) + timedelta(seconds=1),
+        "synced_at": datetime.now(UTC) + timedelta(seconds=1),
         "registry_url": _REGISTRY,
         "settings_revision": 1,
         "generation": 2,
@@ -625,14 +626,14 @@ async def test_rejected_scan_does_not_adopt_an_intermediate_registry_winner():
     registry_c = "https://registry-c.example"
     old = {
         "entries": [catalog_entry(record("com.example/old"))],
-        "synced_at": datetime.now(timezone.utc) - timedelta(hours=3),
+        "synced_at": datetime.now(UTC) - timedelta(hours=3),
         "registry_url": registry_a,
         "settings_revision": 1,
         "generation": 0,
     }
     intermediate_winner = {
         "entries": [catalog_entry(record("com.example/intermediate"))],
-        "synced_at": datetime.now(timezone.utc),
+        "synced_at": datetime.now(UTC),
         "registry_url": registry_b,
         "settings_revision": 2,
         "generation": 2,
@@ -645,7 +646,7 @@ async def test_rejected_scan_does_not_adopt_an_intermediate_registry_winner():
     ]
     repo.save_mcp_catalog.side_effect = [
         McpCatalogSave(None, registry_c, 3),
-        McpCatalogSave(datetime.now(timezone.utc), registry_c, 3),
+        McpCatalogSave(datetime.now(UTC), registry_c, 3),
     ]
     requests = []
 
@@ -670,7 +671,7 @@ async def test_rejected_scan_does_not_adopt_an_intermediate_registry_winner():
 async def test_invalid_registry_setting_keeps_the_durable_snapshot(fresh):
     cached = {
         "entries": [catalog_entry(record("com.example/cached"))],
-        "synced_at": datetime.now(timezone.utc) - (timedelta() if fresh else timedelta(hours=3)),
+        "synced_at": datetime.now(UTC) - (timedelta() if fresh else timedelta(hours=3)),
     }
     repo = repository(cached, source=sync("http://private.example"))
     client = AsyncMock()
@@ -688,7 +689,7 @@ async def test_invalid_registry_setting_keeps_the_durable_snapshot(fresh):
 async def test_restart_uses_fresh_cache_without_network_and_searches_locally():
     cached = {
         "entries": [catalog_entry(record())],
-        "synced_at": datetime.now(timezone.utc),
+        "synced_at": datetime.now(UTC),
         "registry_url": _REGISTRY,
         "settings_revision": 1,
         "generation": 1,
@@ -709,11 +710,11 @@ async def test_saved_registry_url_replaces_fresh_catalog_on_next_refresh(monkeyp
     monkeypatch.setattr(
         catalog_module,
         "number_setting",
-        lambda name, default=None: 7 if name == "mcp_catalog_request_timeout_s" else default,
+        lambda name: 7 if name == "mcp_catalog_request_timeout_s" else number_setting(name),
     )
     cached = {
         "entries": [catalog_entry(record())],
-        "synced_at": datetime.now(timezone.utc),
+        "synced_at": datetime.now(UTC),
         "registry_url": _REGISTRY,
         "settings_revision": 1,
         "generation": 1,
@@ -743,7 +744,7 @@ async def test_full_refresh_removes_deleted_entries_and_commits_before_serving()
     repo = repository(
         {
             "entries": [catalog_entry(record())],
-            "synced_at": datetime.now(timezone.utc) - timedelta(hours=2),
+            "synced_at": datetime.now(UTC) - timedelta(hours=2),
             "registry_url": _REGISTRY,
             "settings_revision": 1,
             "generation": 1,
@@ -788,7 +789,7 @@ def test_catalog_route_requires_owner_and_validates_pagination():
     catalog = McpCatalog(AsyncMock(), AsyncMock())
     catalog.snapshot = {
         "entries": [catalog_entry(record())],
-        "synced_at": datetime.now(timezone.utc),
+        "synced_at": datetime.now(UTC),
     }
     app.state.mcp_catalog = catalog
     assert client.get("/v1/agent/mcp/catalog?recommended=true").json()["total"] == 0

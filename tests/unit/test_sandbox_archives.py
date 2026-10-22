@@ -28,9 +28,14 @@ from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,
 )
-from cloud_agent_host.sandbox_archives import SandboxArchiveService, SandboxInitialArchiveMarker
+from cloud_agent_host.sandbox_archives import (
+    CaptureGate,
+    SandboxArchiveService,
+    SandboxInitialArchiveMarker,
+)
 from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
 from cloud_agent_shared.errors import SandboxError
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -45,10 +50,13 @@ _PREPARATION_ID = "ajob_initial"
 
 
 def _config() -> SandboxArchiveS3Config:
-    return SandboxArchiveS3Config(
-        region=_REGION,
-        kms_key_arn=_KMS_KEY,
-        expected_bucket_owner=_ACCOUNT,
+    return SandboxArchiveS3Config.from_policy(
+        SandboxArchivePolicy(
+            enabled=True,
+            region=_REGION,
+            kms_key_arn=_KMS_KEY,
+            expected_bucket_owner=_ACCOUNT,
+        )
     )
 
 
@@ -259,20 +267,24 @@ def _zero_clock() -> float:
     return 0.0
 
 
-class _ContendedSlot(threading.BoundedSemaphore):
+class _ContendedSlot(CaptureGate):
     """The one capture slot, saying when a capture has to wait for it."""
 
     def __init__(self) -> None:
         super().__init__(1)
         self.contended = threading.Event()
+        self.urgent: list[bool] = []
 
-    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
-        if super().acquire(blocking=False):
+    def acquire(
+        self, blocking: bool = True, timeout: float | None = None, *, urgent: bool = False
+    ) -> bool:
+        self.urgent.append(urgent)
+        if super().acquire(blocking=False, urgent=urgent):
             return True
         if not blocking:
             return False
         self.contended.set()
-        return super().acquire(blocking=True, timeout=timeout)
+        return super().acquire(blocking=True, timeout=timeout, urgent=urgent)
 
 
 def _service(
@@ -280,7 +292,7 @@ def _service(
     uploader: _Uploader,
     *,
     capture_capacity: int = 1,
-    capture_slots: threading.BoundedSemaphore | None = None,
+    capture_slots: CaptureGate | None = None,
     spool_budget_bytes: int = 8 * 1024 * 1024 * 1024,
     max_upload_attempts: int = 3,
     retry_delay_s: float = 0,
@@ -391,6 +403,106 @@ def test_initial_capture_is_synchronous_workspace_only_and_returns_safe_receipt(
     assert uploader.bodies[0].closed
 
 
+def test_a_capture_someone_waits_on_asks_for_the_slot_ahead_of_background_work() -> None:
+    """A first prompt's capture is urgent; a stopped chat's final archive is not."""
+    spec = _spec()
+    running = _Manager(spec, running=True)
+    initial_slot = _ContendedSlot()
+    service = _service(running, _Uploader(_config()), capture_slots=initial_slot)
+    service.start()
+    try:
+        service.capture_initial(
+            RetainedChatBackend(running, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            base_sha=_BASE_SHA,
+            members=_members(),
+        )
+    finally:
+        service.close()
+    stopped = _Manager(spec, running=False)
+    final_slot = _ContendedSlot()
+    service = _service(stopped, _Uploader(_config()), capture_slots=final_slot)
+    service.start()
+    try:
+        service.queue_final(spec, stopped.current, ())
+    finally:
+        service.close()
+
+    assert initial_slot.urgent == [True]
+    assert final_slot.urgent == [False]
+
+
+class _GateHolder(threading.Thread):
+    """One capture holding the gate from when it is admitted until told to finish."""
+
+    def __init__(self, gate: CaptureGate, name: str, *, urgent: bool, order: list[str]) -> None:
+        super().__init__(name=name, daemon=True)
+        self.gate, self.urgent, self.order = gate, urgent, order
+        self.holding = threading.Event()
+        self.finish = threading.Event()
+
+    def run(self) -> None:
+        if self.gate.acquire(timeout=5, urgent=self.urgent):
+            self.order.append(self.name)
+            self.holding.set()
+            self.finish.wait(5)
+            self.gate.release()
+
+
+def _gate_queue_is(gate: CaptureGate, count: int) -> None:
+    deadline = time.monotonic() + 5
+    while len(gate._waiting) != count:
+        assert time.monotonic() < deadline, "the captures never queued"
+        time.sleep(0.001)
+
+
+def _hold_gate(gate: CaptureGate, name: str, *, urgent: bool, order: list[str]) -> _GateHolder:
+    capture = _GateHolder(gate, name, urgent=urgent, order=order)
+    capture.start()
+    return capture
+
+
+def test_an_urgent_capture_goes_first_but_overtakes_a_waiting_one_at_most_twice() -> None:
+    gate = CaptureGate(1)
+    order: list[str] = []
+    assert gate.acquire(timeout=1)
+    final = _hold_gate(gate, "final", urgent=False, order=order)
+    _gate_queue_is(gate, 1)
+    first = _hold_gate(gate, "first", urgent=True, order=order)
+    _gate_queue_is(gate, 2)
+
+    gate.release()
+    assert first.holding.wait(5)
+    second = _hold_gate(gate, "second", urgent=True, order=order)
+    _gate_queue_is(gate, 2)
+    third = _hold_gate(gate, "third", urgent=True, order=order)
+    _gate_queue_is(gate, 3)
+    first.finish.set()
+    assert second.holding.wait(5)
+    second.finish.set()
+    assert final.holding.wait(5), "overtaken twice, the final archive goes next"
+    final.finish.set()
+    assert third.holding.wait(5)
+    third.finish.set()
+    for capture in (final, first, second, third):
+        capture.join(5)
+
+    assert order == ["first", "second", "final", "third"]
+
+
+def test_the_capture_gate_is_a_bounded_semaphore_otherwise() -> None:
+    gate = CaptureGate(1)
+    assert gate.acquire(blocking=False)
+    assert not gate.acquire(blocking=False)
+    assert not gate.acquire(timeout=0.01, urgent=True)
+    assert gate._waiting == [], "a wait that ended leaves nothing queued"
+    gate.release()
+    with pytest.raises(ValueError, match="released too many times"):
+        gate.release()
+    assert gate.acquire(blocking=False, urgent=True)
+
+
 def test_initial_already_exists_is_a_successful_idempotent_result() -> None:
     spec = _spec()
     manager = _Manager(spec, running=True)
@@ -458,6 +570,40 @@ def test_initial_upload_failure_logs_safe_type_and_discards_the_spool(
     assert record.error_type == "RuntimeError"  # type: ignore[attr-defined]
     assert record.exc_info is None
     assert unsafe not in caplog.text
+
+
+def test_a_non_bytes_write_to_the_compressed_bundle_names_the_bundle_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compressed bundle's writer names what writes to it, not the per-path callback."""
+
+    def writes_text(out, **_kwargs: object) -> dict[str, object]:
+        out.write("not bytes")
+        return {}
+
+    monkeypatch.setattr(
+        "cloud_agent_host.sandbox_archives.build_sandbox_archive_bundle", writes_text
+    )
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(_config())
+    service = _service(manager, uploader)
+    service.start()
+    try:
+        with pytest.raises(
+            SandboxError, match=r"^sandbox archive bundle builder wrote non-bytes data$"
+        ):
+            service.capture_initial(
+                RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+                expected_container_id=_CONTAINER_ID,
+                preparation_id=_PREPARATION_ID,
+                base_sha=_BASE_SHA,
+                members=(),
+            )
+    finally:
+        service.close()
+
+    assert uploader.calls == []
 
 
 def test_initial_conditional_conflict_has_exactly_three_total_put_attempts(

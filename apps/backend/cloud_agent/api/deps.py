@@ -30,13 +30,15 @@ dependencies they asked for there. Three kinds arrive at this module:
   from inside this repository is to reach back into the gateway's database.
   Resolving a key to a user needs a gateway contract in ``gateway_contracts/`` and a
   ``GatewayClient`` method; until one exists the session is the only owner
-  credential. See MIGRATION.md's deferred register and its discarded-test row.
+  credential. See the extraction record's deferred register and its discarded-test row.
 
-- **One contract that did not come across, and is honest about it.**
-  ``get_log_store`` names a gateway-side table (``api_logs``). Nothing in this
-  repository produces it, so it answers ``None`` in every real deployment and
-  the code path behind it degrades the way it was written to: job spend is
-  reported as *absent* rather than as a fabricated zero.
+ - **One contract that did not come across, and is honest about it.**
+   ``get_log_store`` named a gateway-side table (``api_logs``). Nothing in this
+   repository produces it, so it answered ``None`` in every real deployment
+   and the code path behind it degraded the way it was written to: job spend
+   was reported as *absent* rather than as a fabricated zero. It is gone now
+   (#823): the job read sources spend from the grant ledger, the same
+   accounting the usage and admin surfaces use.
 
 **Every decision below fails closed.** An unset secret, an unreachable gateway,
 an unconfigured store: each is a refusal, never a pass. That is the one property
@@ -66,7 +68,6 @@ from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, setting_env
 from cloud_agent.source_control_runtime import (
-    RETRY_INTERVAL_S,
     GitHubAppState,
     LoadStatus,
     SourceControlRuntime,
@@ -209,9 +210,7 @@ def source_control_unavailable(provider: str) -> HTTPException:
                 "message": f"{name} is temporarily unavailable. Please try again shortly.",
             }
         },
-        headers={
-            "Retry-After": str(int(number_setting("github_reload_interval_s", RETRY_INTERVAL_S)))
-        },
+        headers={"Retry-After": str(int(number_setting("github_reload_interval_s")))},
     )
 
 
@@ -282,19 +281,6 @@ def get_gitlab_load_status(
 
 
 # ── The gateway-side contract that did not move ────────────────────────
-
-
-def get_log_store(request: Request) -> Any | None:
-    """Dependency to obtain the log store (if configured).
-
-    Job spend was summed from the gateway's ``api_logs`` ledger, and that
-    ledger stayed there — MIGRATION.md's "What stays in HybridInference" says
-    so explicitly. Nothing in this repository sets ``app.state.log_store``, so
-    this answers ``None`` and ``_job_usage`` omits spend and token totals from
-    the job response. Absent, deliberately, rather than a fabricated zero: a
-    zero would read as "this job was free".
-    """
-    return getattr(request.app.state, "log_store", None)
 
 
 # ── Agent permissions and credential namespaces ────────────────────────

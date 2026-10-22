@@ -13,7 +13,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -28,8 +28,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 REGISTRY_URL = "https://registry.modelcontextprotocol.io"
-SYNC_INTERVAL = 3600
-RETRY_INTERVAL = 300
 _OFFICIAL = "io.modelcontextprotocol.registry/official"
 # An editorial shortlist for common coding workflows, not a download ranking.
 # Match publisher identifiers, never display names. Metadata still comes from
@@ -211,7 +209,7 @@ def _remote_options(label: str, remote: dict[str, Any]) -> list[dict[str, str]]:
     return options
 
 
-def _package_option(label: str, package: dict[str, Any]) -> dict[str, str] | None:
+def _package_option(label: str, package: dict[str, Any]) -> dict[str, str] | None:  # noqa: C901, PLR0912 complexity baseline, #771
     """Prefill simple pinned npm/PyPI stdio installs; leave complex recipes explicit."""
     if (
         package.get("transport") != {"type": "stdio"}
@@ -309,7 +307,7 @@ def _icon_url(icons: Any) -> str | None:
     return str(candidates[0]["src"]) if candidates else None
 
 
-def catalog_entry(record: Mapping[str, Any]) -> dict[str, Any] | None:
+def catalog_entry(record: Mapping[str, Any]) -> dict[str, Any] | None:  # noqa: C901 complexity baseline, #771
     """Normalize one active latest record, preserving its publisher identifier."""
     metadata = record.get("_meta")
     if not isinstance(metadata, Mapping):
@@ -418,7 +416,7 @@ def _checkpoint_page(
         state.cursors.add(cursor)
 
 
-async def fetch_catalog(
+async def fetch_catalog(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     client: httpx.AsyncClient,
     *,
     checkpoint: _CatalogFetchCheckpoint | None = None,
@@ -436,7 +434,7 @@ async def fetch_catalog(
         raise ValueError("MCP Registry changed during directory sync")
     if state.complete:
         return sorted(state.entries.values(), key=_sort_key)
-    async with asyncio.timeout(number_setting("mcp_catalog_sync_timeout_s", 240)):
+    async with asyncio.timeout(number_setting("mcp_catalog_sync_timeout_s")):
         while state.pages < 1000:
             params = {"version": "latest", "limit": "100"}
             if state.next_cursor is not None:
@@ -445,7 +443,7 @@ async def fetch_catalog(
                 "GET",
                 f"{registry_url}/v0.1/servers",
                 params=params,
-                timeout=number_setting("mcp_catalog_request_timeout_s", 15),
+                timeout=number_setting("mcp_catalog_request_timeout_s"),
                 follow_redirects=False,
                 headers=IDENTITY_ENCODING_HEADERS,
             ) as response:
@@ -528,7 +526,7 @@ class McpCatalog:
 
     async def refresh(self) -> None:
         """Reuse a fresh durable snapshot or atomically publish one complete fetch."""
-        async with asyncio.timeout(number_setting("mcp_catalog_storage_timeout_s", 10)):
+        async with asyncio.timeout(number_setting("mcp_catalog_storage_timeout_s")):
             stored = await self.repository.load_mcp_catalog()
             current_sync = await self.repository.begin_mcp_catalog_sync()
         if stored is not None:
@@ -539,8 +537,8 @@ class McpCatalog:
         if (
             stored is not None
             and stored.get("registry_url") == registry_url
-            and (datetime.now(timezone.utc) - stored["synced_at"]).total_seconds()
-            < number_setting("mcp_catalog_sync_seconds", SYNC_INTERVAL)
+            and (datetime.now(UTC) - stored["synced_at"]).total_seconds()
+            < number_setting("mcp_catalog_sync_seconds")
         ):
             self._fetch_checkpoint = None
             return
@@ -559,7 +557,7 @@ class McpCatalog:
         entries = await fetch_catalog(self.client, checkpoint=checkpoint, registry_url=registry_url)
         if checkpoint.sync is None:  # pragma: no cover - constructed above
             raise RuntimeError("MCP catalog checkpoint has no database fence")
-        async with asyncio.timeout(number_setting("mcp_catalog_storage_timeout_s", 10)):
+        async with asyncio.timeout(number_setting("mcp_catalog_storage_timeout_s")):
             save = await self.repository.save_mcp_catalog(entries, checkpoint.sync)
             winner = None if save.saved_at is not None else await self.repository.load_mcp_catalog()
         if save.saved_at is not None:
@@ -593,14 +591,14 @@ class McpCatalog:
             try:
                 await self.refresh()
                 age = (
-                    (datetime.now(timezone.utc) - self.snapshot["synced_at"]).total_seconds()
+                    (datetime.now(UTC) - self.snapshot["synced_at"]).total_seconds()
                     if self.snapshot
                     else 0
                 )
-                delay = max(1, number_setting("mcp_catalog_sync_seconds", SYNC_INTERVAL) - age)
+                delay = max(1, number_setting("mcp_catalog_sync_seconds") - age)
             except Exception:
                 logger.warning("MCP directory sync failed; keeping cached servers", exc_info=True)
-                delay = number_setting("mcp_catalog_retry_seconds", RETRY_INTERVAL)
+                delay = number_setting("mcp_catalog_retry_seconds")
             await asyncio.sleep(delay)
 
     def search(
@@ -629,6 +627,6 @@ class McpCatalog:
             "next_offset": offset + limit if offset + limit < len(matches) else None,
             "synced_at": synced_at.isoformat() if synced_at else None,
             "stale": not synced_at
-            or (datetime.now(timezone.utc) - synced_at).total_seconds()
-            > 2 * number_setting("mcp_catalog_sync_seconds", SYNC_INTERVAL),
+            or (datetime.now(UTC) - synced_at).total_seconds()
+            > 2 * number_setting("mcp_catalog_sync_seconds"),
         }

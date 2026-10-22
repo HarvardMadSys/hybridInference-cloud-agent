@@ -119,6 +119,34 @@ def _error_detail(response: httpx.Response, refused: str) -> str:
     return f"{reason} ({problems})" if problems else reason
 
 
+def _group_identity(
+    spec: ChatSandboxSpec,
+    *,
+    members: builtins.list[dict[str, Any]],
+    expected_container_id: str | None,
+) -> dict[str, Any]:
+    """The wire identity of the group ``spec`` describes, with its member manifest.
+
+    The Sandbox Manager validates it as a
+    :class:`~cloud_agent_shared.sandbox_manager_wire.SharedGroupIdentity`.
+    """
+    return {
+        "sandbox_id": spec.sandbox_id,
+        "generation": spec.generation,
+        "origin_thread_id": spec.thread_id,
+        "runtime_id": spec.runtime_id,
+        "runtime_version": spec.runtime_version,
+        "sandbox_image_digest": spec.sandbox_image_digest,
+        "expected_container_id": expected_container_id,
+        "resident_slot_capacity": spec.resident_slot_capacity,
+        "memory_limit": spec.memory_limit,
+        "cpu_limit": spec.cpu_limit,
+        "disk_limit_mib": spec.disk_limit_mib,
+        "stop_timeout_s": spec.stop_timeout_s,
+        "members": members,
+    }
+
+
 class SessionSupervisorClient:
     """Use the sandbox manager credential without ever exposing it to a chat container."""
 
@@ -190,20 +218,57 @@ class SessionSupervisorClient:
         without the route answers 404/405, which fails the turn rather than
         starting an agent its servers were promised to.
         """
-        response = self._client.put(
-            f"{self._base_url}/workspaces/{quote(thread_id, safe='')}/ssh-access",
-            json={"access": access.model_dump(mode="json"), "starting": starting},
+        return self._request_object(
+            "PUT",
+            f"/workspaces/{quote(thread_id, safe='')}/ssh-access",
+            payload={"access": access.model_dump(mode="json"), "starting": starting},
             timeout=120,
+            unavailable="sandbox manager is unavailable",
+            refused="SSH access could not be applied",
+            invalid="SSH access returned invalid data",
         )
-        if response.is_error:
-            raise SessionSupervisorError(
-                response.status_code, _error_detail(response, "SSH access could not be applied")
-            )
-        return response.json()
 
     def close(self) -> None:
         """Close the reusable private HTTP connection pool."""
         self._client.close()
+
+    def _request_object(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: dict[str, Any] | None,
+        timeout: float | httpx.Timeout,
+        unavailable: str,
+        refused: str,
+        invalid: str,
+    ) -> dict[str, Any]:
+        """Run one ordinary request and return its JSON object.
+
+        Streaming turns and environment preparation have different ownership,
+        cancellation, and health-probe semantics and deliberately do not enter
+        this path.
+        """
+        try:
+            if payload is None:
+                response = self._client.request(method, f"{self._base_url}{path}", timeout=timeout)
+            else:
+                response = self._client.request(
+                    method, f"{self._base_url}{path}", json=payload, timeout=timeout
+                )
+        except httpx.HTTPError as exc:
+            raise SessionSupervisorError(503, unavailable) from exc
+        if response.is_error:
+            raise SessionSupervisorError(response.status_code, _error_detail(response, refused))
+        try:
+            body = response.json()
+        except ValueError as exc:
+            # This intentionally normalizes what used to escape as a raw
+            # JSONDecodeError/ValueError on successful malformed responses.
+            raise SessionSupervisorError(502, invalid) from exc
+        if not isinstance(body, dict):
+            raise SessionSupervisorError(502, invalid)
+        return body
 
     def _shared_request(
         self,
@@ -217,28 +282,16 @@ class SessionSupervisorClient:
         path = f"/shared-sandboxes/{quote(thread_id, safe='')}"
         if suffix:
             path += f"/{suffix}"
-        try:
-            response = self._client.request(
-                method,
-                f"{self._base_url}{path}",
-                json=payload,
-                timeout=self._client.timeout if timeout is None else timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise SessionSupervisorError(503, "shared Session Supervisor is unavailable") from exc
-        if response.is_error:
-            operation = suffix or "status"
-            raise SessionSupervisorError(
-                response.status_code,
-                _error_detail(
-                    response,
-                    f"shared Session Supervisor rejected the lifecycle transition ({operation})",
-                ),
-            )
-        body = response.json()
-        if not isinstance(body, dict):
-            raise SessionSupervisorError(502, "shared Session Supervisor returned invalid data")
-        return body
+        operation = suffix or "status"
+        return self._request_object(
+            method,
+            path,
+            payload=payload,
+            timeout=self._client.timeout if timeout is None else timeout,
+            unavailable="shared Session Supervisor is unavailable",
+            refused=f"shared Session Supervisor rejected the lifecycle transition ({operation})",
+            invalid="shared Session Supervisor returned invalid data",
+        )
 
     def apply_profiling_policy(self, policy: dict[str, Any]) -> dict[str, Any]:
         """Hand the sandbox manager one profiling policy and read back its confirmation.
@@ -253,19 +306,15 @@ class SessionSupervisorClient:
         was sent: the control plane records the confirmation, so a sandbox manager that
         rejected a newer revision must be visible rather than assumed.
         """
-        try:
-            response = self._client.post(f"{self._base_url}/profiling-policy", json=policy)
-        except httpx.HTTPError as exc:
-            raise SessionSupervisorError(503, "sandbox manager is unavailable") from exc
-        if response.is_error:
-            raise SessionSupervisorError(
-                response.status_code,
-                _error_detail(response, "sandbox manager rejected the profiling policy"),
-            )
-        body = response.json()
-        if not isinstance(body, dict):
-            raise SessionSupervisorError(502, "sandbox manager returned invalid data")
-        return body
+        return self._request_object(
+            "POST",
+            "/profiling-policy",
+            payload=policy,
+            timeout=self._client.timeout,
+            unavailable="sandbox manager is unavailable",
+            refused="sandbox manager rejected the profiling policy",
+            invalid="sandbox manager returned invalid data",
+        )
 
     def apply_host_settings(
         self, settings: dict[str, int], *, timeout: float = 5.0
@@ -278,20 +327,15 @@ class SessionSupervisorClient:
         host reports — not what it sent. Bounded well under the heartbeat
         interval, because it runs on the heartbeat thread.
         """
-        try:
-            response = self._client.post(
-                f"{self._base_url}/host-settings", json={"settings": settings}, timeout=timeout
-            )
-        except httpx.HTTPError as exc:
-            raise SessionSupervisorError(503, "sandbox manager is unavailable") from exc
-        if response.is_error:
-            raise SessionSupervisorError(
-                response.status_code, "sandbox manager rejected the runtime settings"
-            )
-        body = response.json()
-        if not isinstance(body, dict):
-            raise SessionSupervisorError(502, "sandbox manager returned invalid data")
-        return body
+        return self._request_object(
+            "POST",
+            "/host-settings",
+            payload={"settings": settings},
+            timeout=timeout,
+            unavailable="sandbox manager is unavailable",
+            refused="sandbox manager rejected the runtime settings",
+            invalid="sandbox manager returned invalid data",
+        )
 
     def apply_sandbox_archive_settings(
         self, settings: dict[str, Any], *, timeout: float = 5.0
@@ -303,39 +347,28 @@ class SessionSupervisorClient:
         identity. Re-sending an equal revision is idempotent and repairs a
         sandbox manager that restarted since the previous heartbeat.
         """
-        try:
-            response = self._client.post(
-                f"{self._base_url}/sandbox-archive-settings",
-                json={"settings": settings},
-                timeout=timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise SessionSupervisorError(503, "sandbox manager is unavailable") from exc
-        if response.is_error:
-            raise SessionSupervisorError(
-                response.status_code,
-                _error_detail(response, "sandbox manager rejected sandbox archive settings"),
-            )
-        body = response.json()
-        if not isinstance(body, dict):
-            raise SessionSupervisorError(502, "sandbox manager returned invalid data")
-        return body
+        return self._request_object(
+            "POST",
+            "/sandbox-archive-settings",
+            payload={"settings": settings},
+            timeout=timeout,
+            unavailable="sandbox manager is unavailable",
+            refused="sandbox manager rejected sandbox archive settings",
+            invalid="sandbox manager returned invalid data",
+        )
 
     def list(self) -> builtins.list[dict[str, Any]]:
         """Observe every retained container owned by this host's sandbox manager."""
-        try:
-            response = self._client.get(f"{self._base_url}/sandboxes")
-        except httpx.HTTPError as exc:
-            raise SessionSupervisorError(503, "chat Session Supervisor is unavailable") from exc
-        if response.is_error:
-            raise SessionSupervisorError(
-                response.status_code,
-                _error_detail(
-                    response, "chat Session Supervisor rejected the lifecycle observation"
-                ),
-            )
-        body = response.json()
-        rows = body.get("sandboxes") if isinstance(body, dict) else None
+        body = self._request_object(
+            "GET",
+            "/sandboxes",
+            payload=None,
+            timeout=self._client.timeout,
+            unavailable="chat Session Supervisor is unavailable",
+            refused="chat Session Supervisor rejected the lifecycle observation",
+            invalid="chat Session Supervisor returned invalid data",
+        )
+        rows = body.get("sandboxes")
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise SessionSupervisorError(502, "chat Session Supervisor returned invalid data")
         return [dict(row) for row in rows]
@@ -361,19 +394,9 @@ class SessionSupervisorClient:
             thread_id,
             "acquire",
             payload={
-                "sandbox_id": spec.sandbox_id,
-                "generation": spec.generation,
-                "origin_thread_id": spec.thread_id,
-                "runtime_id": spec.runtime_id,
-                "runtime_version": spec.runtime_version,
-                "sandbox_image_digest": spec.sandbox_image_digest,
-                "expected_container_id": expected_container_id,
-                "resident_slot_capacity": spec.resident_slot_capacity,
-                "memory_limit": spec.memory_limit,
-                "cpu_limit": spec.cpu_limit,
-                "disk_limit_mib": spec.disk_limit_mib,
-                "stop_timeout_s": spec.stop_timeout_s,
-                "members": members,
+                **_group_identity(
+                    spec, members=members, expected_container_id=expected_container_id
+                ),
                 "owner": owner,
                 "activation_generation": activation_generation,
                 "has_settled_context": has_settled_context,
@@ -391,18 +414,15 @@ class SessionSupervisorClient:
     def _manager_post(
         self, path: str, payload: dict[str, Any], *, timeout: float
     ) -> dict[str, Any]:
-        try:
-            response = self._client.post(f"{self._base_url}{path}", json=payload, timeout=timeout)
-        except httpx.HTTPError as exc:
-            raise SessionSupervisorError(503, "sandbox manager is unavailable") from exc
-        if response.is_error:
-            raise SessionSupervisorError(
-                response.status_code, _error_detail(response, f"sandbox manager refused {path}")
-            )
-        body = response.json()
-        if not isinstance(body, dict):
-            raise SessionSupervisorError(502, "sandbox manager returned invalid data")
-        return body
+        return self._request_object(
+            "POST",
+            path,
+            payload=payload,
+            timeout=timeout,
+            unavailable="sandbox manager is unavailable",
+            refused=f"sandbox manager refused {path}",
+            invalid="sandbox manager returned invalid data",
+        )
 
     def capture_environment_snapshot(
         self,
@@ -492,19 +512,9 @@ class SessionSupervisorClient:
             "archive-initial",
             timeout=900.0,
             payload={
-                "sandbox_id": spec.sandbox_id,
-                "generation": spec.generation,
-                "origin_thread_id": spec.thread_id,
-                "runtime_id": spec.runtime_id,
-                "runtime_version": spec.runtime_version,
-                "sandbox_image_digest": spec.sandbox_image_digest,
-                "expected_container_id": expected_container_id,
-                "resident_slot_capacity": spec.resident_slot_capacity,
-                "memory_limit": spec.memory_limit,
-                "cpu_limit": spec.cpu_limit,
-                "disk_limit_mib": spec.disk_limit_mib,
-                "stop_timeout_s": spec.stop_timeout_s,
-                "members": members,
+                **_group_identity(
+                    spec, members=members, expected_container_id=expected_container_id
+                ),
                 "token": token,
                 "preparation_id": preparation_id,
                 "base_sha": base_sha,
@@ -528,19 +538,9 @@ class SessionSupervisorClient:
             "archive-initial/status",
             timeout=900.0,
             payload={
-                "sandbox_id": spec.sandbox_id,
-                "generation": spec.generation,
-                "origin_thread_id": spec.thread_id,
-                "runtime_id": spec.runtime_id,
-                "runtime_version": spec.runtime_version,
-                "sandbox_image_digest": spec.sandbox_image_digest,
-                "expected_container_id": expected_container_id,
-                "resident_slot_capacity": spec.resident_slot_capacity,
-                "memory_limit": spec.memory_limit,
-                "cpu_limit": spec.cpu_limit,
-                "disk_limit_mib": spec.disk_limit_mib,
-                "stop_timeout_s": spec.stop_timeout_s,
-                "members": members,
+                **_group_identity(
+                    spec, members=members, expected_container_id=expected_container_id
+                ),
                 "token": token,
                 "preparation_id": preparation_id,
             },
@@ -628,10 +628,6 @@ class SessionSupervisorClient:
             "abandon",
             payload={"token": token, "lost": lost},
         )
-
-    def shared_status(self, thread_id: str) -> dict[str, Any]:
-        """Read one member plus its shared Docker group state."""
-        return self._shared_request("GET", thread_id)
 
     def stop_shared_idle(
         self,

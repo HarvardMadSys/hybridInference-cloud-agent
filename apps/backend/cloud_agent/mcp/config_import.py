@@ -29,11 +29,10 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
-
-import tomllib
 
 from cloud_agent.mcp.models import (
     AuthKind,

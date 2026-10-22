@@ -56,8 +56,7 @@ from cloud_agent_host.sandbox_manager import (
     MAX_TERMINAL_SESSIONS_PER_WORKSPACE,
     SharedIdleStopRequest,
     SharedTurnRequest,
-    TerminalRequest,
-    _run_terminal,
+    _run_sandbox,
     _terminal_sse_frame,
     _TerminalLimits,
     _TerminalManager,
@@ -402,7 +401,7 @@ class _SharedSupervisor:
             raise SandboxError("unknown member")
         return _descriptor(thread_id)
 
-    def list(self):
+    def list(self, *, background_recovery=False):
         return [_descriptor("athr_source"), _descriptor("athr_child")]
 
     def list_for_thread(self, thread_id: str):
@@ -977,7 +976,8 @@ async def test_targeted_inventory_is_authenticated_and_isolated_from_full_invent
     supervisor = _SharedSupervisor()
     calls = []
 
-    def failed_inventory():
+    def failed_inventory(*, background_recovery=False):
+        assert background_recovery is True
         calls.append(("list",))
         raise SandboxError("unrelated sandbox reconciliation failed")
 
@@ -1011,7 +1011,7 @@ async def test_targeted_inventory_is_authenticated_and_isolated_from_full_invent
 @pytest.mark.asyncio
 async def test_targeted_inventory_rejects_unknown_members_without_falling_back_to_full_inventory():
     supervisor = _SharedSupervisor()
-    supervisor.list = lambda: pytest.fail("targeted inventory must not list the host")
+    supervisor.list = lambda **_kwargs: pytest.fail("targeted inventory must not list the host")
     app = _app(supervisor)
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://sandbox_manager"
@@ -1093,7 +1093,7 @@ async def test_sandbox_inventory_reports_terminals_across_all_shared_members(
         replace(_descriptor("athr_source"), terminal_count=origin_count),
         replace(_descriptor("athr_child"), terminal_count=child_count),
     ]
-    supervisor.list = lambda: descriptors
+    supervisor.list = lambda **_kwargs: descriptors
     supervisor.list_for_thread = lambda _thread_id: descriptors
     app = _app(supervisor)
     async with AsyncClient(
@@ -1203,7 +1203,7 @@ async def test_native_question_reads_require_a_bounded_owner(params):
 @pytest.mark.parametrize("running", [True, False])
 async def test_inventory_syncs_one_group_and_reads_only_cached_resources(running):
     supervisor = _SharedSupervisor()
-    supervisor.list = lambda: [
+    supervisor.list = lambda **_kwargs: [
         replace(_descriptor("athr_source"), running=running),
         replace(_descriptor("athr_child"), running=running),
     ]
@@ -2180,17 +2180,6 @@ async def test_refused_terminal_creation_releases_its_activity_token():
     assert failed_cleanup == [("terminal_closed", "athr_source", "terminal-token", {})]
 
 
-def test_shared_one_shot_terminal_uses_group_writable_umask():
-    backend = _WorkspaceBackend()
-    result = _run_terminal(
-        backend,  # type: ignore[arg-type]
-        "/workspace",
-        TerminalRequest(command="touch shared.txt", cwd="/workspace", timeout_seconds=1),
-    )
-    assert result["exit_code"] == 0
-    assert backend.spawned[0].argv[-1].startswith("umask 0002; ")
-
-
 @pytest.mark.asyncio
 async def test_the_runner_sets_the_sandbox_managers_runtime_settings_over_its_own():
     """Apply runtime overrides and reset the complete configuration to defaults."""
@@ -2363,6 +2352,15 @@ async def test_admin_file_limits_reach_the_retained_workspace_reader_and_writer(
     ]
 
 
+def _git_transcript(spec) -> list[str]:
+    """A clean Git inspection's output, using the tags the script asked for."""
+    tags = {
+        kind: tag
+        for tag, kind in re.findall(r"(__HYI_[0-9a-f]{32}_(DIFF|COMMITS|STATUS)__)", spec.argv[-1])
+    }
+    return ["## main\n", f"\n{tags['DIFF']}\n", f"\n{tags['COMMITS']}\n", f"\n{tags['STATUS']}0\n"]
+
+
 def test_lower_terminal_output_limits_apply_to_existing_terminals():
     manager = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
     session = _TerminalSession(
@@ -2413,11 +2411,7 @@ async def test_lower_command_output_limit_stops_an_oversized_command(monkeypatch
             headers=headers,
             json={"settings": {"workspace_command_output_max_mib": 1}},
         )
-        command = await client.post(
-            "/workspaces/athr_source/terminal",
-            headers=headers,
-            json={"command": "print_many_bytes"},
-        )
+        command = await client.get("/workspaces/athr_source/git", headers=headers)
 
     assert configured.status_code == 200
     assert command.status_code == 413
@@ -2428,7 +2422,7 @@ async def test_lower_command_output_limit_stops_an_oversized_command(monkeypatch
 async def test_owner_commands_are_bounded_and_never_wait_on_the_lifecycle_pool(monkeypatch):
     """A flood of slow owner commands is refused, not queued ahead of turns.
 
-    Commands and Git inspection run on a pool of their own, bounded for each
+    Git inspection and exports run on a pool of their own, bounded for each
     workspace and for the sandbox manager; every lifecycle call keeps the
     loop's default pool, so a turn's settle or acquire never waits behind them.
     """
@@ -2438,10 +2432,13 @@ async def test_owner_commands_are_bounded_and_never_wait_on_the_lifecycle_pool(m
     supervisor.threads.add("athr_third")
     release = threading.Event()
 
-    def spawn(_spec):
+    def spawn(spec):
         release.wait(10)
         return SimpleNamespace(
-            lines=lambda: iter(()), kill=lambda: None, wait=lambda: 0, stderr_text=lambda: ""
+            lines=lambda: iter(_git_transcript(spec)),
+            kill=lambda: None,
+            wait=lambda: 0,
+            stderr_text=lambda: "",
         )
 
     monkeypatch.setattr(supervisor.workspace_backend, "spawn", spawn)
@@ -2451,13 +2448,7 @@ async def test_owner_commands_are_bounded_and_never_wait_on_the_lifecycle_pool(m
         transport=ASGITransport(app=app), base_url="http://sandbox_manager"
     ) as client:
         commands = [
-            asyncio.create_task(
-                client.post(
-                    f"/workspaces/{workspace}/terminal",
-                    headers=headers,
-                    json={"command": "sleep 119"},
-                )
-            )
+            asyncio.create_task(client.get(f"/workspaces/{workspace}/git", headers=headers))
             for workspace in ("athr_source", "athr_child", "athr_third")
             for _ in range(4)
         ]
@@ -2472,9 +2463,7 @@ async def test_owner_commands_are_bounded_and_never_wait_on_the_lifecycle_pool(m
         finally:
             release.set()
         answered = [response.status_code for response in await asyncio.gather(*commands)]
-        again = await client.post(
-            "/workspaces/athr_source/terminal", headers=headers, json={"command": "true"}
-        )
+        again = await client.get("/workspaces/athr_source/git", headers=headers)
 
     assert refused == [429] * 10
     assert status.status_code == 200
@@ -2564,7 +2553,7 @@ def _finish_within(seconds: float, function):
     return outcome["result"]
 
 
-def test_one_shot_command_output_survives_a_byte_that_is_not_utf8(tmp_path):
+def test_command_output_survives_a_byte_that_is_not_utf8(tmp_path):
     """A stray byte is replaced; it must not drop the output or wedge the read.
 
     Enough output follows it to fill a pipe: had the read stopped at the byte,
@@ -2572,28 +2561,38 @@ def test_one_shot_command_output_survives_a_byte_that_is_not_utf8(tmp_path):
     forever.
     """
     backend = _LocalRetainedBackend(str(tmp_path))
-    request = TerminalRequest(
-        command="printf 'hello\\n\\377'; head -c 400000 /dev/zero | tr '\\000' y",
-        cwd=str(tmp_path),
-        timeout_seconds=20,
+
+    status, output, _stderr = _finish_within(
+        30,
+        lambda: _run_sandbox(
+            backend,  # type: ignore[arg-type]
+            workdir=str(tmp_path),
+            script="printf 'hello\\n\\377'; head -c 400000 /dev/zero | tr '\\000' y",
+            env={},
+            timeout_s=20,
+        ),
     )
 
-    result = _finish_within(30, lambda: _run_terminal(backend, str(tmp_path), request))  # type: ignore[arg-type]
-
-    assert result["exit_code"] == 0
-    assert result["output"] == "hello\n\ufffd" + "y" * 400000
+    assert status == 0
+    assert output == "hello\n\ufffd" + "y" * 400000
     assert backend.manager.calls == []
 
 
-def test_one_shot_command_deadline_covers_a_command_that_closed_its_output(tmp_path):
+def test_command_deadline_covers_a_command_that_closed_its_output(tmp_path):
     backend = _LocalRetainedBackend(str(tmp_path))
-    request = TerminalRequest(
-        command="exec >/dev/null; sleep 10", cwd=str(tmp_path), timeout_seconds=1
-    )
     started = time.monotonic()
 
     with pytest.raises(HTTPException) as timed_out:
-        _finish_within(8, lambda: _run_terminal(backend, str(tmp_path), request))  # type: ignore[arg-type]
+        _finish_within(
+            8,
+            lambda: _run_sandbox(
+                backend,  # type: ignore[arg-type]
+                workdir=str(tmp_path),
+                script="exec >/dev/null; sleep 10",
+                env={},
+                timeout_s=1,
+            ),
+        )
 
     assert timed_out.value.status_code == 408
     assert time.monotonic() - started < 5
@@ -2605,21 +2604,18 @@ def test_oversized_output_without_newlines_is_refused_before_it_is_buffered(tmp_
     """The limit holds for what the sandbox manager holds, not just what it returns."""
     backend = _LocalRetainedBackend(str(tmp_path))
     limit = 1024 * 1024
-    request = TerminalRequest(
-        command="head -c 33554432 /dev/zero | tr '\\000' x",
-        cwd=str(tmp_path),
-        timeout_seconds=20,
-    )
 
     tracemalloc.start()
     try:
         with pytest.raises(HTTPException) as refused:
             _finish_within(
                 30,
-                lambda: _run_terminal(
+                lambda: _run_sandbox(
                     backend,  # type: ignore[arg-type]
-                    str(tmp_path),
-                    request,
+                    workdir=str(tmp_path),
+                    script="head -c 33554432 /dev/zero | tr '\\000' x",
+                    env={},
+                    timeout_s=20,
                     max_output_bytes=limit,
                 ),
             )
@@ -2663,15 +2659,16 @@ def test_a_command_stopped_for_overrunning_answers_why_even_if_its_kill_fails(
     """
     backend = _LocalRetainedBackend(str(tmp_path))
     backend.manager = _ReceiptGoneManager()
-    request = TerminalRequest(command=command, cwd=str(tmp_path), timeout_seconds=timeout_seconds)
 
     with pytest.raises(HTTPException) as stopped:
         _finish_within(
             30,
-            lambda: _run_terminal(
+            lambda: _run_sandbox(
                 backend,  # type: ignore[arg-type]
-                str(tmp_path),
-                request,
+                workdir=str(tmp_path),
+                script=command,
+                env={},
+                timeout_s=timeout_seconds,
                 max_output_bytes=1024 * 1024,
             ),
         )
@@ -3711,7 +3708,7 @@ async def test_inventory_rows_carry_each_groups_latest_checkpoint(tmp_path):
         base_image="sha256:" + "b" * 64,
         runtime_id="claude-code",
         runtime_version=None,
-        object_key="key",
+        object_key="cloud-agent/sandbox/v2/" + "d" * 64 + "/g1/" + "c" * 32 + ".oci.tar",
         version_id="v1",
         sha256="e" * 64,
         size_bytes=10,

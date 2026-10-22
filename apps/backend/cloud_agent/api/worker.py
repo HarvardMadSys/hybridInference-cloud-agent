@@ -34,6 +34,7 @@ from cloud_agent.api._body_limits import (
     payload_too_large,
     read_bounded_body,
 )
+from cloud_agent.api._sensitive_routes import no_store, no_store_exception
 from cloud_agent.api._workspace_access import (
     _workspace_id,
     _workspace_not_ready,
@@ -173,7 +174,7 @@ if TYPE_CHECKING:
         SshServerRepository,
     )
     from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
-    from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.environments import EnvironmentExecutionRepository
     from cloud_agent.sandbox_manager_client import SandboxManagerClient
 
 
@@ -231,25 +232,24 @@ class _BoundedTurnResourcesRoute(HostBodyLimitRoute):
                 response = await handler(request)
             except RequestValidationError:
                 # Missing fields otherwise repeat the entire input per error.
-                # A fixed response also keeps malformed reports out of logs
-                # and avoids returning any caller-supplied telemetry content.
-                return JSONResponse(
-                    status_code=422,
-                    content={
-                        "detail": {
-                            "error": {
-                                "type": "invalid_request",
-                                "message": "Invalid turn resource snapshot.",
+                # A fixed response keeps malformed reports and their content out of logs.
+                return no_store(
+                    JSONResponse(
+                        status_code=422,
+                        content={
+                            "detail": {
+                                "error": {
+                                    "type": "invalid_request",
+                                    "message": "Invalid turn resource snapshot.",
+                                }
                             }
-                        }
-                    },
-                    headers={"Cache-Control": "no-store"},
+                        },
+                    )
                 )
             except HTTPException as exc:
-                exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+                no_store_exception(exc)
                 raise
-            response.headers["Cache-Control"] = "no-store"
-            return response
+            return no_store(response)
 
         return bounded_handler
 
@@ -263,13 +263,7 @@ logger = get_logger("cloud_agent.api.routes")
 
 
 class _WorkerStorage(Protocol):
-    """The capabilities the runner-facing surface reaches the store for.
-
-    ``attachments`` is here for the claim that tells a host how many uploads the
-    conversation carries, and for the two endpoints that hand them over.
-    ``pending_messages`` and ``skills`` are the finish's: a turn that ends sends
-    the owner's next waiting message, checked like any message.
-    """
+    """Capabilities reached by runner endpoints and their claim/finish helpers."""
 
     agent_memory: AgentMemoryRepository
     attachments: AttachmentRepository
@@ -288,7 +282,12 @@ class _WorkerStorage(Protocol):
     sandbox: SandboxRepository
     skills: SkillRepository
     source_control: SourceControlPort
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentExecutionRepository:
+        """Environment persistence needed by this flow."""
+        ...
+
     environment_snapshots: EnvironmentSnapshotRepository
     ssh_servers: SshServerRepository
 
@@ -382,14 +381,13 @@ def _worker_claims(authorization: str | None) -> dict[str, Any]:
             detail={"error": {"type": "unauthorized", "message": f"Invalid worker token: {exc}"}},
         ) from exc
     if claims.get("scope") != SCOPE_FULL:
-        # Anything that is not the runner's full-scope control token. Two
-        # narrower scopes exist and neither belongs here: ``mcp``, which the
-        # sandbox carries to reach this service's MCP relay, and ``model``,
-        # which predates the gateway grant and is kept only for jobs started
-        # before the cutover.
+        # Anything that is not the runner's full-scope control token. The one
+        # narrower worker scope is ``mcp``, which the sandbox carries to reach
+        # this service's MCP relay. (The old ``model`` scope, which predated
+        # the gateway grant, no longer parses at all: #822.)
         #
-        # This is the structural refusal for both — and the reason the relay's
-        # own check is written positively rather than as "not full". A sandbox
+        # This is the structural refusal — and the reason the relay's own
+        # check is written positively rather than as "not full". A sandbox
         # credential arriving on the worker surface is what an escaped
         # credential looks like.
         raise HTTPException(
@@ -398,7 +396,7 @@ def _worker_claims(authorization: str | None) -> dict[str, Any]:
                 "error": {
                     "type": "insufficient_scope",
                     "message": (
-                        "This credential may only be used for model calls, not for "
+                        "This credential may only be used for MCP relay calls, not for "
                         "reporting job state."
                     ),
                 }
@@ -929,7 +927,7 @@ async def worker_claim(
         ) from exc
 
 
-async def _hand_over_claim(
+async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     job_store: _WorkerStorage,
     claim: dict[str, Any],
     *,
@@ -1284,16 +1282,15 @@ async def _hand_over_claim(
 @router.post("/worker/wait", response_model=WorkerWaitResponse)
 async def worker_wait(
     body: WorkerWaitRequest,
-    _claiming_host: dict[str, str] = Depends(verify_claiming_host),
+    claiming_host: dict[str, str] = Depends(verify_claiming_host),
     signal: WorkSignal | None = Depends(get_work_signal),
 ) -> WorkerWaitResponse:
     """Hold an idle host's request until there may be work, then answer.
 
     A host whose claim found nothing asks here instead of sleeping out its poll
-    interval, and claims again when this answers: at once if the token it
-    passes is stale, when a job is queued, requeued or ends, or after
-    ``timeout_seconds`` regardless. The answer is the token for its next wait
-    and never a job; the claim stays the only way to take one.
+    interval, and claims again when this answers: at once if its token is stale,
+    when a job it may take is queued, requeued or ends, or after ``timeout_seconds``.
+    The answer is the token for its next wait, never a job: only a claim takes one.
 
     Enrolled hosts only, like the claim it precedes. 404 where nothing listens
     for work, which is also what a control plane predating this answers, so a
@@ -1309,7 +1306,8 @@ async def worker_wait(
                 }
             },
         )
-    return WorkerWaitResponse(token=await signal.wait(body.since, body.timeout_seconds))
+    token = await signal.wait(body.since, body.timeout_seconds, host=claiming_host["host"])
+    return WorkerWaitResponse(token=token)
 
 
 @router.post("/worker/jobs/{job_id}/heartbeat", response_model=WorkerHeartbeatResponse)

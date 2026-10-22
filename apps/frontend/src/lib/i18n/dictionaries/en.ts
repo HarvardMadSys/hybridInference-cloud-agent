@@ -1,3 +1,5 @@
+import { modelSelectionEn } from './modelSelection';
+
 /**
  * The source dictionary.
  *
@@ -480,7 +482,6 @@ export const en = {
   'sidebar.archived': 'Archived',
   'sidebar.noJobs': 'No jobs yet.',
   'sidebar.resize': 'Resize task list',
-  'sidebar.showMore': 'Show {count} more',
   'sidebar.newTaskIn': 'New task in {project}',
   'sidebar.runningOrQueued': '{count} running or queued',
   'sidebar.pin': 'Pin {title}',
@@ -542,7 +543,7 @@ export const en = {
   'settings.backToChats': 'Back to chats',
   'settings.collapseNavigation': 'Collapse settings navigation',
   'settings.expandNavigation': 'Expand settings navigation',
-  'settings.personalDescription': 'Manage your profile and notifications.',
+  'settings.personalDescription': 'Manage your profile, default model, and notifications.',
   'settings.plugins': 'Plugins & MCPs',
   'settings.pluginsDescription':
     'Connect MCP servers and manage the skills available to your agents.',
@@ -563,8 +564,6 @@ export const en = {
   'settings.helpEnvironment': '2. Set up a repository environment (optional)',
   'settings.helpChat': '3. Start a chat',
   'settings.title': 'My Settings',
-  'settings.description':
-    'Manage your profile, connections, skills, memory, notifications, and keyboard shortcuts.',
   'settings.shortcuts.title': 'Keyboard shortcuts',
   'settings.shortcuts.description':
     'Customize navigation shortcuts. Changes apply immediately and are saved for your account in this browser.',
@@ -636,7 +635,6 @@ export const en = {
   'settings.memory.addLabel': 'New memory',
   'settings.memory.addPlaceholder': 'A rule to follow from now on, such as: Reply in Chinese.',
   'settings.memory.add': 'Add',
-  'settings.memory.adding': 'Adding…',
   'settings.memory.memories': 'Saved memories',
   'settings.memory.count': '{count}/30',
   'settings.memory.empty':
@@ -673,6 +671,7 @@ export const en = {
   'settings.projectMemory.projectsError': 'Could not load repositories.',
   'settings.projectMemory.noProjects': 'Repositories you work in appear here.',
   'settings.projectMemory.confirmTitle': 'Clear the memory of {repo}?',
+  ...modelSelectionEn,
   'settings.notifications.title': 'Notifications',
   'settings.notifications.description':
     'Get browser notifications when an agent asks a question or finishes a turn. Keep the app open to receive them.',
@@ -789,13 +788,11 @@ export const en = {
     'Unarchive this session to use its terminal. Git and files remain available for viewing.',
 
   'settings.appearance.title': 'Appearance',
-  'settings.appearance.theme': 'Theme',
   'settings.appearance.light': 'Light',
   'settings.appearance.dark': 'Dark',
   'settings.appearance.system': 'System',
 
   'settings.language.title': 'Language',
-  'settings.language.label': 'Display language',
 
   'settings.gettingStarted.about': 'What is getting started?',
   'settings.gettingStarted.help': 'Takes you from connecting GitHub to your first task.',
@@ -953,10 +950,6 @@ export const en = {
   'composer.chooseRepository': 'Choose a repository first',
   'composer.branch': 'Branch',
   'composer.agent': 'Agent',
-  'picker.search': 'Search…',
-  'picker.noResults': 'No matching options',
-  'composer.model': 'Model',
-  'composer.reasoning': 'Reasoning',
   'composer.run': 'Run',
   'composer.starting': 'Starting…',
   'composer.runTitle': 'Run — ⏎ to send, ⇧⏎ for a new line',

@@ -11,7 +11,7 @@ import asyncio
 import re
 import secrets
 from contextlib import suppress
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -20,6 +20,7 @@ from pydantic import SecretStr
 from cloud_agent.application.compute_rotation import ComputeRotation
 from cloud_agent.application.compute_setup import HostRelease, load_control_plane_host_release
 from cloud_agent.application.host_commands import HostCommands
+from cloud_agent.application.release_inventory import quiesce_and_scan
 from cloud_agent.compute_config import current_observation_seconds, current_registration_url
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import (
@@ -47,7 +48,6 @@ from cloud_agent.ports.external.host_bootstrap import (
     BootstrapIntent,
     BootstrapResult,
     DeploymentProfile,
-    RecordedHostState,
 )
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
@@ -143,7 +143,7 @@ def _preferred_host_key(keys: list[str]) -> str:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _provider_observation_is_fresh(observation: ResourceObservation) -> bool:
@@ -151,7 +151,7 @@ def _provider_observation_is_fresh(observation: ResourceObservation) -> bool:
     observed_at = observation.observed_at
     if observed_at.tzinfo is None:
         return False
-    age = (_now() - observed_at.astimezone(timezone.utc)).total_seconds()
+    age = (_now() - observed_at.astimezone(UTC)).total_seconds()
     return -30 <= age <= 300
 
 
@@ -208,7 +208,7 @@ _SAFE_PROVIDER_REASONS = {
 }
 
 
-def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:
+def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:  # noqa: PLR0912 complexity baseline, #771
     """Validate provider diagnostic values as well as their field names."""
     details: dict[str, str | int | bool] = {}
     operation = source.get("provider_operation")
@@ -407,20 +407,9 @@ class ComputeReconciler:
         """Observe leases and submit renewals even while retirement is blocked."""
         now = _now()
         observation_seconds = current_observation_seconds(self.commands.configuration)
-        rows = await self.repository.list_allocations()
-        # The bundle is needed only for a managed allocation still being kept
-        # present; with none, the pass reads nothing from disk (issue #770).
-        # The first load of a pass runs in a thread: reading and validating the
-        # archive is tens of milliseconds of otherwise event-loop stall.
-        release = None
-        if any(
-            row.get("desired_state") == "present"
-            and not row.get("release_committed_at")
-            and row.get("observed_state") not in {"terminated", "absent"}
-            for row in rows
-        ):
-            release = await asyncio.to_thread(load_control_plane_host_release)
-        for row in rows:
+        release = await asyncio.to_thread(load_control_plane_host_release)
+        snapshot = await self.repository.scheduling_inventory()
+        for row in snapshot.allocations:
             if row.get("observed_state") == "terminated":
                 await self._lose_reclaimed_groups(row)
             if row.get("release_committed_at") or row.get("observed_state") in {
@@ -428,7 +417,7 @@ class ComputeReconciler:
                 "absent",
             }:
                 continue
-            operations = await self.repository.list_operations(allocation_id=row["id"])
+            operations = snapshot.operations.get(row["id"], [])
             if row.get("external_id"):
                 observed = _moment(row.get("observed_at"))
                 due = observed is None or (now - observed).total_seconds() >= observation_seconds
@@ -463,9 +452,7 @@ class ComputeReconciler:
                 seconds=renew_before
             ):
                 continue
-            lifecycle = await self.repository.list_operations(
-                allocation_id=row["id"], kinds=["extend", "rotate"]
-            )
+            lifecycle = snapshot.lifecycle_operations.get(row["id"], [])
             trigger = self.rotation.due(row, policy, lifecycle, now, expires)
             # A rollout already occupies this machine. Keep renewing the lease
             # it is still serving; do not start a node replacement beside it.
@@ -578,7 +565,7 @@ class ComputeReconciler:
             reason=f"{remaining} groups not moved",
         )
 
-    async def execute(self, operation: dict[str, Any]) -> None:
+    async def execute(self, operation: dict[str, Any]) -> None:  # noqa: C901, PLR0912 complexity baseline, #771
         """Execute one claimed operation; public diagnostics contain no remote output."""
         try:
             kind = operation["kind"]
@@ -778,7 +765,7 @@ class ComputeReconciler:
             },
         )
 
-    async def _acquire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
+    async def _acquire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         provider = self.commands.registry.get(allocation["provider_id"]).provider
         observation: ResourceObservation | None
         if allocation.get("external_id"):
@@ -1167,7 +1154,7 @@ class ComputeReconciler:
             for op in operations
         )
 
-    async def _upgrade(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
+    async def _upgrade(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:  # noqa: PLR0912 complexity baseline, #771
         """Deploy this control plane's host bundle and record that release.
 
         The host recipe builds the replacement before it drains runners, and it
@@ -1748,7 +1735,7 @@ class ComputeReconciler:
             result={"external_pending": False, "blocked_reasons": []},
         )
 
-    async def _retire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
+    async def _retire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:  # noqa: PLR0912 complexity baseline, #771
         if not allocation.get("release_committed_at"):
             if allocation.get("desired_state") == "absent" and allocation.get("observed_state") in {
                 "terminated",
@@ -2082,6 +2069,7 @@ class ComputeReconciler:
             registration = await self.repository.node_registration(allocation_id=allocation["id"])
             never_registered = registration is None or not registration.get("registered_at")
         bound = {host.get("compute_node_id") for host in allocation.get("hosts", [])}
+        scans: list[dict[str, Any]] = []
         for node in allocation["nodes"]:
             if (
                 never_registered
@@ -2089,23 +2077,17 @@ class ComputeReconciler:
                 and node["id"] not in bound
             ):
                 continue
-            intent = self._bootstrap_intent(operation, allocation, node)
-            # Receipts the Host keeps of what the control plane recorded, and
-            # nothing else, are not retained state.
-            receipts = RecordedHostState.model_validate(
-                await self.repository.recorded_host_state(host=intent.host)
+            await quiesce_and_scan(
+                self.bootstrap,
+                lambda host: self.repository.recorded_host_state(host=host),
+                lambda result: self._checkpoint(operation, operation["step"], result),
+                operation,
+                self._node(node),
+                node["id"],
+                profile,
+                self._bootstrap_intent(operation, allocation, node),
+                scans,
             )
-            proof = await self.bootstrap.inventory(self._node(node), profile, intent, receipts)
-            if (
-                not proof.complete
-                or proof.retained_containers
-                or proof.unknown_containers
-                or proof.orphan_state
-            ):
-                raise ProviderError(
-                    "inventory_not_empty",
-                    "Stopped containers, unrecognized containers, or retained files prevent release",
-                )
         recorded = await self.repository.record_inventory(
             allocation_id=allocation["id"],
             hosts=[h["host"] for h in allocation.get("hosts", [])],
