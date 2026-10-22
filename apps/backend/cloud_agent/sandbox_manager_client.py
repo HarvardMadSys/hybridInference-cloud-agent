@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import base64
+import asyncio
 import copy
 import json
 from contextlib import asynccontextmanager
@@ -19,6 +19,11 @@ from cloud_agent_shared.environment import (
     environment_payload,
     uses_inference_names,
 )
+from cloud_agent_shared.git.base_bundle_stream import (
+    BASE_BUNDLE_CONTENT_TYPE,
+    BASE_BUNDLE_STREAM_CHUNK_BYTES,
+    encode_base_bundle_metadata,
+)
 from cloud_agent_shared.operation_profiling import (
     MAX_CONTEXT_CHARS,
     PROFILING_CONTEXT_HEADER,
@@ -30,6 +35,7 @@ from cloud_agent_shared.storable_text import storable_json
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
+    from typing import BinaryIO
 
 
 SHARED_SESSION_FORK_TIMEOUT_S = 180.0
@@ -49,6 +55,25 @@ MAX_SANDBOX_MANAGER_CONTENT_BYTES = 32 * 1024 * 1024
 MAX_SANDBOX_MANAGER_CONTROL_BYTES = 16 * 1024 * 1024
 #: The route suffixes whose replies are workspace content.
 _CONTENT_ROUTES = frozenset({"files", "git", "snapshot"})
+
+
+def _rewind_and_size(bundle: BinaryIO) -> int:
+    """Rewind a seekable bundle and return its exact byte length."""
+    bundle.seek(0, 2)
+    size = bundle.tell()
+    bundle.seek(0)
+    return size
+
+
+async def _base_bundle_body(prefix: bytes, bundle: BinaryIO) -> AsyncIterator[bytes]:
+    """Yield one framed request while keeping the source reusable on failure."""
+    bundle.seek(0)
+    try:
+        yield prefix
+        while chunk := await asyncio.to_thread(bundle.read, BASE_BUNDLE_STREAM_CHUNK_BYTES):
+            yield chunk
+    finally:
+        bundle.seek(0)
 
 
 async def _read_capped(response: httpx.Response, limit: int) -> bytes | None:
@@ -297,6 +322,8 @@ class SandboxManagerClient:
         *,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        content: AsyncIterator[bytes] | None = None,
+        headers: Mapping[str, str] | None = None,
         timeout: float = 60,
     ) -> dict[str, Any]:
         """Call the private shared-live supervisor for one membership."""
@@ -316,9 +343,10 @@ class SandboxManagerClient:
                     method,
                     f"{self._base_url}{path}",
                     limit=limit,
-                    headers=self._headers,
+                    headers={**self._headers, **(headers or {})},
                     params=params,
                     json=json,
+                    content=content,
                     timeout=timeout,
                 )
         except httpx.HTTPError as exc:
@@ -907,20 +935,27 @@ class SandboxManagerClient:
         snapshot: dict[str, Any],
         *,
         commit_sha: str,
-        bundle: bytes,
+        bundle: BinaryIO,
     ) -> dict[str, Any]:
-        """Import trusted commit objects without changing workspace state."""
-        payload = {
+        """Stream trusted commit objects without changing workspace state."""
+        metadata = {
             **identity_from_row(snapshot, members=snapshot["members"]),
             "snapshot_id": snapshot["snapshot_id"],
             "commit_sha": commit_sha,
-            "bundle_b64": base64.b64encode(bundle).decode("ascii"),
         }
+        prefix = encode_base_bundle_metadata(metadata)
+        size = _rewind_and_size(bundle)
+        if size <= 0:
+            raise ValueError("base bundle must be non-empty")
         return await self._shared_sandbox_request(
             "POST",
             str(snapshot["origin_thread_id"]),
             "import-base",
-            json=payload,
+            content=_base_bundle_body(prefix, bundle),
+            headers={
+                "Content-Type": BASE_BUNDLE_CONTENT_TYPE,
+                "Content-Length": str(len(prefix) + size),
+            },
             timeout=360,
         )
 

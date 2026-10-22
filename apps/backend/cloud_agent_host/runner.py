@@ -1896,13 +1896,13 @@ def _import_retained_base(
             held = (parent.stdout.strip() or None) if parent.returncode == 0 else None
             if held and not _sandbox_has_commit(CHAT_WORKDIR, held, backend):
                 held = None
-        bundle = build_base_bundle(source, commit=resolved, prerequisite=held)
-        manager.import_base_bundle(
-            spec,
-            bundle,
-            commit=resolved,
-            env=dict(_SAFE_DIRECTORY_ENV),
-        )
+        with build_base_bundle(source, commit=resolved, prerequisite=held) as bundle:
+            manager.import_base_bundle(
+                spec,
+                bundle,
+                commit=resolved,
+                env=dict(_SAFE_DIRECTORY_ENV),
+            )
     return resolved
 
 

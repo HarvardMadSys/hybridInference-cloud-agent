@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -601,7 +602,7 @@ async def test_an_import_answered_by_the_old_host_after_the_restore_changes_noth
     answered: list[int] = []
 
     class _OldHost:
-        async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
+        async def import_shared_base(self, row, *, commit_sha: str, bundle):
             assert (row["generation"], row["container_id"]) == (1, "container-a")
             answered.append(row["generation"])
             return {"ok": True}
@@ -613,7 +614,7 @@ async def test_an_import_answered_by_the_old_host_after_the_restore_changes_noth
     monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", route)
 
     assert not await publish_worker._import_snapshot_base(
-        store, snapshot=sent, commit_sha=commit_sha, bundle=b"bundle"
+        store, snapshot=sent, commit_sha=commit_sha, bundle=io.BytesIO(b"bundle")
     )
     assert answered == [1]
 

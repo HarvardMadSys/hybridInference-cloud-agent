@@ -122,6 +122,7 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
 )
 from cloud_agent_host.sandbox_checkpoints import checkpoint_image_reference
+from cloud_agent_host.stream_input import interactive_input, require_nonempty_rewindable
 from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
 from cloud_agent_shared.environment import (
     DOCKER_CLIENT_ENV as _DOCKER_CLIENT_ENV,
@@ -2644,6 +2645,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         workdir: str = CHAT_WORKDIR,
         timeout_s: float = 60,
         input_bytes: bytes | None = None,
+        stdin: BinaryIO | None = None,
         user_uid: int | None = None,
         user_gid: int | None = None,
         observer: StageObserver | None = None,
@@ -2664,11 +2666,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         )
         if not current.running:
             raise SandboxError("chat sandbox must be started before exec")
-        interactive = input_bytes is not None
-        if self.backend.runtime == KATA_RUNTIME and not input_bytes:
-            # Attaching and immediately closing an empty stdin can wedge the
-            # Kata shim. build_exec_command supplies /dev/null in this case.
-            interactive = False
+        interactive = interactive_input(input_bytes, stdin, self.backend.runtime == KATA_RUNTIME)
         command = self.build_exec_command(
             spec,
             argv,
@@ -2685,6 +2683,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                     command,
                     env=self.exec_client_env(env),
                     input=input_bytes,
+                    stdin=stdin,
                     capture_output=True,
                     timeout=timeout_s,
                     check=False,
@@ -3741,7 +3740,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
     def import_base_bundle(
         self,
         spec: ChatSandboxSpec,
-        bundle: bytes,
+        bundle: BinaryIO,
         *,
         commit: str,
         env: dict[str, str] | None = None,
@@ -3752,8 +3751,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         this command returns. ``git bundle unbundle`` adds objects only: it
         does not move HEAD, refs, the real index, or working-tree files.
         """
-        if not bundle:
-            raise ValueError("base bundle must be non-empty")
+        require_nonempty_rewindable(bundle)
         if not _FULL_OBJECT_ID.fullmatch(commit):
             raise ValueError("base bundle commit must be a full Git object id")
         script = (
@@ -3778,8 +3776,9 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             env={**(env or {}), "GIT_ALLOW_PROTOCOL": ""},
             workdir=CHAT_WORKDIR,
             timeout_s=300,
-            input_bytes=bundle,
+            stdin=bundle,
         )
+        bundle.seek(0)
         if result.returncode != 0:
             raise SandboxError(
                 "retained base bundle import failed: "

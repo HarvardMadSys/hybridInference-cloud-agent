@@ -145,8 +145,8 @@ def build_base_bundle(
     commit: str,
     prerequisite: str | None = None,
     max_bytes: int = DEFAULT_MAX_BASE_BUNDLE_BYTES,
-) -> bytes:
-    """Build a bounded credential-free Git bundle for one resolved base commit.
+) -> BinaryIO:
+    """Build a bounded credential-free Git bundle in a seekable temporary file.
 
     Follow-up turns run against the commit produced by the trusted publisher,
     while the retained workspace intentionally keeps the Agent CLI's own HEAD,
@@ -204,18 +204,12 @@ def build_base_bundle(
                 f"retained base bundle ({_human_size(size)}) exceeds the "
                 f"{_human_size(max_bytes)} import size limit"
             )
-        payload = bundle_path.read_bytes()
+        return bundle_path.open("rb")
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SandboxError(f"could not build retained base bundle: {exc}") from exc
     finally:
         if bundle_path is not None:
             bundle_path.unlink(missing_ok=True)
-    if len(payload) > max_bytes:
-        raise SandboxError(
-            f"retained base bundle ({_human_size(len(payload))}) exceeds the "
-            f"{_human_size(max_bytes)} import size limit"
-        )
-    return payload
 
 
 def build_upload_archive(

@@ -71,6 +71,7 @@ from cloud_agent_shared.git.patch_gate import branch_name_for
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from typing import BinaryIO
 
     from cloud_agent.grants import GrantClient
     from cloud_agent.ports import (
@@ -557,7 +558,7 @@ async def _import_snapshot_base(
     *,
     snapshot: dict[str, Any],
     commit_sha: str,
-    bundle: bytes | None,
+    bundle: BinaryIO | None,
 ) -> bool:
     """Import a published commit into Docker without changing HEAD or files.
 
@@ -566,7 +567,7 @@ async def _import_snapshot_base(
     may have moved the group to another one while the request was out.
     """
     snapshot_id = int(snapshot["snapshot_id"])
-    if not bundle:
+    if bundle is None:
         await store.snapshot.record_snapshot_base_import_failure(
             snapshot_id=snapshot_id,
             detail="the publisher produced no retained base bundle",
@@ -644,6 +645,7 @@ async def _retry_base_import(
     the commits published before it; the workspace's own history keeps the
     commit it started from, and every published commit descends from that.
     """
+    bundle: BinaryIO | None = None
     try:
         await require_entitled_repo(
             snapshot["repo"],
@@ -657,7 +659,7 @@ async def _retry_base_import(
             raise PublishError("no GitHub credential is configured for base import")
         commit_sha = str(snapshot["published_commit_sha"])
 
-        async def fetch(credential: GitHubCredential) -> bytes:
+        async def fetch(credential: GitHubCredential) -> BinaryIO:
             return await asyncio.to_thread(
                 fetch_base_bundle,
                 clone_url=credential.clone_url(snapshot["repo"]),
@@ -682,6 +684,9 @@ async def _retry_base_import(
             delay_s=_provider_wait(exc),
         )
         return False
+    finally:
+        if bundle is not None:
+            bundle.close()
 
 
 async def publish_one(
@@ -1082,16 +1087,21 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
                 auth_env=credential.git_auth_env(),
                 **({"known_secrets": environment.secrets()} if environment else {}),
             )
-            title = await generate_pr_title(job, result.changed_files, grants=grants)
-            pr_url = await ensure_draft_pull_request(
-                repo=job["repo"],
-                head_branch=result.branch,
-                base_branch=pr_base,
-                title=title or _pr_title(job, result.changed_files),
-                body=_pr_body(job, result.changed_files),
-                credential=credential,
-            )
-            return result, pr_url
+            try:
+                title = await generate_pr_title(job, result.changed_files, grants=grants)
+                pr_url = await ensure_draft_pull_request(
+                    repo=job["repo"],
+                    head_branch=result.branch,
+                    base_branch=pr_base,
+                    title=title or _pr_title(job, result.changed_files),
+                    body=_pr_body(job, result.changed_files),
+                    credential=credential,
+                )
+                return result, pr_url
+            except BaseException:
+                if result.base_bundle is not None:
+                    result.base_bundle.close()
+                raise
 
         result, pr_url = await _replacing_a_refused_token(
             app_credentials, job["repo"], credential, publish
@@ -1118,40 +1128,44 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
         await fail(detail)
         return None
 
-    recorded = await store.snapshot.record_snapshot_publish(
-        snapshot_id=int(job["snapshot_id"]),
-        expected_publish_attempt_count=expected_publish_attempt_count,
-        pr_url=pr_url,
-        commit_sha=result.commit_sha,
-    )
-    if not recorded:
-        # The claim was no longer ours: the stalled-publish reaper failed it,
-        # or another publisher settled it. The branch is the same one, but
-        # this PR is recorded nowhere, so say so rather than pretend.
-        logger.warning(
-            "agent_job_publish_raced",
-            extra={"event": "agent_job_publish_raced", "job_id": job_id, "pr_url": pr_url},
+    try:
+        recorded = await store.snapshot.record_snapshot_publish(
+            snapshot_id=int(job["snapshot_id"]),
+            expected_publish_attempt_count=expected_publish_attempt_count,
+            pr_url=pr_url,
+            commit_sha=result.commit_sha,
         )
-        return None
+        if not recorded:
+            # The claim was no longer ours: the stalled-publish reaper failed it,
+            # or another publisher settled it. The branch is the same one, but
+            # this PR is recorded nowhere, so say so rather than pretend.
+            logger.warning(
+                "agent_job_publish_raced",
+                extra={"event": "agent_job_publish_raced", "job_id": job_id, "pr_url": pr_url},
+            )
+            return None
 
-    await _import_snapshot_base(
-        store,
-        snapshot=job,
-        commit_sha=result.commit_sha,
-        bundle=result.base_bundle,
-    )
+        await _import_snapshot_base(
+            store,
+            snapshot=job,
+            commit_sha=result.commit_sha,
+            bundle=result.base_bundle,
+        )
 
-    logger.info(
-        "agent_job_pr_opened",
-        extra={
-            "event": "agent_job_pr_opened",
-            "job_id": job_id,
-            "branch": branch_name_for(job.get("branch_id") or job.get("thread_id") or job_id),
-            "base_branch": pr_base,
-            "pr_url": pr_url,
-        },
-    )
-    return pr_url
+        logger.info(
+            "agent_job_pr_opened",
+            extra={
+                "event": "agent_job_pr_opened",
+                "job_id": job_id,
+                "branch": branch_name_for(job.get("branch_id") or job.get("thread_id") or job_id),
+                "base_branch": pr_base,
+                "pr_url": pr_url,
+            },
+        )
+        return pr_url
+    finally:
+        if result.base_bundle is not None:
+            result.base_bundle.close()
 
 
 async def publish_loop(

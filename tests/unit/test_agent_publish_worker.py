@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import io
 import json
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -551,7 +552,7 @@ async def test_a_base_import_replaces_a_token_github_refuses(monkeypatch):
         fetched_with.append(_git_token(kwargs["auth_env"]))
         if fetched_with[-1] == "ghs_1":
             raise TransientPublishError(_GIT_REFUSED.replace("ls-remote", "fetch"))
-        return b"bundle"
+        return io.BytesIO(b"bundle")
 
     monkeypatch.setattr(publish_worker, "fetch_base_bundle", fetch)
     monkeypatch.setattr(publish_worker, "_import_snapshot_base", AsyncMock(return_value=True))
@@ -732,7 +733,7 @@ async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(
             branch="agent/athr_origin",
             commit_sha="b" * 40,
             changed_files=["x"],
-            base_bundle=b"bundle",
+            base_bundle=io.BytesIO(b"bundle"),
         ),
     )
     captured_pr = _patch_pr(monkeypatch)
@@ -741,8 +742,9 @@ async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(
         def __init__(self) -> None:
             self.imported: tuple[dict[str, Any], str, bytes] | None = None
 
-        async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
-            self.imported = (row, commit_sha, bundle)
+        async def import_shared_base(self, row, *, commit_sha: str, bundle):
+            self.imported = (row, commit_sha, bundle.read())
+            bundle.seek(0)
 
     sandbox_manager = SandboxManager()
 
@@ -783,13 +785,14 @@ async def test_a_retried_base_import_bundles_against_the_workspaces_first_base(m
 
     def fetch(**kwargs: Any) -> bytes:
         fetched.update(kwargs)
-        return b"bundle"
+        return io.BytesIO(b"bundle")
 
     class SandboxManager:
         imported: tuple[str, bytes] | None = None
 
-        async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
-            self.imported = (commit_sha, bundle)
+        async def import_shared_base(self, row, *, commit_sha: str, bundle):
+            self.imported = (commit_sha, bundle.read())
+            bundle.seek(0)
 
     sandbox_manager = SandboxManager()
 
@@ -833,7 +836,7 @@ async def test_a_base_import_that_cannot_fence_its_start_waits(monkeypatch, fenc
     class _SandboxManager:
         imported = False
 
-        async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
+        async def import_shared_base(self, row, *, commit_sha: str, bundle):
             self.imported = True
 
     sandbox_manager = _SandboxManager()
@@ -849,7 +852,7 @@ async def test_a_base_import_that_cannot_fence_its_start_waits(monkeypatch, fenc
         store,
         snapshot={"snapshot_id": 9, "sandbox_id": "asbx_1", "anchor_job_id": "ajob_1"},
         commit_sha="c" * 40,
-        bundle=b"bundle",
+        bundle=io.BytesIO(b"bundle"),
     )
 
     assert sandbox_manager.imported is False

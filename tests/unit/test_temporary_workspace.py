@@ -120,9 +120,12 @@ def test_a_missing_temporary_base_is_rebuilt_not_cloned(monkeypatch) -> None:
     monkeypatch.setattr(runner_mod, "prepare_worktree", _refuse_clone)
     bundles: list[dict[str, Any]] = []
     manager = Mock()
-    manager.import_base_bundle.side_effect = lambda _spec, bundle, **kwargs: bundles.append(
-        {"bytes": bundle, **kwargs}
-    )
+
+    def capture_bundle(_spec, bundle, **kwargs):
+        bundles.append({"bytes": bundle.read(), **kwargs})
+        bundle.seek(0)
+
+    manager.import_base_bundle.side_effect = capture_bundle
 
     imported = runner_mod._import_retained_base(
         job=_TEMPORARY_JOB, manager=manager, spec=Mock(), backend=Mock()
