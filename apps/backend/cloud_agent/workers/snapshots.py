@@ -21,7 +21,7 @@ from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
 
 if TYPE_CHECKING:
     from cloud_agent.ports import HostPoolRepository, SnapshotRepository
-    from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.environments import EnvironmentBindingRepository
     from cloud_agent.workers.background_wake import BackgroundWake
 
 #: The moved loop keeps logging under the module it came from: the deployment's
@@ -35,7 +35,11 @@ class _SnapshotCapture(Protocol):
 
     host_pool: HostPoolRepository
     snapshot: SnapshotRepository
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentBindingRepository:
+        """Environment persistence needed by this flow."""
+        ...
 
 
 SNAPSHOT_CAPTURE_INTERVAL_S = 5.0
