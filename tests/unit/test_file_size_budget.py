@@ -19,7 +19,7 @@ BASELINE = {
     "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5643,
     "apps/backend/cloud_agent_host/runner.py": 5034,
     "apps/backend/cloud_agent_host/chat_sandbox.py": 4596,
-    "apps/backend/cloud_agent_host/sandbox_manager.py": 4171,
+    "apps/backend/cloud_agent_host/sandbox_manager.py": 4159,
     "apps/backend/cloud_agent/storage/repositories/compute_resources.py": 3856,
     "apps/backend/cloud_agent/storage/repositories/sandbox.py": 3480,
     "apps/backend/cloud_agent_host/drivers.py": 3052,
@@ -34,7 +34,6 @@ BASELINE = {
     "apps/backend/cloud_agent/storage/repositories/snapshot.py": 1701,
     "apps/backend/cloud_agent_host/host_capacity.py": 1636,
     "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1595,
-    "apps/backend/cloud_agent_host/sandbox_checkpoints.py": 1563,
 }
 
 
