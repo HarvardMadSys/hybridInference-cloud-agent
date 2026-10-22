@@ -282,6 +282,35 @@ async def test_host_removal_retires_only_after_completion(monkeypatch, outcome, 
     assert retirement.call_args_list == ([((["host-a"],), {})] if retired else [])
 
 
+@pytest.mark.parametrize(
+    "outcome, retired",
+    [
+        ("deleted", True),
+        ("active", False),
+        ("fenced", False),
+        ("unknown", False),
+        ("retained_groups_present", False),
+    ],
+)
+async def test_host_forget_retires_only_after_deletion(monkeypatch, outcome, retired) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from cloud_agent.application.host_commands import HostCommandError, HostCommands
+
+    retirement = Mock()
+    monkeypatch.setattr(
+        "cloud_agent.application.host_commands.retire_sandbox_manager_hosts", retirement
+    )
+    command = HostCommands(SimpleNamespace(forget_runner_host=AsyncMock(return_value=outcome)))
+    if outcome == "deleted":
+        await command.forget("host-a")
+    else:
+        with pytest.raises(HostCommandError):
+            await command.forget("host-a")
+    assert retirement.call_args_list == ([((["host-a"],), {})] if retired else [])
+
+
 async def test_reaper_retires_completed_host_removals(monkeypatch) -> None:
     from types import SimpleNamespace
     from unittest.mock import Mock
