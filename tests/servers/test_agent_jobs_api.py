@@ -1422,7 +1422,16 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         operation.update(state="ready", target_anchor_job_id=copied["id"])
         return copied
 
-    async def get_thread_for_job(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
+    async def get_thread_for_job(
+        self,
+        *,
+        job_id: str,
+        user_id: str,
+        cursor: str | None = None,
+        after: str | None = None,
+        limit: int = 50,
+        anchor: bool = False,
+    ) -> dict[str, Any] | None:
         job = self.jobs.get(job_id)
         # The real read joins the thread and refuses a deleted conversation.
         if job is None or job["user_id"] != user_id or job.get("deleted_at") is not None:

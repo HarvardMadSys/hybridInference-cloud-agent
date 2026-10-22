@@ -10,6 +10,10 @@ export interface AgentThreadMessageApi {
   id: number;
   role: 'user' | 'assistant';
   content: string;
+  content_truncated?: boolean;
+  content_length?: number | null;
+  next_offset?: number | null;
+  turn_no?: number | null;
   job_id: string;
   created_at: string | null;
   /**
@@ -27,6 +31,11 @@ export interface AgentThreadApi {
   repo?: string | null;
   messages: AgentThreadMessageApi[];
   jobs: AgentJobApi[];
+  history_version?: number;
+  current_job_id?: string | null;
+  next_cursor?: string | null;
+  sync_cursor?: string | null;
+  pending_messages_complete?: boolean;
   created_at?: string | null;
   updated_at?: string | null;
   /** Messages written while a turn ran, in the order they will be sent. */
@@ -115,8 +124,27 @@ export async function listAgentProjects(archived = false): Promise<AgentProjectA
 }
 
 /** Load the conversation containing a job. Old standalone jobs return null. */
-export async function getAgentJobThread(jobId: string): Promise<AgentThreadApi | null> {
-  const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread`);
+export interface ThreadHistoryOptions {
+  cursor?: string;
+  after?: string;
+  anchor?: boolean;
+  limit?: number;
+}
+
+export async function getAgentJobThread(
+  jobId: string,
+  options: ThreadHistoryOptions = {},
+): Promise<AgentThreadApi | null> {
+  const params = new URLSearchParams();
+  if (options.cursor) params.set('cursor', options.cursor);
+  if (options.after) params.set('after', options.after);
+  if (options.anchor) params.set('anchor', 'true');
+  if (options.limit) params.set('limit', String(options.limit));
+  const query = params.size ? `?${params}` : '';
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread${query}`,
+  );
   if (resp.status === 404) return null;
   return jsonOrThrow<AgentThreadApi>(resp);
 }
@@ -129,4 +157,14 @@ export async function getAgentThreadStats(jobId: string): Promise<AgentThreadSta
   );
   if (resp.status === 404) return null;
   return jsonOrThrow<AgentThreadStatsApi>(resp);
+}
+
+/** Read the next bounded Unicode-character chunk of an explicitly expanded message. */
+export async function getAgentThreadMessage(
+  jobId: string,
+  messageId: number,
+  offset: number,
+): Promise<AgentThreadMessageApi> {
+  const path = `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread/messages/${messageId}?offset=${offset}`;
+  return jsonOrThrow(await fetchWithAuth(API_BASE, path));
 }

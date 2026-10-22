@@ -290,6 +290,8 @@ class AgentJobResponse(BaseModel):
     #: Null for a temporary workspace, which has no repository.
     repo: str | None
     task_prompt: str
+    #: Thread pages may preview wide fields; GET /jobs/{id} returns full detail.
+    thread_preview: bool = False
     title: str | None = None
     title_source: str | None = None
     runtime: str
