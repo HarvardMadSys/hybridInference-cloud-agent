@@ -310,7 +310,7 @@ class WorkerClaimResponse(BaseModel):
     mcp_token: str = Field(
         "",
         description=(
-            "Deprecated, and read by no host: each member's CLI reaches this "
+            "Deprecated, and used by no host: each member's CLI reaches this "
             "service's MCP relay with its residency's `mcp_credential` from the "
             "sandbox residency route. This attempt-scoped credential is scoped "
             "`mcp`, so it opens that relay and nothing else."
