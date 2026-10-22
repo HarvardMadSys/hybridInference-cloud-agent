@@ -10,7 +10,8 @@ import { onAgentRecordsChanged } from './agentPush';
 
 const AgentReadContext = createContext<AgentReadScope>({
   getAgentJob: (jobId) => getAgentJob(jobId),
-  getAgentJobThread: (jobId) => getAgentJobThread(jobId),
+  getAgentJobThread: (jobId, options) =>
+    options ? getAgentJobThread(jobId, options) : getAgentJobThread(jobId),
   // Outside the provider there is no signed-in owner to hold snapshots for, so
   // the fallback keeps none: every read goes to the API.
   getUsage: () => undefined,
