@@ -457,6 +457,13 @@ class PostgresConversationQueries:
         The sidebar groups tasks by project, so it needs every repo the user
         has ever run in — not just those represented in the newest-first job
         page, which would silently drop dormant projects from the tree.
+
+        The order-independent refresh fingerprint folds fixed-width row hashes,
+        not bodies or a growing string aggregate. IDs cover membership changes;
+        revisions cover mutations that leave the maximum activity unchanged.
+        The membership fingerprint also detects equal-count repo swaps, which
+        cannot safely reuse an activity-only first-page merge. Both are only
+        invalidation hints, never authority or stable cursors.
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -470,7 +477,9 @@ class PostgresConversationQueries:
                        COUNT(DISTINCT j.thread_id) FILTER (
                            WHERE t.pinned_at IS NOT NULL
                        ) AS pinned_count,
-                       MAX(t.pinned_at) AS pinned_at
+                       MAX(t.pinned_at) AS pinned_at,
+                       bit_xor(('x' || md5(ROW(j.id, j.revision, t.id, t.revision)::text))::bit(128))::text AS refresh_token,
+                       bit_xor(('x' || md5(ROW(j.id, t.id)::text))::bit(128))::text AS membership_token
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = $1
                 WHERE j.user_id = $1
@@ -491,6 +500,8 @@ class PostgresConversationQueries:
                 "last_activity_at": row["last_activity_at"],
                 "pinned_count": int(row["pinned_count"]),
                 "pinned_at": row["pinned_at"],
+                "refresh_token": row["refresh_token"],
+                "membership_token": row["membership_token"],
             }
             for row in rows
         ]
