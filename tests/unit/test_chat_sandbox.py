@@ -2852,10 +2852,13 @@ def test_base_bundle_import_uses_activation_tmpfs_and_preserves_git_state(monkey
     monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
     commit = "a" * 40
 
-    manager.import_base_bundle(spec, b"bundle bytes", commit=commit, env={"SAFE": "1"})
+    bundle = io.BytesIO(b"bundle bytes")
+    manager.import_base_bundle(spec, bundle, commit=commit, env={"SAFE": "1"})
 
     command, kwargs = calls[-1]
-    assert kwargs["input"] == b"bundle bytes"
+    assert kwargs["stdin"] is bundle
+    assert kwargs["input"] is None
+    assert bundle.tell() == 0
     assert command[command.index("--workdir") + 1] == CHAT_WORKDIR
     assert ACTIVATION_TMPFS in command[-4]
     assert "git bundle unbundle" in command[-4]
