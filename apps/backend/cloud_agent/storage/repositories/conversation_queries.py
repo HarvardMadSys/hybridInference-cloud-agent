@@ -20,6 +20,7 @@ from cloud_agent.storage._sql.jobs import (
     JOB_SELECT,
     QUALIFIED_JOB_SUMMARY_COLUMNS,
     SESSION_DELETE_BLOCK_SQL,
+    read_job,
 )
 from cloud_agent.storage._sql.rows import job_row_to_dict
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
@@ -123,18 +124,7 @@ class PostgresConversationQueries:
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         """Fetch one job by id."""
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                SELECT {QUALIFIED_JOB_SUMMARY_COLUMNS}, t.title, t.title_source, t.pinned_at, t.archived_at, t.deleted_at,
-                       to_jsonb(s) AS thread_sandbox
-                FROM agent_jobs j
-                LEFT JOIN agent_threads t ON t.id = j.thread_id
-                LEFT JOIN {THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
-                WHERE j.id = $1
-                """,
-                job_id,
-            )
-        return job_row_to_dict(row) if row else None
+            return await read_job(conn, job_id)
 
     async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
         """Read only an owned job's state and publication URL for its event stream.

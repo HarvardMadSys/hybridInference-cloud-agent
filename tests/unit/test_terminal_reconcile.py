@@ -12,10 +12,9 @@ resume loses the terminal silently — the job looks recovered, the user opens i
 and there is nothing there. It is worth a test precisely because the failure is
 invisible from every side.
 
-The one adaptation: the sandbox manager is resolved **per job** here, not once from the
-environment. With a host pool there is no "the" sandbox manager — each job's retained
-terminal lives on the machine that ran it — so the double is injected through
-``sandbox_manager_for_job`` rather than through the client factory.
+The owning host and shared manifest are selected per job, not from a global
+environment fallback. These tests inject the same validated host-client
+factory used by the replay's narrow routing projection.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ import asyncio
 import contextlib
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from tests.support.storage import OneFake
@@ -39,18 +38,20 @@ pytestmark = pytest.mark.asyncio
 def store() -> OneFake:
     return OneFake(
         SimpleNamespace(
-            list_terminal_resumes_pending=AsyncMock(return_value=["ajob_test"]),
             mark_terminal_resume_complete=AsyncMock(return_value=True),
-            get_job=AsyncMock(
-                return_value={
-                    "id": "ajob_test",
-                    "thread_id": "athr_test",
-                    "thread_sandbox": {
-                        "shared_live": True,
+            terminal_resume_page=AsyncMock(
+                return_value=[
+                    {
+                        "id": "ajob_test",
+                        "updated_at": 1,
                         "thread_id": "athr_test",
-                        "origin_thread_id": "athr_test",
-                    },
-                }
+                        "thread_sandbox": {
+                            "shared_live": True,
+                            "thread_id": "athr_test",
+                            "origin_thread_id": "athr_test",
+                        },
+                    }
+                ]
             ),
         )
     )
@@ -67,8 +68,8 @@ async def test_a_settled_terminal_resume_retries_until_the_sandbox_manager_confi
         ),
     )
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job",
-        AsyncMock(return_value=sandbox_manager),
+        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host",
+        Mock(return_value=sandbox_manager),
     )
 
     await _reconcile_settled_terminals(store)
@@ -88,8 +89,8 @@ async def test_a_missing_owner_sandbox_manager_keeps_the_marker_for_retry(
 ) -> None:
     """A routing/configuration fault must not be reported as recovered."""
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job",
-        AsyncMock(return_value=None),
+        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host",
+        Mock(return_value=None),
     )
 
     await _reconcile_settled_terminals(store)
@@ -101,19 +102,22 @@ async def test_a_cancelled_pre_claim_job_has_no_workspace_to_resume(
     monkeypatch, store: SimpleNamespace
 ) -> None:
     """A queued cancellation can retire its marker without contacting Docker."""
-    store.get_job.return_value = {
-        "id": "ajob_test",
-        "thread_id": "athr_test",
-        "thread_sandbox": None,
-    }
-    sandbox_manager = AsyncMock()
+    store.terminal_resume_page.return_value = [
+        {
+            "id": "ajob_test",
+            "updated_at": 1,
+            "thread_id": "athr_test",
+            "thread_sandbox": None,
+        }
+    ]
+    sandbox_manager = Mock()
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", sandbox_manager
+        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host", sandbox_manager
     )
 
     await _reconcile_settled_terminals(store)
 
-    sandbox_manager.assert_not_awaited()
+    sandbox_manager.assert_not_called()
     store.mark_terminal_resume_complete.assert_awaited_once_with(job_id="ajob_test")
 
 
@@ -121,15 +125,16 @@ async def test_one_broken_host_does_not_skip_other_terminal_markers(
     monkeypatch, store: SimpleNamespace
 ) -> None:
     """Recovery is isolated per job because a pool can lose only one sandbox manager."""
-    store.list_terminal_resumes_pending.return_value = ["ajob_broken", "ajob_ready"]
-    store.get_job.side_effect = [
+    store.terminal_resume_page.return_value = [
         {
             "id": "ajob_broken",
+            "updated_at": 1,
             "thread_id": "athr_broken",
             "thread_sandbox": {"shared_live": True},
         },
         {
             "id": "ajob_ready",
+            "updated_at": 2,
             "thread_id": "athr_ready",
             "thread_sandbox": {"shared_live": True},
         },
@@ -144,8 +149,8 @@ async def test_one_broken_host_does_not_skip_other_terminal_markers(
         resume_settled_terminals=AsyncMock(return_value={"ok": True}),
     )
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job",
-        AsyncMock(side_effect=[broken, ready]),
+        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host",
+        Mock(side_effect=[broken, ready]),
     )
 
     await _reconcile_settled_terminals(store)
@@ -177,7 +182,7 @@ async def test_a_sandbox_manager_that_never_answers_does_not_hold_up_the_reaper(
             replay_cancelled.set()
 
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", silent_sandbox_manager
+        "cloud_agent.sandbox_manager_routing.hydrate_shared_sandbox_manager", silent_sandbox_manager
     )
     store.reap_expired = AsyncMock(return_value=[])
     store.take_revocable_grants = AsyncMock(return_value=[])

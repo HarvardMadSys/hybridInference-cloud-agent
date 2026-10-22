@@ -12,7 +12,6 @@ from .clock import clock
 from .models import _EMPTY_SPAN, _NULL_SPAN, Measurement, _SpanRecord
 from .policy import _claim_budget, _load, _release_budget
 from .schema import (
-    _OUTCOMES,
     BOUNDARIES_BY_OPERATION,
     BOUNDARY_VERSION,
     COVERAGE_BY_OPERATION,
@@ -24,6 +23,7 @@ from .schema import (
     STARTUP_OPERATION,
     STARTUP_OUTCOME_ALIAS,
     STOP_REASON_EXPIRED,
+    V3_OUTCOMES,
 )
 
 
@@ -376,7 +376,7 @@ def frozen_record(
     # that ``finish`` is about to re-decide from a later clock.
     finalize(measurement, outcome)
     frozen_outcome = measurement.frozen_outcome
-    if frozen_outcome not in _OUTCOMES:  # pragma: no cover - guarded by callers
+    if frozen_outcome not in V3_OUTCOMES:  # pragma: no cover - guarded by callers
         frozen_outcome = "incomplete"
     if measurement.run_target and not measurement.bound:
         return None

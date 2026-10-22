@@ -34,6 +34,7 @@ from cloud_agent.api._body_limits import (
     payload_too_large,
     read_bounded_body,
 )
+from cloud_agent.api._sensitive_routes import no_store, no_store_exception
 from cloud_agent.api._workspace_access import (
     _workspace_id,
     _workspace_not_ready,
@@ -231,25 +232,24 @@ class _BoundedTurnResourcesRoute(HostBodyLimitRoute):
                 response = await handler(request)
             except RequestValidationError:
                 # Missing fields otherwise repeat the entire input per error.
-                # A fixed response also keeps malformed reports out of logs
-                # and avoids returning any caller-supplied telemetry content.
-                return JSONResponse(
-                    status_code=422,
-                    content={
-                        "detail": {
-                            "error": {
-                                "type": "invalid_request",
-                                "message": "Invalid turn resource snapshot.",
+                # A fixed response keeps malformed reports and their content out of logs.
+                return no_store(
+                    JSONResponse(
+                        status_code=422,
+                        content={
+                            "detail": {
+                                "error": {
+                                    "type": "invalid_request",
+                                    "message": "Invalid turn resource snapshot.",
+                                }
                             }
-                        }
-                    },
-                    headers={"Cache-Control": "no-store"},
+                        },
+                    )
                 )
             except HTTPException as exc:
-                exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+                no_store_exception(exc)
                 raise
-            response.headers["Cache-Control"] = "no-store"
-            return response
+            return no_store(response)
 
         return bounded_handler
 

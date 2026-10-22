@@ -5,13 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
 
 from cloud_agent.api._body_limits import payload_too_large, read_bounded_body
 from cloud_agent.api._owner_auth import require_agent_owner
+from cloud_agent.api._sensitive_routes import SensitiveRoute
 from cloud_agent.api.deps import get_gateway_client, get_storage, require_store
 from cloud_agent.gateway import GatewayClient, GatewayError
 from cloud_agent.user_avatar import generate_user_avatar
@@ -30,8 +29,14 @@ if TYPE_CHECKING:
     from cloud_agent.ports.user_profile import UserProfileRepository
 
 
-class _ProfileRoute(APIRoute):
+class _ProfileRoute(SensitiveRoute):
     """Bound uploads before parsing and keep submitted personal data out of errors."""
+
+    def validation_response(self, exc: Exception) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "Check the profile fields and image size."},
+        )
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         """Apply a streamed ceiling even when Content-Length is absent or incorrect."""
@@ -43,14 +48,7 @@ class _ProfileRoute(APIRoute):
                 if body is None:
                     return payload_too_large(MAX_PROFILE_REQUEST_BYTES, "A profile request")
                 request._body = body
-            try:
-                return await handler(request)
-            except RequestValidationError:
-                return JSONResponse(
-                    status_code=422,
-                    content={"detail": "Check the profile fields and image size."},
-                    headers={"Cache-Control": "no-store"},
-                )
+            return await handler(request)
 
         return guarded
 
@@ -84,13 +82,11 @@ async def _email(gateway: GatewayClient, user_id: str) -> str:
 
 @router.get("", response_model=ProfileResponse)
 async def read_profile(
-    response: Response,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _ProfileStorage | None = Depends(get_storage),
     gateway: GatewayClient = Depends(get_gateway_client),
 ) -> ProfileResponse:
     """Read the signed-in owner's display profile and current account email."""
-    response.headers["Cache-Control"] = "no-store"
     saved = await require_store(store).user_profile.get_user_profile(user_id=user["user_id"])
     email = await _email(gateway, user["user_id"])
     return _response(saved, user_id=user["user_id"], email=email)
@@ -99,13 +95,11 @@ async def read_profile(
 @router.patch("", response_model=ProfileResponse)
 async def save_profile(
     body: UpdateProfile,
-    response: Response,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _ProfileStorage | None = Depends(get_storage),
     gateway: GatewayClient = Depends(get_gateway_client),
 ) -> ProfileResponse:
     """Persist names and a sanitized picture at the profile revision the owner read."""
-    response.headers["Cache-Control"] = "no-store"
     image = body.image_data_url
     if image is not None:
         try:
