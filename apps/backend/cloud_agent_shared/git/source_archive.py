@@ -19,10 +19,18 @@ import tempfile
 from typing import TYPE_CHECKING, Final
 
 from cloud_agent_shared.errors import SandboxError
+from cloud_agent_shared.git.source_cancellation import (
+    CancellableArchiveWriter,
+    check_source_stop,
+    checked_entries,
+    source_entries,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
     from typing import BinaryIO
+
+    from cloud_agent_shared.git.source_cancellation import StopSignal
 
 
 #: Counts the working tree *and* the fetched commit's Git objects, so the
@@ -47,14 +55,9 @@ _GIT_ENV = {
 }
 
 
-def _entries(root: pathlib.Path) -> Iterator[pathlib.Path]:
-    """Yield every entry without following a repository symlink."""
-    for directory, names, files in os.walk(root, topdown=True, followlinks=False):
-        parent = pathlib.Path(directory)
-        for name in sorted(names):
-            yield parent / name
-        for name in sorted(files):
-            yield parent / name
+def _entries(root: pathlib.Path, *, stop: StopSignal | None = None) -> Iterator[pathlib.Path]:
+    """Yield every entry, checking cancellation even inside large directories."""
+    return source_entries(root, stop)
 
 
 def _human_size(size: int) -> str:
@@ -71,6 +74,7 @@ def build_source_archive(
     uid: int,
     gid: int,
     max_bytes: int = DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
+    stop: StopSignal | None = None,
 ) -> int:
     """Write a normalized tar of one prepared checkout to ``out``, complete or refuse.
 
@@ -79,15 +83,16 @@ def build_source_archive(
     read any of it. Returns the bytes written. After a refusal ``out`` holds a
     partial archive and must be discarded.
     """
+    check_source_stop(stop)
     root = pathlib.Path(workdir).resolve()
     if max_bytes <= 0:
         raise ValueError("source archive size limit must be positive")
     if not root.is_dir() or not (root / ".git").exists():
         raise SandboxError("source preparer produced no Git checkout")
 
-    paths = list(_entries(root))
+    paths = list(checked_entries(_entries(root, stop=stop), stop))
     estimated = 0
-    for path in paths:
+    for path in checked_entries(paths, stop):
         try:
             info = path.lstat()
         except OSError as exc:
@@ -125,8 +130,10 @@ def build_source_archive(
     )
     start = out.tell()
     try:
-        with tarfile.open(fileobj=out, mode="w", dereference=False) as archive:
-            for path in paths:
+        with tarfile.open(
+            fileobj=CancellableArchiveWriter(out, stop), mode="w", dereference=False
+        ) as archive:
+            for path in checked_entries(paths, stop):
                 relative = path.relative_to(root).as_posix()
                 archive.add(path, arcname=relative, recursive=False, filter=normalize)
                 if out.tell() - start > max_bytes:
