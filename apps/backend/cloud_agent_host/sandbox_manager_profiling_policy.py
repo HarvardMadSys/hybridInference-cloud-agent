@@ -60,6 +60,7 @@ from cloud_agent_shared.operation_profiling import (
     MODE_DISABLED,
     MODE_ENVIRONMENT,
     RUN_ID_PATTERN,
+    SOURCE_ADMIN,
     TARGET_KEYS,
     ControlState,
     ProfilingRun,
@@ -228,6 +229,8 @@ def _parse_run_payload(value: Any) -> ProfilingRun | None:
             name = str(key)
             if name not in TARGET_KEYS:
                 return None
+            if not isinstance(item, (str, int)) or isinstance(item, bool) or not str(item).strip():
+                return None
             target[name] = str(item)[:MAX_DETAIL_CHARS]
     expires_at = value.get("expires_at")
     if isinstance(expires_at, datetime):
@@ -238,8 +241,8 @@ def _parse_run_payload(value: Any) -> ProfilingRun | None:
         "run_id": run_id,
         "operations": operations,
         "expires_at": expires_at_text,
-        "config_version": _bounded_int(value.get("config_version")) or 1,
-        "max_operations": _bounded_int(value.get("max_operations")) or 100,
+        "config_version": value.get("config_version", 1),
+        "max_operations": value.get("max_operations", 100),
         "target": target,
         "admission_instances": [],
     }
@@ -248,7 +251,11 @@ def _parse_run_payload(value: Any) -> ProfilingRun | None:
             return None
         descriptor.update(continuous=True, expires_at=value.get("expires_at"), max_operations=0)
     try:
-        return parse_run(json.dumps(descriptor), allow_continuous=True)
+        return parse_run(
+            json.dumps(descriptor),
+            allow_continuous=True,
+            source=SOURCE_ADMIN,
+        )
     except ValueError:
         return None
 

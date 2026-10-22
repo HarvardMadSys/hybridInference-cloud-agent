@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from tests.support.compute_snapshot import snapshot_repository
 
 from cloud_agent.application.compute_reconcile import ComputeReconciler
 from cloud_agent.application.compute_rotation import (
@@ -182,7 +183,7 @@ async def test_scheduler_moves_an_old_node_instead_of_extending_it(monkeypatch):
         created.append(kwargs)
         return {"id": "op", **kwargs}
 
-    repository = SimpleNamespace(
+    repository = snapshot_repository(
         list_allocations=AsyncMock(return_value=[old]),
         list_operations=AsyncMock(side_effect=list_operations),
         create_operation=AsyncMock(side_effect=create_operation),
@@ -206,7 +207,7 @@ async def test_scheduler_moves_an_old_node_instead_of_extending_it(monkeypatch):
 
 async def test_scheduler_extends_owned_autoscaling_node_instead_of_rotating_legacy_policy():
     old = row(created_at=NOW - timedelta(days=8), autoscaling_owned=True)
-    repository = SimpleNamespace(
+    repository = snapshot_repository(
         list_allocations=AsyncMock(return_value=[old]),
         list_operations=AsyncMock(return_value=[]),
         create_operation=AsyncMock(),
@@ -232,7 +233,7 @@ async def test_scheduler_extends_owned_autoscaling_node_instead_of_rotating_lega
 async def test_scheduler_still_extends_when_the_move_is_stuck(monkeypatch):
     old = row(created_at=NOW - timedelta(days=8))
     stuck = {"id": "rotate-1", "kind": "rotate", "state": "blocked", "request_id": "r", "step": "x"}
-    repository = SimpleNamespace(
+    repository = snapshot_repository(
         list_allocations=AsyncMock(return_value=[old]),
         list_operations=AsyncMock(return_value=[stuck]),
         create_operation=AsyncMock(),
@@ -261,7 +262,7 @@ def old_node_scheduler(operations, *, expires, existing=None):
         # The store returns an earlier operation of the same request unchanged.
         return existing or {"id": "new-move", "state": "pending", "result": {}, **kwargs}
 
-    repository = SimpleNamespace(
+    repository = snapshot_repository(
         list_allocations=AsyncMock(return_value=[old]),
         list_operations=AsyncMock(return_value=operations),
         create_operation=AsyncMock(side_effect=create_operation),
