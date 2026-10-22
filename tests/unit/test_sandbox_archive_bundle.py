@@ -12,6 +12,7 @@ import pytest
 
 from cloud_agent_host.sandbox_archive_bundle import (
     DEFAULT_ARCHIVE_COMPRESSION_LEVEL,
+    BoundedDigestWriter,
     build_sandbox_archive_bundle,
     spool_sandbox_archive,
 )
@@ -352,6 +353,21 @@ def test_fetch_callback_streams_directly_to_a_bounded_sink() -> None:
         )
 
     assert limits == [len(content)] * 3
+
+
+def test_a_restarted_sink_holds_and_hashes_only_what_follows() -> None:
+    stream = io.BytesIO()
+    sink = BoundedDigestWriter(stream, limits=((8, "over the limit"),), what="x", source="y")
+    sink.write(b"abandon")
+
+    sink.restart()
+    sink.write(b"kept")
+
+    assert stream.getvalue() == b"kept"
+    assert (sink.size, sink.sha256) == (4, hashlib.sha256(b"kept").hexdigest())
+    # The limit counts from the restart too.
+    with pytest.raises(SandboxError, match="over the limit"):
+        sink.write(b"fives")
 
 
 @pytest.mark.parametrize("bad_limit", [0, -1, True, 1.5, "100"])

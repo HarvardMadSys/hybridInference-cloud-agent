@@ -34,7 +34,7 @@ BASELINE = {
     "apps/backend/cloud_agent/storage/repositories/snapshot.py": 1701,
     "apps/backend/cloud_agent_host/host_capacity.py": 1636,
     "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1595,
-    "apps/backend/cloud_agent_host/sandbox_checkpoints.py": 1563,
+    "apps/backend/cloud_agent_host/sandbox_checkpoints.py": 1561,
 }
 
 

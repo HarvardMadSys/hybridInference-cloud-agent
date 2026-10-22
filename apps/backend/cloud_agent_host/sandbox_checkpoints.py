@@ -35,8 +35,9 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import IO, TYPE_CHECKING, Any, BinaryIO, Final, TypeVar
+from typing import IO, TYPE_CHECKING, Any, BinaryIO, Final, TypeVar, cast
 
+from cloud_agent_host.sandbox_archive_bundle import BoundedDigestWriter
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveDownloadError
 from cloud_agent_shared.environment_snapshots import (
     SNAPSHOT_IMAGE_REPOSITORY,
@@ -66,7 +67,6 @@ CHECKPOINT_IMAGE_REPOSITORY: Final = "freeinference-checkpoint"
 # Index, layout and manifest files are tiny; anything larger is not an image
 # description and is refused rather than buffered.
 _MAX_METADATA_BYTES: Final = 1024 * 1024
-_COPY_CHUNK_BYTES: Final = 1024 * 1024
 _DIGEST_RE: Final = re.compile(r"[0-9a-f]{64}")
 _CHECKPOINT_ID_RE: Final = re.compile(r"[0-9a-f]{32}")
 _METADATA_FILES: Final = frozenset(("index.json", "oci-layout", "manifest.json", "repositories"))
@@ -1153,22 +1153,20 @@ class SandboxCheckpointCapture:
         try:
             self._spool_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             with tempfile.TemporaryFile(dir=self._spool_dir, prefix="checkpoint-") as spool:
+                # Hashed as it is written, rather than read back to be hashed.
+                sink = BoundedDigestWriter(spool, limits=(), what="a checkpoint", source="export")
                 archive = self._export_from_content(
-                    reference, base_image, spool, max_bytes, deadline, durations
+                    reference, base_image, sink, max_bytes, deadline, durations
                 )
                 if archive is None:
                     base_layers = self._base_image_layers(base_image, deadline, durations)
                     started = self._clock()
-                    archive = self._export(reference, spool, base_layers, max_bytes, deadline)
+                    archive = self._export(reference, sink, base_layers, max_bytes, deadline)
                     durations["export"] = self._elapsed_ms(started)
                 size = spool.tell()
                 spool.seek(0)
-                digest = hashlib.sha256()
-                for chunk in iter(lambda: spool.read(_COPY_CHUNK_BYTES), b""):
-                    digest.update(chunk)
-                spool.seek(0)
                 started = self._clock()
-                uploaded = upload(spool, size, digest.hexdigest())
+                uploaded = upload(spool, size, sink.sha256)
                 durations["upload"] = self._elapsed_ms(started)
         except BaseException:
             self._remove_image(reference)
@@ -1181,7 +1179,7 @@ class SandboxCheckpointCapture:
         self,
         reference: str,
         base_image: str,
-        spool: BinaryIO,
+        spool: BoundedDigestWriter,
         max_bytes: int,
         deadline: float,
         durations: dict[str, int],
@@ -1193,7 +1191,7 @@ class SandboxCheckpointCapture:
         try:
             archive = export_from_content_store(
                 self._content,
-                spool,
+                cast("BinaryIO", spool),
                 image=self._image_descriptor(reference, deadline),
                 base=self._image_descriptor(base_image, deadline),
                 reference=reference,
@@ -1204,8 +1202,8 @@ class SandboxCheckpointCapture:
                 "sandbox checkpoint falls back to image save",
                 extra={"event": "sandbox_checkpoint_content_unavailable", "detail": str(exc)},
             )
-            spool.seek(0)
-            spool.truncate()
+            # Image save starts the spool over, and its digest with it.
+            spool.restart()
             return None
         durations["export"] = self._elapsed_ms(started)
         return archive
@@ -1450,7 +1448,7 @@ class SandboxCheckpointCapture:
     def _export(
         self,
         reference: str,
-        spool: BinaryIO,
+        spool: BoundedDigestWriter,
         base_layers: frozenset[str],
         max_bytes: int,
         deadline: float,
@@ -1468,7 +1466,7 @@ class SandboxCheckpointCapture:
                 deadline,
                 lambda: export_checkpoint_archive(
                     stdout,
-                    spool,
+                    cast("BinaryIO", spool),
                     base_layers=base_layers,
                     max_bytes=max_bytes,
                 ),

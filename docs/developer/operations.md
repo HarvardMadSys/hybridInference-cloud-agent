@@ -1945,7 +1945,9 @@ is never accepted from the browser. The destination is a source constant
 so a distribution archiving to another bucket changes it there; the IAM
 policy below names the same bucket and prefix. An administrator atomically saves the
 enabled state, AWS region, maximum compressed archive size, multipart
-threshold, and part size. Authentication is either an AWS access key or the
+threshold, and part size. An object above the threshold is uploaded in parts
+of that size, eight at a time, so an upload holds up to eight parts in memory:
+64 MiB at the default 8 MiB part size. Authentication is either an AWS access key or the
 workload-identity pair: a customer-managed KMS key ARN and the expected
 12-digit bucket owner. An access key makes that pair optional; uploads then
 use SSE-S3 unless a KMS key is also set. The secret is write-only, encrypted

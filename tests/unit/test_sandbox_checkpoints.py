@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from cloud_agent_host import sandbox_checkpoints as checkpoints_module
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveReceipt
 from cloud_agent_host.sandbox_checkpoints import (
     CHECKPOINT_IMAGE_REPOSITORY,
@@ -901,6 +902,79 @@ def test_capture_falls_back_to_image_save_without_a_usable_content_store(
         base_layers=frozenset(_digest(layer) for layer in BASE),
         max_bytes=10**6,
     ).new_layers == (_digest(NEW),)
+
+
+class _CountingSpool(io.BytesIO):
+    """A capture spool that counts the reads made of it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    def read(self, size: int | None = -1) -> bytes:
+        self.reads += 1
+        return super().read(size)
+
+
+def test_capture_hashes_the_spool_as_it_writes_it(tmp_path, monkeypatch) -> None:
+    docker = _FakeDocker(_Image(list(BASE)), _Image([*BASE, NEW]))
+    spools: list[_CountingSpool] = []
+
+    def temporary_file(**_kwargs: Any) -> _CountingSpool:
+        spools.append(_CountingSpool())
+        return spools[-1]
+
+    monkeypatch.setattr(checkpoints_module.tempfile, "TemporaryFile", temporary_file)
+    reads_before_upload: list[int] = []
+    uploads: list[bytes] = []
+
+    def upload(**kwargs: Any) -> SandboxArchiveReceipt:
+        reads_before_upload.append(spools[0].reads)
+        body = kwargs["body"].read()
+        assert _digest(body) == kwargs["sha256"]
+        return _recording_upload(uploads)(**kwargs | {"body": io.BytesIO(body)})
+
+    receipt = _capture(tmp_path, docker).capture(
+        _spec(),
+        SimpleNamespace(container_id="container-1234567890", running=False, image="i"),
+        [],
+        upload=upload,
+        max_bytes=10**6,
+        deadline=1e3,
+    )
+
+    # The digest the upload is given came from writing the spool, not reading it.
+    assert reads_before_upload == [0]
+    assert receipt.sha256 == _digest(uploads[0])
+    assert receipt.size_bytes == len(uploads[0])
+
+
+def test_a_content_store_attempt_leaves_nothing_in_the_digest(tmp_path, monkeypatch) -> None:
+    base, committed = _Image(list(BASE)), _Image([*BASE, NEW])
+    docker = _InspectingDocker(base, committed)
+    content = _content_store(tmp_path / "content", base, committed)
+
+    def partial_export(_store: Any, output: Any, **_kwargs: Any) -> Any:
+        output.write(b"half of an archive the content store could not finish" * 100)
+        raise CheckpointContentUnavailable("checkpoint blobs are not in the content store")
+
+    monkeypatch.setattr(checkpoints_module, "export_from_content_store", partial_export)
+    uploads: list[bytes] = []
+
+    receipt = _direct_capture(tmp_path, docker, content).capture(
+        _spec(),
+        SimpleNamespace(container_id="container-1234567890", running=False, image="i"),
+        [],
+        upload=_recording_upload(uploads),
+        max_bytes=10**6,
+        deadline=1e3,
+    )
+
+    assert any(command[1:3] == ["image", "save"] for command in docker.commands)
+    assert b"content store could not finish" not in uploads[0]
+    # The spool was emptied for image save, and its digest started over too.
+    assert receipt.sha256 == _digest(uploads[0])
+    assert receipt.size_bytes == len(uploads[0])
 
 
 @pytest.mark.parametrize(

@@ -158,6 +158,14 @@ class BoundedDigestWriter:
         self._check()
         return self._stream.tell()
 
+    def restart(self) -> None:
+        """Empty the stream, and start the size and digest over, for a write begun again."""
+        self._check()
+        self._stream.seek(0)
+        self._stream.truncate()
+        self._digest = hashlib.sha256()
+        self.size = 0
+
     @property
     def sha256(self) -> str:
         """Return the digest of every byte written so far."""
