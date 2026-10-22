@@ -1100,14 +1100,10 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
     token = mint_worker_token(**fence, scope=SCOPE_FULL)
     sandbox_token = await _mint_sandbox_grant(job_store, grants, claim)
 
-    # The sandbox's *second* credential, and this one is ours to mint: MCP is
-    # served by this service's relay, against this service's registry and this
-    # service's attempt fence. Scoped `mcp` so it opens the relay and nothing
-    # else — not the worker surface, and certainly not the gateway.
-    #
-    # Two credentials rather than one because they authorize at two services
-    # now. A leak is bounded by whichever it was: the grant buys models it
-    # names, this buys tools the job asked for, and neither buys the other.
+    # COMPAT(remove-after=2026-11-30): no host reads the claim's mcp_token, as
+    # none since #773 does: each member's CLI reaches the MCP relay with its
+    # residency's mcp_credential. Then this attempt-scoped token, its claim
+    # field and the relay's SCOPE_MCP branch go together.
     mcp_token = mint_worker_token(**fence, scope=SCOPE_MCP)
     # A third credential, weaker than either: read-only, this repository only,
     # one hour. The runner needs it to check the repository out — a runner that
@@ -1257,7 +1253,7 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         thread_sandbox=claim.get("thread_sandbox"),
         worker_token=token,
         sandbox_token=sandbox_token,
-        mcp_token=mcp_token,
+        mcp_token=mcp_token,  # COMPAT(remove-after=2026-11-30): as at its mint above.
         clone_token=clone_token,
         github_token=github_token,
         # Aliases, because that is what the runtime config addresses: the relay

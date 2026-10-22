@@ -310,11 +310,10 @@ class WorkerClaimResponse(BaseModel):
     mcp_token: str = Field(
         "",
         description=(
-            "The sandbox's *second* credential, for this service's MCP relay. "
-            "Scoped `mcp`, so it opens the relay and nothing else — not the "
-            "worker surface, and not the gateway. The relay's address is the "
-            "claiming host's own, the one its network rules admit; the claim "
-            "names none."
+            "Deprecated, and read by no host: each member's CLI reaches this "
+            "service's MCP relay with its residency's `mcp_credential` from the "
+            "sandbox residency route. This attempt-scoped credential is scoped "
+            "`mcp`, so it opens that relay and nothing else."
         ),
     )
     clone_token: str | None = Field(
