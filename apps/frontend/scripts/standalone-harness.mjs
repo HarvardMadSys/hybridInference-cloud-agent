@@ -212,7 +212,7 @@ export async function startStandalone({
       signalTarget.removeListener(signal, handler);
     }
   };
-  for (const [signal, handler] of signalHandlers) signalTarget.once(signal, handler);
+  for (const [signal, handler] of signalHandlers) signalTarget.on(signal, handler);
   if (terminated) removeSignalHandlers();
 
   return server;

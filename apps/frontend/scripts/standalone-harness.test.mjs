@@ -131,7 +131,7 @@ describe('standalone process lifecycle', () => {
     await rejected;
   });
 
-  it('stops the child before forwarding a process signal', async () => {
+  it('coalesces repeated process signals until the child stops', async () => {
     const child = fakeChild();
     const signalTarget = fakeSignalTarget();
     const server = await startWith(child, { signalTarget });
@@ -139,8 +139,13 @@ describe('standalone process lifecycle', () => {
     expect(signalTarget.listenerCount('SIGINT')).toBe(1);
     expect(signalTarget.listenerCount('SIGTERM')).toBe(1);
     signalTarget.emit('SIGTERM');
+    signalTarget.emit('SIGTERM');
+    signalTarget.emit('SIGINT');
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(child.kill).toHaveBeenCalledTimes(1);
     expect(signalTarget.kill).not.toHaveBeenCalled();
+    expect(signalTarget.listenerCount('SIGINT')).toBe(1);
+    expect(signalTarget.listenerCount('SIGTERM')).toBe(1);
 
     child.signalCode = 'SIGTERM';
     child.emit('exit', null, 'SIGTERM');
@@ -148,6 +153,7 @@ describe('standalone process lifecycle', () => {
     await Promise.resolve();
 
     expect(signalTarget.kill).toHaveBeenCalledWith(signalTarget.pid, 'SIGTERM');
+    expect(signalTarget.kill).toHaveBeenCalledTimes(1);
     expect(signalTarget.listenerCount('SIGINT')).toBe(0);
     expect(signalTarget.listenerCount('SIGTERM')).toBe(0);
   });
