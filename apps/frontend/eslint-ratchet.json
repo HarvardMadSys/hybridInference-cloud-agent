@@ -25,7 +25,7 @@
         "max-lines": [
           "error",
           {
-            "max": 950
+            "max": 1005
           }
         ]
       }

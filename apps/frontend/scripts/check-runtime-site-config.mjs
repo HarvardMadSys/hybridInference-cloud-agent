@@ -71,9 +71,11 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   buildStandalone,
   NEXT_DIR,
+  sanitizeRuntimeSiteEnvironment,
   STANDALONE_DIR,
   STATIC_DIR,
   startStandalone,
@@ -171,9 +173,55 @@ const NEUTRAL = {
   rag: false,
 };
 
-function fail(message) {
+class RuntimeSiteConfigError extends Error {}
+
+export function fail(message) {
   console.error(`::error title=Runtime site config::${message}`);
-  process.exit(1);
+  throw new RuntimeSiteConfigError(message);
+}
+
+function closeControlPlane(controlPlane) {
+  return new Promise((resolve, reject) =>
+    controlPlane.close((error) => (error ? reject(error) : resolve())),
+  );
+}
+
+/** Start the app lazily and settle both owned servers before reporting failure. */
+export async function withRuntimeResources(
+  { controlPlane, startServer = async () => undefined },
+  operation,
+) {
+  let server;
+  let value;
+  let operationError;
+  try {
+    server = await startServer();
+    value = await operation(server);
+  } catch (error) {
+    operationError = error;
+  }
+
+  const cleanupResults = await Promise.allSettled([
+    Promise.resolve().then(() => server?.stop()),
+    Promise.resolve().then(() => closeControlPlane(controlPlane)),
+  ]);
+  const cleanupErrors = cleanupResults
+    .filter((result) => result.status === 'rejected')
+    .map((result) => result.reason);
+
+  if (operationError && cleanupErrors.length > 0) {
+    throw new AggregateError(
+      [operationError, ...cleanupErrors],
+      'Runtime site config assertion and cleanup failed',
+      { cause: operationError },
+    );
+  }
+  if (operationError) throw operationError;
+  if (cleanupErrors.length === 1) throw cleanupErrors[0];
+  if (cleanupErrors.length > 1) {
+    throw new AggregateError(cleanupErrors, 'Runtime site config cleanup failed');
+  }
+  return value;
 }
 
 function titleOf(html) {
@@ -338,16 +386,9 @@ function artifactDigest() {
 
 function buildVariant(variant) {
   const env = {
-    ...process.env,
+    ...sanitizeRuntimeSiteEnvironment(process.env),
     NODE_ENV: 'production',
-    NEXT_PUBLIC_BASE_PATH: variant.basePath,
-    NEXT_PUBLIC_AGENT_API_URL: variant.apiUrl,
   };
-  // The build must never see a deployment identity. If it did, a build-time
-  // read would look like a runtime one and this whole check would be void.
-  for (const key of Object.keys(env)) {
-    if (key.startsWith('AGENT_WEB_')) delete env[key];
-  }
   try {
     buildStandalone(variant, { env, stdio: 'pipe' });
   } catch (error) {
@@ -358,12 +399,9 @@ function buildVariant(variant) {
 async function startServer(env) {
   // The deployment's identity is given, never inherited: a shell or CI job that
   // happens to export one of these must not decide what any render below shows.
-  const inherited = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !key.startsWith('AGENT_WEB_')),
-  );
   return startStandalone({
     env: {
-      ...inherited,
+      ...sanitizeRuntimeSiteEnvironment(process.env),
       ...env,
     },
     captureOutput: true,
@@ -674,11 +712,8 @@ async function assertSavedConfigRequestScope(variant) {
   });
   await new Promise((done) => controlPlane.listen(0, '127.0.0.1', done));
 
-  const server = await startServer({
-    ...DEPLOYMENTS[0].env,
-    AGENT_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlane.address().port}`,
-  });
-  const url = `http://127.0.0.1:${server.port}${variant.basePath}/login`;
+  let server;
+  let url;
 
   async function assertSnapshot(expected, label, bounded = false) {
     const before = reads;
@@ -711,69 +746,78 @@ async function assertSavedConfigRequestScope(variant) {
     }
   }
 
-  try {
-    // Start the production process through an asset request, so its startup
-    // time cannot hide the appearance budget or prime the public fallback.
-    const chunk = readdirSync(join(STATIC_DIR, 'chunks')).find((file) =>
-      /^main-app-.*\.js$/.test(file),
-    );
-    if (!chunk) throw new Error('No main-app chunk to check production server readiness');
-    const asset = await waitForResponse(
-      `http://127.0.0.1:${server.port}${variant.basePath}/_next/static/chunks/${chunk}`,
-      { server },
-    );
-    await asset.arrayBuffer();
-    if (asset.status !== 200 || reads !== 0) {
-      throw new Error(`${variant.name}: static readiness request unexpectedly read settings`);
-    }
+  await withRuntimeResources(
+    {
+      controlPlane,
+      startServer: () =>
+        startServer({
+          ...DEPLOYMENTS[0].env,
+          AGENT_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlane.address().port}`,
+        }),
+    },
+    async (startedServer) => {
+      server = startedServer;
+      url = `http://127.0.0.1:${server.port}${variant.basePath}/login`;
+      // Start the production process through an asset request, so its startup
+      // time cannot hide the appearance budget or prime the public fallback.
+      const chunk = readdirSync(join(STATIC_DIR, 'chunks')).find((file) =>
+        /^main-app-.*\.js$/.test(file),
+      );
+      if (!chunk) throw new Error('No main-app chunk to check production server readiness');
+      const asset = await waitForResponse(
+        `http://127.0.0.1:${server.port}${variant.basePath}/_next/static/chunks/${chunk}`,
+        { server },
+      );
+      await asset.arrayBuffer();
+      if (asset.status !== 200 || reads !== 0) {
+        throw new Error(`${variant.name}: static readiness request unexpectedly read settings`);
+      }
 
-    const neutral = {
-      appName: NEUTRAL.appName,
-      orgName: '',
-      orgUrl: '',
-      statusUrl: '',
-      docsUrl: '',
-      contactUrl: '',
-      gatewayUrl: '',
-    };
-    for (const stalled of ['slow headers', 'slow body']) {
-      mode = stalled;
-      await assertSnapshot(neutral, `cold ${mode}`, true);
-    }
+      const neutral = {
+        appName: NEUTRAL.appName,
+        orgName: '',
+        orgUrl: '',
+        statusUrl: '',
+        docsUrl: '',
+        contactUrl: '',
+        gatewayUrl: '',
+      };
+      for (const stalled of ['slow headers', 'slow body']) {
+        mode = stalled;
+        await assertSnapshot(neutral, `cold ${mode}`, true);
+      }
 
-    mode = 'success';
-    for (const deployment of DEPLOYMENTS) {
-      target = deployment;
-      await assertSnapshot(expectedIdentity(target), `saved ${target.name}`);
-    }
+      mode = 'success';
+      for (const deployment of DEPLOYMENTS) {
+        target = deployment;
+        await assertSnapshot(expectedIdentity(target), `saved ${target.name}`);
+      }
 
-    for (const failure of ['slow headers', 'slow body', 'http', 'invalid']) {
-      mode = failure;
-      await assertSnapshot(expectedIdentity(target), `retained appearance after ${mode}`, true);
-    }
+      for (const failure of ['slow headers', 'slow body', 'http', 'invalid']) {
+        mode = failure;
+        await assertSnapshot(expectedIdentity(target), `retained appearance after ${mode}`, true);
+      }
 
-    mode = 'success';
-    target = DEPLOYMENTS[0];
-    await assertSnapshot(expectedIdentity(target), 'saved edits after backend recovery');
+      mode = 'success';
+      target = DEPLOYMENTS[0];
+      await assertSnapshot(expectedIdentity(target), 'saved edits after backend recovery');
 
-    // Separate concurrent page requests must each read their own settings,
-    // rather than sharing a process-wide in-flight promise.
-    const before = reads;
-    const responses = await Promise.all([fetch(url), fetch(url)]);
-    await Promise.all(responses.map((response) => response.text()));
-    if (responses.some((response) => response.status !== 200) || reads - before !== 2) {
-      throw new Error(`${variant.name}: concurrent pages did not each read one settings snapshot`);
-    }
-    console.log(
-      `${variant.name}: cold and retained appearance fallbacks rendered within ` +
-        `${Math.max(...fallbackTimings).toFixed(0)}ms.`,
-    );
-  } finally {
-    await server.stop();
-    await new Promise((done, reject) =>
-      controlPlane.close((error) => (error ? reject(error) : done())),
-    );
-  }
+      // Separate concurrent page requests must each read their own settings,
+      // rather than sharing a process-wide in-flight promise.
+      const before = reads;
+      const responses = await Promise.all([fetch(url), fetch(url)]);
+      await Promise.all(responses.map((response) => response.text()));
+      if (responses.some((response) => response.status !== 200) || reads - before !== 2) {
+        throw new Error(
+          `${variant.name}: concurrent pages did not each read one settings snapshot`,
+        );
+      }
+      console.log(
+        `${variant.name}: cold and retained appearance fallbacks rendered within ` +
+          `${Math.max(...fallbackTimings).toFixed(0)}ms.`,
+      );
+    },
+  );
 }
 
 /** The headers every response carries, documents and build assets alike. */
@@ -936,15 +980,26 @@ async function main() {
   );
 }
 
-if (process.argv.includes('--saved-config-only')) {
-  const { basePath } = JSON.parse(readFileSync(join(NEXT_DIR, 'routes-manifest.json'), 'utf8'));
-  const variant = VARIANTS.find((item) => item.basePath === basePath);
-  if (!variant)
-    throw new Error(`No runtime config fixture for basePath ${JSON.stringify(basePath)}`);
-  await assertSavedConfigRequestScope(variant);
-  console.log(
-    'Runtime site config: one fetch per request, fresh edits, and concurrent pages correct.',
-  );
-} else {
-  await main();
+async function run() {
+  if (process.argv.includes('--saved-config-only')) {
+    const { basePath } = JSON.parse(readFileSync(join(NEXT_DIR, 'routes-manifest.json'), 'utf8'));
+    const variant = VARIANTS.find((item) => item.basePath === basePath);
+    if (!variant)
+      throw new Error(`No runtime config fixture for basePath ${JSON.stringify(basePath)}`);
+    await assertSavedConfigRequestScope(variant);
+    console.log(
+      'Runtime site config: one fetch per request, fresh edits, and concurrent pages correct.',
+    );
+  } else {
+    await main();
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    await run();
+  } catch (error) {
+    if (!(error instanceof RuntimeSiteConfigError)) console.error(error);
+    process.exitCode = 1;
+  }
 }

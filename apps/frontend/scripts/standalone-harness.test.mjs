@@ -1,6 +1,11 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { startStandalone, waitForResponse } from './standalone-harness.mjs';
+import {
+  buildEnvironmentForVariant,
+  sanitizeRuntimeSiteEnvironment,
+  startStandalone,
+  waitForResponse,
+} from './standalone-harness.mjs';
 
 function fakeChild({ spawned = true } = {}) {
   const child = new EventEmitter();
@@ -29,6 +34,36 @@ async function startWith(child, options = {}) {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe('standalone environment policy', () => {
+  it('forces public build paths to match the selected variant', () => {
+    const variant = { basePath: '/agents', apiUrl: '/agents/api' };
+
+    expect(
+      buildEnvironmentForVariant(variant, {
+        NEXT_PUBLIC_BASE_PATH: '/wrong',
+        NEXT_PUBLIC_AGENT_API_URL: 'https://wrong.invalid',
+        UNRELATED: 'kept',
+      }),
+    ).toEqual({
+      NEXT_PUBLIC_BASE_PATH: '/agents',
+      NEXT_PUBLIC_AGENT_API_URL: '/agents/api',
+      UNRELATED: 'kept',
+    });
+  });
+
+  it('removes every ambient runtime-site key and retains unrelated values', () => {
+    expect(
+      sanitizeRuntimeSiteEnvironment({
+        AGENT_WEB_APP_NAME: 'ambient',
+        AGENT_WEB_FUTURE_VALUE: 'ambient',
+        AGENT_DEPLOYMENT_SHA: 'ambient',
+        AGENT_CONTROL_PLANE_URL: 'https://real-control-plane.invalid',
+        UNRELATED: 'kept',
+      }),
+    ).toEqual({ UNRELATED: 'kept' });
+  });
 });
 
 describe('waitForResponse', () => {
@@ -83,6 +118,55 @@ describe('waitForResponse', () => {
       'answered 503; response did not complete before the deadline',
     );
     await vi.advanceTimersByTimeAsync(250);
+
+    await rejected;
+  });
+
+  it('returns an accepted buffered response with its status and headers', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response('ready', {
+        status: 202,
+        statusText: 'Accepted',
+        headers: { 'x-runtime-fixture': 'complete' },
+      }),
+    );
+
+    const response = await waitForResponse('http://127.0.0.1:4321/ready');
+    const replay = response.clone();
+
+    expect(response.status).toBe(202);
+    expect(response.statusText).toBe('Accepted');
+    expect(response.headers.get('x-runtime-fixture')).toBe('complete');
+    await expect(response.text()).resolves.toBe('ready');
+    await expect(replay.text()).resolves.toBe('ready');
+  });
+
+  it('keeps the total deadline through an accepted partial response body', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockImplementation((_url, { signal }) =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('partial'));
+              signal.addEventListener('abort', () => controller.error(signal.reason), {
+                once: true,
+              });
+            },
+          }),
+          {
+            status: 200,
+            headers: { 'x-runtime-fixture': 'partial' },
+          },
+        ),
+      ),
+    );
+
+    const waiting = waitForResponse('http://127.0.0.1:4321/ready', { timeoutMs: 50 });
+    const rejected = expect(waiting).rejects.toThrow(
+      'did not answer within 50ms: answered 200; response did not complete before the deadline',
+    );
+    await vi.advanceTimersByTimeAsync(50);
 
     await rejected;
   });

@@ -14,12 +14,31 @@ const ARTIFACT_IDENTITY = join(NEXT_DIR, 'cloud-agent-web-variant.json');
 const STOP_GRACE_MS = 5_000;
 const FORCE_KILL_WAIT_MS = 1_000;
 const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM'];
+const RUNTIME_SITE_ENV_KEYS = new Set(['AGENT_CONTROL_PLANE_URL', 'AGENT_DEPLOYMENT_SHA']);
 
 function identityOf(variant) {
   return {
     name: variant.name,
     basePath: variant.basePath,
     apiUrl: variant.apiUrl,
+  };
+}
+
+/** Remove deployment identity that must only come from the selected fixture. */
+export function sanitizeRuntimeSiteEnvironment(env) {
+  return Object.fromEntries(
+    Object.entries(env).filter(
+      ([key]) => !key.startsWith('AGENT_WEB_') && !RUNTIME_SITE_ENV_KEYS.has(key),
+    ),
+  );
+}
+
+/** Bind a build's public paths to the identity written beside its artifact. */
+export function buildEnvironmentForVariant(variant, env = process.env) {
+  return {
+    ...env,
+    NEXT_PUBLIC_BASE_PATH: variant.basePath,
+    NEXT_PUBLIC_AGENT_API_URL: variant.apiUrl,
   };
 }
 
@@ -36,12 +55,12 @@ export function stageStandalone() {
   cpSync(STATIC_DIR, destination, { recursive: true });
 }
 
-/** Build and identify one production artifact. The caller owns environment policy. */
+/** Build and identify one production artifact. The variant owns its public paths. */
 export function buildStandalone(variant, { env, stdio = 'inherit' } = {}) {
   rmSync(NEXT_DIR, { recursive: true, force: true });
   const result = spawnSync(process.execPath, [NEXT_BIN, 'build'], {
     cwd: WEB_ROOT,
-    env: env ?? process.env,
+    env: buildEnvironmentForVariant(variant, env),
     encoding: stdio === 'inherit' ? undefined : 'utf8',
     stdio,
   });
@@ -240,10 +259,17 @@ export async function waitForResponse(
     let responseDiagnostic = null;
     try {
       const response = await fetch(url, { signal: controller.signal });
-      if (acceptResponse(response)) return response;
       responseDiagnostic = `answered ${response.status}`;
       lastError = responseDiagnostic;
-      await response.arrayBuffer();
+      const accepted = acceptResponse(response);
+      const body = await response.arrayBuffer();
+      if (accepted) {
+        return new Response(body.byteLength === 0 ? null : body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      }
     } catch (error) {
       if (controller.signal.aborted) {
         lastError = responseDiagnostic

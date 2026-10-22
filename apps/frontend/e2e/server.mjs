@@ -4,16 +4,18 @@
 import { createServer, request as proxyRequest } from 'node:http';
 import {
   buildStandalone,
+  sanitizeRuntimeSiteEnvironment,
   startStandalone,
   verifyStandaloneVariant,
   waitForResponse,
 } from '../scripts/standalone-harness.mjs';
+import { createE2EServerLifecycle, unexpectedExitCode } from '../scripts/e2e-server-lifecycle.mjs';
 import { createFixture } from './service.mjs';
 
 const port = Number(process.env.CLOUD_AGENT_E2E_PORT);
 if (!port) throw new Error('Missing isolated browser-test port');
 const env = {
-  ...process.env,
+  ...sanitizeRuntimeSiteEnvironment(process.env),
   NEXT_TELEMETRY_DISABLED: '1',
   NEXT_PUBLIC_BASE_PATH: '',
   NEXT_PUBLIC_AGENT_API_URL: '/api',
@@ -27,6 +29,13 @@ if (process.env.CLOUD_AGENT_E2E_SKIP_BUILD !== '1') {
 }
 verifyStandaloneVariant(variant);
 const app = await startStandalone({ env });
+const lifecycle = createE2EServerLifecycle({
+  app,
+  onUnexpectedAppExit(code, error) {
+    if (error) console.error(error);
+    process.exitCode = unexpectedExitCode(code);
+  },
+});
 try {
   await waitForResponse(`http://127.0.0.1:${app.port}/login`, {
     server: app,
@@ -34,7 +43,7 @@ try {
     acceptResponse: (response) => response.ok,
   });
 } catch (error) {
-  await app.stop();
+  await lifecycle.stop();
   throw error;
 }
 const fixture = createFixture();
@@ -64,19 +73,4 @@ const server = createServer(async (req, res) => {
     res.writeHead(500).end('Fixture error');
   }
 });
-server.listen(port, '127.0.0.1');
-let stopping = false;
-async function stop() {
-  if (stopping) return;
-  stopping = true;
-  fixture.close();
-  server.closeAllConnections();
-  await new Promise((resolve) => server.close(resolve));
-  await app.stop();
-}
-app.child.once('exit', (code) => {
-  if (stopping) return;
-  void stop().finally(() => {
-    process.exitCode = code ?? 1;
-  });
-});
+await lifecycle.listen({ proxy: server, fixture, port });
