@@ -150,15 +150,20 @@ afterEach(() => {
 });
 
 describe('owner-wide agent notifications', () => {
-  it('notifies a turn finished during initial bootstrap once without replaying an older recent terminal', async () => {
+  it('uses the server epoch when the browser clock is behind during bootstrap', async () => {
     const pending = deferred<AgentNotificationStateApi>();
     list.mockReturnValueOnce(pending.promise);
     await mount({ ...preferences, questions: false });
-    const older = job({ id: 'older', state: 'succeeded', finished_at: '2026-10-11T11:59:00Z' });
+    const older = job({ id: 'older', state: 'succeeded', finished_at: '2026-10-11T12:59:00Z' });
     await act(async () => vi.advanceTimersByTimeAsync(1_000));
-    const terminal = job({ state: 'succeeded', finished_at: new Date().toISOString() });
+    const terminal = job({ state: 'succeeded', finished_at: '2026-10-11T13:00:00.500Z' });
     await act(async () =>
-      pending.resolve(page([older, terminal], null, { change_cursor: 'bootstrap-tail' })),
+      pending.resolve(
+        page([older, terminal], null, {
+          observed_at: '2026-10-11T13:00:01Z',
+          change_cursor: 'bootstrap-tail',
+        }),
+      ),
     );
     expect(notify).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ jobId: 'job-1', kind: 'succeeded' }),
@@ -168,6 +173,26 @@ describe('owner-wide agent notifications', () => {
     expect(list).toHaveBeenLastCalledWith('bootstrap-tail');
     expect(notify).toHaveBeenCalledTimes(1);
     expect(get).not.toHaveBeenCalled();
+  });
+
+  it('holds an unseen pushed completion until the server epoch is known', async () => {
+    const pending = deferred<AgentNotificationStateApi>();
+    list.mockReturnValueOnce(pending.promise);
+    await mount({ ...preferences, questions: false });
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    const terminal = job({
+      state: 'succeeded',
+      revision: 2,
+      finished_at: '2026-10-11T13:00:00.500Z',
+    });
+
+    await changed(terminal);
+    expect(notify).not.toHaveBeenCalled();
+
+    await act(async () => pending.resolve(page([], null, { observed_at: '2026-10-11T13:00:01Z' })));
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ jobId: 'job-1', kind: 'succeeded' }),
+    );
   });
 
   it('never scans 1,000 archived conversations and uses one state request per steady-state refresh', async () => {
@@ -687,7 +712,7 @@ describe('owner-wide agent notifications', () => {
     );
   });
 
-  it('notifies a no-attempt cancellation during initial bootstrap without replaying older cancellations', async () => {
+  it('uses the server epoch when the browser clock is ahead during bootstrap', async () => {
     const pending = deferred<AgentNotificationStateApi>();
     list.mockReturnValueOnce(pending.promise);
     await mount({ ...preferences, questions: false });
@@ -696,16 +721,18 @@ describe('owner-wide agent notifications', () => {
       state: 'cancelled',
       current_attempt_id: null,
       finished_at: null,
-      updated_at: new Date().toISOString(),
+      updated_at: '2026-10-11T11:00:00.500Z',
       revision: 2,
     });
     const older = {
       ...terminal,
       id: 'older-cancellation',
       thread_id: 'older-thread',
-      updated_at: '2026-10-11T11:59:00Z',
+      updated_at: '2026-10-11T10:59:00Z',
     };
-    await act(async () => pending.resolve(page([older, terminal])));
+    await act(async () =>
+      pending.resolve(page([older, terminal], null, { observed_at: '2026-10-11T11:00:01Z' })),
+    );
     expect(notify).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ kind: 'cancelled', jobId: 'job-1', attemptId: null }),
     );

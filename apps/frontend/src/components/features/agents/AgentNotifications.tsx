@@ -77,7 +77,7 @@ export function useAgentNotifications(
     let disposed = false;
     const current = () => !disposed && owner.current === userId;
     const controller = new AbortController();
-    const startedAt = Date.now();
+    const bootstrapStartedAt = performance.now();
     const jobs = new Map<string, WatchedJob>();
     const titles = new Map<string, string>();
     const latestTurns = new Map<string, number>();
@@ -94,6 +94,7 @@ export function useAgentNotifications(
     let refreshAgain = false;
     let lastRefresh = 0;
     let changeCursor: string | undefined;
+    let notificationEpoch: number | undefined;
 
     function deliver(notice: AgentNotice): void {
       if (!current() || receipts.has(notice.key) || pendingNotices.has(notice.key)) return;
@@ -175,13 +176,20 @@ export function useAgentNotifications(
       if (pendingNotices.has(key)) return;
       const transitioned = previous && isActiveJobState(previous.state);
       const inherited = 'forked_from_job_id' in job && job.forked_from_job_id;
+      if (!preferences.turns || receipts.has(key) || (inherited && !transitioned)) {
+        jobs.delete(job.id);
+        return;
+      }
+      if (!transitioned && notificationEpoch === undefined) return;
+      const completedAt = Date.parse(job.finished_at ?? job.updated_at ?? '');
       const newlyFinished =
-        !inherited &&
         (!previous ||
           previous.current_attempt_id !== job.current_attempt_id ||
           !previous.finished_at) &&
-        Date.parse(job.finished_at ?? job.updated_at ?? '') >= startedAt;
-      if (!preferences.turns || receipts.has(key) || (!transitioned && !newlyFinished)) {
+        notificationEpoch !== undefined &&
+        Number.isFinite(completedAt) &&
+        completedAt >= notificationEpoch;
+      if (!transitioned && !newlyFinished) {
         jobs.delete(job.id);
         return;
       }
@@ -192,6 +200,17 @@ export function useAgentNotifications(
         attemptId: job.current_attempt_id,
         title: (job.thread_id && titles.get(job.thread_id)) || fallbackTitle(job),
       });
+    }
+
+    function establishNotificationEpoch(observedAt: string): void {
+      if (notificationEpoch !== undefined) return;
+      const observed = Date.parse(observedAt);
+      if (!Number.isFinite(observed)) throw new Error('Notification state omitted its clock');
+      // Convert the request's monotonic elapsed time into the server clock domain.
+      // No comparison depends on the browser and database wall clocks agreeing.
+      notificationEpoch = observed - Math.max(0, performance.now() - bootstrapStartedAt);
+      for (const job of [...jobs.values()])
+        if (TERMINAL_STATES.has(job.state)) acceptTerminal(job, undefined);
     }
 
     function forgetJob(id: string): void {
@@ -349,6 +368,7 @@ export function useAgentNotifications(
         while (current()) {
           const result = await getAgentNotificationState(cursor);
           if (!current()) return;
+          establishNotificationEpoch(result.observed_at);
           if (result.reset_required) {
             if (resetOnce) throw new Error('Notification state could not be rebuilt');
             resetOnce = true;
