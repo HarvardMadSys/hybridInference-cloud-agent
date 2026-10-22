@@ -32,7 +32,7 @@ if TYPE_CHECKING:
         SandboxRepository,
         SessionForkRepository,
         SkillRepository,
-        SnapshotRepository,
+        SnapshotReapingRepository,
         SourceControlRepository,
     )
 
@@ -64,7 +64,11 @@ class _Reaping(Protocol):
     sandbox: SandboxRepository
     session_fork: SessionForkRepository
     skills: SkillRepository
-    snapshot: SnapshotRepository
+
+    @property
+    def snapshot(self) -> SnapshotReapingRepository:
+        """Snapshot persistence needed by this flow."""
+        ...
 
 
 #: How often the reaper looks for expired leases and stalled publishes, and
