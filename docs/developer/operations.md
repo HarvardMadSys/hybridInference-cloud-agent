@@ -1998,11 +1998,43 @@ Changing the bucket changes where new archives go and where restores read.
 Checkpoints and environment snapshots are read back by object version, which a
 copy to another bucket does not keep, so those stored in the previous bucket
 are not restored after a change. Change it only when no retained group still
-needs a checkpoint from the previous bucket. A bucket other than
-`freeinference` is sent only to hosts that advertise
-`sandbox-archive-destination-v1`. An older host is sent no policy, so it
-confirms no revision and is given no work that needs archives until it is
-redeployed.
+needs a checkpoint from the previous bucket.
+
+A ready environment snapshot in the previous bucket is still offered to new
+groups. Loading it fails and the group installs in full; the failure is
+reported as `unavailable`, which neither retires the snapshot nor queues a new
+build. A failed load is not a use, so the snapshot stays on offer until 7 days
+after its last use, or until it is 25 days old if that comes first. Until then
+each new group of that environment pays for a failed download and a full
+installation, unless its owner rebuilds the snapshot. Snapshot cleanup deletes
+objects in the current bucket only; those in the previous bucket are left to
+that bucket's lifecycle rule.
+
+Redeploy every host before changing the bucket. Only a host that advertises
+`sandbox-archive-destination-v1` can archive to a bucket other than
+`freeinference`, and the settings card names the others only once archives are
+enabled with another bucket. This read-only query lists them:
+
+```sql
+SELECT host
+FROM agent_runner_hosts
+WHERE NOT capabilities ? 'sandbox-archive-destination-v1'
+ORDER BY host;
+```
+
+While archives are disabled, such a host is sent the policy with the default
+bucket, which writes nothing anywhere, and it keeps taking work. While they are
+enabled, it is sent no policy, and the card lists it as needing a redeploy.
+Until it is redeployed, its sandbox manager keeps the last policy it applied:
+it keeps archiving the groups it holds into the previous bucket, and the
+checkpoints it stores there are recorded, so a host that later restores one of
+those groups reads the new bucket and fails. With no confirmed revision, the
+host takes no work at all.
+
+A control plane older than this release refuses a stored bucket other than the
+default: its heartbeats and admin archive routes fail, and no turn is claimed.
+Reset the bucket to `freeinference` before rolling the control plane back past
+this release.
 
 Enabling archives requires migration `0042_sandbox_archive_settings` and a
 runner/sandbox manager advertising `sandbox-archive-settings-v1`. The settings
