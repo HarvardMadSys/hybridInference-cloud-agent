@@ -56,6 +56,39 @@ async def test_the_lifespan_gives_both_gateway_clients_one_pool(monkeypatch) -> 
     assert shared.is_closed, "the pool outlived the application that owned it"
 
 
+async def test_the_shared_pool_keeps_no_cookies(monkeypatch) -> None:
+    """One owner's answer must not set a cookie that rides on the next owner's request.
+
+    The pool carries owners' grants to the gateway and repositories' tokens to
+    GitHub. Each per-call client it replaced had a jar of its own.
+    """
+    monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
+    monkeypatch.delenv("GATEWAY_BASE_URL", raising=False)
+    monkeypatch.delenv("GATEWAY_ISSUER", raising=False)
+    monkeypatch.setattr(asyncpg, "create_pool", AsyncMock(return_value=AsyncMock()))
+    monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
+    monkeypatch.setattr(
+        "cloud_agent.identity_namespace.ensure_gateway_namespace", AsyncMock(return_value=None)
+    )
+    app = FastAPI()
+    url = "https://gateway.example/v1/chat/completions"
+
+    async with lifespan(app, background=False):
+        shared = app.state.http
+        # What the client does with every answer it receives.
+        shared.cookies.extract_cookies(
+            httpx.Response(
+                200,
+                headers={"set-cookie": "session=owner-a; Path=/"},
+                request=httpx.Request("POST", url),
+            )
+        )
+        follow_up = shared.build_request("POST", url)
+
+    assert not shared.cookies
+    assert "cookie" not in follow_up.headers
+
+
 async def test_the_lifespan_opens_its_database_pool_without_jit(monkeypatch) -> None:
     """Every database session the service opens leaves PostgreSQL's JIT compiler off.
 

@@ -212,6 +212,7 @@ def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
             credential_provider=credential_provider,
             github_app=app.state.source_control.github,
             grants=app.state.grants,
+            http=app.state.http,
             wake=getattr(app.state, "background_wake", None),
         ),
     )
@@ -388,6 +389,8 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     or record anything, so it refuses to start rather than serving an API that
     fails at every call.
     """
+    from http.cookiejar import CookieJar, DefaultCookiePolicy
+
     import httpx
 
     from cloud_agent.application.profiling_control import ProfilingControlService
@@ -444,9 +447,20 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # client and pay a connect — and a TLS handshake, where the gateway is
         # behind TLS — and admission is not an occasional call: `require_agent_owner`
         # is a dependency of every owner route, terminal input and resize included.
-        # Both clients pass their own deadline per request, so this one carries no
-        # default timeout of its own.
-        http = httpx.AsyncClient()
+        # Task and pull-request titles, prompt rewrites, web search, draft pull
+        # requests and CloudLab borrow it for the same reason, and a title or a
+        # rewrite follows its grant mint to the gateway on the connection the
+        # mint just used. Every borrower passes its own deadline per request, so
+        # this one carries no default timeout of its own.
+        #
+        # It keeps no cookies. A cookie one answer set would go out with every
+        # later request to that host, and these requests carry owners' grants and
+        # repositories' tokens; the per-call clients they replaced kept none.
+        #
+        # Idle connections still expire at httpx's five seconds: no upstream here
+        # documents a longer idle timeout, and a gateway served straight from
+        # uvicorn, as in deploy/local, closes its connections at five.
+        http = httpx.AsyncClient(cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])))
         app.state.http = http
         app.state.gateway = GatewayClient(client=http)
         # The sandbox's credential is minted at the gateway now, so the claim

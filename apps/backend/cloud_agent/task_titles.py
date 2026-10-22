@@ -15,6 +15,10 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import integer_setting, number_setting, setting_env
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from fastapi import BackgroundTasks
+
     from cloud_agent.ports import ConversationCommands
 
 logger = get_logger(__name__)
@@ -88,6 +92,36 @@ def normalize_generated_title(value: Any) -> str | None:
     if not any(char.isalnum() for char in title):
         return None
     return _shorten_title(title)
+
+
+def schedule_thread_title(
+    tasks: BackgroundTasks,
+    store: ConversationCommands,
+    claim: Mapping[str, Any],
+    *,
+    sandbox_token: str,
+    client: httpx.AsyncClient | None,
+) -> None:
+    """Queue a claimed conversation's title behind the claim, if it still needs one.
+
+    FastAPI sends the claim first; title inference cannot delay the runner.
+    Only unnamed/contaminated conversations are eligible. A later claim can
+    recover a failed generation using the original conversation prompt.
+    ``client`` is the process's shared pool, whose connection to the gateway
+    the claim's grant mint has just used.
+    """
+    if claim.get("title_generation_pending") is not True:
+        return
+    tasks.add_task(
+        generate_thread_title,
+        store,
+        job_id=claim["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        model=claim["model"],
+        sandbox_token=sandbox_token,
+        client=client,
+    )
 
 
 async def generate_thread_title(

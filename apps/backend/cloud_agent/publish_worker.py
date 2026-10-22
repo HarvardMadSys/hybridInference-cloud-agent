@@ -312,15 +312,18 @@ async def create_draft_pull_request(
     body: str,
     credential: GitHubCredential,
     timeout_s: float | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> str:
     """Open a draft PR and return its URL.
 
     Draft is not a nicety: the whole safety story assumes a human reads the
     change before it can merge, so this must never open a ready-for-review PR.
+
+    ``client`` is borrowed and left open; without one, the call opens its own.
     """
-    async with httpx.AsyncClient(
-        timeout=timeout_s if timeout_s is not None else number_setting("publish_pr_timeout_s")
-    ) as client:
+    async with contextlib.AsyncExitStack() as stack:
+        if client is None:
+            client = await stack.enter_async_context(httpx.AsyncClient())
         response = await client.post(
             f"{credential.api_base}/repos/{repo}/pulls",
             headers=_github_headers(credential),
@@ -331,6 +334,9 @@ async def create_draft_pull_request(
                 "body": body,
                 "draft": True,
             },
+            timeout=timeout_s if timeout_s is not None else number_setting("publish_pr_timeout_s"),
+            # A borrowed client's own setting must not decide where the token goes.
+            follow_redirects=False,
         )
     if response.status_code == 422:
         # An earlier create can have committed while its response was lost,
@@ -370,6 +376,7 @@ async def ensure_draft_pull_request(
     title: str,
     body: str,
     credential: GitHubCredential,
+    client: httpx.AsyncClient | None = None,
 ) -> str:
     """Refresh an open branch PR, or create a new draft after closure/merge.
 
@@ -381,14 +388,23 @@ async def ensure_draft_pull_request(
     reviewer who retargets the draft has decided where it merges, and filtering
     by the job's base made the next snapshot open a second draft beside it.
     ``base_branch`` is only for a draft this creates.
+
+    The lookup, the refresh and the create share one client: ``client``,
+    borrowed and left open, or one this call opens. The create used to open a
+    second connection right after the lookup closed the first.
     """
     headers = _github_headers(credential)
     endpoint = f"{credential.api_base}/repos/{repo}/pulls"
-    async with httpx.AsyncClient(timeout=number_setting("publish_pr_timeout_s")) as client:
+    timeout = number_setting("publish_pr_timeout_s")
+    async with contextlib.AsyncExitStack() as stack:
+        if client is None:
+            client = await stack.enter_async_context(httpx.AsyncClient())
         response = await client.get(
             endpoint,
             headers=headers,
             params={"state": "open", "head": f"{repo.split('/')[0]}:{head_branch}"},
+            timeout=timeout,
+            follow_redirects=False,
         )
         if response.status_code >= 400:
             raise _github_api_error("the PR lookup", response)
@@ -407,7 +423,11 @@ async def ensure_draft_pull_request(
             if not isinstance(number, int) or not isinstance(url, str) or not url.strip():
                 raise TransientPublishError("GitHub returned an open PR without its number or URL")
             updated = await client.patch(
-                f"{endpoint}/{number}", headers=headers, json={"title": title, "body": body}
+                f"{endpoint}/{number}",
+                headers=headers,
+                json={"title": title, "body": body},
+                timeout=timeout,
+                follow_redirects=False,
             )
             if updated.status_code >= 400:
                 raise _github_api_error("the PR update", updated)
@@ -421,14 +441,15 @@ async def ensure_draft_pull_request(
                 # The owner can close/merge while publication is updating it.
                 break
             return url
-    return await create_draft_pull_request(
-        repo=repo,
-        head_branch=head_branch,
-        base_branch=base_branch,
-        title=title,
-        body=body,
-        credential=credential,
-    )
+        return await create_draft_pull_request(
+            repo=repo,
+            head_branch=head_branch,
+            base_branch=base_branch,
+            title=title,
+            body=body,
+            credential=credential,
+            client=client,
+        )
 
 
 def _github_headers(credential: GitHubCredential) -> dict[str, str]:
@@ -820,6 +841,7 @@ async def _publish_due(
     app_credentials: Any | None,
     grants: GrantClient | None = None,
     base_branch: str,
+    http: httpx.AsyncClient | None = None,
 ) -> None:
     """Publish every captured snapshot, past any that fails.
 
@@ -835,6 +857,7 @@ async def _publish_due(
             app_credentials=app_credentials,
             grants=grants,
             base_branch=base_branch,
+            http=http,
         )
 
 
@@ -889,6 +912,7 @@ async def _publish_claimed(
     grants: GrantClient | None = None,
     base_branch: str,
     allow_workflow_changes: bool = False,
+    http: httpx.AsyncClient | None = None,
 ) -> str | None:
     """Publish under a claim heartbeat spanning every local and remote phase."""
     snapshot_id = int(job["snapshot_id"])
@@ -923,6 +947,7 @@ async def _publish_claimed(
             grants=grants,
             base_branch=base_branch,
             allow_workflow_changes=allow_workflow_changes,
+            http=http,
         )
     except asyncio.CancelledError:
         # A control-plane stop must not leave this claim `publishing` until the
@@ -959,8 +984,13 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
     grants: GrantClient | None = None,
     base_branch: str,
     allow_workflow_changes: bool = False,
+    http: httpx.AsyncClient | None = None,
 ) -> str | None:
-    """Publish one claimed snapshot. Returns the PR URL, or ``None``."""
+    """Publish one claimed snapshot. Returns the PR URL, or ``None``.
+
+    ``http`` is the control plane's shared pool, for the title's model calls
+    and GitHub's pull-request API; without it each opens its own client.
+    """
     job_id = job["job_id"]
     base_sha = job["base_sha"]
     pr_base = _pr_base_branch(job, base_branch)
@@ -1078,7 +1108,7 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
                 auth_env=credential.git_auth_env(),
                 **({"known_secrets": environment.secrets()} if environment else {}),
             )
-            title = await generate_pr_title(job, result.changed_files, grants=grants)
+            title = await generate_pr_title(job, result.changed_files, grants=grants, client=http)
             pr_url = await ensure_draft_pull_request(
                 repo=job["repo"],
                 head_branch=result.branch,
@@ -1086,6 +1116,7 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
                 title=title or _pr_title(job, result.changed_files),
                 body=_pr_body(job, result.changed_files),
                 credential=credential,
+                client=http,
             )
             return result, pr_url
 
@@ -1159,6 +1190,7 @@ async def publish_loop(
     base_branch: str | None = None,
     interval_seconds: float | None = None,
     wake: BackgroundWake | None = None,
+    http: httpx.AsyncClient | None = None,
 ) -> None:
     """Drain the publish queue forever.
 
@@ -1176,6 +1208,9 @@ async def publish_loop(
     ``github_app`` is asked for the App's credentials once per pass, for the
     same reason: a loop that captured them at startup published nothing for
     the rest of the process after one failed load (issue #47).
+
+    ``http`` is the control plane's shared pool, lent to each publication's
+    title and pull-request calls; the lifespan closes it after this loop stops.
     """
     without_source = False
     while True:
@@ -1223,6 +1258,7 @@ async def publish_loop(
                 base_branch=base_branch
                 if base_branch is not None
                 else setting_env("AGENT_PUBLISH_BASE_BRANCH") or "dev",
+                http=http,
             )
         except asyncio.CancelledError:
             raise

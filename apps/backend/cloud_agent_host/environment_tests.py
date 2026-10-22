@@ -17,6 +17,7 @@ from cloud_agent_host.environment_preparation import (
     run_step,
     write_setup_marker,
 )
+from cloud_agent_host.host_control import keepalive_client
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
 from cloud_agent_shared.secret_redaction import SecretRedactor
@@ -38,6 +39,15 @@ def environment_run_spec(run_id: str, generation: int, image_digest: str | None)
     )
 
 
+def _control_plane_client(base_url: str, credential: str) -> httpx.Client:
+    """A keep-alive client that presents ``credential`` on every request it sends."""
+    return keepalive_client(
+        base_url=base_url.rstrip("/"),
+        headers={"Authorization": f"Bearer {credential}"},
+        timeout=30,
+    )
+
+
 def claim_and_execute(
     *,
     base_url: str,
@@ -46,13 +56,20 @@ def claim_and_execute(
     stop: threading.Event | None = None,
     cleanup_orphans: bool = True,
     cleanup_snapshots: bool = False,
+    client: httpx.Client | None = None,
+    attestation: dict[str, Any] | None = None,
 ) -> bool:
-    """Claim and clean up one test or prebuild using a normal registered host slot."""
+    """Claim and clean up one test or prebuild using a normal registered host slot.
+
+    ``client`` is the worker's keep-alive client for ``credential`` and is left
+    open; without one, this opens its own. ``attestation`` is the proof the
+    claim loop just built for its own claim; without one, this builds it.
+    """
     from cloud_agent_host.runner import _claim_attestation
 
-    with httpx.Client(
-        base_url=base_url.rstrip("/"), headers={"Authorization": f"Bearer {credential}"}, timeout=30
-    ) as client:
+    with contextlib.ExitStack() as stack:
+        if client is None:
+            client = stack.enter_context(_control_plane_client(base_url, credential))
         if cleanup_orphans:
             orphan_response = client.get("/v1/agent/worker/environment-runs/orphans")
             orphan_response.raise_for_status()
@@ -81,7 +98,7 @@ def claim_and_execute(
             "/v1/agent/worker/environment-runs/claim",
             json={
                 "capabilities": [ENVIRONMENT_CAPABILITY, ENVIRONMENT_SNAPSHOT_CAPABILITY],
-                "attestation": _claim_attestation(backend),
+                "attestation": _claim_attestation(backend) if attestation is None else attestation,
             },
         )
         response.raise_for_status()
@@ -443,14 +460,22 @@ class EnvironmentTestWorker:
         self._next_poll = 0.0
         self._next_cleanup = 0.0
         self._next_snapshot_cleanup = 0.0
+        #: The keep-alive client every poll and run uses, and the credential it
+        #: presents. Each poll opened its own, every five seconds, before.
+        self._client: httpx.Client | None = None
+        self._credential = ""
 
     @property
     def busy(self) -> bool:
         """Count an in-flight claim or test as one reserved local slot."""
         return self._thread is not None and self._thread.is_alive()
 
-    def poll(self, credential: str) -> None:
-        """Start at most one bounded poll without waiting for its HTTP or script work."""
+    def poll(self, credential: str, attestation: dict[str, Any] | None = None) -> None:
+        """Start at most one bounded poll without waiting for its HTTP or script work.
+
+        ``attestation`` is the proof the claim loop built for the claim that
+        just found nothing; without one, the poll builds its own.
+        """
         if self._stop.is_set() or self.busy or time.monotonic() < self._next_poll:
             return
         self._next_poll = time.monotonic() + 5
@@ -460,6 +485,7 @@ class EnvironmentTestWorker:
         snapshots = time.monotonic() >= self._next_snapshot_cleanup
         if snapshots:
             self._next_snapshot_cleanup = time.monotonic() + 600
+        client = self._client_for(credential)
 
         def execute() -> None:
             try:
@@ -470,6 +496,8 @@ class EnvironmentTestWorker:
                     stop=self._stop,
                     cleanup_orphans=cleanup,
                     cleanup_snapshots=snapshots,
+                    client=client,
+                    attestation=attestation,
                 )
             except Exception:
                 logging.getLogger(__name__).warning("environment_test_poll_failed")
@@ -477,8 +505,24 @@ class EnvironmentTestWorker:
         self._thread = threading.Thread(target=execute, name="environment-test", daemon=True)
         self._thread.start()
 
+    def _client_for(self, credential: str) -> httpx.Client:
+        """The client presenting ``credential``, replacing one made for another.
+
+        Called only between runs, so no thread is using the one it replaces.
+        """
+        if self._client is None or credential != self._credential:
+            if self._client is not None:
+                self._client.close()
+            self._client = _control_plane_client(self._base_url, credential)
+            self._credential = credential
+        return self._client
+
     def close(self) -> None:
         """Cancel in-flight preparation and allow its fenced cleanup to finish."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=45)
+        # A run still cleaning up keeps its client, or its last report would be
+        # lost: the process is ending, and takes both with it.
+        if self._client is not None and not self.busy:
+            self._client.close()

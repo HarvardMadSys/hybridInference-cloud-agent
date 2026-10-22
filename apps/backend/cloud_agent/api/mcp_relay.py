@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from cloud_agent import memory_tool, web_search
 from cloud_agent.agent_memory import MemoryTask
-from cloud_agent.api.deps import get_mcp_decision_signal, get_storage
+from cloud_agent.api.deps import get_http_client, get_mcp_decision_signal, get_storage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol
 from cloud_agent.mcp.authorization import decide, visible_capabilities
@@ -1520,8 +1520,8 @@ async def _host_web_search(
     request_id: Any,
     identity: dict[str, Any],
     store: _McpRelayStorage,
-    authorization: str | None,
     stateless: bool,
+    client: Any = None,
 ) -> dict[str, Any]:
     """Dispatch the platform search tool without exposing its provider key."""
     search_arguments = arguments if isinstance(arguments, dict) else {}
@@ -1605,7 +1605,7 @@ async def _host_web_search(
 
     try:
         await _recheck_fence(identity, store)
-        result = await web_search.search(search_arguments)
+        result = await web_search.search(search_arguments, client=client)
     except HTTPException as exc:
         return _binding_error(request_id, exc)
     except web_search.WebSearchError as exc:
@@ -1689,8 +1689,8 @@ async def _host_call(
             request_id=request_id,
             identity=identity,
             store=store,
-            authorization=authorization,
             stateless=stateless,
+            client=get_http_client(request) if request is not None else None,
         )
     catalogue = await _host_catalogue(protocol.presenting(identity, name), store)
     entry = catalogue.get(name)

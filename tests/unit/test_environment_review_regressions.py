@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import os
 import subprocess
 import sys
@@ -434,6 +435,60 @@ def test_environment_orphan_poll_is_throttled(monkeypatch):
         worker._thread.join(1)
     worker.close()
     assert [call["cleanup_orphans"] for call in calls] == [True, False, False, True]
+
+
+def test_environment_polls_keep_one_client_per_credential(monkeypatch):
+    """A poll opened a client of its own every five seconds; the worker keeps one."""
+    now = [100.0]
+    calls = []
+    monkeypatch.setattr(environment_tests.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(environment_tests, "claim_and_execute", lambda **kw: calls.append(kw))
+    worker = environment_tests.EnvironmentTestWorker("http://control", object())
+    for instant, credential in ((100.0, "host-cred"), (106.0, "host-cred"), (112.0, "rotated")):
+        now[0] = instant
+        worker.poll(credential, {"proof": instant})
+        worker._thread.join(1)
+    worker.close()
+
+    first, again, rotated = (call["client"] for call in calls)
+    assert first is again, "the same credential reuses its client"
+    assert rotated is not first and first.is_closed, "a replaced client is closed"
+    assert rotated.headers["Authorization"] == "Bearer rotated"
+    assert rotated.is_closed, "closing the worker closes its client"
+    assert [call["attestation"] for call in calls] == [
+        {"proof": 100.0},
+        {"proof": 106.0},
+        {"proof": 112.0},
+    ]
+
+
+def test_a_poll_claims_with_the_loops_proof_on_the_workers_client(monkeypatch):
+    """The claim loop's proof is presented as it was built, and the client stays open."""
+    sent = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append((request.url.path, json.loads(request.content)))
+        # No run is queued: the control plane answers ``null``.
+        return httpx.Response(200, content=b"null")
+
+    def second_proof(*_args, **_kwargs):
+        raise AssertionError("the poll built a proof of its own")
+
+    monkeypatch.setattr("cloud_agent_host.runner._claim_attestation", second_proof)
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://control") as client:
+        claimed = environment_tests.claim_and_execute(
+            base_url="http://control",
+            credential="host-cred",
+            backend=object(),
+            cleanup_orphans=False,
+            client=client,
+            attestation={"proof": 1},
+        )
+        assert not client.is_closed, "the worker's client outlives its poll"
+    assert claimed is False
+    [(path, body)] = sent
+    assert path == "/v1/agent/worker/environment-runs/claim"
+    assert body["attestation"] == {"proof": 1}
 
 
 def _environment_worker(monkeypatch, tmp_path, prepare, status, *, environment=None, retained=None):

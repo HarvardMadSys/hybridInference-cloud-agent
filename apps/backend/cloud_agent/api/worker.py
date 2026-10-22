@@ -42,6 +42,7 @@ from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
     get_grant_client,
+    get_http_client,
     get_source_control,
     get_storage,
     get_work_signal,
@@ -126,7 +127,7 @@ from cloud_agent.source_control import SourceControlError
 from cloud_agent.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
-from cloud_agent.task_titles import generate_thread_title
+from cloud_agent.task_titles import schedule_thread_title
 from cloud_agent.tokens import (
     SCOPE_FULL,
     SCOPE_MCP,
@@ -834,6 +835,7 @@ async def worker_claim(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     grants: Any = Depends(get_grant_client),
     gateway: Any = Depends(get_gateway_client),
+    http: Any = Depends(get_http_client),
 ) -> WorkerClaimResponse | None:
     """Claim the next queued job and mint this attempt's capability token.
 
@@ -884,6 +886,7 @@ async def worker_claim(
             app_credentials=app_credentials,
             grants=grants,
             gateway=gateway,
+            http=http,
             attestation=body.attestation,
             host=claiming_host["host"],
         )
@@ -936,6 +939,7 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
     app_credentials: Any | None,
     grants: Any,
     gateway: Any,
+    http: Any,
     attestation: WorkerClaimAttestation | None,
     host: str,
 ) -> WorkerClaimResponse:
@@ -1266,17 +1270,13 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         mcp_bindings=mcp_aliases,
         metadata=claim["metadata"],
     )
-    if claim.get("title_generation_pending") is True:
-        # FastAPI sends the claim first; title inference cannot delay the runner.
-        # Only unnamed/contaminated conversations are eligible. A later claim
-        # can recover a failed generation using the original conversation prompt.
-        background_tasks.add_task(
-            generate_thread_title,
-            job_store.conversation_commands,
-            **fence,
-            model=claim["model"],
-            sandbox_token=sandbox_token,
-        )
+    schedule_thread_title(
+        background_tasks,
+        job_store.conversation_commands,
+        claim,
+        sandbox_token=sandbox_token,
+        client=http,
+    )
     return response
 
 

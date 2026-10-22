@@ -204,7 +204,9 @@ def service(monkeypatch):
     monkeypatch.setattr(
         runner_mod,
         "release_turn",
-        lambda *, base_url, worker_token, job_id, reason: released.append((job_id, reason)) or True,
+        lambda *, base_url, worker_token, job_id, reason, client=None: (
+            released.append((job_id, reason)) or True
+        ),
     )
     yield identity, backend, released
     runner_mod._STOPPING.clear()
@@ -1499,6 +1501,92 @@ def test_an_idle_host_waits_for_work_instead_of_sleeping(service, monkeypatch):
     ]
     assert {w["timeout_s"] for w in waits} == {5.0}, "never longer than the poll it replaces"
     assert {w["base_url"] for w in waits} == {"http://control"}
+
+
+def test_claims_waits_and_releases_share_one_client_the_loop_closes(service, monkeypatch):
+    """Each of these used to open a connection: with the environment claim, three a cycle."""
+    _identity, backend, _released = service
+    used: list[tuple[str, Any]] = []
+    jobs = [_job(1)]
+
+    def claim(**kwargs: Any) -> dict | None:
+        used.append(("claim", kwargs["client"]))
+        if jobs:
+            return jobs.pop()
+        runner_mod._STOPPING.set()
+        return None
+
+    def wait(**kwargs: Any) -> str:
+        used.append(("wait", kwargs["client"]))
+        return "token"
+
+    def release(**kwargs: Any) -> bool:
+        used.append(("release", kwargs["client"]))
+        return True
+
+    monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    monkeypatch.setattr(runner_mod, "wait_for_work", wait)
+    monkeypatch.setattr(runner_mod, "release_turn", release)
+
+    assert (
+        runner_mod.run_forever(
+            base_url="http://control",
+            worker_id="runner-a",
+            backend=backend,
+            host="host-a",
+            spawn_turn=lambda _p: LaunchResult(LAUNCH_NOT_STARTED, None, "could not start"),
+        )
+        == 0
+    )
+    assert [call for call, _client in used] == ["claim", "release", "claim", "wait"]
+    [client] = {id(client): client for _call, client in used}.values()
+    assert isinstance(client, httpx.Client)
+    assert client.is_closed, "the host's client outlived the loop that owned it"
+
+
+def test_an_empty_claims_proof_is_the_one_its_environment_poll_presents(service, monkeypatch):
+    """Built once a pass: the environment-test claim used to build a second one."""
+    _identity, _process_backend, _released = service
+    backend = runner_mod.ContainerBackend(image="img")
+    monkeypatch.setattr(backend, "preflight", lambda **_kw: None)
+    monkeypatch.setattr(backend, "check_gateway_reachable", lambda _url: None)
+    monkeypatch.setattr(
+        backend, "version_stamp", lambda: {"sandbox_image_digest": "sha256:" + "a" * 64}
+    )
+    attest = runner_mod._claim_attestation
+    built: list[dict[str, Any]] = []
+    sent: list[dict[str, Any]] = []
+    polled: list[tuple[str, Any]] = []
+
+    def counted(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        built.append(attest(*args, **kwargs))
+        return built[-1]
+
+    def claim(**kwargs: Any) -> None:
+        sent.append(kwargs["attestation"])
+        if len(sent) == 2:
+            runner_mod._STOPPING.set()
+
+    class _Worker:
+        busy = False
+
+        def __init__(self, _base_url: str, _backend: Any) -> None:
+            pass
+
+        def poll(self, credential: str, attestation: Any = None) -> None:
+            polled.append((credential, attestation))
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(runner_mod, "_claim_attestation", counted)
+    monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    monkeypatch.setattr("cloud_agent_host.environment_tests.EnvironmentTestWorker", _Worker)
+
+    assert _serve(backend, launch=lambda _p: LaunchResult(LAUNCH_STARTED, FakeHandle())) == 0
+    assert len(built) == len(sent) == 2, "one proof a pass"
+    assert [credential for credential, _proof in polled] == ["host-cred", "host-cred"]
+    assert all(proof is claimed for (_credential, proof), claimed in zip(polled, sent, strict=True))
 
 
 def test_a_control_plane_without_the_wait_is_polled_and_asked_again_later(monkeypatch):

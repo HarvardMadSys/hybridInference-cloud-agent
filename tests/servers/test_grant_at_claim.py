@@ -37,6 +37,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.storage import AllCapabilities, EmptyAttachments
 
+from cloud_agent import task_titles
 from cloud_agent.api import routes as agent_jobs_router, worker as agent_worker
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
@@ -627,8 +628,10 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
 
     monkeypatch.setattr(store, "claim_job", claim_with_title_state)
     generate = AsyncMock()
-    monkeypatch.setattr(agent_worker, "generate_thread_title", generate)
+    monkeypatch.setattr(task_titles, "generate_thread_title", generate)
     background = BackgroundTasks()
+    # Stands in for the process's shared pool, which the title borrows.
+    shared = object()
     response = await agent_worker.worker_claim(
         WorkerClaimRequest(worker_id="w1"),
         background,
@@ -637,6 +640,7 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
         app_credentials=None,
         grants=grants,
         gateway=_Gateway(),
+        http=shared,
     )
     assert response.job_id == _JOB
     generate.assert_not_awaited()
@@ -650,16 +654,40 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
             lease_generation=_GENERATION,
             model="glm-5.1",
             sandbox_token="agr.header.signature",
+            client=shared,
         )
     else:
         generate.assert_not_awaited()
+
+
+async def test_a_claimed_title_borrows_the_process_connection_pool(monkeypatch):
+    """Through the route: the title reaches the gateway on the claim's own pool."""
+    from unittest.mock import AsyncMock
+
+    store, grants = _ClaimStore(), _Grants()
+    original_claim = store.claim_job
+
+    async def claim_with_title_state(**kwargs):
+        return {**await original_claim(**kwargs), "title_generation_pending": True}
+
+    monkeypatch.setattr(store, "claim_job", claim_with_title_state)
+    generate = AsyncMock()
+    monkeypatch.setattr(task_titles, "generate_thread_title", generate)
+    app = _app(store, grants)
+    app.state.http = shared = object()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+
+    assert response.status_code == 200
+    generate.assert_awaited_once()
+    assert generate.await_args.kwargs["client"] is shared
 
 
 async def test_failed_claim_does_not_schedule_title_generation(monkeypatch, claim):
     from unittest.mock import AsyncMock
 
     generate = AsyncMock()
-    monkeypatch.setattr(agent_worker, "generate_thread_title", generate)
+    monkeypatch.setattr(task_titles, "generate_thread_title", generate)
     store, grants = _ClaimStore(), _Grants(fail=True)
     original_claim = store.claim_job
 

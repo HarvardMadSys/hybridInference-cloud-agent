@@ -12,9 +12,9 @@ dependencies they asked for there. Three kinds arrive at this module:
   already handle it. A configured App this process could not load is *not*
   ``None``: see :func:`get_agent_app_credentials`. The attribute names
   (``store``, ``gateway``, ``grants``, ``renewal_schedule``,
-  ``source_control``) are the contract with the lifespan; renaming one there
-  without renaming it here degrades silently to "not configured" rather than
-  failing.
+  ``source_control``, ``http``) are the contract with the lifespan;
+  renaming one there without renaming it here degrades silently to "not
+  configured" rather than failing.
 
 - **Identity and admin auth, which this service answers from its own world.**
   There is no ``users`` table here and no ``api_keys`` table: the gateway kept
@@ -77,6 +77,8 @@ from cloud_agent.source_control_runtime import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+
+    import httpx
 
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient, RenewalSchedule
@@ -146,6 +148,16 @@ def get_grant_client(request: Request) -> GrantClient:
         client = _GrantClient()
         request.app.state.grants = client
     return client
+
+
+def get_http_client(request: Request) -> httpx.AsyncClient | None:
+    """Dependency to obtain the process's shared outbound connection pool.
+
+    The one the gateway and grant clients use, lent to calls that used to
+    open a client of their own. ``None`` in a test application that has not
+    set one: those callers then open a client for the call, as they always did.
+    """
+    return getattr(request.app.state, "http", None)
 
 
 def get_renewal_schedule(request: Request) -> RenewalSchedule:
