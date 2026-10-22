@@ -26,6 +26,8 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
 
+from cloud_agent_shared.s3_bucket_name import is_s3_bucket_name
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -53,11 +55,6 @@ SANDBOX_ARCHIVE_CAPABILITY: Final = "sandbox-archive-settings-v1"
 SANDBOX_CHECKPOINT_CAPABILITY: Final = "sandbox-checkpoints-v1"
 SANDBOX_ARCHIVE_DESTINATION_CAPABILITY: Final = "sandbox-archive-destination-v1"
 
-# S3's rules for a general purpose bucket name: lowercase letters, digits,
-# dots and hyphens, beginning and ending with a letter or digit, no two dots
-# together, and not shaped like an IP address.
-_BUCKET_RE: Final = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
-_IP_ADDRESS_RE: Final = re.compile(r"[0-9]+(?:\.[0-9]+){3}")
 _ACCOUNT_ID_RE: Final = re.compile(r"[0-9]{12}")
 _ACCESS_KEY_ID_RE: Final = re.compile(r"[A-Z0-9]{20}")
 _SECRET_ACCESS_KEY_RE: Final = re.compile(r"[A-Za-z0-9/+=]{40}")
@@ -86,12 +83,7 @@ def archive_bucket(s3_uri: object) -> str:
 
 
 def _check_bucket(bucket: object) -> None:
-    if (
-        not isinstance(bucket, str)
-        or _BUCKET_RE.fullmatch(bucket) is None
-        or ".." in bucket
-        or _IP_ADDRESS_RE.fullmatch(bucket) is not None
-    ):
+    if not isinstance(bucket, str) or not is_s3_bucket_name(bucket):
         raise SandboxArchivePolicyError("the archive bucket must be a valid S3 bucket name")
 
 

@@ -67,8 +67,19 @@ def test_the_bucket_is_a_setting_and_the_prefix_is_not() -> None:
         "s3://-archives/cloud-agent/sandbox",
         "s3://archives-/cloud-agent/sandbox",
         "s3://example..archives/cloud-agent/sandbox",
+        "s3://example.-archives/cloud-agent/sandbox",
+        "s3://example-.archives/cloud-agent/sandbox",
         "s3://192.168.5.4/cloud-agent/sandbox",
         "s3://example_archives/cloud-agent/sandbox",
+        # Prefixes and suffixes S3 reserves for names it gives out itself.
+        "s3://xn--archives/cloud-agent/sandbox",
+        "s3://sthree-archives/cloud-agent/sandbox",
+        "s3://amzn-s3-demo-archives/cloud-agent/sandbox",
+        "s3://archives-s3alias/cloud-agent/sandbox",
+        "s3://archives--ol-s3/cloud-agent/sandbox",
+        "s3://archives.mrap/cloud-agent/sandbox",
+        "s3://archives--x-s3/cloud-agent/sandbox",
+        "s3://archives--table-s3/cloud-agent/sandbox",
     ],
 )
 def test_a_destination_must_be_a_valid_bucket_under_the_fixed_prefix(uri: str) -> None:

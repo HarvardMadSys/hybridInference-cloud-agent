@@ -166,6 +166,35 @@ describe('sandbox archive settings card', () => {
     expect(onSave.mock.calls[0][0].s3_uri).toBe('s3://example-archives/cloud-agent/sandbox');
   });
 
+  it.each([
+    'ab',
+    'a'.repeat(64),
+    '-archives',
+    'archives-',
+    'example..archives',
+    'example.-archives',
+    'example-.archives',
+    '192.168.5.4',
+    // Prefixes and suffixes S3 reserves for names it gives out itself.
+    'xn--archives',
+    'sthree-archives',
+    'amzn-s3-demo-archives',
+    'archives-s3alias',
+    'archives--ol-s3',
+    'archives.mrap',
+    'archives--x-s3',
+    'archives--table-s3',
+  ])('refuses %s as a bucket name, as S3 does', (bucket) => {
+    const onSave = vi.fn();
+    render(<SandboxArchiveSettingsCard settings={settings()} busy={false} onSave={onSave} />);
+
+    fireEvent.change(screen.getByLabelText('S3 bucket'), { target: { value: bucket } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+
+    expect(screen.getByLabelText('S3 bucket')).toHaveAttribute('aria-invalid', 'true');
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it('requires region, owner, and a customer-managed KMS key before enabling', () => {
     const onSave = vi.fn();
     render(

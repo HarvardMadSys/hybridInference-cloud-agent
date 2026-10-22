@@ -15,6 +15,7 @@ import {
 } from '@/lib/api/adminArchiveSettings';
 
 import { SettingsSection } from '../SettingsSection';
+import { isS3BucketName } from './settingValues';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
@@ -26,9 +27,6 @@ const MAX_MULTIPART_PARTS = 10_000;
 
 const KMS_KEY_ARN = /^arn:([^:]+):kms:([a-z0-9-]+):([0-9]{12}):key\/([A-Za-z0-9-]+)$/;
 const ACCESS_KEY_ID = /^[A-Z0-9]{20}$/;
-// S3's rules for a general purpose bucket, as the server applies them.
-const BUCKET = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
-const IP_ADDRESS = /^[0-9]+(\.[0-9]+){3}$/;
 const SECRET_ACCESS_KEY = /^[A-Za-z0-9/+=]{40}$/;
 
 interface Draft {
@@ -64,7 +62,7 @@ function bucketOf(s3Uri: string): string {
 
 /** The bucket's error, if its name breaks S3's rules for a general purpose bucket. */
 function bucketErrors(bucket: string): DraftErrors {
-  return BUCKET.test(bucket) && !bucket.includes('..') && !IP_ADDRESS.test(bucket)
+  return isS3BucketName(bucket)
     ? {}
     : { bucket: 'Enter an S3 bucket name: 3 to 63 lowercase letters, digits, dots or hyphens.' };
 }
