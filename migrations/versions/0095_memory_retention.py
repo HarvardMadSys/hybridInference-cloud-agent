@@ -1,13 +1,13 @@
 """Index global archived-memory retention and self-reference cleanup.
 
-Revision ID: 0093_memory_retention
-Revises: 0092_targeted_work_wakes
+Revision ID: 0095_memory_retention
+Revises: 0094_thread_message_pages
 """
 
 from alembic import context, op
 
-revision = "0093_memory_retention"
-down_revision = "0092_targeted_work_wakes"
+revision = "0095_memory_retention"
+down_revision = "0094_thread_message_pages"
 branch_labels = None
 depends_on = None
 

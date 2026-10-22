@@ -1,16 +1,25 @@
-"""Validate run descriptors and build their immutable catalogue manifests."""
+"""Normalize run descriptors and project immutable catalogue manifests."""
 
 from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 from .clock import clock
-from .models import Measurement, ProfilingRun
-from .schema import _TRUTHY, MAX_RUN_ID_CHARS, PRODUCER_INSTANCE_ID, RUN_ID_PATTERN, TARGET_KEYS
+from .models import AdmissionInstance, Measurement, ProfilingRun, RunManifest
+from .schema import (
+    _TRUTHY,
+    MAX_REMOTE_STAGES,
+    MAX_RUN_ID_CHARS,
+    PRODUCER_INSTANCE_ID,
+    RUN_ID_PATTERN,
+    SOURCE_ADMIN,
+    SOURCE_ENVIRONMENT,
+    TARGET_KEYS,
+)
 
 
 def _truthy(raw: str | None) -> bool:
@@ -18,17 +27,9 @@ def _truthy(raw: str | None) -> bool:
     return (raw or "").strip().lower() in _TRUTHY
 
 
-def _parse_absolute_expiry(raw: str) -> datetime:
-    """Return the configured absolute expiry of a run, normalized to UTC.
-
-    A trailing ``Z`` is accepted because the design's run descriptors are
-    written in UTC, and any other ISO-8601 offset is normalized to UTC so two
-    spellings of one instant compare equal.
-
-    Raises:
-        ValueError: the value is missing, unparseable, or not in the future.
-    """
-    text = (raw or "").strip()
+def _parse_instant(raw: Any) -> datetime:
+    """Return an ISO-8601 instant normalized to UTC, without judging its age."""
+    text = str(raw or "").strip()
     if not text:
         raise ValueError("expires_at is required")
     normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
@@ -38,37 +39,20 @@ def _parse_absolute_expiry(raw: str) -> datetime:
         raise ValueError(f"expires_at is not an ISO-8601 timestamp: {text!r}") from exc
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
-    moment = moment.astimezone(UTC)
-    if (moment - datetime.now(UTC)).total_seconds() <= 0:
-        raise ValueError(f"expires_at is not in the future: {text!r}")
-    return moment
+    return moment.astimezone(UTC)
 
 
-def _parse_expiry(raw: str) -> float:
-    """Return the monotonic deadline for an ISO-8601 ``expires_at``.
+def _future_expiry(raw: Any) -> tuple[datetime, float]:
+    """Return one configured expiry and the process-local deadline derived from it."""
+    moment = _parse_instant(raw)
+    remaining = (moment - datetime.now(UTC)).total_seconds()
+    if remaining <= 0:
+        raise ValueError(f"expires_at is not in the future: {str(raw).strip()!r}")
+    return moment, clock().monotonic() + remaining
 
-    Derived from :func:`_parse_absolute_expiry`, so the configured instant is
-    read in exactly one place.
-    """
-    moment = _parse_absolute_expiry(raw)
-    return clock().monotonic() + (moment - datetime.now(UTC)).total_seconds()
 
-
-def parse_run(raw: str, *, allow_continuous: bool = False) -> ProfilingRun:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
-    """Build a run descriptor from its JSON form.
-
-    Raises:
-        ValueError: the descriptor is not an object, is missing a run id, a
-            non-empty operation list, a future expiry or a positive cap, or
-            scopes itself by a field that does not exist.
-    """
-    try:
-        body = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"run descriptor is not valid JSON: {exc}") from exc
-    if not isinstance(body, dict):
-        raise ValueError("run descriptor must be a JSON object")
-
+def _run_id(body: Mapping[str, Any]) -> str:
+    """Normalize and validate a run id."""
     run_id = str(body.get("run_id") or "").strip()
     if not run_id:
         raise ValueError("run descriptor has no run_id")
@@ -76,51 +60,104 @@ def parse_run(raw: str, *, allow_continuous: bool = False) -> ProfilingRun:  # n
         raise ValueError(f"run_id is longer than {MAX_RUN_ID_CHARS} characters")
     if RUN_ID_PATTERN.fullmatch(run_id) is None:
         raise ValueError("run_id must contain only letters, numbers, '.', '_', ':' or '-'")
+    return run_id
 
-    raw_operations = body.get("operations")
-    if not isinstance(raw_operations, list):
+
+def _operations(
+    body: Mapping[str, Any], *, accepted: tuple[type[Any], ...] = (list,)
+) -> frozenset[str]:
+    """Normalize the non-empty operation selection."""
+    raw = body.get("operations")
+    if not isinstance(raw, accepted):
         raise ValueError("run descriptor has no operations list")
-    operations = frozenset(str(item).strip() for item in raw_operations if str(item).strip())
+    operations = frozenset(str(item).strip() for item in raw if str(item).strip())
     if not operations:
         raise ValueError("run descriptor selects no operations")
+    return operations
 
-    continuous = body.get("continuous") is True
-    if continuous and (
-        not allow_continuous or "expires_at" not in body or body["expires_at"] is not None
-    ):
-        raise ValueError("continuous runs require Admin control and an explicit null expires_at")
+
+def _continuous(body: Mapping[str, Any], *, allow: bool, source: str) -> bool:
+    """Validate the explicit continuous-run contract."""
     if "continuous" in body and not isinstance(body["continuous"], bool):
         raise ValueError("continuous must be a boolean")
+    continuous = body.get("continuous") is True
+    if continuous and (
+        not allow
+        or source != SOURCE_ADMIN
+        or "expires_at" not in body
+        or body["expires_at"] is not None
+    ):
+        raise ValueError("continuous runs require Admin control and an explicit null expires_at")
+    return continuous
 
+
+def _max_operations(body: Mapping[str, Any], *, continuous: bool) -> int:
+    """Normalize the finite or continuous admission budget."""
     try:
-        if isinstance(body.get("max_operations"), bool):
+        raw = body["max_operations"]
+        if isinstance(raw, bool):
             raise TypeError
-        max_operations = int(body["max_operations"])
+        value = int(raw)
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("run descriptor has no valid max_operations") from exc
-    if (continuous and max_operations != 0) or (not continuous and max_operations <= 0):
+    if (continuous and value != 0) or (not continuous and value <= 0):
         raise ValueError("max_operations must be zero for continuous runs, positive otherwise")
+    return value
 
+
+def _config_version(body: Mapping[str, Any]) -> int:
+    """Normalize a positive manifest version without defaulting explicit zero."""
+    raw = body.get("config_version", 1)
     try:
-        if isinstance(body.get("config_version"), bool):
+        if isinstance(raw, bool):
             raise TypeError
-        config_version = int(body.get("config_version") or 1)
+        value = int(raw)
     except (TypeError, ValueError) as exc:
         raise ValueError("config_version must be an integer") from exc
-    if config_version <= 0:
+    if value <= 0:
         raise ValueError("config_version must be positive")
+    return value
 
-    raw_admissions = body.get("admission_instances") or []
-    if not isinstance(raw_admissions, list):
+
+def _target(body: Mapping[str, Any]) -> dict[str, str]:
+    """Normalize the bounded target vocabulary."""
+    raw = body.get("target") or {}
+    if not isinstance(raw, Mapping):
+        raise ValueError("target must be a JSON object")
+    unknown = sorted(str(key) for key in raw if str(key) not in TARGET_KEYS)
+    if unknown:
+        raise ValueError(f"target names unknown field(s): {', '.join(unknown)}")
+    normalized: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(value, (str, int)) or isinstance(value, bool) or not str(value).strip():
+            raise ValueError(f"target.{key} must be a non-empty string or integer")
+        normalized[str(key)] = str(value)
+    return normalized
+
+
+def _admissions(
+    raw: Any,
+    *,
+    continuous: bool,
+    bounded: bool,
+) -> tuple[AdmissionInstance, ...]:
+    """Normalize immutable admission entries under one boundary's policy."""
+    if raw is None:
+        values: Sequence[Any] = ()
+    elif isinstance(raw, list):
+        values = raw
+    else:
         raise ValueError("admission_instances must be a list")
-    admissions: list[Mapping[str, Any]] = []
-    for raw_admission in raw_admissions:
-        if not isinstance(raw_admission, Mapping):
+    if bounded and len(values) > MAX_REMOTE_STAGES:
+        raise ValueError("admission_instances has too many entries")
+    admissions: list[AdmissionInstance] = []
+    for item in values:
+        if not isinstance(item, Mapping):
             raise ValueError("admission_instances entries must be objects")
-        instance = str(raw_admission.get("instance") or "").strip()
+        instance = str(item.get("instance") or "").strip()
         if not instance:
             raise ValueError("admission_instances entries need an instance")
-        raw_budget = raw_admission.get("max_operations")
+        raw_budget = item.get("max_operations")
         if (
             not isinstance(raw_budget, (str, int))
             or isinstance(raw_budget, bool)
@@ -133,82 +170,125 @@ def parse_run(raw: str, *, allow_continuous: bool = False) -> ProfilingRun:  # n
             raise ValueError("admission_instances entries need max_operations") from exc
         if budget < 0 or (budget == 0 and not continuous):
             raise ValueError("admission instance max_operations must be positive unless continuous")
-        admissions.append({"instance": instance, "max_operations": budget})
-    if not any(item["instance"] == PRODUCER_INSTANCE_ID for item in admissions):
-        admissions.append({"instance": PRODUCER_INSTANCE_ID, "max_operations": max_operations})
+        admissions.append(AdmissionInstance(instance=instance, max_operations=budget))
+    return tuple(admissions)
 
-    raw_target = body.get("target") or {}
-    if not isinstance(raw_target, dict):
-        raise ValueError("target must be a JSON object")
-    unknown = sorted(str(key) for key in raw_target if str(key) not in TARGET_KEYS)
-    if unknown:
-        raise ValueError(f"target names unknown field(s): {', '.join(unknown)}")
-    target: dict[str, str] = {}
-    for key, value in raw_target.items():
-        if not isinstance(value, (str, int)) or isinstance(value, bool) or not str(value).strip():
-            raise ValueError(f"target.{key} must be a non-empty string or integer")
-        target[str(key)] = str(value)
 
-    raw_expiry = str(body.get("expires_at") or "")
-    return ProfilingRun(
-        run_id=run_id,
-        operations=operations,
-        expires_at=raw_expiry.strip(),
-        expires_at_utc=None if continuous else _parse_absolute_expiry(raw_expiry),
-        deadline_mono=math.inf if continuous else _parse_expiry(raw_expiry),
+def _configured_admissions(
+    raw: Any, *, continuous: bool, max_operations: int
+) -> tuple[AdmissionInstance, ...]:
+    """Normalize descriptor admissions and add this producer once."""
+    admissions = list(_admissions(raw, continuous=continuous, bounded=False))
+    if not any(item.instance == PRODUCER_INSTANCE_ID for item in admissions):
+        admissions.append(
+            AdmissionInstance(
+                instance=PRODUCER_INSTANCE_ID,
+                max_operations=max_operations,
+            )
+        )
+    return tuple(admissions)
+
+
+def parse_run(
+    raw: str,
+    *,
+    allow_continuous: bool = False,
+    source: str = SOURCE_ENVIRONMENT,
+) -> ProfilingRun:
+    """Build a fail-fast run descriptor from deployment or control configuration.
+
+    Raises:
+        ValueError: the descriptor is malformed, out of scope, expired, or
+            internally inconsistent.
+    """
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"run descriptor is not valid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise ValueError("run descriptor must be a JSON object")
+
+    continuous = _continuous(body, allow=allow_continuous, source=source)
+    max_operations = _max_operations(body, continuous=continuous)
+    expires_at: datetime | None
+    if continuous:
+        expires_at, deadline = None, math.inf
+    else:
+        expires_at, deadline = _future_expiry(body.get("expires_at"))
+    manifest = RunManifest(
+        run_id=_run_id(body),
+        operations=_operations(body),
+        target=_target(body),
+        expires_at=expires_at,
         continuous=continuous,
+        config_version=_config_version(body),
         max_operations=max_operations,
-        target=target,
-        config_version=config_version,
-        admission_instances=tuple(admissions),
+        admission_instances=_configured_admissions(
+            body.get("admission_instances"),
+            continuous=continuous,
+            max_operations=max_operations,
+        ),
+        source=source,
     )
+    return ProfilingRun(manifest=manifest, deadline_mono=deadline)
+
+
+def inherited_manifest(context: Mapping[str, Any]) -> RunManifest | None:
+    """Fail softly while normalizing the manifest carried by a selection.
+
+    Syntax is validated here; whether a finite expiry is still in the future is
+    deliberately left to the local deadline adapter. A stale handoff is normal
+    transport input, not malformed configuration.
+    """
+    raw = context.get("run")
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        source = str(raw.get("source") or SOURCE_ADMIN)
+        continuous = _continuous(raw, allow=True, source=source)
+        max_operations = _max_operations(raw, continuous=continuous)
+        expires_at = None if continuous else _parse_instant(raw.get("expires_at"))
+        return RunManifest(
+            run_id=_run_id(raw),
+            operations=_operations(
+                raw,
+                accepted=(list, tuple, set, frozenset),
+            ),
+            target=_target(raw),
+            expires_at=expires_at,
+            max_operations=max_operations,
+            continuous=continuous,
+            config_version=_config_version(raw),
+            admission_instances=_admissions(
+                context.get("admission_instances"),
+                continuous=continuous,
+                bounded=True,
+            ),
+            source=source,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def inherited_admissions(
+    context: Mapping[str, Any], *, continuous: bool
+) -> tuple[AdmissionInstance, ...] | None:
+    """Fail softly while normalizing a legacy handoff's admission owners."""
+    try:
+        return _admissions(
+            context.get("admission_instances"),
+            continuous=continuous,
+            bounded=True,
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def manifest_for_run(run: ProfilingRun | None) -> dict[str, Any] | None:
-    """Return the immutable catalogue manifest for one parsed run."""
-    if run is None:
-        return None
-    return {
-        "run_id": run.run_id,
-        "operations": sorted(run.operations),
-        "target": dict(run.target),
-        "expires_at": run.expires_at_utc.isoformat() if run.expires_at_utc else None,
-        **({"continuous": True} if run.continuous else {}),
-        "config_version": run.config_version,
-        "max_operations": run.max_operations,
-        "admission_instances": [dict(item) for item in run.admission_instances],
-    }
+    """Return the immutable catalogue projection for one parsed run."""
+    return None if run is None else run.manifest.to_catalogue_payload()
 
 
 def manifest_for_measurement(measurement: Measurement | None) -> dict[str, Any] | None:
-    """Return the run manifest this measurement was selected under.
-
-    Built from the measurement's *own* copy of the experiment rather than from
-    whatever run is configured now. That is what stops a delivery that happens
-    after a new experiment started from describing the old record as a sample
-    of the new one -- a mix-up the writer would reject as ``run_conflict`` and
-    an operator would have to debug from two disagreeing manifests.
-    """
-    if measurement is None:
-        return None
-    if not measurement.run_id:
-        return None
-    manifest: dict[str, Any] = {
-        "run_id": measurement.run_id,
-        "operations": sorted(measurement.run_operations),
-        "target": dict(measurement.run_target),
-        "config_version": measurement.run_config_version,
-        "max_operations": measurement.run_max_operations,
-        "admission_instances": [dict(item) for item in measurement.run_admission_instances],
-    }
-    # The configured expiry travels with the record, so a measurement that was
-    # handed over rather than selected here still states the experiment's
-    # identity instead of deriving a different instant from its own clock.
-    if measurement.run_expires_at is None and not measurement.run_continuous:
-        return None
-    manifest["expires_at"] = (
-        measurement.run_expires_at.isoformat() if measurement.run_expires_at else None
-    )
-    if measurement.run_continuous:
-        manifest["continuous"] = True
-    return manifest
+    """Return the retained run snapshot this measurement was selected under."""
+    return None if measurement is None else measurement.run_manifest.to_catalogue_payload()

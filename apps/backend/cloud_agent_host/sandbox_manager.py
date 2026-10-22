@@ -83,9 +83,7 @@ from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveConfigError
 from cloud_agent_host.sandbox_archives import safe_archive_error_type
 from cloud_agent_host.sandbox_checkpoints import (
     DEFAULT_CONTAINERD_CONTENT_DIR,
-    CheckpointRestore,
     SandboxCheckpointCapture,
-    SandboxCheckpointError,
     SandboxCheckpointStore,
 )
 from cloud_agent_host.sandbox_deletion_backup import (
@@ -127,7 +125,11 @@ from cloud_agent_shared.sandbox_manager_wire import (
     SharedMember,
     member_manifest,
 )
-from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER, parse_start_fence
+from cloud_agent_shared.sandbox_restore import (
+    START_FENCE_HEADER,
+    CheckpointRestore,
+    parse_start_fence,
+)
 from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
 from cloud_agent_shared.workspace_browser import (
     WorkspacePathError,
@@ -537,22 +539,8 @@ class SandboxArchiveUploadRequest(SandboxArchiveCommitRequest):
     ] = Field(..., min_length=4, max_length=4)
 
 
-class SharedSandboxRestoreRequest(BaseModel):
+class SharedSandboxRestoreRequest(CheckpointRestore):
     """The control plane's record of a moved group's checkpoint."""
-
-    checkpoint_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
-    object_key: str = Field(..., min_length=1, max_length=1024)
-    version_id: str | None = Field(None, max_length=1024)
-    sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
-    size_bytes: int = Field(..., gt=0)
-    base_image: str = Field(..., min_length=1, max_length=512)
-    format_version: int = Field(1, ge=1)
-
-    def restore(self) -> CheckpointRestore:
-        try:
-            return CheckpointRestore(**self.model_dump())
-        except SandboxCheckpointError as exc:
-            raise ValueError(str(exc)) from exc
 
 
 class SharedSandboxIdentityRequest(SharedGroupIdentity):
@@ -2804,7 +2792,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 expected_container_id=body.expected_container_id,
                 profiling=body.profiling,
                 start_seq=body.start_seq,
-                restore=None if body.restore is None else body.restore.restore(),
+                restore=None if body.restore is None else body.restore.require_supported(),
                 **(
                     {"environment_snapshot": body.environment_snapshot}
                     if body.environment_snapshot is not None
@@ -3651,7 +3639,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         try:
             owner = require_shared_supervisor()
             shared_descriptors = (
-                await endpoint_calls.run(owner.list)
+                await endpoint_calls.run(owner.list, background_recovery=True)
                 if thread_id is None
                 else await endpoint_calls.run(owner.list_for_thread, thread_id)
             )

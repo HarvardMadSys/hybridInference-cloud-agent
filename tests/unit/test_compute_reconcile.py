@@ -15,12 +15,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from tests.support.compute_snapshot import snapshot_repository
 
 from cloud_agent.application import compute_reconcile
 from cloud_agent.application.compute_reconcile import ComputeReconciler
 from cloud_agent.application.compute_setup import HostRelease
 from cloud_agent.domain.compute import autoscaling_acquire_can_cancel, fingerprint, public_operation
 from cloud_agent.host_pool import hash_secret
+from cloud_agent.ports.compute_resources import ComputeSchedulingSnapshot
 from cloud_agent.ports.external.compute_provider import (
     AcquisitionResolution,
     NodeObservation,
@@ -56,6 +58,21 @@ PROFILE = DeploymentProfile(
     deployment_sha="b" * 40,
     environment_ref="deployment:host",
 )
+
+
+@pytest.mark.parametrize("count", [1, 100])
+async def test_schedule_reads_one_snapshot_without_per_allocation_queries(monkeypatch, count):
+    h = harness(monkeypatch, identified=True)
+    rows = [{**h.allocation, "id": f"allocation-{index}"} for index in range(count)]
+    h.repository.scheduling_inventory = AsyncMock(
+        return_value=ComputeSchedulingSnapshot(rows, {}, {})
+    )
+    h.repository.list_allocations.side_effect = AssertionError("must use the bulk snapshot")
+    h.repository.list_operations.side_effect = AssertionError("per-allocation query")
+    await h.reconciler.schedule()
+    h.repository.scheduling_inventory.assert_awaited_once_with()
+    h.repository.list_allocations.assert_not_awaited()
+    h.repository.list_operations.assert_not_awaited()
 
 
 def observed(*, state="ready", expires=NOW + timedelta(hours=4)):
@@ -149,7 +166,7 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
         operation["result"].update(kwargs.get("result") or {})
         return True
 
-    repository = SimpleNamespace(
+    repository = snapshot_repository(
         get_allocation=AsyncMock(side_effect=lambda _id: allocation),
         list_allocations=AsyncMock(return_value=[allocation]),
         list_operations=AsyncMock(return_value=[]),
@@ -219,6 +236,7 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
             )
         ),
         inventory=AsyncMock(),
+        quiesce=AsyncMock(return_value=0),
     )
     host_pool = SimpleNamespace(
         get_host=AsyncMock(return_value=allocation["hosts"][0]), issue_enroll_token=AsyncMock()
@@ -771,6 +789,106 @@ async def test_release_removes_what_moved_groups_left_behind_then_releases(monke
     h.bootstrap.inventory.assert_awaited_once()
     h.repository.commit_release.assert_awaited_once()
     h.provider.release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_release_stops_the_runner_before_reading_the_inventory(monkeypatch):
+    """A refused runner restarting under its policy would leave self-tests to count."""
+    h = harness(monkeypatch, kind="retire", identified=True)
+    h.bootstrap.inventory.return_value = HostInventory(complete=True)
+    order = Mock()
+    order.attach_mock(h.bootstrap.quiesce, "quiesce")
+    order.attach_mock(h.bootstrap.inventory, "inventory")
+    h.bootstrap.quiesce.return_value = 1
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "succeeded"
+    assert [name for name, *_ in order.mock_calls] == ["quiesce", "inventory"]
+    assert h.operation["result"]["inventory"] == [
+        {
+            "node_id": h.allocation["nodes"][0]["id"],
+            "probes_removed": 1,
+            "complete": True,
+            "retained_containers": 0,
+            "unknown_containers": 0,
+            "orphan_state": False,
+            "blocked_reasons": [],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_inventory_keeps_what_the_node_showed(monkeypatch):
+    h = harness(monkeypatch, kind="retire", identified=True)
+    h.bootstrap.inventory.return_value = HostInventory(
+        complete=True,
+        retained_containers=1,
+        blocked_reasons=("retained_containers_present",),
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    # Something is there: nothing changes it by waiting, so it needs attention.
+    assert h.operation["state"] == "blocked"
+    assert h.operation["result"]["blocked_reasons"][0]["code"] == "inventory_not_empty"
+    (scan,) = h.operation["result"]["inventory"]
+    assert scan["retained_containers"] == 1
+    assert scan["blocked_reasons"] == ["retained_containers_present"]
+    h.repository.commit_release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_inventory_that_could_not_be_read_is_read_again(monkeypatch):
+    h = harness(monkeypatch, kind="retire", identified=True)
+    h.bootstrap.inventory.return_value = HostInventory(
+        complete=False, blocked_reasons=("host_inventory_unavailable",)
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "waiting"
+    assert h.operation["result"]["inventory"][0]["blocked_reasons"] == [
+        "host_inventory_unavailable"
+    ]
+    h.repository.commit_release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_runner_that_could_not_be_stopped_is_never_inventoried(monkeypatch):
+    h = harness(monkeypatch, kind="retire", identified=True)
+    h.bootstrap.quiesce.side_effect = ProviderError(
+        "host_quiesce_failed", "The releasing Host's runner could not be stopped", retryable=True
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "waiting"
+    h.bootstrap.inventory.assert_not_awaited()
+    h.repository.commit_release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_release_records_that_it_stops_runners_before_the_first_stop(monkeypatch):
+    """A stop whose answer is lost still ends cancellation: the record comes first."""
+    h = harness(monkeypatch, kind="retire", identified=True)
+    order = Mock()
+    order.attach_mock(h.repository.checkpoint_operation, "checkpoint")
+    order.attach_mock(h.bootstrap.quiesce, "quiesce")
+    h.bootstrap.quiesce.side_effect = ProviderError(
+        "result_unknown", "The node's answer was lost", retryable=True
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    stopping = [
+        name
+        for name, _args, kwargs in order.mock_calls
+        if name == "quiesce" or (kwargs.get("result") or {}).get("runners_stopping")
+    ]
+    assert stopping[:2] == ["checkpoint", "quiesce"]
+    assert h.operation["result"]["runners_stopping"] is True
+    assert "cancel" not in public_operation(h.operation)["allowed_actions"]
 
 
 @pytest.mark.asyncio
