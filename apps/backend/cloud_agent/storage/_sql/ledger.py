@@ -6,6 +6,7 @@ from one snapshot and given that snapshot's version.
 
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.storage._sql.attempts import NEXT_ATTEMPT_START_SQL
@@ -17,18 +18,56 @@ if TYPE_CHECKING:
 
 _SUMMARY_PAYLOAD_KEYS_SQL = ", ".join(f"'{key}'" for key in SUMMARY_PAYLOAD_KEYS)
 
-#: The payload of event ``e`` as a usage read needs it: the keys the summaries
-#: read (``SUMMARY_PAYLOAD_KEYS``) and whether its text has anything to show. A
-#: tool result also carries what the tool returned, such as a whole edited
-#: file, and taking every key but a few moved all of it to add up token counts.
-USAGE_EVENT_PAYLOAD_SQL = f"""
+
+def _usage_projection(payload: str) -> str:
+    """The jsonb ``payload`` as a usage read needs it.
+
+    That is the keys the summaries read (``SUMMARY_PAYLOAD_KEYS``) and whether
+    its text has anything to show. A tool result also carries what the tool
+    returned, such as a whole edited file, and taking every key but a few moved
+    all of it to add up token counts.
+    """
+    return f"""
 COALESCE((
     SELECT jsonb_object_agg(field.key, field.value)
-    FROM jsonb_each(CASE WHEN jsonb_typeof(e.payload) = 'object'
-                         THEN e.payload ELSE '{{}}'::jsonb END) AS field
+    FROM jsonb_each(CASE WHEN jsonb_typeof({payload}) = 'object'
+                         THEN {payload} ELSE '{{}}'::jsonb END) AS field
     WHERE field.key IN ({_SUMMARY_PAYLOAD_KEYS_SQL})
 ), '{{}}'::jsonb)
-|| jsonb_build_object('has_text', COALESCE(e.payload->>'text', '') ~ '[^[:space:]]')
+|| jsonb_build_object('has_text', COALESCE({payload}->>'text', '') ~ '[^[:space:]]')
+"""
+
+
+#: Which projection a stored ``usage_summary`` was made with. The keys and the
+#: expression are both in its SQL, so changing either makes a new version, and
+#: a summary stored under an older one is ignored rather than trusted.
+USAGE_SUMMARY_VERSION = hashlib.sha256(_usage_projection("payload").encode()).hexdigest()[:16]
+_USAGE_SUMMARY_VERSION_KEY = "_usage_projection"
+
+
+def usage_summary_sql(payload: str) -> str:
+    """The projection of ``payload`` as an event row stores it (migration ``0090``).
+
+    It is the read's own SQL, run once when the event is inserted, so the
+    stored value cannot drift from what a read would compute; the version
+    beside it says which projection that was.
+    """
+    return (
+        f"(({_usage_projection(payload)}) || jsonb_build_object("
+        f"'{_USAGE_SUMMARY_VERSION_KEY}', '{USAGE_SUMMARY_VERSION}'))"
+    )
+
+
+#: The payload of event ``e`` as a usage read needs it. Events record that
+#: projection when they are stored, and a read takes it from there without
+#: opening the payload: a long turn's usage is read again each time a model
+#: call is counted, by every tab the owner has open. Rows stored before
+#: migration ``0090``, or under a projection since changed, are projected here.
+USAGE_EVENT_PAYLOAD_SQL = f"""
+CASE WHEN e.usage_summary ->> '{_USAGE_SUMMARY_VERSION_KEY}' = '{USAGE_SUMMARY_VERSION}'
+     THEN e.usage_summary - '{_USAGE_SUMMARY_VERSION_KEY}'
+     ELSE {_usage_projection("e.payload")}
+END
 """
 
 LEDGER_WINDOW_UNTIL_SQL = f"""

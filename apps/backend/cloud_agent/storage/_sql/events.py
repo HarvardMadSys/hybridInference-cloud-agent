@@ -12,11 +12,26 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from cloud_agent.storage._sql.ledger import usage_summary_sql
 from cloud_agent_shared.event_payloads import subagent_owned
 from cloud_agent_shared.shared_protocol import USER_MESSAGE_EVENT
 
 if TYPE_CHECKING:
     from typing import Any
+
+#: The payload is parsed once, and its usage projection is stored with it, so
+#: the reads that add a turn's usage up never open the payload again. The
+#: parameters are cast because an ``INSERT … SELECT`` does not type them from
+#: the target columns the way ``VALUES`` does.
+_INSERT_EVENT_SQL = f"""
+    INSERT INTO agent_job_events
+        (job_id, attempt_id, seq, event_type, payload, client_seq, usage_summary)
+    SELECT $1::text, $2::bigint,
+           (SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_job_events WHERE attempt_id = $2::bigint),
+           $3::text, event.payload, $5::bigint, {usage_summary_sql("event.payload")}
+    FROM (SELECT $4::jsonb AS payload) AS event
+    RETURNING id
+"""
 
 
 async def insert_event(
@@ -43,15 +58,7 @@ async def insert_event(
         if existing is not None:
             return int(existing)
     event_id = await conn.fetchval(
-        """
-            INSERT INTO agent_job_events (job_id, attempt_id, seq, event_type, payload, client_seq)
-            VALUES (
-                $1, $2,
-                (SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_job_events WHERE attempt_id = $2),
-                $3, $4::jsonb, $5
-            )
-            RETURNING id
-            """,
+        _INSERT_EVENT_SQL,
         job_id,
         attempt_id,
         event_type,

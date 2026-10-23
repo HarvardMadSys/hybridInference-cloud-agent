@@ -95,9 +95,24 @@ def _thread(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _usage(store: _ChangesStorage, user_id: str, job_id: str) -> dict[str, Any]:
-    """A job's usage as its usage read returns it; only its id if it is not theirs."""
-    usage = await job_usage_response(store, job_id=job_id, user_id=user_id)
+async def _usage(
+    store: _ChangesStorage,
+    signal: OwnerChangeSignal,
+    user_id: str,
+    job_id: str,
+    *,
+    after: int,
+) -> dict[str, Any]:
+    """A job's usage as its usage read returns it; only its id if it is not theirs.
+
+    Each of the owner's tabs is woken by the same notification, so they share
+    one read: one made since the notification that woke this stream.
+    """
+    usage = await signal.reads.read(
+        ("usage", user_id, job_id),
+        after=after,
+        read=lambda: job_usage_response(store, job_id=job_id, user_id=user_id),
+    )
     if usage is None:
         return {"id": job_id}
     return {"id": job_id, "usage": usage.model_dump(mode="json")}
@@ -173,7 +188,12 @@ async def stream_owner_changes(
                 for kind in HINT_KINDS:
                     for row_id in sorted(changes.hints.get(kind, ())):
                         if kind == "usage":
-                            yield _frame(kind, await _usage(job_store, user_id, row_id))
+                            yield _frame(
+                                kind,
+                                await _usage(
+                                    job_store, signal, user_id, row_id, after=changes.sequence
+                                ),
+                            )
                         else:
                             yield _frame(kind, {"id": row_id})
                 if not (woken or changes.resync) and clock() < closes_at:
