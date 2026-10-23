@@ -180,24 +180,24 @@ def test_a_checkpoint_is_produced_without_any_turn_event():
     if supervisor._sampler_thread is not None:
         supervisor._sampler_thread.join(timeout=2)
 
-    supervisor.start_turn(
+    turn = supervisor.start_turn(
         "athr_source",
         lease.token,
         prompt="work",
         model="glm-5.1",
         reasoning_effort=None,
     )
-    assert supervisor.take_reported_checkpoint("athr_source") is None
+    assert supervisor.take_reported_checkpoint("athr_source", turn) is None
 
     supervisor.sample_open_windows()
 
     # A checkpoint was produced and is waiting for the turn stream to forward,
     # without a single turn event having been read.
-    pending = supervisor.take_reported_checkpoint("athr_source")
+    pending = supervisor.take_reported_checkpoint("athr_source", turn)
     assert pending is not None and pending["state"] == "collecting"
     assert pending["cpu"]["capacity_cores"] == 2.0
     # Taking it is what makes forwarding happen once rather than repeatedly.
-    assert supervisor.take_reported_checkpoint("athr_source") is None
+    assert supervisor.take_reported_checkpoint("athr_source", turn) is None
 
 
 def test_the_final_report_sequence_stays_above_every_checkpoint():
@@ -246,7 +246,7 @@ def test_the_final_report_sequence_stays_above_every_checkpoint():
     sequences: list[int] = []
     for _ in range(3):
         supervisor.sample_open_windows()
-        checkpoint = supervisor.take_reported_checkpoint("athr_source")
+        checkpoint = supervisor.take_reported_checkpoint("athr_source", turn)
         if checkpoint is not None:
             sequences.append(checkpoint["report_seq"])
             assert checkpoint["cpu"]["capacity_cores"] == 0.5

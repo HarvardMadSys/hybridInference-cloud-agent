@@ -144,7 +144,7 @@ async def test_resource_checkpoint_is_forwarded_before_any_native_event():
     supervisor.start_turn = lambda *_args, **_kw: QuietTurn()  # type: ignore[attr-defined]
     pending = [{"measurement_id": "sample", "state": "collecting", "report_seq": 1}]
     supervisor.take_reported_checkpoint = (  # type: ignore[attr-defined]
-        lambda _thread_id: pending.pop() if pending else None
+        lambda _thread_id, _turn: pending.pop() if pending else None
     )
     supervisor.abort_turn = lambda *_args: gate.set()  # type: ignore[attr-defined]
     app = _app(supervisor)
