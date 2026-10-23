@@ -661,7 +661,9 @@ as a successful deletion.
 Upload failures retain the container. Once an archive is verified, uncertain
 deletion acknowledgements keep admission blocked and retry the same request.
 The sandbox manager stores its deletion receipts on its own persistent volume so an
-acknowledgement can survive a sandbox manager restart.
+acknowledgement can survive a sandbox manager restart. After a rollback past #763,
+a Sandbox Manager cannot upload a request that a newer one prepared, and two of
+its files stay on the host; see [rollback compatibility](#rollback-compatibility).
 
 **Delete without archive** removes the same exact stopped or dead, idle container without
 uploading workspace files or native session history. It does not require an S3
@@ -2630,6 +2632,58 @@ change status only when the separately verified recovery requires it. Never
 bulk-clear fence fields. If the owner, token, or epoch is uncertain, leave the
 host draining and restore the V2 fence-capable control plane.
 
+**A Sandbox Manager rolled back past #763 cannot upload a deletion archive that
+a newer one prepared.** For **Archive to S3 and delete**, a Sandbox Manager
+first prepares the archive in the request's own directory under
+`AGENT_SANDBOX_ARCHIVE_STATE_DIR`. Since #763 it keeps the container's export
+there as `container-rootfs.tar` and the tar's bytes before it as
+`archive.head`, and sends the archive from the two. An older Sandbox Manager
+keeps the whole archive as one `archive.tar` and reads nothing else, so its
+upload of a request that a newer one prepared, and had not yet uploaded, fails
+before anything is sent: it answers HTTP 500 and logs a `FileNotFoundError` for
+`archive.tar`. The control plane then aborts the request on the host and marks
+the deletion failed, without retrying it. The sandbox's details say that the
+container has not been deleted, and its deletion attempt shows the archive
+upload stage, failure `sandbox_manager_unavailable` and Sandbox Manager HTTP
+500. Nothing is lost: the container stays as it was, its chats can continue,
+and requests the older Sandbox Manager prepares itself upload as before.
+
+The older Sandbox Manager's abort removes only its own files, `rootfs.partial`
+and `archive.tar`, and so does its completion of a deletion that a newer one
+had already uploaded. `container-rootfs.tar` and `archive.head` stay in the
+request's directory, and neither version removes them later; the export can be
+as large as 5 GiB. They do not hold up a later deletion, which gets a new
+request and directory, and a finished request does not count towards the four
+pending archives a Sandbox Manager allows. Remove them by hand.
+
+With the supported host Compose, the state directory is
+`${AGENT_HOST_STATE_ROOT}/sandbox-archives` on the host, mounted at
+`/var/lib/hybridinference/broker-archives` in the Sandbox Manager. Each request
+has a directory there named by the SHA-256 of its request ID, next to the
+`checkpoints/` and `checkpoint-spool/` of restorable checkpoints. As root on
+each host whose Sandbox Manager was rolled back, remove the two files from
+every request directory that holds `abort.json` or `deleted.json`. Leave
+everything else: the receipts, and a request directory with neither, whose
+request is still in progress. If the host's `.env` sets `AGENT_HOST_STATE_ROOT`,
+export that value first; the commands otherwise use the default.
+
+```bash
+archives="${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/sandbox-archives"
+for request in "$archives"/*/; do
+  if [ -e "${request}abort.json" ] || [ -e "${request}deleted.json" ]; then
+    rm -fv "${request}container-rootfs.tar" "${request}archive.head"
+  fi
+done
+```
+
+To retry the deletion, refresh the sandbox's details and, once it is stopped
+and idle, choose **Archive to S3 and delete** again
+(**Retry archive and delete** on the admin sandbox page). The retry is a new
+request, which the running Sandbox Manager prepares in its own layout, so it
+works whether or not the files are gone. Rolling forward again needs nothing
+more: the current Sandbox Manager still uploads a request that an older one
+prepared as `archive.tar`, and its abort and its deletion remove either layout.
+
 #### Cold starts and failed deployments
 
 This fence is unconditional because retained/shared-live is the only executor.
@@ -3596,9 +3650,12 @@ rules, not the host's.
   start or wake never waits for the install and read-back itself. A host where
   nothing runs starts no helper for it: the next start or wake renews a lapsed
   pass before its group joins a bridge. The runner renews its own pass when it
-  hands a turn over and that pass is 45 seconds old. The turn's process runs no
-  helper of its own: it takes the runner's pass, and declines the turn unless
-  that pass is less than 60 seconds old.
+  hands a turn over and that pass is 45 seconds old. The turn's process
+  normally runs no helper of its own: it takes the runner's pass, and declines
+  the turn if the runner's check failed or its pass is missing or unreadable. A
+  process that starts so slowly that the pass is 60 seconds old when it reads
+  it logs `network_guard_verification_aged_out`, runs the install and
+  read-back itself, and accepts the turn only if that check passes.
 - **Scoped to this deployment.** The tables recognise traffic by the bridge
   interface prefix. They never flush or edit another deployment's rules, so
   several deployments can share a host.

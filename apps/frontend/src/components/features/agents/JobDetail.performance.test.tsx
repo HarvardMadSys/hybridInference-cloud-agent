@@ -369,7 +369,9 @@ describe('job page rendering work', () => {
     expect(diff).not.toHaveTextContent('"dependency-4000"');
     // Formatted as the panel formats it, in whatever locale the run has.
     expect(
-      screen.getByText(`Diff limited to the first ${(4000).toLocaleString()} lines.`),
+      screen.getByText(
+        `Diff limited to the first ${(4000).toLocaleString()} of ${(4001).toLocaleString()} lines.`,
+      ),
     ).toBeInTheDocument();
 
     fireEvent.change(screen.getByRole('combobox', { name: 'Changed file' }), {

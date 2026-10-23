@@ -22,10 +22,18 @@ const DIFF_LINE_CLASS = {
 type GitView = 'diff' | 'review' | 'commits';
 
 function DiffLinesView({ file }: { file: AgentDiffFile }) {
-  const shown = file.lines.slice(0, MAX_DIFF_LINES);
+  const region = useRef<HTMLPreElement>(null);
+  // Rows the owner has asked to see, MAX_DIFF_LINES more at a time. Another
+  // file, or a new diff of this one, starts again from its first rows.
+  const [drawn, setDrawn] = useState({ file, rows: MAX_DIFF_LINES });
+  const current = drawn.file === file;
+  if (!current) setDrawn({ file, rows: MAX_DIFF_LINES });
+  const shown = file.lines.slice(0, current ? drawn.rows : MAX_DIFF_LINES);
+  const remaining = file.lines.length - shown.length;
   return (
     <>
       <pre
+        ref={region}
         tabIndex={0}
         role="region"
         aria-label={`Diff for ${file.path}`}
@@ -39,17 +47,34 @@ function DiffLinesView({ file }: { file: AgentDiffFile }) {
           ))}
         </code>
       </pre>
-      {file.lines.length > shown.length ? (
-        <p className="px-4 py-3 text-[11px] text-gray-400 dark:text-gray-500">
-          Diff limited to the first {MAX_DIFF_LINES.toLocaleString()} lines.
-        </p>
+      {remaining > 0 ? (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 text-[11px] text-gray-400 dark:text-gray-500">
+          <p>
+            Diff limited to the first {shown.length.toLocaleString()} of{' '}
+            {file.lines.length.toLocaleString()} lines.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              // The last rows take this button away; the reader stays in the diff.
+              if (remaining <= MAX_DIFF_LINES) region.current?.focus({ preventScroll: true });
+              setDrawn({ file, rows: shown.length + MAX_DIFF_LINES });
+            }}
+            className="ui-focus-ring rounded-md border border-gray-200 dark:border-white/10 px-2.5 py-1 text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5"
+          >
+            {remaining > MAX_DIFF_LINES
+              ? `Show ${MAX_DIFF_LINES.toLocaleString()} more lines`
+              : `Show the remaining ${remaining.toLocaleString()} line${remaining === 1 ? '' : 's'}`}
+          </button>
+        </div>
       ) : null}
     </>
   );
 }
 
 // The selected file's lines, drawn again only when another file or diff is
-// shown — not for a refresh, a view switch, or the page around the panel.
+// shown, or more of it is asked for — not for a refresh, a view switch, or the
+// page around the panel.
 const DiffLines = memo(DiffLinesView);
 
 export function GitPanel({
