@@ -38,10 +38,10 @@ _HASH_CHUNK_BYTES = 1024 * 1024
 # copy of the export inside a whole archive: the upload sends those bytes, the
 # export, and the tar's end in turn. A request that an earlier version prepared
 # keeps the whole archive as ``archive.tar``.
-# COMPAT(remove-after=2026-12-31): no host keeps a request an earlier version
-# prepared; reading ``archive.tar`` goes then, with this name.
 _ROOTFS_MEMBER = "container-rootfs.tar"
 _ARCHIVE_HEAD = "archive.head"
+# COMPAT(remove-after=2026-12-31): no host keeps a request an earlier version
+# prepared; reading ``archive.tar`` goes then, with this name.
 _LEGACY_ARCHIVE = "archive.tar"
 _ARCHIVE_FILES = ("rootfs.partial", _ROOTFS_MEMBER, _ARCHIVE_HEAD, _LEGACY_ARCHIVE)
 
