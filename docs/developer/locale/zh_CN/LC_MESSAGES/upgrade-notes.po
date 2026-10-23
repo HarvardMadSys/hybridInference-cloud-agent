@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-22 18:43-0400\n"
+"POT-Creation-Date: 2026-10-22 19:03-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -38,7 +38,7 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0103_terminal_resume_keyset`. The supported deployment scripts run "
+"`0104_notification_change_keyset`. The supported deployment scripts run "
 "migrations before replacing the API; every migration listed here is "
 "additive and safe under the running previous release unless it says "
 "otherwise. The few transitions that need stopped writers are listed in "
@@ -46,7 +46,7 @@ msgid ""
 "#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0103_terminal_resume_keyset`。官方支持的部署脚本会在替换 API "
+"`0104_notification_change_keyset`。官方支持的部署脚本会在替换 API "
 "之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数几个需要先停掉所有写入的迁移，列在[执行不向后兼容的迁移](operations.md"
 "#applying-migrations-that-are-not-backwards-compatible)里。"
 
@@ -135,6 +135,26 @@ msgid "What it changes"
 msgstr "改了什么"
 
 #: ../developer/upgrade-notes.md
+msgid "`0104_notification_change_keyset`"
+msgstr "`0104_notification_change_keyset`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Builds a `(user_id, kind, change_xid, entity_id)` index concurrently "
+"before dropping the preceding owner/XID index, so notification delta "
+"continuation pages seek directly instead of scanning the whole snapshot "
+"interval. It changes no row and does not block foreground writes. "
+"Existing v1 continuations finish in their previous kind/identity order "
+"before advancing to v2. The previous API remains functionally compatible "
+"during migration, although its delta reads may use a less selective index"
+" until it is replaced. A downgrade restores the preceding index "
+"concurrently."
+msgstr ""
+"先并发构建 `(user_id, kind, change_xid, entity_id)` 索引，再删除原来的所有者/XID "
+"索引，让通知增量的续页直接定位，不再扫描整个快照区间。这个迁移不改动任何行，也不阻塞前台写入。已有的 v1 "
+"续页会继续按原先的 kind/identity 顺序读完，再升级到 v2。迁移期间旧版 API 的功能仍兼容，但在替换前，它的增量读取可能使用选择性较差的索引。降级会并发恢复原索引。"
+
+#: ../developer/upgrade-notes.md
 msgid "`0103_terminal_resume_keyset`"
 msgstr "`0103_terminal_resume_keyset`"
 
@@ -146,8 +166,8 @@ msgid ""
 " foreground writes and changes no row. A downgrade restores the preceding"
 " one-column index."
 msgstr ""
-"把终端恢复的部分索引重建为 `(updated_at, id)`，与重放所用的键集一致，使每个有界续页都能直接定位，"
-"不必再次排序时间相同的记录。在线构建不会阻塞前台写入，也不会改动任何行。降级会恢复之前的单列索引。"
+"把终端恢复的部分索引重建为 `(updated_at, "
+"id)`，与重放所用的键集一致，使每个有界续页都能直接定位，不必再次排序时间相同的记录。在线构建不会阻塞前台写入，也不会改动任何行。降级会恢复之前的单列索引。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0102_admin_sandbox_marker_order`"
@@ -697,7 +717,7 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:99
+#: ../developer/upgrade-notes.md:100
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
@@ -711,11 +731,11 @@ msgstr ""
 "之前已退役的旧迁移链，就无法直接升级；见[保留旧迁移链的数据库](operations.md#preserving-an-old-chain-"
 "database)。"
 
-#: ../developer/upgrade-notes.md:105
+#: ../developer/upgrade-notes.md:106
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:107
+#: ../developer/upgrade-notes.md:108
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"
@@ -728,4 +748,3 @@ msgstr ""
 "里给上表加一行，写清楚升级线上部署的运维人员需要知道什么：会改动哪些已有数据、可能锁表多久、降级会不会被拒绝。然后把 *启动本次发布之前* 一节和"
 " [ENVIRONMENT.md](../../ENVIRONMENT.md) 里写的 head 修订号也更新掉；有测试会检查这两处写的都是当前的"
 " head。"
-
