@@ -42,10 +42,7 @@ from cloud_agent_host.sandbox_archives import (
     encode_marker,
     safe_archive_error_type,
 )
-from cloud_agent_shared.sandbox_archive_settings import (
-    SANDBOX_ARCHIVE_BUCKET,
-    SandboxArchivePolicy,
-)
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +235,7 @@ class _FinalArchiveMarker:
     def with_receipt(self, receipt: SandboxArchiveReceipt) -> _FinalArchiveMarker:
         if self.state != "pending":
             raise SandboxError("only a pending final archive can accept an upload receipt")
-        if receipt.phase != "final" or receipt.bucket != SANDBOX_ARCHIVE_BUCKET:
+        if receipt.phase != "final" or receipt.bucket != self.policy.bucket:
             raise SandboxError("final archive upload returned an unexpected destination")
         return replace(
             self,

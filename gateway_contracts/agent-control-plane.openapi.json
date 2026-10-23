@@ -12442,7 +12442,15 @@
             "type": "array"
           },
           "sandbox_archive_settings": {
-            "$ref": "#/components/schemas/HostSandboxArchiveSettings"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostSandboxArchiveSettings"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The archive policy this host should apply. Null for a host that cannot apply it: an enabled policy with a bucket other than the default goes only to a host advertising sandbox-archive-destination-v1."
           },
           "sandbox_manager_error": {
             "anyOf": [
@@ -12730,8 +12738,8 @@
             "type": "integer"
           },
           "s3_uri": {
-            "const": "s3://freeinference/cloud-agent/sandbox",
             "default": "s3://freeinference/cloud-agent/sandbox",
+            "description": "Where archives go: s3://<bucket>/cloud-agent/sandbox. Only the bucket is a setting.",
             "title": "S3 Uri",
             "type": "string"
           },
@@ -16070,8 +16078,8 @@
             "type": "integer"
           },
           "s3_uri": {
-            "const": "s3://freeinference/cloud-agent/sandbox",
             "default": "s3://freeinference/cloud-agent/sandbox",
+            "description": "Where archives go: s3://<bucket>/cloud-agent/sandbox. Only the bucket is a setting.",
             "title": "S3 Uri",
             "type": "string"
           },
@@ -16931,6 +16939,19 @@
             "minimum": 0.0,
             "title": "Revision",
             "type": "integer"
+          },
+          "s3_uri": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "s3://<bucket>/cloud-agent/sandbox. Omit it to keep the stored destination. Checkpoints and environment snapshots are read back by object version, so those stored in a previous bucket are not restored after a change.",
+            "title": "S3 Uri"
           }
         },
         "required": [
@@ -26512,7 +26533,7 @@
         "summary": "Get Sandbox Archive Settings"
       },
       "put": {
-        "description": "Atomically replace the archive policy; hosts apply it on their next beat.\n\nThe destination is fixed in server code. A saved access key is encrypted\nat rest and is not returned. With no key, sandbox managers authenticate with their\nworkload identity and still require the bucket owner and KMS key.",
+        "description": "Atomically replace the archive policy; hosts apply it on their next beat.\n\nOnly the bucket of the destination is a setting; an omitted ``s3_uri``\nkeeps the stored one. A saved access key is encrypted at rest and is not\nreturned. With no key, sandbox managers authenticate with their workload\nidentity and still require the bucket owner and KMS key.",
         "operationId": "set_sandbox_archive_settings_admin_agent_sandbox_archive_settings_put",
         "parameters": [
           {

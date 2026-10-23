@@ -73,8 +73,10 @@ const ARCHIVE_FIELDS: StaticSearchField[] = [
   },
   {
     key: 's3_uri',
-    label: 'S3 destination',
-    description: 'Fixed by the deployment security policy and not included in update requests.',
+    label: 'S3 bucket',
+    description:
+      'Archives go to s3://<bucket>/cloud-agent/sandbox. Checkpoints and snapshots stored in a previous bucket are not restored after a change.',
+    keywords: ['destination', 's3'],
   },
   {
     key: 'region',

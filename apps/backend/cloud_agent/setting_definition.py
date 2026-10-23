@@ -15,6 +15,7 @@ from urllib.parse import SplitResult, urlsplit
 
 from pydantic import AnyHttpUrl, ValidationError
 
+from cloud_agent_shared.s3_bucket_name import is_s3_bucket_name
 from cloud_agent_shared.sandbox_manager_compat import STORED_SETTING_KEYS
 
 if TYPE_CHECKING:
@@ -236,13 +237,7 @@ def _grant_base_path(value: str) -> bool:
 
 def _s3_bucket(value: str) -> bool:
     """Empty, or a name S3 accepts for a general purpose bucket."""
-    return not value or (
-        bool(re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", value))
-        and not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", value)
-        and not any(part in value for part in ("..", ".-", "-."))
-        and not value.startswith(("xn--", "sthree-", "amzn-s3-demo-"))
-        and not value.endswith(("-s3alias", "--ol-s3", ".mrap", "--x-s3", "--table-s3"))
-    )
+    return not value or is_s3_bucket_name(value)
 
 
 def _s3_region(value: str) -> bool:

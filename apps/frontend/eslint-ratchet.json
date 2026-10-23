@@ -74,6 +74,7 @@
     {
       "files": [
         "src/app/(agents)/admin/measurements/present.ts",
+        "src/app/(agents)/admin/settings/settingValues.ts",
         "src/components/features/agents/AddWorkspace.tsx",
         "src/components/features/agents/agentPush.ts",
         "src/lib/workspaceLink.ts"
@@ -85,7 +86,6 @@
     {
       "files": [
         "src/app/(agents)/admin/runs/Resources.tsx",
-        "src/app/(agents)/admin/settings/settingValues.ts",
         "src/components/features/agents/recordedTurnOutputs.ts",
         "src/components/features/agents/useConversationReadState.ts",
         "src/components/features/agents/useNativeQuestions.ts",

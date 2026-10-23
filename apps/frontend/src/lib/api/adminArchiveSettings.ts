@@ -7,6 +7,14 @@ const SANDBOX_ARCHIVE_SETTINGS = '/admin/agent/sandbox-archive-settings';
 /** A host with this capability accepts database-backed archive policy. */
 export const SANDBOX_ARCHIVE_SETTINGS_CAPABILITY = 'sandbox-archive-settings-v1';
 
+/** A host with this capability archives to a bucket other than the default. */
+export const SANDBOX_ARCHIVE_DESTINATION_CAPABILITY = 'sandbox-archive-destination-v1';
+
+/** Every archive key starts with this prefix. Only the bucket is a setting. */
+export const SANDBOX_ARCHIVE_PREFIX = 'cloud-agent/sandbox';
+
+export const DEFAULT_SANDBOX_ARCHIVE_URI = `s3://freeinference/${SANDBOX_ARCHIVE_PREFIX}`;
+
 /** Deployment-wide archive settings stored by the control plane. */
 export interface SandboxArchiveSettings {
   enabled: boolean;
@@ -29,12 +37,13 @@ export interface SandboxArchiveSettings {
 }
 
 /**
- * The destination URI is deliberately absent: the service owns the only
- * permitted bucket and prefix, while an admin controls whether and how it is
- * used. `revision` makes replacement of the related fields atomic.
+ * `s3_uri` is `s3://<bucket>/cloud-agent/sandbox`: the bucket is a setting,
+ * the prefix is not. Leaving it out keeps the stored destination. `revision`
+ * makes replacement of the related fields atomic.
  */
 export interface SandboxArchiveSettingsUpdate {
   enabled: boolean;
+  s3_uri?: string;
   region: string;
   kms_key_arn: string;
   expected_bucket_owner: string;

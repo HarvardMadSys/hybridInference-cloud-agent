@@ -12,6 +12,14 @@ default; ``checkpoints_enabled=False`` opts out. Only the opt-out ever appears
 on the wire, and only a host that advertises
 :data:`SANDBOX_CHECKPOINT_CAPABILITY` receives it: older managers reject unknown
 policy keys, and a policy without the key means the default.
+
+The bucket is part of the policy; the prefix inside it is not. Every key is
+derived from the fixed prefix, so it is the same in any bucket. A copy keeps
+the keys but not the object versions that checkpoints and snapshots are read
+back by, so those in a previous bucket are not restored. A bucket other than
+the default reaches only a host that advertises
+:data:`SANDBOX_ARCHIVE_DESTINATION_CAPABILITY`: an older sandbox manager
+refuses any other ``s3_uri``.
 """
 
 from __future__ import annotations
@@ -20,9 +28,12 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
 
+from cloud_agent_shared.s3_bucket_name import is_s3_bucket_name
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+#: The default destination, which a policy without ``s3_uri`` means.
 SANDBOX_ARCHIVE_S3_URI: Final = "s3://freeinference/cloud-agent/sandbox"
 SANDBOX_ARCHIVE_BUCKET: Final = "freeinference"
 SANDBOX_ARCHIVE_PREFIX: Final = "cloud-agent/sandbox"
@@ -44,6 +55,7 @@ MAX_MULTIPART_PARTS: Final = 10_000
 
 SANDBOX_ARCHIVE_CAPABILITY: Final = "sandbox-archive-settings-v1"
 SANDBOX_CHECKPOINT_CAPABILITY: Final = "sandbox-checkpoints-v1"
+SANDBOX_ARCHIVE_DESTINATION_CAPABILITY: Final = "sandbox-archive-destination-v1"
 
 _ACCOUNT_ID_RE: Final = re.compile(r"[0-9]{12}")
 _ACCESS_KEY_ID_RE: Final = re.compile(r"[A-Z0-9]{20}")
@@ -56,6 +68,25 @@ _KMS_KEY_ARN_RE: Final = re.compile(
 
 class SandboxArchivePolicyError(ValueError):
     """The stored or delivered archive policy is incomplete or unsafe."""
+
+
+def archive_bucket(s3_uri: object) -> str:
+    """Return the bucket an archive destination names.
+
+    Only the bucket is a setting: the destination is always
+    ``s3://<bucket>/cloud-agent/sandbox``.
+    """
+    suffix = f"/{SANDBOX_ARCHIVE_PREFIX}"
+    if not isinstance(s3_uri, str) or not s3_uri.startswith("s3://") or not s3_uri.endswith(suffix):
+        raise SandboxArchivePolicyError(f"s3_uri must be s3://<bucket>{suffix}")
+    bucket = s3_uri.removeprefix("s3://").removesuffix(suffix)
+    _check_bucket(bucket)
+    return bucket
+
+
+def _check_bucket(bucket: object) -> None:
+    if not isinstance(bucket, str) or not is_s3_bucket_name(bucket):
+        raise SandboxArchivePolicyError("the archive bucket must be a valid S3 bucket name")
 
 
 def _bounded_int(name: str, value: Any, *, minimum: int, maximum: int) -> int:
@@ -71,6 +102,7 @@ class SandboxArchivePolicy:
     """One normalized policy revision delivered intact to every host."""
 
     enabled: bool = False
+    bucket: str = SANDBOX_ARCHIVE_BUCKET
     region: str = ""
     kms_key_arn: str = ""
     expected_bucket_owner: str = ""
@@ -93,6 +125,7 @@ class SandboxArchivePolicy:
             raise SandboxArchivePolicyError("enabled must be a boolean")
         if not isinstance(self.checkpoints_enabled, bool):
             raise SandboxArchivePolicyError("checkpoints_enabled must be a boolean")
+        _check_bucket(self.bucket)
         if not self.enabled:
             object.__setattr__(self, "checkpoints_enabled", False)
         if not isinstance(self.access_key_auth, bool):
@@ -184,6 +217,11 @@ class SandboxArchivePolicy:
             raise SandboxArchivePolicyError("revision must be a non-negative integer")
 
     @property
+    def s3_uri(self) -> str:
+        """Where this policy's archives go: the bucket, under the fixed prefix."""
+        return f"s3://{self.bucket}/{SANDBOX_ARCHIVE_PREFIX}"
+
+    @property
     def checkpoints_opted_out(self) -> bool:
         """Whether enabled archives explicitly skip checkpoints."""
         return self.enabled and not self.checkpoints_enabled
@@ -212,12 +250,10 @@ class SandboxArchivePolicy:
 
         Static credentials are optional. Session tokens and custom endpoints
         stay rejected: an access key is the only extra credential, and the
-        destination remains the fixed AWS bucket.
+        destination is an AWS bucket under the fixed prefix.
         """
         raw = dict(value or {})
-        uri = raw.pop("s3_uri", SANDBOX_ARCHIVE_S3_URI)
-        if uri != SANDBOX_ARCHIVE_S3_URI:
-            raise SandboxArchivePolicyError(f"s3_uri must be exactly {SANDBOX_ARCHIVE_S3_URI}")
+        bucket = archive_bucket(raw.pop("s3_uri", SANDBOX_ARCHIVE_S3_URI))
         allowed = {
             "enabled",
             "region",
@@ -245,6 +281,7 @@ class SandboxArchivePolicy:
         raw.pop("aws_secret_access_key_configured", None)
         return cls(
             enabled=raw.get("enabled", False),
+            bucket=bucket,
             region=raw.get("region", ""),
             kms_key_arn=raw.get("kms_key_arn", ""),
             expected_bucket_owner=raw.get("expected_bucket_owner", ""),
@@ -268,7 +305,7 @@ class SandboxArchivePolicy:
         """
         return {
             "enabled": self.enabled,
-            "s3_uri": SANDBOX_ARCHIVE_S3_URI,
+            "s3_uri": self.s3_uri,
             "region": self.region,
             "kms_key_arn": self.kms_key_arn,
             "expected_bucket_owner": self.expected_bucket_owner,
@@ -292,9 +329,14 @@ class SandboxArchivePolicy:
         return values
 
     def as_storage_dict(self) -> dict[str, bool | int | str]:
-        """Return only values kept inside the JSONB policy column."""
+        """Return only values kept inside the JSONB policy column.
+
+        The default destination is not stored, so a row saved before the
+        bucket was a setting reads the same as one saved after.
+        """
         values = self.as_dict()
-        values.pop("s3_uri")
+        if self.bucket == SANDBOX_ARCHIVE_BUCKET:
+            values.pop("s3_uri")
         values.pop("revision")
         if self.aws_access_key_id:
             values["aws_access_key_id"] = self.aws_access_key_id
@@ -314,9 +356,11 @@ __all__ = [
     "MIN_MULTIPART_PART_BYTES",
     "SANDBOX_ARCHIVE_BUCKET",
     "SANDBOX_ARCHIVE_CAPABILITY",
+    "SANDBOX_ARCHIVE_DESTINATION_CAPABILITY",
     "SANDBOX_ARCHIVE_PREFIX",
     "SANDBOX_ARCHIVE_S3_URI",
     "SANDBOX_CHECKPOINT_CAPABILITY",
     "SandboxArchivePolicy",
     "SandboxArchivePolicyError",
+    "archive_bucket",
 ]

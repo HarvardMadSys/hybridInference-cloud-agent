@@ -1938,13 +1938,11 @@ explicit **Archive to S3 and delete** control has its own control-plane storage
 configuration, documented in [Sandbox archive storage](#sandbox-archive-storage).
 
 Use the **Sandbox archives** card under **Admin → Settings → Sandbox** to store
-the deployment-wide archive policy in the Agent database. The destination is
-fixed at `s3://freeinference/cloud-agent/sandbox`; it is displayed read-only and
-is never accepted from the browser. The destination is a source constant
-(`SANDBOX_ARCHIVE_S3_URI` in `cloud_agent_shared/sandbox_archive_settings.py`),
-so a distribution archiving to another bucket changes it there; the IAM
-policy below names the same bucket and prefix. An administrator atomically saves the
-enabled state, AWS region, maximum compressed archive size, multipart
+the deployment-wide archive policy in the Agent database. Archives go to
+`s3://<bucket>/cloud-agent/sandbox`. The bucket is part of the policy and
+defaults to `freeinference`; the prefix is fixed, and the IAM policy below names
+both. An administrator atomically saves the
+bucket, enabled state, AWS region, maximum compressed archive size, multipart
 threshold, and part size. An object above the threshold is uploaded in parts
 of that size, eight at a time, so an upload holds up to eight parts in memory:
 64 MiB at the default 8 MiB part size. Authentication is either an AWS access key or the
@@ -1987,16 +1985,115 @@ key. The bucket must have versioning enabled. Configure lifecycle retention
 and access logging on the bucket itself.
 
 Concretely, grant the sandbox manager role `s3:GetBucketVersioning` on
-`arn:aws:s3:::freeinference`; `s3:ListBucket` on that bucket constrained to the
+`arn:aws:s3:::<bucket>`; `s3:ListBucket` on that bucket constrained to the
 `cloud-agent/sandbox/*` prefix (so an exact-key `HeadObject` can distinguish a
 missing immutable initial object from an authorization failure); and
-`s3:GetObject`, `s3:PutObject`, and `s3:AbortMultipartUpload` on
-`arn:aws:s3:::freeinference/cloud-agent/sandbox/*`. The configured KMS key
-policy must permit `kms:GenerateDataKey` and `kms:Decrypt` for SSE-KMS
-multipart uploads. An access key needs those same S3 actions; SSE-S3 uploads
-do not call KMS. Add an `AbortIncompleteMultipartUpload` bucket lifecycle
-rule as defense in depth for a host that disappears before its bounded abort
-request completes.
+`s3:GetObject`, `s3:GetObjectVersion`, `s3:PutObject`, and
+`s3:AbortMultipartUpload` on `arn:aws:s3:::<bucket>/cloud-agent/sandbox/*`.
+Checkpoint restores and snapshot loads need `s3:GetObjectVersion`: they read
+the exact object version their record names. The configured KMS key policy
+must permit `kms:GenerateDataKey` and `kms:Decrypt` for SSE-KMS multipart
+uploads. An access key needs those same S3 actions; SSE-S3 uploads do not call
+KMS. Snapshot cleanup also uses `s3:DeleteObject` and `s3:DeleteObjectVersion`
+on `arn:aws:s3:::<bucket>/cloud-agent/sandbox/env/*`. Those two are optional:
+a refused delete is logged and retried, and the bucket lifecycle rule described
+under [Environment installation snapshots](#environment-installation-snapshots)
+removes the objects instead. Add an `AbortIncompleteMultipartUpload` bucket
+lifecycle rule as defense in depth for a host that disappears before its
+bounded abort request completes.
+
+Changing the bucket changes where new archives go and where restores read.
+Checkpoints and environment snapshots are read back by object version, which a
+copy to another bucket does not keep, so those stored in the previous bucket
+are not restored after a change. Change it only when no retained group still
+needs a checkpoint from the previous bucket.
+
+A ready environment snapshot in the previous bucket is still offered to new
+groups. A host that already holds its image, because it built the snapshot or
+loaded it before the change, starts the group from that image without a
+download, and that counts as a use. On any other host, loading it fails and the
+group installs in full; the failure is reported as `unavailable`, which neither
+retires the snapshot nor queues a new build. A failed load is not a use, so the
+snapshot stays on offer until 7 days after its last use on any host, or until
+it is 25 days old if that comes first. Until then each new group of that
+environment on another host pays for a failed download and a full
+installation, unless its owner rebuilds the snapshot. Snapshot cleanup deletes
+objects in the current bucket only; those in the previous bucket are left to
+that bucket's lifecycle rule.
+
+Redeploy every host before changing the bucket. Only a host that advertises
+`sandbox-archive-destination-v1` can archive to a bucket other than
+`freeinference`, and the settings card names the others only once archives are
+enabled with another bucket. This read-only query lists them, leaving out
+removed (`disabled`) hosts as the card does:
+
+```sql
+SELECT host, status
+FROM agent_runner_hosts
+WHERE status <> 'disabled'
+  AND NOT capabilities ? 'sandbox-archive-destination-v1'
+ORDER BY host;
+```
+
+While archives are disabled, such a host is sent the policy with the default
+bucket and keeps taking work. A disabled policy starts no new archive; a final
+already fenced under an earlier enabled revision still uploads under that
+revision. While archives are enabled, the host is sent no policy, and the card
+lists it as needing a redeploy. Until it is redeployed, its sandbox manager
+keeps the last policy it applied: it keeps archiving the groups it holds into
+the previous bucket, and the checkpoints it stores there are recorded, so a
+host that later restores one of those groups reads the new bucket and fails.
+With no confirmed revision, the host takes no work at all.
+
+Redeployed hosts write to the previous bucket for a while too. A stop that any
+host fenced before it applied the new revision finishes there: the sandbox
+manager pins the policy in force when it fences a stop, and stores that stop's
+final archive and checkpoint under it, also when it retries a failed final or,
+after a restart, recovers a pending one. The control plane records that
+checkpoint as the group's restore point, and a host that later has to download
+it to restore the group reads the new bucket and fails. If the previous bucket
+can no longer be written, such a final never completes. Nothing gives up on
+it: until the upload succeeds, its group refuses every start and every
+deletion, so its chats stay blocked.
+
+Keep the previous bucket writable by every host's workload identity, and by
+the saved access key if there is one, until every host reports the new
+revision and no final archive is pending. Such a final keeps the region, KMS
+key and bucket owner it was fenced with, so keep that KMS key usable as well. A
+final retried by the same sandbox manager signs with the access key in force
+when it was fenced, and one recovered after a restart with the access key saved
+now, so if the access key changes with the bucket, both keys need that access.
+
+Nothing in the database or on the admin pages shows a pending final: its group
+is recorded as `stopped`, like one whose final is stored. The sandbox manager
+logs `sandbox_final_archive_failed`, with the sandbox id and generation, each
+time a final fails, and keeps retrying a pending one, including after an
+offline host returns. A final still in progress logs nothing until it is
+stored or fails, within 12 minutes of its container stopping, and its
+checkpoint can take 12 minutes more. So wait until every host is online and
+has reported the new revision, then until no sandbox manager has logged that
+event for an hour.
+
+Nothing records which bucket a checkpoint is in either:
+`agent_sandbox_checkpoints` keeps its key and version, not its bucket. Treat
+every restore point captured before the end of that wait as stored in the
+previous bucket. A group gets one in the new bucket at its next clean stop;
+until then, a move to another host cannot restore it. This read-only query
+lists those groups, with the end of the wait as the cutoff:
+
+```sql
+SELECT g.id, g.host, g.state, c.captured_at
+FROM agent_sandboxes g
+JOIN agent_sandbox_checkpoints c ON c.id = g.restore_checkpoint_id
+WHERE c.captured_at < '<cutoff>'::timestamptz
+  AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
+ORDER BY g.host, c.captured_at;
+```
+
+A control plane older than this release refuses a stored bucket other than the
+default: its heartbeats and admin archive routes fail, and no turn is claimed.
+Reset the bucket to `freeinference` before rolling the control plane back past
+this release.
 
 Enabling archives requires migration `0042_sandbox_archive_settings` and a
 runner/sandbox manager advertising `sandbox-archive-settings-v1`. The settings
@@ -2201,8 +2298,8 @@ could not start it, or reaped because the host died right after claiming. It
 is not a failed restore and starts no wait. The checkpoint is never changed. Workspace
 requests to a `cold` or `restoring` group return `workspace_restoring` (409)
 until a turn has restored it. Restore reads with
-the archive credentials hosts already receive: `s3:GetObject` and
-`kms:Decrypt` on the archive prefix.
+the archive credentials hosts already receive: `s3:GetObject`,
+`s3:GetObjectVersion` and `kms:Decrypt` on the archive prefix.
 
 A turn that was running when its host disappeared is not covered and still
 ends as LOST. A group created from a locally built sandbox image cannot move,
