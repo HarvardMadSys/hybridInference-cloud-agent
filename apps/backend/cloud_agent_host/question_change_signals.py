@@ -59,7 +59,7 @@ class QuestionChangeTrackable:
     """Expose the tracked question map's coalesced signal under its owner lock."""
 
     _questions_lock: Any
-    _questions: ChangeTrackedDict[Any, Any]
+    _questions: Any
 
     def take_question_change(self) -> bool:
         """Consume the pending question-change signal under its owner lock."""
@@ -74,12 +74,16 @@ def question_change_frames(turn: Any) -> Iterator[str]:
         yield json.dumps({"kind": "question_changed"}, separators=(",", ":")) + "\n"
 
 
-def question_change_frame_kind(frame: dict[str, Any], control: Any, job_id: str) -> str | None:
+def question_change_frame_kind(
+    frame: dict[str, Any], control: Any, job_id: str | None
+) -> str | None:
     """Report a question wake-up and return ordinary frame kinds unchanged."""
     kind = frame.get("kind")
     if not isinstance(kind, str):
         return None
     if kind == "question_changed":
+        if not isinstance(job_id, str) or not job_id:
+            raise ValueError("question-change frame has no job identity")
         control.report_question_change(job_id)
         return None
     return kind

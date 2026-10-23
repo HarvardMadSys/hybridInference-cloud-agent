@@ -1970,7 +1970,11 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
                 raise SessionSupervisorError(502, str(exc)[:1000]) from exc
             if frame is None:
                 break
-            kind = question_change_signals.question_change_frame_kind(frame, control, job.job_id)
+            kind = question_change_signals.question_change_frame_kind(
+                frame, control, getattr(job, "job_id", None)
+            )
+            if kind is None:
+                continue
             if kind == "event":
                 raw_line = frame.get("raw_line")
                 if isinstance(raw_line, str):
