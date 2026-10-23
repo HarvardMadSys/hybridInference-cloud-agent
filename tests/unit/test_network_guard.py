@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -790,7 +791,7 @@ def test_a_child_adopts_its_hosts_verification_and_starts_no_helper_for_it(monke
     handed = json.loads(json.dumps(host.handover()))  # as the turn payload carries it
     nft, child = _child_guard(host_nft)
 
-    child.adopt(handed)
+    assert child.adopt(handed) is True
 
     assert child.ensure() is None, "trusted as the host's own guard trusts it"
     assert nft.calls == []
@@ -850,7 +851,7 @@ _NOW = 10_000.0
         pytest.param({"verified_at": _NOW - 1}, "unreadable", id="no-image"),
         pytest.param({"verified_at": _NOW - 1, "helper_image": "runner:1"}, "unreadable", id="tag"),
         pytest.param(
-            {"verified_at": _NOW - GUARD_RECHECK_S, "helper_image": _IMAGE}, "60s ago", id="stale"
+            {"verified_at": 1.0, "helper_image": "runner:1"}, "unreadable", id="tag-past-the-window"
         ),
     ],
 )
@@ -870,6 +871,42 @@ def test_a_child_refuses_a_verification_it_cannot_trust_and_holds_nothing(
     assert nft.calls == []
     child.ensure()
     assert _steps(nft.calls) == ["inspect", "python3", "ip"], "nothing adopted, nothing trusted"
+
+
+@pytest.mark.parametrize(
+    "age", [pytest.param(GUARD_RECHECK_S, id="at-the-window"), pytest.param(90.0, id="past-it")]
+)
+def test_a_child_slow_to_start_adopts_nothing_of_a_sound_verification_and_says_why(
+    monkeypatch, caplog, age
+) -> None:
+    """The host's check aged out on the way, nothing more: no reason to decline the turn.
+
+    Neither its time nor its helper image is adopted, so the child's own check
+    is the full one every child made before the host handed its check over.
+    """
+    from cloud_agent_host import network_guard
+
+    monkeypatch.setattr(network_guard.time, "monotonic", lambda: _NOW)
+    monkeypatch.setenv("HOSTNAME", "runner-1")
+    nft = FakeNft()
+    child = HostNetworkGuard(_network(), run=nft)
+    handed_image = "sha256:" + "b" * 64
+
+    with caplog.at_level(logging.WARNING):
+        adopted = child.adopt({"verified_at": _NOW - age, "helper_image": handed_image})
+
+    assert adopted is False
+    assert nft.calls == []
+    (warned,) = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "network_guard_verification_aged_out"
+    ]
+    assert warned.age_s == age
+    assert f"rules {age:.0f}s ago" in warned.detail
+    child.ensure()
+    assert _steps(nft.calls) == ["inspect", "python3", "ip"], "nothing adopted, nothing trusted"
+    assert not [argv for argv, _stdin in nft.calls if handed_image in argv]
 
 
 # ── remembered relay exceptions ─────────────────────────────────────────

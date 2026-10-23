@@ -423,24 +423,26 @@ def test_preflight_installs_and_reads_back_the_host_rules_before_claiming(monkey
     assert ensured == [{"max_age_s": 0}]
 
 
-@pytest.mark.parametrize("adopted", [True, False])
+@pytest.mark.parametrize("adoption", ["adopted", "aged_out", "refused"])
 def test_a_turns_child_checks_the_network_on_its_hosts_verification_of_the_rules(
-    monkeypatch, adopted
+    monkeypatch, adoption
 ):
     """The Docker version and relay network as ever; the rules as an activation trusts them.
 
-    A verification the child could not adopt leaves it nothing to rely on, so
-    its check makes a fresh one, as every other caller's does.
+    A verification the child could not adopt, refused or too old by the time
+    the child took it, leaves it nothing to rely on, so its check makes a
+    fresh one, as every other caller's does.
     """
     from cloud_agent_host.network_guard import VERIFICATION_KEY, NetworkGuardError
 
     calls, ensured = _network_preflight(monkeypatch)
     handed: list[object] = []
 
-    def adopt(verification: object) -> None:
+    def adopt(verification: object) -> bool:
         handed.append(verification)
-        if not adopted:
-            raise NetworkGuardError("the host service verified the sandbox network rules 61s ago")
+        if adoption == "refused":
+            raise NetworkGuardError("the host service could not verify the sandbox network rules")
+        return adoption == "adopted"
 
     monkeypatch.setattr(
         ContainerBackend,
@@ -449,11 +451,11 @@ def test_a_turns_child_checks_the_network_on_its_hosts_verification_of_the_rules
     )
     backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
     turn = {"job_id": "ajob_1", VERIFICATION_KEY: {"verified_at": 1.0}}
-    if adopted:
-        backend.adopt_rules_verification(turn)
-    else:
-        with pytest.raises(SandboxError, match="61s ago"):
+    if adoption == "refused":
+        with pytest.raises(SandboxError, match="could not verify"):
             backend.adopt_rules_verification(turn)
+    else:
+        backend.adopt_rules_verification(turn)
 
     backend.preflight()
 
@@ -461,7 +463,7 @@ def test_a_turns_child_checks_the_network_on_its_hosts_verification_of_the_rules
     assert [argv[1:4] for argv in calls if argv[1:3] == ["network", "inspect"]] == [
         ["network", "inspect", "agent-relays"]
     ]
-    assert ensured == ([{}] if adopted else [{"max_age_s": 0}])
+    assert ensured == ([{}] if adoption == "adopted" else [{"max_age_s": 0}])
 
 
 def test_a_relay_network_that_routes_out_is_refused(monkeypatch):
