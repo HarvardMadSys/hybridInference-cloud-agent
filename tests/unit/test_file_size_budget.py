@@ -22,7 +22,7 @@ TEST_LIMIT = 2000
 
 #: Line counts of the modules over the limit when it arrived.
 BASELINE = {
-    "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5380,
+    "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5379,
     "apps/backend/cloud_agent_host/runner.py": 4981,
     "apps/backend/cloud_agent_host/chat_sandbox.py": 4115,
     "apps/backend/cloud_agent_host/sandbox_manager.py": 3958,

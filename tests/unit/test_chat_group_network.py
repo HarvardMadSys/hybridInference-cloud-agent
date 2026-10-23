@@ -25,6 +25,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -88,6 +89,8 @@ class FakeGuard:
     def __init__(self) -> None:
         self.ensured = 0
         self.fail: Exception | None = None
+        self.recheck_fail: Exception | None = None
+        self.rechecks = 0
         self.relays: dict[str, set[tuple[str, int]]] = {}
         self.network_ids: dict[str, str | None] = {}
         self.ssh_targets: dict[str, set[tuple[str, int]]] = {}
@@ -98,6 +101,13 @@ class FakeGuard:
         if self.fail is not None:
             raise self.fail
         self.ensured += 1
+
+    def recheck(self) -> None:
+        self.events.append("recheck")
+        self.rechecks += 1
+        if self.recheck_fail is not None:
+            raise self.recheck_fail
+        return None
 
     def sync_relays(
         self, bridge: str, endpoints: set[tuple[str, int]], *, network_id: str | None = None
@@ -872,6 +882,72 @@ def test_start_proves_the_network_from_inside_and_stops_a_sandbox_that_fails(mon
     assert docker.network(manager.network.network_for(spec)) is None
 
 
+def test_cold_start_rechecks_host_rules_after_guest_proof(monkeypatch):
+    manager, docker, guard = _world(monkeypatch)
+    spec = _spec()
+    docker.add_sandbox(spec)
+    guest_checked = threading.Event()
+    finish_guest_check = threading.Event()
+    errors: list[BaseException] = []
+
+    def verify_guest(*_args, **_kwargs) -> None:
+        guest_checked.set()
+        assert finish_guest_check.wait(timeout=5)
+
+    monkeypatch.setattr(
+        manager._network_lifecycle,
+        "_verify_guest_network",
+        verify_guest,
+    )
+
+    def start() -> None:
+        try:
+            manager.start(spec)
+        except BaseException as exc:
+            errors.append(exc)
+
+    starting = threading.Thread(target=start)
+    starting.start()
+    assert guest_checked.wait(timeout=2)
+    guard.recheck_fail = SandboxError("nft rules disappeared during start")
+    finish_guest_check.set()
+    starting.join(timeout=5)
+
+    assert not starting.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], RetainedChatFailStopped)
+    assert errors[0].inspection.running is False
+    assert docker.containers["sandbox-container"]["running"] is False
+    assert guard.rechecks == 1
+
+
+def test_cold_start_raw_stops_when_structured_stop_inspection_breaks(monkeypatch):
+    manager, docker, guard = _world(monkeypatch)
+    spec = _spec()
+    docker.add_sandbox(spec)
+    guard.recheck_fail = SandboxError("nft rules disappeared during start")
+    monkeypatch.setattr(
+        manager._network_lifecycle, "_verify_guest_network", lambda *_args, **_kwargs: None
+    )
+
+    def invalid_structured_stop(*_args, **_kwargs):
+        raise AttributeError("Docker inspection has no State")
+
+    monkeypatch.setattr(manager, "stop", invalid_structured_stop)
+
+    with pytest.raises(SandboxError, match="nft rules disappeared during start"):
+        manager.start(spec)
+
+    assert docker.containers["sandbox-container"]["running"] is False
+    assert [
+        manager.backend.docker_binary,
+        "stop",
+        "--time",
+        "10",
+        "sandbox-container",
+    ] in docker.calls
+
+
 def _check_that_times_out_once(monkeypatch, manager) -> list[str]:
     """The in-guest check raises the first time it runs and passes after that."""
     checks: list[str] = []
@@ -1588,6 +1664,83 @@ def test_stale_cleanup_leaves_a_same_name_replacement_alone(monkeypatch):
     )
 
     assert docker.network(name) is not None
+
+
+def test_final_network_release_follows_a_renamed_exact_container(monkeypatch):
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    original = docker.add_sandbox(spec, running=True)
+    name, network = _group_bridge(manager, docker, spec)
+    docker.connect(network["Id"], original["Id"], [])
+    original["running"], original["status"] = False, "exited"
+    original["Name"] = "/renamed-original"
+
+    released = manager.release_stopped_networks(
+        spec,
+        expected_container_id=original["Id"],
+    )
+
+    assert released.container_id == original["Id"]
+    assert released.networks == ()
+    assert docker.network(name) is None
+
+
+@pytest.mark.parametrize("restart_read", (2, 3, 4))
+def test_final_network_release_rejects_a_restart_at_each_exact_read(monkeypatch, restart_read):
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    original = docker.add_sandbox(spec, running=True)
+    name, network = _group_bridge(manager, docker, spec)
+    docker.connect(network["Id"], original["Id"], [])
+    original["running"], original["status"] = False, "exited"
+    require_exact = manager._require_exact
+    reads = 0
+
+    def restart_at_exact_read(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        if reads == restart_read:
+            original["running"], original["status"] = True, "running"
+        return require_exact(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_require_exact", restart_at_exact_read)
+    docker.calls.clear()
+    with pytest.raises(SandboxError, match=r"running|restarted"):
+        manager.release_stopped_networks(spec, expected_container_id=original["Id"])
+
+    assert original["running"] is True
+    if restart_read < 4:
+        assert docker.network(name) is not None
+        assert not any(call[1:3] == ["network", "disconnect"] for call in docker.calls)
+
+
+def test_final_network_release_leaves_a_same_name_bridge_replacement_alone(monkeypatch):
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    original = docker.add_sandbox(spec, running=True)
+    name, network = _group_bridge(manager, docker, spec)
+    docker.connect(network["Id"], original["Id"], [])
+    original["running"], original["status"] = False, "exited"
+    old_id = network["Id"]
+    release = manager._network_lifecycle._release_owned_network
+
+    def replace_before_release(*args, **kwargs):
+        del docker.networks[old_id]
+        _group_bridge(manager, docker, spec)
+        return release(*args, **kwargs)
+
+    monkeypatch.setattr(
+        manager._network_lifecycle, "_release_owned_network", replace_before_release
+    )
+    docker.calls.clear()
+    released = manager.release_stopped_networks(spec, expected_container_id=original["Id"])
+
+    replacement = docker.network(name)
+    assert released.networks == (name,)
+    assert replacement is not None and replacement["Id"] != old_id
+    assert not any(
+        call[1:3] in (["network", "disconnect"], ["network", "rm"]) for call in docker.calls
+    )
 
 
 def test_final_network_release_refuses_a_same_name_container_replacement(monkeypatch):
