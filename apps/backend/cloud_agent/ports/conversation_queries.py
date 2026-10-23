@@ -62,6 +62,10 @@ class ConversationQueries(Protocol):
         """Fetch one job by id."""
         ...
 
+    async def owns_job(self, *, job_id: str, user_id: str) -> bool:
+        """Whether the job belongs to this owner and its conversation is live."""
+        ...
+
     async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
         """Read only an owned job's state and publication URL for its event stream.
 

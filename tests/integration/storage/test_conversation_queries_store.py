@@ -112,6 +112,31 @@ async def test_a_job_is_only_read_by_its_owner(store, queries: PostgresConversat
     assert await queries.get_thread_for_job(job_id=job["id"], user_id=_OTHER) is None
 
 
+async def test_ownership_is_answered_as_the_full_job_read_answers_it(
+    store, queries: PostgresConversationQueries, db
+) -> None:
+    """The narrow check refuses what the full read's fields refuse, and nothing else."""
+    job = await _create_job(store, user_id=_OWNER)
+
+    def owned(row: dict[str, Any] | None, user_id: str) -> bool:
+        return row is not None and row["user_id"] == user_id and row.get("deleted_at") is None
+
+    for user_id in (_OWNER, _OTHER):
+        assert await queries.owns_job(job_id=job["id"], user_id=user_id) == owned(
+            await queries.get_job(job["id"]), user_id
+        )
+    assert await queries.owns_job(job_id=job["id"], user_id=_OWNER) is True
+    assert await queries.owns_job(job_id=job["id"], user_id=_OTHER) is False
+    assert await queries.owns_job(job_id="ajob_missing", user_id=_OWNER) is False
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", job["thread_id"]
+        )
+    assert owned(await queries.get_job(job["id"]), _OWNER) is False
+    assert await queries.owns_job(job_id=job["id"], user_id=_OWNER) is False
+
+
 async def test_an_unknown_job_answers_nothing(queries: PostgresConversationQueries) -> None:
     """Absence and refusal are the same answer, which callers rely on."""
     assert await queries.get_job("ajob_does_not_exist") is None
