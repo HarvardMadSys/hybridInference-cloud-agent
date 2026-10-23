@@ -21,18 +21,7 @@ from cloud_agent_host.archive_failure_diagnostics import (
     archive_failure_http_detail,
 )
 from cloud_agent_host.chat_sandbox import (
-    CHAT_CPU_LIMIT_LABEL,
-    CHAT_DISK_LIMIT_LABEL,
-    CHAT_GENERATION_LABEL,
-    CHAT_IMAGE_DIGEST_LABEL,
-    CHAT_MEMORY_LIMIT_LABEL,
-    CHAT_RESIDENT_CAPACITY_LABEL,
-    CHAT_RUNTIME_LABEL,
-    CHAT_RUNTIME_VERSION_LABEL,
-    CHAT_SANDBOX_ID_LABEL,
     CHAT_SHARED_LABEL,
-    CHAT_STOP_TIMEOUT_LABEL,
-    CHAT_THREAD_LABEL,
     MEMBER_UID_BASE,
     ChatSandboxInspection,
     ChatSandboxManager,
@@ -45,12 +34,21 @@ from cloud_agent_host.chat_sandbox import (
     SandboxRestoreFailed,
 )
 from cloud_agent_host.drivers import DialectRuntime, InputOutcome, PendingInput
+from cloud_agent_host.guarded_workloads import (
+    GuardedWorkload,
+    exact_stop_unguarded,
+    host_rule_failure,
+    merge_guarded_inventories,
+    retry_unresolved_stops,
+    running_guarded_workloads,
+    sandbox_spec_from_inspection,
+    workloads_with_known,
+)
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_SOURCE,
     GuestObservation,
     GuestObserverCursor,
 )
-from cloud_agent_host.idle_host_rules import IdleHostRules
 from cloud_agent_host.member_resources import (
     MEMBER_WINDOW_SAMPLE_INTERVAL_MS,
     RUNNING_CHECKPOINT_INTERVAL_S,
@@ -459,7 +457,6 @@ class SharedChatSessionSupervisor:
         self._sample_tick_s = min(0.25, self._sample_interval_s / 4)
         self._sampler_thread: threading.Thread | None = None
         self._manager = manager
-        self._idle_host_rules = IdleHostRules(manager)
         self._idle_timeout_s = idle_timeout_s
         self._sweep_interval_s = sweep_interval_s
         self._clock = clock
@@ -1287,7 +1284,7 @@ class SharedChatSessionSupervisor:
         for inspection in (listed := self._manager.list()):
             if inspection.labels.get(CHAT_SHARED_LABEL) != "true":
                 continue
-            spec = self._spec_from_inspection(inspection)
+            spec = sandbox_spec_from_inspection(inspection)
             specs.append(spec)
             with self._lock:
                 group = self._groups.get(spec.sandbox_id)
@@ -4201,7 +4198,7 @@ class SharedChatSessionSupervisor:
             if current.container_id != container_id:
                 self._mark_container_lost_locked(group)
                 raise RetainedChatLost("shared sandbox container identity changed")
-            if self._spec_from_inspection(current) != spec:
+            if sandbox_spec_from_inspection(current) != spec:
                 raise SandboxError("shared sandbox immutable labels changed")
             self._accept_inspection_locked(group, current)
             for group_member in group.members.values():
@@ -5159,78 +5156,72 @@ class SharedChatSessionSupervisor:
             profiling_truncated=truncated,
         )
 
-    @staticmethod
-    def _spec_from_inspection(inspection: ChatSandboxInspection) -> ChatSandboxSpec:
-        labels = inspection.labels
-        try:
-            if labels.get(CHAT_SHARED_LABEL) != "true":
-                raise ValueError("not a shared-live sandbox")
-            return ChatSandboxSpec(
-                thread_id=labels[CHAT_THREAD_LABEL],
-                sandbox_id=labels[CHAT_SANDBOX_ID_LABEL],
-                generation=int(labels[CHAT_GENERATION_LABEL]),
-                runtime_id=labels[CHAT_RUNTIME_LABEL],
-                runtime_version=labels.get(CHAT_RUNTIME_VERSION_LABEL) or None,
-                sandbox_image_digest=labels.get(CHAT_IMAGE_DIGEST_LABEL) or None,
-                memory_limit=labels[CHAT_MEMORY_LIMIT_LABEL],
-                cpu_limit=labels[CHAT_CPU_LIMIT_LABEL],
-                disk_limit_mib=int(labels.get(CHAT_DISK_LIMIT_LABEL, "0")),
-                stop_timeout_s=int(labels[CHAT_STOP_TIMEOUT_LABEL]),
-                shared_live=True,
-                resident_slot_capacity=int(labels[CHAT_RESIDENT_CAPACITY_LABEL]),
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise SandboxError(
-                f"shared container {inspection.name!r} has incomplete identity labels"
-            ) from exc
+    def _exact_stop_unguarded(self, workload: GuardedWorkload) -> bool:
+        """Stop one discovered container by exact id, retaining archive state when needed."""
+        return exact_stop_unguarded(
+            self._manager,
+            workload,
+            release_networks=workload.environment_run or self._stopped_archive_hook is None,
+        )
 
     def guard_network(self) -> builtins.list[SharedSessionDescriptor]:
-        """Stop every running group when the host can no longer show its rules.
+        """Fail-stop every running workload when the host cannot prove its rules.
 
-        Every pass reads the host's tables back and reinstalls what it finds
-        missing, so this only acts when that repair fails twice: a running
-        group would otherwise go on without the boundary it was started
-        behind, and anything a repository left running in it with it. Fail
-        closed — stop them all, which releases their bridges and
-        keeps their workspaces. Waking one reinstalls and verifies the rules
-        before it runs again, and refuses while they cannot be.
-
-        The running groups are named to the check: a table it (or another
-        process) reinstalled holds none of their relay or SSH exceptions, and
-        it gives back what each still-running group lost.
+        Discovery is host-wide, including environment runs and groups already
+        stopping or not yet reconciled. Retained groups keep their normal final
+        archive lifecycle and pending-archive bridge.
         """
+        inventory = running_guarded_workloads(self._manager)
         with self._lock:
-            groups = [
-                group
-                for group in self._groups.values()
-                if group.inspection.running and not group.stopping and group.members
-            ]
-            running = [(next(iter(group.members)), group.spec.generation) for group in groups]
-            specs = [group.spec for group in groups]
-        if not running:
-            self._idle_host_rules.renew()
+            workloads = workloads_with_known(inventory, self._groups.values())
+        if not workloads and inventory.complete and not inventory.unresolved_container_ids:
             return []
-        try:
-            self._manager.network.verify_host_rules(specs)
+        failure = host_rule_failure(self._manager, workloads)
+        if failure is None:
             return []
-        except SandboxError:
-            pass
-        try:
-            # A failed check is never cached, so this is a full second attempt:
-            # one Docker hiccup is not reason enough to stop every group.
-            self._manager.network.verify_host_rules(specs)
-            return []
-        except SandboxError as exc:
-            logger.error(
-                "shared_chat_network_unguarded",
-                extra={
-                    "event": "shared_chat_network_unguarded",
-                    "groups": len(running),
-                    "detail": str(exc)[:300],
-                },
-            )
+        inventory = merge_guarded_inventories(
+            inventory,
+            running_guarded_workloads(self._manager),
+        )
+        with self._lock:
+            workloads = workloads_with_known(inventory, self._groups.values())
+        retry_unresolved_stops(self._manager, inventory)
+        logger.error(
+            "shared_chat_network_unguarded",
+            extra={
+                "event": "shared_chat_network_unguarded",
+                "groups": len(workloads),
+                "inventory_complete": inventory.complete,
+                "unidentified": len(inventory.unresolved_container_ids),
+                "detail": failure,
+            },
+        )
+
+        managed: builtins.list[tuple[str, int, GuardedWorkload]] = []
+        direct: builtins.list[GuardedWorkload] = []
+        with self._lock:
+            for workload in workloads:
+                group = self._groups.get(workload.spec.sandbox_id)
+                if (
+                    workload.environment_run
+                    or group is None
+                    or group.spec != workload.spec
+                    or group.inspection.container_id != workload.inspection.container_id
+                    or group.stopping
+                    or group.starting
+                    or not group.members
+                ):
+                    direct.append(workload)
+                else:
+                    managed.append((next(iter(group.members)), workload.spec.generation, workload))
+
+        # Stop independent and already-stopping workloads before any retained
+        # group spends time flushing native state or preparing an archive.
+        for workload in direct:
+            self._exact_stop_unguarded(workload)
+
         staged: builtins.list[tuple[str, int]] = []
-        for thread_id, generation in running:
+        for thread_id, generation, workload in managed:
             try:
                 self.stop_if_idle(
                     thread_id,
@@ -5240,20 +5231,20 @@ class SharedChatSessionSupervisor:
                 )
             except Exception:
                 logger.exception(
-                    "unguarded shared sandbox could not be stopped",
+                    "unguarded shared sandbox lifecycle stop failed",
                     extra={
                         "event": "shared_chat_network_fail_stop_failed",
                         "thread_id": thread_id,
                         "generation": generation,
                     },
                 )
+                # A concurrent stop may have raised SessionBusy after discovery.
+                # Its exact container still must not keep running unguarded.
+                self._exact_stop_unguarded(workload)
             else:
                 staged.append((thread_id, generation))
 
-        # Compression and S3 upload can take minutes. No group remains running
-        # on a host whose packet boundary is unproven while an earlier group's
-        # final archive is in flight: every exact Docker stop above completes
-        # before this second persistence/release phase begins.
+        # Every exact Docker stop completes before compression or upload starts.
         stopped: builtins.list[SharedSessionDescriptor] = []
         for thread_id, generation in staged:
             try:

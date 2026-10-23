@@ -1604,13 +1604,14 @@ def test_abandon_drops_the_window_when_normal_turn_cleanup_fails(monkeypatch):
     assert [event for event in manager.events if event[0] == "member-window"] == []
 
 
-def test_a_stopping_group_is_kept_behind_renewed_host_rules():
-    """It runs on through its archive and Docker stop, though no group counts as running."""
+def test_a_stopping_group_is_included_in_the_exact_host_rule_check():
+    """It remains guarded through archive preparation and Docker stop."""
     manager, supervisor = _running_group()
     supervisor._members["athr_source"].stopping = True
 
     assert supervisor.guard_network() == []
 
-    assert manager.host_rule_checks == 0
-    assert manager.host_rule_renewals == 1
+    assert manager.host_rule_checks == 1
+    assert manager.host_rule_running == [[_spec()]]
+    assert manager.host_rule_renewals == 0
     assert manager.stop_count == 0

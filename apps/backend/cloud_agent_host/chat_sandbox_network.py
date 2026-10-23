@@ -168,6 +168,8 @@ class ChatNetworkContainers(Protocol):
 
     def _require(self, spec: ChatSandboxSpec) -> ChatSandboxInspection: ...
 
+    def _require_exact(self, spec: ChatSandboxSpec, container_id: str) -> ChatSandboxInspection: ...
+
     def _verify_identity(
         self, inspection: ChatSandboxInspection, spec: ChatSandboxSpec, *, require_name: bool = True
     ) -> None: ...
@@ -936,7 +938,7 @@ class ChatSandboxNetwork:
                 f"{(network_name or network)!r}: " + disconnected.stderr.strip()[:300]
             )
 
-    def _release_owned_network(  # noqa: PLR0912 complexity baseline, #771
+    def _release_owned_network(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         network_name: str,
         spec: ChatSandboxSpec,
@@ -946,6 +948,18 @@ class ChatSandboxNetwork:
         expected_container_id: str | None = None,
     ) -> None:
         """Disconnect exact owned endpoints and delete one inactive bridge."""
+        sandbox: ChatSandboxInspection | None
+        if expected_container_id is not None:
+            sandbox = self._containers._require_exact(spec, expected_container_id)
+            if sandbox.running:
+                raise SandboxError("chat sandbox restarted during network release")
+            named = self._containers.inspect(spec.container_name)
+            if named is not None and named.container_id != expected_container_id:
+                raise RetainedChatLost("sandbox identity changed during network release")
+        else:
+            sandbox = self._containers.inspect(spec.container_name)
+            if sandbox is not None:
+                self._containers._verify_identity(sandbox, spec)
         network = self._inspect_network(network_name)
         if network is None:
             return
@@ -968,13 +982,6 @@ class ChatSandboxNetwork:
         containers = network.get("Containers") or {}
         if not isinstance(containers, dict):
             raise SandboxError("Docker returned invalid group-network endpoints")
-        sandbox = self._containers.inspect(spec.container_name)
-        if sandbox is not None:
-            self._containers._verify_identity(sandbox, spec)
-        if expected_container_id is not None and (
-            sandbox is None or sandbox.container_id != expected_container_id
-        ):
-            raise RetainedChatLost("chat sandbox container identity changed during network release")
         sandbox_id = sandbox.container_id if sandbox is not None else None
         if only_if_sandbox_unattached and sandbox_id in containers:
             # Opportunistic orphan pruning must never detach a sandbox that
@@ -1085,23 +1092,17 @@ class ChatSandboxNetwork:
         expected_container_id: str | None = None,
     ) -> ChatSandboxInspection:
         """Release the group bridge after the retained container stops."""
+        if expected_container_id is not None:
+            current = self._containers._require_exact(spec, expected_container_id)
         if current.running:
             raise SandboxError("refusing to release networking from a running chat sandbox")
-        if expected_container_id is not None:
-            named = self._containers._require(spec)
-            if named.container_id != expected_container_id:
-                raise RetainedChatLost(
-                    "chat sandbox container identity changed during network release"
-                )
+        network_ids = dict(current.network_ids)
         for network_name in current.networks:
             if network_name == CHAT_NULL_NETWORK:
-                # There is no connectivity here to withdraw. Docker reports the
-                # null network for a container whose last endpoint has gone, so
-                # this is what a release that already succeeded looks like --
-                # and reading it as a network nobody owns made every
-                # later stop of an already-released sandbox raise. Because the
-                # supervisor stops every retained sandbox while reconciling, one
-                # such container was enough to keep the sandbox manager from starting.
+                # Docker reports null after its last endpoint is gone, so there is
+                # no connectivity to withdraw. This is an already-successful release:
+                # treating it as ownerless made reconcile stops fail and could block
+                # the sandbox manager from starting.
                 continue
             if (
                 network_name == CHAT_BOOTSTRAP_NETWORK
@@ -1117,17 +1118,12 @@ class ChatSandboxNetwork:
                 self._release_owned_network(
                     network_name,
                     spec,
+                    expected_network_id=network_ids.get(network_name, ""),
                     expected_container_id=expected_container_id,
                 )
                 continue
-            # A network that no longer exists cannot be an ownership violation:
-            # there is nothing left to release and nothing left to leak. The
-            # group bridge is pruned on its own grace timer, so a container that
-            # stopped before that timer can outlive its network and keep a stale
-            # endpoint record. Reading that record as an unknown network failed
-            # this sandbox's stop -- and with it the whole reconcile, and with
-            # that the sandbox manager's startup -- over a bridge the platform had
-            # already removed itself.
+            # A stopped container can retain an endpoint after its bridge was
+            # pruned. Nothing remains to release or treat as an ownership breach.
             if self._inspect_network(network_name) is None:
                 self._disconnect_endpoint(network_name, current.container_id)
                 continue
@@ -1136,9 +1132,13 @@ class ChatSandboxNetwork:
                 "group bridge; a sandbox from before the single-network change needs the "
                 "one-time cleanup"
             )
-        released = self._containers._require(spec)
-        if expected_container_id is not None and released.container_id != expected_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed during network release")
+        released = (
+            self._containers._require_exact(spec, expected_container_id)
+            if expected_container_id is not None
+            else self._containers._require(spec)
+        )
+        if released.running:
+            raise SandboxError("chat sandbox restarted during network release")
         return released
 
     @staticmethod

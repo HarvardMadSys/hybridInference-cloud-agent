@@ -71,6 +71,8 @@ class _Manager:
             gid=10001,
             image="sha256:image",
             runtime="runc",
+            docker_binary="docker",
+            sandbox_namespace="test",
         )
         self.items: dict[str, ChatSandboxInspection] = {}
         self.events: list[object] = []
@@ -78,12 +80,9 @@ class _Manager:
         # Network proofs made without a start; each start makes its own.
         self.network_proofs: list[str] = []
         self.stop_count = 0
-        # The host-rule check: how many of the next checks fail, and how many ran.
         self.host_rule_failures = 0
         self.host_rule_checks = 0
-        # The running groups each check was given, whose exceptions it restores.
         self.host_rule_running: list[list[ChatSandboxSpec]] = []
-        # Renewals of the host-rule verification the sweep makes while idle.
         self.host_rule_renewals = 0
         self.host_rule_renewal_failures = 0
         self.pruned_specs: list[ChatSandboxSpec] = []
@@ -112,13 +111,9 @@ class _Manager:
         observer: Any = None,
     ) -> ChatSandboxInspection:
         created = spec.container_name not in self.items
-        # Instrumented like the real manager, so a test can exercise the stage
-        # path rather than only the action path.
         with operation_profiling.substage(observer, "container_create"):
             inspection = self.items.setdefault(spec.container_name, self._inspection(spec))
         if created and facts is not None:
-            # Mirrors the real manager: only a container this call actually
-            # made is reported as created.
             facts.note("create")
         return inspection
 
@@ -134,6 +129,11 @@ class _Manager:
 
     def list(self) -> list[ChatSandboxInspection]:
         return list(self.items.values())
+
+    def _run(self, *_args, **_kwargs):
+        return SimpleNamespace(
+            returncode=0, stdout="\n".join(f"{x.name}\t" for x in self.items.values() if x.running)
+        )
 
     def ensure_downloaded_runtime(self, _spec: ChatSandboxSpec, runtime: str, version: str) -> None:
         """The image already holds every version these tests launch."""
@@ -2482,15 +2482,15 @@ def test_one_failed_check_is_retried_before_anything_is_stopped():
     assert manager.stop_count == 0
 
 
-def test_while_no_group_runs_the_sweep_reads_nothing_back_and_asks_for_a_renewal():
-    """Whether to renew is the lifecycle's call, on what Docker shows: see test_idle_host_rules."""
+def test_while_nothing_runs_the_sweep_starts_no_guard_helper():
+    """The running-container query proves that nothing remains behind the rules."""
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
 
     for _ in range(120):
         assert supervisor.guard_network() == []
     assert manager.host_rule_checks == 0
-    assert manager.host_rule_renewals == 120
+    assert manager.host_rule_renewals == 0
     assert manager.stop_count == 0
 
 
