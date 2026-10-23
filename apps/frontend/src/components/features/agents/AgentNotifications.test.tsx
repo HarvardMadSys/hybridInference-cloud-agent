@@ -320,6 +320,32 @@ describe('owner-wide agent notifications', () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  it('rebuilds once without a cursor when the server rejects its saved cursor', async () => {
+    await mount({ ...preferences, questions: false });
+    list
+      .mockRejectedValueOnce(new APIError('UNKNOWN_ERROR', 'Invalid notification cursor', 422))
+      .mockResolvedValueOnce(page([], null, { change_cursor: 'rebuilt-tail' }));
+
+    await act(async () => vi.advanceTimersByTimeAsync(NOTIFICATION_STATE_POLL_MS));
+
+    expect(list).toHaveBeenNthCalledWith(2, 'changes');
+    expect(list).toHaveBeenNthCalledWith(3, undefined);
+    list.mockResolvedValueOnce(page([], null, { mode: 'delta', change_cursor: 'next-tail' }));
+    await act(async () => vi.advanceTimersByTimeAsync(NOTIFICATION_STATE_POLL_MS));
+    expect(list).toHaveBeenNthCalledWith(4, 'rebuilt-tail');
+  });
+
+  it('keeps its cursor after a transient notification-state failure', async () => {
+    await mount({ ...preferences, questions: false });
+    list.mockRejectedValueOnce(new APIError('SERVER_ERROR', 'Try again', 500));
+
+    await act(async () => vi.advanceTimersByTimeAsync(NOTIFICATION_STATE_POLL_MS));
+    expect(list).toHaveBeenNthCalledWith(2, 'changes');
+    list.mockResolvedValueOnce(page([], null, { mode: 'delta', change_cursor: 'next-tail' }));
+    await act(async () => vi.advanceTimersByTimeAsync(NOTIFICATION_STATE_POLL_MS));
+    expect(list).toHaveBeenNthCalledWith(3, 'changes');
+  });
+
   it('isolates cursors and receipts across owners while ignoring the previous owner state response', async () => {
     list.mockResolvedValueOnce(page([job()], null, { change_cursor: 'owner-tail' }));
     const mounted = await mount({ ...preferences, questions: false });

@@ -39,4 +39,4 @@ def downgrade() -> None:
         op.execute(f"DROP INDEX {_INDEX}")
         return
     with op.get_context().autocommit_block():
-        op.execute(f"DROP INDEX CONCURRENTLY {_INDEX}")
+        op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {_INDEX}")

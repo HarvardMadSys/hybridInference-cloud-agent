@@ -2491,15 +2491,15 @@ def test_one_failed_check_is_retried_before_anything_is_stopped():
     assert manager.stop_count == 0
 
 
-def test_while_nothing_runs_the_sweep_does_not_start_guard_helpers():
-    """An empty host leaves expired proofs for the next guarded activation."""
+def test_while_no_group_runs_the_sweep_reads_nothing_back_and_asks_for_a_renewal():
+    """Whether to renew is the lifecycle's call, on what Docker shows: see test_idle_host_rules."""
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
 
     for _ in range(120):
         assert supervisor.guard_network() == []
     assert manager.host_rule_checks == 0
-    assert manager.host_rule_renewals == 0
+    assert manager.host_rule_renewals == 120
     assert manager.stop_count == 0
 
 

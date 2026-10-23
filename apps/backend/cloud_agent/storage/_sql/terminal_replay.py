@@ -33,13 +33,18 @@ async def page(
     so the normal routing validator continues to fail closed.
     """
     owner = "COALESCE(CASE WHEN a.status = 'running' THEN a.host_id END, s.host, a.host_id)"
+    after_clause = ""
+    arguments: list[Any] = [list(TERMINAL_STATES), limit]
+    if after is not None:
+        after_clause = "AND (updated_at, id) > ($3::timestamptz, $4::text)"
+        arguments.extend(after)
     rows = await conn.fetch(
         f"""
         WITH candidates AS MATERIALIZED (
             SELECT id, thread_id, current_attempt_id, updated_at
             FROM agent_jobs
             WHERE terminal_resume_pending = TRUE AND state = ANY($1::text[])
-              AND ($3::timestamptz IS NULL OR (updated_at, id) > ($3, $4::text))
+              {after_clause}
             ORDER BY updated_at, id LIMIT $2
         )
         SELECT j.id, j.thread_id, j.updated_at, to_jsonb(s) AS thread_sandbox,
@@ -50,10 +55,7 @@ async def page(
         LEFT JOIN agent_runner_hosts h ON h.host = {owner}
         ORDER BY j.updated_at, j.id
         """,
-        list(TERMINAL_STATES),
-        limit,
-        after[0] if after else None,
-        after[1] if after else None,
+        *arguments,
     )
     result = []
     for row in rows:

@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-22 13:55+0000\n"
+"POT-Creation-Date: 2026-10-22 18:43-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -38,15 +38,15 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0101_notification_state_deltas`. The supported deployment scripts run migrations "
-"before replacing the API; every migration listed here is additive and "
-"safe under the running previous release unless it says otherwise. The few"
-" transitions that need stopped writers are listed in [applying migrations"
-" that are not backwards-compatible](operations.md#applying-migrations-"
-"that-are-not-backwards-compatible)."
+"`0103_terminal_resume_keyset`. The supported deployment scripts run "
+"migrations before replacing the API; every migration listed here is "
+"additive and safe under the running previous release unless it says "
+"otherwise. The few transitions that need stopped writers are listed in "
+"[applying migrations that are not backwards-compatible](operations.md"
+"#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0101_notification_state_deltas`。官方支持的部署脚本会在替换 API "
+"`0103_terminal_resume_keyset`。官方支持的部署脚本会在替换 API "
 "之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数几个需要先停掉所有写入的迁移，列在[执行不向后兼容的迁移](operations.md"
 "#applying-migrations-that-are-not-backwards-compatible)里。"
 
@@ -135,6 +135,40 @@ msgid "What it changes"
 msgstr "改了什么"
 
 #: ../developer/upgrade-notes.md
+msgid "`0103_terminal_resume_keyset`"
+msgstr "`0103_terminal_resume_keyset`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Rebuilds the partial terminal-resume index on `(updated_at, id)`, "
+"matching the replay keyset so every bounded continuation seeks directly "
+"instead of sorting equal-time rows again. The online build does not block"
+" foreground writes and changes no row. A downgrade restores the preceding"
+" one-column index."
+msgstr ""
+"把终端恢复的部分索引重建为 `(updated_at, id)`，与重放所用的键集一致，使每个有界续页都能直接定位，"
+"不必再次排序时间相同的记录。在线构建不会阻塞前台写入，也不会改动任何行。降级会恢复之前的单列索引。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0102_admin_sandbox_marker_order`"
+msgstr "`0102_admin_sandbox_marker_order`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Replaces revision 0097's membership trigger so that it locks a "
+"membership's sandbox group before marking the group changed, the order "
+"every write to the group already takes. Before it, settling, abandoning, "
+"ending, releasing or reaping a turn could deadlock with the admin "
+"terminal check or a workspace start on the same group, and Postgres "
+"aborted one of the two. Only the trigger function changes: no table is "
+"locked or rewritten, and the previous release's statements run unchanged "
+"under it. A downgrade restores the 0097 trigger."
+msgstr ""
+"替换修订 0097 "
+"的成员关系触发器：先锁住成员关系所属的沙箱组，再把这个沙箱组标记为已变更，和每次写入沙箱组时的顺序一致。在此之前，结算、放弃、结束、释放或回收一个轮次时，可能和同一沙箱组上的管理员终端检查或工作区启动互相死锁，Postgres"
+" 会中止其中一个。只替换触发器函数：不锁表，也不重写任何表；上一个发布的语句不用改，照常在新函数下运行。降级会恢复 0097 的触发器。"
+
+#: ../developer/upgrade-notes.md
 msgid "`0101_notification_state_deltas`"
 msgstr "`0101_notification_state_deltas`"
 
@@ -149,15 +183,23 @@ msgid ""
 "push stream remains available. A downgrade drops only derived state and "
 "restores push-only trigger behavior."
 msgstr ""
-"新增按所有者合并的作业和对话变更标记、活动作业索引，以及近期终态标记的部分索引。通知客户端以数据库收到请求的时间为基线，先按有界的键集页读取活动作业和近期终态作业，再请求有界的快照增量；不会回填或重放历史作业。标记在 24 小时后惰性清理；游标过期时会明确触发重建。原有推送流仍然可用。降级只删除派生状态，并恢复仅推送的触发器行为。"
+"新增按所有者合并的作业和对话变更标记、活动作业索引，以及近期终态标记的部分索引。通知客户端以数据库收到请求的时间为基线，先按有界的键集页读取活动作业和近期终态作业，再请求有界的快照增量；不会回填或重放历史作业。标记在"
+" 24 小时后惰性清理；游标过期时会明确触发重建。原有推送流仍然可用。降级只删除派生状态，并恢复仅推送的触发器行为。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0100_memory_archive_pages`"
 msgstr "`0100_memory_archive_pages`"
 
 #: ../developer/upgrade-notes.md
-msgid "Builds partial owner/scope indexes for active memories and archive cursor pages concurrently. Existing memory rows are unchanged. Online builds avoid blocking foreground writes; interrupted builds can be retried. Offline SQL uses ordinary index builds. Downgrade drops only these indexes."
-msgstr "并发创建按 owner 和 scope 组织的活跃记忆及归档游标分页部分索引，不修改已有记忆行。在线构建不阻塞前台写入；中断后可以重试。离线 SQL 使用普通索引构建。降级只删除这些索引。"
+msgid ""
+"Builds partial owner/scope indexes for active memories and archive cursor"
+" pages concurrently. Existing memory rows are unchanged. Online builds "
+"avoid blocking foreground writes; interrupted builds can be retried. "
+"Offline SQL uses ordinary index builds. Downgrade drops only these "
+"indexes."
+msgstr ""
+"并发创建按 owner 和 scope 组织的活跃记忆及归档游标分页部分索引，不修改已有记忆行。在线构建不阻塞前台写入；中断后可以重试。离线 "
+"SQL 使用普通索引构建。降级只删除这些索引。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0099_thread_stats_rollups`"
@@ -166,11 +208,11 @@ msgstr "`0099_thread_stats_rollups`"
 #: ../developer/upgrade-notes.md
 msgid ""
 "Adds a derived, versioned per-attempt cache for owner thread statistics. "
-"Missing or stale attempts reduce their compact event projections in bounded "
-"1,000-row pages; unchanged reads compare the newest indexed sequence and reuse "
-"the cache without transferring historical event rows. Event storage and the "
-"authoritative billing ledger are unchanged. A downgrade drops only this "
-"rebuildable cache."
+"Missing or stale attempts reduce their compact event projections in "
+"bounded 1,000-row pages; unchanged reads compare the newest indexed "
+"sequence and reuse the cache without transferring historical event rows. "
+"Event storage and the authoritative billing ledger are unchanged. A "
+"downgrade drops only this rebuildable cache."
 msgstr ""
 "为所有者的对话统计新增按尝试存储、带版本的派生缓存。缺失或过期的尝试会按每页 1,000 "
 "行的固定上限归约紧凑事件投影；未变更的读取会比较带索引的最新序号并复用缓存，不再传输历史事件行。事件存储和权威计费账本均不变。降级只删除这份可重建缓存。"
@@ -180,24 +222,16 @@ msgid "`0098_measurement_counts`"
 msgstr "`0098_measurement_counts`"
 
 #: ../developer/upgrade-notes.md
-msgid "Backfills exact profiling counts into at most 64 counter shards per run and installs transactional accounting triggers. The historical scan holds a write-conflicting lock on measurements until migration commit; schedule this one-time write pause for the size of retained history. Raw samples and whole-run summaries are unchanged. Downgrade removes only counters and triggers."
-msgstr "将每次 profiling 运行的精确计数回填到最多 64 个分片，并安装事务内计数触发器。历史扫描会持有与测量写入冲突的锁，直到迁移提交；应按保留历史的规模安排这次写入暂停。原始样本和整次运行的统计不变。降级只删除计数表和触发器。"
-
-#: ../developer/upgrade-notes.md
-msgid "`0096_snapshot_title_context`"
-msgstr "`0096_snapshot_title_context`"
-
-#: ../developer/upgrade-notes.md
 msgid ""
-"Adds a bounded JSON title context to immutable sandbox snapshots. "
-"Existing snapshots start with an empty context and retain the "
-"deterministic changed-file fallback; newly captured snapshots persist "
-"recent conversation material so a publisher claim never rebuilds or "
-"transfers the sandbox's unbounded transcript. A downgrade drops only this"
-" derived context."
+"Backfills exact profiling counts into at most 64 counter shards per run "
+"and installs transactional accounting triggers. The historical scan holds"
+" a write-conflicting lock on measurements until migration commit; "
+"schedule this one-time write pause for the size of retained history. Raw "
+"samples and whole-run summaries are unchanged. Downgrade removes only "
+"counters and triggers."
 msgstr ""
-"为不可变沙箱快照添加有界的 JSON "
-"标题上下文。现有快照以空上下文开始，并保留基于变更文件的确定性回退标题；新捕获的快照会持久化最近的对话材料，使发布者领取任务时不再重建或传输沙箱中无界增长的对话记录。降级只会删除这份派生上下文。"
+"将每次 profiling 运行的精确计数回填到最多 64 "
+"个分片，并安装事务内计数触发器。历史扫描会持有与测量写入冲突的锁，直到迁移提交；应按保留历史的规模安排这次写入暂停。原始样本和整次运行的统计不变。降级只删除计数表和触发器。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0097_admin_sandbox_deltas`"
@@ -213,8 +247,31 @@ msgid ""
 "migration before enabling the new UI; older list clients remain "
 "supported. A downgrade discards only derived inventory state and its "
 "triggers."
+msgstr "新增合并的元数据变更标记，以及短期保留、不含内容的管理员清单快照分页。首次快照之后，管理员刷新只请求发生变化的标识；游标过期时会明确要求重新同步。触发器覆盖沙箱、成员计数、原始对话标题和主机心跳，不引入全局写锁。启用新界面之前先执行迁移；旧版列表客户端仍受支持。降级只删除派生清单状态及其触发器。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0096_snapshot_title_context`"
+msgstr "`0096_snapshot_title_context`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds a bounded JSON title context to immutable sandbox snapshots, so a "
+"publisher claim never rebuilds or transfers the sandbox's unbounded "
+"transcript. Each capture continues from the newest earlier snapshot of "
+"its group that has a context, adding the turns of every snapshot since, "
+"including one whose capture failed. Existing snapshots start with an "
+"empty context; a snapshot still holding it when a publisher claims it, "
+"captured before this migration or by the previous release during the "
+"rollout, has its context built and stored at that claim, so its draft is "
+"titled from the conversation rather than from its changed files. These "
+"reads look back over at most 24 earlier snapshots and read the newest 24 "
+"turns; the older turns of a longer gap are left out of the title. A "
+"downgrade drops only this derived context."
 msgstr ""
-"新增合并的元数据变更标记，以及短期保留、不含内容的管理员清单快照分页。首次快照之后，管理员刷新只请求发生变化的标识；游标过期时会明确要求重新同步。触发器覆盖沙箱、成员计数、原始对话标题和主机心跳，不引入全局写锁。启用新界面之前先执行迁移；旧版列表客户端仍受支持。降级只删除派生清单状态及其触发器。"
+"为不可变沙箱快照添加有界的 JSON "
+"标题上下文，使发布者认领快照时不再重建或传输沙箱中无界增长的对话记录。每次捕获都以沙箱组里更早的、最新一个带有上下文的快照为起点，补入此后每个快照的轮次，包括捕获失败的那个快照。现有快照以空上下文开始；发布者认领快照时，如果它仍是空上下文（在这次迁移之前捕获，或在滚动发布期间由上一个发布捕获），就在这次认领时构建并保存它的上下文，使它的草稿"
+" PR 以对话而不是变更的文件来命名。这些读取最多回看 24 个更早的快照，只读取最新的 24 "
+"个轮次；间隔更长时，较早的轮次不会进入标题。降级只会删除这份派生上下文。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0095_memory_retention`"
@@ -227,7 +284,9 @@ msgid ""
 "policy. Online builds avoid blocking foreground writes; interrupted "
 "builds can be retried. Offline SQL uses ordinary index builds. Downgrade "
 "drops only these indexes."
-msgstr "并发创建归档时间和非空 superseded_by 的部分索引，不修改记忆行或 90 天保留规则。在线构建不阻塞前台写入；中断后可以重试。离线 SQL 使用普通索引构建。降级只删除这些索引。"
+msgstr ""
+"并发创建归档时间和非空 superseded_by 的部分索引，不修改记忆行或 90 天保留规则。在线构建不阻塞前台写入；中断后可以重试。离线 "
+"SQL 使用普通索引构建。降级只删除这些索引。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0094_thread_message_pages`"
@@ -638,7 +697,7 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:91
+#: ../developer/upgrade-notes.md:99
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
@@ -652,11 +711,11 @@ msgstr ""
 "之前已退役的旧迁移链，就无法直接升级；见[保留旧迁移链的数据库](operations.md#preserving-an-old-chain-"
 "database)。"
 
-#: ../developer/upgrade-notes.md:97
+#: ../developer/upgrade-notes.md:105
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:99
+#: ../developer/upgrade-notes.md:107
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"
@@ -669,3 +728,4 @@ msgstr ""
 "里给上表加一行，写清楚升级线上部署的运维人员需要知道什么：会改动哪些已有数据、可能锁表多久、降级会不会被拒绝。然后把 *启动本次发布之前* 一节和"
 " [ENVIRONMENT.md](../../ENVIRONMENT.md) 里写的 head 修订号也更新掉；有测试会检查这两处写的都是当前的"
 " head。"
+

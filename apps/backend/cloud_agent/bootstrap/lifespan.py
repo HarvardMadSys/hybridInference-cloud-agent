@@ -23,6 +23,7 @@ from cloud_agent.workers.background_wake import BackgroundWake
 from cloud_agent.workers.environment_maintenance import run_environment_maintenance
 from cloud_agent.workers.job_event_signal import JobEventSignal
 from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
+from cloud_agent.workers.notification_maintenance import run_notification_maintenance
 from cloud_agent.workers.notifications import listen
 from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
 from cloud_agent.workers.recovery_maintenance import (
@@ -109,6 +110,7 @@ _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "mcp_catalog_task",
     "reaper_task",
     "environment_maintenance_task",
+    "notification_maintenance_task",
     "queued_follow_up_maintenance_task",
     "goal_wakeup_maintenance_task",
     "goal_scheduling_maintenance_task",
@@ -451,6 +453,11 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 app,
                 "environment_maintenance_task",
                 run_environment_maintenance(storage.environments, storage.environment_snapshots),
+            )
+            _spawn(
+                app,
+                "notification_maintenance_task",
+                run_notification_maintenance(storage.notification_maintenance),
             )
             _spawn(
                 app, "queued_follow_up_maintenance_task", run_queued_follow_up_maintenance(storage)
