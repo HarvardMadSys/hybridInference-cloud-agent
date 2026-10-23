@@ -19,13 +19,38 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     _configured_identity_issuer,
     _create_job,
     client,
-    store,
 )
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
 
 pytestmark = pytest.mark.asyncio
+
+
+class _QuestionStorage(FakeStorage):
+    def __init__(self):
+        super().__init__()
+        self.question_hints = []
+
+    async def notify_question_change(
+        self, *, job_id: str, attempt_id: int, lease_generation: int
+    ) -> bool:
+        if not self._fenced(attempt_id, lease_generation):
+            return False
+        job = self.jobs.get(job_id)
+        if (
+            job is None
+            or job.get("current_attempt_id") != attempt_id
+            or job.get("state") != "running"
+        ):
+            return False
+        self.question_hints.append((str(job["user_id"]), str(job["thread_id"])))
+        return True
+
+
+@pytest.fixture
+def store() -> FakeStorage:
+    return _QuestionStorage()
 
 
 async def _worker_auth(client: AsyncClient) -> tuple[str, dict[str, str]]:

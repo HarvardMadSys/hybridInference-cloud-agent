@@ -29,6 +29,15 @@ from cloud_agent_host import control_plane_client, runner as runner_mod
 from cloud_agent_host.runner import LeaseLost
 
 
+class _QuestionControl(_Control):
+    def __init__(self):
+        super().__init__()
+        self.question_hints = []
+
+    def report_question_change(self, job_id):
+        self.question_hints.append(job_id)
+
+
 def test_a_lease_an_event_upload_lost_ends_the_turn_at_once():
     """Uploads are not waited for, so the loop reads the sender's flag beside the heartbeat's."""
 
@@ -70,7 +79,7 @@ def test_question_change_frame_notifies_the_attempt_control_plane():
             {"kind": "result", "status": "completed", "exit_code": 0},
         ]
     )
-    control = _Control()
+    control = _QuestionControl()
 
     code, _tail, errors, result, _reported = runner_mod._stream_shared_agent_turn(
         supervisor=supervisor,

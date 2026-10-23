@@ -36,7 +36,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
-from cloud_agent_host.bounded_output import OutputPump
+from cloud_agent_host import bounded_output, question_change_signals
 from cloud_agent_host.runtimes import (
     DIFF,
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -434,7 +434,7 @@ class LaunchContext:
     claude_config_dir: str | None = None
 
 
-class HarnessTurn(Generic[_RuntimeT]):
+class HarnessTurn(question_change_signals.QuestionChangeTrackable, Generic[_RuntimeT]):
     """One executing turn: its event stream, cancellation, and result."""
 
     def __init__(self, session: HarnessSession[_RuntimeT], process: SandboxProcess) -> None:
@@ -445,13 +445,10 @@ class HarnessTurn(Generic[_RuntimeT]):
         self._final_messages: list[str] = []
         self._result: TurnResult | None = None
         self._questions_lock = threading.Lock()
-        self._questions: dict[str, _PendingQuestion] = {}
+        self._questions: dict[str, _PendingQuestion] = question_change_signals.ChangeTrackedDict()
         self._question_records: dict[str, _PendingQuestion] = {}
         self._question_keys: dict[str, str] = {}
         self._questions_closed = False
-        # One coalesced wake-up is enough: consumers reread the current set,
-        # so intermediate snapshots have no value and the queue stays bounded.
-        self._question_change_pending = False
 
     def _remember_question(
         self,
@@ -468,24 +465,18 @@ class HarnessTurn(Generic[_RuntimeT]):
             pending = _PendingQuestion({"request_id": request_id, "questions": questions}, respond)
             self._questions[request_id] = pending
             self._question_records[native_key] = pending
-            self._question_change_pending = True
 
     def _clear_questions(self) -> None:
         with self._questions_lock:
-            changed = bool(self._questions)
             self._questions_closed = True
             self._questions.clear()
             self._question_records.clear()
-            if changed:
-                self._question_change_pending = True
 
     def _forget_question(self, native_key: str) -> None:
         with self._questions_lock:
             request_id = self._question_keys.get(native_key)
             if request_id is not None:
-                changed = self._questions.pop(request_id, None) is not None
-                if changed:
-                    self._question_change_pending = True
+                self._questions.pop(request_id, None)
             self._question_records.pop(native_key, None)
 
     def _restore_question(self, native_key: str) -> None:
@@ -501,14 +492,6 @@ class HarnessTurn(Generic[_RuntimeT]):
             self._question_keys[native_key] = request_id
             self._question_records[native_key] = restored
             self._questions[request_id] = restored
-            self._question_change_pending = True
-
-    def take_question_change(self) -> bool:
-        """Consume one coalesced signal that the pending set changed."""
-        with self._questions_lock:
-            changed = self._question_change_pending
-            self._question_change_pending = False
-            return changed
 
     def pending_questions(self) -> list[dict[str, Any]]:
         """Read this turn's unanswered requests; snapshots cannot mutate the CLI input."""
@@ -555,7 +538,6 @@ class HarnessTurn(Generic[_RuntimeT]):
             except (DriverError, OSError):
                 return InputOutcome(False, INPUT_PROCESS_GONE)
             self._questions.pop(request_id)
-            self._question_change_pending = True
             return InputOutcome(True)
 
     def iter_events(self) -> Iterator[HarnessEvent]:
@@ -2801,7 +2783,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         # Reading with a deadline takes a thread that reads stdout into this
         # queue from then on; ``None`` in it is the end of the stream. Started
         # only when a turn needs one, which is rare.
-        self._stdout: OutputPump[str] | None = None
+        self._stdout: bounded_output.OutputPump[str] | None = None
         self._stdout_ended = False
         self._pushed_back: deque[str] = deque()
         self._model: str | None = None
@@ -2838,7 +2820,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         if self._stdout is None:
             if timeout is None:
                 return next(self._lines, None)
-            self._stdout = OutputPump(self._lines, name="claude-resident-output")
+            self._stdout = bounded_output.OutputPump(self._lines, name="claude-resident-output")
         line = self._stdout.get(timeout=timeout)
         if line is None:
             self._stdout_ended = True

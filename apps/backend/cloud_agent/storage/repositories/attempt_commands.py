@@ -34,7 +34,7 @@ from cloud_agent.execution_profiles import (
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
-from cloud_agent.storage._sql.attempts import lock_live_attempt
+from cloud_agent.storage.repositories.attempt_question_changes import AttemptQuestionChanges
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent.storage._sql.environment_runs import env_run_blocks_host, env_runs_holding_slots
 from cloud_agent.storage._sql.event_batches import append_attempt_events
@@ -93,17 +93,12 @@ logger = get_logger(__name__)
 TurnSummaryDecision = Literal["accept", "duplicate", "conflict"]
 
 
-class PostgresAttemptCommands:
+class PostgresAttemptCommands(AttemptQuestionChanges):
     """Claim, heartbeat, transition and reap -- every fenced write a worker makes."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
-
-    @staticmethod
-    async def _lock_live_attempt(conn: Any, attempt_id: int, lease_generation: int | None) -> bool:
-        """Lock an attempt first, then test its lease against the post-wait wall clock."""
-        return await lock_live_attempt(conn, attempt_id, lease_generation) is not None
 
     async def sweep_queued_follow_ups(self) -> None:
         """Fail queued follow-ups whose earlier native context is unavailable.
@@ -1151,38 +1146,6 @@ class PostgresAttemptCommands:
             return await append_attempt_events(
                 conn, attempt_id=attempt_id, lease_generation=lease_generation, events=events
             )
-
-    async def notify_question_change(
-        self, *, job_id: str, attempt_id: int, lease_generation: int
-    ) -> bool:
-        """Publish a thread hint while holding the live attempt's fence."""
-        async with self._pool.acquire() as conn, conn.transaction():
-            if not await self._lock_live_attempt(conn, attempt_id, lease_generation):
-                return False
-            row = await conn.fetchrow(
-                """
-                SELECT j.user_id, t.id AS thread_id
-                FROM agent_jobs j
-                JOIN agent_attempts a ON a.job_id = j.id
-                JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = j.user_id
-                WHERE j.id = $1 AND j.current_attempt_id = $2 AND j.state = 'running'
-                  AND a.id = $2 AND a.lease_generation = $3 AND a.status = 'running'
-                  AND a.lease_expires_at > clock_timestamp() AND t.deleted_at IS NULL
-                """,
-                job_id,
-                attempt_id,
-                lease_generation,
-            )
-            if row is None:
-                return False
-            await conn.execute(
-                "SELECT pg_notify('agent_owner_changes', $1)",
-                json.dumps(
-                    {"user": row["user_id"], "kind": "question", "id": row["thread_id"]},
-                    separators=(",", ":"),
-                ),
-            )
-        return True
 
     async def record_continuity_mode(
         self,

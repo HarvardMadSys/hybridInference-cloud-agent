@@ -371,7 +371,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self.jobs: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
         self.messages: list[dict[str, Any]] = []
-        self.question_hints: list[tuple[str, str]] = []
         self.archived_threads: dict[str, datetime] = {}
         self.pinned_threads: dict[str, datetime] = {}
         #: The conversation-level goal, exactly as ``agent_threads`` holds it,
@@ -1974,22 +1973,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "state": job["state"],
             "cancel_requested": job["cancel_requested"],
         }
-
-    async def notify_question_change(
-        self, *, job_id: str, attempt_id: int, lease_generation: int
-    ) -> bool:
-        """Model a thread-keyed PostgreSQL notification under the current fence."""
-        if not self._fenced(attempt_id, lease_generation):
-            return False
-        job = self.jobs.get(job_id)
-        if (
-            job is None
-            or job.get("current_attempt_id") != attempt_id
-            or job.get("state") != "running"
-        ):
-            return False
-        self.question_hints.append((str(job["user_id"]), str(job["thread_id"])))
-        return True
 
     async def append_event(
         self,

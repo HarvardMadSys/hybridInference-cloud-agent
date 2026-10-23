@@ -36,7 +36,7 @@ from fastapi.concurrency import iterate_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from cloud_agent_host import sandbox_manager_profiling_policy
+from cloud_agent_host import question_change_signals, sandbox_manager_profiling_policy
 from cloud_agent_host.base_bundle_request import bind_base_bundle_reader
 from cloud_agent_host.bounded_output import OutputPump
 from cloud_agent_host.chat_sandbox import (
@@ -2449,11 +2449,6 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             nonlocal turn_boundary_closed
             tool_windows = ToolWindowTracker()
             resources: dict[str, Any] | None = None
-            take_question_change = getattr(turn, "take_question_change", lambda: False)
-
-            def question_frames() -> Generator[str, None, None]:
-                if take_question_change():
-                    yield json.dumps({"kind": "question_changed"}, separators=(",", ":")) + "\n"
 
             def close_resources(value: Any) -> dict[str, Any]:
                 nonlocal resources
@@ -2473,10 +2468,9 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             events = OutputPump(observed_events(), name="shared-turn-events")
             try:
                 while True:
-                    yield from question_frames()
-                    # Sampling and forwarding must both proceed while the CLI
-                    # is silent. A crash should retain its latest closed
-                    # checkpoint even during one long tool invocation.
+                    yield from question_change_signals.question_change_frames(turn)
+                    # Sampling continues while the CLI is silent, so a crash retains the latest
+                    # closed checkpoint even during a long tool invocation.
                     checkpoint = take_reported_checkpoint(owner, thread_id)
                     if checkpoint is not None:
                         yield (

@@ -44,6 +44,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER, manager_env
+from cloud_agent_host import question_change_signals
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -72,11 +73,7 @@ from cloud_agent_host.control_plane_client import (
     ControlPlane as ControlPlane,
     _log_control_failure,
 )
-from cloud_agent_host.drivers import (
-    LINE,
-    DriverError,
-    driver_for,
-)
+from cloud_agent_host.drivers import LINE, DriverError, driver_for
 from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
 from cloud_agent_host.host_capacity import (
     HostCapacityCollector,
@@ -1973,10 +1970,7 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
                 raise SessionSupervisorError(502, str(exc)[:1000]) from exc
             if frame is None:
                 break
-            kind = frame.get("kind")
-            if kind == "question_changed":
-                control.report_question_change(job.job_id)
-                continue
+            kind = question_change_signals.question_change_frame_kind(frame, control, job.job_id)
             if kind == "event":
                 raw_line = frame.get("raw_line")
                 if isinstance(raw_line, str):
