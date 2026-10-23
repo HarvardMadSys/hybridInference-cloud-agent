@@ -577,11 +577,16 @@ def _pr_title(job: dict[str, Any], changed_files: list[str]) -> str:
     # Share the title budget across summaries when several chats settle together.
     fragments = list(lines)
     try:
-        summary_count = max(len(fragments), int(job.get("session_summary_count", 0)))
+        summary_count = int(job.get("session_summary_count", 0))
     except (TypeError, ValueError):
-        summary_count = len(fragments)
-    if summary_count > 5:
-        fragments = [*fragments[:4], f"+{summary_count - 4} more"]
+        summary_count = 0
+    # A collapsed duplicate or an unreadable summary is no further work; one
+    # the claim did not keep (it keeps the newest few) may be.
+    kept = len(summaries) if isinstance(summaries, list) else 0
+    total = len(fragments) + max(0, summary_count - kept)
+    if total > 5 and fragments:
+        shown = fragments[:4]
+        fragments = [*shown, f"+{total - len(shown)} more"]
     budget = (70 - 2 * (len(fragments) - 1)) // max(1, len(fragments))
     summary = "; ".join(
         line if len(line) <= budget else line[: budget - 1].rstrip() + "…" for line in fragments
@@ -891,12 +896,21 @@ async def _publish_due(
     Snapshots behind either still go out in this pass. Claims enter entitlement
     preflight in storage order; once each check has started, independent remote
     work proceeds concurrently.
+
+    A claim that raises stops this pass's claiming, and its error is raised
+    once the publications already claimed have finished: cancelling them would
+    defer each one, spending one of its five attempts on that error.
     """
     in_flight: set[asyncio.Task[str | None]] = set()
+    claim_error: Exception | None = None
     try:
         while True:
-            while len(in_flight) < _PUBLISH_CONCURRENCY:
-                job = await store.snapshot.claim_for_publish()
+            while claim_error is None and len(in_flight) < _PUBLISH_CONCURRENCY:
+                try:
+                    job = await store.snapshot.claim_for_publish()
+                except Exception as exc:
+                    claim_error = exc
+                    break
                 if job is None:
                     break
                 admission_started = asyncio.Event()
@@ -918,6 +932,8 @@ async def _publish_due(
                 in_flight.add(task)
                 await admission_started.wait()
             if not in_flight:
+                if claim_error is not None:
+                    raise claim_error
                 return
             done, in_flight = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
             for task in done:

@@ -16,6 +16,9 @@ from tests.integration.storage.test_agent_job_store import (  # noqa: F401 - pyt
 
 from cloud_agent.notification_state import decode_notification_cursor
 from cloud_agent.storage import notification_state as notification_state_storage
+from cloud_agent.storage.repositories import (
+    notification_maintenance as notification_maintenance_storage,
+)
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -327,9 +330,7 @@ async def test_terminal_job_carries_title_revision_before_the_thread_delta_page(
     assert second["change_cursor"]
 
 
-async def test_notification_markers_skip_churn_and_expire_explicitly(
-    pool, store: Storage, monkeypatch
-):
+async def test_notification_markers_skip_churn_and_expire_explicitly(pool, store: Storage):
     """Prune generations expire only pre-prune cursors across older XIDs."""
     job = await _create_job(store)
     initial = await store.conversation_queries.notification_state(user_id="user-1", limit=200)
@@ -406,7 +407,7 @@ async def test_notification_markers_skip_churn_and_expire_explicitly(
         durable_xid = int(durable_thread["change_xid"])
         assert older_xid < durable_xid
 
-        monkeypatch.setattr(notification_state_storage, "_next_prune_at", 0.0)
+        assert await store.notification_maintenance.prune_notification_changes() > 0
         expired = await store.conversation_queries.notification_state(
             user_id="user-1", cursor=initial["change_cursor"], limit=200
         )
@@ -482,7 +483,7 @@ async def test_notification_markers_skip_churn_and_expire_explicitly(
     assert final["threads"] == []
 
 
-async def test_notification_prune_floor_tracks_last_committer(pool, store: Storage, monkeypatch):
+async def test_notification_prune_floor_tracks_last_committer(pool, store: Storage):
     """A later commit with an older XID replaces the visible prune generation."""
     job = await _create_job(store)
     initial = await store.conversation_queries.notification_state(user_id="user-1", limit=200)
@@ -502,7 +503,7 @@ async def test_notification_prune_floor_tracks_last_committer(pool, store: Stora
                 """
             )
 
-        monkeypatch.setattr(notification_state_storage, "_next_prune_at", 0.0)
+        assert await store.notification_maintenance.prune_notification_changes() > 0
         expired = await store.conversation_queries.notification_state(
             user_id="user-1", cursor=initial["change_cursor"], limit=200
         )
@@ -532,7 +533,9 @@ async def test_notification_prune_floor_tracks_last_committer(pool, store: Stora
             """,
             job["thread_id"],
         )
-        await notification_state_storage._prune(older)
+        assert (
+            await notification_maintenance_storage._prune_notification_changes(older, limit=500) > 0
+        )
         assert (
             int(
                 await older.fetchval(
