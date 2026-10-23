@@ -5,6 +5,8 @@ them whole on the persistent pool. The split itself is `scripts/ci_shard.py`'s
 and is tested there. What is pinned here is the wiring around it: each shard
 asks for the tier that its pytest then runs, the steps that must run once per
 commit run in one shard, and a shard cannot report checks it skipped as green.
+The step that builds the Host move's node image first builds the image its
+test builds, so the test's own build is a cached one.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests.external.test_host_move_out_two_nodes import NODE_CONTEXT, NODE_IMAGE
 from tests.unit.test_ci_workflow_policy import _expression
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
@@ -68,6 +71,7 @@ def test_each_shard_asks_for_the_tier_its_pytest_runs(job: str, step: str) -> No
     [
         ("test-db", "Previous release survives the candidate migration"),
         ("test", "Shared member permissions survive a sibling CLI restart"),
+        ("test", "Build the node image for the Host move"),
         ("test", "Set up Node for native CLI regression"),
         ("test", "Install the sandbox's pinned Claude CLI"),
         ("test", "Install the sandbox's pinned Claude SDK"),
@@ -79,6 +83,16 @@ def test_each_shard_asks_for_the_tier_its_pytest_runs(job: str, step: str) -> No
 )
 def test_once_per_commit_steps_run_in_the_first_shard(job: str, step: str) -> None:
     assert _step(job, step)["if"] == "matrix.shard == 1"
+
+
+def test_the_host_move_image_step_builds_the_image_its_test_builds() -> None:
+    """Built from other inputs, the image would be built again in the test's 300 s (#985)."""
+    names = [step.get("name") for step in _jobs()["test"]["steps"]]
+    build = names.index("Build the node image for the Host move")
+    assert names[build + 1] == "A Host moves between two nodes over SSH"
+    context = NODE_CONTEXT.relative_to(WORKFLOW.parents[2]).as_posix()
+    command = ["docker", "build", "-t", NODE_IMAGE, context]
+    assert _step("test", names[build])["run"].split() == command
 
 
 def test_vitest_runs_this_shard_of_the_frontend_tests() -> None:

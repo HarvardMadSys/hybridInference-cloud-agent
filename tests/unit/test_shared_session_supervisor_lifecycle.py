@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from tests.unit.test_shared_session_supervisor import (
@@ -19,6 +20,7 @@ from tests.unit.test_shared_session_supervisor import (
     SessionBusy,
     SessionLeaseLost,
     SharedChatSessionSupervisor,
+    SimpleNamespace,
     _gated_inspect,
     _in_thread,
     _launch,
@@ -38,6 +40,7 @@ from tests.unit.test_shared_session_supervisor import (
 
 from cloud_agent_host.member_resources import CheckpointSchedule
 from cloud_agent_host.sandbox import KATA_RUNTIME
+from cloud_agent_host.sandbox_manager import SharedTurnRequest
 from cloud_agent_host.session_lifecycle import StaleStartFence
 
 
@@ -1133,7 +1136,7 @@ def test_a_second_window_reads_the_journal_from_its_own_opening_cursor():
     # One in-window census. It is the only cycle this window may count.
     manager.append_journal(_journal_sample_line(measurement, 2))
     assert supervisor.sample_open_windows() == 1
-    checkpoint = supervisor.take_reported_checkpoint("athr_source")
+    checkpoint = supervisor.take_reported_checkpoint("athr_source", turn)
     assert checkpoint is not None
     assert checkpoint["memory"]["valid_samples"] == 1
 
@@ -1157,7 +1160,7 @@ def test_a_second_window_reads_the_journal_from_its_own_opening_cursor():
 
     manager.append_journal(_journal_sample_line(second_measurement, 3))
     assert supervisor.sample_open_windows() == 1
-    checkpoint = supervisor.take_reported_checkpoint("athr_source")
+    checkpoint = supervisor.take_reported_checkpoint("athr_source", second_turn)
     assert checkpoint is not None
     # The rotated journal was read from its own beginning: the cycle the
     # second window wrote is in the checkpoint instead of being silently lost.
@@ -1234,7 +1237,7 @@ def test_the_census_reads_the_journal_only_for_a_checkpoint():
         member.window.next_census_mono = 0.0
         manager.append_journal(_journal_sample_line(measurement, second + 1))
         assert supervisor.sample_open_windows() == 1
-        checkpoint = supervisor.take_reported_checkpoint("athr_source")
+        checkpoint = supervisor.take_reported_checkpoint("athr_source", turn)
         if checkpoint is not None:
             checkpoints.append(checkpoint)
         now[0] += 1.0
@@ -1391,10 +1394,10 @@ def test_a_checkpoint_left_when_its_turn_ends_never_reaches_the_next_turn():
     second = supervisor.start_turn(
         "athr_source", lease.token, prompt="again", model="glm-5.1", reasoning_effort=None
     )
-    assert supervisor.take_reported_checkpoint("athr_source") is None
+    assert supervisor.take_reported_checkpoint("athr_source", second) is None
 
     supervisor.sample_open_windows()
-    pending = supervisor.take_reported_checkpoint("athr_source")
+    pending = supervisor.take_reported_checkpoint("athr_source", second)
     window = supervisor._groups["asbx_shared"].members["athr_source"].window
     assert pending is not None and window is not None
     assert pending["measurement_id"] == window.handle.measurement_id
@@ -1454,8 +1457,155 @@ def test_a_checkpoint_built_across_a_turn_boundary_never_reaches_the_next_turn()
     assert not tick.is_alive()
     assert "error" not in outcome
 
-    assert supervisor.take_reported_checkpoint("athr_source") is None
+    assert supervisor.take_reported_checkpoint("athr_source", second) is None
     supervisor.complete_turn("athr_source", lease.token, second)
+
+
+class _StreamedTurn(_Turn):
+    """A turn whose CLI says one thing, then works until it finishes or is interrupted."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.finished = threading.Event()
+
+    def lines(self):
+        yield SimpleNamespace(event_type="message", payload={"text": "on it"}, raw_line="on it")
+        self.finished.wait(timeout=_HELD_S)
+
+    def interrupt(self) -> None:
+        super().interrupt()
+        self.finished.set()
+
+    @staticmethod
+    def wait() -> SimpleNamespace:
+        return SimpleNamespace(
+            status="completed",
+            final_output="done",
+            exit_code=0,
+            usage=None,
+            raw=None,
+            native_turn_settled=False,
+        )
+
+    @staticmethod
+    def stderr_text() -> str:
+        return ""
+
+
+class _StreamedTransport(_Transport):
+    def start_turn(self, **_kwargs) -> _StreamedTurn:
+        turn = _StreamedTurn()
+        self.turns.append(turn)
+        return turn
+
+
+class _StreamedTransportFactory(_TransportFactory):
+    def open(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> _StreamedTransport:
+        self.opened.append(launch)
+        transport = _StreamedTransport(launch)
+        self.transports.append(transport)
+        return transport
+
+
+async def _read(stream, count: int | None = None) -> list[dict[str, Any]]:
+    """The stream's next ``count`` frames, or every frame it has left."""
+
+    async def frames() -> list[dict[str, Any]]:
+        read: list[dict[str, Any]] = []
+        async for line in stream.body_iterator:
+            read.append(json.loads(line))
+            if len(read) == count:
+                break
+        return read
+
+    return await asyncio.wait_for(frames(), timeout=_HELD_S)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["abandon", "group stop"])
+async def test_a_stream_that_outlives_its_turn_never_takes_the_next_turns_checkpoint(ending: str):
+    """A stalled stream that outlives its turn takes nothing from the next one.
+
+    An abandon (the lost-turn sweep's or the runner's) or a group stop can end
+    a turn while the runner has stopped reading its stream. The member's next
+    lease then starts a turn whose window parks a checkpoint. A stream takes
+    what is parked at the top of every loop, before it reads its next event,
+    and the take used to name only the chat: the resumed stream forwarded the
+    next turn's checkpoint on its own response, under its own attempt, and
+    the next turn's stream never saw it.
+    """
+    factory = _StreamedTransportFactory()
+    supervisor, first_lease = _windowed_supervisor(_Manager(), factory)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="test-secret",
+        shared_session_supervisor=supervisor,
+    )
+    run_turn = next(
+        route.endpoint
+        for route in app.routes
+        if getattr(route, "path", None) == "/shared-sandboxes/{thread_id}/turn"
+    )
+    first = await run_turn(
+        "athr_source", SharedTurnRequest(token=first_lease.token, prompt="one", model="glm-5.1")
+    )
+    streams = [first]
+    try:
+        assert [frame["kind"] for frame in await _read(first, 1)] == ["event"]
+        # The runner stops reading the first stream here, and the first
+        # activation ends without it.
+        if ending == "abandon":
+            supervisor.abandon("athr_source", first_lease.token, lost=False)
+        else:
+            supervisor.stop_if_idle(
+                "athr_source",
+                generation=1,
+                activation_generation=0,
+                reason="orphaned_attempt",
+                member_activation_generations={"athr_source": 1, "athr_peer": 0},
+            )
+            # Closing the transport leaves the stand-in CLI's turn running.
+            factory.transports[0].turns[0].finished.set()
+        second_lease = supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:2",
+            activation_generation=2,
+            has_settled_context=True,
+            manifest=_members(),
+        )
+        supervisor.ensure_resident(
+            "athr_source",
+            second_lease.token,
+            _launch("athr_source", native_session_id="native-source", slot=0),
+        )
+        second = await run_turn(
+            "athr_source",
+            SharedTurnRequest(token=second_lease.token, prompt="two", model="glm-5.1"),
+        )
+        streams.append(second)
+        window = supervisor._groups["asbx_shared"].members["athr_source"].window
+        assert window is not None
+        supervisor.sample_open_windows()
+
+        # The first stream resumes. It takes before it reads, finds nothing,
+        # and ends on its own stale lease.
+        stale = await _read(first)
+        assert [frame["kind"] for frame in stale] == ["error"]
+        assert stale[0]["detail"] == "shared member activation lease is stale"
+        # The checkpoint is still waiting for the stream of the turn it measures.
+        forwarded = await _read(second, 1)
+        assert forwarded[0]["kind"] == "resource_checkpoint"
+        assert forwarded[0]["turn_resources"]["measurement_id"] == window.handle.measurement_id
+        # The second turn's CLI finishes, and its stream ends with the result.
+        factory.transports[-1].turns[-1].finished.set()
+        assert [frame["kind"] for frame in await _read(second)] == ["event", "result"]
+    finally:
+        for transport in factory.transports:
+            for turn in transport.turns:
+                turn.finished.set()
+        for stream in streams:
+            await stream.body_iterator.aclose()
 
 
 def test_a_journal_read_that_outlives_its_turn_does_not_move_the_next_windows_fence():

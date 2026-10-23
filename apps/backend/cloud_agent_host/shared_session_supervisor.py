@@ -2663,20 +2663,25 @@ class SharedChatSessionSupervisor:
         self._report_due_checkpoints()
         return sum(len(censuses) for censuses in due.values())
 
-    def take_reported_checkpoint(self, thread_id: str) -> dict[str, Any] | None:
-        """The newest checkpoint not yet handed to a caller, or None.
+    def take_reported_checkpoint(
+        self, thread_id: str, turn: ResidentTurn[DialectRuntime]
+    ) -> dict[str, Any] | None:
+        """The newest checkpoint of ``turn``'s window not yet handed out, or None.
 
         The sampler thread produces checkpoints on its own clock; this is how
         the turn's event stream collects them. Taking is destructive so a
         checkpoint is forwarded once, but the window keeps producing new ones
         whether or not anything ever asks. A checkpoint is only ever handed out
         by the window that produced it: one left behind when its turn ended
-        goes with that window.
+        goes with that window. It is handed only to the stream of the turn
+        the window measures: an abandon or a group stop can end a turn while
+        its stream is stalled, and that stream, once it resumes, must not
+        forward the member's next turn's checkpoint under its own attempt.
         """
         with self._lock:
-            try:
-                _, member = self._leased_member(thread_id, self._lease_token_for(thread_id))
-            except Exception:
+            group = self._members.get(thread_id)
+            member = group.members.get(thread_id) if group is not None else None
+            if member is None or not member.lease_token or member.current_turn is not turn:
                 return None
             window = member.window
             if window is None:
@@ -2685,20 +2690,13 @@ class SharedChatSessionSupervisor:
             window.pending_checkpoint = None
             return pending
 
-    def _lease_token_for(self, thread_id: str) -> str:
-        with self._lock:
-            group = self._members.get(thread_id)
-            if group is None:
-                raise SessionLeaseLost("member is not in a shared sandbox")
-            return group.members[thread_id].lease_token or ""
-
     def _report_due_checkpoints(self) -> None:
         """Produce a checkpoint for every window whose interval has elapsed.
 
-        The checkpoint is parked on the window for whoever forwards it. Nothing
-        else delivers it: the sandbox manager builds this supervisor with no
-        observer of its own, so a cadence that waited for one would leave a
-        crashed turn with nothing.
+        The checkpoint is parked on the window for its turn's stream to forward.
+        Nothing else delivers it: the sandbox manager builds this supervisor
+        with no observer of its own, so a cadence that waited for one would
+        leave a crashed turn with nothing.
         """
         with self._lock:
             due = [
