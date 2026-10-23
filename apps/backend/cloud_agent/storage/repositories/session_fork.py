@@ -759,6 +759,15 @@ class PostgresSessionForkRepository:
                 # order. Locking the source job first here while a concurrent
                 # follow-up held the thread row produced a real PostgreSQL
                 # deadlock cycle (each transaction then waited for the other).
+                # The two conversations come first, lower id first, as an
+                # owner archiving or deleting both takes them: the target's id
+                # is as likely to sort first as the source's. The source is
+                # locked for update. The copied turns reference the target,
+                # which share-locks it: take that share here.
+                target_lock = "SELECT 1 FROM agent_threads WHERE id = $1 FOR KEY SHARE"
+                target_first = operation["target_thread_id"] < operation["source_thread_id"]
+                if target_first:
+                    await conn.execute(target_lock, operation["target_thread_id"])
                 thread = await conn.fetchrow(
                     "SELECT repo, title, setup_script, execution_profile "
                     "FROM agent_threads WHERE id = $1 FOR UPDATE",
@@ -766,12 +775,8 @@ class PostgresSessionForkRepository:
                 )
                 if thread is None:
                     return None
-                # The copied turns reference the target conversation, which
-                # share-locks it. Take it now, before its membership below.
-                await conn.execute(
-                    "SELECT 1 FROM agent_threads WHERE id = $1 FOR KEY SHARE",
-                    operation["target_thread_id"],
-                )
+                if not target_first:
+                    await conn.execute(target_lock, operation["target_thread_id"])
                 source = await conn.fetchrow(
                     f"{JOB_SELECT} WHERE j.id = $1 FOR UPDATE OF j",
                     operation["source_job_id"],
@@ -996,6 +1001,21 @@ class PostgresSessionForkRepository:
                 )
                 if operation is not None:
                     operations.append(operation)
+            # A failed operation's target is tombstoned below, and a pass may
+            # fail several: their conversations come before any member, in id
+            # order, as an owner archiving or deleting several takes them.
+            # This is the lock the tombstone itself takes, taken earlier.
+            targets = [
+                operation["target_thread_id"]
+                for operation in operations
+                if operation["state"] == "preparing"
+            ]
+            if targets:
+                await conn.execute(
+                    "SELECT id FROM agent_threads WHERE id = ANY($1::text[]) "
+                    "ORDER BY id FOR NO KEY UPDATE",
+                    targets,
+                )
             # A failed operation's two members are written below, and a pass
             # may fail several: every one of them, in thread order, before any.
             # A heartbeat extending several takes them in that order.

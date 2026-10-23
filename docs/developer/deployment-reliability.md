@@ -109,17 +109,20 @@ that minute verify again, including after a long setup script or at turn end.
 Terminals and sandbox manager workspace operations always check, as does every command
 when the sandbox manager did not supply that proof.
 
-The turn child does not install and read back the host rules itself. The host
-service keeps the network guard its startup preflight verified. When it hands a
-turn over, it renews that verification if it is 45 seconds old. It adds the
-verification time and its own helper image to the child's stdin payload, after
-stripping claim-supplied underscore keys, as it does for the qualification
-verdict. The child declines the turn, before accepting it, unless that
-verification is present, well formed, successful and younger than the network
-guard's one-minute window. It still checks the Docker version and the relay
-network itself, but starts no helper container before it accepts its turn. The
-sandbox manager still installs and reads back the rules before any group joins
-its bridge.
+The turn child normally does not install and read back the host rules itself.
+The host service keeps the network guard its startup preflight verified. When
+it hands a turn over, it renews that verification if it is 45 seconds old. It
+adds the verification time and its own helper image to the child's stdin
+payload, after stripping claim-supplied underscore keys, as it does for the
+qualification verdict. The child declines the turn, before accepting it, unless
+that verification is present, well formed and successful. It still checks the
+Docker version and the relay network itself, but starts no helper container
+before it accepts its turn. A child that starts so slowly that the verification
+is already past the network guard's one-minute window uses nothing from it: it
+logs `network_guard_verification_aged_out`, installs and reads back the rules
+itself, as every child did before the host handed its verification over, and
+accepts the turn only if that check passes. The sandbox manager still installs
+and reads back the rules before any group joins its bridge.
 
 Network-rule reads share a disposable helper; route reads use a separate helper
 without capabilities. Reconciliation caches inspections only within one
