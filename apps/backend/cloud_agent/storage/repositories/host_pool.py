@@ -32,8 +32,8 @@ from cloud_agent.host_pool import (
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import (
     archive_settings_payload,
-    load_stored_archive_policy,
     seal_archive_storage,
+    stored_archive_policy,
 )
 from cloud_agent.settings import number_setting
 from cloud_agent.storage._sql.compute_admission import (
@@ -60,7 +60,7 @@ from cloud_agent.storage._sql.move_out import (
     UNMOVED_GROUP_SQL,
     move_out_possible,
 )
-from cloud_agent.storage._sql.rows import load_json, stored_archive_settings
+from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.runner_policy import (
     HEARTBEAT_POLICY_COLUMNS,
     archive_settings,
@@ -1349,7 +1349,7 @@ class PostgresHostPoolRepository:
             )
 
             try:
-                archive_policy = load_stored_archive_policy(stored_archive_settings(policy))
+                archive_policy = stored_archive_policy(policy)
             except SandboxArchivePolicyError:
                 archive_policy = None
 
@@ -1493,7 +1493,7 @@ class PostgresHostPoolRepository:
                 """
             )
             try:
-                archive_policy = load_stored_archive_policy(stored_archive_settings(archive_row))
+                archive_policy = stored_archive_policy(archive_row)
                 archive_required = archive_policy.enabled
                 archive_revision = archive_policy.revision
             except SandboxArchivePolicyError:
@@ -1890,7 +1890,7 @@ class PostgresHostPoolRepository:
                 """
             )
             assert current is not None
-            current_policy = load_stored_archive_policy(stored_archive_settings(current))
+            current_policy = stored_archive_policy(current)
             requested = SandboxArchivePolicy.from_mapping(
                 {**dict(settings), "revision": current_policy.revision}
             )

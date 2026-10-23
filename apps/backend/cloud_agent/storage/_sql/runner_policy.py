@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from cloud_agent.sandbox_archive_credentials import (
     archive_settings_payload,
-    load_stored_archive_policy,
+    stored_archive_policy,
 )
-from cloud_agent.storage._sql.rows import load_json, stored_archive_settings
+from cloud_agent.storage._sql.rows import load_json
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:
@@ -72,8 +72,7 @@ def archive_settings(policy: Mapping[str, Any] | None) -> dict[str, Any]:
         # readable during restore/bootstrap; the first write recreates it.
         return archive_settings_payload(SandboxArchivePolicy(), None)
     return archive_settings_payload(
-        load_stored_archive_policy(stored_archive_settings(policy)),
-        policy["sandbox_archive_updated_at"],
+        stored_archive_policy(policy), policy["sandbox_archive_updated_at"]
     )
 
 

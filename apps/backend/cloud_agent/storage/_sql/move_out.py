@@ -11,10 +11,10 @@ import json
 from typing import Any
 
 from cloud_agent.execution_profiles import KATA_RUNTIME, ExecutionProfile
-from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
+from cloud_agent.sandbox_archive_credentials import stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
 from cloud_agent.storage._sql.hosts import COVERED_GROUP_SQL, UNDELETED_GROUP_SQL
-from cloud_agent.storage._sql.rows import load_json, stored_archive_settings
+from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import member_turn_running
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
@@ -55,7 +55,7 @@ async def move_out_blocker(conn: Any, leaving: list[str], *, need_target: bool) 
     if policy is None:
         return "archives_disabled"
     try:
-        archive = load_stored_archive_policy(stored_archive_settings(policy))
+        archive = stored_archive_policy(policy)
     except ValueError:
         return "archives_disabled"
     if not archive.enabled:
