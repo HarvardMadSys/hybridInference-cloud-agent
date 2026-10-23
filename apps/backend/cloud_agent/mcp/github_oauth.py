@@ -25,8 +25,9 @@ def is_endpoint(url: str | None) -> bool:
 def is_managed(*, issuer: object, token_endpoint: object, resource: str | None) -> bool:
     """Whether a sign-in is GitHub's own, the only one the app identity may serve.
 
-    Its authorization server must be GitHub's and its resource one of GitHub's
-    service addresses. Never endpoints a discovery document supplied: the
-    shared secret would go wherever they point.
+    Its issuer and token endpoint must be GitHub's, and its resource one of
+    GitHub's service addresses. Never endpoints a discovery document supplied:
+    the shared secret would go wherever they point. The authorization endpoint
+    is not checked here; a caller that sends the browser there checks it.
     """
     return issuer == ISSUER and token_endpoint == TOKEN_ENDPOINT and is_endpoint(resource)
