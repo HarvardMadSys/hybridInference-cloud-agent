@@ -1,16 +1,9 @@
-"""The sweep's renewal of the host rules while no chat group is running.
+"""Fallback renewal when exact guarded-workload discovery is unavailable.
 
-The sweep reads the rules back on every pass for each running group. With
-none running, a host can still have something behind its packet boundary: a
-group that is stopping, which keeps running through its archive and ``docker
-stop``, and environment tests and prebuilds, which no group lists. A firewall
-reload under them would otherwise stay unrepaired until a chat next starts.
-So while anything of this deployment runs, the sweep keeps the rules renewed,
-as it did on every idle pass before #944.
-
-A host where nothing of this deployment runs has nothing behind the rules. It
-starts no guard helper: the next start or wake renews a lapsed verification
-before its group joins a bridge.
+The periodic supervisor normally lists every exact running container, verifies
+the host rules, and fail-stops those containers if repair fails. If Docker
+cannot enumerate or inspect that set, exact stopping cannot be fenced safely;
+this fallback still asks the guard to repair the shared packet boundary.
 """
 
 from __future__ import annotations
@@ -18,7 +11,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox_models import CHAT_NAMESPACE_LABEL, CHAT_SANDBOX_LABEL
+from cloud_agent_host.chat_sandbox_models import (
+    CHAT_NAMESPACE_LABEL,
+    CHAT_PROBE_LABEL,
+    CHAT_SANDBOX_LABEL,
+)
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:
@@ -28,23 +25,22 @@ if TYPE_CHECKING:
 #: The records keep the supervisor's logger name, where this renewal began.
 logger = logging.getLogger("cloud_agent_host.shared_session_supervisor")
 
+_RUNNING_FORMAT = f'{{{{.ID}}}}\t{{{{.Label "{CHAT_PROBE_LABEL}"}}}}'
 
-def deployment_running(containers: ChatNetworkContainers) -> bool:
-    """Whether Docker shows any container of this deployment running.
 
-    Chat groups, stopping ones included, and environment tests and prebuilds
-    all carry the chat sandbox label and this deployment's namespace. Listing
-    running containers by label reads only the daemon's records, so a wedged
-    Kata shim cannot hold it up. A listing that fails counts as running, so the
-    rules stay renewed.
-    """
+def running_deployment_container_ids(
+    containers: ChatNetworkContainers,
+) -> list[str] | None:
+    """List exact running container ids, or ``None`` when Docker cannot answer."""
     try:
         result = containers._run(
             [
                 containers.backend.docker_binary,
                 "container",
                 "ls",
-                "--quiet",
+                "--no-trunc",
+                "--format",
+                _RUNNING_FORMAT,
                 "--filter",
                 f"label={CHAT_SANDBOX_LABEL}=true",
                 "--filter",
@@ -53,15 +49,30 @@ def deployment_running(containers: ChatNetworkContainers) -> bool:
             timeout=30,
         )
     except SandboxError:
-        return True
-    return result.returncode != 0 or bool(result.stdout.strip())
+        return None
+    if result.returncode != 0:
+        return None
+    found: list[str] = []
+    for line in result.stdout.splitlines():
+        container_id, separator, probe = line.partition("\t")
+        if not separator or not container_id:
+            return None
+        if not probe:
+            found.append(container_id)
+    return found
+
+
+def deployment_running(containers: ChatNetworkContainers) -> bool:
+    """Whether Docker shows anything running, treating an unavailable list as running."""
+    found = running_deployment_container_ids(containers)
+    return found is None or bool(found)
 
 
 class IdleHostRules:
-    """Renew the host rules on a sweep pass that found no running group.
+    """Renew host rules when exact workload discovery cannot complete.
 
-    A failure is logged once until a renewal succeeds again, and stops
-    nothing: the next activation repeats the same check and refuses on its own.
+    A failure is logged once until a renewal succeeds again. The next
+    activation repeats the same check and refuses on its own.
     """
 
     def __init__(self, manager: ChatSandboxManager) -> None:

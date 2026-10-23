@@ -11,7 +11,7 @@ import pytest
 from tests.unit.test_chat_group_network import _NAMESPACE, _config, _spec
 
 from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.chat_sandbox_models import CHAT_NAMESPACE_LABEL
+from cloud_agent_host.chat_sandbox_models import CHAT_NAMESPACE_LABEL, CHAT_PROBE_LABEL
 from cloud_agent_host.environment_tests import environment_run_spec
 from cloud_agent_host.idle_host_rules import IdleHostRules, deployment_running
 from cloud_agent_host.network_guard import GUARD_RENEW_S
@@ -32,14 +32,22 @@ class _Docker:
         self.calls.append(list(argv))
         if self.fail is not None:
             raise self.fail
-        assert argv[1:4] == ["container", "ls", "--quiet"], argv
+        assert argv[1:3] == ["container", "ls"], argv
         wanted = [argv[i + 1].removeprefix("label=") for i, v in enumerate(argv) if v == "--filter"]
         found = [
             container_id
             for container_id, labels in self.containers.items()
             if all(labels.get(key) == value for key, _, value in (w.partition("=") for w in wanted))
         ]
-        return subprocess.CompletedProcess(argv, self.returncode, "\n".join(found), "")
+        return subprocess.CompletedProcess(
+            argv,
+            self.returncode,
+            "\n".join(
+                f"{container_id}\t{self.containers[container_id].get(CHAT_PROBE_LABEL, '')}"
+                for container_id in found
+            ),
+            "",
+        )
 
 
 class _Guard:
@@ -79,7 +87,9 @@ def test_an_empty_host_lists_running_containers_once_and_starts_no_guard_helper(
             "docker",
             "container",
             "ls",
-            "--quiet",
+            "--no-trunc",
+            "--format",
+            '{{.ID}}\t{{.Label "org.freeinference.chat-probe-created"}}',
             "--filter",
             "label=org.freeinference.chat-sandbox=true",
             "--filter",

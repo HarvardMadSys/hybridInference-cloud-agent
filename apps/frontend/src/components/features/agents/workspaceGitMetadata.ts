@@ -19,6 +19,23 @@ type WorkspaceGitProjection = Pick<AgentJob, 'diffFiles'> &
     >
   >;
 
+// The adapter projects the job again for every streamed event, and the
+// retained workspace panels are drawn again only when a field they read is a
+// new object, so one status read keeps one list of paths. The lists are never
+// mutated, so sharing them is safe.
+const changedPathLists = new WeakMap<AgentWorkspaceGitChange[], string[]>();
+const NO_CHANGED_PATHS: string[] = [];
+
+function changedPaths(changes: AgentWorkspaceGitChange[] | undefined): string[] {
+  if (!changes) return NO_CHANGED_PATHS;
+  let paths = changedPathLists.get(changes);
+  if (paths === undefined) {
+    paths = [...new Set(changes.map((change) => change.path))];
+    changedPathLists.set(changes, paths);
+  }
+  return paths;
+}
+
 /** Map the lightweight status view without parsing or retaining a full patch. */
 export function workspaceGitProjection(
   parsedFiles: string[],
@@ -26,10 +43,7 @@ export function workspaceGitProjection(
 ): WorkspaceGitProjection {
   const metadata = options.gitMetadata;
   return {
-    diffFiles:
-      typeof options.patch === 'string'
-        ? parsedFiles
-        : [...new Set((metadata?.changes ?? []).map((change) => change.path))],
+    diffFiles: typeof options.patch === 'string' ? parsedFiles : changedPaths(metadata?.changes),
     ...(metadata ? { workspaceGitChanges: metadata.changes } : {}),
     ...(metadata?.revision ? { workspaceGitRevision: metadata.revision } : {}),
     ...(options.gitMetadataPending ? { workspaceGitMetadataPending: true } : {}),

@@ -36,7 +36,6 @@ from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
-from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 
@@ -112,31 +111,35 @@ async def test_a_job_is_only_read_by_its_owner(store, queries: PostgresConversat
     assert await queries.get_thread_for_job(job_id=job["id"], user_id=_OTHER) is None
 
 
+async def test_ownership_is_answered_as_the_full_job_read_answers_it(
+    store, queries: PostgresConversationQueries, db
+) -> None:
+    """The narrow check refuses what the full read's fields refuse, and nothing else."""
+    job = await _create_job(store, user_id=_OWNER)
+
+    def owned(row: dict[str, Any] | None, user_id: str) -> bool:
+        return row is not None and row["user_id"] == user_id and row.get("deleted_at") is None
+
+    for user_id in (_OWNER, _OTHER):
+        assert await queries.owns_job(job_id=job["id"], user_id=user_id) == owned(
+            await queries.get_job(job["id"]), user_id
+        )
+    assert await queries.owns_job(job_id=job["id"], user_id=_OWNER) is True
+    assert await queries.owns_job(job_id=job["id"], user_id=_OTHER) is False
+    assert await queries.owns_job(job_id="ajob_missing", user_id=_OWNER) is False
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", job["thread_id"]
+        )
+    assert owned(await queries.get_job(job["id"]), _OWNER) is False
+    assert await queries.owns_job(job_id=job["id"], user_id=_OWNER) is False
+
+
 async def test_an_unknown_job_answers_nothing(queries: PostgresConversationQueries) -> None:
     """Absence and refusal are the same answer, which callers rely on."""
     assert await queries.get_job("ajob_does_not_exist") is None
     assert await queries.get_thread_for_job(job_id="ajob_does_not_exist", user_id=_OWNER) is None
-
-
-async def test_stream_state_is_current_and_scoped_to_the_owner(
-    store, queries: PostgresConversationQueries, db
-) -> None:
-    job = await _create_job(store, user_id=_OWNER)
-    assert await queries.get_job_stream_state(job_id=job["id"], user_id=_OWNER) == JobStreamState(
-        "queued", None
-    )
-    assert await queries.get_job_stream_state(job_id=job["id"], user_id=_OTHER) is None
-    assert await queries.get_job_stream_state(job_id="ajob_missing", user_id=_OWNER) is None
-    async with db.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_jobs SET state = 'succeeded', native_turn_no = 1, "
-            "published_pr_url = $2 WHERE id = $1",
-            job["id"],
-            "https://example.test/pr/42",
-        )
-    assert await queries.get_job_stream_state(job_id=job["id"], user_id=_OWNER) == JobStreamState(
-        "succeeded", "https://example.test/pr/42"
-    )
 
 
 async def test_the_job_list_is_scoped_to_its_owner(

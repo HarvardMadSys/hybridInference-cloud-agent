@@ -50,6 +50,7 @@ from cloud_agent.sandbox_manager_routing import (
     validate_sandbox_manager_url,
 )
 from cloud_agent_shared.host_settings import default_values
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicyError
 
 ADMIN = {"Authorization": "Bearer test-admin"}
 
@@ -87,6 +88,18 @@ class FakeHostPoolStore(AllCapabilities):
         self.linked: list[tuple[str, int, str]] = []
         self.link_ok = True
         self.beat_answers: dict[tuple[str, int], str | None] = {}
+        #: Every batch of residency beats, as the store was asked for it.
+        self.beat_batches: list[list[tuple[str, int]]] = []
+        self.fail_beats = False
+        #: The stored archive policy does not decode, as a hand-edited row may not.
+        self.archive_settings_undecodable = False
+        #: Nor the global settings, or the agent version selection and updates.
+        self.host_settings_undecodable = False
+        self.runtime_policy_undecodable = False
+        #: How many times a heartbeat tried to switch new chats to an update.
+        self.activation_attempts = 0
+        #: ``(sandbox_id, thread_id, generation)`` residencies already released.
+        self.closed_residencies: set[tuple[str, str, int]] = set()
         self.release_answer: str | None = None
         self.release_calls: list[tuple[str, int, str, int | None]] = []
         self.sandbox_observations: list[dict[str, Any]] = []
@@ -259,7 +272,26 @@ class FakeHostPoolStore(AllCapabilities):
                 capacity=capacity,
                 sample_age_ms=capacity_sample_age_ms,
             )
-        return dict(row)
+        # What the store reads off the policy row in the same statement: a
+        # part that does not decode is None.
+        runtime = not self.runtime_policy_undecodable
+        return {
+            **row,
+            "runner_policy": {
+                "host_settings": (
+                    None if self.host_settings_undecodable else dict(self.global_settings)
+                ),
+                "sandbox_archive_settings": (
+                    None if self.archive_settings_undecodable else dict(self.archive_settings)
+                ),
+                "runtime_download_targets": self._download_targets() if runtime else None,
+                "runtime_upgrade_waiting": (
+                    any(not target.get("activated_at") for target in self.runtime_upgrades.values())
+                    if runtime
+                    else None
+                ),
+            },
+        }
 
     def _apply_capacity(
         self,
@@ -434,15 +466,25 @@ class FakeHostPoolStore(AllCapabilities):
         return rows, self.active_host, dict(self.runtime_versions), datetime.now(UTC)
 
     async def host_settings(self) -> dict[str, Any]:
+        if self.host_settings_undecodable:
+            raise TypeError("host settings: dictionary update sequence element #0 has length 1")
         return dict(self.global_settings)
 
     async def runtime_download_targets(self) -> list[dict[str, str]]:
+        if self.runtime_policy_undecodable:
+            raise TypeError("agent versions: dictionary update sequence element #0 has length 1")
+        return self._download_targets()
+
+    def _download_targets(self) -> list[dict[str, str]]:
         return [
             {key: target[key] for key in ("version", "before", "nonce")} | {"runtime": runtime}
             for runtime, target in sorted(self.runtime_upgrades.items())
         ]
 
     async def activate_ready_runtime_upgrades(self) -> list[str]:
+        self.activation_attempts += 1
+        if self.runtime_policy_undecodable:
+            raise AttributeError("'list' object has no attribute 'values'")
         # The store's decision: every online, enrolled host offers the version.
         menus = [
             row.get("runtime_versions_available") or {}
@@ -460,6 +502,8 @@ class FakeHostPoolStore(AllCapabilities):
         return switched
 
     async def sandbox_archive_settings(self) -> dict[str, Any]:
+        if self.archive_settings_undecodable:
+            raise SandboxArchivePolicyError("region is required when sandbox archives are enabled")
         return dict(self.archive_settings)
 
     async def host_capacity_history(
@@ -521,9 +565,27 @@ class FakeHostPoolStore(AllCapabilities):
     ) -> str | None:
         return self.beat_answers.get((thread_id, generation))
 
+    async def heartbeat_residencies(
+        self, *, residencies: list[tuple[str, int]], host: str, ttl_seconds: float
+    ) -> dict[tuple[str, int], str]:
+        self.beat_batches.append(list(residencies))
+        if self.fail_beats:
+            raise RuntimeError("database unavailable")
+        return {
+            beat: answer
+            for beat in residencies
+            if (answer := self.beat_answers.get(beat)) is not None
+        }
+
     async def release_residency(self, *, thread_id: str, generation: int, host: str) -> str | None:
         self.release_calls.append((thread_id, generation, host, None))
         return self.release_answer
+
+    async def open_shared_residencies(
+        self, *, residencies: list[tuple[str, str, int]]
+    ) -> set[tuple[str, str, int]]:
+        # Open unless a test closed it: released on an earlier beat.
+        return set(residencies) - self.closed_residencies
 
     async def release_shared_residency_if_quiescent(
         self,
@@ -540,6 +602,18 @@ class FakeHostPoolStore(AllCapabilities):
     async def reconcile_thread_sandbox_observation(self, **kwargs: Any) -> str | None:
         self.sandbox_observations.append(dict(kwargs))
         return "running" if kwargs["running"] else "stopped"
+
+    async def reconcile_thread_sandbox_observations(
+        self, *, host: str, observations: list[dict[str, Any]]
+    ) -> list[str | None]:
+        return [
+            await self.reconcile_thread_sandbox_observation(host=host, **observation)
+            for observation in observations
+        ]
+
+    async def recorded_sandbox_checkpoints(self, *, checkpoint_ids: list[str]) -> set[str]:
+        stored = {recorded["checkpoint"]["checkpoint_id"] for recorded in self.checkpoints}
+        return {checkpoint_id for checkpoint_id in checkpoint_ids if checkpoint_id in stored}
 
     async def record_sandbox_checkpoint(self, **kwargs: Any) -> bool:
         if self.fail_checkpoint_record:
@@ -2713,84 +2787,6 @@ def _live_group(*members: tuple[str, int]) -> dict[str, Any]:
     }
 
 
-async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_client):
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.beat_answers = {
-        ("th-linked", 1): "agr-1",  # extended, grant linked → renew
-        ("th-grantless", 1): "",  # extended, workspace-only → nothing to renew
-        # th-lost absent → not extended → reported lost
-    }
-
-    response = await client.post(
-        "/v1/agent/host/heartbeat",
-        json={
-            "retained_sandboxes": [
-                _live_group(("th-linked", 1), ("th-grantless", 1), ("th-lost", 3))
-            ]
-        },
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 200, response.text
-    assert grants.renewed == ["agr-1"]
-    assert response.json()["residencies_lost"] == [{"thread_id": "th-lost", "generation": 3}]
-
-
-async def test_a_slow_gateway_does_not_hold_the_heartbeat_reply():
-    """Renewals run after the reply, and together.
-
-    A host's heartbeat times out at 15 s, and each renewal may take the
-    gateway's full request timeout. Awaited one by one before the reply, two
-    slow renewals were enough to time the beat out — and the host then never
-    received the stops and lost residencies the reply carries. Here every
-    renewal blocks until all of them have started: awaited inline the reply
-    never comes, and awaited one at a time the renewals never finish.
-    """
-    from fastapi import BackgroundTasks
-
-    from cloud_agent.schemas import HostHeartbeatRequest
-
-    class GatedGrants(RecordingGrants):
-        def __init__(self, expected: int) -> None:
-            super().__init__()
-            self.started: list[str] = []
-            self._expected = expected
-            self._all_started = asyncio.Event()
-
-        async def renew(self, grant_id: str) -> dict[str, Any]:
-            self.started.append(grant_id)
-            if len(self.started) >= self._expected:
-                self._all_started.set()
-            await self._all_started.wait()
-            return await super().renew(grant_id)
-
-    store = FakeHostPoolStore()
-    store.seed("runner-a", credential_hash="credential-hash", enrolled=True)
-    store.beat_answers = {("th-1", 1): "agr-1", ("th-2", 1): "agr-2"}
-    grants = GatedGrants(expected=2)
-    body = HostHeartbeatRequest.model_validate(
-        {"retained_sandboxes": [_live_group(("th-1", 1), ("th-2", 1))]}
-    )
-    background = BackgroundTasks()
-
-    reply = await asyncio.wait_for(
-        hosts.heartbeat_host(
-            body,
-            background_tasks=background,
-            host={"host": "runner-a", "credential_hash": "credential-hash"},
-            store=store,
-            grants=grants,
-        ),
-        timeout=5,
-    )
-
-    assert reply.residencies_lost == []
-    assert grants.started == [], "the reply waited on the gateway"
-    await asyncio.wait_for(background(), timeout=5)
-    assert sorted(grants.renewed) == ["agr-1", "agr-2"]
-
-
 async def test_host_heartbeat_reconciles_exact_retained_docker_observations(residency_client):
     client, store, _grants = residency_client
     credential = await _enroll(client, store)
@@ -2961,57 +2957,6 @@ async def test_host_heartbeat_accepts_a_fenced_generation_zero_group_stop(reside
     assert response.json()["retained_sandboxes_stop"] == [
         {**store.sandbox_stop_due, "shared_live": True}
     ]
-
-
-async def test_stopped_shared_group_releases_and_revokes_each_member_residency(residency_client):
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.release_answer = "agr-stopped"
-
-    response = await client.post(
-        "/v1/agent/host/heartbeat",
-        json={
-            "retained_sandboxes": [
-                {
-                    "thread_id": "athr_source",
-                    "sandbox_id": "asbx_shared",
-                    "container_id": "0123456789abcdef",
-                    "generation": 1,
-                    "activation_generation": 2,
-                    "running": False,
-                    "shared_live": True,
-                    "members": [
-                        {
-                            "thread_id": "athr_source",
-                            "native_session_id": "native-source",
-                            "process_generation": 11,
-                            "residency_generation": 7,
-                            "resident_state": "stopped",
-                            "resident_slot_id": 0,
-                        },
-                        {
-                            "thread_id": "athr_child",
-                            "native_session_id": "native-child",
-                            "process_generation": 12,
-                            "residency_generation": 8,
-                            "resident_state": "stopped",
-                            "resident_slot_id": 1,
-                        },
-                    ],
-                }
-            ]
-        },
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 200, response.text
-    assert store.release_calls == [
-        ("athr_source", 7, "runner-a", 11),
-        ("athr_child", 8, "runner-a", 12),
-    ]
-    assert grants.renewed == []
-    assert grants.revoked == ["agr-stopped", "agr-stopped"]
-    assert response.json()["residencies_lost"] == []
 
 
 async def test_stopped_member_revocation_cannot_hold_the_heartbeat_reply(monkeypatch):
@@ -3501,6 +3446,45 @@ async def test_a_checkpoint_bookkeeping_failure_keeps_the_heartbeat(client):
 
     assert response.status_code == 200
     assert len(store.sandbox_observations) == 1
+
+
+async def test_a_recorded_checkpoint_receipt_is_not_offered_again(client):
+    """Hosts repeat their latest receipt on every beat; only a new one is recorded."""
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    later = {**_CHECKPOINT, "checkpoint_id": "f" * 32}
+
+    for checkpoint in (_CHECKPOINT, _CHECKPOINT, later, later):
+        response = await async_client.post(
+            "/v1/agent/host/heartbeat",
+            json={"retained_sandboxes": [_retained_with_checkpoint(checkpoint)]},
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+        assert response.status_code == 200
+
+    assert [recorded["checkpoint"]["checkpoint_id"] for recorded in store.checkpoints] == [
+        "c" * 32,
+        "f" * 32,
+    ]
+    assert len(store.sandbox_observations) == 4
+
+
+async def test_a_failed_checkpoint_lookup_still_offers_the_receipt(client, monkeypatch):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+
+    async def unavailable(*, checkpoint_ids: list[str]) -> set[str]:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store, "recorded_sandbox_checkpoints", unavailable)
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"retained_sandboxes": [_retained_with_checkpoint(_CHECKPOINT)]},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    assert [recorded["checkpoint"]["checkpoint_id"] for recorded in store.checkpoints] == ["c" * 32]
 
 
 async def test_a_due_stop_is_fenced_to_the_activation_the_beat_reported(residency_client):

@@ -12,7 +12,7 @@ import {
 import { buildTrajectorySteps, turnContextFromJobs } from '../trajectorySteps';
 import type { AgentEvent, AgentJob } from '../types';
 import { useResizablePane } from '../useResizablePane';
-import { useWorkspaceTabs, type WorkspaceTab } from '../useWorkspaceTabs';
+import { useWorkspaceTabs, type SideChatTab, type WorkspaceTab } from '../useWorkspaceTabs';
 import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
 import { matchesShortcut } from '@/lib/keyboardShortcuts';
 
@@ -89,6 +89,11 @@ export function useJobDetailPanels({
   // Mount a panel only when first used, then retain it while hidden so closing
   // the workspace preserves terminals, file previews, and side chat drafts.
   const workspaceInitialized = workspaceOpen || initializedWorkspace?.scope === workspaceScope;
+  // Git included: a large diff is the heaviest thing the workspace draws, and a
+  // workspace opened on another tab has no reason to draw it.
+  const gitInitialized =
+    (workspaceOpen && workspaceTab === 'git') ||
+    (initializedWorkspace?.scope === workspaceScope && initializedWorkspace.tabs.has('git'));
   const terminalInitialized =
     (workspaceOpen && workspaceTab === 'terminal') ||
     (initializedWorkspace?.scope === workspaceScope && initializedWorkspace.tabs.has('terminal'));
@@ -179,7 +184,15 @@ export function useJobDetailPanels({
     [inspectorContainerRef, workspaceContainerRef],
   );
 
-  function openWorkspace(tab: WorkspaceTab) {
+  // Every Markdown link in the transcript and every retained workspace panel
+  // holds these actions. They keep one identity and read the latest state
+  // through this ref, so a keystroke or a streamed event does not draw all of
+  // those again just to hand them the same action.
+  const latest = useRef({ workspaceOpen, workspaceScope, workspaceTabs, setWorkspaceOpen });
+  latest.current = { workspaceOpen, workspaceScope, workspaceTabs, setWorkspaceOpen };
+
+  const openWorkspace = useCallback((tab: WorkspaceTab) => {
+    const { workspaceOpen, workspaceTabs, setWorkspaceOpen } = latest.current;
     if (!workspaceOpen) {
       const active = document.activeElement;
       workspaceTriggerRef.current = active instanceof HTMLElement ? active : null;
@@ -189,21 +202,31 @@ export function useJobDetailPanels({
     workspaceTabs.select(tab);
     setWorkspaceOpen(true);
     setInspector(null);
-  }
+  }, []);
 
-  function openWorkspaceFile(path: string) {
-    setRequestedFile((current) => ({
-      scope: workspaceScope,
-      path,
-      token: (current?.token ?? 0) + 1,
-    }));
-    openWorkspace('files');
-  }
+  const openWorkspaceFile = useCallback(
+    (path: string) => {
+      const scope = latest.current.workspaceScope;
+      setRequestedFile((current) => ({ scope, path, token: (current?.token ?? 0) + 1 }));
+      openWorkspace('files');
+    },
+    [openWorkspace],
+  );
 
-  function openRecordedFile(selection: RecordedFileSelection) {
-    openWorkspace('git');
-    setRecordedFile({ scope: workspaceScope, selection });
-  }
+  const openRecordedFile = useCallback(
+    (selection: RecordedFileSelection) => {
+      openWorkspace('git');
+      setRecordedFile({ scope: latest.current.workspaceScope, selection });
+    },
+    [openWorkspace],
+  );
+
+  // The side chat tab actions, with one identity for the memoized workspace panels.
+  const addSideChat = useCallback(() => latest.current.workspaceTabs.add(), []);
+  const closeSideChat = useCallback(
+    (id: SideChatTab['id']) => latest.current.workspaceTabs.close(id),
+    [],
+  );
 
   const toggleWorkspace = useCallback(() => {
     if (workspaceOpen) {
@@ -367,6 +390,7 @@ export function useJobDetailPanels({
     workspaceTabs,
     workspaceTab,
     workspaceInitialized,
+    gitInitialized,
     terminalInitialized,
     filesInitialized,
     wideLayout,
@@ -391,6 +415,8 @@ export function useJobDetailPanels({
     openWorkspace,
     openWorkspaceFile,
     openRecordedFile,
+    addSideChat,
+    closeSideChat,
     toggleWorkspace,
     closeInspector,
     selectStep,

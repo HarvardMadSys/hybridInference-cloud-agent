@@ -24,7 +24,10 @@ interface TabsState {
   nextNumber: number;
 }
 
-export function sideChatAnchor(source: AgentJob, jobs: AgentJobApi[]) {
+export function sideChatAnchor(
+  source: Pick<AgentJob, 'id' | 'threadId' | 'sandboxId'>,
+  jobs: AgentJobApi[],
+) {
   const rows = jobs.filter((row) => row.thread_id === source.threadId);
   const anchor =
     latestJob(rows.filter((row) => ['running', 'publishing'].includes(row.state))) ??

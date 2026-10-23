@@ -83,6 +83,23 @@ Error-event upload and the terminal `finish` request are independent. The
 runner attempts the terminal transition even if event upload fails. If both
 remain unavailable, the reaper is the final backstop.
 
+The turn loop does not wait for event uploads. It numbers, redacts and queues
+each event as it reads it, and one sender thread posts the queue in order to
+`POST /v1/agent/worker/jobs/<job>/events:batch`: up to 100 events or 256 KiB
+per request, stored by the control plane in one transaction. A batch is retried
+whole for up to 60 seconds on transport failures and HTTP
+408/429/500/502/503/504, with delays doubling from one second up to eight; the
+event numbers make the retry safe. The queue holds up to 1,000 events or 4 MiB,
+and past that the turn loop waits, so a CLI whose events cannot be recorded
+stops being read. An upload refused with 409 ends the turn as a refused
+heartbeat does. A turn's outcome waits for its events: if the sender gives up,
+the turn fails before it settles, and its error event and `finish` are still
+attempted. `finish`, the release and the terminal suspend and resume requests
+also wait for the events queued before them, which keeps the log in order. A
+control plane that answers the batch route with 404 or 405 predates it; the
+runner logs `agent_event_batches_unsupported` and posts the rest of that
+attempt's events one at a time to `/events`.
+
 Post-claim preparation outside the shared execution handler, such as image
 inspection or manifest validation, has an outer failure handler too. It attempts
 a terminal failure before stopping heartbeat renewal and logs the exception

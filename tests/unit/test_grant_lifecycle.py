@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -40,7 +42,13 @@ from tests.support.storage import AllCapabilities
 
 from cloud_agent import grants as grant_client
 from cloud_agent.gateway import GatewayError
-from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
+from cloud_agent.grants import (
+    GATEWAY_RENEWAL_STEP_S,
+    GRANT_TTL_S,
+    RENEWAL_DUE_WITHIN_S,
+    RENEWAL_INTERVAL_S,
+    RenewalSchedule,
+)
 from cloud_agent.workers import attempts as control_plane
 from cloud_agent.workers.attempts import (
     _cleanup_reaped_shared_residencies,
@@ -804,3 +812,389 @@ async def test_a_host_that_never_answers_does_not_hold_up_the_reapers_pass(monke
     await asyncio.wait_for(_cleanup_reaped_shared_residencies(object(), actions, grants), 2)
 
     assert sorted(grants.revoked) == ["grant-0", "grant-1", "grant-2"]
+
+
+# ── Renewing only what is running low ─────────────────────────────────
+#
+# Every pass used to renew every live grant, although each renewal buys the
+# gateway's whole step: ten renewals per step for every grant, the control
+# plane's largest steady stream of gateway calls. The schedule keeps what each
+# renewal bought, and a pass renews only a grant that is running low. The
+# cases above still hold with it in place, and these say why: the store is
+# still asked every pass, a refused grant is still asked every pass until the
+# give-up, and an answer the schedule cannot read renews as before.
+
+
+class _Clocks:
+    """This process's two clocks, moved by hand together."""
+
+    def __init__(self) -> None:
+        self.elapsed = 0.0
+        self.epoch = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
+
+    def monotonic(self) -> float:
+        return 5_000.0 + self.elapsed
+
+    def wall(self) -> datetime:
+        return self.epoch + timedelta(seconds=self.elapsed)
+
+    def advance(self, seconds: float) -> None:
+        self.elapsed += seconds
+
+    def schedule(self) -> RenewalSchedule:
+        return RenewalSchedule(monotonic=self.monotonic, wall_clock=self.wall)
+
+
+class _SteppedGrants(_Grants):
+    """A gateway whose renewal buys its step from now, by its own clock.
+
+    ``skew`` is how far the gateway's clock runs ahead of this process's.
+    """
+
+    def __init__(
+        self,
+        clocks: _Clocks,
+        *,
+        step: float = GATEWAY_RENEWAL_STEP_S,
+        skew: float = 0.0,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.clocks = clocks
+        self.step = step
+        self.skew = skew
+
+    async def renew(self, grant_id: str) -> dict[str, Any]:
+        answer = await super().renew(grant_id)
+        gateway_now = self.clocks.wall() + timedelta(seconds=self.skew)
+        return {**answer, "expires_at": (gateway_now + timedelta(seconds=self.step)).isoformat()}
+
+
+async def _renewal_times(
+    store: _AttemptStore,
+    grants: _Grants,
+    clocks: _Clocks,
+    schedule: RenewalSchedule,
+    *,
+    passes: int,
+    failures: dict[str, int] | None = None,
+) -> list[float]:
+    """Run passes one interval apart, and say when each renewal was asked for."""
+    failures = {} if failures is None else failures
+    times: list[float] = []
+    for _ in range(passes):
+        asked = len(grants.renewed)
+        await _renew_live_grants(store, grants, failures=failures, schedule=schedule)
+        times.extend([clocks.elapsed] * (len(grants.renewed) - asked))
+        clocks.advance(RENEWAL_INTERVAL_S)
+    return times
+
+
+def _expiring_in(clocks: _Clocks, seconds: float) -> dict[str, Any]:
+    """A gateway answer whose grant expires ``seconds`` from now, by our clock."""
+    return {"expires_at": (clocks.wall() + timedelta(seconds=seconds)).isoformat()}
+
+
+#: Passes from one renewal of a grant to the next, when each buys the full step.
+_PASSES_BETWEEN_RENEWALS = math.ceil(
+    (GATEWAY_RENEWAL_STEP_S - RENEWAL_DUE_WITHIN_S) / RENEWAL_INTERVAL_S
+)
+
+
+async def test_a_grant_first_found_due_still_has_a_new_grants_headroom() -> None:
+    """The threshold, stated as the thing that would break.
+
+    The pass that first finds a grant due comes one interval after a pass that
+    found more than the threshold left. What it finds must still cover every
+    pass a freshly minted grant may lose, or skipping a pass to save a call
+    spends the headroom the TTL was sized to give.
+    """
+    assert RENEWAL_DUE_WITHIN_S - RENEWAL_INTERVAL_S >= GRANT_TTL_S
+
+
+async def test_a_renewed_grant_is_skipped_at_least_once() -> None:
+    """A threshold within a pass of the step renews every pass and saves nothing."""
+    assert RENEWAL_DUE_WITHIN_S + RENEWAL_INTERVAL_S <= GATEWAY_RENEWAL_STEP_S
+
+
+async def test_a_skipped_grant_is_reached_again_while_it_lives_even_after_late_passes() -> None:
+    """Two consecutive passes can each run to their deadline, so one grant's
+    turns can come ``duration + interval + duration`` apart. A grant a pass
+    skips must outlive that gap, or a slow gateway turns a skip into a lapse."""
+    worst_gap = 2 * control_plane.GRANT_RENEWAL_PASS_DEADLINE_S + RENEWAL_INTERVAL_S
+    assert worst_gap < RENEWAL_DUE_WITHIN_S
+
+
+async def test_a_grant_first_found_due_outlives_a_whole_give_up() -> None:
+    """A refusal is first seen when the grant falls due, and the give-up needs
+    consecutive refusals after that. They must all fit inside what is left."""
+    give_up_after_s = control_plane.GRANT_RENEWAL_GIVE_UP_AFTER * control_plane.REAP_INTERVAL_S
+    assert give_up_after_s < RENEWAL_DUE_WITHIN_S - control_plane.REAP_INTERVAL_S
+
+
+async def test_heartbeats_come_at_least_as_often_as_renewal_passes() -> None:
+    """Residency grants are renewed by host heartbeats against the same
+    threshold, which is sized in passes. Beats further apart than passes would
+    leave a resident member's grant less headroom than an attempt's."""
+    from cloud_agent.host_pool import HEARTBEAT_INTERVAL_S
+
+    assert HEARTBEAT_INTERVAL_S <= RENEWAL_INTERVAL_S
+
+
+async def test_a_grant_falls_due_once_no_more_than_the_threshold_is_left() -> None:
+    clocks = _Clocks()
+    schedule = clocks.schedule()
+    schedule.record("agr_1", _expiring_in(clocks, GATEWAY_RENEWAL_STEP_S))
+
+    clocks.advance(GATEWAY_RENEWAL_STEP_S - RENEWAL_DUE_WITHIN_S - 1)
+    assert not schedule.due("agr_1")
+    clocks.advance(1)
+    assert schedule.due("agr_1")
+
+
+async def test_a_renewed_grant_is_left_alone_until_it_runs_low() -> None:
+    """**The point of it**: one renewal per stretch of the step, not one per pass.
+
+    Nothing is recorded for a grant before its first renewal, so the first
+    pass renews it. The passes after that find most of the step left and skip
+    it; the first to find the threshold or less renews it again.
+    """
+    clocks = _Clocks()
+    store, grants = _AttemptStore(), _SteppedGrants(clocks)
+    store.add(1, "agr_1")
+
+    times = await _renewal_times(
+        store, grants, clocks, clocks.schedule(), passes=3 * _PASSES_BETWEEN_RENEWALS
+    )
+
+    stretch = _PASSES_BETWEEN_RENEWALS * RENEWAL_INTERVAL_S
+    assert times == [0.0, stretch, 2 * stretch]
+
+
+async def test_a_restarted_process_renews_every_grant_on_its_first_pass() -> None:
+    """The schedule is per process. A new one knows nothing, so it renews."""
+    clocks = _Clocks()
+    store, grants = _AttemptStore(), _SteppedGrants(clocks)
+    store.add(1, "agr_1")
+    await _renewal_times(store, grants, clocks, clocks.schedule(), passes=1)
+
+    times = await _renewal_times(store, grants, clocks, clocks.schedule(), passes=1)
+
+    assert times == [RENEWAL_INTERVAL_S]
+
+
+_NO_EXPIRY = object()
+
+
+@pytest.mark.parametrize(
+    "expires_at",
+    [
+        pytest.param(_NO_EXPIRY, id="absent"),
+        pytest.param(None, id="null"),
+        pytest.param("in five minutes", id="unparseable"),
+        pytest.param("2026-10-21T12:05:00", id="no-utc-offset"),
+        pytest.param("2026-10-21T11:59:00+00:00", id="already-over"),
+        pytest.param(1_792_584_300, id="not-a-string"),
+    ],
+)
+async def test_an_answer_without_a_usable_expiry_renews_every_pass(expires_at: object) -> None:
+    """What the schedule cannot read, it does not guess at.
+
+    The grant is renewed on every pass, exactly as before the schedule existed
+    -- which is also why the fakes above, answering ``{"grant_id": ...}``,
+    still exercise every pass.
+    """
+
+    class _Answering(_Grants):
+        async def renew(self, grant_id: str) -> dict[str, Any]:
+            answer = await super().renew(grant_id)
+            return answer if expires_at is _NO_EXPIRY else {**answer, "expires_at": expires_at}
+
+    clocks = _Clocks()
+    store, grants = _AttemptStore(), _Answering()
+    store.add(1, "agr_1")
+
+    times = await _renewal_times(store, grants, clocks, clocks.schedule(), passes=4)
+
+    assert times == [index * RENEWAL_INTERVAL_S for index in range(4)]
+
+
+async def test_a_grant_with_a_refusal_counted_is_asked_every_pass() -> None:
+    """The give-up must never wait on the schedule.
+
+    It needs refusals on consecutive passes, and it has to finish while the
+    capability is alive, so a grant with any refusal counted is asked every
+    pass, whatever its last renewal recorded.
+    """
+    clocks = _Clocks()
+    schedule = clocks.schedule()
+    store, grants = _AttemptStore(), _SteppedGrants(clocks, renew_fails=True)
+    store.add(1, "agr_1")
+    schedule.record("agr_1", _expiring_in(clocks, GATEWAY_RENEWAL_STEP_S))
+    assert not schedule.due("agr_1")
+    failures = {"agr_1": 1}
+
+    times = await _renewal_times(
+        store,
+        grants,
+        clocks,
+        schedule,
+        passes=control_plane.GRANT_RENEWAL_GIVE_UP_AFTER,
+        failures=failures,
+    )
+
+    assert times == [0.0, RENEWAL_INTERVAL_S], "a refused grant waited for its schedule"
+    assert store.released == [("ajob_1", 1, 1)]
+
+
+async def test_a_grant_refused_once_it_falls_due_is_given_up_on_while_it_lives() -> None:
+    """The suspension case end to end, at the cadence the schedule leaves.
+
+    A subject suspended between renewals is noticed when the grant next falls
+    due, up to a couple of minutes after a pass every thirty seconds would
+    have. From then on it is asked every pass, and the attempt is handed back
+    before the grant it already holds runs out.
+    """
+    clocks = _Clocks()
+    schedule = clocks.schedule()
+    store, grants = _AttemptStore(), _SteppedGrants(clocks)
+    store.add(1, "agr_1")
+    failures: dict[str, int] = {}
+    await _renewal_times(store, grants, clocks, schedule, passes=1, failures=failures)
+    grants.renew_fails = True
+
+    times = await _renewal_times(
+        store, grants, clocks, schedule, passes=2 * _PASSES_BETWEEN_RENEWALS, failures=failures
+    )
+
+    first_refusal = _PASSES_BETWEEN_RENEWALS * RENEWAL_INTERVAL_S
+    assert times == [
+        first_refusal + index * RENEWAL_INTERVAL_S
+        for index in range(control_plane.GRANT_RENEWAL_GIVE_UP_AFTER)
+    ]
+    assert store.released == [("ajob_1", 1, 1)]
+    assert times[-1] < GATEWAY_RENEWAL_STEP_S, "given up on only after its grant ran out"
+
+
+async def test_a_renewal_that_fails_once_due_is_retried_on_the_next_pass() -> None:
+    """An unreachable gateway costs the schedule nothing, and counts for nothing.
+
+    The failed renewal recorded nothing new, so the grant is still due on the
+    next pass; and once the gateway answers again it is left alone again.
+    """
+    clocks = _Clocks()
+    schedule = clocks.schedule()
+    store = _AttemptStore()
+    grants = _SteppedGrants(clocks, renew_error=_refusal(status=None))
+    store.add(1, "agr_1")
+    failures: dict[str, int] = {}
+    await _renewal_times(
+        store, grants, clocks, schedule, passes=_PASSES_BETWEEN_RENEWALS, failures=failures
+    )
+    due_at = clocks.elapsed
+
+    grants.renew_fails = True
+    failing = await _renewal_times(store, grants, clocks, schedule, passes=3, failures=failures)
+    grants.renew_fails = False
+    recovered = await _renewal_times(store, grants, clocks, schedule, passes=2, failures=failures)
+
+    assert failing == [due_at + index * RENEWAL_INTERVAL_S for index in range(3)]
+    assert failures == {}
+    assert store.released == []
+    assert recovered == [due_at + 3 * RENEWAL_INTERVAL_S]
+
+
+async def test_a_grant_the_store_stops_returning_is_not_renewed_and_is_forgotten() -> None:
+    """**The fence, with the schedule in place.**
+
+    The schedule only ever holds a renewal back, so a superseded attempt's
+    grant is never renewed again, whatever was recorded for it. Nor does it
+    stay recorded: once it falls due, its entry says nothing a missing one
+    would not, and the next renewal anywhere sheds it.
+    """
+    clocks = _Clocks()
+    schedule = clocks.schedule()
+    store, grants = _AttemptStore(), _SteppedGrants(clocks)
+    store.add(1, "agr_1")
+    store.add(2, "agr_2")
+    failures: dict[str, int] = {}
+    await _renewal_times(store, grants, clocks, schedule, passes=1, failures=failures)
+    assert grants.renewed == ["agr_1", "agr_2"]
+    assert "agr_1" in schedule
+
+    store.supersede(1)
+    passes = math.ceil(GATEWAY_RENEWAL_STEP_S / RENEWAL_INTERVAL_S)
+    await _renewal_times(store, grants, clocks, schedule, passes=passes, failures=failures)
+
+    assert grants.renewed.count("agr_1") == 1, "the superseded attempt was renewed"
+    assert grants.renewed.count("agr_2") > 1
+    assert "agr_1" not in schedule, "a finished attempt's grant stayed in the schedule"
+    assert "agr_2" in schedule
+
+
+async def test_a_gateway_clock_ahead_of_ours_buys_no_more_than_one_step() -> None:
+    """**The case the monotonic deadline exists for.**
+
+    With this clock an hour behind the gateway's, every ``expires_at`` reads an
+    hour and five minutes away. Trusted, the grant would go unrenewed for an
+    hour while it died at minute five. Read once, capped at one step and kept
+    on the monotonic clock, it renews exactly as if the clocks agreed.
+    """
+    clocks = _Clocks()
+    store, grants = _AttemptStore(), _SteppedGrants(clocks, skew=3600)
+    store.add(1, "agr_1")
+
+    times = await _renewal_times(
+        store, grants, clocks, clocks.schedule(), passes=3 * _PASSES_BETWEEN_RENEWALS
+    )
+
+    stretch = _PASSES_BETWEEN_RENEWALS * RENEWAL_INTERVAL_S
+    assert times == [0.0, stretch, 2 * stretch]
+
+
+async def test_a_wall_clock_that_moves_after_an_answer_changes_nothing() -> None:
+    """The wall clock is read once, as the answer arrives. A step in it later,
+    an NTP correction say, neither stretches nor shortens what was recorded."""
+    clocks = _Clocks()
+    schedule = clocks.schedule()
+    schedule.record("agr_1", _expiring_in(clocks, GATEWAY_RENEWAL_STEP_S))
+
+    clocks.epoch -= timedelta(hours=1)
+    clocks.advance(GATEWAY_RENEWAL_STEP_S - RENEWAL_DUE_WITHIN_S)
+
+    assert schedule.due("agr_1")
+
+
+@pytest.mark.parametrize("skew", [-60.0, -3600.0])
+async def test_our_clock_ahead_of_the_gateways_only_renews_sooner(skew: float) -> None:
+    """The other direction costs calls, never a grant.
+
+    Running ahead of the gateway, this clock reads less of each renewal left
+    than there is, so it renews early: a minute ahead, every other pass; an
+    hour ahead, every answer reads as already over, and the grant is renewed
+    every pass as if the schedule were not there.
+    """
+    clocks = _Clocks()
+    store, grants = _AttemptStore(), _SteppedGrants(clocks, skew=skew)
+    store.add(1, "agr_1")
+
+    times = await _renewal_times(
+        store, grants, clocks, clocks.schedule(), passes=3 * _PASSES_BETWEEN_RENEWALS
+    )
+
+    stretch = _PASSES_BETWEEN_RENEWALS * RENEWAL_INTERVAL_S
+    assert {0.0, stretch, 2 * stretch} <= set(times), "a renewal came later than on time"
+    assert len(times) > 3
+
+
+async def test_a_gateway_that_shortens_its_step_is_renewed_by_its_numbers() -> None:
+    """The mirrored step is a cap, not an assumption. A gateway that grants
+    less is renewed sooner, without anything here being told."""
+    clocks = _Clocks()
+    shorter = RENEWAL_DUE_WITHIN_S + 2 * RENEWAL_INTERVAL_S
+    store, grants = _AttemptStore(), _SteppedGrants(clocks, step=shorter)
+    store.add(1, "agr_1")
+
+    times = await _renewal_times(store, grants, clocks, clocks.schedule(), passes=6)
+
+    assert times == [0.0, 2 * RENEWAL_INTERVAL_S, 4 * RENEWAL_INTERVAL_S]

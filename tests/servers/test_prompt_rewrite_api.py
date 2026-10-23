@@ -65,6 +65,27 @@ async def test_rewrite_endpoint_authenticates_owner_without_creating_job(app):
     assert not hasattr(app.state, "storage")
 
 
+async def test_rewrite_keeps_its_model_call_off_the_shared_pool(app):
+    """The completion opens a client of its own.
+
+    It holds its connection for the model's whole answer, and a burst of
+    rewrites must not leave owner admission and grant calls waiting for one of
+    the shared pool's connections.
+    """
+    # The process has a shared pool; the rewrite must not borrow it.
+    app.state.http = object()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
+    ) as client:
+        response = await client.post(
+            "/v1/agent/prompts/rewrite",
+            json={"prompt": "Draft", "model": "allowed-model"},
+            headers=session_headers(),
+        )
+    assert response.status_code == 200
+    assert "client" not in app.state.rewrite.await_args.kwargs
+
+
 @pytest.mark.parametrize("credential", [None, "ajt.worker-token", "agr.inference-token"])
 async def test_rewrite_rejects_missing_or_nonowner_credentials(app, credential):
     async with httpx.AsyncClient(

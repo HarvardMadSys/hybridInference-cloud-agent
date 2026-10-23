@@ -203,6 +203,106 @@ async def test_usage_arrives_with_its_value_and_the_rest_as_hints(monkeypatch):
     await stream.aclose()
 
 
+async def test_the_owners_tabs_share_one_usage_read_per_notification(monkeypatch):
+    """Every tab is woken by the same notification, and one read answers them all."""
+    release = asyncio.Event()
+    usage = {"ledger": {"status": "available"}, "runtime": {"source": "runtime"}, "version": "v"}
+
+    async def slow_usage(store: Any, *, job_id: str, user_id: str) -> Any:
+        await release.wait()
+        return SimpleNamespace(model_dump=lambda **_: usage)
+
+    read_usage = AsyncMock(side_effect=slow_usage)
+    monkeypatch.setattr(changes, "job_usage_response", read_usage)
+    signal = _listening()
+    tabs = [await _open(Queries(), signal) for _ in range(3)]
+    for tab in tabs:
+        await anext(tab)
+
+    _notify(signal, "usage", "ajob_1")
+    frames = [asyncio.create_task(anext(tab)) for tab in tabs]
+    await asyncio.sleep(0.05)
+    assert read_usage.call_count == 1, "the other tabs joined the first one's read"
+    release.set()
+    assert [_parse(await asyncio.wait_for(frame, AT_ONCE_S)) for frame in frames] == [
+        ("usage", {"id": "ajob_1", "usage": usage})
+    ] * 3
+    assert signal.reads.running() == 0
+    for tab in tabs:
+        await tab.aclose()
+
+
+async def test_a_tab_told_of_a_newer_change_does_not_join_an_older_read(monkeypatch):
+    """A read that started before a notification may not include what it reports."""
+    releases: list[asyncio.Event] = []
+    versions = iter(["v1", "v2"])
+
+    async def slow_usage(store: Any, *, job_id: str, user_id: str) -> Any:
+        version = next(versions)
+        released = asyncio.Event()
+        releases.append(released)
+        await released.wait()
+        return SimpleNamespace(model_dump=lambda **_: {"version": version})
+
+    monkeypatch.setattr(changes, "job_usage_response", AsyncMock(side_effect=slow_usage))
+    signal = _listening()
+    early = await _open(Queries(), signal)
+    late = await _open(Queries(), signal)
+    await anext(early)
+    await anext(late)
+
+    _notify(signal, "usage", "ajob_1")
+    first = asyncio.create_task(anext(early))
+    await asyncio.sleep(0.05)
+    # The second tab has not looked yet when a newer change of the same job
+    # arrives: the read already under way may predate it.
+    _notify(signal, "usage", "ajob_1")
+    second = asyncio.create_task(anext(late))
+    await asyncio.sleep(0.05)
+    assert len(releases) == 2, "the tab told of the newer change made its own read"
+    for released in releases:
+        released.set()
+    assert _parse(await asyncio.wait_for(first, AT_ONCE_S)) == (
+        "usage",
+        {"id": "ajob_1", "usage": {"version": "v1"}},
+    )
+    assert _parse(await asyncio.wait_for(second, AT_ONCE_S)) == (
+        "usage",
+        {"id": "ajob_1", "usage": {"version": "v2"}},
+    )
+    await early.aclose()
+    await late.aclose()
+
+
+async def test_a_tab_that_goes_away_leaves_the_shared_read_to_the_others(monkeypatch):
+    release = asyncio.Event()
+
+    async def slow_usage(store: Any, *, job_id: str, user_id: str) -> Any:
+        await release.wait()
+        return SimpleNamespace(model_dump=lambda **_: {"version": "v1"})
+
+    monkeypatch.setattr(changes, "job_usage_response", AsyncMock(side_effect=slow_usage))
+    signal = _listening()
+    leaving = await _open(Queries(), signal)
+    staying = await _open(Queries(), signal)
+    await anext(leaving)
+    await anext(staying)
+
+    _notify(signal, "usage", "ajob_1")
+    gone = asyncio.create_task(anext(leaving))
+    kept = asyncio.create_task(anext(staying))
+    await asyncio.sleep(0.05)
+    gone.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await gone
+    release.set()
+    assert _parse(await asyncio.wait_for(kept, AT_ONCE_S)) == (
+        "usage",
+        {"id": "ajob_1", "usage": {"version": "v1"}},
+    )
+    await staying.aclose()
+
+
 async def test_a_row_that_is_gone_is_reported_as_deleted():
     signal = _listening()
     stream = await _open(Queries(), signal)

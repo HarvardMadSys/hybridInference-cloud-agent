@@ -8,6 +8,7 @@ import {
   getAgentNotificationState,
   type AgentJobApi,
   type AgentNotificationJobApi,
+  type AgentNotificationStateApi,
 } from '@/lib/api/agents';
 import { useQuestionReads } from './AgentReadProvider';
 import { onAgentRecordsChanged, isAgentPushLive, PUSH_FALLBACK_POLL_MS } from './agentPush';
@@ -17,12 +18,22 @@ import {
   type NotificationPreferences,
 } from './notificationPreferences';
 import { isActiveJobState } from './conversationJob';
+import { QUESTION_BACKGROUND_POLL_MS } from './useNativeQuestions';
 import { APIError } from '@/lib/utils/errors';
 
-export const NOTIFICATION_QUESTION_POLL_MS = 2_000;
+/**
+ * How often a running conversation's questions are read for a notification.
+ * It shares the tab's clock for that conversation, so one on screen is read
+ * at the page's pace anyway.
+ */
+export const NOTIFICATION_QUESTION_POLL_MS = QUESTION_BACKGROUND_POLL_MS;
 export const NOTIFICATION_STATE_POLL_MS = 10_000;
 const TERMINAL_STATES = new Set(['succeeded', 'failed', 'cancelled']);
 const RECEIPT_LIMIT = 200;
+
+function isRejectedChangeCursor(cause: unknown, cursor: string | undefined): boolean {
+  return !!cursor && cause instanceof APIError && cause.statusCode === 422;
+}
 
 export interface AgentNotice {
   key: string;
@@ -47,6 +58,11 @@ function fallbackTitle(job: WatchedJob): string {
     job.repo ||
     ('task_prompt' in job ? job.task_prompt.split('\n')[0].slice(0, 80) : 'Agent task')
   );
+}
+
+/** A turn that can be waiting on its owner's answer: running, not stopping, with an attempt. */
+function asking(job: WatchedJob | undefined): job is WatchedJob {
+  return job?.state === 'running' && !job.cancel_requested && job.current_attempt_id !== null;
 }
 
 function readReceipts(userId: string): string[] {
@@ -90,6 +106,8 @@ export function useAgentNotifications(
     const receipts = new Set(readReceipts(userId));
     const pendingNotices = new Set<string>();
     const readingQuestions = new Set<string>();
+    /** The conversations whose questions this watcher reads, and how to stop. */
+    const watchedQuestions = new Map<string, () => void>();
     let refreshing = false;
     let refreshAgain = false;
     let lastRefresh = 0;
@@ -250,21 +268,32 @@ export function useAgentNotifications(
       const version = (reads.get(id) ?? 0) + 1;
       reads.set(id, version);
       pendingReads.set(id, version);
+      let settled = false;
       try {
         const job = await getAgentJob(id);
-        if (current() && reads.get(id) === version) accept(job);
+        if (current() && reads.get(id) === version) {
+          accept(job);
+          settled = true;
+        }
       } catch (cause) {
         if (
           current() &&
           reads.get(id) === version &&
           cause instanceof APIError &&
           cause.statusCode === 404
-        )
+        ) {
           forgetJob(id);
+          settled = true;
+        }
         // Other failures stay unconfirmed for the next successful reconciliation.
       } finally {
         if (pendingReads.get(id) === version) pendingReads.delete(id);
       }
+      // Outside the fence above. A turn this read found running in a
+      // conversation not yet watched has its questions read at once; one
+      // already watched is read on its clock's next tick. A turn it found
+      // deleted no longer keeps its conversation watched.
+      if (settled) watchQuestions();
     }
 
     async function retryUnconfirmed(retried: Set<string>): Promise<void> {
@@ -302,66 +331,96 @@ export function useAgentNotifications(
       }
     }
 
-    async function questions(): Promise<void> {
-      if (!preferences.questions || !current()) return;
-      const latest = new Map<string, WatchedJob>();
-      for (const job of jobs.values()) {
-        if (!job.thread_id) continue;
-        const held = latest.get(job.thread_id);
-        if (!held || (job.turn_no ?? 1) > (held.turn_no ?? 1)) latest.set(job.thread_id, job);
-      }
-      await Promise.allSettled(
-        [...latest.values()].map(async (job) => {
-          const threadId = job.thread_id!;
-          if (
-            job.state !== 'running' ||
-            latestForThread(threadId)?.id !== job.id ||
-            job.cancel_requested ||
-            job.current_attempt_id === null ||
-            readingQuestions.has(threadId) ||
-            pendingReads.has(job.id) ||
-            unconfirmedChanges.has(job.id)
-          )
-            return;
-          readingQuestions.add(threadId);
-          const readVersion = reads.get(job.id) ?? 0;
-          try {
-            const result = await questionReads.listThreadQuestions(threadId, controller.signal);
-            const held = jobs.get(job.id);
-            if (
-              !current() ||
-              latestForThread(threadId)?.id !== job.id ||
-              (reads.get(job.id) ?? 0) !== readVersion ||
-              unconfirmedChanges.has(job.id) ||
-              held?.state !== 'running' ||
-              held.cancel_requested ||
-              held.current_attempt_id !== job.current_attempt_id ||
-              result.job_id !== job.id ||
-              result.attempt_id !== job.current_attempt_id
-            )
-              return;
-            for (const request of result.questions) {
-              deliver({
-                key: JSON.stringify([
-                  'question',
-                  threadId,
-                  job.id,
-                  result.attempt_id,
-                  request.request_id,
-                ]),
-                kind: 'question',
-                jobId: job.id,
-                attemptId: job.current_attempt_id,
-                title: titles.get(threadId) || fallbackTitle(job),
-              });
-            }
-          } catch {
-            // Hosts can be temporarily unavailable; keep the next poll alive.
-          } finally {
-            readingQuestions.delete(threadId);
-          }
-        }),
+    /**
+     * Whether a question read begun for `job` at `readVersion` may still alert:
+     * no newer turn, job read or push has replaced what it was read for.
+     */
+    function stillAsking(threadId: string, job: WatchedJob, readVersion: number): boolean {
+      const held = jobs.get(job.id);
+      return (
+        current() &&
+        latestForThread(threadId)?.id === job.id &&
+        (reads.get(job.id) ?? 0) === readVersion &&
+        !unconfirmedChanges.has(job.id) &&
+        asking(held) &&
+        held.current_attempt_id === job.current_attempt_id
       );
+    }
+
+    async function readQuestions(threadId: string): Promise<void> {
+      const job = latestForThread(threadId);
+      if (
+        !preferences.questions ||
+        !current() ||
+        !asking(job) ||
+        readingQuestions.has(threadId) ||
+        pendingReads.has(job.id) ||
+        unconfirmedChanges.has(job.id)
+      )
+        return;
+      readingQuestions.add(threadId);
+      const readVersion = reads.get(job.id) ?? 0;
+      try {
+        const result = await questionReads.listThreadQuestions(threadId, controller.signal);
+        if (
+          !stillAsking(threadId, job, readVersion) ||
+          result.job_id !== job.id ||
+          result.attempt_id !== job.current_attempt_id
+        )
+          return;
+        for (const request of result.questions) {
+          deliver({
+            key: JSON.stringify([
+              'question',
+              threadId,
+              job.id,
+              result.attempt_id,
+              request.request_id,
+            ]),
+            kind: 'question',
+            jobId: job.id,
+            attemptId: job.current_attempt_id,
+            title: titles.get(threadId) || fallbackTitle(job),
+          });
+        }
+      } catch {
+        // Hosts can be temporarily unavailable; keep the next poll alive.
+      } finally {
+        readingQuestions.delete(threadId);
+      }
+    }
+
+    /**
+     * Watch the questions of each conversation whose newest turn is running,
+     * on the tab's clock for that conversation, and stop watching the rest.
+     * A notification is for an owner who is not looking, so these reads go on
+     * while the tab is hidden.
+     */
+    function watchQuestions(): void {
+      const running = new Set<string>();
+      if (preferences.questions && current()) {
+        for (const job of jobs.values()) {
+          const threadId = job.thread_id;
+          if (threadId && asking(job) && latestForThread(threadId)?.id === job.id)
+            running.add(threadId);
+        }
+      }
+      for (const [threadId, leave] of watchedQuestions) {
+        if (running.has(threadId)) continue;
+        watchedQuestions.delete(threadId);
+        leave();
+      }
+      for (const threadId of running) {
+        if (watchedQuestions.has(threadId)) continue;
+        watchedQuestions.set(
+          threadId,
+          questionReads.watch(
+            threadId,
+            { intervalMs: NOTIFICATION_QUESTION_POLL_MS, whileHidden: true },
+            () => void readQuestions(threadId),
+          ),
+        );
+      }
     }
 
     function latestForThread(threadId: string): WatchedJob | undefined {
@@ -385,7 +444,18 @@ export function useAgentNotifications(
         let resetOnce = false;
         const retried = new Set<string>();
         while (current()) {
-          const result = await getAgentNotificationState(cursor);
+          let result: AgentNotificationStateApi;
+          try {
+            result = await getAgentNotificationState(cursor);
+          } catch (cause) {
+            if (!isRejectedChangeCursor(cause, cursor) || resetOnce) throw cause;
+            resetOnce = true;
+            prepareReset();
+            await retryUnconfirmed(retried);
+            changeCursor = undefined;
+            cursor = undefined;
+            continue;
+          }
           if (!current()) return;
           establishNotificationEpoch(result.observed_at);
           if (result.reset_required) {
@@ -409,7 +479,7 @@ export function useAgentNotifications(
           await retryUnconfirmed(retried);
           if (!current()) return;
           lastRefresh = Date.now();
-          void questions();
+          watchQuestions();
           break;
         }
       } catch {
@@ -440,10 +510,10 @@ export function useAgentNotifications(
           void readJob(job.id);
         }
       }
+      watchQuestions();
       if (change.resync) void refresh();
     });
     void refresh();
-    const questionTimer = setInterval(() => void questions(), NOTIFICATION_QUESTION_POLL_MS);
     const stateTimer = setInterval(() => {
       const interval = isAgentPushLive() ? PUSH_FALLBACK_POLL_MS : NOTIFICATION_STATE_POLL_MS;
       if (Date.now() - lastRefresh >= interval) void refresh();
@@ -452,7 +522,8 @@ export function useAgentNotifications(
       disposed = true;
       controller.abort();
       unsubscribe();
-      clearInterval(questionTimer);
+      for (const leave of watchedQuestions.values()) leave();
+      watchedQuestions.clear();
       clearInterval(stateTimer);
     };
   }, [userId, preferences.enabled, preferences.questions, preferences.turns, questionReads]);

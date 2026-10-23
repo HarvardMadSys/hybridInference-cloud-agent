@@ -91,6 +91,10 @@ function VariableList({
  */
 const pendingStarts = new Map<string, string>();
 
+function bumpRunVersion(versions: Map<string, number>, actionId: string): void {
+  versions.set(actionId, (versions.get(actionId) ?? 0) + 1);
+}
+
 /**
  * A conversation's Environment panel. What the reader needs first is whether
  * the workspace is ready and, when it is not, what to do about it; then the
@@ -116,8 +120,12 @@ export function WorkspaceEnvironment({
   // succeeds; an action's failure stays until the owner acts again.
   const [loadError, setLoadError] = useState('');
   const [runs, setRuns] = useState<Record<string, ActionRun>>({});
-  // The actions whose listed run this panel has already taken in.
-  const listedRuns = useRef(new Set<string>());
+  // Run identity changes synchronously fence list/detail responses that began
+  // before a local start or a newer cross-tab run was observed.
+  const runIds = useRef(new Map<string, string>());
+  const runVersions = useRef(new Map<string, number>());
+  const listedOutputs = useRef(new Map<string, string>());
+  const localStarts = useRef(new Set<string>());
   const [busy, setBusy] = useState(false);
   const [reload, setReload] = useState(0);
   const [skipArmed, setSkipArmed] = useState(false);
@@ -128,47 +136,64 @@ export function WorkspaceEnvironment({
   useEffect(() => {
     if (!visible) return;
     let active = true;
-    // The panel's own record of a run is newer than any listing: it may hold a
-    // start this read predates. A listed run fills only an action the panel
-    // knows nothing about, as when it was opened again mid-run; a finished one
-    // is read once more for the output the listing leaves out.
-    const adoptRuns = async (listed: ActionRun[], signal: AbortSignal) => {
-      const known = listedRuns.current;
-      const adopted = listed.filter((run) => run.action_id && !known.has(run.action_id));
-      if (!adopted.length) return;
-      adopted.forEach((run) => known.add(run.action_id!));
-      setRuns((previous) => {
-        const next = { ...previous };
-        for (const run of adopted) next[run.action_id!] ??= run;
-        return next;
-      });
+    const adoptRuns = async (
+      listed: ActionRun[],
+      signal: AbortSignal,
+      observedVersions: Map<string, number>,
+    ) => {
+      const adopted: ActionRun[] = [];
+      const finished: ActionRun[] = [];
+      for (const run of listed) {
+        const actionId = run.action_id;
+        if (
+          !actionId ||
+          localStarts.current.has(actionId) ||
+          (runVersions.current.get(actionId) ?? 0) !== (observedVersions.get(actionId) ?? 0)
+        )
+          continue;
+        if (runIds.current.get(actionId) !== run.id) {
+          runIds.current.set(actionId, run.id);
+          bumpRunVersion(runVersions.current, actionId);
+          adopted.push(run);
+        }
+        if (!ACTIVE_STATES.includes(run.state) && listedOutputs.current.get(actionId) !== run.id) {
+          listedOutputs.current.set(actionId, run.id);
+          finished.push(run);
+        }
+      }
+      if (adopted.length)
+        setRuns((previous) => {
+          const next = { ...previous };
+          for (const run of adopted) next[run.action_id!] = run;
+          return next;
+        });
       await Promise.all(
-        adopted
-          .filter((run) => !ACTIVE_STATES.includes(run.state))
-          .map((run) =>
-            getEnvironmentActionRun(run.id, signal)
-              .then((value) => {
-                if (!active || signal.aborted) return;
-                setRuns((previous) =>
-                  previous[run.action_id!]?.id === run.id
-                    ? { ...previous, [run.action_id!]: value }
-                    : previous,
-                );
-              })
-              .catch(() => {
-                // The state is already shown; only its output is missing.
-                known.delete(run.action_id!);
-              }),
-          ),
+        finished.map((run) =>
+          getEnvironmentActionRun(run.id, signal)
+            .then((value) => {
+              const actionId = run.action_id!;
+              if (!active || signal.aborted || runIds.current.get(actionId) !== run.id) return;
+              setRuns((previous) =>
+                previous[actionId]?.id === run.id ? { ...previous, [actionId]: value } : previous,
+              );
+            })
+            .catch(() => {
+              // The state is already shown; only its output is missing.
+              const actionId = run.action_id!;
+              if (listedOutputs.current.get(actionId) === run.id)
+                listedOutputs.current.delete(actionId);
+            }),
+        ),
       );
     };
     const stop = pollWhileVisible(async (signal) => {
       try {
+        const observedVersions = new Map(runVersions.current);
         const value = await getWorkspaceEnvironment(jobId, signal);
         if (!active || signal.aborted) return 5000;
         setBound(value);
         setLoadError('');
-        await adoptRuns(value.action_runs ?? [], signal);
+        await adoptRuns(value.action_runs ?? [], signal, observedVersions);
         const unsettled =
           ['pending', 'preparing'].includes(status(value)) ||
           value.action_runs?.some((run) => ACTIVE_STATES.includes(run.state));
@@ -191,16 +216,39 @@ export function WorkspaceEnvironment({
     if (!current.length) return;
     return pollWhileVisible(async (signal) => {
       const updates = await Promise.all(
-        current.map(async ([id, run]) => {
+        current.map(async ([actionId, run]) => {
           try {
-            return [id, await getEnvironmentActionRun(run.id, signal)] as const;
+            return [actionId, run.id, await getEnvironmentActionRun(run.id, signal)] as const;
           } catch (e) {
-            if (!signal.aborted) setError(e instanceof Error ? e.message : String(e));
-            return [id, run] as const;
+            if (!signal.aborted && runIds.current.get(actionId) === run.id)
+              setError(e instanceof Error ? e.message : String(e));
+            return [actionId, run.id, null] as const;
           }
         }),
       );
-      if (!signal.aborted) setRuns((previous) => ({ ...previous, ...Object.fromEntries(updates) }));
+      if (!signal.aborted) {
+        for (const [actionId, expectedId, value] of updates)
+          if (
+            value &&
+            runIds.current.get(actionId) === expectedId &&
+            !ACTIVE_STATES.includes(value.state)
+          )
+            listedOutputs.current.set(actionId, value.id);
+        setRuns((previous) => {
+          let next = previous;
+          for (const [actionId, expectedId, value] of updates) {
+            if (
+              value &&
+              runIds.current.get(actionId) === expectedId &&
+              previous[actionId]?.id === expectedId
+            ) {
+              if (next === previous) next = { ...previous };
+              next[actionId] = value;
+            }
+          }
+          return next;
+        });
+      }
       return 1500;
     }, 1500);
   }, [runs, visible]);
@@ -366,7 +414,14 @@ export function WorkspaceEnvironment({
                         onClick={() =>
                           void perform(async () => {
                             const result = await stopEnvironmentAction(run.id);
-                            setRuns((v) => ({ ...v, [action.id]: result }));
+                            if (runIds.current.get(action.id) !== run.id) return;
+                            if (!ACTIVE_STATES.includes(result.state))
+                              listedOutputs.current.set(action.id, result.id);
+                            setRuns((value) =>
+                              value[action.id]?.id === run.id
+                                ? { ...value, [action.id]: result }
+                                : value,
+                            );
                           })
                         }
                       >
@@ -384,9 +439,19 @@ export function WorkspaceEnvironment({
                             const pending = `${jobId}:${action.id}`;
                             const key = pendingStarts.get(pending) ?? crypto.randomUUID();
                             pendingStarts.set(pending, key);
-                            const result = await startEnvironmentAction(jobId, action.id, key);
-                            pendingStarts.delete(pending);
-                            setRuns((v) => ({ ...v, [action.id]: result }));
+                            localStarts.current.add(action.id);
+                            bumpRunVersion(runVersions.current, action.id);
+                            try {
+                              const result = await startEnvironmentAction(jobId, action.id, key);
+                              pendingStarts.delete(pending);
+                              runIds.current.set(action.id, result.id);
+                              bumpRunVersion(runVersions.current, action.id);
+                              if (!ACTIVE_STATES.includes(result.state))
+                                listedOutputs.current.set(action.id, result.id);
+                              setRuns((value) => ({ ...value, [action.id]: result }));
+                            } finally {
+                              localStarts.current.delete(action.id);
+                            }
                           })
                         }
                       >

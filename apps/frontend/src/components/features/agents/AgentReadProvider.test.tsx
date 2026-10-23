@@ -6,7 +6,14 @@ import { getAgentJob, type AgentJobApi } from '@/lib/api/agents';
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { listThreadQuestions, type AgentQuestionsApi } from '@/lib/api/questions';
 import { AgentReadProvider, useAgentReads, useQuestionReads } from './AgentReadProvider';
-import { PUSH_BATCH_MS, receiveSync, resetAgentPush } from './agentPush';
+import {
+  PUSH_BATCH_MS,
+  receiveHint,
+  receiveJobChange,
+  receiveSync,
+  receiveThreadChange,
+  resetAgentPush,
+} from './agentPush';
 import { clearWorkspaceGitCache } from './workspaceGitCache';
 
 vi.mock('@/lib/api/agents', () => ({ getAgentJob: vi.fn(), getAgentJobThread: vi.fn() }));
@@ -84,5 +91,62 @@ describe('the shell read scope', () => {
     });
     hook.result.current.getAgentJob('job-a');
     expect(getAgentJob).toHaveBeenCalledTimes(3);
+  });
+
+  it('cancels question reads only for a change to their own turn, or a gap in pushes', () => {
+    vi.useFakeTimers();
+    const reads: Record<string, AbortSignal[]> = {};
+    vi.mocked(listThreadQuestions).mockImplementation((threadId, signal) => {
+      (reads[threadId] ??= []).push(signal!);
+      return new Promise<AgentQuestionsApi>(() => {});
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <AgentReadProvider userId="alice">{children}</AgentReadProvider>
+    );
+    const questions = renderHook(() => useQuestionReads(), { wrapper }).result.current;
+    const read = (threadId: string) => void questions.listThreadQuestions(threadId).catch(() => {});
+    const pending = (threadId: string) => !reads[threadId].at(-1)!.aborted;
+    read('thread-a');
+    read('thread-b');
+    // A new message moves the conversation, a publication its workspace, and a
+    // rename is the owner's own: none of them changes the turn's questions.
+    act(() => {
+      receiveThreadChange({ id: 'thread-a', revision: 2, title: 'Fix login' });
+      receiveHint('publication', 'thread-a');
+      receiveJobChange({ id: 'job-b', thread_id: 'thread-b', state: 'succeeded', revision: 2 });
+      announceAgentSessionsChanged({ threadIds: ['thread-b'], title: 'Renamed' });
+      vi.advanceTimersByTime(PUSH_BATCH_MS);
+    });
+    expect(pending('thread-a')).toBe(true);
+    expect(pending('thread-b')).toBe(false);
+    act(() => {
+      receiveJobChange({ id: 'job-a', thread_id: 'thread-a', state: 'succeeded', revision: 2 });
+      vi.advanceTimersByTime(PUSH_BATCH_MS);
+    });
+    expect(pending('thread-a')).toBe(false);
+    read('thread-a');
+    read('thread-b');
+    act(() => {
+      receiveThreadChange({ id: 'thread-b', deleted: true });
+      vi.advanceTimersByTime(PUSH_BATCH_MS);
+    });
+    expect(pending('thread-a')).toBe(true);
+    expect(pending('thread-b')).toBe(false);
+    read('thread-b');
+    // A deleted job is sent without its conversation, and a resync means
+    // pushes were missed: either way every read is cancelled.
+    act(() => {
+      receiveJobChange({ id: 'job-gone', deleted: true });
+      vi.advanceTimersByTime(PUSH_BATCH_MS);
+    });
+    expect(pending('thread-a')).toBe(false);
+    expect(pending('thread-b')).toBe(false);
+    read('thread-a');
+    act(() => {
+      receiveSync();
+      vi.advanceTimersByTime(PUSH_BATCH_MS);
+    });
+    expect(pending('thread-a')).toBe(false);
+    expect(listThreadQuestions).toHaveBeenCalledTimes(6);
   });
 });

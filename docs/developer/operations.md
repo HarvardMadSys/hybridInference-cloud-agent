@@ -1943,7 +1943,9 @@ is never accepted from the browser. The destination is a source constant
 so a distribution archiving to another bucket changes it there; the IAM
 policy below names the same bucket and prefix. An administrator atomically saves the
 enabled state, AWS region, maximum compressed archive size, multipart
-threshold, and part size. Authentication is either an AWS access key or the
+threshold, and part size. An object above the threshold is uploaded in parts
+of that size, eight at a time, so an upload holds up to eight parts in memory:
+64 MiB at the default 8 MiB part size. Authentication is either an AWS access key or the
 workload-identity pair: a customer-managed KMS key ARN and the expected
 12-digit bucket owner. An access key makes that pair optional; uploads then
 use SSE-S3 unless a KMS key is also set. The secret is write-only, encrypted
@@ -2092,13 +2094,14 @@ see [Restoring a removed host's sandboxes](#restoring-a-removed-hosts-sandboxes)
   file, terminal, Git or environment request, a Fork, a snapshot capture or a
   base import) advances the fence first and sends the value it took with the
   request itself: in its body, or for a workspace request in an
-  `X-Agent-Start-Seq` header. The Sandbox Manager labels a run only with the
-  fences of the requests it admitted to that run. Once the run stops, a
-  request at or below its label that would start the container again is
-  refused (409), and the control plane advances the fence and retries. A
-  running container clears the restore point too. A receipt covers its group
-  only while its fence is still current; receipts from sandbox managers that
-  predate restore carry none and never cover a group.
+  `X-Agent-Start-Seq` header. An open terminal's input, resize and close
+  cannot start the container, so they take no fence. The Sandbox Manager
+  labels a run only with the fences of the requests it admitted to that run.
+  Once the run stops, a request at or below its label that would start the
+  container again is refused (409), and the control plane advances the fence
+  and retries. A running container clears the restore point too. A receipt
+  covers its group only while its fence is still current; receipts from
+  sandbox managers that predate restore carry none and never cover a group.
 - The policy omits the default and carries only an opt-out
   (`checkpoints_enabled: false`), which is sent only to hosts that advertise
   `sandbox-checkpoints-v1`. Older sandbox managers parse the policy unchanged
@@ -2574,6 +2577,11 @@ means an operator, reaper, old writer, or placement change invalidates every
 previous snapshot rather than recreating a token-only ABA state. An older V1
 control plane does not compare the epoch and is therefore not operationally
 compatible, even though its writes still cause rotation.
+
+A host that misses heartbeats and is marked `offline` keeps its inactive
+receipt. When it returns, the next rollout still finds the token its
+predecessor released; the epoch has already rotated, so delayed requests stay
+fenced.
 
 Inspect fence state before rollback or recovery:
 
@@ -3587,7 +3595,10 @@ rules, not the host's.
   prebuild — the sandbox manager's sweep renews that pass after 45 seconds, so a
   start or wake never waits for the install and read-back itself. A host where
   nothing runs starts no helper for it: the next start or wake renews a lapsed
-  pass before its group joins a bridge.
+  pass before its group joins a bridge. The runner renews its own pass when it
+  hands a turn over and that pass is 45 seconds old. The turn's process runs no
+  helper of its own: it takes the runner's pass, and declines the turn unless
+  that pass is less than 60 seconds old.
 - **Scoped to this deployment.** The tables recognise traffic by the bridge
   interface prefix. They never flush or edit another deployment's rules, so
   several deployments can share a host.

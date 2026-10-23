@@ -8,7 +8,9 @@ wrong installation, or a private key leaking into a log line.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -559,6 +561,125 @@ async def test_a_token_handed_to_a_holder_is_its_own(config):
         assert [await token(), await token("athr_1"), await token("athr_2")] == minted
 
     assert minted == [publisher, first, second] == ["ghs_1", "ghs_2", "ghs_3"]
+
+
+async def test_holder_token_cache_is_bounded_lru(config, monkeypatch):
+    """Holder churn cannot retain a token for every conversation ever seen."""
+    import cloud_agent.github_app as github_app
+
+    monkeypatch.setattr(github_app, "_INSTALLATION_TOKEN_CACHE_MAX", 2)
+    minted: list[str] = []
+    async with httpx.AsyncClient(transport=_minting(minted)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+
+        async def token(holder: str) -> str:
+            return await credentials.token_for("o/n", holder=holder)
+
+        first, second = await token("athr_1"), await token("athr_2")
+        first_key, second_key = list(credentials._tokens)
+        second_cached = credentials._tokens[second_key]
+        assert second_cached.token == second
+        assert await token("athr_1") == first
+        third = await token("athr_3")
+
+    assert {cached.token for cached in credentials._tokens.values()} == {first, third}
+    assert first_key in credentials._tokens and second_key not in credentials._tokens
+    assert second_cached.token == ""
+
+
+async def test_cache_access_prunes_expired_token_strings(config, monkeypatch):
+    """A cache hit also releases expired slots that belong to other holders."""
+    import cloud_agent.github_app as github_app
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(github_app.time, "time", lambda: now[0])
+    minted: list[str] = []
+    async with httpx.AsyncClient(transport=_minting(minted)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        await credentials.token_for("o/n", holder="expired")
+        live = await credentials.token_for("o/n", holder="live")
+        expired_key, _ = list(credentials._tokens)
+        expired = credentials._tokens[expired_key]
+        expired.expires_at = now[0] - 1
+
+        assert await credentials.token_for("o/n", holder="live") == live
+
+    assert expired_key not in credentials._tokens
+    assert expired.token == ""
+    assert len(credentials._tokens) == 1
+
+
+async def test_failed_mint_still_prunes_expired_token_strings(config, monkeypatch):
+    """A GitHub outage cannot keep already expired holder secrets resident."""
+    import cloud_agent.github_app as github_app
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(github_app.time, "time", lambda: now[0])
+    fail_mint = [False]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 1})
+        if fail_mint[0]:
+            return httpx.Response(503, json={"message": "Unavailable"})
+        return httpx.Response(201, json={"token": "ghs_first"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        await credentials.token_for("o/n", holder="expired")
+        expired = next(iter(credentials._tokens.values()))
+        expired.expires_at = now[0] - 1
+        fail_mint[0] = True
+
+        with pytest.raises(GitHubAppError):
+            await credentials.token_for("o/n", holder="new")
+
+    assert not credentials._tokens
+    assert expired.token == ""
+
+
+async def test_retirement_and_close_release_cached_token_strings(config):
+    """Lifecycle cleanup drops secrets without breaking a retired caller."""
+    minted: list[str] = []
+    async with httpx.AsyncClient(transport=_minting(minted)) as client:
+        retired = GitHubAppCredentials(config, client=client)
+        await retired.token_for("o/n", holder="athr_1")
+        retired_cached = next(iter(retired._tokens.values()))
+        retired.retire()
+        assert not retired._tokens and retired_cached.token == ""
+        assert await retired.token_for("o/n", holder="athr_2") == "ghs_2"
+        assert not retired._tokens
+
+        closed = GitHubAppCredentials(config, client=client)
+        await closed.token_for("o/n", holder="athr_3")
+        closed_cached = next(iter(closed._tokens.values()))
+        await closed.aclose()
+        assert not closed._tokens and closed_cached.token == ""
+
+
+async def test_cross_thread_retirement_clears_tokens_on_the_owning_loop(config, monkeypatch):
+    """A settings refresh cannot mutate the event loop's token map from its worker."""
+    minted: list[str] = []
+    owner_thread = threading.get_ident()
+    cleanup_threads: list[int] = []
+    cleaned = asyncio.Event()
+    async with httpx.AsyncClient(transport=_minting(minted)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        await credentials.token_for("o/n", holder="athr_1")
+        cached = next(iter(credentials._tokens.values()))
+        original_clear = credentials._clear_tokens
+
+        def tracked_clear() -> None:
+            cleanup_threads.append(threading.get_ident())
+            original_clear()
+            cleaned.set()
+
+        monkeypatch.setattr(credentials, "_clear_tokens", tracked_clear)
+        await asyncio.to_thread(credentials.retire)
+        await asyncio.wait_for(cleaned.wait(), timeout=1)
+
+        assert cleanup_threads == [owner_thread]
+        assert not credentials._tokens and cached.token == ""
 
 
 async def test_a_token_github_refused_is_not_served_again(config):

@@ -21,8 +21,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, BinaryIO, Final, cast
 
 from cloud_agent_host.sandbox_archive_bundle import (
+    DEFAULT_ARCHIVE_COMPRESSION_LEVEL,
     BoundedDigestWriter,
-    build_sandbox_archive_bundle,
+    spool_sandbox_archive,
 )
 from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveAlreadyExists,
@@ -44,7 +45,7 @@ if TYPE_CHECKING:
         ChatSandboxSpec,
         RetainedChatBackend,
     )
-    from cloud_agent_host.sandbox_archive_bundle import ArchivePhase
+    from cloud_agent_host.sandbox_archive_bundle import ArchivePhase, SpooledSandboxArchive
     from cloud_agent_host.sandbox_checkpoints import (
         CheckpointRestore,
         SandboxCheckpointCapture,
@@ -62,6 +63,15 @@ GIB: Final = 1024 * 1024 * 1024
 DEFAULT_ARCHIVE_SPOOL_BUDGET_BYTES: Final = 8 * GIB
 DEFAULT_ARCHIVE_OPERATION_TIMEOUT_S: Final = 12 * 60.0
 INITIAL_ARCHIVE_MARKER_FORMAT_VERSION: Final = 2
+# Every gzip level an initial bundle has been written at, newest first. A new
+# capture uses the first; hosts before #760 wrote 9. The marker names its
+# bundle's exact size and SHA-256, not the level, so a probe that has to
+# rebuild writes its one fetch of the workspace at each level until one
+# reproduces those bytes. Recording the level instead would take a new marker
+# version, which a host rolled back across it cannot decode: it would fail
+# every first turn holding such a marker, even one whose object is stored. Put
+# a new level first, and never drop one that a retained marker may still name.
+INITIAL_ARCHIVE_COMPRESSION_LEVELS: Final = (6, 9)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _GIT_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _ERROR_TYPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
@@ -98,6 +108,26 @@ def safe_archive_error_type(error: BaseException) -> str:
     """Return a bounded class name without copying provider-controlled text."""
     name = type(error).__name__
     return name if _ERROR_TYPE.fullmatch(name) else "Error"
+
+
+class _RebuildTooLarge(Exception):
+    """A rebuild outgrew the object ceiling, so it is not the marked bundle."""
+
+
+class _RebuildWriter(BoundedDigestWriter):
+    """Bound a probe's rebuild by the same object ceiling as a capture.
+
+    The marked bundle fitted under that ceiling. A rebuild at a level the
+    marker did not use can outgrow it, which is a mismatch to try the next
+    level for, not an object-limit failure.
+    """
+
+    def write(self, chunk: bytes | bytearray | memoryview) -> int:
+        """Write and hash ``chunk``, unless the rebuild has outgrown a limit."""
+        for maximum, _message in self._limits:
+            if self.size + len(chunk) > maximum:
+                raise _RebuildTooLarge
+        return super().write(chunk)
 
 
 @dataclass
@@ -569,6 +599,7 @@ class SandboxArchiveService:
                 phase="initial",
                 members=members,
                 base_sha=base_sha,
+                compression_level=INITIAL_ARCHIVE_COMPRESSION_LEVELS[0],
                 deadline=deadline,
             )
             try:
@@ -692,22 +723,14 @@ class SandboxArchiveService:
             # retry only the exact immutable bytes named by the marker. Either
             # racing conditional writer may win; the other can reconcile its
             # 412 only when the same metadata is present.
-            archive = self._build(
+            archive = self._rebuild_initial(
                 backend.spec,
                 inspection,
-                phase="initial",
+                marker,
                 members=members,
-                base_sha=marker.base_sha,
                 deadline=deadline,
             )
             try:
-                if (
-                    archive.size != marker.bundle_size_bytes
-                    or archive.sha256 != marker.bundle_sha256
-                ):
-                    raise SandboxError(
-                        "prepared workspace no longer matches its initial archive marker"
-                    )
                 receipt = self._upload_initial(
                     sandbox_id=backend.spec.sandbox_id,
                     generation=backend.spec.generation,
@@ -740,12 +763,15 @@ class SandboxArchiveService:
                 running=False,
                 deadline=operation.deadline,
             )
+            # A final bundle is uploaded once and never rebuilt to match a
+            # digest, so its gzip level decides only how long the stop takes.
             archive = self._build(
                 spec,
                 exact,
                 phase="final",
                 members=members,
                 base_sha=None,
+                compression_level=DEFAULT_ARCHIVE_COMPRESSION_LEVEL,
                 deadline=operation.deadline,
             )
             try:
@@ -948,8 +974,78 @@ class SandboxArchiveService:
         phase: ArchivePhase,
         members: Sequence[SharedMemberManifest],
         base_sha: str | None,
+        compression_level: int,
         deadline: float,
     ) -> _BuiltArchive:
+        with self._spool(
+            spec,
+            inspection,
+            phase=phase,
+            members=members,
+            base_sha=base_sha,
+            deadline=deadline,
+        ) as spooled:
+            return self._write(
+                spooled,
+                phase=phase,
+                compression_level=compression_level,
+                deadline=deadline,
+            )
+
+    def _rebuild_initial(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+        marker: SandboxInitialArchiveMarker,
+        *,
+        members: Sequence[SharedMemberManifest],
+        deadline: float,
+    ) -> _BuiltArchive:
+        """Rebuild the frozen workspace as exactly the bundle ``marker`` names.
+
+        The workspace is fetched once and written at each level an initial
+        bundle has been written at, until one write has the marked size and
+        SHA-256. Every other write is discarded before the next one starts, so
+        scratch space still holds at most one bundle beside its inputs.
+        """
+        with self._spool(
+            spec,
+            inspection,
+            phase="initial",
+            members=members,
+            base_sha=marker.base_sha,
+            deadline=deadline,
+        ) as spooled:
+            for level in INITIAL_ARCHIVE_COMPRESSION_LEVELS:
+                try:
+                    archive = self._write(
+                        spooled,
+                        phase="initial",
+                        compression_level=level,
+                        deadline=deadline,
+                        rebuild=True,
+                    )
+                except _RebuildTooLarge:
+                    continue
+                if (
+                    archive.size == marker.bundle_size_bytes
+                    and archive.sha256 == marker.bundle_sha256
+                ):
+                    return archive
+                archive.close()
+        raise SandboxError("prepared workspace no longer matches its initial archive marker")
+
+    @contextmanager
+    def _spool(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+        *,
+        phase: ArchivePhase,
+        members: Sequence[SharedMemberManifest],
+        base_sha: str | None,
+        deadline: float,
+    ) -> Iterator[SpooledSandboxArchive]:
         self._check_deadline(deadline)
         # Membership is an admission-time fence, not durable archive identity.
         # A replacement sandbox manager can reconstruct a stopped container before the
@@ -959,22 +1055,6 @@ class SandboxArchiveService:
         # native histories; keep the outer manifest limited to immutable
         # sandbox/container facts so the same stopped bytes stay deterministic.
         _ = members
-        stream = cast(
-            "BinaryIO",
-            tempfile.TemporaryFile(  # noqa: SIM115 - ownership passes to queue/uploader.
-                prefix=f"sandbox-{phase}-archive-"
-            ),
-        )
-        maximum = self._config.max_archive_bytes
-        bounded = BoundedDigestWriter(
-            stream,
-            limits=(
-                (maximum, f"compressed sandbox archive exceeds the {maximum}-byte object limit"),
-            ),
-            what="a compressed sandbox archive",
-            source="sandbox archive bundle builder",
-            check=lambda: self._check_deadline(deadline),
-        )
         metadata: dict[str, object] = {
             "sandbox_namespace": self._namespace,
             "sandbox": {
@@ -1008,15 +1088,49 @@ class SandboxArchiveService:
             finally:
                 self._check_deadline(deadline)
 
+        with spool_sandbox_archive(
+            phase=phase,
+            fetch_archive=fetch_archive,
+            metadata=metadata,
+            max_member_bytes=self._config.max_archive_bytes,
+            max_total_bytes=self._config.max_archive_bytes,
+        ) as spooled:
+            yield spooled
+
+    def _write(
+        self,
+        spooled: SpooledSandboxArchive,
+        *,
+        phase: ArchivePhase,
+        compression_level: int,
+        deadline: float,
+        rebuild: bool = False,
+    ) -> _BuiltArchive:
+        """Write one bundle from ``spooled`` to new scratch space.
+
+        The bundle is bounded by the object ceiling. For a ``rebuild``,
+        outgrowing it raises :class:`_RebuildTooLarge` instead.
+        """
+        self._check_deadline(deadline)
+        stream = cast(
+            "BinaryIO",
+            tempfile.TemporaryFile(  # noqa: SIM115 - ownership passes to queue/uploader.
+                prefix=f"sandbox-{phase}-archive-"
+            ),
+        )
+        maximum = self._config.max_archive_bytes
+        writer = _RebuildWriter if rebuild else BoundedDigestWriter
+        bounded = writer(
+            stream,
+            limits=(
+                (maximum, f"compressed sandbox archive exceeds the {maximum}-byte object limit"),
+            ),
+            what="a compressed sandbox archive",
+            source="sandbox archive bundle builder",
+            check=lambda: self._check_deadline(deadline),
+        )
         try:
-            build_sandbox_archive_bundle(
-                cast("BinaryIO", bounded),
-                phase=phase,
-                fetch_archive=fetch_archive,
-                metadata=metadata,
-                max_member_bytes=self._config.max_archive_bytes,
-                max_total_bytes=self._config.max_archive_bytes,
-            )
+            spooled.write(cast("BinaryIO", bounded), compression_level=compression_level)
             bounded.flush()
             self._check_deadline(deadline)
             if bounded.size <= 0:

@@ -1,25 +1,31 @@
 """Attempt-scoped HTTP client for worker control-plane endpoints.
 
 The runner constructs this client at its orchestration boundary. This module
-owns request payloads, fencing responses, event replay, and request deadlines;
-lease renewal and turn scheduling remain in the runner.
+owns request payloads, fencing responses, event delivery and replay, and
+request deadlines; lease renewal and turn scheduling remain in the runner.
 """
 
 from __future__ import annotations
 
 import base64
+import json
+import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from cloud_agent_host.claimed_job import LeaseLost
+from cloud_agent_host.event_sender import OrderedSender
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.measurement_delivery import DELIVERY_TIMEOUT_S
 from cloud_agent_host.runtimes import NormalizedEvent  # noqa: TC001 — Public method introspection.
 from cloud_agent_shared.secret_redaction import SecretRedactor
 from cloud_agent_shared.shared_protocol import ABANDON_DETAIL_MAX_CHARS
 from cloud_agent_shared.storable_text import storable_json
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # Heartbeats must answer before ordinary lifecycle requests consume the lease.
 _HEARTBEAT_TIMEOUT_S = 10.0
@@ -32,8 +38,28 @@ _ATTACHMENT_TIMEOUT_S = 120.0
 _EVENT_RETRY_BUDGET_S = 60.0
 _EVENT_RETRY_MAX_DELAY_S = 8.0
 _EVENT_RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+#: What a control plane from before the batch endpoint answers it with.
+_EVENT_BATCH_UNSUPPORTED = frozenset({404, 405})
+_JSON_CONTENT = {"Content-Type": "application/json"}
 
 logger = get_logger(__name__)
+
+
+def _event_json(event_type: str, payload: Any, event_seq: int) -> bytes:
+    """One event as an upload carries it, encoded the way httpx encodes JSON.
+
+    Encoded where it is reported, so an event that cannot be sent fails the
+    append that reported it, and the sender only joins what is encoded.
+    """
+    body = {"event_type": event_type, "payload": payload, "event_seq": event_seq}
+    return json.dumps(
+        # Tool output can hold half a surrogate pair, which UTF-8 cannot
+        # encode, or a NUL, which the control plane cannot store.
+        storable_json(body),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
 
 
 def _log_control_failure(operation: str, job_id: str, exc: Exception) -> None:
@@ -66,9 +92,30 @@ class ControlPlane:
         self._preview_redactors: dict[str, SecretRedactor] = {}
         self._preview_contexts: dict[str, tuple[str, dict[str, Any]]] = {}
         self._secret_values: dict[str, str] = {}
+        # One appending thread at a time: the numbers, the redactors' state and
+        # the queue's order are only the same order while it holds this.
+        self._appending = threading.Lock()
+        self._events = OrderedSender(self._deliver_events)
+        # Cleared by a control plane from before the batch endpoint.
+        self._batches = True
+
+    @property
+    def lease_lost(self) -> bool:
+        """Whether an event upload was refused for a lost lease.
+
+        Uploads are not waited for, so the turn loop reads this beside the
+        heartbeat's own flag, and a lost lease ends the turn there.
+        """
+        return self._events.lease_lost
 
     def close(self) -> None:
-        """Release the HTTP connection pool."""
+        """Stop the event sender and release the HTTP connection pool.
+
+        Whatever events are still queued are dropped: ``finish`` delivers a
+        turn's events, so what remains belongs to an attempt that lost its
+        lease or never ended, and cannot be recorded now.
+        """
+        self._events.close()
         self._client.close()
 
     def _post(
@@ -77,9 +124,8 @@ class ControlPlane:
         payload: dict[str, Any] | None = None,
         *,
         timeout: float | None = None,
-        already_redacted: bool = False,
     ) -> dict[str, Any]:
-        body = (payload or {}) if already_redacted else self._redactor.payload(payload or {})
+        body = self._redactor.payload(payload or {})
         response = self._client.post(
             f"{self._base}{path}",
             # A reason quoting what the sandbox printed can hold half a
@@ -113,52 +159,129 @@ class ControlPlane:
         return response.status_code, parsed if isinstance(parsed, dict) else {}
 
     def append_event(self, event: NormalizedEvent) -> None:
-        """Report one normalized event, retrying with backoff since replay is safe.
+        """Number, redact and queue one normalized event for the ordered sender.
+
+        Everything that depends on order happens here, on the caller's thread:
+        the secret redaction, a preview's redactor (which carries state from
+        one delta to the next), the number and the encoding. The call returns
+        once the event is queued, so a slow or restarting control plane no
+        longer holds up the turn's stream; it waits only while the sender holds
+        its fill. What made the sender give up is raised here, by the next
+        append after it: a lost lease, or a control plane that refused an
+        upload or stayed unreachable for the whole retry budget. Unless the
+        lease was lost, that append's event is queued first: it is often the
+        error the ending turn reports, once, and the finish that follows
+        delivers it to a control plane that is back.
+        """
+        with self._appending:
+            payload = self._redactor.payload(event.payload)
+            if isinstance(event.payload, dict) and isinstance(event.payload.get("delta"), str):
+                stream_id = str(
+                    event.payload.get("preview_id") or event.payload.get("id") or event.event_type
+                )
+                if event.payload.get("reset") or stream_id not in self._preview_redactors:
+                    self._preview_redactors[stream_id] = SecretRedactor(self._secret_values)
+                payload["delta"] = self._preview_redactors[stream_id].feed(event.payload["delta"])
+                self._preview_contexts[stream_id] = (
+                    event.event_type,
+                    {k: v for k, v in payload.items() if k not in {"delta", "reset"}},
+                )
+            self._event_seq += 1
+            self._events.put(_event_json(event.event_type, payload, self._event_seq))
+
+    def flush(self) -> None:
+        """Wait until every queued event is stored, or raise what stopped one.
+
+        Raises what the next append would: a lost lease, or what made the
+        sender give up.
+        """
+        self._events.flush()
+
+    def _drain_events(self) -> None:
+        """Deliver every queued event ahead of a write that ends the attempt.
+
+        What each preview's redactor still holds back is queued first. The
+        ending write is attempted even when the drain was given up on, as it
+        was when each event was posted on its own: an event the control plane
+        could not record must not strand the attempt as running. A lost lease
+        is final.
+        """
+        try:
+            with self._appending:
+                for stream_id, redactor in tuple(self._preview_redactors.items()):
+                    final = redactor.flush()
+                    if final:
+                        event_type, payload = self._preview_contexts[stream_id]
+                        self._event_seq += 1
+                        self._events.put(
+                            _event_json(event_type, {**payload, "delta": final}, self._event_seq)
+                        )
+                self._preview_redactors.clear()
+                self._preview_contexts.clear()
+            self.flush()
+        except LeaseLost:
+            raise
+        except Exception as exc:
+            _log_control_failure("event_drain", self.job_id, exc)
+
+    def _deliver_events(self, batch: list[bytes], stopped: Callable[[], bool]) -> None:
+        """Store one batch of encoded events in order, or raise why it was not stored."""
+        if self._batches:
+            try:
+                self._upload("events:batch", b'{"events":[' + b",".join(batch) + b"]}", stopped)
+                return
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code not in _EVENT_BATCH_UNSUPPORTED:
+                    raise
+                # A control plane from before batches, still answering while a
+                # deploy rolls forward, or again after one rolled back.
+                # COMPAT(remove-after=2026-12-31): every control plane serves
+                # events:batch; this fallback to one post per event goes then.
+                self._batches = False
+                logger.info(
+                    "agent_event_batches_unsupported job_id=%s status_code=%s",
+                    self.job_id,
+                    exc.response.status_code,
+                )
+        for body in batch:
+            self._upload("events", body, stopped)
+
+    def _upload(self, endpoint: str, content: bytes, stopped: Callable[[], bool]) -> None:
+        """Post encoded events, retrying with backoff since replay is safe.
 
         The retry exists *because of* ``event_seq``: before it, a response
         lost on the wire left the runner unable to tell "never stored" from
         "stored, answer dropped", and re-sending risked a duplicate row in the
         owner's stream. With the number attached, the server answers a replay
-        with the already-stored id.
+        with the already-stored id, so a batch is sent again whole.
 
         One immediate retry was not enough: a control plane being recreated by
         a deploy refuses connections, or its proxy answers 502, for longer
         than that, and the escaping error ended an otherwise healthy turn and
         marked its native context lost. Transport errors and transient statuses
         are retried for a bounded time instead, well inside the lease the
-        heartbeat keeps renewing meanwhile; a lost lease (409) still ends the
-        turn at once.
+        heartbeat keeps renewing meanwhile; a lost lease (409) is not retried,
+        and neither is anything once the client is closed.
         """
-        payload = self._redactor.payload(event.payload)
-        if isinstance(event.payload, dict) and isinstance(event.payload.get("delta"), str):
-            stream_id = str(
-                event.payload.get("preview_id") or event.payload.get("id") or event.event_type
-            )
-            if event.payload.get("reset") or stream_id not in self._preview_redactors:
-                self._preview_redactors[stream_id] = SecretRedactor(self._secret_values)
-            payload["delta"] = self._preview_redactors[stream_id].feed(event.payload["delta"])
-            self._preview_contexts[stream_id] = (
-                event.event_type,
-                {k: v for k, v in payload.items() if k not in {"delta", "reset"}},
-            )
-        self._event_seq += 1
-        body = {
-            "event_type": event.event_type,
-            "payload": payload,
-            "event_seq": self._event_seq,
-        }
-        path = f"/v1/agent/worker/jobs/{self.job_id}/events"
+        url = f"{self._base}/v1/agent/worker/jobs/{self.job_id}/{endpoint}"
         give_up_at = time.monotonic() + _EVENT_RETRY_BUDGET_S
         delay = 1.0
         while True:
             try:
-                self._post(path, body, already_redacted=True)
+                response = self._client.post(url, content=content, headers=_JSON_CONTENT)
+                if response.status_code == 409:
+                    raise LeaseLost(response.text[:200])
+                response.raise_for_status()
                 return
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
                 if (
-                    isinstance(exc, httpx.HTTPStatusError)
-                    and exc.response.status_code not in _EVENT_RETRY_STATUSES
-                ) or time.monotonic() + delay > give_up_at:
+                    (
+                        isinstance(exc, httpx.HTTPStatusError)
+                        and exc.response.status_code not in _EVENT_RETRY_STATUSES
+                    )
+                    or time.monotonic() + delay > give_up_at
+                    or stopped()
+                ):
                     raise
                 _log_control_failure("event_retry", self.job_id, exc)
             time.sleep(delay)
@@ -408,9 +531,11 @@ class ControlPlane:
         """Hand this never-admitted turn back to the queue without spending an attempt.
 
         The control plane refuses once the turn was admitted, so ``False`` is
-        never a reason to retry: the lease decides, as it always would.
+        never a reason to retry: the lease decides, as it always would. The
+        release ends the attempt, so the events it queued are delivered first.
         """
         try:
+            self._drain_events()
             self._post(f"/v1/agent/worker/jobs/{self.job_id}/release", {"reason": reason})
         except Exception as exc:
             _log_control_failure("release", self.job_id, exc)
@@ -418,44 +543,37 @@ class ControlPlane:
         return True
 
     def suspend_terminals(self, phase: str) -> None:
-        """Freeze owner PTYs before workspace preparation or group snapshot capture."""
+        """Freeze owner PTYs before workspace preparation or group snapshot capture.
+
+        The endpoint writes its own lifecycle event, so the events this attempt
+        queued before it are stored first, in the order they happened.
+        """
+        self.flush()
         self._post(
             f"/v1/agent/worker/jobs/{self.job_id}/terminals/suspend",
             {"phase": phase},
         )
 
     def resume_terminals(self) -> None:
-        """Resume retained PTYs and publish readiness for this attempt."""
+        """Resume retained PTYs and publish readiness for this attempt.
+
+        After the events queued before it, as :meth:`suspend_terminals` is.
+        """
+        self.flush()
         self._post(f"/v1/agent/worker/jobs/{self.job_id}/terminals/resume")
 
     def finish(self, state: str, detail: str | None = None, base_sha: str | None = None) -> None:
-        """Drive the fenced terminal transition.
+        """Drive the fenced terminal transition, after the attempt's events.
 
         ``base_sha`` reports the commit the agent actually worked from. A job
         may be submitted without one, and the publisher cannot apply a patch
         without knowing its base — so the runner, which resolves it when it
         checks the repository out, is the component that knows.
+
+        Every event the attempt reported is delivered first, so the error a
+        failing turn reported is stored ahead of the turn's end.
         """
-        for stream_id, redactor in tuple(self._preview_redactors.items()):
-            final = redactor.flush()
-            if final:
-                event_type, payload = self._preview_contexts[stream_id]
-                self._event_seq += 1
-                body = {
-                    "event_type": event_type,
-                    "payload": {**payload, "delta": final},
-                    "event_seq": self._event_seq,
-                }
-                try:
-                    self._post(
-                        f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True
-                    )
-                except httpx.TransportError:
-                    self._post(
-                        f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True
-                    )
-        self._preview_redactors.clear()
-        self._preview_contexts.clear()
+        self._drain_events()
         self._post(
             f"/v1/agent/worker/jobs/{self.job_id}/finish",
             {"state": state, "detail": detail, "base_sha": base_sha},
