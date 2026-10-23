@@ -195,7 +195,7 @@ async def test_web_search_keeps_the_residency_through_admission(client, store, m
             store.residency_turn = None
         return result
 
-    async def search(arguments):
+    async def search(arguments, *, client=None):
         called.append(arguments)
         return {"query": arguments["query"], "organic": []}
 

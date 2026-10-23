@@ -284,6 +284,38 @@ msgstr ""
 
 #: ../developer/runner-lease-troubleshooting.md:86
 msgid ""
+"The turn loop does not wait for event uploads. It numbers, redacts and "
+"queues each event as it reads it, and one sender thread posts the queue in "
+"order to `POST /v1/agent/worker/jobs/<job>/events:batch`: up to 100 events "
+"or 256 KiB per request, stored by the control plane in one transaction. A "
+"batch is retried whole for up to 60 seconds on transport failures and HTTP "
+"408/429/500/502/503/504, with delays doubling from one second up to eight; "
+"the event numbers make the retry safe. The queue holds up to 1,000 events or"
+" 4 MiB, and past that the turn loop waits, so a CLI whose events cannot be "
+"recorded stops being read. An upload refused with 409 ends the turn as a "
+"refused heartbeat does. A turn's outcome waits for its events: if the sender"
+" gives up, the turn fails before it settles, and its error event and "
+"`finish` are still attempted. `finish`, the release and the terminal suspend"
+" and resume requests also wait for the events queued before them, which "
+"keeps the log in order. A control plane that answers the batch route with "
+"404 or 405 predates it; the runner logs `agent_event_batches_unsupported` "
+"and posts the rest of that attempt's events one at a time to `/events`."
+msgstr ""
+"轮次循环不再等事件上传。它每读到一个事件，就给它编号、脱敏并放进队列，由一个发送线程按顺序把队列发到 `POST "
+"/v1/agent/worker/jobs/<job>/events:batch`：每个请求最多 100 个事件或 "
+"256 KiB，控制面在一个事务里把它们存下。遇到传输失败，或者 HTTP "
+"408/429/500/502/503/504 时，整批最多重试 60 秒，间隔从 1 秒起翻倍，最长 8 "
+"秒；有了事件编号，重试是安全的。队列最多放 1,000 个事件或 4 MiB，再多时轮次循环就会等着，所以事件记不下来的"
+" CLI 不会再被继续读取。上传被 409 "
+"拒绝时，轮次会像心跳被拒绝那样结束。轮次的结果要等它的事件存好：如果发送线程放弃了，轮次会在结算之前失败，但仍会尝试发出它的错误事件和"
+" "
+"`finish`。`finish`、释放请求，以及终端的挂起和恢复请求，也都会先等排在它们前面的事件存好，这样日志的顺序不会乱。如果控制面对批量接口回答"
+" 404 或 405，说明它比这个接口旧；runner 会记一条 "
+"`agent_event_batches_unsupported` 日志，然后把这个 attempt 剩下的事件逐个发到"
+" `/events`。"
+
+#: ../developer/runner-lease-troubleshooting.md:103
+msgid ""
 "Post-claim preparation outside the shared execution handler, such as "
 "image inspection or manifest validation, has an outer failure handler "
 "too. It attempts a terminal failure before stopping heartbeat renewal and"
@@ -294,7 +326,7 @@ msgstr ""
 "认领之后、在共享执行处理流程之外的准备工作，比如检查镜像或校验清单，外面也包了一层失败处理。它会在停止心跳续期之前，先尝试写入一个失败的终态；即使上报失败，也会把异常类记进日志。如果租约已被明确拒绝，就跳过这次写入。这样早期的"
 " setup 失败能留下记录，但问题本身不会因此被修好。"
 
-#: ../developer/runner-lease-troubleshooting.md:92
+#: ../developer/runner-lease-troubleshooting.md:109
 msgid ""
 "After supervisor and control-plane settlement both succeed, a failed "
 "upload of the final `shared_workspace_settled` notice does not fail the "
@@ -305,7 +337,7 @@ msgstr ""
 "supervisor 和控制平面两边的结算都成功之后，如果最后那条 `shared_workspace_settled` "
 "通知没传上去，这一轮不会因此失败：runner 照样提交成功的终态。租约被拒绝时，这次写入不会发生。更早阶段的结算失败，仍然按失败处理。"
 
-#: ../developer/runner-lease-troubleshooting.md:97
+#: ../developer/runner-lease-troubleshooting.md:114
 msgid ""
 "The control plane's admission and settlement receipts are retried **for "
 "as long as the lease holds**, using ten-second HTTP timeouts and delays "
@@ -326,7 +358,7 @@ msgstr ""
 " supervisor 已经结算好的会话。supervisor 的结算最多尝试三次，间隔五秒。只有网络传输失败和 HTTP 408/502/503/504 "
 "会重试；409/410 就是最终结果。提示词只发送一次，而且是在准入确认成功之后。"
 
-#: ../developer/runner-lease-troubleshooting.md:109
+#: ../developer/runner-lease-troubleshooting.md:126
 msgid ""
 "Supervisor settlement retains the last token's receipt until another "
 "activation takes ownership. Control-plane settlement returns the recorded"
@@ -339,11 +371,11 @@ msgstr ""
 "和激活，返回已记录的边界。重复结算不会让工作区的 epoch 加一，不会追加快照，也不会改变原生轮次的序号。sandbox manager "
 "重启后，内存里的回执就没了，所以跨重启、无法确定是否完成的情况，一律按失败处理。"
 
-#: ../developer/runner-lease-troubleshooting.md:116
+#: ../developer/runner-lease-troubleshooting.md:133
 msgid "When a retained conversation can continue"
 msgstr "保留对话什么时候还能继续"
 
-#: ../developer/runner-lease-troubleshooting.md:118
+#: ../developer/runner-lease-troubleshooting.md:135
 msgid ""
 "A reported preparation failure **before admission** can leave an existing"
 " conversation usable. The runner abandons the activation and reports a "
@@ -355,7 +387,7 @@ msgstr ""
 "**准入之前**报告的准备失败，已有的对话可能还能继续用。runner "
 "会放弃这次激活，报告一个失败的轮次；下一条消息可以接着用保留的原生会话。前提是确切知道是哪个保留容器。如果在记下容器身份之前就失败了，就证明不了这一点；而且能不能上报错误事件，不能成为报告失败的前提。"
 
-#: ../developer/runner-lease-troubleshooting.md:124
+#: ../developer/runner-lease-troubleshooting.md:141
 msgid ""
 "An admission request with no received acknowledgement is different: the "
 "database may have committed it even though the runner has not sent the "
@@ -369,7 +401,7 @@ msgstr ""
 "只能释放准入之前的轮次（`admitted_job_id IS NULL`），所以释放不了这个状态不确定的轮次；转入终态时，会把它的上下文标成 "
 "LOST。runner 绝不会重放一个没有确认过的已准入提示词。"
 
-#: ../developer/runner-lease-troubleshooting.md:131
+#: ../developer/runner-lease-troubleshooting.md:148
 msgid ""
 "Recovery after an expired activation or killed runner requires a further "
 "protocol: durably quarantine the member, fence the old runner's "
@@ -386,7 +418,7 @@ msgstr ""
 "`busy=false` 是不够的，因为工作区的 setup 命令不走它的 agent "
 "轮次通道。绝不能只因为准入字段为空就把一个轮次重新入队，也不能清掉 lost 标记，更不能为了让界面显示正常就重放一个已准入的提示词。"
 
-#: ../developer/runner-lease-troubleshooting.md:140
+#: ../developer/runner-lease-troubleshooting.md:157
 msgid ""
 "Owner-facing wording describes interrupted responses and unavailable "
 "conversations in plain language. Infrastructure details stay in API "
@@ -397,31 +429,31 @@ msgstr ""
 "给所有者看的文字，会用大白话说明回复被中断了、对话用不了了。基础设施层面的细节留在 API 记录和运维日志里；任务错误和 assistant "
 "消息都原样保留。改了这些文字之后，历史上已经是 LOST 的成员关系依然保持禁用。"
 
-#: ../developer/runner-lease-troubleshooting.md:145
+#: ../developer/runner-lease-troubleshooting.md:162
 msgid "The safe release case: a child never accepted its turn"
 msgstr "可以安全释放的情况：子进程从没接下这个轮次"
 
-#: ../developer/runner-lease-troubleshooting.md:147
+#: ../developer/runner-lease-troubleshooting.md:164
 msgid ""
 "The host runs each turn in a child process. It can release a claim back "
 "to the queue only when it can prove that child never accepted the turn:"
 msgstr "主机为每个轮次单独起一个子进程。只有能证明这个子进程从没接下这一轮时，主机才能把认领释放回队列："
 
-#: ../developer/runner-lease-troubleshooting.md:150
+#: ../developer/runner-lease-troubleshooting.md:167
 msgid "Process creation failed."
 msgstr "进程没创建成功。"
 
-#: ../developer/runner-lease-troubleshooting.md:151
+#: ../developer/runner-lease-troubleshooting.md:168
 msgid "Payload delivery failed."
 msgstr "数据没送到子进程。"
 
-#: ../developer/runner-lease-troubleshooting.md:152
+#: ../developer/runner-lease-troubleshooting.md:169
 msgid ""
 "The child closed its handover descriptor without accepting, including a "
 "failed read-only Docker/network preflight before acceptance."
 msgstr "子进程没接任务就关闭了交接用的描述符，包括接任务之前那次只读的 Docker 或网络 preflight 失败的情况。"
 
-#: ../developer/runner-lease-troubleshooting.md:155
+#: ../developer/runner-lease-troubleshooting.md:172
 msgid ""
 "A silent child that remains alive is not proof and is never released. "
 "After acceptance, crashes, kills and lost acknowledgements belong to the "
@@ -429,7 +461,7 @@ msgid ""
 " turn."
 msgstr "子进程一直不吭声但还活着，这不算证据，永远不会因此释放。一旦接下任务，之后的崩溃、被杀和确认丢失都交给租约协议处理；对话可能因此丢失，但绝不会把这一轮重跑一遍。"
 
-#: ../developer/runner-lease-troubleshooting.md:159
+#: ../developer/runner-lease-troubleshooting.md:176
 msgid ""
 "Release uses `POST /v1/agent/worker/jobs/<job>/release` with that turn's "
 "worker token. The control plane requires the same still-running attempt "
@@ -441,7 +473,7 @@ msgstr ""
 "令牌。控制平面要求两点都满足：是同一个仍在运行的 "
 "attempt、同一个租约代次，**并且**没有任何成员关系已经准入了这个任务。准入条件由数据库语句本身强制检查，所以主机即使观察错了，也没法把已准入的工作重新入队。"
 
-#: ../developer/runner-lease-troubleshooting.md:165
+#: ../developer/runner-lease-troubleshooting.md:182
 msgid ""
 "Consecutive launch failures stop claims on that host and back off. "
 "Heartbeats report `launch_error`, which appears beside the host on Admin "

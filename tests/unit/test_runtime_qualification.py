@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent_host import runtime_qualification as qualification
+from cloud_agent_host.network_guard import VERIFICATION_KEY
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, ProcessBackend, SandboxError
 
 
@@ -79,6 +80,49 @@ def test_a_verdict_survives_the_json_handoff(lab):
     assert lab.host.refresh()
     adopted, _child_backend = _child(lab, json.loads(json.dumps(lab.host.verdict())))
     assert adopted
+
+
+class _Guard:
+    """A guard whose every hand-over is counted; the real one renews when not recent."""
+
+    def __init__(self) -> None:
+        self.handovers = 0
+
+    def handover(self) -> dict[str, object]:
+        self.handovers += 1
+        return {"verified_at": 1.0, "helper_image": "sha256:helper"}
+
+
+@pytest.mark.parametrize("network", [True, False])
+def test_a_handover_carries_the_verdict_and_the_hosts_verification_of_the_rules(
+    lab, monkeypatch, network
+):
+    """Both travel in the one hand-off; the rules' only where there are rules to verify."""
+    guard = _Guard()
+    monkeypatch.setattr(lab.backend, "sandbox_network", object() if network else None)
+    monkeypatch.setattr(lab.backend, "network_guard", lambda: guard)
+    assert lab.host.refresh()
+
+    handed = lab.host.handover()
+
+    assert handed[qualification.VERDICT_KEY] == lab.host.verdict()
+    if network:
+        assert handed[VERIFICATION_KEY] == {"verified_at": 1.0, "helper_image": "sha256:helper"}
+    else:
+        assert VERIFICATION_KEY not in handed
+    assert guard.handovers == (1 if network else 0)
+
+
+def test_a_host_without_a_verdict_still_hands_over_its_verification_of_the_rules(monkeypatch):
+    """A runc host has no verdict to give, but its children still start no helper."""
+    guard = _Guard()
+    backend = ContainerBackend(image="fixture@sha256:abc")
+    monkeypatch.setattr(backend, "sandbox_network", object())
+    monkeypatch.setattr(backend, "network_guard", lambda: guard)
+
+    assert qualification.HostQualification(backend).handover() == {
+        VERIFICATION_KEY: {"verified_at": 1.0, "helper_image": "sha256:helper"}
+    }
 
 
 @pytest.mark.parametrize("change", ["epoch", "image", "recheck"])

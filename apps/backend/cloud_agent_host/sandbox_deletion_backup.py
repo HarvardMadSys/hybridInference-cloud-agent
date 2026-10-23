@@ -20,8 +20,11 @@ import httpx
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
+from cloud_agent_host.upload_import import forget_deleted_container_uploads
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 
 # Single-object S3 PUT maximum. A larger sandbox needs a separate multipart
@@ -30,6 +33,17 @@ MAX_ARCHIVE_BYTES = 5 * 1024**3
 # Preserve existing deletion receipts across the Sandbox Manager service rename.
 DEFAULT_ARCHIVE_STATE_DIR = "/var/lib/hybridinference/broker-archives"
 _HASH_CHUNK_BYTES = 1024 * 1024
+# The archive is a tar of ``manifest.json`` and the root filesystem export. A
+# prepared request keeps the export and the tar's bytes before it, not a second
+# copy of the export inside a whole archive: the upload sends those bytes, the
+# export, and the tar's end in turn. A request that an earlier version prepared
+# keeps the whole archive as ``archive.tar``.
+# COMPAT(remove-after=2026-12-31): no host keeps a request an earlier version
+# prepared; reading ``archive.tar`` goes then, with this name.
+_ROOTFS_MEMBER = "container-rootfs.tar"
+_ARCHIVE_HEAD = "archive.head"
+_LEGACY_ARCHIVE = "archive.tar"
+_ARCHIVE_FILES = ("rootfs.partial", _ROOTFS_MEMBER, _ARCHIVE_HEAD, _LEGACY_ARCHIVE)
 
 
 @dataclass(frozen=True)
@@ -97,11 +111,7 @@ class SandboxDeletionBackupService:
             except FileExistsError:
                 if path.read_bytes() != encoded:
                     raise SessionLeaseLost("sandbox archive receipt changed") from None
-            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            _sync_directory(path.parent)
         finally:
             os.unlink(temporary)
 
@@ -133,6 +143,50 @@ class SandboxDeletionBackupService:
             while chunk := stream.read(_HASH_CHUNK_BYTES):
                 digest.update(chunk)
         return digest.hexdigest()
+
+    def _seal(self, directory: Path, rootfs: Path, manifest: bytes) -> tuple[str, int]:
+        """Durably keep what the archive is sent from, and return its SHA-256 and size.
+
+        The archive is never written out whole: it is the tar's bytes before
+        the export, the export, and the tar's end, hashed here and sent in turn.
+        """
+        head = _archive_head(manifest, rootfs)
+        rootfs_bytes = rootfs.stat().st_size
+        tail = _archive_tail(len(head), rootfs_bytes)
+        size_bytes = len(head) + rootfs_bytes + len(tail)
+        if size_bytes > self._max_bytes:
+            raise SandboxError("sandbox archive exceeds the S3 upload size limit")
+        digest = hashlib.sha256()
+        for chunk in _archive_chunks(head, rootfs, tail):
+            digest.update(chunk)
+        with (directory / _ARCHIVE_HEAD).open("wb") as output:
+            os.chmod(directory / _ARCHIVE_HEAD, 0o600)
+            output.write(head)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(rootfs, directory / _ROOTFS_MEMBER)
+        # Both are durable, under these names, before a receipt names their archive.
+        _sync_directory(directory)
+        return digest.hexdigest(), size_bytes
+
+    @staticmethod
+    def _stored_archive(directory: Path) -> tuple[tuple[bytes | Path, ...], int | None]:
+        """Return the pieces a prepared archive is sent from, and its size if they agree."""
+        legacy = directory / _LEGACY_ARCHIVE
+        if legacy.exists():
+            return (legacy,), legacy.stat().st_size
+        head = (directory / _ARCHIVE_HEAD).read_bytes()
+        rootfs = directory / _ROOTFS_MEMBER
+        rootfs_bytes = rootfs.stat().st_size
+        if _declared_rootfs_bytes(head) != rootfs_bytes:
+            return (), None
+        tail = _archive_tail(len(head), rootfs_bytes)
+        return (head, rootfs, tail), len(head) + rootfs_bytes + len(tail)
+
+    @staticmethod
+    def _remove_archive(directory: Path) -> None:
+        for name in _ARCHIVE_FILES:
+            (directory / name).unlink(missing_ok=True)
 
     @staticmethod
     def _match_receipt(record: dict[str, Any], sha256: str, size_bytes: int) -> None:
@@ -175,7 +229,6 @@ class SandboxDeletionBackupService:
                 container_id=identity.expected_container_id,
             )
             rootfs = directory / "rootfs.partial"
-            archive = directory / "archive.tar"
             try:
                 # Preserve the full immutable spec only in the private host
                 # receipt. The S3 recovery manifest omits arbitrary labels,
@@ -193,6 +246,9 @@ class SandboxDeletionBackupService:
                         output=output,
                         max_bytes=max(0, self._max_bytes - _HASH_CHUNK_BYTES),
                     )
+                    # The export is part of the archive the receipt names.
+                    output.flush()
+                    os.fsync(output.fileno())
                 manifest.update(
                     {
                         "format": "cloud-agent-sandbox-archive-v1",
@@ -204,24 +260,12 @@ class SandboxDeletionBackupService:
                     }
                 )
                 payload = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
-                with archive.open("wb") as output:
-                    os.chmod(archive, 0o600)
-                    with tarfile.open(fileobj=output, mode="w") as bundle:
-                        info = tarfile.TarInfo("manifest.json")
-                        info.size = len(payload)
-                        info.mode = 0o600
-                        bundle.addfile(info, io.BytesIO(payload))
-                        bundle.add(rootfs, arcname="container-rootfs.tar", recursive=False)
-                    output.flush()
-                    os.fsync(output.fileno())
-                size_bytes = archive.stat().st_size
-                if size_bytes > self._max_bytes:
-                    raise SandboxError("sandbox archive exceeds the S3 upload size limit")
+                sha256, size_bytes = self._seal(directory, rootfs, payload)
                 receipt = {
                     "request_id": identity.request_id,
                     "container_id": identity.expected_container_id,
                     "archive_key": identity.archive_key,
-                    "sha256": self._digest(archive),
+                    "sha256": sha256,
                     "size_bytes": size_bytes,
                 }
                 self._append(
@@ -234,7 +278,7 @@ class SandboxDeletionBackupService:
                 )
                 return receipt
             except BaseException:
-                archive.unlink(missing_ok=True)
+                self._remove_archive(directory)
                 self._supervisor.abort_archive(
                     spec,
                     request_id=identity.request_id,
@@ -282,17 +326,18 @@ class SandboxDeletionBackupService:
             }
             if headers != expected_headers:
                 raise ValueError("sandbox archive upload headers must bind checksum and size")
-            archive = directory / "archive.tar"
-            if archive.stat().st_size != size_bytes or self._digest(archive) != sha256:
+            pieces, stored_bytes = self._stored_archive(directory)
+            # Not hashed again: the signed request carries the receipt's SHA-256,
+            # and S3 refuses a body that does not match it.
+            if stored_bytes != size_bytes:
                 raise SandboxError("prepared sandbox archive changed on disk")
             try:
-                with (
-                    archive.open("rb") as stream,
-                    httpx.Client(
-                        timeout=httpx.Timeout(600, connect=30), follow_redirects=False
-                    ) as client,
-                ):
-                    response = client.put(upload_url, headers=upload_headers, content=stream)
+                with httpx.Client(
+                    timeout=httpx.Timeout(600, connect=30), follow_redirects=False
+                ) as client:
+                    response = client.put(
+                        upload_url, headers=upload_headers, content=_archive_chunks(*pieces)
+                    )
             except httpx.HTTPError:
                 # Do not expose the signed URL or response body to logs/UI.
                 raise SandboxError("sandbox archive S3 upload failed") from None
@@ -319,7 +364,7 @@ class SandboxDeletionBackupService:
                 container_id=identity.expected_container_id,
             )
             self._append(directory / "deleted.json", {"receipt": record["receipt"]})
-            (directory / "archive.tar").unlink(missing_ok=True)
+            self._remove_archive(directory)
             return {**record["receipt"], "deleted": True}
 
     def abort(self, identity: ArchiveIdentity) -> dict[str, Any]:
@@ -335,8 +380,7 @@ class SandboxDeletionBackupService:
                 self._state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
                 directory.mkdir(mode=0o700, exist_ok=True)
                 self._append(directory / "abort.json", {"identity": self._identity_dict(identity)})
-                (directory / "rootfs.partial").unlink(missing_ok=True)
-                (directory / "archive.tar").unlink(missing_ok=True)
+                self._remove_archive(directory)
                 return {
                     "request_id": identity.request_id,
                     "container_id": identity.expected_container_id,
@@ -353,7 +397,7 @@ class SandboxDeletionBackupService:
                 container_id=identity.expected_container_id,
             )
             self._append(directory / "abort.json", {"receipt": record["receipt"]})
-            (directory / "archive.tar").unlink(missing_ok=True)
+            self._remove_archive(directory)
             return {
                 "request_id": identity.request_id,
                 "container_id": identity.expected_container_id,
@@ -436,6 +480,7 @@ class SandboxDeletionBackupService:
                     identity.thread_id,
                     sandbox_id=recorded_sandbox_id,
                     container_id=identity.expected_container_id,
+                    on_absent=forget_deleted_container_uploads,
                 ):
                     raise SessionLeaseLost("sandbox discard target is no longer absent")
                 absent_sandbox_id = recorded_sandbox_id
@@ -458,3 +503,61 @@ class SandboxDeletionBackupService:
             "container_id": identity.expected_container_id,
             "deleted": True,
         }
+
+
+def _sync_directory(directory: Path) -> None:
+    """Make the entries just made in ``directory`` durable."""
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _archive_head(manifest: bytes, rootfs: Path) -> bytes:
+    """Return the archive's bytes before the export's content.
+
+    They are what ``tarfile`` writes for ``manifest.json`` and then the
+    export's own header, so with the export and :func:`_archive_tail` the
+    archive is byte for byte the tar ``tarfile`` writes whole.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as bundle:
+        info = tarfile.TarInfo("manifest.json")
+        info.size = len(manifest)
+        info.mode = 0o600
+        bundle.addfile(info, io.BytesIO(manifest))
+        member = bundle.gettarinfo(rootfs, arcname=_ROOTFS_MEMBER)
+        # The header ``bundle.add`` would write. Closing then ends the tar in
+        # the buffer, which is left out: that end follows the export instead.
+        return buffer.getvalue() + member.tobuf(bundle.format, bundle.encoding, bundle.errors)
+
+
+def _declared_rootfs_bytes(head: bytes) -> int | None:
+    """Return the export's size as its header at the end of ``head`` declares it."""
+    try:
+        member = tarfile.TarInfo.frombuf(
+            head[-tarfile.BLOCKSIZE :], tarfile.ENCODING, "surrogateescape"
+        )
+    except tarfile.HeaderError:
+        return None
+    return member.size
+
+
+def _archive_tail(head_bytes: int, rootfs_bytes: int) -> bytes:
+    """Return the archive's bytes after the export: its padding and the tar's end."""
+    padding = -rootfs_bytes % tarfile.BLOCKSIZE
+    end = head_bytes + rootfs_bytes + padding + 2 * tarfile.BLOCKSIZE
+    return bytes(padding + 2 * tarfile.BLOCKSIZE + -end % tarfile.RECORDSIZE)
+
+
+def _archive_chunks(*pieces: bytes | Path) -> Iterator[bytes]:
+    """Yield the archive's pieces in order, a file's a bounded chunk at a time."""
+    for piece in pieces:
+        if isinstance(piece, bytes):
+            if piece:
+                yield piece
+            continue
+        with piece.open("rb") as stream:
+            while chunk := stream.read(_HASH_CHUNK_BYTES):
+                yield chunk

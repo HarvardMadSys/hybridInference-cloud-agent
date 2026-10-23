@@ -308,9 +308,9 @@ def test_silent_turn_completes_across_three_lease_periods(monkeypatch, network_r
 
     def endpoint(request):
         operation = request.url.path.rsplit("/", 1)[-1]
-        if operation == "events":
+        if operation == "events:batch":
             assert clock.now == 0
-            dispatch_events.append(json.loads(request.content))
+            dispatch_events.extend(json.loads(request.content)["events"])
             return httpx.Response(200, json={})
         requests.append((operation, clock.now))
         if clock.now >= clock.expires_at:

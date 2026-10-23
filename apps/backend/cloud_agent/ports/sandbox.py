@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
 
 
@@ -28,6 +29,29 @@ class DeletionFailureDecision:
     def __bool__(self) -> bool:
         """Keep existing truth tests aligned with whether the fence was recorded."""
         return self.recorded
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalControlRoute:
+    """What an attached terminal's input, resize or kill needs, read at once.
+
+    The answers of the three reads the general workspace path makes for the
+    job's owner: the job itself, :meth:`SandboxRepository.thread_workspace_ready`,
+    and the host ``host_for_job`` names.
+    """
+
+    thread_id: str | None
+    #: Whether the chat's group lets its owner change the workspace now.
+    workspace_ready: bool
+    #: A settled turn's terminals still wait for the manager to resume them.
+    terminal_resume_pending: bool
+    #: The state of the chat's group; ``None`` when the chat has none.
+    group_state: str | None
+    #: Whether the group's host was removed from the pool.
+    host_revoked: bool
+    #: ``host`` and ``sandbox_manager_url``, as ``host_for_job`` returns them,
+    #: or ``None`` when the job names no host.
+    host: dict[str, Any] | None
 
 
 class SandboxRepository(Protocol):
@@ -270,6 +294,18 @@ class SandboxRepository(Protocol):
         """
         ...
 
+    async def terminal_control_route(
+        self, *, job_id: str, user_id: str
+    ) -> TerminalControlRoute | None:
+        """Read what an attached terminal's control call needs, in one statement.
+
+        ``None`` unless the job is this owner's and its conversation is not
+        deleted, as ``owns_job`` answers it. A read only: input, a resize and
+        a kill cannot start the container, so none of them takes the start
+        fence.
+        """
+        ...
+
     async def fence_terminal_workspace(self, *, attempt_id: int, lease_generation: int) -> bool:
         """Revoke readiness only for the still-live fenced attempt."""
         ...
@@ -414,6 +450,23 @@ class SandboxRepository(Protocol):
         terminal_count: int | None = None,
     ) -> str | None:
         """Reconcile one authenticated shared-group Docker observation."""
+        ...
+
+    async def reconcile_thread_sandbox_observations(
+        self, *, host: str, observations: Sequence[Mapping[str, Any]]
+    ) -> list[str | None]:
+        """Reconcile every group one heartbeat reports, writing only what changed.
+
+        Each observation carries the arguments of
+        ``reconcile_thread_sandbox_observation`` but the host, and gets its
+        answer, in order. One unlocked read decides which would change
+        nothing; those take no lock and write nothing. A group the host did
+        not report is left alone.
+        """
+        ...
+
+    async def recorded_sandbox_checkpoints(self, *, checkpoint_ids: Sequence[str]) -> set[str]:
+        """Return which of these checkpoint receipts are already recorded, without locks."""
         ...
 
     async def record_sandbox_checkpoint(

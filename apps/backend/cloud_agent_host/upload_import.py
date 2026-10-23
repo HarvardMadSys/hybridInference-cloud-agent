@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 import tempfile
+from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.enrollment import credential_path
@@ -17,9 +19,10 @@ from cloud_agent_shared.git.source_archive import (
     write_upload_archive,
 )
 
-if TYPE_CHECKING:
-    from pathlib import Path
+ENV_UPLOAD_RECEIPT_DIR = "AGENT_UPLOAD_RECEIPT_DIR"
 
+
+if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
     from cloud_agent_host.claimed_job import ClaimedJob
     from cloud_agent_host.control_plane_client import ControlPlane
@@ -56,6 +59,43 @@ def _save(path: Path, receipt: dict[str, Any]) -> None:
         os.close(directory)
 
 
+def _paths(container_name: str) -> tuple[Path, Path]:
+    configured = os.environ.get(ENV_UPLOAD_RECEIPT_DIR)
+    root = Path(configured) if configured else credential_path().parent / "upload-receipts"
+    key = hashlib.sha256(container_name.encode()).hexdigest()
+    return root / f"{key}.json", root / f"{key}.lock"
+
+
+def forget_deleted_container_uploads(container_name: str) -> None:
+    """Drop host-private state after the stable container name is retired.
+
+    The caller must first fence the sandbox lifecycle and prove that neither
+    the deleted container ID nor a replacement at ``container_name`` exists.
+    That exclusion makes removing the lock file safe: no later import can open
+    a second inode while an earlier importer still owns this one.
+    """
+    path, lock_path = _paths(container_name)
+    if not path.parent.exists():
+        return
+    try:
+        lock = lock_path.open("a+")
+    except FileNotFoundError:
+        return
+    with lock:
+        os.fchmod(lock.fileno(), 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for stale in (path, path.with_suffix(".tmp")):
+            with suppress(FileNotFoundError):
+                stale.unlink()
+        with suppress(FileNotFoundError):
+            lock_path.unlink()
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
 def import_uploads(
     *,
     job: ClaimedJob,
@@ -75,11 +115,10 @@ def import_uploads(
     """
     if job.thread_attachment_count <= 0:
         return 0
-    root = credential_path().parent / "upload-receipts"
+    path, lock_path = _paths(spec.container_name)
+    root = path.parent
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    key = hashlib.sha256(spec.container_name.encode()).hexdigest()
-    path = root / f"{key}.json"
-    with (root / f"{key}.lock").open("a+") as lock:
+    with lock_path.open("a+") as lock:
         os.fchmod(lock.fileno(), 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX)
         receipt = {} if fresh_container else _read(path, container_id)

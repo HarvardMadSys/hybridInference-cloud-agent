@@ -209,6 +209,9 @@ services:
       # Sandbox Manager-only archival receipts and temporary exports survive service
       # replacement. No sandbox or runner mounts this directory.
       AGENT_SANDBOX_ARCHIVE_STATE_DIR: /var/lib/hybridinference/broker-archives
+      # The importer and deletion lifecycle share only this dedicated state;
+      # the sandbox manager must not receive the sibling host credential.
+      AGENT_UPLOAD_RECEIPT_DIR: /var/lib/hybridinference/upload-receipts
       # containerd's content store, mounted read-only below, so a checkpoint
       # copies only its new layer instead of saving the whole image.
       AGENT_CONTAINERD_CONTENT_DIR: /var/lib/hybridinference/containerd-content
@@ -242,6 +245,8 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/sandbox-archives:/var/lib/hybridinference/broker-archives
+      # Mount the receipt child, never the credential-bearing parent.
+      - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/upload-receipts:/var/lib/hybridinference/upload-receipts
       # Read-only image blobs, named by digest. The Sandbox Manager already reaches the
       # daemon through its socket; this only spares it a full image save.
       - ${AGENT_HOST_CONTAINERD_CONTENT_DIR:-/var/lib/containerd/io.containerd.content.v1.content}:/var/lib/hybridinference/containerd-content:ro
@@ -312,6 +317,8 @@ services:
       # container spends a fresh enrollment token on every restart, and
       # enrollment tokens are single-use.
       AGENT_HOST_CREDENTIAL_FILE: ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/credential
+      # Shared with the sandbox manager at a path that contains no credential.
+      AGENT_UPLOAD_RECEIPT_DIR: /var/lib/hybridinference/upload-receipts
       # The host script writes this exact commit only after every runner,
       # sandbox manager, tunnel and Docker storage check succeeds. The control-plane
       # deploy waits for the matching heartbeat before replacing its service.
@@ -407,6 +414,8 @@ services:
       # restart. The lock is taken on this directory, so a replaced container
       # and its predecessor cannot both spend a token during a rollout.
       - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}:${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}
+      # Project the shared child at the same credential-free container path.
+      - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/upload-receipts:/var/lib/hybridinference/upload-receipts
       # Host-wide Kata updates invalidate every deployment's cached probe.
       # Bind the directory so atomic epoch replacements remain visible. An
       # empty directory never qualifies a runtime: it requires full probes.

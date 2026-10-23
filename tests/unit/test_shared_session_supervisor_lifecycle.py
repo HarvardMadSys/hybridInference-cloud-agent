@@ -36,6 +36,7 @@ from tests.unit.test_shared_session_supervisor import (
     threading,
 )
 
+from cloud_agent_host.member_resources import CheckpointSchedule
 from cloud_agent_host.sandbox import KATA_RUNTIME
 from cloud_agent_host.session_lifecycle import StaleStartFence
 
@@ -432,6 +433,113 @@ def test_absence_proof_rechecks_registration_after_slow_docker_reads(monkeypatch
         worker.join(timeout=5)
     assert not worker.is_alive()
     assert outcome == {"value": False}
+
+
+def test_absent_cleanup_fences_registration_until_callback_returns():
+    creation_started = threading.Event()
+
+    class Manager(_Manager):
+        def create(self, spec, *, facts=None, observer=None):
+            creation_started.set()
+            return super().create(spec, facts=facts, observer=observer)
+
+    manager = Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    cleanup_entered, release_cleanup = threading.Event(), threading.Event()
+
+    def cleanup(container_name):
+        assert container_name == spec.container_name
+        cleanup_entered.set()
+        assert release_cleanup.wait(timeout=_HELD_S)
+
+    deletion, deletion_outcome = _in_thread(
+        lambda: supervisor.admin_deletion_target_absent(
+            spec.thread_id,
+            sandbox_id=spec.sandbox_id,
+            container_id="container-shared",
+            on_absent=cleanup,
+        )
+    )
+    assert cleanup_entered.wait(timeout=_UNBLOCKED_S)
+    admission_started = threading.Event()
+
+    def register():
+        admission_started.set()
+        return supervisor.register_manifest(spec, _members())
+
+    registration, registration_outcome = _in_thread(register)
+    try:
+        assert admission_started.wait(timeout=_UNBLOCKED_S)
+        assert not creation_started.wait(timeout=0.1)
+        assert registration.is_alive()
+    finally:
+        release_cleanup.set()
+        deletion.join(timeout=_UNBLOCKED_S)
+        registration.join(timeout=_UNBLOCKED_S)
+
+    assert not deletion.is_alive()
+    assert not registration.is_alive()
+    assert deletion_outcome == {"value": True}
+    assert "error" not in registration_outcome
+    assert creation_started.is_set()
+    assert supervisor.owns(spec.thread_id)
+
+
+def test_deletion_retries_upload_receipt_cleanup_after_failure(monkeypatch):
+    from cloud_agent_host import shared_session_supervisor as supervisor_module
+
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+    manager.items[spec.container_name] = replace(
+        group.inspection, running=False, status=ChatSandboxStatus.STOPPED
+    )
+    retired = []
+
+    def require_stopped(owned_spec, *, container_id):
+        current = manager.items[owned_spec.container_name]
+        assert current.container_id == container_id
+        return current
+
+    def remove(owned_spec, *, container_id):
+        assert manager.items[owned_spec.container_name].container_id == container_id
+        manager.items.pop(owned_spec.container_name)
+
+    def retire(container_name):
+        retired.append(container_name)
+        if len(retired) == 1:
+            raise OSError("receipt directory sync failed")
+
+    monkeypatch.setattr(manager, "require_stopped_archive", require_stopped, raising=False)
+    monkeypatch.setattr(manager, "remove_stopped_archived", remove, raising=False)
+    monkeypatch.setattr(
+        supervisor_module,
+        "forget_deleted_container_uploads",
+        retire,
+    )
+    supervisor.begin_archive(
+        spec.thread_id,
+        request_id="delete-1",
+        generation=spec.generation,
+        container_id=group.inspection.container_id,
+    )
+
+    with pytest.raises(OSError, match="directory sync"):
+        supervisor.commit_archive(
+            spec, request_id="delete-1", container_id=group.inspection.container_id
+        )
+    assert supervisor._groups[spec.sandbox_id] is group
+    supervisor.commit_archive(
+        spec, request_id="delete-1", container_id=group.inspection.container_id
+    )
+    supervisor.commit_archive(
+        spec, request_id="delete-1", container_id=group.inspection.container_id
+    )
+
+    assert retired == [spec.container_name] * 3
 
 
 @pytest.mark.parametrize("replacement", ["stable_name", "renamed_original"])
@@ -1058,6 +1166,184 @@ def test_a_second_window_reads_the_journal_from_its_own_opening_cursor():
     supervisor.complete_turn("athr_source", lease.token, second_turn)
 
 
+class _JournalReadCountingManager(_RotatingJournalManager):
+    """Counts every read of the simulated guest journal."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.journal_reads = 0
+
+    def member_window_journal_delta(
+        self,
+        spec: ChatSandboxSpec,
+        cursor: GuestObserverCursor,
+        *,
+        timeout_s: float = 10.0,
+    ) -> tuple[bytes, int]:
+        self.journal_reads += 1
+        return super().member_window_journal_delta(spec, cursor, timeout_s=timeout_s)
+
+
+def test_the_census_reads_the_journal_only_for_a_checkpoint():
+    """A census writes its cycle; only a checkpoint reads the journal back.
+
+    Folding the journal after every census cost each running member a second
+    guest exec every second, although nothing between two checkpoints reads
+    the fold. Folding at the checkpoint loses no cycle: the window's cursor
+    keeps the journal from rotating while it is open.
+    """
+    manager = _JournalReadCountingManager()
+    manager.backend.runtime = KATA_RUNTIME
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        transport_factory=_TransportFactory(),
+        window_sample_interval_s=10.0,
+    )
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    supervisor._stop.set()
+    if supervisor._sampler_thread is not None:
+        supervisor._sampler_thread.join(timeout=2)
+    turn = supervisor.start_turn(
+        "athr_source",
+        lease.token,
+        prompt="work",
+        model="glm-5.1",
+        reasoning_effort=None,
+    )
+    member = supervisor._groups["asbx_shared"].members["athr_source"]
+    assert member.window is not None
+    measurement = member.window.handle.measurement_id
+    # Sixteen simulated seconds of the production cadence: a census every
+    # second, a checkpoint every fifteen.
+    now = [0.0]
+    member.window.checkpoints = CheckpointSchedule(interval_s=15.0, clock=lambda: now[0])
+    checkpoints: list[dict[str, Any]] = []
+    for second in range(16):
+        member.window.next_census_mono = 0.0
+        manager.append_journal(_journal_sample_line(measurement, second + 1))
+        assert supervisor.sample_open_windows() == 1
+        checkpoint = supervisor.take_reported_checkpoint("athr_source")
+        if checkpoint is not None:
+            checkpoints.append(checkpoint)
+        now[0] += 1.0
+
+    assert manager.events.count(("member-window", "sample")) == 16
+    assert manager.journal_reads == 2
+    assert [checkpoint["memory"]["valid_samples"] for checkpoint in checkpoints] == [1, 16]
+
+    supervisor.complete_turn("athr_source", lease.token, turn)
+
+
+class _CensusOverlapManager(_Manager):
+    """Records how censuses overlap, within a container and across them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.backend.runtime = KATA_RUNTIME
+        # Each container's first census waits here for another container's.
+        # Censuses taken one after another never meet: the wait runs out.
+        self.rendezvous = threading.Barrier(2, timeout=_UNBLOCKED_S)
+        self.met: list[str] = []
+        self.most_in_flight: dict[str, int] = {}
+        self._in_flight: dict[str, int] = {}
+        self._guard = threading.Lock()
+
+    def member_window_request(self, spec: ChatSandboxSpec, argv: list[str], *, timeout_s: float):
+        if argv[1] != "sample":
+            return super().member_window_request(spec, argv, timeout_s=timeout_s)
+        name = spec.container_name
+        with self._guard:
+            first = name not in self.most_in_flight
+            self._in_flight[name] = self._in_flight.get(name, 0) + 1
+            self.most_in_flight[name] = max(self.most_in_flight.get(name, 0), self._in_flight[name])
+        try:
+            if first:
+                self.rendezvous.wait()
+                self.met.append(name)
+            return super().member_window_request(spec, argv, timeout_s=timeout_s)
+        finally:
+            with self._guard:
+                self._in_flight[name] -= 1
+
+
+def test_separate_containers_are_censused_at_once_and_one_container_in_order():
+    """One slow guest must not stretch every other container's census period.
+
+    Each census is a Docker exec into its own container's guest. Taken one
+    after another, every concurrent turn on the host delayed all the others.
+    The censuses of one container still reach its single observer one at a
+    time.
+    """
+    manager = _CensusOverlapManager()
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        transport_factory=_TransportFactory(),
+        window_sample_interval_s=10.0,
+    )
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    leases = {
+        "athr_source": supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:1",
+            activation_generation=1,
+            has_settled_context=True,
+            manifest=_members(),
+        ),
+        "athr_peer": supervisor.acquire(
+            _spec(),
+            thread_id="athr_peer",
+            owner="attempt:2",
+            activation_generation=1,
+            has_settled_context=True,
+            manifest=_members(),
+        ),
+        "athr_other": supervisor.acquire(
+            other,
+            thread_id="athr_other",
+            owner="attempt:3",
+            activation_generation=1,
+            has_settled_context=True,
+            manifest=[replace(_members()[0], thread_id="athr_other")],
+        ),
+    }
+    launches = {
+        "athr_source": _launch("athr_source", native_session_id="native-source", slot=0),
+        "athr_peer": _launch("athr_peer", native_session_id="native-peer", slot=1),
+        "athr_other": _launch("athr_other", native_session_id="native-source", slot=0),
+    }
+    supervisor._stop.set()
+    if supervisor._sampler_thread is not None:
+        supervisor._sampler_thread.join(timeout=2)
+    for thread_id, lease in leases.items():
+        supervisor.ensure_resident(thread_id, lease.token, launches[thread_id])
+        supervisor.start_turn(
+            thread_id,
+            lease.token,
+            prompt="work",
+            model="glm-5.1",
+            reasoning_effort=None,
+        )
+
+    assert supervisor.sample_open_windows() == 3
+
+    assert sorted(manager.met) == sorted([_spec().container_name, other.container_name])
+    assert manager.most_in_flight == {_spec().container_name: 1, other.container_name: 1}
+    assert manager.events.count(("member-window", "sample")) == 3
+
+
 def _windowed_supervisor(manager: _Manager, factory: _TransportFactory | None = None):
     manager.backend.runtime = KATA_RUNTIME
     supervisor = SharedChatSessionSupervisor(
@@ -1152,9 +1438,9 @@ def test_a_checkpoint_built_across_a_turn_boundary_never_reaches_the_next_turn()
         "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
     )
     manager.append_journal(_journal_sample_line(member.observer_cursor.measurement_id, 2))
-    # A tick folds its census into the window and then builds the checkpoint,
-    # whose own read is the tick's second: that is the one held.
-    manager.hold_read = manager.reads + 2
+    # A tick's census only writes its cycle, so the checkpoint it then builds
+    # makes the tick's one read: that is the one held.
+    manager.hold_read = manager.reads + 1
     tick, outcome = _in_thread(supervisor.sample_open_windows)
     try:
         assert read_held.wait(timeout=_HELD_S)
@@ -1173,13 +1459,13 @@ def test_a_checkpoint_built_across_a_turn_boundary_never_reaches_the_next_turn()
 
 
 def test_a_journal_read_that_outlives_its_turn_does_not_move_the_next_windows_fence():
-    """A census read still running when the next turn opens leaves that turn's fence.
+    """A journal read still running when the next turn opens leaves that turn's fence.
 
-    The census reads the journal outside the supervisor lock, so a turn can end
-    and the member's next turn open while a read is still running. That read
-    used to record where it stopped on the member, which by then held the next
-    window, so the next window's first read began inside the previous turn's
-    bytes.
+    A checkpoint reads the journal outside the supervisor lock, so a turn can
+    end and the member's next turn open while a read is still running. That
+    read used to record where it stopped on the member, which by then held the
+    next window, so the next window's first read began inside the previous
+    turn's bytes.
     """
     read_held = threading.Event()
     release_read = threading.Event()
@@ -1227,8 +1513,9 @@ def test_a_journal_read_that_outlives_its_turn_does_not_move_the_next_windows_fe
     assert not census.is_alive()
     assert "error" not in outcome
 
-    # Released, the held tick goes on to checkpoint the next window, and that
-    # window's first read starts where it opened.
+    # Released, the held read lands on the window it was made for. The next
+    # tick checkpoints the next window, whose first read starts where it opened.
+    supervisor.sample_open_windows()
     reads = [offset for measurement, offset in manager.reads if measurement == fence.measurement_id]
     assert reads[:1] == [fence.offset]
     supervisor.complete_turn("athr_source", lease.token, second)
@@ -1317,13 +1604,14 @@ def test_abandon_drops_the_window_when_normal_turn_cleanup_fails(monkeypatch):
     assert [event for event in manager.events if event[0] == "member-window"] == []
 
 
-def test_a_stopping_group_is_kept_behind_renewed_host_rules():
-    """It runs on through its archive and Docker stop, though no group counts as running."""
+def test_a_stopping_group_is_included_in_the_exact_host_rule_check():
+    """It remains guarded through archive preparation and Docker stop."""
     manager, supervisor = _running_group()
     supervisor._members["athr_source"].stopping = True
 
     assert supervisor.guard_network() == []
 
-    assert manager.host_rule_checks == 0
-    assert manager.host_rule_renewals == 1
+    assert manager.host_rule_checks == 1
+    assert manager.host_rule_running == [[_spec()]]
+    assert manager.host_rule_renewals == 0
     assert manager.stop_count == 0

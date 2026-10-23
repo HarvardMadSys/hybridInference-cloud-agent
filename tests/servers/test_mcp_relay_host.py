@@ -1416,7 +1416,7 @@ class TestBuiltInWebSearch:
         calls: list[dict[str, Any]] = []
         monkeypatch.setattr(agent_mcp_router.web_search, "configured", lambda: True)
 
-        async def search(arguments):
+        async def search(arguments, *, client=None):
             calls.append(arguments)
             return {
                 "query": arguments["query"],
@@ -1451,6 +1451,33 @@ class TestBuiltInWebSearch:
         assert host.opened == []
         assert host.called == []
 
+    async def test_searches_borrow_the_listeners_shared_pool(
+        self, store: FakeStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One connection to the provider serves consecutive searches, not one each."""
+        monkeypatch.setattr(agent_mcp_router.web_search, "configured", lambda: True)
+        borrowed: list[Any] = []
+
+        async def search(arguments, *, client=None):
+            borrowed.append(client)
+            return {"query": arguments["query"], "organic": []}
+
+        monkeypatch.setattr(agent_mcp_router.web_search, "search", search)
+        app = FastAPI()
+        app.include_router(agent_mcp_router.router)
+        app.dependency_overrides[get_storage] = lambda: OneFake(store)
+        async with httpx.AsyncClient() as shared:
+            app.state.http = shared
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
+                for query in ("first", "second"):
+                    response = await api.post(
+                        _HOST_URL,
+                        json=_rpc("tools/call", name="web_search", arguments={"query": query}),
+                        headers=_auth(),
+                    )
+                    assert "isError" not in _result(response)
+        assert borrowed == [shared, shared]
+
     async def test_provider_failure_is_a_tool_error_with_no_provider_body(
         self,
         client: AsyncClient,
@@ -1459,7 +1486,7 @@ class TestBuiltInWebSearch:
     ) -> None:
         monkeypatch.setattr(agent_mcp_router.web_search, "configured", lambda: True)
 
-        async def failed(arguments):
+        async def failed(arguments, *, client=None):
             del arguments
             raise agent_mcp_router.web_search.WebSearchError(
                 "Web search is rate limited. Try again later.",
@@ -1554,7 +1581,7 @@ class TestBuiltInWebSearch:
         monkeypatch.setattr(agent_mcp_router.web_search, "configured", lambda: True)
         store.search_admission = WebSearchAdmission(call_id=None, reason="user_rate_limited")
 
-        async def unexpected(arguments):
+        async def unexpected(arguments, *, client=None):
             raise AssertionError(f"rate-limited search reached a provider: {arguments!r}")
 
         monkeypatch.setattr(agent_mcp_router.web_search, "search", unexpected)
@@ -1579,7 +1606,7 @@ class TestBuiltInWebSearch:
         monkeypatch.setattr(agent_mcp_router.web_search, "configured", lambda: True)
         store.search_admission_error = True
 
-        async def unexpected(arguments):
+        async def unexpected(arguments, *, client=None):
             raise AssertionError(f"unadmitted search reached a provider: {arguments!r}")
 
         monkeypatch.setattr(agent_mcp_router.web_search, "search", unexpected)
@@ -1600,7 +1627,7 @@ class TestBuiltInWebSearch:
     ) -> None:
         started = asyncio.Event()
 
-        async def blocked(arguments):
+        async def blocked(arguments, *, client=None):
             del arguments
             started.set()
             await asyncio.Event().wait()
@@ -1618,7 +1645,6 @@ class TestBuiltInWebSearch:
                 request_id=1,
                 identity=identity,
                 store=store,
-                authorization=_auth()["Authorization"],
                 stateless=False,
             )
         )

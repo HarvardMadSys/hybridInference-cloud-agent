@@ -48,11 +48,32 @@ def test_bootstrap_and_change_cursors_round_trip_for_one_owner_and_page_size():
         database_snapshot="100:104:101,103",
         target_snapshot="104:108:",
         after_kind="thread",
+        after_xid=105,
         after_id="thread-4",
     )
     assert (
         decode_notification_cursor(encode_cursor(changes), user_id="owner-a", limit=200) == changes
     )
+    assert changes.version == 2
+
+
+def test_v1_delta_continuation_remains_decodable_during_rollout():
+    token = _token(
+        {
+            "version": 1,
+            "scope": notification_scope("owner-a", 200),
+            "database_snapshot": "100:104:101,103",
+            "target_snapshot": "104:108:",
+            "after_kind": "thread",
+            "after_id": "thread-4",
+        }
+    )
+
+    cursor = decode_notification_cursor(token, user_id="owner-a", limit=200)
+
+    assert cursor is not None
+    assert cursor.version == 1
+    assert cursor.after_xid is None
 
 
 @pytest.mark.parametrize(
@@ -101,6 +122,32 @@ def test_bootstrap_and_change_cursors_round_trip_for_one_owner_and_page_size():
         {"after_changed_at": "2026-10-22T00:00:00Z"},
         {"target_snapshot": "20:21:", "after_id": "job-1"},
         {"target_snapshot": "20:21:", "after_kind": "job"},
+        {"version": 3},
+        {
+            "version": 2,
+            "target_snapshot": "20:21:",
+            "after_kind": "job",
+            "after_id": "job-1",
+        },
+        {"after_xid": 10},
+        {
+            "target_snapshot": "20:21:",
+            "after_kind": "job",
+            "after_xid": 10,
+            "after_id": "job-1",
+        },
+        {
+            "target_snapshot": "20:21:",
+            "after_kind": "job",
+            "after_xid": 0,
+            "after_id": "job-1",
+        },
+        {
+            "target_snapshot": "20:21:",
+            "after_kind": "job",
+            "after_xid": True,
+            "after_id": "job-1",
+        },
     ],
 )
 def test_rejects_malformed_or_ambiguous_cursor_shapes(overrides):

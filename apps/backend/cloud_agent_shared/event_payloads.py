@@ -11,6 +11,10 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 MAX_EVENT_PAYLOAD_BYTES = 256 * 1024
+#: The most events one batch upload carries: as many as a runner coalesces, and
+#: as many as the control plane accepts. A control plane must accept a larger
+#: number before any runner sends one, or it refuses those runners' batches.
+MAX_EVENT_BATCH_EVENTS = 100
 #: Name the delegated agent an event came from: Claude Code's delegating call,
 #: or the Codex thread a subagent runs in. The conversation's own events carry
 #: neither.

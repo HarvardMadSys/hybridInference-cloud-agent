@@ -53,9 +53,8 @@ from cloud_agent_host.chat_sandbox_network import ChatSandboxNetwork
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_ROOT,
-    GUEST_OBSERVER_ROTATE_BYTES,
     GUEST_OBSERVER_VERSION,
-    GuestObservation,
+    MAX_OBSERVATION_BYTES,
     GuestObserverController,
     GuestObserverCursor,
     GuestObserverSnapshot,
@@ -367,13 +366,13 @@ def test_archive_export_rejects_oversize_and_changed_identity_after_export(monke
 def _plain_group_network(monkeypatch):
     """Keep these tests on one fixed bridge; the group network is tested elsewhere.
 
-    Everything here is about exec, terminals, observers and ownership. Their
-    containers sit on ``agent-net`` and the group network's own lifecycle
-    (creation, relays, host exceptions, release, pruning, the in-guest check)
-    is covered against a model of Docker in ``test_chat_group_network.py``.
+    Exec, terminals, observers and ownership use ``agent-net`` here; group
+    lifecycle (creation, relays, host exceptions, release, pruning, guest check)
+    is tested against a Docker model in ``test_chat_group_network.py``.
     """
     monkeypatch.setattr(ChatSandboxNetwork, "network_for", lambda _self, _spec: "agent-net")
     monkeypatch.setattr(ChatSandboxNetwork, "require_host_rules", lambda _self: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "verify_host_rules", lambda *_args: None)
     monkeypatch.setattr(
         ChatSandboxNetwork,
         "_require_group_network",
@@ -411,6 +410,19 @@ def _observer_snapshot_payload(snapshot: GuestObserverSnapshot) -> bytes:
         },
         separators=(",", ":"),
     ).encode()
+
+
+def _observer_drain_payload(
+    closing: GuestObserverSnapshot,
+    flushed: GuestObserverSnapshot,
+    payload: bytes = b"",
+) -> bytes:
+    """The drain script's output: both publications on one line, then the slice."""
+    header = {
+        "closing": json.loads(_observer_snapshot_payload(closing)),
+        "flushed": json.loads(_observer_snapshot_payload(flushed)),
+    }
+    return json.dumps(header, separators=(",", ":")).encode() + b"\n" + payload
 
 
 def _inspect_payload(
@@ -559,19 +571,16 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
         journal_size=0,
         guest_mono_ns=2_050_000_000,
     )
-    waits: list[int | None] = []
+    drains: list[list[str]] = []
+    published = [flushed]
 
     def capture(argv, _timeout_s):
-        if GUEST_OBSERVER_BINARY in argv:
-            wanted = int(argv[-2])
-            waits.append(None if wanted < 0 else wanted)
-            snapshot = closing if wanted < 0 else flushed
-            return SimpleNamespace(
-                returncode=0,
-                stdout=_observer_snapshot_payload(snapshot),
-                stderr=b"",
-            )
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        drains.append(list(argv))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_observer_drain_payload(closing, published[-1]),
+            stderr=b"",
+        )
 
     controller = GuestObserverController(
         capture=capture,
@@ -594,8 +603,14 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
     assert observation.complete is True
     # The first post-turn publication can have completed its poll before the
     # closing status was read.  Crossing the following publication proves a
-    # full drain happened after that read.
-    assert waits == [None, 21]
+    # full drain happened after that read: the one guest exec, fenced on this
+    # cursor's journal, waits for it, and a drain reporting less is refused.
+    assert len(drains) == 1
+    assert drains[0][-5:] == ["0", "7", "19", str(MAX_OBSERVATION_BYTES), "3.0"]
+    published.append(replace(flushed, status=replace(flushed.status, poll_seq=21)))
+    refused = controller.finish(cursor)
+    assert refused.complete is False
+    assert "full poll" in (refused.detail or "")
 
 
 def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary():
@@ -673,9 +688,10 @@ def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
         journal_size=10,
         guest_mono_ns=2_050_000_000,
     )
+    closing = replace(snapshot, status=replace(snapshot.status, poll_seq=19))
 
-    def capture(argv, _timeout_s):
-        stdout = _observer_snapshot_payload(snapshot) if GUEST_OBSERVER_BINARY in argv else b"short"
+    def capture(_argv, _timeout_s):
+        stdout = _observer_drain_payload(closing, snapshot, b"short")
         return SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
 
     controller = GuestObserverController(
@@ -698,69 +714,6 @@ def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
     assert observation.source is None
     assert observation.complete is False
     assert "published fence" in (observation.detail or "")
-
-
-def test_retained_guest_journal_rotates_only_without_active_turns(monkeypatch):
-    manager = ChatSandboxManager(ContainerBackend(image="registry/agent:1", runtime=KATA_RUNTIME))
-
-    class Controller:
-        def __init__(self):
-            self.pid = 91
-            self.size = 0
-            self.starts = 0
-            self.restart_choices: list[bool] = []
-
-        def snapshot(self, **_kwargs):
-            return GuestObserverSnapshot(
-                status=GuestObserverStatus(self.pid, 1, 0, 0, 0, self.size),
-                journal_size=self.size,
-                guest_mono_ns=1,
-            )
-
-        def start(self):
-            self.starts += 1
-            self.pid += 1
-            self.size = 0
-
-        def rotate_if_needed(self, *, threshold):
-            if self.size < threshold:
-                return False
-            self.start()
-            return True
-
-        def begin(self, *, user_uid, restart_if_missing=True, measurement_id=None):
-            self.restart_choices.append(restart_if_missing)
-            return GuestObserverCursor(
-                uid=user_uid,
-                observer_pid=self.pid,
-                offset=self.size,
-                available=True,
-                measurement_id=measurement_id,
-            )
-
-        def finish(self, _cursor):
-            return GuestObservation(
-                source="kata-guest-ebpf-v1",
-                complete=True,
-                lost_events=0,
-                truncated=False,
-            )
-
-    controller = Controller()
-    monkeypatch.setattr(manager, "_guest_observer_controller", lambda _spec: controller)
-
-    first = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE)
-    controller.size = GUEST_OBSERVER_ROTATE_BYTES
-    second = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE + 1)
-    assert controller.starts == 0
-
-    manager.finish_guest_observation(_spec(), first)
-    manager.finish_guest_observation(_spec(), second)
-    third = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE)
-
-    assert controller.starts == 1
-    assert controller.restart_choices == [True, False, True]
-    assert third.observer_pid == 92
 
 
 def test_retained_tool_marks_are_read_as_the_shared_state_owner(monkeypatch):
@@ -1649,18 +1602,20 @@ def test_member_permission_normalization_prunes_platform_and_sibling_provider_ho
     )
 
     script = calls[0][0][2]
-    assert script.count("-path /agent-state/.platform") == 2
-    assert script.count("-path /agent-state/claude ") == 2
-    assert "normalize_dirs /agent-state/claude/projects" in script
-    assert "normalize_files /agent-state/claude/projects" in script
+    # One walk of /agent-state, and it prunes every one of these.
+    walks = script.count("find /agent-state ")
+    assert walks == 1
+    assert script.count("-path /agent-state/.platform") == walks
+    assert script.count("-path /agent-state/claude ") == walks
+    assert "normalize /agent-state/claude/projects" in script
     assert "/home/agent-member-" not in script
-    assert script.count("-path /agent-state/codex-members") == 2
-    assert script.count("-path /agent-state/opencode-members") == 2
-    assert script.count("-path /agent-state/kilo-members") == 2
+    assert script.count("-path /agent-state/codex-members") == walks
+    assert script.count("-path /agent-state/opencode-members") == walks
+    assert script.count("-path /agent-state/kilo-members") == walks
     # The trusted collections hold other members' 0700 homes; a traversal
     # into them would fail on the first one it cannot open.
     for runtime_id in ("codex", "opencode", "kilo"):
-        assert script.count(f"-path /agent-state/{runtime_id}-homes ") == 2
+        assert script.count(f"-path /agent-state/{runtime_id}-homes ") == walks
     # A member's provider home is never widened, not even by its owner: the
     # pass no longer enters the collections at all.
     assert "-members/" not in script

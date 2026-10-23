@@ -6,8 +6,9 @@ starts, whenever the installer's runtime epoch or the sandbox image changes,
 and at least every half hour. Each child receives the verdict inside the turn
 payload the host already writes to its standard input. A claim's own
 underscore keys are stripped before delivery, so only this host can supply it.
-Mutable network rules stay outside the verdict: every child checks them before
-it accepts its turn.
+Mutable network rules stay outside the verdict: they travel as a verification of
+their own, at most a minute old (``network_guard.VERIFICATION_KEY``), and every
+child checks the network before it accepts its turn.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import uuid
 from typing import Any
 
 from cloud_agent_host.host_runtime import LAUNCH_BACKOFF_CAP_S, LAUNCH_BACKOFF_S
+from cloud_agent_host.network_guard import VERIFICATION_KEY
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxBackend
 from cloud_agent_shared.errors import SandboxError
 
@@ -222,6 +224,25 @@ class HostQualification:
             self._verdict = None
             return None
         return dict(self._verdict)
+
+    def handover(self) -> dict[str, Any]:
+        """What a turn handed over now carries of this host's proofs.
+
+        The runtime verdict while it stands (:meth:`verdict`), and the
+        verification of the network rules from the guard this service's
+        startup check verified them with, renewed first once it is no longer
+        recent (``HostNetworkGuard.handover``). With the verification the
+        child starts no helper container of its own; without a recent one it
+        declines the turn. The caller adds both after the claim's own
+        underscore keys are stripped, so only this host can supply them.
+        """
+        handed: dict[str, Any] = {}
+        verdict = self.verdict()
+        if verdict is not None:
+            handed[VERDICT_KEY] = verdict
+        if self.backend.sandbox_network is not None:
+            handed[VERIFICATION_KEY] = self.backend.network_guard().handover()
+        return handed
 
 
 def adopt_verdict(
