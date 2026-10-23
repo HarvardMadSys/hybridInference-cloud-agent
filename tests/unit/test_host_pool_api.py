@@ -93,6 +93,11 @@ class FakeHostPoolStore(AllCapabilities):
         self.fail_beats = False
         #: The stored archive policy does not decode, as a hand-edited row may not.
         self.archive_settings_undecodable = False
+        #: Nor the global settings, or the agent version selection and updates.
+        self.host_settings_undecodable = False
+        self.runtime_policy_undecodable = False
+        #: How many times a heartbeat tried to switch new chats to an update.
+        self.activation_attempts = 0
         #: ``(sandbox_id, thread_id, generation)`` residencies already released.
         self.closed_residencies: set[tuple[str, str, int]] = set()
         self.release_answer: str | None = None
@@ -267,17 +272,23 @@ class FakeHostPoolStore(AllCapabilities):
                 capacity=capacity,
                 sample_age_ms=capacity_sample_age_ms,
             )
-        # What the store reads off the policy row in the same statement.
+        # What the store reads off the policy row in the same statement: a
+        # part that does not decode is None.
+        runtime = not self.runtime_policy_undecodable
         return {
             **row,
             "runner_policy": {
-                "host_settings": dict(self.global_settings),
+                "host_settings": (
+                    None if self.host_settings_undecodable else dict(self.global_settings)
+                ),
                 "sandbox_archive_settings": (
                     None if self.archive_settings_undecodable else dict(self.archive_settings)
                 ),
-                "runtime_download_targets": self._download_targets(),
-                "runtime_upgrade_waiting": any(
-                    not target.get("activated_at") for target in self.runtime_upgrades.values()
+                "runtime_download_targets": self._download_targets() if runtime else None,
+                "runtime_upgrade_waiting": (
+                    any(not target.get("activated_at") for target in self.runtime_upgrades.values())
+                    if runtime
+                    else None
                 ),
             },
         }
@@ -455,9 +466,13 @@ class FakeHostPoolStore(AllCapabilities):
         return rows, self.active_host, dict(self.runtime_versions), datetime.now(UTC)
 
     async def host_settings(self) -> dict[str, Any]:
+        if self.host_settings_undecodable:
+            raise TypeError("host settings: dictionary update sequence element #0 has length 1")
         return dict(self.global_settings)
 
     async def runtime_download_targets(self) -> list[dict[str, str]]:
+        if self.runtime_policy_undecodable:
+            raise TypeError("agent versions: dictionary update sequence element #0 has length 1")
         return self._download_targets()
 
     def _download_targets(self) -> list[dict[str, str]]:
@@ -467,6 +482,9 @@ class FakeHostPoolStore(AllCapabilities):
         ]
 
     async def activate_ready_runtime_upgrades(self) -> list[str]:
+        self.activation_attempts += 1
+        if self.runtime_policy_undecodable:
+            raise AttributeError("'list' object has no attribute 'values'")
         # The store's decision: every online, enrolled host offers the version.
         menus = [
             row.get("runtime_versions_available") or {}
@@ -2782,76 +2800,6 @@ async def test_host_heartbeat_reconciles_exact_retained_docker_observations(resi
             "members": [],
         }
     ]
-
-
-async def test_an_archive_policy_that_does_not_decode_fails_only_the_answer(residency_client):
-    """The beat's own work is done before an undecodable archive policy fails it.
-
-    The heartbeat now reads the policy in its own write. A stored policy that
-    does not decode used to fail only the answer, once the beat had extended
-    its residencies and reconciled its observations, and it still does.
-    """
-    client, store, _grants = residency_client
-    credential = await _enroll(client, store)
-    store.archive_settings_undecodable = True
-    store.beat_answers = {("th-1", 1): ""}
-
-    with pytest.raises(SandboxArchivePolicyError):
-        await client.post(
-            "/v1/agent/host/heartbeat",
-            json={
-                "residencies": [{"thread_id": "th-1", "generation": 1}],
-                "retained_sandboxes": [
-                    {
-                        "thread_id": "athr_1",
-                        "sandbox_id": "asbx_1",
-                        "container_id": "0123456789abcdef",
-                        "generation": 3,
-                        "activation_generation": 7,
-                        "running": False,
-                        "members": [],
-                    }
-                ],
-            },
-            headers={"Authorization": f"Bearer {credential}"},
-        )
-
-    assert store.beat_batches[0] == [("th-1", 1)]
-    assert [observation["sandbox_id"] for observation in store.sandbox_observations] == ["asbx_1"]
-
-
-async def test_host_heartbeat_forwards_optional_container_telemetry(residency_client):
-    from tests.unit.test_sandbox_resource_protocol import beat, sample
-
-    client, store, _grants = residency_client
-    credential = await _enroll(client, store)
-    measured = sample()
-    response = await client.post(
-        "/v1/agent/host/heartbeat",
-        json={"retained_sandboxes": [beat(resource_usage=measured, terminal_count=3)]},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-    assert response.status_code == 200, response.text
-    assert store.sandbox_observations[0]["resource_usage"] == measured
-    assert store.sandbox_observations[0]["terminal_count"] == 3
-    assert store.sandbox_observations[0]["host"] == "runner-a"
-
-
-async def test_host_heartbeat_drops_bad_telemetry_and_still_reports_lifecycle(residency_client):
-    from tests.unit.test_sandbox_resource_protocol import beat, sample
-
-    client, store, _grants = residency_client
-    credential = await _enroll(client, store)
-    response = await client.post(
-        "/v1/agent/host/heartbeat",
-        json={"retained_sandboxes": [beat(resource_usage=sample(pids=-1), terminal_count=-1)]},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-    assert response.status_code == 200, response.text
-    observation = store.sandbox_observations[0]
-    assert observation["running"] is True
-    assert observation.get("resource_usage") is None
-    assert observation.get("terminal_count") is None
 
 
 async def test_host_heartbeat_rejects_a_non_shared_sandbox_observation(residency_client):

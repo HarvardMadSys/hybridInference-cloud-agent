@@ -14,6 +14,7 @@ than answered as a lost residency.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -196,11 +197,11 @@ async def _enrolled(store) -> None:
     )
 
 
-async def _beat(store, retained: list[dict[str, Any]], *, grants: Any = None) -> Any:
+async def _beat(store, retained: list[dict[str, Any]], *, grants: Any = None, **body: Any) -> Any:
     """One heartbeat through the real handler and the real store."""
     background_tasks = BackgroundTasks()
     reply = await hosts.heartbeat_host(
-        HostHeartbeatRequest.model_validate({"retained_sandboxes": retained}),
+        HostHeartbeatRequest.model_validate({"retained_sandboxes": retained, **body}),
         background_tasks=background_tasks,
         host={"host": HOST, "credential_hash": CREDENTIAL},
         store=store,
@@ -728,8 +729,19 @@ async def test_a_repeated_beat_rewrites_only_the_running_group(db, store):
     assert grants.revoked == []
 
 
-async def test_an_archive_policy_that_does_not_decode_fails_only_the_answer(db, store):
-    """The beat reads the archive policy in its own write, and that read must not fail it.
+@pytest.mark.parametrize(
+    ("column", "stored", "error"),
+    [
+        ("sandbox_archive_settings", '{"enabled": true}', SandboxArchivePolicyError),
+        # Nothing keeps the version selection an object, as the schema keeps
+        # the global settings and the agent updates.
+        ("runtime_versions", "[1]", TypeError),
+    ],
+)
+async def test_a_policy_that_does_not_decode_fails_only_the_answer(
+    db, store, column: str, stored: str, error: type[Exception]
+):
+    """The beat reads the policy in its own write, and that read must not fail it.
 
     A stored policy that does not decode fails the answer, as it always has,
     once the beat is recorded and its observations are reconciled.
@@ -741,15 +753,50 @@ async def test_an_archive_policy_that_does_not_decode_fails_only_the_answer(db, 
             "UPDATE agent_sandboxes SET state = 'running', "
             "idle_deadline = NOW() - INTERVAL '1 minute' WHERE id = 'asbx_policy'"
         )
-        await conn.execute(
-            "UPDATE agent_runner_policy SET sandbox_archive_settings = '{\"enabled\": true}'::jsonb"
-        )
+        await conn.execute(f"UPDATE agent_runner_policy SET {column} = $1::jsonb", stored)
 
-    with pytest.raises(SandboxArchivePolicyError):
+    with pytest.raises(error):
         await _beat(store, [_retained(job, "asbx_policy", running=False)])
 
     group = await _group(db, "asbx_policy")
     assert group["state"] == "stopped" and group["idle_deadline"] is None
+
+
+async def test_an_archive_policy_that_does_not_decode_still_lets_the_beat_switch_an_update(
+    db, store
+):
+    """The agent update a beat completes switches before the archive policy fails the answer.
+
+    Until the beat read the policy itself, the switch came before the answer
+    read the archive policy, and one that did not decode failed only the
+    answer. Reading it again first kept every update waiting for as long as
+    the archive policy stayed broken.
+    """
+    await _enrolled(store)
+    update = {
+        "version": "2.1.300",
+        "before": "2026-10-15T00:00:00Z",
+        "nonce": "4f1c0d2e9b8a4c6d8e0f1a2b3c4d5e6f",
+        "previous_version": None,
+        "activated_at": None,
+    }
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_runner_policy SET sandbox_archive_settings = $1::jsonb, "
+            "runtime_upgrades = $2::jsonb",
+            json.dumps({"enabled": True}),
+            json.dumps({"claude-code": update}),
+        )
+
+    with pytest.raises(SandboxArchivePolicyError):
+        await _beat(store, [], runtime_versions_available={"claude-code": ["2.1.300"]})
+
+    async with db.acquire() as conn:
+        policy = await conn.fetchrow(
+            "SELECT runtime_versions, runtime_upgrades FROM agent_runner_policy"
+        )
+    assert json.loads(policy["runtime_versions"]) == {"claude-code": "2.1.300"}
+    assert json.loads(policy["runtime_upgrades"])["claude-code"]["activated_at"]
 
 
 async def test_a_repeated_checkpoint_receipt_is_not_recorded_again(db, store, monkeypatch):

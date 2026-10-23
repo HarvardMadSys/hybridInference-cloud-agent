@@ -231,7 +231,8 @@ class HostPoolRepository(Protocol):
             takes on it: the global ``host_settings``, the
             ``sandbox_archive_settings``, the ``runtime_download_targets`` and
             whether an agent update waits to switch
-            (``runtime_upgrade_waiting``).
+            (``runtime_upgrade_waiting``). Each is ``None`` when its stored
+            value does not decode; the answer reads that part again.
         """
         ...
 

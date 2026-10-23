@@ -45,6 +45,7 @@ from tests.support.follow_ups import append_follow_up
 from cloud_agent.storage._sql.sandbox import fence_sandbox_start
 from cloud_agent.storage.repositories import (
     attempt_commands as attempt_module,
+    session_fork as session_fork_module,
     snapshot as snapshot_module,
 )
 
@@ -1340,3 +1341,126 @@ async def test_deleting_snapshots_does_not_deadlock_with_a_build_receipt(
             )
         )
     assert states == {older: "deleting", newer: "deleting"}
+
+
+_LOCK_MEMBER = (
+    "SELECT thread_id FROM agent_thread_sandbox_memberships WHERE thread_id = $1 FOR UPDATE"
+)
+
+
+async def _forked(store: Storage, monkeypatch, *, target_sorts_first: bool) -> tuple[dict, dict]:
+    """A Fork of a settled chat, its coordinator claimed and both residencies established.
+
+    A new chat's id is random, so a Fork's target sorts before its source half
+    the time; this one's sorts first, or last, as asked.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    await _run_turn(store, job, claim, sandbox)
+    target = "athr_" + ("0" if target_sorts_first else "f") * 16
+    monkeypatch.setattr(session_fork_module, "new_thread_id", lambda: target)
+    operation = await store.session_fork.prepare_session_fork(
+        source_job_id=job["id"], user_id=job["user_id"], idempotency_key="lock-order-fork"
+    )
+    assert operation is not None and operation.get("error") is None, operation
+    assert (operation["target_thread_id"] < job["thread_id"]) is target_sorts_first
+    assert await store.session_fork.claim_session_fork_materialization(
+        operation_id=operation["id"], coordinator_token="coordinator", lease_seconds=990
+    )
+    residencies = await store.session_fork.establish_session_fork_residencies(
+        operation_id=operation["id"], coordinator_token="coordinator", ttl_seconds=120
+    )
+    assert residencies is not None
+    return {**operation, "residencies": residencies}, job
+
+
+async def _materialized(store: Storage, operation: dict) -> None:
+    """Record the host's receipt for the Fork, as its coordinator does."""
+    residencies = operation["residencies"]
+    receipt = {
+        key: operation[key]
+        for key in (
+            "sandbox_id",
+            "sandbox_generation",
+            "container_id",
+            "runtime_id",
+            "runtime_version",
+            "source_thread_id",
+            "source_native_session_id",
+            "target_thread_id",
+            "target_resident_slot_id",
+        )
+    }
+    recorded = await store.session_fork.record_session_fork_materialized(
+        operation_id=operation["id"],
+        coordinator_token="coordinator",
+        receipt={
+            **receipt,
+            "operation_id": operation["id"],
+            "target_native_session_id": "native-child",
+            "source_residency_generation": residencies["source"]["generation"],
+            "target_residency_generation": residencies["target"]["generation"],
+            "source_process_generation": 2,
+            "target_process_generation": 1,
+        },
+    )
+    assert recorded is not None and recorded["state"] == "materialized"
+
+
+@pytest.mark.parametrize("target_sorts_first", [True, False], ids=["target-first", "source-first"])
+@pytest.mark.parametrize("writer", ["establish", "finalize", "reap", "delete"])
+async def test_a_write_to_both_fork_members_takes_them_in_a_heartbeats_order(
+    pool, store: Storage, monkeypatch, writer: str, target_sorts_first: bool
+):
+    """A write to both members of a Fork takes them in thread order, as a heartbeat does.
+
+    A heartbeat extending both residencies locks the two members in thread
+    order. Fork's writers took the source's and then the target's, and the
+    target's random id sorts first half the time: a beat holding the target
+    then waited for the source while the Fork held the source and waited for
+    the target. Owner deletion of both chats updated their members in
+    whatever order its plan met them. The heartbeat retries as a deadlock's
+    victim; the owner's Fork and deletion do not, and failed with a 500. The
+    rival here is the beat part-way through its lock: it holds the member
+    first in thread order and then asks for the other one, which the writer
+    must not be holding while it waits.
+    """
+    operation, job = await _forked(store, monkeypatch, target_sorts_first=target_sorts_first)
+    if writer in {"finalize", "delete"}:
+        await _materialized(store, operation)
+    if writer == "delete":
+        assert await store.session_fork.finalize_session_fork(operation_id=operation["id"])
+    if writer == "reap":
+        # Its coordinator stopped before the host's receipt was recorded.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_session_forks "
+                "SET coordinator_lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+                operation["id"],
+            )
+    members = (job["thread_id"], operation["target_thread_id"])
+    writes = {
+        "establish": lambda: store.session_fork.establish_session_fork_residencies(
+            operation_id=operation["id"], coordinator_token="coordinator", ttl_seconds=120
+        ),
+        "finalize": lambda: store.session_fork.finalize_session_fork(operation_id=operation["id"]),
+        "reap": lambda: store.session_fork.reap_stalled_session_forks(stall_seconds=0),
+        "delete": lambda: store.conversation_commands.delete_sessions(
+            thread_ids=list(members), user_id=job["user_id"]
+        ),
+    }
+    first, second = sorted(members)
+    write = None
+    async with pool.acquire() as beat:
+        try:
+            async with beat.transaction():
+                await beat.execute(_LOCK_MEMBER, first)
+                write = asyncio.create_task(writes[writer]())
+                await _blocked_by(pool, await beat.fetchval("SELECT pg_backend_pid()"))
+                await _close_a_cycle(beat, _LOCK_MEMBER, second)
+            written = await asyncio.wait_for(write, timeout=10)
+        finally:
+            await _settle(write)
+    assert written
+    if writer == "delete":
+        assert sorted(written["thread_ids"]) == sorted(members)
+        assert len(written["released_residencies"]) == 2

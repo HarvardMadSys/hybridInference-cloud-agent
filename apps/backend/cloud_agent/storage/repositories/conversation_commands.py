@@ -30,6 +30,7 @@ from cloud_agent.storage._sql.mcp import write_mcp_bindings
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.read_receipts import merge_read_receipts
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
+from cloud_agent.storage._sql.sandbox import lock_memberships
 from cloud_agent.storage._sql.ssh import enable_ssh_servers
 from cloud_agent.storage.repositories.environments import bind_environment
 from cloud_agent.storage.repositories.goals import new_goal_id
@@ -433,7 +434,10 @@ class PostgresConversationCommands:
             )
             # Thread -> membership, the order Fork preparation also takes. A
             # released generation opens nothing more: no heartbeat extends it
-            # and no credential is renewed for it.
+            # and no credential is renewed for it. The memberships are locked
+            # in thread order first, as a heartbeat extending several takes
+            # them: the update's plan picks its own order.
+            await lock_memberships(conn, thread_ids)
             released = await conn.fetch(
                 """
                 UPDATE agent_thread_sandbox_memberships m

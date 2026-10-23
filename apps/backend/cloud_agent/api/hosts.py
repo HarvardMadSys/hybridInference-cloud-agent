@@ -372,12 +372,17 @@ async def heartbeat_host(
     if renewals and grants is not None:
         background_tasks.add_task(_renew_residency_grants, grants, list(renewals))
     # The answer is made of the policy the beat's own write read, under the
-    # same lock, rather than of four more reads of it.
+    # same lock, rather than of four more reads of it. A part of it that did
+    # not decode is None and is read again here, now that the beat's own work
+    # is done and any agent update it completes has switched: that read fails
+    # the answer with its error, as it did before the beat read the policy.
     policy = updated["runner_policy"]
+    runtime_downloads = await _runtime_downloads(job_store, updated["host"], policy)
+    host_settings = policy["host_settings"]
+    if host_settings is None:
+        host_settings = await job_store.host_pool.host_settings()
     archive = policy["sandbox_archive_settings"]
     if archive is None:
-        # The stored archive policy did not decode. Reading it again fails the
-        # answer with its error, now that the beat's own work is done.
         archive = await job_store.host_pool.sandbox_archive_settings()
     return HostHeartbeatResponse(
         host=updated["host"],
@@ -390,12 +395,12 @@ async def heartbeat_host(
         slots_desired=updated.get("slots_desired"),
         # The whole set every time: this server's values over global values
         # and built-in defaults, so clearing an override never revives its .env.
-        settings=merge_admin_values(policy["host_settings"], updated.get("settings_desired")),
+        settings=merge_admin_values(host_settings, updated.get("settings_desired")),
         sandbox_archive_settings=_host_archive_settings(
             archive,
             updated.get("capabilities") or body.capabilities or [],
         ),
-        runtime_downloads=await _runtime_downloads(job_store, updated["host"], policy),
+        runtime_downloads=runtime_downloads,
         residencies_lost=lost,
         retained_sandboxes_stop=retained_stops,
         heartbeat_interval_seconds=HEARTBEAT_INTERVAL_S,
@@ -541,11 +546,28 @@ async def _runtime_downloads(
 ) -> list[dict[str, str]]:
     """What the answer tells the host to hold, once any update this beat completes switches.
 
-    This beat may carry the last report an agent update was waiting for.
+    This beat may carry the last report an agent update was waiting for, so
+    the switch is tried whenever one may be waiting, including when the beat's
+    read of the updates did not decode. The targets are read again after a
+    switch, since hosts now hold what it made current, and when the beat's
+    read of them did not decode, which then fails the answer.
+    """
+    targets = policy["runtime_download_targets"]
+    switched = (
+        []
+        if policy["runtime_upgrade_waiting"] is False
+        else await _switch_ready_runtime_upgrades(store, host)
+    )
+    if switched or targets is None:
+        return await store.host_pool.runtime_download_targets()
+    return list(targets)
+
+
+async def _switch_ready_runtime_upgrades(store: _HostsStorage, host: str) -> list[str]:
+    """Switch new chats to each update every online host holds; return the runtimes switched.
+
     Bookkeeping, so a failure here costs the host nothing but a later switch.
     """
-    if not policy["runtime_upgrade_waiting"]:
-        return list(policy["runtime_download_targets"])
     try:
         switched = await store.host_pool.activate_ready_runtime_upgrades()
     except Exception:
@@ -554,16 +576,13 @@ async def _runtime_downloads(
             extra={"event": "agent_runtime_upgrade_activation_failed", "host": host},
             exc_info=True,
         )
-        return list(policy["runtime_download_targets"])
+        return []
     for runtime in switched:
         logger.info(
             "agent runtime upgrade activated",
             extra={"event": "agent_runtime_upgrade_activated", "runtime": runtime},
         )
-    if not switched:
-        return list(policy["runtime_download_targets"])
-    # Hosts now hold what the switch made current: read it again.
-    return await store.host_pool.runtime_download_targets()
+    return switched
 
 
 async def _record_checkpoints(
