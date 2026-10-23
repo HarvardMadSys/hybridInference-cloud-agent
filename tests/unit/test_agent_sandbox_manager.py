@@ -129,18 +129,11 @@ def test_generation_zero_is_limited_to_fenced_group_stop_requests():
 
 @pytest.mark.asyncio
 async def test_resource_checkpoint_is_forwarded_before_any_native_event():
-    """Question hints and turn-fenced checkpoints both precede native output."""
+    """A checkpoint persists during a silent tool invocation, before CLI output."""
     gate = threading.Event()
     turn_started = threading.Event()
 
     class QuietTurn:
-        def __init__(self):
-            self.question_pending = True
-
-        def take_question_change(self):
-            pending, self.question_pending = self.question_pending, False
-            return pending
-
         @staticmethod
         def lines():
             turn_started.set()
@@ -164,9 +157,7 @@ async def test_resource_checkpoint_is_forwarded_before_any_native_event():
         "athr_source", SharedTurnRequest(token="lease", prompt="work", model="model")
     )
     try:
-        question = json.loads(await asyncio.wait_for(anext(response.body_iterator), timeout=1))
         checkpoint = json.loads(await asyncio.wait_for(anext(response.body_iterator), timeout=1))
-        assert question == {"kind": "question_changed"}
         assert checkpoint["kind"] == "resource_checkpoint"
         assert checkpoint["turn_resources"]["state"] == "collecting"
         assert turn_started.wait(1)
