@@ -1659,12 +1659,10 @@ def test_member_permission_normalization_prunes_platform_and_sibling_provider_ho
     assert script.count("-path /agent-state/codex-members") == walks
     assert script.count("-path /agent-state/opencode-members") == walks
     assert script.count("-path /agent-state/kilo-members") == walks
-    # The trusted collections hold other members' 0700 homes; a traversal
-    # into them would fail on the first one it cannot open.
+    # Avoid crossing into other members' 0700 homes.
     for runtime_id in ("codex", "opencode", "kilo"):
         assert script.count(f"-path /agent-state/{runtime_id}-homes ") == walks
-    # A member's provider home is never widened, not even by its owner: the
-    # pass no longer enters the collections at all.
+    # Never widen a member's provider home.
     assert "-members/" not in script
     assert "-homes/" not in script
     assert '"$member"' not in script
