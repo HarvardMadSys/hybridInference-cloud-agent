@@ -14,7 +14,11 @@ from tests.integration.storage.test_agent_job_store import (  # noqa: F401 - pyt
     store,
 )
 
-from cloud_agent.notification_state import decode_notification_cursor
+from cloud_agent.notification_state import (
+    NotificationStateCursor,
+    decode_notification_cursor,
+    encode_cursor,
+)
 from cloud_agent.storage import notification_state as notification_state_storage
 from cloud_agent.storage.repositories import (
     notification_maintenance as notification_maintenance_storage,
@@ -232,6 +236,282 @@ async def test_notification_bootstrap_pages_100k_recent_terminals_with_bounded_i
         for node in marker_nodes
     )
     assert examined <= 201, f"examined {examined} markers for a 200-row page"
+
+
+async def test_notification_delta_continuation_reads_one_keyset_page(pool):
+    """A continuation seeks past history instead of rebuilding the whole interval."""
+    count = 100_000
+    owner = "notification-delta-scale"
+    async with pool.acquire() as conn:
+        base = await conn.fetchval("SELECT pg_current_snapshot()::text")
+        await conn.execute(
+            """
+            INSERT INTO agent_notification_changes (
+                kind,entity_id,user_id,change_xid,changed_at,terminal
+            )
+            SELECT 'job','job_notification_delta_scale_' || lpad(n::text,6,'0'),
+                   $1,pg_current_xact_id(),clock_timestamp(),FALSE
+            FROM generate_series(1,$2) AS n
+            """,
+            owner,
+            count,
+        )
+        after_xid = int(
+            await conn.fetchval(
+                """
+                SELECT change_xid::text FROM agent_notification_changes
+                WHERE user_id=$1 LIMIT 1
+                """,
+                owner,
+            )
+        )
+        target = await conn.fetchval("SELECT pg_current_snapshot()::text")
+        await conn.execute("ANALYZE agent_notification_changes")
+
+        cursor = NotificationStateCursor(
+            scope="plan",
+            database_snapshot=base,
+            target_snapshot=target,
+            after_kind="job",
+            after_xid=after_xid,
+            after_id="job_notification_delta_scale_050000",
+        )
+        statement = notification_state_storage._change_page_statement(cursor)
+        raw_plan = await conn.fetchval(
+            "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) " + statement,
+            owner,
+            base,
+            target,
+            201,
+            str(after_xid),
+            cursor.after_id,
+        )
+
+    plan = json.loads(raw_plan)[0]["Plan"]
+
+    def nodes(node):
+        yield node
+        for child in node.get("Plans", []):
+            yield from nodes(child)
+
+    marker_nodes = [
+        node for node in nodes(plan) if node.get("Relation Name") == "agent_notification_changes"
+    ]
+    assert any(
+        node.get("Index Name") == "idx_agent_notification_changes_owner_kind_xid"
+        for node in marker_nodes
+    )
+    examined = sum(
+        (node.get("Actual Rows", 0) + node.get("Rows Removed by Filter", 0))
+        * node.get("Actual Loops", 1)
+        for node in marker_nodes
+    )
+    assert examined <= 201, f"examined {examined} markers for a 200-row continuation"
+
+
+async def test_notification_delayed_xid_continuation_reads_one_keyset_page(pool):
+    """A base-snapshot XID seeks directly to its continuation boundary."""
+    count = 100_000
+    owner = "notification-delta-xip-scale"
+    writer = await pool.acquire()
+    transaction = writer.transaction()
+    await transaction.start()
+    committed = False
+    try:
+        await writer.execute(
+            """
+            INSERT INTO agent_notification_changes (
+                kind,entity_id,user_id,change_xid,changed_at,terminal
+            )
+            SELECT 'job','job_notification_delta_xip_' || lpad(n::text,6,'0'),
+                   $1,pg_current_xact_id(),clock_timestamp(),FALSE
+            FROM generate_series(1,$2) AS n
+            """,
+            owner,
+            count,
+        )
+        after_xid = int(
+            await writer.fetchval(
+                """
+                SELECT change_xid::text FROM agent_notification_changes
+                WHERE user_id=$1 LIMIT 1
+                """,
+                owner,
+            )
+        )
+        async with pool.acquire() as observer:
+            # Put the delayed writer below xmax so the snapshot records it in xip.
+            await observer.fetchval("SELECT pg_current_xact_id()")
+            base = await observer.fetchval("SELECT pg_current_snapshot()::text")
+        assert str(after_xid) in base.split(":", 2)[2].split(",")
+        await transaction.commit()
+        committed = True
+    finally:
+        if not committed:
+            await transaction.rollback()
+        await pool.release(writer)
+
+    async with pool.acquire() as conn:
+        target = await conn.fetchval("SELECT pg_current_snapshot()::text")
+        await conn.execute("ANALYZE agent_notification_changes")
+        cursor = NotificationStateCursor(
+            scope="plan",
+            database_snapshot=base,
+            target_snapshot=target,
+            after_kind="job",
+            after_xid=after_xid,
+            after_id="job_notification_delta_xip_050000",
+        )
+        raw_plan = await conn.fetchval(
+            "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) "
+            + notification_state_storage._change_page_statement(cursor),
+            owner,
+            base,
+            target,
+            201,
+            str(after_xid),
+            cursor.after_id,
+        )
+
+    plan = json.loads(raw_plan)[0]["Plan"]
+
+    def nodes(node):
+        yield node
+        for child in node.get("Plans", []):
+            yield from nodes(child)
+
+    marker_nodes = [
+        node for node in nodes(plan) if node.get("Relation Name") == "agent_notification_changes"
+    ]
+    assert any(
+        node.get("Index Name") == "idx_agent_notification_changes_owner_kind_xid"
+        for node in marker_nodes
+    )
+    examined = sum(
+        (node.get("Actual Rows", 0) + node.get("Rows Removed by Filter", 0))
+        * node.get("Actual Loops", 1)
+        for node in marker_nodes
+    )
+    assert examined <= 201, f"examined {examined} markers for a delayed-XID continuation"
+
+
+async def test_notification_delayed_xids_share_one_global_page(pool):
+    """Many base-snapshot XIDs stop after one globally bounded marker page."""
+    owner = "notification-delta-many-xips"
+    rows_per_xid = 500
+    xids: list[int] = []
+    async with pool.acquire() as conn:
+        for batch in range(10):
+            xid = await conn.fetchval(
+                """
+                WITH inserted AS (
+                    INSERT INTO agent_notification_changes (
+                        kind,entity_id,user_id,change_xid,changed_at,terminal
+                    )
+                    SELECT 'job',
+                           'job_notification_delta_xips_' || lpad($2::text,2,'0')
+                               || '_' || lpad(n::text,6,'0'),
+                           $1,pg_current_xact_id(),clock_timestamp(),FALSE
+                    FROM generate_series(1,$3) AS n
+                    RETURNING change_xid
+                )
+                SELECT change_xid::text FROM inserted LIMIT 1
+                """,
+                owner,
+                str(batch),
+                rows_per_xid,
+            )
+            xids.append(int(xid))
+        base = f"{xids[0]}:{xids[-1] + 1}:{','.join(map(str, xids))}"
+        target = await conn.fetchval("SELECT pg_current_snapshot()::text")
+        await conn.execute("ANALYZE agent_notification_changes")
+        cursor = NotificationStateCursor(
+            scope="plan",
+            database_snapshot=base,
+            target_snapshot=target,
+            after_kind="job",
+            after_xid=xids[0],
+            after_id=f"job_notification_delta_xips_00_{rows_per_xid:06d}",
+        )
+        raw_plan = await conn.fetchval(
+            "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) "
+            + notification_state_storage._change_page_statement(cursor),
+            owner,
+            base,
+            target,
+            201,
+            str(cursor.after_xid),
+            cursor.after_id,
+        )
+
+    plan = json.loads(raw_plan)[0]["Plan"]
+
+    def nodes(node):
+        yield node
+        for child in node.get("Plans", []):
+            yield from nodes(child)
+
+    marker_nodes = [
+        node for node in nodes(plan) if node.get("Relation Name") == "agent_notification_changes"
+    ]
+    assert any(
+        node.get("Index Name") == "idx_agent_notification_changes_owner_kind_xid"
+        for node in marker_nodes
+    )
+    examined = sum(
+        (node.get("Actual Rows", 0) + node.get("Rows Removed by Filter", 0))
+        * node.get("Actual Loops", 1)
+        for node in marker_nodes
+    )
+    assert examined <= 202, f"examined {examined} markers across delayed XIDs"
+
+
+async def test_v1_delta_continuation_finishes_before_upgrading_its_cursor(pool, store: Storage):
+    """A cursor emitted before rollout keeps its original kind/identity ordering."""
+    thread_ids = [f"athr_notification_legacy_{suffix}" for suffix in ("a", "b", "c")]
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_threads (id,user_id,repo,title,execution_profile)
+            SELECT id,'user-1','owner/repo',id,'trusted-v1' FROM unnest($1::text[]) AS id
+            """,
+            thread_ids,
+        )
+    initial = await store.conversation_queries.notification_state(user_id="user-1", limit=1)
+    base = decode_notification_cursor(initial["change_cursor"], user_id="user-1", limit=1)
+    assert base is not None
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET title=title || '-updated' WHERE id=ANY($1::text[])",
+            thread_ids,
+        )
+        target = await conn.fetchval("SELECT pg_current_snapshot()::text")
+    legacy = NotificationStateCursor(
+        version=1,
+        scope=base.scope,
+        database_snapshot=base.database_snapshot,
+        target_snapshot=target,
+        after_kind="thread",
+        after_id=thread_ids[0],
+    )
+
+    second = await store.conversation_queries.notification_state(
+        user_id="user-1", cursor=encode_cursor(legacy), limit=1
+    )
+    assert [row["id"] for row in second["threads"]] == [thread_ids[1]]
+    continuation = decode_notification_cursor(second["next_cursor"], user_id="user-1", limit=1)
+    assert continuation is not None
+    assert continuation.version == 1
+    assert continuation.after_xid is None
+
+    third = await store.conversation_queries.notification_state(
+        user_id="user-1", cursor=second["next_cursor"], limit=1
+    )
+    assert [row["id"] for row in third["threads"]] == [thread_ids[2]]
+    assert third["next_cursor"] is None
+    current = decode_notification_cursor(third["change_cursor"], user_id="user-1", limit=1)
+    assert current is not None and current.version == 2
 
 
 async def test_notification_state_recovers_delayed_commit_once_and_reports_deletion(

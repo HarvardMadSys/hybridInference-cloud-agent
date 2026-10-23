@@ -46,7 +46,7 @@ _USAGE_SUMMARY_VERSION_KEY = "_usage_projection"
 
 
 def usage_summary_sql(payload: str) -> str:
-    """The projection of ``payload`` as an event row stores it (migration ``0104``).
+    """The projection of ``payload`` as an event row stores it (migration ``0105``).
 
     It is the read's own SQL, run once when the event is inserted, so the
     stored value cannot drift from what a read would compute; the version
@@ -62,7 +62,7 @@ def usage_summary_sql(payload: str) -> str:
 #: projection when they are stored, and a read takes it from there without
 #: opening the payload: a long turn's usage is read again each time a model
 #: call is counted, by every tab the owner has open. Rows stored before
-#: migration ``0104``, or under a projection since changed, are projected here.
+#: migration ``0105``, or under a projection since changed, are projected here.
 USAGE_EVENT_PAYLOAD_SQL = f"""
 CASE WHEN e.usage_summary ->> '{_USAGE_SUMMARY_VERSION_KEY}' = '{USAGE_SUMMARY_VERSION}'
      THEN e.usage_summary - '{_USAGE_SUMMARY_VERSION_KEY}'

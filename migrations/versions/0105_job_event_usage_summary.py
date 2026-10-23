@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "0104_job_event_usage_summary"
-down_revision = "0103_terminal_resume_keyset"
+revision = "0105_job_event_usage_summary"
+down_revision = "0104_notification_change_keyset"
 branch_labels = None
 depends_on = None
 
