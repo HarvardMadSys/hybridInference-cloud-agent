@@ -817,13 +817,14 @@ class ContainerBackend(SandboxBackend):
         so the child's network check does not start the two helper containers
         that takes; it still checks the Docker version and the relay network
         itself. Raises, and the child declines the turn before accepting it,
-        when the verification is missing, failed, malformed or older than an
-        activation would trust (``HostNetworkGuard.adopt``).
+        when the verification is missing, failed or malformed
+        (``HostNetworkGuard.adopt``). One already older than an activation
+        would trust, because the child was slow to start, is not taken: the
+        network check then installs and reads back the rules itself.
         """
         from cloud_agent_host.network_guard import VERIFICATION_KEY
 
-        self.network_guard().adopt(payload.get(VERIFICATION_KEY))
-        self._rules_handed_over = True
+        self._rules_handed_over = self.network_guard().adopt(payload.get(VERIFICATION_KEY))
 
     def base_env(self) -> dict[str, str]:
         """The image's own environment, not the runner's.
@@ -977,7 +978,8 @@ class ContainerBackend(SandboxBackend):
         A turn's child holding its host service's verification
         (:meth:`adopt_rules_verification`) uses that instead, while an
         activation would still trust it; if it lapsed during the checks
-        above, the guard makes a new one here.
+        above, the guard makes a new one here. A child handed one that had
+        already lapsed holds none, and checks as every other caller does.
         """
         network = self.require_sandbox_network()
         self._require_gateway_priority()

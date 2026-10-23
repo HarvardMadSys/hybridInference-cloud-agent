@@ -232,9 +232,11 @@ class HostQualification:
         verification of the network rules from the guard this service's
         startup check verified them with, renewed first once it is no longer
         recent (``HostNetworkGuard.handover``). With the verification the
-        child starts no helper container of its own; without a recent one it
-        declines the turn. The caller adds both after the claim's own
-        underscore keys are stripped, so only this host can supply them.
+        child starts no helper container of its own; with one that aged out
+        before a slow child could adopt it, the child installs and reads back
+        the rules itself; with a failed one it declines the turn. The caller
+        adds both after the claim's own underscore keys are stripped, so only
+        this host can supply them.
         """
         handed: dict[str, Any] = {}
         verdict = self.verdict()

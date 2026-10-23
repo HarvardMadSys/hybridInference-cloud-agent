@@ -3596,9 +3596,12 @@ rules, not the host's.
   start or wake never waits for the install and read-back itself. A host where
   nothing runs starts no helper for it: the next start or wake renews a lapsed
   pass before its group joins a bridge. The runner renews its own pass when it
-  hands a turn over and that pass is 45 seconds old. The turn's process runs no
-  helper of its own: it takes the runner's pass, and declines the turn unless
-  that pass is less than 60 seconds old.
+  hands a turn over and that pass is 45 seconds old. The turn's process
+  normally runs no helper of its own: it takes the runner's pass, and declines
+  the turn if the runner's check failed or its pass is missing or unreadable. A
+  process that starts so slowly that the pass is 60 seconds old when it reads
+  it logs `network_guard_verification_aged_out`, runs the install and
+  read-back itself, and accepts the turn only if that check passes.
 - **Scoped to this deployment.** The tables recognise traffic by the bridge
   interface prefix. They never flush or edit another deployment's rules, so
   several deployments can share a host.
