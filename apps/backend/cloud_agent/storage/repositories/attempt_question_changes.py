@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import asyncpg
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    import asyncpg
 
 from cloud_agent.storage._sql.attempts import lock_live_attempt
 
@@ -61,6 +63,7 @@ class AttemptQuestionChanges:
     async def notify_question_change(
         self, *, job_id: str, attempt_id: int, lease_generation: int
     ) -> bool:
+        """Notify owners of a question change if this attempt still holds its lease."""
         return await notify_question_change(
             self._pool,
             self._lock_live_attempt,

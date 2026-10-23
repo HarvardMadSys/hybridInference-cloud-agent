@@ -34,7 +34,6 @@ from cloud_agent.execution_profiles import (
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
-from cloud_agent.storage.repositories.attempt_question_changes import AttemptQuestionChanges
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent.storage._sql.environment_runs import env_run_blocks_host, env_runs_holding_slots
 from cloud_agent.storage._sql.event_batches import append_attempt_events
@@ -67,6 +66,7 @@ from cloud_agent.storage._sql.sandbox import (
     restore_claim_due,
 )
 from cloud_agent.storage.deadlocks import retry_deadlock_victim
+from cloud_agent.storage.repositories.attempt_question_changes import AttemptQuestionChanges
 from cloud_agent.task_titles import thread_title_needs_generation
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,

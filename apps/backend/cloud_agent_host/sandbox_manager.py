@@ -2445,7 +2445,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
 
         turn_boundary_closed = False
 
-        def frames() -> Generator[str, None, None]:  # noqa: C901, PLR0915 complexity baseline, #771
+        def frames() -> Generator[str, None, None]:  # noqa: PLR0915 complexity baseline, #771
             nonlocal turn_boundary_closed
             tool_windows = ToolWindowTracker()
             resources: dict[str, Any] | None = None

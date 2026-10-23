@@ -1579,6 +1579,7 @@ class _Control:
     def flush(self):
         """Each event is recorded as it is appended, so nothing is left to deliver."""
 
+
 @pytest.mark.parametrize(
     ("heart", "timeout_s", "expected_code"),
     [

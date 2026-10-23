@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterator
-from typing import Any, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeVar, overload
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _Key = TypeVar("_Key")
 _Value = TypeVar("_Value")
@@ -33,21 +35,21 @@ class ChangeTrackedDict(dict[_Key, _Value]):
     def pop(self, key: _Key, default: _Default) -> _Value | _Default: ...
 
     def pop(self, key: _Key, default: Any = _MISSING) -> Any:
+        """Remove a key and signal only when it was present."""
         present = key in self
-        if default is _MISSING:
-            value = super().pop(key)
-        else:
-            value = super().pop(key, default)
+        value = super().pop(key) if default is _MISSING else super().pop(key, default)
         if present:
             self._mark()
         return value
 
     def clear(self) -> None:
+        """Remove all entries and signal when the mapping was nonempty."""
         if self:
             self._mark()
         super().clear()
 
     def take_change(self) -> bool:
+        """Return and clear the coalesced mutation signal."""
         changed = self._changed
         self._changed = False
         return changed
@@ -60,6 +62,7 @@ class QuestionChangeTrackable:
     _questions: ChangeTrackedDict[Any, Any]
 
     def take_question_change(self) -> bool:
+        """Consume the pending question-change signal under its owner lock."""
         with self._questions_lock:
             return self._questions.take_change()
 
@@ -71,9 +74,7 @@ def question_change_frames(turn: Any) -> Iterator[str]:
         yield json.dumps({"kind": "question_changed"}, separators=(",", ":")) + "\n"
 
 
-def question_change_frame_kind(
-    frame: dict[str, Any], control: Any, job_id: str
-) -> str | None:
+def question_change_frame_kind(frame: dict[str, Any], control: Any, job_id: str) -> str | None:
     """Report a question wake-up and return ordinary frame kinds unchanged."""
     kind = frame.get("kind")
     if not isinstance(kind, str):

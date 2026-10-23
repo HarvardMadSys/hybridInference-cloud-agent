@@ -445,7 +445,9 @@ class HarnessTurn(question_change_signals.QuestionChangeTrackable, Generic[_Runt
         self._final_messages: list[str] = []
         self._result: TurnResult | None = None
         self._questions_lock = threading.Lock()
-        self._questions: dict[str, _PendingQuestion] = question_change_signals.ChangeTrackedDict()
+        self._questions: question_change_signals.ChangeTrackedDict[str, _PendingQuestion] = (
+            question_change_signals.ChangeTrackedDict()
+        )
         self._question_records: dict[str, _PendingQuestion] = {}
         self._question_keys: dict[str, str] = {}
         self._questions_closed = False

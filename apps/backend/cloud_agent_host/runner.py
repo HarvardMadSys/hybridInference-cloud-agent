@@ -43,8 +43,8 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER, manager_env
 from cloud_agent_host import question_change_signals
+from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER, manager_env
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
