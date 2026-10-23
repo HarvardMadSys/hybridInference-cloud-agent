@@ -408,3 +408,25 @@ def test_heartbeat_has_a_short_timeout_without_changing_other_control_requests()
 
     assert timeouts["heartbeat"] == dict.fromkeys(("connect", "read", "write", "pool"), 10)
     assert timeouts["finish"] == dict.fromkeys(("connect", "read", "write", "pool"), 30)
+
+
+def test_question_hint_is_best_effort_and_uses_a_short_deadline():
+    requests = []
+
+    def endpoint(request):
+        requests.append(request)
+        return httpx.Response(204)
+
+    control = runner.ControlPlane("https://control.test", "test-token")
+    control.close()
+    control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
+    try:
+        control.report_question_change("ajob_questions")
+    finally:
+        control.close()
+
+    assert len(requests) == 1
+    assert requests[0].url.path == "/v1/agent/worker/jobs/ajob_questions/questions:changed"
+    assert requests[0].extensions["timeout"] == dict.fromkeys(
+        ("connect", "read", "write", "pool"), 2
+    )

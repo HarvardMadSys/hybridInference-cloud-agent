@@ -1974,6 +1974,9 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
             if frame is None:
                 break
             kind = frame.get("kind")
+            if kind == "question_changed":
+                control.report_question_change(job.job_id)
+                continue
             if kind == "event":
                 raw_line = frame.get("raw_line")
                 if isinstance(raw_line, str):

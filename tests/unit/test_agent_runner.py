@@ -1572,12 +1572,16 @@ class _Control:
 
     def __init__(self):
         self.events = []
+        self.question_hints = []
 
     def append_event(self, event):
         self.events.append((event.event_type, event.payload))
 
     def flush(self):
         """Each event is recorded as it is appended, so nothing is left to deliver."""
+
+    def report_question_change(self, job_id):
+        self.question_hints.append(job_id)
 
 
 @pytest.mark.parametrize(

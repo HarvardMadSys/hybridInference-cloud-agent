@@ -449,6 +449,9 @@ class HarnessTurn(Generic[_RuntimeT]):
         self._question_records: dict[str, _PendingQuestion] = {}
         self._question_keys: dict[str, str] = {}
         self._questions_closed = False
+        # One coalesced wake-up is enough: consumers reread the current set,
+        # so intermediate snapshots have no value and the queue stays bounded.
+        self._question_change_pending = False
 
     def _remember_question(
         self,
@@ -465,18 +468,24 @@ class HarnessTurn(Generic[_RuntimeT]):
             pending = _PendingQuestion({"request_id": request_id, "questions": questions}, respond)
             self._questions[request_id] = pending
             self._question_records[native_key] = pending
+            self._question_change_pending = True
 
     def _clear_questions(self) -> None:
         with self._questions_lock:
+            changed = bool(self._questions)
             self._questions_closed = True
             self._questions.clear()
             self._question_records.clear()
+            if changed:
+                self._question_change_pending = True
 
     def _forget_question(self, native_key: str) -> None:
         with self._questions_lock:
             request_id = self._question_keys.get(native_key)
             if request_id is not None:
-                self._questions.pop(request_id, None)
+                changed = self._questions.pop(request_id, None) is not None
+                if changed:
+                    self._question_change_pending = True
             self._question_records.pop(native_key, None)
 
     def _restore_question(self, native_key: str) -> None:
@@ -492,6 +501,14 @@ class HarnessTurn(Generic[_RuntimeT]):
             self._question_keys[native_key] = request_id
             self._question_records[native_key] = restored
             self._questions[request_id] = restored
+            self._question_change_pending = True
+
+    def take_question_change(self) -> bool:
+        """Consume one coalesced signal that the pending set changed."""
+        with self._questions_lock:
+            changed = self._question_change_pending
+            self._question_change_pending = False
+            return changed
 
     def pending_questions(self) -> list[dict[str, Any]]:
         """Read this turn's unanswered requests; snapshots cannot mutate the CLI input."""
@@ -538,6 +555,7 @@ class HarnessTurn(Generic[_RuntimeT]):
             except (DriverError, OSError):
                 return InputOutcome(False, INPUT_PROCESS_GONE)
             self._questions.pop(request_id)
+            self._question_change_pending = True
             return InputOutcome(True)
 
     def iter_events(self) -> Iterator[HarnessEvent]:

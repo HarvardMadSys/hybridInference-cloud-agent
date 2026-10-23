@@ -2445,10 +2445,15 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
 
         turn_boundary_closed = False
 
-        def frames() -> Generator[str, None, None]:  # noqa: PLR0915 complexity baseline, #771
+        def frames() -> Generator[str, None, None]:  # noqa: C901, PLR0915 complexity baseline, #771
             nonlocal turn_boundary_closed
             tool_windows = ToolWindowTracker()
             resources: dict[str, Any] | None = None
+            take_question_change = getattr(turn, "take_question_change", lambda: False)
+
+            def question_frames() -> Generator[str, None, None]:
+                if take_question_change():
+                    yield json.dumps({"kind": "question_changed"}, separators=(",", ":")) + "\n"
 
             def close_resources(value: Any) -> dict[str, Any]:
                 nonlocal resources
@@ -2468,6 +2473,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             events = OutputPump(observed_events(), name="shared-turn-events")
             try:
                 while True:
+                    yield from question_frames()
                     # Sampling and forwarding must both proceed while the CLI
                     # is silent. A crash should retain its latest closed
                     # checkpoint even during one long tool invocation.

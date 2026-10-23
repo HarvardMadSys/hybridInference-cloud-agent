@@ -51,6 +51,8 @@ def _turn(tmp_path, runtime, kind="question"):
 @pytest.mark.parametrize("runtime", ["claude", "codex"])
 def test_native_request_retains_wire_identity_and_answers_once(tmp_path, runtime):
     process, _session, turn, request, response, spawned = _turn(tmp_path, runtime)
+    assert turn.take_question_change() is True
+    assert turn.take_question_change() is False
     (pending,) = turn.pending_questions()
     (question,) = pending["questions"]
     assert question["question"] == "Which approach?"
@@ -62,6 +64,8 @@ def test_native_request_retains_wire_identity_and_answers_once(tmp_path, runtime
     assert turn.answer_question(pending["request_id"], {question_id: ["B"]}).accepted
     assert json.loads(process.sent[-1]) == response
     assert turn.pending_questions() == []
+    assert turn.take_question_change() is True
+    assert turn.take_question_change() is False
     assert turn.answer_question(pending["request_id"], {question_id: ["A"]}).reason == INPUT_REFUSED
     if runtime == "claude":
         argv = spawned[0][0]

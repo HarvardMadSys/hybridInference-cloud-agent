@@ -149,4 +149,33 @@ describe('the shell read scope', () => {
     expect(pending('thread-a')).toBe(false);
     expect(listThreadQuestions).toHaveBeenCalledTimes(6);
   });
+
+  it('rereads only the thread named by a native-question hint', () => {
+    vi.useFakeTimers();
+    vi.mocked(listThreadQuestions).mockResolvedValue({
+      job_id: 'job',
+      attempt_id: 1,
+      questions: [],
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <AgentReadProvider userId="alice">{children}</AgentReadProvider>
+    );
+    const reads = renderHook(() => useQuestionReads(), { wrapper }).result.current;
+    const readA = vi.fn(() => void reads.listThreadQuestions('thread-a'));
+    const readB = vi.fn(() => void reads.listThreadQuestions('thread-b'));
+    const leaveA = reads.watch('thread-a', { intervalMs: 60_000 }, readA);
+    const leaveB = reads.watch('thread-b', { intervalMs: 60_000 }, readB);
+    expect(listThreadQuestions).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      receiveHint('question', 'thread-a');
+      vi.advanceTimersByTime(PUSH_BATCH_MS);
+    });
+
+    expect(readA).toHaveBeenCalledTimes(2);
+    expect(readB).toHaveBeenCalledOnce();
+    expect(listThreadQuestions).toHaveBeenCalledTimes(3);
+    leaveA();
+    leaveB();
+  });
 });

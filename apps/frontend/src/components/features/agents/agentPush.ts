@@ -41,6 +41,8 @@ export interface AgentRecordsChange {
   mcp: string[];
   /** Conversations whose publication progress changed. */
   publications: string[];
+  /** Conversations whose native pending-question set changed. */
+  questionThreads: string[];
   /** Changes may have been missed: read again rather than trust patches. */
   resync: boolean;
 }
@@ -50,6 +52,7 @@ const HINT_FIELD = {
   queue: 'queues',
   mcp: 'mcp',
   publication: 'publications',
+  question: 'questionThreads',
 } as const satisfies Record<AgentChangeHint, keyof AgentRecordsChange>;
 
 let live = false;
@@ -77,6 +80,7 @@ function queue(update: (change: AgentRecordsChange) => void): void {
     queues: [],
     mcp: [],
     publications: [],
+    questionThreads: [],
     resync: false,
   };
   update(pending);

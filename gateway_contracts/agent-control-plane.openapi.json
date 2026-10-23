@@ -28167,7 +28167,7 @@
     },
     "/v1/agent/changes": {
       "get": {
-        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage`` carries the\njob's ``{\"id\": ..., \"usage\": ...}`` as ``GET /v1/agent/jobs/{id}/usage``\nreturns it; ``mcp`` (a job) and ``queue``, ``publication`` (a\nconversation) carry only ``{\"id\": ...}``: read that again. 404 where this\nprocess pushes nothing, which a tab treats as \"keep reading on a clock\".\nThe stream ends after at most ``OWNER_STREAM_MAX_S`` (15 minutes); the tab\nreconnects, is admitted again, and its ``hello`` has it read its lists.\n429 when the account already holds as many streams as this process allows\none account (:mod:`cloud_agent.api._stream_slots`).",
+        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage`` carries the\njob's ``{\"id\": ..., \"usage\": ...}`` as ``GET /v1/agent/jobs/{id}/usage``\nreturns it; ``mcp`` (a job) and ``queue``, ``publication``, ``question``\n(a conversation) carry only ``{\"id\": ...}``: read that again. 404 where this\nprocess pushes nothing, which a tab treats as \"keep reading on a clock\".\nThe stream ends after at most ``OWNER_STREAM_MAX_S`` (15 minutes); the tab\nreconnects, is admitted again, and its ``hello`` has it read its lists.\n429 when the account already holds as many streams as this process allows\none account (:mod:`cloud_agent.api._stream_slots`).",
         "operationId": "stream_owner_changes_v1_agent_changes_get",
         "parameters": [
           {
@@ -40467,6 +40467,55 @@
           }
         },
         "summary": "Worker Record Measurement"
+      }
+    },
+    "/v1/agent/worker/jobs/{job_id}/questions:changed": {
+      "post": {
+        "description": "Wake owner question readers for this attempt's exact conversation.",
+        "operationId": "worker_notify_question_change_v1_agent_worker_jobs__job_id__questions_changed_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Worker Notify Question Change"
       }
     },
     "/v1/agent/worker/jobs/{job_id}/release": {

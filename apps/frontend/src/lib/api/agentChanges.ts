@@ -45,11 +45,11 @@ export interface AgentThreadChangeApi {
 
 /**
  * Things that changed for a job or a conversation. `usage` and `mcp` name a job;
- * `queue` and `publication` name a conversation. `usage` comes with the job's
- * usage as its usage read returns it; the others, and a `usage` without one,
- * mean: read that one thing again.
+ * `queue`, `publication` and `question` name a conversation. `usage` comes
+ * with the job's usage as its usage read returns it; the others, and a `usage`
+ * without one, mean: read that one thing again.
  */
-export const AGENT_CHANGE_HINTS = ['usage', 'queue', 'mcp', 'publication'] as const;
+export const AGENT_CHANGE_HINTS = ['usage', 'queue', 'mcp', 'publication', 'question'] as const;
 export type AgentChangeHint = (typeof AGENT_CHANGE_HINTS)[number];
 
 export interface StreamAgentChangesOptions {

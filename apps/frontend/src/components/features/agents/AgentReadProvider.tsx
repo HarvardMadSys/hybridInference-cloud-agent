@@ -73,6 +73,7 @@ export function AgentReadProvider({ userId, children }: { userId?: string; child
       const threads = staleQuestionThreads(change);
       if (threads === null) questions.invalidate();
       else for (const threadId of new Set(threads)) questions.invalidate(threadId);
+      for (const threadId of change.questionThreads) questions.invalidate(threadId, true);
     });
     return () => {
       sessions();

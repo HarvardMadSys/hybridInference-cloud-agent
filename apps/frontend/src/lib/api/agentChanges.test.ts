@@ -47,6 +47,7 @@ describe('streamAgentChanges', () => {
         'event: job\ndata: {"id":"ajob_1","revision":3,"state":"succeeded"}\n\n',
         'event: usage\ndata: {"id":"ajob_1"}\n\n',
         'event: publication\ndata: {"id":"athr_1"}\n\n',
+        'event: question\ndata: {"id":"athr_1"}\n\n',
         'event: usage\ndata: {"id":"ajob_2","usage":{"ledger":{"status":"available"}}}\n\n',
         'event: resync\ndata: {"live":false}\n\n',
         'event: job\ndata: not json\n\n',
@@ -69,7 +70,8 @@ describe('streamAgentChanges', () => {
     expect(opts.onJob).toHaveBeenCalledWith({ id: 'ajob_1', revision: 3, state: 'succeeded' });
     expect(opts.onHint).toHaveBeenNthCalledWith(1, 'usage', 'ajob_1');
     expect(opts.onHint).toHaveBeenNthCalledWith(2, 'publication', 'athr_1');
-    expect(opts.onHint).toHaveBeenNthCalledWith(3, 'usage', 'ajob_2', {
+    expect(opts.onHint).toHaveBeenNthCalledWith(3, 'question', 'athr_1');
+    expect(opts.onHint).toHaveBeenNthCalledWith(4, 'usage', 'ajob_2', {
       ledger: { status: 'available' },
     });
     expect(opts.onDisconnect).toHaveBeenCalledTimes(1);

@@ -136,6 +136,27 @@ describe('one question clock per conversation', () => {
     expect(other).toHaveBeenCalledTimes(2);
   });
 
+  it('refreshes hinted readers immediately without waking a hidden page', () => {
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    const reads = createQuestionReadScope();
+    const page = vi.fn();
+    const notification = vi.fn();
+    const leavePage = reads.watch('thread', { intervalMs: 60_000 }, page);
+    const leaveNotification = reads.watch(
+      'thread',
+      { intervalMs: 60_000, whileHidden: true },
+      notification,
+    );
+
+    reads.invalidate('thread', true);
+
+    expect(page).not.toHaveBeenCalled();
+    expect(notification).toHaveBeenCalledTimes(2);
+    leavePage();
+    leaveNotification();
+    visibility.mockRestore();
+  });
+
   it('pauses what the page shows while the tab is hidden, but not a notification', async () => {
     vi.useFakeTimers();
     const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');

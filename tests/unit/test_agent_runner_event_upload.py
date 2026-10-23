@@ -63,6 +63,29 @@ def test_a_lease_an_event_upload_lost_ends_the_turn_at_once():
     ]
 
 
+def test_question_change_frame_notifies_the_attempt_control_plane():
+    supervisor = _Supervisor(
+        [
+            {"kind": "question_changed"},
+            {"kind": "result", "status": "completed", "exit_code": 0},
+        ]
+    )
+    control = _Control()
+
+    code, _tail, errors, result, _reported = runner_mod._stream_shared_agent_turn(
+        supervisor=supervisor,
+        job=_JOB,
+        control=control,
+        heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+        lease_token="lease",
+        timeout_s=30,
+    )
+
+    assert code == 0 and not errors and result["status"] == "completed"
+    assert control.question_hints == [_JOB.job_id]
+    assert control.events == [("lifecycle", {"phase": "turn_started"})]
+
+
 def _uploaded_events(request: httpx.Request) -> list[dict[str, Any]]:
     """The events one upload carries: a batch's, or the one a single post sends."""
     body = json.loads(request.content)

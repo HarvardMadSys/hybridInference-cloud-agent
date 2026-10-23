@@ -1152,6 +1152,38 @@ class PostgresAttemptCommands:
                 conn, attempt_id=attempt_id, lease_generation=lease_generation, events=events
             )
 
+    async def notify_question_change(
+        self, *, job_id: str, attempt_id: int, lease_generation: int
+    ) -> bool:
+        """Publish a thread hint while holding the live attempt's fence."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            if not await self._lock_live_attempt(conn, attempt_id, lease_generation):
+                return False
+            row = await conn.fetchrow(
+                """
+                SELECT j.user_id, t.id AS thread_id
+                FROM agent_jobs j
+                JOIN agent_attempts a ON a.job_id = j.id
+                JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = j.user_id
+                WHERE j.id = $1 AND j.current_attempt_id = $2 AND j.state = 'running'
+                  AND a.id = $2 AND a.lease_generation = $3 AND a.status = 'running'
+                  AND a.lease_expires_at > clock_timestamp() AND t.deleted_at IS NULL
+                """,
+                job_id,
+                attempt_id,
+                lease_generation,
+            )
+            if row is None:
+                return False
+            await conn.execute(
+                "SELECT pg_notify('agent_owner_changes', $1)",
+                json.dumps(
+                    {"user": row["user_id"], "kind": "question", "id": row["thread_id"]},
+                    separators=(",", ":"),
+                ),
+            )
+        return True
+
     async def record_continuity_mode(
         self,
         *,
