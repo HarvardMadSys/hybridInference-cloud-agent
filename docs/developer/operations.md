@@ -2578,6 +2578,11 @@ previous snapshot rather than recreating a token-only ABA state. An older V1
 control plane does not compare the epoch and is therefore not operationally
 compatible, even though its writes still cause rotation.
 
+A host that misses heartbeats and is marked `offline` keeps its inactive
+receipt. When it returns, the next rollout still finds the token its
+predecessor released; the epoch has already rotated, so delayed requests stay
+fenced.
+
 Inspect fence state before rollback or recovery:
 
 ```sql
