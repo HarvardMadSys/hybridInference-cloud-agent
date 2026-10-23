@@ -74,14 +74,13 @@ def question_change_frames(turn: Any) -> Iterator[str]:
         yield json.dumps({"kind": "question_changed"}, separators=(",", ":")) + "\n"
 
 
-def question_change_frame_kind(
-    frame: dict[str, Any], control: Any, job_id: str | None
-) -> str | None:
+def question_change_frame_kind(frame: dict[str, Any], control: Any, job: Any) -> str | None:
     """Report a question wake-up and return ordinary frame kinds unchanged."""
     kind = frame.get("kind")
     if not isinstance(kind, str):
         return None
     if kind == "question_changed":
+        job_id = getattr(job, "job_id", None)
         if not isinstance(job_id, str) or not job_id:
             raise ValueError("question-change frame has no job identity")
         control.report_question_change(job_id)
