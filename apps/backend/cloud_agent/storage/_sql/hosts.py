@@ -78,6 +78,20 @@ QUALIFIED_HOST_COLUMNS = (
 )
 
 
+#: The host holding a job's workspace: its running attempt's host, else its
+#: thread's group's durable host, else the host its last attempt ran on.
+#: ``{attempt}`` names the job's current attempt and ``{group}`` its thread's
+#: group.
+#:
+#: A finished attempt names where the turn ran, which is not where the group
+#: is once a restore has moved it to another host; the group's own host is.
+#: Only a thread without a group falls back to that attempt.
+JOB_HOST_SQL = (
+    "COALESCE(CASE WHEN {attempt}.status = 'running' THEN {attempt}.host_id END, "
+    "{group}.host, {attempt}.host_id)"
+)
+
+
 #: The latest host-capacity observation, projected only where it is read.
 #:
 #: Deliberately *not* part of ``HOST_COLUMN_NAMES``. That list is also what

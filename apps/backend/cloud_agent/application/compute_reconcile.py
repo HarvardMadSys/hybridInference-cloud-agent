@@ -1684,10 +1684,7 @@ class ComputeReconciler:
                 await self._checkpoint(
                     operation,
                     "extension_rejected",
-                    {
-                        "extension_requested": False,
-                        "external_pending": False,
-                    },
+                    {"extension_requested": False, "external_pending": False},
                 )
             raise
         await self._checkpoint(
@@ -1829,10 +1826,7 @@ class ComputeReconciler:
                 await self._checkpoint(
                     operation,
                     "release_rejected",
-                    {
-                        "release_requested": False,
-                        "external_pending": False,
-                    },
+                    {"release_requested": False, "external_pending": False},
                 )
             raise
         observation = receipt.observation or await provider.inspect(self._ref(allocation))

@@ -107,8 +107,19 @@ returns `network_verified`. The runner may rely on that proof for up to one
 minute, matching the network guard's existing freshness window. Commands after
 that minute verify again, including after a long setup script or at turn end.
 Terminals and sandbox manager workspace operations always check, as does every command
-when the sandbox manager did not supply that proof. The turn child still installs and
-reads back host rules before acceptance.
+when the sandbox manager did not supply that proof.
+
+The turn child does not install and read back the host rules itself. The host
+service keeps the network guard its startup preflight verified. When it hands a
+turn over, it renews that verification if it is 45 seconds old. It adds the
+verification time and its own helper image to the child's stdin payload, after
+stripping claim-supplied underscore keys, as it does for the qualification
+verdict. The child declines the turn, before accepting it, unless that
+verification is present, well formed, successful and younger than the network
+guard's one-minute window. It still checks the Docker version and the relay
+network itself, but starts no helper container before it accepts its turn. The
+sandbox manager still installs and reads back the rules before any group joins
+its bridge.
 
 Network-rule reads share a disposable helper; route reads use a separate helper
 without capabilities. Reconciliation caches inspections only within one

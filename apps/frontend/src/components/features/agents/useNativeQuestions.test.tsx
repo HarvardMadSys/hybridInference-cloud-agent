@@ -8,7 +8,11 @@ import {
   type AgentQuestionsApi,
 } from '@/lib/api/questions';
 import { AgentReadProvider, useQuestionReads } from './AgentReadProvider';
-import { QUESTION_POLL_MS, useNativeQuestions } from './useNativeQuestions';
+import {
+  QUESTION_BACKGROUND_POLL_MS,
+  QUESTION_POLL_MS,
+  useNativeQuestions,
+} from './useNativeQuestions';
 
 vi.mock('@/lib/api/questions', () => ({
   listThreadQuestions: vi.fn(),
@@ -138,4 +142,68 @@ it('preserves discovered questions while hidden and refreshes on return', async 
   visibility.mockReturnValue('visible');
   await act(async () => document.dispatchEvent(new Event('visibilitychange')));
   expect(listThreadQuestions).toHaveBeenCalledTimes(2);
+});
+
+it('renders again only when a poll changes the question on offer or its error', async () => {
+  vi.useFakeTimers();
+  vi.mocked(listThreadQuestions).mockResolvedValue(pending);
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <AgentReadProvider userId="alice">{children}</AgentReadProvider>
+  );
+  let renders = 0;
+  const { result } = renderHook(
+    () => {
+      renders += 1;
+      return useNativeQuestions(activeTurn);
+    },
+    { wrapper },
+  );
+  await act(async () => {});
+  expect(result.current.request?.request_id).toBe('question');
+  const shown = renders;
+  for (let poll = 0; poll < 3; poll += 1)
+    await act(async () => vi.advanceTimersByTimeAsync(QUESTION_POLL_MS));
+  expect(listThreadQuestions).toHaveBeenCalledTimes(4);
+  expect(renders).toBe(shown);
+  vi.mocked(listThreadQuestions).mockResolvedValue({
+    ...pending,
+    questions: [{ request_id: 'next', questions: [] }],
+  });
+  await act(async () => vi.advanceTimersByTimeAsync(QUESTION_POLL_MS));
+  expect(result.current.request?.request_id).toBe('next');
+  expect(renders).toBe(shown + 1);
+  vi.mocked(listThreadQuestions).mockRejectedValue(new Error('offline'));
+  await act(async () => vi.advanceTimersByTimeAsync(QUESTION_POLL_MS));
+  expect(result.current.error).toBe('offline');
+  await act(async () => vi.advanceTimersByTimeAsync(QUESTION_POLL_MS));
+  expect(listThreadQuestions).toHaveBeenCalledTimes(7);
+  expect(renders).toBe(shown + 2);
+});
+
+it('reads once per tick for the page and its row, at the page pace only while it is open', async () => {
+  vi.useFakeTimers();
+  vi.mocked(listThreadQuestions).mockResolvedValue(pending);
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <AgentReadProvider userId="alice">{children}</AgentReadProvider>
+  );
+  const { result, rerender } = renderHook(
+    ({ open }: { open: boolean }) => ({
+      row: useNativeQuestions({ ...activeTurn, intervalMs: QUESTION_BACKGROUND_POLL_MS }),
+      page: useNativeQuestions({ ...activeTurn, active: open }),
+    }),
+    { wrapper, initialProps: { open: true } },
+  );
+  await act(async () => {});
+  expect(listThreadQuestions).toHaveBeenCalledOnce();
+  expect(result.current.row.request?.request_id).toBe('question');
+  vi.mocked(listThreadQuestions).mockResolvedValue({ ...pending, questions: [] });
+  await act(async () => vi.advanceTimersByTimeAsync(QUESTION_POLL_MS));
+  expect(listThreadQuestions).toHaveBeenCalledTimes(2);
+  // The row shares the page's read, so it clears at the page's pace.
+  expect(result.current.row.request).toBeNull();
+  rerender({ open: false });
+  await act(async () => vi.advanceTimersByTimeAsync(QUESTION_BACKGROUND_POLL_MS - 1));
+  expect(listThreadQuestions).toHaveBeenCalledTimes(2);
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(listThreadQuestions).toHaveBeenCalledTimes(3);
 });

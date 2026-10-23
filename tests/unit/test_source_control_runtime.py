@@ -611,6 +611,8 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         # went with them to the task that asks for it.
         assert started["queue"]["github_app"] is runtime.github
         assert started["publisher"]["github_app"] is runtime.github
+        # Its titles and pull requests ride the process's pool, not a client each.
+        assert started["publisher"]["http"] is app.state.http
         credentials = runtime.github.get()
         assert credentials is not None
         async with credentials._http() as client:

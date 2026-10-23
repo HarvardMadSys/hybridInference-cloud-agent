@@ -898,6 +898,37 @@ async def test_a_background_task_that_dies_is_reported_when_it_dies(
     assert prepared.pool.closes == 1
 
 
+async def test_the_renewal_task_and_the_heartbeat_share_one_renewal_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One record of what each grant's renewal bought, per process.
+
+    The renewal task is handed the same one the heartbeat's dependency reads
+    off the application, rather than each path keeping its own.
+    """
+    from types import SimpleNamespace
+
+    from cloud_agent.api.deps import get_renewal_schedule
+    from cloud_agent.grants import RenewalSchedule
+
+    prepared = _prepare(monkeypatch)
+    handed: dict[str, Any] = {}
+    idle = _idle(prepared.events, "reaper_task")
+
+    def reaper(*_args: object, **kwargs: Any) -> Any:
+        handed.update(kwargs)
+        return idle()
+
+    monkeypatch.setattr("cloud_agent.bootstrap.lifespan.reap_expired_attempts", reaper)
+
+    async with lifespan(prepared.app, background=True):
+        schedule = prepared.app.state.renewal_schedule
+        assert isinstance(schedule, RenewalSchedule)
+        assert handed["schedule"] is schedule
+        assert handed["grants"] is prepared.app.state.grants
+        assert get_renewal_schedule(SimpleNamespace(app=prepared.app)) is schedule
+
+
 async def test_a_task_shutdown_would_not_stop_is_never_started() -> None:
     """Every background task has a place in the shutdown order, or it does not start."""
     app = FastAPI()

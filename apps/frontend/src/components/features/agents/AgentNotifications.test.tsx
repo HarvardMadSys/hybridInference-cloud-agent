@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, renderHook } from '@testing-library/react';
+import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getAgentJob,
@@ -25,7 +26,9 @@ import {
   NOTIFICATION_STATE_POLL_MS,
   type AgentNotice,
 } from './AgentNotifications';
+import { AgentReadProvider } from './AgentReadProvider';
 import { NOTIFICATION_PERMISSION_EVENT } from './notificationPreferences';
+import { QUESTION_POLL_MS, useNativeQuestions } from './useNativeQuestions';
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentJob: vi.fn(),
@@ -146,6 +149,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   resetAgentPush();
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -439,19 +443,26 @@ describe('owner-wide agent notifications', () => {
 
   it('retries an unconfirmed metadata-only push after an empty delta so questions resume', async () => {
     await mount();
+    // The conversation's question clock ticks less often than the state poll.
+    // Push just after a poll, so that the clock ticks once before the next one.
+    await act(async () => vi.advanceTimersByTimeAsync(NOTIFICATION_STATE_POLL_MS));
     get.mockRejectedValueOnce(new Error('temporary job read failure'));
     await act(async () => {
       receiveJobChange({ id: 'job-1', state: 'running', revision: 2 });
       await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
     });
     questions.mockResolvedValue(snapshot());
-    await act(async () => vi.advanceTimersByTimeAsync(NOTIFICATION_QUESTION_POLL_MS));
+    await act(async () =>
+      vi.advanceTimersByTimeAsync(NOTIFICATION_QUESTION_POLL_MS - NOTIFICATION_STATE_POLL_MS),
+    );
     expect(notify).not.toHaveBeenCalled();
     expect(questions).toHaveBeenCalledTimes(1);
     get.mockResolvedValueOnce(job({ revision: 2 }));
     list.mockResolvedValueOnce(page([], null, { mode: 'delta' }));
     await act(async () => vi.advanceTimersByTimeAsync(NOTIFICATION_STATE_POLL_MS));
     expect(get).toHaveBeenCalledTimes(2);
+    // Already watched, the conversation is read again on its clock's next tick.
+    await act(async () => vi.advanceTimersByTimeAsync(NOTIFICATION_QUESTION_POLL_MS));
     expect(notify).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ kind: 'question', jobId: 'job-1' }),
     );
@@ -647,6 +658,27 @@ describe('owner-wide agent notifications', () => {
     await act(async () => vi.advanceTimersByTimeAsync(NOTIFICATION_QUESTION_POLL_MS * 2));
     expect(questions).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('reads a new turn at once where an older running turn was passed over', async () => {
+    list.mockResolvedValueOnce(
+      page([
+        job(),
+        job({
+          id: 'newer-terminal',
+          turn_no: 2,
+          state: 'cancelled',
+          finished_at: '2026-10-11T11:59:00Z',
+        }),
+      ]),
+    );
+    await mount();
+    questions.mockResolvedValue(snapshot('job-3', 30));
+    await changed(job({ id: 'job-3', turn_no: 3, current_attempt_id: 30 }));
+    expect(questions).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ kind: 'question', jobId: 'job-3' }),
+    );
   });
 
   it('seeds history quietly and alerts once when an observed turn finishes, after publishing', async () => {
@@ -926,6 +958,68 @@ describe('owner-wide agent notifications', () => {
     expect(questions).not.toHaveBeenCalled();
     await changed(job({ state: 'succeeded', revision: 2 }));
     expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps reading questions while the tab is hidden, on the slower clock', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    await mount();
+    expect(questions).toHaveBeenCalledOnce();
+    await act(async () => vi.advanceTimersByTimeAsync(QUESTION_POLL_MS));
+    expect(questions).toHaveBeenCalledOnce();
+    questions.mockResolvedValue(snapshot());
+    await act(async () =>
+      vi.advanceTimersByTimeAsync(NOTIFICATION_QUESTION_POLL_MS - QUESTION_POLL_MS),
+    );
+    expect(questions).toHaveBeenCalledTimes(2);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ kind: 'question' }));
+  });
+
+  it('stops reading the questions of a conversation once its turn ends', async () => {
+    await mount();
+    await changed(job({ state: 'succeeded', revision: 2 }));
+    questions.mockClear();
+    await act(async () => vi.advanceTimersByTimeAsync(NOTIFICATION_QUESTION_POLL_MS * 3));
+    expect(questions).not.toHaveBeenCalled();
+    await changed(job({ id: 'job-2', state: 'running', turn_no: 2, revision: 1 }));
+    expect(questions).toHaveBeenCalledOnce();
+  });
+
+  it('drops the watch of a turn a read finds deleted, so a new turn there is read at once', async () => {
+    await mount();
+    get.mockRejectedValueOnce(new APIError('not_found', 'Deleted', 404));
+    await act(async () => {
+      receiveJobChange({ id: 'job-1', state: 'running', revision: 2 });
+      await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+    });
+    questions.mockClear().mockResolvedValue(snapshot('job-2', 20));
+    list.mockResolvedValueOnce(
+      page([job({ id: 'job-2', turn_no: 2, current_attempt_id: 20 })], null, { mode: 'delta' }),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(NOTIFICATION_STATE_POLL_MS));
+    expect(questions).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ kind: 'question', jobId: 'job-2' }),
+    );
+  });
+
+  it('joins the reads of the open conversation, one per tick, and alerts at its pace', async () => {
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <AgentReadProvider userId="owner">{children}</AgentReadProvider>
+    );
+    await act(async () => {
+      renderHook(
+        () => {
+          useAgentNotifications(userId, preferences, notify);
+          useNativeQuestions({ threadId: 'thread-1', jobId: 'job-1', attemptId: 10, active: true });
+        },
+        { wrapper },
+      );
+    });
+    expect(questions).toHaveBeenCalledOnce();
+    questions.mockResolvedValue(snapshot());
+    await act(async () => vi.advanceTimersByTimeAsync(QUESTION_POLL_MS));
+    expect(questions).toHaveBeenCalledTimes(2);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ kind: 'question' }));
   });
 
   it('does not record a failed delivery so the pending question can be retried', async () => {

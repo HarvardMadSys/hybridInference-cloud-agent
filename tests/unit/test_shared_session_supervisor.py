@@ -51,7 +51,6 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
     SharedSessionDescriptor,
-    SharedSessionLease,
 )
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.errors import SandboxArchiveBlocked
@@ -78,6 +77,8 @@ class _Manager:
         self.items: dict[str, ChatSandboxInspection] = {}
         self.events: list[object] = []
         self.starts: list[str] = []
+        # Network proofs made without a start; each start makes its own.
+        self.network_proofs: list[str] = []
         self.stop_count = 0
         self.host_rule_failures = 0
         self.host_rule_checks = 0
@@ -85,6 +86,7 @@ class _Manager:
         self.host_rule_renewals = 0
         self.host_rule_renewal_failures = 0
         self.pruned_specs: list[ChatSandboxSpec] = []
+        self.pruned_observed: list[ChatSandboxInspection] | None = None
         self.process_baseline: tuple[tuple[int, int], ...] = ((41, 400),)
         self.initial_archive_marker: bytes | None = None
 
@@ -203,6 +205,10 @@ class _Manager:
                 facts.note("reuse")
         return current
 
+    def require_network(self, spec: ChatSandboxSpec, *, observer: Any = None) -> None:
+        del observer
+        self.network_proofs.append(spec.container_name)
+
     def stop(
         self,
         spec: ChatSandboxSpec,
@@ -235,8 +241,11 @@ class _Manager:
         self.items[spec.container_name] = current
         return current
 
-    def prune_orphan_networks(self, specs: list[ChatSandboxSpec]) -> None:
+    def prune_orphan_networks(
+        self, specs: list[ChatSandboxSpec], observed: list[ChatSandboxInspection] | None = None
+    ) -> None:
         self.pruned_specs = specs
+        self.pruned_observed = observed
 
     def renew_host_rules(self) -> None:
         self.host_rule_renewals += 1
@@ -2321,34 +2330,6 @@ def test_acquire_starts_a_settled_context_on_its_group():
     assert manager.starts == [_spec().container_name]
 
 
-def test_a_lease_claims_a_bridge_proof_only_for_a_call_that_made_one():
-    """The runner's commands rely on it for their turn, so a repeat must not claim it."""
-    manager = _Manager()
-    supervisor = SharedChatSessionSupervisor(manager)
-    supervisor.register_manifest(_spec(), _members())
-
-    def acquire() -> SharedSessionLease:
-        return supervisor.acquire(
-            _spec(),
-            thread_id="athr_source",
-            owner="attempt:1",
-            activation_generation=1,
-            has_settled_context=True,
-            manifest=_members(),
-            expected_container_id="container-shared",
-        )
-
-    first = acquire()
-    repeat = acquire()
-
-    assert first.network_verified is True
-    assert asdict(first)["network_verified"] is True, "what the sandbox manager endpoint sends"
-    # The same owner is handed its existing lease without touching the group.
-    assert repeat.token == first.token
-    assert manager.starts == [_spec().container_name]
-    assert repeat.network_verified is False
-
-
 def _running_group(*, stopped_archive_hook=None) -> tuple[_Manager, SharedChatSessionSupervisor]:
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(
@@ -2366,6 +2347,16 @@ def _running_group(*, stopped_archive_hook=None) -> tuple[_Manager, SharedChatSe
         expected_container_id="container-shared",
     )
     return manager, supervisor
+
+
+def test_reconcile_hands_the_network_prune_the_listing_it_just_read():
+    """Whose bridge each retained container is on comes from that listing, not a re-read."""
+    manager, supervisor = _running_group()
+
+    supervisor.reconcile()
+
+    assert manager.pruned_specs == [_spec()]
+    assert manager.pruned_observed == manager.list()
 
 
 def test_a_host_that_cannot_show_its_rules_stops_every_running_group():

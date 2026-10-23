@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+from cloud_agent_host.chat_sandbox_inspect import containers_by_ref, inspect_each
 from cloud_agent_host.chat_sandbox_models import (
     CHAT_GENERATION_LABEL,
     CHAT_NAMESPACE_LABEL,
@@ -327,49 +328,8 @@ class ChatSandboxNetwork:
         )
 
     def _inspect_containers(self, container_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
-        """Inspect many containers in one call, keyed by the id asked for.
-
-        ``docker container inspect`` takes any number of ids and answers for
-        all of them at once, and the marginal cost of an extra id is a few
-        hundred microseconds against roughly twelve milliseconds for the
-        process itself. Asking once per container — which is what the callers
-        below used to do — made a reconcile's cost scale with the size of the
-        relay network for no reason.
-
-        An id that does not resolve is simply absent from the result. Docker
-        exits non-zero when *any* id is missing while still answering for the
-        rest, so the output is parsed regardless of the exit code: a partial
-        answer is the normal case here, since Compose replacement can remove
-        an endpoint between the network inspection and this one.
-        """
-        wanted = list(dict.fromkeys(str(container_id) for container_id in container_ids))
-        if not wanted:
-            return {}
-        result = self._containers._run(
-            [self.backend.docker_binary, "container", "inspect", *wanted], timeout=30
-        )
-        try:
-            payload = json.loads(result.stdout or "[]")
-        except json.JSONDecodeError:
-            return {}
-        if not isinstance(payload, list):
-            return {}
-
-        found: dict[str, dict[str, Any]] = {}
-        for raw in payload:
-            if not isinstance(raw, dict):
-                continue
-            identifier = str(raw.get("Id") or "")
-            name = str(raw.get("Name") or "").removeprefix("/")
-            for container_id in wanted:
-                if container_id in found:
-                    continue
-                # A caller may hold a full id, a short id, or a name; Docker
-                # always answers with the full id and the name.
-                if container_id in (identifier, name) or identifier.startswith(container_id):
-                    found[container_id] = raw
-                    break
-        return found
+        """Inspect many containers in one call, keyed by the id asked for."""
+        return containers_by_ref(self._containers._run, self.backend.docker_binary, container_ids)
 
     @staticmethod
     def _endpoint_aliases(raw: dict[str, Any], network: str) -> set[str] | None:
@@ -674,8 +634,8 @@ class ChatSandboxNetwork:
                         "stale relay could not leave the group network: "
                         + disconnected.stderr.strip()[:300]
                     )
-
-        refreshed = self._inspect_network(network)
+        # Only a detach changed the bridge since it was read; an activation still rereads it.
+        refreshed = self._inspect_network(network) if unexpected else inspected
         if refreshed is None:
             raise SandboxError("group network disappeared during reconciliation")
         self._verify_group_network(refreshed, spec)
@@ -1220,12 +1180,19 @@ class ChatSandboxNetwork:
                 return True
         return False
 
-    def prune_orphan_networks(self, specs: builtins.list[ChatSandboxSpec]) -> None:
+    def prune_orphan_networks(
+        self,
+        specs: builtins.list[ChatSandboxSpec],
+        observed: Sequence[ChatSandboxInspection] | None = None,
+    ) -> None:
         """Remove stale owned bridges without racing a create or activation.
 
-        A bridge that cannot be examined or removed is logged and left for the
-        next pass; it never keeps the others, or the caller's reconciliation,
-        from going on.
+        Only this namespace's bridges are listed, and they are inspected
+        together, or one by one when that fails. ``observed``, the containers
+        the caller just listed, says which bridge each retained container is
+        on; without it, each one is inspected here. A bridge that cannot be
+        examined or removed is logged and left for the next pass; it never
+        keeps the others, or the caller's reconciliation, from going on.
         """
         result = self._containers._run(
             [
@@ -1235,18 +1202,26 @@ class ChatSandboxNetwork:
                 "--quiet",
                 "--filter",
                 f"label={CHAT_NETWORK_LABEL}=true",
+                "--filter",
+                f"label={CHAT_NAMESPACE_LABEL}={self.backend.sandbox_namespace}",
             ],
             timeout=30,
         )
         if result.returncode != 0:
             raise SandboxError("group network listing failed: " + result.stderr.strip()[:300])
+        networks, unread = inspect_each(
+            self._containers._run, self.backend.docker_binary, "network", result.stdout.split()
+        )
+        for ref, exc in unread.items():
+            logger.warning(
+                "chat_network_prune_failed", extra={"network": ref, "detail": str(exc)[:300]}
+            )
         by_identity = {(spec.sandbox_id, str(spec.generation)): spec for spec in specs}
+        sandboxes = None if observed is None else {item.name: item for item in observed}
         prefix = self._network().interface_prefix
-        for network_id in result.stdout.split():
+        for network in networks:
+            network_id = str(network.get("Id") or "")
             try:
-                network = self._inspect_network(network_id)
-                if network is None:
-                    continue
                 labels = network.get("Labels") or {}
                 namespace = labels.get(CHAT_NAMESPACE_LABEL)
                 if namespace != self.backend.sandbox_namespace:
@@ -1271,7 +1246,11 @@ class ChatSandboxNetwork:
                 )
                 spec = by_identity.get(identity)
                 if spec is not None:
-                    sandbox = self._containers.inspect(spec.container_name)
+                    sandbox = (
+                        self._containers.inspect(spec.container_name)
+                        if sandboxes is None
+                        else sandboxes.get(spec.container_name)
+                    )
                     if sandbox is not None and str(network["Name"]) in sandbox.networks:
                         # This is the live bridge of a retained container, not an
                         # orphan. reconcile() also runs for status polling, so

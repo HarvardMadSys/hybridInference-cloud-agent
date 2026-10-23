@@ -101,8 +101,6 @@ from cloud_agent.schemas import (
     WorkerClaimResponse,
     WorkerContinuityRequest,
     WorkerEnvironmentSnapshotReport,
-    WorkerEventRequest,
-    WorkerEventResponse,
     WorkerFinishRequest,
     WorkerHeartbeatRequest,
     WorkerHeartbeatResponse,
@@ -127,7 +125,7 @@ from cloud_agent.skills.selection import prompt_with_skills
 from cloud_agent.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
-from cloud_agent.task_titles import generate_thread_title
+from cloud_agent.task_titles import schedule_thread_title
 from cloud_agent.tokens import (
     SCOPE_FULL,
     SCOPE_MCP,
@@ -1260,17 +1258,12 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         mcp_bindings=mcp_aliases,
         metadata=claim["metadata"],
     )
-    if claim.get("title_generation_pending") is True:
-        # FastAPI sends the claim first; title inference cannot delay the runner.
-        # Only unnamed/contaminated conversations are eligible. A later claim
-        # can recover a failed generation using the original conversation prompt.
-        background_tasks.add_task(
-            generate_thread_title,
-            job_store.conversation_commands,
-            **fence,
-            model=claim["model"],
-            sandbox_token=sandbox_token,
-        )
+    schedule_thread_title(
+        background_tasks,
+        job_store.conversation_commands,
+        claim,
+        sandbox_token=sandbox_token,
+    )
     return response
 
 
@@ -1326,37 +1319,6 @@ async def worker_heartbeat(
     return WorkerHeartbeatResponse(
         ok=True, state=beat["state"], cancel_requested=beat["cancel_requested"]
     )
-
-
-@router.post("/worker/jobs/{job_id}/events", response_model=WorkerEventResponse, status_code=201)
-async def worker_append_event(
-    job_id: str,
-    body: WorkerEventRequest,
-    authorization: str | None = Header(None),
-    store: _WorkerStorage | None = Depends(get_storage),
-) -> WorkerEventResponse:
-    """Append one normalized event to the job's append-only log."""
-    job_store = _require_store(store)
-    claims = _worker_claims(authorization)
-    _match_job(claims, job_id)
-    event_id = await job_store.attempt_commands.append_event(
-        attempt_id=claims["attempt_id"],
-        lease_generation=claims["lease_generation"],
-        event_type=body.event_type,
-        payload=body.payload,
-        event_seq=body.event_seq,
-    )
-    if event_id is None:
-        raise _lease_lost()
-    if (
-        body.event_type == "lifecycle"
-        and body.payload
-        and body.payload.get("phase") == "environment_prepared"
-    ):
-        await job_store.environments.record_worker_environment_preparation(
-            job_id, claims["attempt_id"], claims["lease_generation"], body.payload
-        )
-    return WorkerEventResponse(event_id=event_id)
 
 
 #: How long after its attempt ends a startup measurement is still accepted.

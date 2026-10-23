@@ -86,6 +86,11 @@ def quiet_sandbox_manager():
         thread.join(timeout=5)
 
 
+def _control(append_event):
+    """A control plane that hands each event to ``append_event`` as it is reported."""
+    return SimpleNamespace(append_event=append_event, flush=lambda: None, lease_lost=False)
+
+
 def _run_turn(client, *, heart=None, control=None, timeout_s=5):
     return runner._stream_shared_agent_turn(
         supervisor=client,
@@ -95,7 +100,7 @@ def _run_turn(client, *, heart=None, control=None, timeout_s=5):
             model="model",
             reasoning_effort=None,
         ),
-        control=control or SimpleNamespace(append_event=lambda _event: None),
+        control=control or _control(lambda _event: None),
         heart=heart or SimpleNamespace(cancel_requested=False, lease_lost=False),
         lease_token="lease",
         timeout_s=timeout_s,
@@ -112,7 +117,7 @@ def test_quiet_turn_outlives_lifecycle_timeout(quiet_sandbox_manager):
         if event.payload == {"phase": "init"}:
             timer.start()
 
-    control = SimpleNamespace(append_event=on_event)
+    control = _control(on_event)
     try:
         code, _tail, errors, result, _reported = _run_turn(
             quiet_sandbox_manager.client, control=control
@@ -153,7 +158,7 @@ def test_quiet_turn_remains_interruptible(quiet_sandbox_manager, monkeypatch, re
 
     kwargs = {
         "heart": heart,
-        "control": SimpleNamespace(append_event=on_event),
+        "control": _control(on_event),
         "timeout_s": 0.3 if reason == "deadline" else 5,
     }
     if reason == "lease_lost":

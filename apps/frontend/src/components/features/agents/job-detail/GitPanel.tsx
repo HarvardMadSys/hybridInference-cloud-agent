@@ -3,11 +3,14 @@
 import { useT } from '@/components/providers';
 import type { AgentGitWorkspaceApi } from '@/lib/api/agents';
 import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ownerFailureMessage, toDiffFileDetails } from '../adapt';
-import type { AgentJob } from '../types';
+import type { AgentDiffFile, AgentJob } from '../types';
 import { loadWorkspaceGit } from '../workspaceGitCache';
 import { ReviewButton, WatchPullRequestButton } from './RunOutcome';
+
+/** Rows drawn at once, as in the file preview: a lockfile's diff runs to tens of thousands. */
+const MAX_DIFF_LINES = 4000;
 
 const DIFF_LINE_CLASS = {
   hunk: 'bg-gray-50 dark:bg-gray-950 py-1 text-gray-400 dark:text-gray-500',
@@ -18,13 +21,59 @@ const DIFF_LINE_CLASS = {
 
 type GitView = 'diff' | 'review' | 'commits';
 
+function DiffLinesView({ file }: { file: AgentDiffFile }) {
+  const shown = file.lines.slice(0, MAX_DIFF_LINES);
+  return (
+    <>
+      <pre
+        tabIndex={0}
+        role="region"
+        aria-label={`Diff for ${file.path}`}
+        className="ui-focus-ring max-h-[34rem] overflow-auto font-mono text-xs leading-relaxed"
+      >
+        <code>
+          {shown.map((line, index) => (
+            <span key={index} className={`block min-w-max px-4 ${DIFF_LINE_CLASS[line.marker]}`}>
+              {line.text || ' '}
+            </span>
+          ))}
+        </code>
+      </pre>
+      {file.lines.length > shown.length ? (
+        <p className="px-4 py-3 text-[11px] text-gray-400 dark:text-gray-500">
+          Diff limited to the first {MAX_DIFF_LINES.toLocaleString()} lines.
+        </p>
+      ) : null}
+    </>
+  );
+}
+
+// The selected file's lines, drawn again only when another file or diff is
+// shown — not for a refresh, a view switch, or the page around the panel.
+const DiffLines = memo(DiffLinesView);
+
 export function GitPanel({
   job,
   active,
   onReview,
   onWatchPr,
 }: {
-  job: AgentJob;
+  job: Pick<
+    AgentJob,
+    | 'id'
+    | 'threadId'
+    | 'sandboxId'
+    | 'repo'
+    | 'branch'
+    | 'baseRef'
+    | 'baseSha'
+    | 'prUrl'
+    | 'diffFileDetails'
+    | 'workspaceGitChanges'
+    | 'workspaceGitRevision'
+    | 'workspaceGitMetadataPending'
+    | 'workspaceGitAvailable'
+  >;
   active: boolean;
   onReview?: () => void;
   onWatchPr?: () => void;
@@ -249,23 +298,7 @@ export function GitPanel({
               <div className="agent-git-selected-path border-b border-gray-100 dark:border-white/5 px-4 py-2.5 font-mono text-xs text-gray-600 dark:text-gray-400">
                 {selected?.path}
               </div>
-              <pre
-                tabIndex={0}
-                role="region"
-                aria-label={`Diff for ${selected?.path ?? 'selected file'}`}
-                className="ui-focus-ring max-h-[34rem] overflow-auto font-mono text-xs leading-relaxed"
-              >
-                <code>
-                  {selected?.lines.map((line, index) => (
-                    <span
-                      key={index}
-                      className={`block min-w-max px-4 ${DIFF_LINE_CLASS[line.marker]}`}
-                    >
-                      {line.text || ' '}
-                    </span>
-                  ))}
-                </code>
-              </pre>
+              {selected ? <DiffLines file={selected} /> : null}
             </div>
           </section>
         ) : view === 'diff' ? (
