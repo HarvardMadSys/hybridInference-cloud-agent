@@ -129,11 +129,18 @@ def test_generation_zero_is_limited_to_fenced_group_stop_requests():
 
 @pytest.mark.asyncio
 async def test_resource_checkpoint_is_forwarded_before_any_native_event():
-    """A checkpoint persists during a silent tool invocation, before CLI output."""
+    """Question hints and turn-fenced checkpoints both precede native output."""
     gate = threading.Event()
     turn_started = threading.Event()
 
     class QuietTurn:
+        def __init__(self):
+            self.question_pending = True
+
+        def take_question_change(self):
+            pending, self.question_pending = self.question_pending, False
+            return pending
+
         @staticmethod
         def lines():
             turn_started.set()
@@ -144,7 +151,7 @@ async def test_resource_checkpoint_is_forwarded_before_any_native_event():
     supervisor.start_turn = lambda *_args, **_kw: QuietTurn()  # type: ignore[attr-defined]
     pending = [{"measurement_id": "sample", "state": "collecting", "report_seq": 1}]
     supervisor.take_reported_checkpoint = (  # type: ignore[attr-defined]
-        lambda _thread_id: pending.pop() if pending else None
+        lambda _thread_id, _turn: pending.pop() if pending else None
     )
     supervisor.abort_turn = lambda *_args: gate.set()  # type: ignore[attr-defined]
     app = _app(supervisor)
@@ -157,9 +164,11 @@ async def test_resource_checkpoint_is_forwarded_before_any_native_event():
         "athr_source", SharedTurnRequest(token="lease", prompt="work", model="model")
     )
     try:
-        first = json.loads(await asyncio.wait_for(anext(response.body_iterator), timeout=1))
-        assert first["kind"] == "resource_checkpoint"
-        assert first["turn_resources"]["state"] == "collecting"
+        question = json.loads(await asyncio.wait_for(anext(response.body_iterator), timeout=1))
+        checkpoint = json.loads(await asyncio.wait_for(anext(response.body_iterator), timeout=1))
+        assert question == {"kind": "question_changed"}
+        assert checkpoint["kind"] == "resource_checkpoint"
+        assert checkpoint["turn_resources"]["state"] == "collecting"
         assert turn_started.wait(1)
         assert not gate.is_set()
     finally:

@@ -24,6 +24,10 @@ from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILI
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
+# AWS's documented example key pair, which no account accepts.
+_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
+_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
 
 async def _age(pool):
     await pool.execute("UPDATE agent_jobs SET updated_at = NOW() - INTERVAL '11 minutes'")
@@ -291,6 +295,51 @@ async def test_autoscaling_observes_only_new_groups_and_effective_free_slots(poo
     assert stale["fresh_effective_free_slots"] == 0
     assert stale["unmatched_new_group_jobs"] == 1
     assert stale["autoscaling_template_hosts"] == []
+
+
+async def test_autoscaling_counts_a_host_that_applied_a_policy_with_an_access_key(
+    pool, store, monkeypatch
+):
+    """The stored key is sealed, and the observation opens it as the claim does (#984)."""
+    monkeypatch.setenv(
+        "AGENT_SETTINGS_ENCRYPTION_KEY", "test-settings-root-key-over-thirty-two-bytes"
+    )
+    await _create_job(store, execution_profile="trusted-v1")
+    await _host(
+        store, slots=2, capabilities=[*_SHARED_HOST_CAPABILITIES, SANDBOX_ARCHIVE_CAPABILITY]
+    )
+    saved = await store.host_pool.set_sandbox_archive_settings(
+        expected_revision=0,
+        settings={
+            "enabled": True,
+            "region": "us-east-1",
+            "aws_access_key_id": _ACCESS_KEY_ID,
+            "aws_secret_access_key": _SECRET_ACCESS_KEY,
+        },
+    )
+    assert saved is not None and saved["revision"] == 1
+    sealed = await pool.fetchval(
+        "SELECT jsonb_typeof(sandbox_archive_settings->'aws_secret_access_key') "
+        "FROM agent_runner_policy WHERE id"
+    )
+    assert sealed == "object"
+    behind = await store.host_pool.autoscaling_observation(
+        expected_deployment_sha="test-deployment"
+    )
+    assert behind["fresh_effective_free_slots"] == 0
+    assert behind["unmatched_new_group_jobs"] == 1
+
+    await store.host_pool.record_host_heartbeat(
+        host="runner-a",
+        credential_hash="test",
+        sandbox_archive_settings_applied_revision=1,
+        sandbox_archive_settings_revision_reported=True,
+    )
+    applied = await store.host_pool.autoscaling_observation(
+        expected_deployment_sha="test-deployment"
+    )
+    assert applied["fresh_effective_free_slots"] == 2
+    assert applied["unmatched_new_group_jobs"] == 0
 
 
 async def test_autoscaling_observation_keeps_queue_and_slots_in_one_snapshot(pool, store):

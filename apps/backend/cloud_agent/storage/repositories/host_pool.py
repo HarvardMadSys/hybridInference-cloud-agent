@@ -1107,6 +1107,8 @@ class PostgresHostPoolRepository:
         operator had just decided it must not take. Drain is an instruction,
         not an observation, so nothing here overwrites it; ``remove`` is what
         ends a drained host's life.
+        A released drain receipt survives too: the next rollout finds its
+        predecessor by that token, and the status change rotates the epoch.
 
         Returns the hosts it changed.
         """
@@ -1115,10 +1117,7 @@ class PostgresHostPoolRepository:
             rows = await conn.fetch(
                 f"""
                 UPDATE agent_runner_hosts
-                SET status = '{HOST_OFFLINE}',
-                    drain_fence_token = NULL,
-                    drain_fence_status_before = NULL,
-                    drain_fence_active = FALSE
+                SET status = '{HOST_OFFLINE}'
                 WHERE credential_hash IS NOT NULL
                   AND status IN ('{HOST_ENROLLING}', '{HOST_ONLINE}')
                   AND COALESCE(last_heartbeat_at, first_seen_at)
@@ -1350,7 +1349,7 @@ class PostgresHostPoolRepository:
             )
 
             try:
-                archive_policy = SandboxArchivePolicy.from_mapping(stored_archive_settings(policy))
+                archive_policy = load_stored_archive_policy(stored_archive_settings(policy))
             except SandboxArchivePolicyError:
                 archive_policy = None
 

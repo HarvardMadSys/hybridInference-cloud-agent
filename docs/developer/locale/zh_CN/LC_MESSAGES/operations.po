@@ -5532,6 +5532,16 @@ msgstr ""
 "检查会在排空栅栏生效期间拒绝删除。这样，无论是运维人员、reaper、旧版写入方，还是放置的变化，都会让之前所有的快照失效，而不会重新造出一个只看令牌的"
 " ABA 状态。旧版 V1 控制平面不比较 epoch，所以在运维上并不兼容，尽管它的写入照样会触发轮换。"
 
+#: ../developer/operations.md:2581
+msgid ""
+"A host that misses heartbeats and is marked `offline` keeps its inactive "
+"receipt. When it returns, the next rollout still finds the token its "
+"predecessor released; the epoch has already rotated, so delayed requests "
+"stay fenced."
+msgstr ""
+"主机错过心跳、被标成 `offline` 时，会留着那张未生效的回执。等它回来，下一次上线仍然找得到上一次释放的令牌；而 epoch "
+"已经轮换过，延迟到达的请求照样会被栅栏挡住。"
+
 #: ../developer/operations.md:2578
 msgid "Inspect fence state before rollback or recovery:"
 msgstr "回滚或恢复之前，先检查栅栏的状态："

@@ -59,7 +59,7 @@ from cloud_agent_host.guest_observer import (
 )
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
 from cloud_agent_host.operation_call import SandboxManagerCall, closed, open_call
-from cloud_agent_host.resident_transport import ResidentLaunch
+from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTurn
 from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.retained_workspace import (
     RetainedWorkspaceError,
@@ -2424,22 +2424,22 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             raise supervisor_error(exc) from exc
 
         def take_reported_checkpoint(
-            supervisor: Any,
-            member_thread_id: str,
+            supervisor: Any, member_thread_id: str, member_turn: ResidentTurn[Any]
         ) -> dict[str, Any] | None:
-            """Collect a checkpoint the sampler thread has already produced.
+            """Collect a checkpoint the sampler thread has already produced for this turn.
 
             The sampler runs on its own clock, so a turn that emits nothing for
             a minute still gets its uploads; this only forwards what is waiting.
-            Best effort by construction: a checkpoint exists so a crash keeps
-            the work already measured, and a failure to forward one must not
-            reach the turn's own event stream as an error.
+            A stream that outlived its turn takes nothing from the member's next
+            one. Best effort by construction: a checkpoint exists so a crash
+            keeps the work already measured, and a failure to forward one must
+            not reach the turn's own event stream as an error.
             """
             take = getattr(supervisor, "take_reported_checkpoint", None)
             if take is None:
                 return None
             try:
-                return take(member_thread_id)
+                return take(member_thread_id, member_turn)
             except Exception:
                 return None
 
@@ -2469,9 +2469,10 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             try:
                 while True:
                     yield from question_change_signals.question_change_frames(turn)
-                    # Sampling continues while the CLI is silent, so a crash retains the latest
-                    # closed checkpoint even during a long tool invocation.
-                    checkpoint = take_reported_checkpoint(owner, thread_id)
+                    # Sampling and forwarding must proceed while the CLI is
+                    # silent, and the checkpoint stays fenced to this turn.
+                    # A stalled stream must not forward the next turn's sample.
+                    checkpoint = take_reported_checkpoint(owner, thread_id, turn)
                     if checkpoint is not None:
                         yield (
                             json.dumps(

@@ -22,7 +22,9 @@ state wrong.
 Run by hand with ``pytest -m external tests/external/test_host_move_out_two_nodes.py``.
 Needs Docker with ``--privileged``, cgroup v2 and the local image
 ``alpine:3.20`` (``AGENT_HOST_NODE_TEST_IMAGE`` overrides it); the node
-image is built from ``tests/external/compute_node``.
+image is built from ``tests/external/compute_node``, inside the test's
+timeout. Where the package mirror is slow, build it first, as CI does:
+``docker build -t cloud-agent-test-compute-node:local tests/external/compute_node``.
 """
 
 from __future__ import annotations
@@ -141,6 +143,9 @@ def node_image() -> str:
         pytest.skip(f"needs Docker and the local image {BASE}")
     if shutil.which("ssh") is None:
         pytest.skip("needs an OpenSSH client")
+    # Built even though CI builds it in a step of its own first (#985): there
+    # it is a cached rebuild, and an edited Dockerfile is never run from a
+    # stale image that happens to carry the tag.
     _docker("build", "-q", "-t", NODE_IMAGE, str(NODE_CONTEXT))
     return NODE_IMAGE
 
