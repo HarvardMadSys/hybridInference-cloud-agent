@@ -33,7 +33,7 @@ from cloud_agent.execution_profiles import (
 )
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
+from cloud_agent.sandbox_archive_credentials import stored_archive_policy
 from cloud_agent.storage._sql.attempts import lock_live_attempt
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent.storage._sql.environment_runs import env_run_blocks_host, env_runs_holding_slots
@@ -56,7 +56,7 @@ from cloud_agent.storage._sql.jobs import (
     runnable_queued_turn,
 )
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
-from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, stored_archive_settings
+from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import (
     THREAD_SANDBOX_CLAIM_SOURCE,
     THREAD_SANDBOX_SOURCE,
@@ -233,7 +233,7 @@ class PostgresAttemptCommands:
                 return None
             capabilities = load_json(host_row["capabilities"]) or []
             try:
-                archive_policy = load_stored_archive_policy(stored_archive_settings(policy))
+                archive_policy = stored_archive_policy(policy)
             except SandboxArchivePolicyError:
                 return None
             archive_required = archive_policy.enabled
