@@ -6,7 +6,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentRunnerHost } from '@/lib/api/admin';
 import type { SandboxArchiveSettings } from '@/lib/api/adminArchiveSettings';
-import { SANDBOX_ARCHIVE_SETTINGS_CAPABILITY } from '@/lib/api/adminArchiveSettings';
+import {
+  SANDBOX_ARCHIVE_DESTINATION_CAPABILITY,
+  SANDBOX_ARCHIVE_SETTINGS_CAPABILITY,
+} from '@/lib/api/adminArchiveSettings';
 
 import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
 
@@ -33,15 +36,14 @@ function settings(over: Partial<SandboxArchiveSettings> = {}): SandboxArchiveSet
 afterEach(cleanup);
 
 describe('sandbox archive settings card', () => {
-  it('shows the fixed destination and an access key instead of requiring a KMS key', () => {
+  it('shows the bucket under its fixed prefix and an access key instead of requiring a KMS key', () => {
     render(<SandboxArchiveSettingsCard settings={settings()} busy={false} onSave={vi.fn()} />);
 
-    expect(screen.getByLabelText('S3 destination')).toHaveValue(
-      's3://freeinference/cloud-agent/sandbox',
-    );
-    expect(screen.getByLabelText('S3 destination')).toHaveAttribute('readonly');
-    expect(screen.getByLabelText('S3 destination')).toHaveAccessibleDescription(
-      'Fixed by the deployment security policy and not included in update requests.',
+    expect(screen.getByLabelText('S3 bucket')).toHaveValue('freeinference');
+    expect(screen.getByLabelText('S3 bucket')).not.toHaveAttribute('readonly');
+    expect(screen.getByLabelText('S3 bucket')).toHaveAccessibleDescription(
+      'Archives go to s3://freeinference/cloud-agent/sandbox. Checkpoints and snapshots ' +
+        'stored in a previous bucket are not restored after a change.',
     );
     expect(screen.getByLabelText('AWS access key ID')).toBeInTheDocument();
     expect(screen.getByLabelText('AWS secret access key')).toHaveAttribute('type', 'password');
@@ -89,6 +91,110 @@ describe('sandbox archive settings card', () => {
     );
   });
 
+  it('counts a server as compatible with another bucket only if it can archive there', () => {
+    const hosts = [
+      {
+        host: 'runner-a',
+        capabilities: [SANDBOX_ARCHIVE_SETTINGS_CAPABILITY, SANDBOX_ARCHIVE_DESTINATION_CAPABILITY],
+        sandbox_archive_settings_applied_revision: 7,
+      },
+      {
+        host: 'runner-b',
+        capabilities: [SANDBOX_ARCHIVE_SETTINGS_CAPABILITY],
+        sandbox_archive_settings_applied_revision: 6,
+      },
+    ] as AgentRunnerHost[];
+    render(
+      <SandboxArchiveSettingsCard
+        settings={settings({ enabled: true, s3_uri: 's3://example-archives/cloud-agent/sandbox' })}
+        hosts={hosts}
+        busy={false}
+        onSave={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText('S3 bucket')).toHaveValue('example-archives');
+    expect(screen.getByText(/Applied on 1 of 1 compatible server/)).toHaveTextContent(
+      'Applied on 1 of 1 compatible server. runner-b needs a redeploy.',
+    );
+  });
+
+  it('needs no redeploy for another bucket while archives are off', () => {
+    // A disabled policy reaches an older server too, in the default bucket.
+    const hosts = [
+      {
+        host: 'runner-a',
+        capabilities: [SANDBOX_ARCHIVE_SETTINGS_CAPABILITY, SANDBOX_ARCHIVE_DESTINATION_CAPABILITY],
+        sandbox_archive_settings_applied_revision: 7,
+      },
+      {
+        host: 'runner-b',
+        capabilities: [SANDBOX_ARCHIVE_SETTINGS_CAPABILITY],
+        sandbox_archive_settings_applied_revision: 7,
+      },
+    ] as AgentRunnerHost[];
+    render(
+      <SandboxArchiveSettingsCard
+        settings={settings({ s3_uri: 's3://example-archives/cloud-agent/sandbox' })}
+        hosts={hosts}
+        busy={false}
+        onSave={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/^Applied on/)).toHaveTextContent(
+      /^Applied on 2 of 2 compatible servers\.$/,
+    );
+  });
+
+  it('saves another bucket under the fixed prefix and refuses an invalid name', () => {
+    const onSave = vi.fn();
+    render(<SandboxArchiveSettingsCard settings={settings()} busy={false} onSave={onSave} />);
+
+    fireEvent.change(screen.getByLabelText('S3 bucket'), { target: { value: 'Example_Archives' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+    expect(
+      screen.getByText(
+        'Enter an S3 bucket name: 3 to 63 lowercase letters, digits, dots or hyphens.',
+      ),
+    ).toBeInTheDocument();
+    expect(onSave).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText('S3 bucket'), { target: { value: 'example-archives' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave.mock.calls[0][0].s3_uri).toBe('s3://example-archives/cloud-agent/sandbox');
+  });
+
+  it.each([
+    'ab',
+    'a'.repeat(64),
+    '-archives',
+    'archives-',
+    'example..archives',
+    'example.-archives',
+    'example-.archives',
+    '192.168.5.4',
+    // Prefixes and suffixes S3 reserves for names it gives out itself.
+    'xn--archives',
+    'sthree-archives',
+    'amzn-s3-demo-archives',
+    'archives-s3alias',
+    'archives--ol-s3',
+    'archives.mrap',
+    'archives--x-s3',
+    'archives--table-s3',
+  ])('refuses %s as a bucket name, as S3 does', (bucket) => {
+    const onSave = vi.fn();
+    render(<SandboxArchiveSettingsCard settings={settings()} busy={false} onSave={onSave} />);
+
+    fireEvent.change(screen.getByLabelText('S3 bucket'), { target: { value: bucket } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+
+    expect(screen.getByLabelText('S3 bucket')).toHaveAttribute('aria-invalid', 'true');
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it('requires region, owner, and a customer-managed KMS key before enabling', () => {
     const onSave = vi.fn();
     render(
@@ -108,7 +214,7 @@ describe('sandbox archive settings card', () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
-  it('saves all seven mutable values and the revision together', () => {
+  it('saves all eight mutable values and the revision together', () => {
     const onSave = vi.fn();
     render(<SandboxArchiveSettingsCard settings={settings()} busy={false} onSave={onSave} />);
 
@@ -117,6 +223,7 @@ describe('sandbox archive settings card', () => {
 
     expect(onSave).toHaveBeenCalledWith({
       enabled: true,
+      s3_uri: 's3://freeinference/cloud-agent/sandbox',
       checkpoints_enabled: true,
       region: 'us-east-1',
       kms_key_arn: KMS_ARN,
@@ -128,7 +235,6 @@ describe('sandbox archive settings card', () => {
       multipart_part_bytes: 8_388_608,
       revision: 7,
     });
-    expect(onSave.mock.calls[0][0]).not.toHaveProperty('s3_uri');
     expect(onSave.mock.calls[0][0]).not.toHaveProperty('aws_secret_access_key_configured');
   });
 
@@ -153,6 +259,7 @@ describe('sandbox archive settings card', () => {
 
     expect(onSave).toHaveBeenCalledWith({
       enabled: true,
+      s3_uri: 's3://freeinference/cloud-agent/sandbox',
       checkpoints_enabled: true,
       region: 'us-east-1',
       kms_key_arn: '',
@@ -186,6 +293,7 @@ describe('sandbox archive settings card', () => {
 
     expect(onSave).toHaveBeenCalledWith({
       enabled: true,
+      s3_uri: 's3://freeinference/cloud-agent/sandbox',
       checkpoints_enabled: true,
       region: 'us-east-1',
       kms_key_arn: KMS_ARN,

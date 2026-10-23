@@ -155,7 +155,7 @@ from cloud_agent_host.source_preparation import (
 )
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
 from cloud_agent_host.upload_import import import_uploads as _import_uploads
-from cloud_agent_shared import operation_profiling
+from cloud_agent_shared import operation_profiling, sandbox_archive_settings
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
     ENVIRONMENT_INFERENCE_CAPABILITY,
@@ -182,10 +182,6 @@ from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,
     RUNNER_SETTING_KEYS,
     reported_values,
-)
-from cloud_agent_shared.sandbox_archive_settings import (
-    SANDBOX_ARCHIVE_CAPABILITY,
-    SANDBOX_CHECKPOINT_CAPABILITY,
 )
 from cloud_agent_shared.sandbox_manager_wire import member_manifest
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
@@ -1175,10 +1171,12 @@ def _shared_live_host_capabilities(  # noqa: C901, PLR0912 complexity baseline, 
         # This exact replica can accept the deployment-wide DB archive policy
         # over its authenticated sandbox manager channel. A claim also attests the
         # exact revision that sandbox manager confirmed.
-        SANDBOX_ARCHIVE_CAPABILITY,
+        sandbox_archive_settings.SANDBOX_ARCHIVE_CAPABILITY,
         # The same-deployment sandbox manager understands the policy's
         # checkpoint switch and reports checkpoint receipts.
-        SANDBOX_CHECKPOINT_CAPABILITY,
+        sandbox_archive_settings.SANDBOX_CHECKPOINT_CAPABILITY,
+        # ... and archives to whichever bucket the policy names.
+        sandbox_archive_settings.SANDBOX_ARCHIVE_DESTINATION_CAPABILITY,
         # ... and recreates a group another host left behind from its
         # checkpoint, so a claim may hand this replica a cold group.
         SANDBOX_RESTORE_CAPABILITY,

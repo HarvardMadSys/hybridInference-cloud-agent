@@ -7,9 +7,15 @@ import type {
   SandboxArchiveSettings,
   SandboxArchiveSettingsUpdate,
 } from '@/lib/api/adminArchiveSettings';
-import { SANDBOX_ARCHIVE_SETTINGS_CAPABILITY } from '@/lib/api/adminArchiveSettings';
+import {
+  DEFAULT_SANDBOX_ARCHIVE_URI,
+  SANDBOX_ARCHIVE_DESTINATION_CAPABILITY,
+  SANDBOX_ARCHIVE_PREFIX,
+  SANDBOX_ARCHIVE_SETTINGS_CAPABILITY,
+} from '@/lib/api/adminArchiveSettings';
 
 import { SettingsSection } from '../SettingsSection';
+import { isS3BucketName } from './settingValues';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
@@ -26,6 +32,7 @@ const SECRET_ACCESS_KEY = /^[A-Za-z0-9/+=]{40}$/;
 interface Draft {
   enabled: boolean;
   checkpointsEnabled: boolean;
+  bucket: string;
   region: string;
   kmsKeyArn: string;
   expectedBucketOwner: string;
@@ -44,9 +51,26 @@ interface EditorState {
 
 type DraftErrors = Partial<Record<keyof Draft | 'form', string>>;
 
+/** The bucket of `s3://<bucket>/cloud-agent/sandbox`, the only part that is a setting. */
+function bucketOf(s3Uri: string): string {
+  const prefix = 's3://';
+  const suffix = `/${SANDBOX_ARCHIVE_PREFIX}`;
+  return s3Uri.startsWith(prefix) && s3Uri.endsWith(suffix)
+    ? s3Uri.slice(prefix.length, -suffix.length)
+    : s3Uri;
+}
+
+/** The bucket's error, if its name breaks S3's rules for a general purpose bucket. */
+function bucketErrors(bucket: string): DraftErrors {
+  return isS3BucketName(bucket)
+    ? {}
+    : { bucket: 'Enter an S3 bucket name: 3 to 63 lowercase letters, digits, dots or hyphens.' };
+}
+
 function initialDraft(settings: SandboxArchiveSettings): Draft {
   return {
     enabled: settings.enabled,
+    bucket: bucketOf(settings.s3_uri),
     // On by default: enabling archives also enables checkpoints unless an
     // administrator saved an opt-out.
     checkpointsEnabled: settings.enabled ? settings.checkpoints_enabled !== false : true,
@@ -85,7 +109,7 @@ export function validateSandboxArchiveSettings(
     secretConfigured: false,
   },
 ): { update: SandboxArchiveSettingsUpdate } | { errors: DraftErrors } {
-  const errors: DraftErrors = {};
+  const errors: DraftErrors = bucketErrors(draft.bucket);
   const region = draft.region;
   const kmsKeyArn = draft.kmsKeyArn;
   const expectedBucketOwner = draft.expectedBucketOwner;
@@ -178,6 +202,7 @@ export function validateSandboxArchiveSettings(
   return {
     update: {
       enabled: draft.enabled,
+      s3_uri: `s3://${draft.bucket}/${SANDBOX_ARCHIVE_PREFIX}`,
       // Checkpoints ride on archives: the server refuses one without the other.
       checkpoints_enabled: draft.enabled && draft.checkpointsEnabled,
       region,
@@ -275,18 +300,24 @@ export default function SandboxArchiveSettingsCard({
       description: 'Size of each uploaded part, from 5 MiB through 64 MiB.',
     },
   ];
-  const supportedHosts = hosts.filter((host) =>
-    host.capabilities.includes(SANDBOX_ARCHIVE_SETTINGS_CAPABILITY),
-  );
+  // An enabled policy with another bucket reaches only a server that can
+  // archive there. An older one is sent no policy: until it is redeployed it
+  // takes no work at all, and its sandbox manager goes on archiving the groups
+  // it holds into the previous bucket. A disabled policy reaches every server.
+  const required =
+    settings.enabled && settings.s3_uri !== DEFAULT_SANDBOX_ARCHIVE_URI
+      ? [SANDBOX_ARCHIVE_SETTINGS_CAPABILITY, SANDBOX_ARCHIVE_DESTINATION_CAPABILITY]
+      : [SANDBOX_ARCHIVE_SETTINGS_CAPABILITY];
+  const capable = (host: AgentRunnerHost) =>
+    required.every((capability) => host.capabilities.includes(capability));
+  const supportedHosts = hosts.filter(capable);
   const appliedHosts = supportedHosts.filter(
     (host) => host.sandbox_archive_settings_applied_revision === settings.revision,
   );
   const pendingHosts = supportedHosts.filter(
     (host) => host.sandbox_archive_settings_applied_revision !== settings.revision,
   );
-  const unsupportedHosts = hosts.filter(
-    (host) => !host.capabilities.includes(SANDBOX_ARCHIVE_SETTINGS_CAPABILITY),
-  );
+  const unsupportedHosts = hosts.filter((host) => !capable(host));
   const compatibleNoun = supportedHosts.length === 1 ? 'server' : 'servers';
   const unsupportedVerb = unsupportedHosts.length === 1 ? 'needs' : 'need';
   const rolloutText =
@@ -415,22 +446,32 @@ export default function SandboxArchiveSettingsCard({
 
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="sm:col-span-2 text-sm font-medium text-gray-800 dark:text-gray-200">
-                S3 destination
+                S3 bucket
                 <input
                   id="archive-setting-s3_uri"
                   type="text"
-                  value={settings.s3_uri}
-                  readOnly
-                  aria-label="S3 destination"
-                  aria-describedby="archive-destination-description"
+                  value={draft.bucket}
+                  disabled={busy}
+                  aria-label="S3 bucket"
+                  aria-invalid={errors.bucket !== undefined}
+                  aria-describedby={
+                    errors.bucket
+                      ? 'archive-destination-description archive-bucket-error'
+                      : 'archive-destination-description'
+                  }
+                  onChange={(event) => set('bucket', event.target.value)}
+                  placeholder="freeinference"
                   className={INPUT}
                 />
                 <span
                   id="archive-destination-description"
                   className="mt-1 block text-xs font-normal text-gray-500 dark:text-gray-400"
                 >
-                  Fixed by the deployment security policy and not included in update requests.
+                  Archives go to s3://{draft.bucket || '<bucket>'}/{SANDBOX_ARCHIVE_PREFIX}.
+                  Checkpoints and snapshots stored in a previous bucket are not restored after a
+                  change.
                 </span>
+                <ErrorText id="archive-bucket-error" error={errors.bucket} />
               </label>
 
               <label className="text-sm font-medium text-gray-800 dark:text-gray-200">

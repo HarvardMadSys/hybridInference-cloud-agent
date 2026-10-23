@@ -21,20 +21,6 @@ def load_json(value: Any) -> Any:
     return value
 
 
-def stored_archive_settings(policy: Any) -> dict[str, Any]:
-    """The archive settings an ``agent_runner_policy`` row stores, with their revision.
-
-    A missing row stores none. Each caller parses the result itself and decides
-    what a policy that does not parse means for it.
-    """
-    if policy is None:
-        return {}
-    return {
-        **(load_json(policy["sandbox_archive_settings"]) or {}),
-        "revision": policy["sandbox_archive_revision"],
-    }
-
-
 def sandbox_row_to_dict(row: Any) -> dict[str, Any]:
     """Decode the JSON members embedded in the shared sandbox read shape."""
     result = dict(row)

@@ -66,6 +66,7 @@ from cloud_agent_shared.host_settings import admin_values, reported_values
 from cloud_agent_shared.sandbox_archive_settings import (
     SandboxArchivePolicy,
     SandboxArchivePolicyError,
+    archive_bucket,
 )
 
 if TYPE_CHECKING:
@@ -381,6 +382,7 @@ def _archive_audit_snapshot(values: dict[str, Any]) -> dict[str, bool | int | st
         key: values[key]
         for key in (
             "enabled",
+            "s3_uri",
             "region",
             "kms_key_arn",
             "expected_bucket_owner",
@@ -410,13 +412,16 @@ async def set_sandbox_archive_settings(
 ) -> SandboxArchiveSettingsResponse:
     """Atomically replace the archive policy; hosts apply it on their next beat.
 
-    The destination is fixed in server code. A saved access key is encrypted
-    at rest and is not returned. With no key, sandbox managers authenticate with their
-    workload identity and still require the bucket owner and KMS key.
+    Only the bucket of the destination is a setting; an omitted ``s3_uri``
+    keeps the stored one. A saved access key is encrypted at rest and is not
+    returned. With no key, sandbox managers authenticate with their workload
+    identity and still require the bucket owner and KMS key.
     """
     job_store = _require_store(store)
     previous = await job_store.host_pool.sandbox_archive_settings()
     settings = payload.model_dump(exclude={"revision"})
+    if settings["s3_uri"] is None:
+        settings["s3_uri"] = previous["s3_uri"]
     if (
         settings["aws_access_key_id"]
         and not settings["aws_secret_access_key"]
@@ -427,6 +432,7 @@ async def set_sandbox_archive_settings(
     try:
         checked = SandboxArchivePolicy(
             enabled=settings["enabled"],
+            bucket=archive_bucket(settings["s3_uri"]),
             region=settings["region"],
             kms_key_arn=settings["kms_key_arn"],
             expected_bucket_owner=settings["expected_bucket_owner"],

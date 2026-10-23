@@ -54,7 +54,11 @@ from cloud_agent.schemas import (
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
 from cloud_agent_shared.host_settings import merge_admin_values, reported_values
-from cloud_agent_shared.sandbox_archive_settings import SANDBOX_CHECKPOINT_CAPABILITY
+from cloud_agent_shared.sandbox_archive_settings import (
+    SANDBOX_ARCHIVE_DESTINATION_CAPABILITY,
+    SANDBOX_ARCHIVE_S3_URI,
+    SANDBOX_CHECKPOINT_CAPABILITY,
+)
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -675,14 +679,32 @@ async def _renew_residency_grants(
 def _host_archive_settings(
     values: dict[str, Any],
     capabilities: list[str],
-) -> HostSandboxArchiveSettings:
-    """Return the policy one host can apply.
+) -> HostSandboxArchiveSettings | None:
+    """Return the policy one host can apply, or ``None`` for one that cannot.
 
     A host whose sandbox manager predates checkpoints rejects the unknown key,
     so an opt-out is reduced to the default (which serializes to nothing) for
     it. It receives the same revision and keeps archiving without checkpoints.
+
+    A host whose sandbox manager predates the bucket setting refuses any bucket
+    but the default. A disabled policy is reduced to the default bucket for it:
+    it creates no S3 service and starts no new archive (a final already fenced
+    under an earlier enabled revision still uploads under that revision), and
+    the host confirms the revision and keeps taking work. An enabled one has no
+    such reduction, since archiving to the default would write somewhere the
+    policy does not say, so that host gets no policy. Until it is redeployed,
+    its sandbox manager keeps the last policy it applied and goes on archiving
+    the groups it holds, checkpoints included, into the previous bucket, and
+    with no confirmed revision the host takes no work at all.
     """
     settings = HostSandboxArchiveSettings.model_validate(values)
+    if (
+        settings.s3_uri != SANDBOX_ARCHIVE_S3_URI
+        and SANDBOX_ARCHIVE_DESTINATION_CAPABILITY not in capabilities
+    ):
+        if settings.enabled:
+            return None
+        settings = settings.model_copy(update={"s3_uri": SANDBOX_ARCHIVE_S3_URI})
     if SANDBOX_CHECKPOINT_CAPABILITY not in capabilities:
         settings = settings.model_copy(update={"checkpoints_enabled": settings.enabled})
     return settings
