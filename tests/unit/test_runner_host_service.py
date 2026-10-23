@@ -202,7 +202,9 @@ def service(monkeypatch):
     monkeypatch.setattr(
         runner_mod,
         "release_turn",
-        lambda *, base_url, worker_token, job_id, reason: released.append((job_id, reason)) or True,
+        lambda *, base_url, worker_token, job_id, reason, client=None: (
+            released.append((job_id, reason)) or True
+        ),
     )
     yield identity, backend, released
     runner_mod._STOPPING.clear()
@@ -255,71 +257,6 @@ def _delivered_job() -> dict[str, Any]:
     }
 
 
-@pytest.mark.parametrize("verdict", ["adopted", "unusable", "updating", "network_failure"])
-def test_a_child_with_the_hosts_verdict_checks_only_the_network(monkeypatch, verdict):
-    import io
-    import os
-
-    from cloud_agent_host.sandbox import ContainerBackend, SandboxError
-
-    events = []
-    read_fd, write_fd = os.pipe()
-    backend = ContainerBackend(image="sandbox", runtime="io.containerd.kata.v2")
-    handed = {"guest_kernel": "guest-kernel", "epoch": {"generation": "g"}}
-    payload = {**_delivered_job(), runner_mod.VERDICT_KEY: handed}
-    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
-    monkeypatch.setattr(backend, "preflight", lambda: events.append("full"))
-    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
-
-    def adopt(actual, received):
-        assert actual is backend
-        assert received == handed
-        events.append("adopt")
-        if verdict == "updating":
-            raise SandboxError("Kata runtime is being updated; refusing to accept a turn")
-        return verdict != "unusable"
-
-    def network():
-        events.append("network")
-        if verdict == "network_failure":
-            raise SandboxError("network changed")
-
-    def run(_job, **_kwargs):
-        events.append("run")
-        assert os.read(read_fd, 256).decode().startswith("accepted")
-        return 0
-
-    monkeypatch.setattr(runner_mod, "adopt_verdict", adopt)
-    monkeypatch.setattr(backend, "check_network", network)
-    monkeypatch.setattr(runner_mod, "run_turn", run)
-    try:
-        code = runner_mod._serve_turn(
-            handover_fd=write_fd,
-            base_url="http://control",
-            gateway_url="http://gateway",
-            worker_id="runner-a",
-            lease_ttl=120.0,
-            agent_timeout_s=3600.0,
-            host="host-a",
-        )
-        if verdict in {"updating", "network_failure"}:
-            assert code == 2
-            assert os.read(read_fd, 256).decode().startswith("declined")
-        else:
-            assert code == 0
-        assert (
-            events
-            == {
-                "adopted": ["adopt", "network", "run"],
-                "unusable": ["adopt", "full", "run"],
-                "updating": ["adopt"],
-                "network_failure": ["adopt", "network"],
-            }[verdict]
-        )
-    finally:
-        os.close(read_fd)
-
-
 @pytest.mark.parametrize("raw", ["", "{", "[]"])
 def test_the_deployment_canary_always_runs_the_full_probe(monkeypatch, raw):
     import io
@@ -351,56 +288,6 @@ def test_the_deployment_canary_always_runs_the_full_probe(monkeypatch, raw):
         assert os.read(read_fd, 256).decode().startswith("declined")
     finally:
         os.close(read_fd)
-
-
-def test_only_this_host_can_hand_a_child_a_runtime_verdict(monkeypatch):
-    """A claim's own underscore keys never reach the child; the host's verdict does."""
-    import io
-    import os
-    from types import SimpleNamespace
-
-    delivered: list[dict[str, Any]] = []
-
-    class Stdin(io.BytesIO):
-        def close(self) -> None:
-            delivered.append(json.loads(self.getvalue()))
-            super().close()
-
-    class Qualification:
-        def __init__(self, verdict):
-            self._verdict = verdict
-
-        def verdict(self):
-            return self._verdict
-
-    def popen(argv, **_kwargs):
-        assert "ajt.1" not in argv and "grant" not in argv
-        return SimpleNamespace(stdin=Stdin(), wait=lambda timeout=None: 0, kill=lambda: None)
-
-    def read(fd):
-        os.close(fd)
-        return "declined for the test"
-
-    monkeypatch.setattr(runner_mod.subprocess, "Popen", popen)
-    monkeypatch.setattr(runner_mod, "read_handover", read)
-    forged = {**_delivered_job(), runner_mod.VERDICT_KEY: {"guest_kernel": "forged"}}
-    for qualification in (None, Qualification(None), Qualification({"guest_kernel": "proved"})):
-        runner_mod._spawn_turn(
-            forged,
-            base_url="http://control",
-            gateway_url="http://gateway",
-            worker_id="runner-a",
-            lease_ttl=120.0,
-            agent_timeout_s=3600.0,
-            host="host-a",
-            qualification=qualification,
-        )
-    assert [payload.get(runner_mod.VERDICT_KEY) for payload in delivered] == [
-        None,
-        None,
-        {"guest_kernel": "proved"},
-    ]
-    assert all(payload["worker_token"] == "ajt.1" for payload in delivered)
 
 
 def test_a_handover_read_error_keeps_the_spawned_child_tracked(monkeypatch):
@@ -564,6 +451,9 @@ class FakeQualification:
 
     def verdict(self) -> None:
         return None
+
+    def handover(self) -> dict[str, Any]:
+        return {}
 
 
 def _qualified_backend(monkeypatch, events: list[str]):
@@ -1180,6 +1070,9 @@ def test_a_rejected_credential_stops_claiming_and_stays_down_until_stopped(servi
         return None
 
     monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    # Until the service builds its own, the last heartbeat is an earlier
+    # test's, which has stopped already.
+    monkeypatch.setattr(FakeHeartbeat, "last", None)
     served: list[int] = []
     thread = threading.Thread(
         target=lambda: served.append(
@@ -1267,6 +1160,92 @@ def test_an_idle_host_waits_for_work_instead_of_sleeping(service, monkeypatch):
     ]
     assert {w["timeout_s"] for w in waits} == {5.0}, "never longer than the poll it replaces"
     assert {w["base_url"] for w in waits} == {"http://control"}
+
+
+def test_claims_waits_and_releases_share_one_client_the_loop_closes(service, monkeypatch):
+    """Each of these used to open a connection: with the environment claim, three a cycle."""
+    _identity, backend, _released = service
+    used: list[tuple[str, Any]] = []
+    jobs = [_job(1)]
+
+    def claim(**kwargs: Any) -> dict | None:
+        used.append(("claim", kwargs["client"]))
+        if jobs:
+            return jobs.pop()
+        runner_mod._STOPPING.set()
+        return None
+
+    def wait(**kwargs: Any) -> str:
+        used.append(("wait", kwargs["client"]))
+        return "token"
+
+    def release(**kwargs: Any) -> bool:
+        used.append(("release", kwargs["client"]))
+        return True
+
+    monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    monkeypatch.setattr(runner_mod, "wait_for_work", wait)
+    monkeypatch.setattr(runner_mod, "release_turn", release)
+
+    assert (
+        runner_mod.run_forever(
+            base_url="http://control",
+            worker_id="runner-a",
+            backend=backend,
+            host="host-a",
+            spawn_turn=lambda _p: LaunchResult(LAUNCH_NOT_STARTED, None, "could not start"),
+        )
+        == 0
+    )
+    assert [call for call, _client in used] == ["claim", "release", "claim", "wait"]
+    [client] = {id(client): client for _call, client in used}.values()
+    assert isinstance(client, httpx.Client)
+    assert client.is_closed, "the host's client outlived the loop that owned it"
+
+
+def test_an_empty_claims_proof_is_the_one_its_environment_poll_presents(service, monkeypatch):
+    """Built once a pass: the environment-test claim used to build a second one."""
+    _identity, _process_backend, _released = service
+    backend = runner_mod.ContainerBackend(image="img")
+    monkeypatch.setattr(backend, "preflight", lambda **_kw: None)
+    monkeypatch.setattr(backend, "check_gateway_reachable", lambda _url: None)
+    monkeypatch.setattr(
+        backend, "version_stamp", lambda: {"sandbox_image_digest": "sha256:" + "a" * 64}
+    )
+    attest = runner_mod._claim_attestation
+    built: list[dict[str, Any]] = []
+    sent: list[dict[str, Any]] = []
+    polled: list[tuple[str, Any]] = []
+
+    def counted(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        built.append(attest(*args, **kwargs))
+        return built[-1]
+
+    def claim(**kwargs: Any) -> None:
+        sent.append(kwargs["attestation"])
+        if len(sent) == 2:
+            runner_mod._STOPPING.set()
+
+    class _Worker:
+        busy = False
+
+        def __init__(self, _base_url: str, _backend: Any) -> None:
+            pass
+
+        def poll(self, credential: str, attestation: Any = None) -> None:
+            polled.append((credential, attestation))
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(runner_mod, "_claim_attestation", counted)
+    monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    monkeypatch.setattr("cloud_agent_host.environment_tests.EnvironmentTestWorker", _Worker)
+
+    assert _serve(backend, launch=lambda _p: LaunchResult(LAUNCH_STARTED, FakeHandle())) == 0
+    assert len(built) == len(sent) == 2, "one proof a pass"
+    assert [credential for credential, _proof in polled] == ["host-cred", "host-cred"]
+    assert all(proof is claimed for (_credential, proof), claimed in zip(polled, sent, strict=True))
 
 
 def test_a_control_plane_without_the_wait_is_polled_and_asked_again_later(monkeypatch):
@@ -2211,6 +2190,8 @@ def _frozen(measurement_id: str = "msm_1", **overrides: Any) -> dict[str, Any]:
 class _StubControl:
     """A control plane that answers measurements with a scripted verdict."""
 
+    lease_lost = False
+
     def __init__(self, answers: list[Any]) -> None:
         self.answers = answers
         self.sent: list[tuple[str, dict[str, Any]]] = []
@@ -2220,6 +2201,9 @@ class _StubControl:
     def append_event(self, event: Any) -> None:
         """Record execution milestones separately from measurement delivery."""
         self.events.append((event.event_type, event.payload))
+
+    def flush(self) -> None:
+        """Each milestone is recorded as it is appended, so nothing is left to deliver."""
 
     def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
         """Record the body and return the next scripted answer."""

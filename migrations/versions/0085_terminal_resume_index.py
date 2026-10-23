@@ -50,4 +50,4 @@ def downgrade() -> None:
         op.execute("DROP INDEX idx_agent_jobs_terminal_resume")
         return
     with op.get_context().autocommit_block():
-        op.execute("DROP INDEX CONCURRENTLY idx_agent_jobs_terminal_resume")
+        op.execute("DROP INDEX CONCURRENTLY IF EXISTS idx_agent_jobs_terminal_resume")

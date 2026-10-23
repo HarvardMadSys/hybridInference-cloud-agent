@@ -37,7 +37,7 @@ from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.shared_protocol import HOST_VERSION_MENU_MAX_ITEMS
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterator
+    from collections.abc import Collection, Iterator, Mapping
 
     from cloud_agent_host.network_guard import HostNetworkGuard
 
@@ -379,6 +379,15 @@ class SandboxBackend(ABC):
         """
         return
 
+    def adopt_rules_verification(self, payload: Mapping[str, Any]) -> None:
+        """Take the host's verification of its network rules from the turn it handed over.
+
+        Called in a turn's child before it accepts the turn. Only a backend
+        that enforces host network rules has one to take; the rest inherit
+        this no-op.
+        """
+        return
+
     def has_binary(self, name: str) -> bool:
         """Whether ``name`` will be runnable inside the sandbox.
 
@@ -591,6 +600,10 @@ class ContainerBackend(SandboxBackend):
         # network test) names one. Deliberately not an environment setting.
         self.network_helper_image = network_helper_image
         self._network_guard: HostNetworkGuard | None = None
+        # Set in a turn's child that holds its host service's verification of
+        # the rules (adopt_rules_verification); everywhere else the network
+        # check installs and reads them back itself.
+        self._rules_handed_over = False
         if not sandbox_namespace or "\x00" in sandbox_namespace or len(sandbox_namespace) > 128:
             raise ValueError("sandbox_namespace must be a non-empty value of at most 128 bytes")
         if sandbox_network is not None and sandbox_network.namespace != sandbox_namespace:
@@ -794,6 +807,24 @@ class ContainerBackend(SandboxBackend):
             )
         return self._network_guard
 
+    def adopt_rules_verification(self, payload: Mapping[str, Any]) -> None:
+        """Take the host service's verification of the rules for this turn's child.
+
+        ``payload`` is the turn the host service handed over; it carries the
+        verification under ``network_guard.VERIFICATION_KEY``
+        (``HostQualification.handover``). The host service installed and read
+        back the rules at most ``GUARD_RENEW_S`` before handing the turn over,
+        so the child's network check does not start the two helper containers
+        that takes; it still checks the Docker version and the relay network
+        itself. Raises, and the child declines the turn before accepting it,
+        when the verification is missing, failed, malformed or older than an
+        activation would trust (``HostNetworkGuard.adopt``).
+        """
+        from cloud_agent_host.network_guard import VERIFICATION_KEY
+
+        self.network_guard().adopt(payload.get(VERIFICATION_KEY))
+        self._rules_handed_over = True
+
     def base_env(self) -> dict[str, str]:
         """The image's own environment, not the runner's.
 
@@ -810,8 +841,9 @@ class ContainerBackend(SandboxBackend):
         Retained chat workspaces live in Docker's writable layer, so this
         preflight deliberately has no host-path or bind-mount probe.
         ``check_network=False`` validates only the runtime: candidate checks
-        have no deployment network, and host qualification leaves mutable
-        host rules for each child to verify before accepting its turn.
+        have no deployment network, and host qualification leaves the
+        network, which can change between turns, to the check each child
+        makes before accepting its turn.
         """
         if self.runtime == KATA_RUNTIME:
             from cloud_agent_host.runtime_qualification import check_runtime_state
@@ -922,7 +954,7 @@ class ContainerBackend(SandboxBackend):
             return []
         from cloud_agent_host.chat_sandbox import ChatSandboxManager
 
-        addresses = ChatSandboxManager(self).relay_addresses(network)
+        addresses = ChatSandboxManager(self).network.relay_addresses(network)
         return [
             part
             for alias, address in sorted(addresses.items())
@@ -941,6 +973,11 @@ class ContainerBackend(SandboxBackend):
         sandbox could use, and nothing but the relays belong on it. Then the
         guard installs this deployment's rules and reads them back from the
         kernel, so a host that cannot enforce the boundary never claims.
+
+        A turn's child holding its host service's verification
+        (:meth:`adopt_rules_verification`) uses that instead, while an
+        activation would still trust it; if it lapsed during the checks
+        above, the guard makes a new one here.
         """
         network = self.require_sandbox_network()
         self._require_gateway_priority()
@@ -968,7 +1005,10 @@ class ContainerBackend(SandboxBackend):
                 f"the relay network {network.relay_network!r} is not `internal`. It is "
                 "where the two relays are discovered, and must not route anywhere."
             )
-        self.network_guard().ensure(max_age_s=0)
+        if self._rules_handed_over:
+            self.network_guard().ensure()
+        else:
+            self.network_guard().ensure(max_age_s=0)
 
     def _require_gateway_priority(self) -> None:
         """Refuse a Docker too old to keep group bridges off the relays' routes."""

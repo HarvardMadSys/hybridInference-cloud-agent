@@ -19,6 +19,8 @@ from __future__ import annotations
 import pathlib
 from typing import Any
 
+from cloud_agent.ports.sandbox import TerminalControlRoute
+
 _PORTS = pathlib.Path(__file__).resolve().parents[2] / "apps" / "backend" / "cloud_agent" / "ports"
 
 #: One name per port module, which is also the assembly's attribute name.
@@ -43,6 +45,38 @@ class AllCapabilities:
     async def ssh_group_state(self, *, thread_id: str):
         """Legacy fixtures have no chat that ever selected an SSH server."""
         return None
+
+    async def owns_job(self, *, job_id: str, user_id: str) -> bool:
+        """Ownership as a fake's full job read answers it, as the routes once asked it."""
+        job = await self.get_job(job_id)  # type: ignore[attr-defined]
+        return job is not None and job["user_id"] == user_id and job.get("deleted_at") is None
+
+    async def terminal_control_route(
+        self, *, job_id: str, user_id: str
+    ) -> TerminalControlRoute | None:
+        """A terminal control call's one read, from the reads the route once made.
+
+        The fake's job, readiness and host reads. A shared group that records
+        no state reads as running, which is how the fake's start fence treats
+        it, and the fence's ``host_revoked`` state is the group's host removed.
+        """
+        if not await self.owns_job(job_id=job_id, user_id=user_id):
+            return None
+        job = await self.get_job(job_id)  # type: ignore[attr-defined]
+        sandbox = job.get("thread_sandbox")
+        thread_id = job.get("thread_id")
+        group = isinstance(sandbox, dict) and sandbox.get("shared_live") is True
+        state = (sandbox.get("state") or "running") if group else None
+        return TerminalControlRoute(
+            thread_id=thread_id,
+            workspace_ready=sandbox is not None
+            and bool(thread_id)
+            and await self.thread_workspace_ready(thread_id=str(thread_id)),  # type: ignore[attr-defined]
+            terminal_resume_pending=bool(job.get("terminal_resume_pending")),
+            group_state=state,
+            host_revoked=state == "host_revoked",
+            host=await self.host_for_job(job_id=job_id),  # type: ignore[attr-defined]
+        )
 
     def __getattr__(self, name: str) -> Any:
         """Resolve a capability name to this object; anything else is an error."""

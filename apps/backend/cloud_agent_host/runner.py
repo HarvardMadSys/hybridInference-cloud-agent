@@ -83,6 +83,12 @@ from cloud_agent_host.host_capacity import (
     build_storage_probe,
     capacity_enabled,
 )
+from cloud_agent_host.host_control import (
+    claim_payload as claim_payload,
+    keepalive_client,
+    release_turn as release_turn,
+    wait_for_work as wait_for_work,
+)
 from cloud_agent_host.host_runtime import (
     HANDOVER_ACCEPTED,
     HANDOVER_DECLINED,
@@ -145,7 +151,13 @@ from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorError,
 )
 from cloud_agent_host.setup import run_setup
+from cloud_agent_host.source_preparation import (
+    SOURCE_PREFETCH_JOIN_TIMEOUT_S,
+    read_tracked_lockfiles,
+    run_source_git,
+)
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
+from cloud_agent_host.upload_import import import_uploads as _import_uploads
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
@@ -153,17 +165,15 @@ from cloud_agent_shared.environment import (
 )
 from cloud_agent_shared.environment_snapshots import (
     ENVIRONMENT_SNAPSHOT_CAPABILITY,
-    MAX_LOCKFILES,
     EnvironmentSnapshotRef,
-    is_lockfile,
 )
 from cloud_agent_shared.git.patch_gate import branch_name_for
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
     build_base_bundle,
     build_source_archive,
-    build_upload_archive,
 )
+from cloud_agent_shared.git.source_cancellation import check_source_stop, checked_entries
 from cloud_agent_shared.git.temporary_workspace import (
     EMPTY_TREE_SHA,
     TEMPORARY_WORKSPACE_BASE_SHA,
@@ -230,9 +240,6 @@ _UNRENEWABLE_LEASE_S = HEARTBEAT_INTERVAL_S + _HEARTBEAT_TIMEOUT_S
 #: How long a host polls before asking again for the wait endpoint a control
 #: plane did not have. Hosts deploy first, so this is the rest of a rollout.
 WORK_WAIT_RETRY_S = 300.0
-#: Added to a wait's own timeout for the client's, so the control plane always
-#: answers first.
-_WORK_WAIT_GRACE_S = 10.0
 DEFAULT_AGENT_TIMEOUT_S = float(HOST_SETTINGS_BY_KEY["agent_timeout_s"].default)
 # How often the control checks run while the agent is silent.
 _POLL_INTERVAL_S = 0.5
@@ -490,67 +497,6 @@ class Heartbeater:
                 self.cancel_requested = True
 
 
-def claim_payload(
-    *,
-    base_url: str,
-    host_credential: str,
-    worker_id: str,
-    lease_ttl: float,
-    attestation: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    """Claim the next queued job and return the control plane's raw answer.
-
-    The host service hands this document to the child that will run the turn,
-    unread beyond the few fields it needs to account for the claim. Parsing it
-    into a :class:`ClaimedJob` is the child's job, in the process that will
-    actually use the credentials it carries.
-    """
-    payload: dict[str, Any] = {"worker_id": worker_id, "lease_ttl_seconds": lease_ttl}
-    if attestation:
-        payload["attestation"] = attestation
-    try:
-        response = httpx.post(
-            f"{base_url.rstrip('/')}/v1/agent/worker/claim",
-            json=payload,
-            headers={"Authorization": f"Bearer {host_credential}"},
-            timeout=30.0,
-        )
-    except httpx.TransportError as exc:
-        # Tagged at the one place where "the gateway is unreachable" also means
-        # "no job was claimed". The same error from a later call — an event, an
-        # group snapshot, a terminal transition — happens with an attempt already
-        # running, and reporting *that* as an unreached gateway would hide the
-        # job an operator has to go look at.
-        raise ClaimUnreachable(str(exc)) from exc
-    response.raise_for_status()
-    body = response.json()
-    return body if body else None
-
-
-def wait_for_work(
-    *, base_url: str, host_credential: str, since: str | None, timeout_s: float
-) -> str:
-    """Wait until the control plane says there may be work, and return its token.
-
-    Answers at once when ``since`` is stale and at the latest after
-    ``timeout_s``; the host claims after either. Raises
-    :class:`WorkWaitUnsupported` for a control plane without the endpoint.
-    """
-    try:
-        response = httpx.post(
-            f"{base_url.rstrip('/')}/v1/agent/worker/wait",
-            json={"since": since, "timeout_seconds": timeout_s},
-            headers={"Authorization": f"Bearer {host_credential}"},
-            timeout=timeout_s + _WORK_WAIT_GRACE_S,
-        )
-    except httpx.TransportError as exc:
-        raise ClaimUnreachable(str(exc)) from exc
-    if response.status_code == 404:
-        raise WorkWaitUnsupported(response.text[:200])
-    response.raise_for_status()
-    return str(response.json()["token"])
-
-
 class _WorkWaiter:
     """Parks an idle host until the control plane says the queue changed.
 
@@ -563,9 +509,12 @@ class _WorkWaiter:
     wait fails.
     """
 
-    def __init__(self, *, base_url: str, interval_s: float) -> None:
+    def __init__(
+        self, *, base_url: str, interval_s: float, client: httpx.Client | None = None
+    ) -> None:
         self._base_url = base_url
         self._interval_s = interval_s
+        self._client = client
         self._token: str | None = None
         self._poll_until = 0.0
 
@@ -580,6 +529,7 @@ class _WorkWaiter:
                 host_credential=host_credential,
                 since=self._token,
                 timeout_s=self._interval_s,
+                client=self._client,
             )
         except WorkWaitUnsupported:
             self._poll_until = time.monotonic() + WORK_WAIT_RETRY_S
@@ -593,50 +543,28 @@ class _WorkWaiter:
             time.sleep(self._interval_s)
 
 
-def release_turn(*, base_url: str, worker_token: str, job_id: str, reason: str) -> bool:
-    """Hand a claimed turn back to the queue, having proved it never began.
-
-    Called only where this host can show the turn was not started — the child
-    could not be spawned, or exited without taking delivery. The control plane
-    checks the same thing from its own side and refuses otherwise, so a host
-    that is wrong about it cannot requeue work that ran.
-
-    Returns whether the turn went back. ``False`` is not an error path worth
-    retrying: the lease is the backstop it always was, and a turn this call
-    could not release is one the control plane has already decided about.
-    """
-    try:
-        response = httpx.post(
-            f"{base_url.rstrip('/')}/v1/agent/worker/jobs/{job_id}/release",
-            json={"reason": reason},
-            headers={"Authorization": f"Bearer {worker_token}"},
-            timeout=30.0,
-        )
-    except httpx.HTTPError as exc:
-        _log_control_failure("release", job_id, exc)
-        return False
-    if response.status_code >= 400:
-        logger.warning(
-            "agent_turn_release_refused",
-            extra={
-                "event": "agent_turn_release_refused",
-                "job_id": job_id,
-                "status": response.status_code,
-            },
-        )
-        return False
-    return True
-
-
 def _run_git(
     args: list[str],
     *,
     cwd: str | None = None,
     env_extra: dict[str, str] | None = None,
     input_text: str | None = None,
+    stop: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one git command hermetically and return the completed process."""
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV, **(env_extra or {})}
+    if stop is not None:
+        result = run_source_git(
+            args,
+            cwd=cwd,
+            env=env,
+            timeout=_GIT_TIMEOUT_S,
+            stop=stop,
+            input_bytes=None if input_text is None else input_text.encode(),
+        )
+        return subprocess.CompletedProcess(
+            result.args, result.returncode, result.stdout.decode(), result.stderr.decode()
+        )
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -665,47 +593,16 @@ def _checkout_bytes(workdir: str) -> int:
     return total
 
 
-def tracked_lockfiles(workdir: str) -> dict[str, str] | None:
-    """Each tracked dependency manifest's Git object id, the snapshot match key.
-
-    Equal object ids mean byte-identical files, on the host checkout of a
-    snapshot's build and of a later task alike. ``None`` when Git cannot say,
-    or when a repository has more manifests than a snapshot records, so that it
-    is never matched.
-    """
-    # Bytes, not text: Git keeps each name as the bytes it was committed
-    # with, and ``-z`` prints them unquoted.
-    listed = subprocess.run(
-        ["git", "ls-files", "-s", "-z"],
-        cwd=workdir,
+def tracked_lockfiles(
+    workdir: str, *, stop: threading.Event | None = None
+) -> dict[str, str] | None:
+    """Each tracked manifest's object id, or ``None`` when Git cannot say."""
+    return read_tracked_lockfiles(
+        workdir,
         env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV},
-        capture_output=True,
         timeout=_GIT_TIMEOUT_S,
-        stdin=subprocess.DEVNULL,
-        check=False,
+        stop=stop,
     )
-    if listed.returncode != 0:
-        return None
-    found: dict[str, str] = {}
-    for entry in listed.stdout.split(b"\0"):
-        meta, _, raw = entry.partition(b"\t")
-        fields = meta.split()
-        if len(fields) != 3:
-            continue
-        try:
-            path = raw.decode()
-        except UnicodeDecodeError:
-            # A manifest whose own name is text may sit in a directory whose
-            # name is not; no receipt can record it, so Git cannot say.
-            if is_lockfile(raw.rpartition(b"/")[2].decode(errors="replace")):
-                return None
-            continue
-        if not is_lockfile(path):
-            continue
-        found[path] = fields[1].decode()
-        if len(found) > MAX_LOCKFILES:
-            return None
-    return found
 
 
 def _choose_environment_snapshot(
@@ -848,7 +745,9 @@ def _basic_credential(clone_token: str) -> str:
     return base64.b64encode(f"x-access-token:{clone_token}".encode()).decode()
 
 
-def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None:
+def _assert_no_credential_on_disk(
+    workdir: str, clone_token: str | None, *, stop: threading.Event | None = None
+) -> None:
     """Fail rather than mount a worktree that carries the clone credential.
 
     No repository credential may be stored in the source tree, which is about
@@ -868,7 +767,7 @@ def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None
         base64.b64encode(clone_token.encode()).decode().rstrip("="),
     )
     git_dir = pathlib.Path(workdir) / ".git"
-    for path in git_dir.rglob("*"):
+    for path in checked_entries(git_dir.rglob("*"), stop):
         # Object and pack files hold repository content, not our configuration,
         # and are compressed; skipping them keeps this check bounded.
         if not path.is_file() or path.is_symlink() or "objects" in path.parts:
@@ -932,12 +831,12 @@ def prepare_worktree(
         args: list[str], env_extra: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
         if max_bytes is None:
-            return _run_git(args, cwd=workdir, env_extra=env_extra)
+            return _run_git(args, cwd=workdir, env_extra=env_extra, stop=stop)
         return _run_git_within(
             args, cwd=workdir, max_bytes=max_bytes, env_extra=env_extra, stop=stop
         )
 
-    init = _run_git(["init", "--quiet", workdir])
+    init = _run_git(["init", "--quiet", workdir], stop=stop)
     if init.returncode != 0:
         raise WorktreeError(f"git init failed: {init.stderr.strip()[:200]}")
 
@@ -957,12 +856,12 @@ def prepare_worktree(
     if checkout.returncode != 0:
         raise WorktreeError(f"could not check out {ref}: {checkout.stderr.strip()[:200]}")
 
-    resolved = _run_git(["rev-parse", "HEAD"], cwd=workdir).stdout.strip()
-    _assert_no_credential_on_disk(workdir, clone_token)
+    resolved = _run_git(["rev-parse", "HEAD"], cwd=workdir, stop=stop).stdout.strip()
+    _assert_no_credential_on_disk(workdir, clone_token, stop=stop)
     return resolved or (base_sha or "")
 
 
-def prepare_temporary_worktree(*, workdir: str) -> str:
+def prepare_temporary_worktree(*, workdir: str, stop: threading.Event | None = None) -> str:
     """Start a temporary workspace in ``workdir`` and return its first commit.
 
     A temporary workspace has no repository, so nothing is fetched and no
@@ -980,7 +879,7 @@ def prepare_temporary_worktree(*, workdir: str) -> str:
         env_extra: dict[str, str] | None = None,
         input_text: str | None = None,
     ) -> str:
-        result = _run_git(args, cwd=workdir, env_extra=env_extra, input_text=input_text)
+        result = _run_git(args, cwd=workdir, env_extra=env_extra, input_text=input_text, stop=stop)
         if result.returncode != 0:
             raise WorktreeError(
                 f"could not start the temporary workspace: git {args[0]} failed: "
@@ -1060,10 +959,12 @@ def source_import_max_bytes(env: dict[str, str] | None = None) -> int:
     return mib * 1024 * 1024
 
 
-def checkout_output_branch(workdir: str, branch_id: str) -> str:
+def checkout_output_branch(
+    workdir: str, branch_id: str, *, stop: threading.Event | None = None
+) -> str:
     """Put a fresh durable worktree on the publisher's local output branch."""
     branch = branch_name_for(branch_id)
-    switched = _run_git(["checkout", "--quiet", "-B", branch, "HEAD"], cwd=workdir)
+    switched = _run_git(["checkout", "--quiet", "-B", branch, "HEAD"], cwd=workdir, stop=stop)
     if switched.returncode != 0:
         raise WorktreeError(
             f"could not create workspace branch {branch}: {switched.stderr.strip()[:200]}"
@@ -1387,15 +1288,6 @@ def _claim_attestation(
         stamp["sandbox_archive_settings_applied_revision"] = (
             sandbox_archive_settings_applied_revision
         )
-    if stamp["runner_capabilities"]:
-        # For a control plane older than this release. Hosts roll out before
-        # the API, so a replacement runner polls that API for a while, and it
-        # refuses every claim that does not name the image's shared-sandbox
-        # protocol. This image has no such label. Its "v2" meant a fork
-        # helper that takes an anchor, which the capabilities above already
-        # required. This control plane reads nothing from it. Remove once
-        # every deployment's control plane is at least this release.
-        stamp["shared_sandbox_protocol"] = "v2"
     return stamp
 
 
@@ -1709,7 +1601,7 @@ class _SourcePrefetch:
 
     The thread is not a daemon: a turn that ends while the clone is still
     running waits for it at exit, so its temporary directory is always removed.
-    Discarding stops a clone still running, so that wait is short.
+    Discarding cancels Git and archive preparation before joining its cleanup.
     """
 
     def __init__(self, job: ClaimedJob, *, uid: int, gid: int, max_bytes: int | None) -> None:
@@ -1732,9 +1624,10 @@ class _SourcePrefetch:
         archive: Any = None
         try:
             with tempfile.TemporaryDirectory(prefix="freeinference-source-") as source:
+                check_source_stop(self._stop)
                 if self._job.repo is None:
                     # Nothing to clone and nothing to publish, so no output branch.
-                    base_sha = prepare_temporary_worktree(workdir=source)
+                    base_sha = prepare_temporary_worktree(workdir=source, stop=self._stop)
                 else:
                     base_sha = prepare_worktree(
                         workdir=source,
@@ -1745,8 +1638,11 @@ class _SourcePrefetch:
                         max_bytes=self._max_bytes,
                         stop=self._stop,
                     )
-                    checkout_output_branch(source, self._job.thread_id)
-                self._lockfiles = tracked_lockfiles(source)
+                    check_source_stop(self._stop)
+                    checkout_output_branch(source, self._job.thread_id, stop=self._stop)
+                check_source_stop(self._stop)
+                self._lockfiles = tracked_lockfiles(source, stop=self._stop)
+                check_source_stop(self._stop)
                 # Unnamed and outside the checkout: the archive is spooled to
                 # disk, not held in this process, and gone when it is closed,
                 # which import_into or discard does once the clone is done.
@@ -1759,6 +1655,7 @@ class _SourcePrefetch:
                     uid=self._uid,
                     gid=self._gid,
                     max_bytes=self._max_bytes,
+                    stop=self._stop,
                 )
                 archive.flush()
                 archive.seek(0)
@@ -1809,13 +1706,14 @@ class _SourcePrefetch:
         return self._base_sha
 
     def discard(self) -> None:
-        """Release the archive now, and stop a clone that is still running."""
+        """Cancel preparation and give its owner a bounded wait to clean up."""
         self._stop.set()
         with self._lock:
             self._discarded = True
             archive, self._archive = self._archive, None
         if archive is not None:
             archive.close()
+        self._thread.join(timeout=SOURCE_PREFETCH_JOIN_TIMEOUT_S)
 
 
 def _prefetch_retained_source(
@@ -1827,44 +1725,6 @@ def _prefetch_retained_source(
     host's own, for a turn started without the runner's settings.
     """
     return _SourcePrefetch(job, uid=uid, gid=gid, max_bytes=max_bytes)
-
-
-def _import_uploads(
-    *,
-    job: ClaimedJob,
-    control: ControlPlane,
-    manager: ChatSandboxManager,
-    spec: ChatSandboxSpec,
-    fresh_container: bool,
-) -> int:
-    """Place this conversation's uploaded files under ``/uploads``.
-
-    Always the whole thread's files, never a delta: the import overwrites the
-    same paths, so one code path serves a new container and a container that
-    gained a file this turn.
-
-    It runs when the container is new, or when this turn attached something.
-    A retained container already holds the earlier turns' files — ``/uploads``
-    is root-owned and read-only, so the sandbox cannot have removed them — and
-    re-fetching them on every follow-up would move the whole conversation's
-    bytes again to write what is already there.
-
-    The files never touch ``CHAT_WORKDIR``. The publish path stages the
-    workspace with ``git add -A -N``, so an upload written there would be
-    committed and appear in the draft pull request.
-    """
-    if job.thread_attachment_count <= 0:
-        return 0
-    if not fresh_container and job.turn_attachment_count <= 0:
-        return 0
-    files: list[tuple[str, bytes]] = []
-    for entry in control.list_attachments():
-        path, content = control.read_attachment(int(entry["id"]))
-        files.append((path, content))
-    if not files:
-        return 0
-    manager.import_archive(spec, CHAT_UPLOADS_DIR, build_upload_archive(files))
-    return len(files)
 
 
 def _import_retained_base(
@@ -1901,13 +1761,13 @@ def _import_retained_base(
             held = (parent.stdout.strip() or None) if parent.returncode == 0 else None
             if held and not _sandbox_has_commit(CHAT_WORKDIR, held, backend):
                 held = None
-        bundle = build_base_bundle(source, commit=resolved, prerequisite=held)
-        manager.import_base_bundle(
-            spec,
-            bundle,
-            commit=resolved,
-            env=dict(_SAFE_DIRECTORY_ENV),
-        )
+        with build_base_bundle(source, commit=resolved, prerequisite=held) as bundle:
+            manager.import_base_bundle(
+                spec,
+                bundle,
+                commit=resolved,
+                env=dict(_SAFE_DIRECTORY_ENV),
+            )
     return resolved
 
 
@@ -2064,6 +1924,8 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
     sandbox_error: str | None = None
 
     def outcome(exit_code: int) -> tuple[int, str, list[str], dict[str, Any] | None, str | None]:
+        # Events the control plane could not record fail the turn before its outcome counts.
+        control.flush()
         if agent_error:
             reported = f"agent reported an error: {agent_error[:900]}"
         elif sandbox_error:
@@ -2075,11 +1937,12 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
     try:
         # The sandbox manager admits and dispatches the prompt before opening this
         # response stream. Resident follow-ups need not emit a native init
-        # event, so report this shared boundary before waiting for CLI output.
+        # event, so store this shared boundary before waiting for CLI output.
         control.append_event(NormalizedEvent("lifecycle", {"phase": "turn_started"}))
+        control.flush()
         frames = OutputPump(stream.frames(), name="shared-agent-stream")
         while True:
-            if heart.lease_lost:
+            if heart.lease_lost or control.lease_lost:
                 with contextlib.suppress(Exception):
                     supervisor.interrupt_shared(job.thread_id, token=lease_token)
                 raise LeaseLost("lease lost while the shared Agent CLI was running")
@@ -2172,15 +2035,8 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
         elif status != "completed" and exit_code == 0:
             exit_code = 1
         if tool_errors:
-            control.append_event(
-                NormalizedEvent(
-                    "error",
-                    {
-                        "detail": f"{len(tool_errors)} tool call(s) failed",
-                        "first": tool_errors[0],
-                    },
-                )
-            )
+            summary = {"detail": f"{len(tool_errors)} tool call(s) failed", "first": tool_errors[0]}
+            control.append_event(NormalizedEvent("error", summary))
         return outcome(exit_code)
     finally:
         if frames is not None:
@@ -2764,6 +2620,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             # first-turn job can still add files of its own and must import the
             # thread's current attachment set before prompt admission.
             fresh_container=not has_context and not recovered_initial,
+            container_id=str(lease["container_id"]),
         )
         if imported_uploads:
             control.append_event(
@@ -2941,21 +2798,17 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             credential = str(residency.get("credential") or "")
             if not credential:
                 raise SandboxError("control plane returned no shared residency credential")
+            # The residency's: this process serves later turns' tools without a restart.
+            mcp_credential = str(residency.get("mcp_credential") or "") if job.mcp_bindings else ""
+            if job.mcp_bindings and not mcp_credential:
+                raise SandboxError("control plane returned no shared residency MCP credential")
             grant_model = residency.get("model")
             if grant_model not in {None, job.model}:
                 raise SandboxError("shared residency grant model does not match this turn")
             launch = replace(
                 launch,
                 credential=credential,
-                # The residency's MCP credential lets this process serve later
-                # turns' tools without a restart. A control plane that predates
-                # it sends none; the turn's own token then works for this turn,
-                # and the next one restarts the process as it always did.
-                mcp_credential=(
-                    str(residency.get("mcp_credential") or "") or job.mcp_token
-                    if job.mcp_bindings
-                    else ""
-                ),
+                mcp_credential=mcp_credential,
                 residency_generation=int(residency["generation"]),
             )
             resident_call = operation_profiling.expect_fragment(
@@ -3708,11 +3561,11 @@ def _spawn_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     remains the backstop.
     """
     child = _child_turn_payload(payload)
-    verdict = qualification.verdict() if qualification is not None else None
-    if verdict is not None:
+    if qualification is not None:
         # Added after the claim's own underscore keys were stripped: only this
-        # host, which proved the runtime itself, can spare the child the probe.
-        child[VERDICT_KEY] = verdict
+        # host, which proved the runtime and the network rules, can spare the
+        # child its own proof of them (HostQualification.handover).
+        child.update(qualification.handover())
     try:
         encoded_child = encode_turn(child)
     except (TypeError, ValueError) as exc:
@@ -3896,13 +3749,13 @@ def _serve_turn(
         if payload is not None:
             measurement = operation_profiling.attach_selection(payload.get("_profiling"))
 
-    # Empty or undecodable input always exercises the full deployment canary.
-    # A real turn may carry the host's runtime verdict, so the child repeats
-    # only what can change between turns: the update marker and the network.
+    # Empty input runs the full deployment canary; a real turn adopts what its host proved.
     operation_profiling.mark(measurement, "preflight")
     try:
         with operation_profiling.span(measurement, "preflight"):
             backend = build_backend_from_env()
+            if payload is not None:
+                backend.adopt_rules_verification(payload)
             verdict = payload.get(VERDICT_KEY) if payload is not None else None
             if isinstance(backend, ContainerBackend) and adopt_verdict(backend, verdict):
                 backend.check_network()
@@ -4244,7 +4097,13 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         flush=True,
     )
 
-    work = _WorkWaiter(base_url=base_url, interval_s=tick_s)
+    # One keep-alive client for the claims, the waits between them and a turn
+    # handed back. Each used to open a connection of its own: with the
+    # environment-test claim, three in every idle cycle. Credentials still go
+    # per request, so a rotated host credential is used at once and a release
+    # sends its own turn's token.
+    host_client = keepalive_client()
+    work = _WorkWaiter(base_url=base_url, interval_s=tick_s, client=host_client)
     immediate = False
     rejected = False
     claims = 0
@@ -4371,16 +4230,20 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             )
             try:
                 with operation_profiling.span(measurement, "claim"):
+                    # Built once a pass: after an empty claim, the
+                    # environment-test claim presents this same proof.
+                    attestation = _claim_attestation(
+                        backend,
+                        sandbox_archive_settings_applied_revision=archive_settings.report(),
+                        host_settings=runtime_settings.turn_settings(),
+                    )
                     payload = claim_payload(
                         base_url=base_url,
                         host_credential=pool.credential,
                         worker_id=turn_worker_id,
                         lease_ttl=lease_ttl,
-                        attestation=_claim_attestation(
-                            backend,
-                            sandbox_archive_settings_applied_revision=archive_settings.report(),
-                            host_settings=runtime_settings.turn_settings(),
-                        ),
+                        attestation=attestation,
+                        client=host_client,
                     )
             except ClaimUnreachable as exc:
                 operation_profiling.discard(measurement)
@@ -4404,7 +4267,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 # the poll must not spend a slot.
                 operation_profiling.discard(measurement)
                 if environment_tests is not None:
-                    environment_tests.poll(pool.credential)
+                    environment_tests.poll(pool.credential, attestation)
                 work.wait(pool.credential)
                 continue
 
@@ -4415,6 +4278,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 worker_id=turn_worker_id,
                 measurement=_bound_measurement(measurement, payload),
                 host_settings=runtime_settings.turn_settings(),
+                client=host_client,
             )
     except KeyboardInterrupt:
         immediate = True
@@ -4422,7 +4286,10 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         try:
             turns.shutdown(immediate=immediate)
         finally:
-            stop_all()
+            try:
+                stop_all()
+            finally:
+                host_client.close()
     if rejected:
         _stay_down()
     return 0
@@ -4642,6 +4509,7 @@ def _hand_over_turn(
     worker_id: str,
     measurement: operation_profiling.Measurement | None = None,
     host_settings: Mapping[str, float] | None = None,
+    client: httpx.Client | None = None,
 ) -> None:
     """Give one claimed turn to a child, and requeue it only if it never began.
 
@@ -4755,6 +4623,7 @@ def _hand_over_turn(
         worker_token=worker_token,
         job_id=job_id,
         reason="launch_failed",
+        client=client,
     )
     logger.warning(
         "agent_turn_not_started",
@@ -4939,16 +4808,13 @@ def build_parser() -> argparse.ArgumentParser:
     # default while both shapes are deployed.
     parser.add_argument(
         "--base-url",
-        default=(
-            os.environ.get("AGENT_CONTROL_PLANE_URL")
-            or os.environ.get("AGENT_GATEWAY_URL")
-            or os.environ.get("FREEINFERENCE_BASE_URL", "")
-        ),
+        default=os.environ.get("AGENT_CONTROL_PLANE_URL")
+        or os.environ.get("AGENT_GATEWAY_URL", ""),
         help="Control plane: claim, heartbeat, events, lifecycle, terminals.",
     )
     parser.add_argument(
         "--gateway-url",
-        default=os.environ.get("AGENT_GATEWAY_URL") or os.environ.get("FREEINFERENCE_BASE_URL", ""),
+        default=os.environ.get("AGENT_GATEWAY_URL", ""),
         help="Inference gateway, as the sandbox reaches it. Model calls only.",
     )
     parser.add_argument("--worker-id", default=default_worker_id())

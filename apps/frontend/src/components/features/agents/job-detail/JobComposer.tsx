@@ -23,18 +23,23 @@ import { isSteerChord } from '../composerKeys';
 import { hasLostContext } from '../conversationJob';
 import { GoalBar } from '../goal/GoalBar';
 import { hasLiveWork } from '../goal/liveWork';
-import type { useGoalCommand } from '../goal/useGoalCommand';
+import { useGoalCommand, type GoalCommandControls } from '../goal/useGoalCommand';
 import { McpSessionPanel } from '../mcp/McpSessionPanel';
 import type { useThreadComposerMcp } from '../mcp/useThreadComposerMcp';
 import type { ComposerSsh } from '../ssh/useComposerSsh';
 import type { AgentJob } from '../types';
-import type { useComposerDraft } from '../useComposerDraft';
+import { useComposerDraftValue, type ComposerDraftStore } from '../useComposerDraft';
 import type { usePendingMessages } from '../usePendingMessages';
 import { SkillSelectionDialog } from './LazyPanels';
 import type { useJobComposerSettings } from './useJobComposerSettings';
 import type { useJobRunActions } from './useJobRunActions';
 
-/** Composer controls and dialogs; request handling remains with the page. */
+/**
+ * Composer controls and dialogs; request handling remains with the page.
+ *
+ * The draft's text is read here and nowhere above, so typing draws the
+ * composer again and leaves the conversation and the workspace alone.
+ */
 export function JobComposer({
   job,
   settings,
@@ -44,7 +49,7 @@ export function JobComposer({
   mcp,
   ssh,
   queue,
-  goalCommand,
+  applyGoalObjective,
   composerRef,
   followUpBox,
   questionTurn,
@@ -69,12 +74,13 @@ export function JobComposer({
   job: AgentJob;
   settings: ReturnType<typeof useJobComposerSettings>;
   runActions: ReturnType<typeof useJobRunActions>;
-  draft: ReturnType<typeof useComposerDraft>;
+  draft: ComposerDraftStore;
   attachments: ReturnType<typeof useAttachments>;
   mcp: ReturnType<typeof useThreadComposerMcp>;
   ssh?: ComposerSsh;
   queue: ReturnType<typeof usePendingMessages>;
-  goalCommand: ReturnType<typeof useGoalCommand>;
+  /** `/goal <objective>` on this conversation; a refusal is thrown, not drawn. */
+  applyGoalObjective: (objective: string) => Promise<void>;
   composerRef: (element: HTMLElement | null) => void;
   followUpBox: RefObject<HTMLTextAreaElement>;
   questionTurn: { id: string; attemptId?: number | null; active: boolean };
@@ -90,8 +96,12 @@ export function JobComposer({
   setRewriting: (rewriting: boolean) => void;
   actionError: string | null;
   setActionError: (error: string | null) => void;
-  submitFollowUp: (event: FormEvent<HTMLFormElement>) => void;
-  steerNow: () => void;
+  /** Each runs the `/goal` command it is given first: a draft that is one is not sent. */
+  submitFollowUp: (
+    event: FormEvent<HTMLFormElement>,
+    command: GoalCommandControls['submit'],
+  ) => void;
+  steerNow: (command: GoalCommandControls['submit']) => void;
   insertGoalCommand: () => void;
   onReload?: () => void;
   /** Kept mounted, with its draft, while another view replaces the Chat. */
@@ -114,7 +124,16 @@ export function JobComposer({
     efforts,
   } = settings;
   const { restoring, unarchive } = runActions;
-  const { value: followUp, setValue: setFollowUp } = draft;
+  const followUp = useComposerDraftValue(draft);
+  const { setValue: setFollowUp } = draft;
+  const goalCommand = useGoalCommand({
+    value: followUp,
+    setValue: setFollowUp,
+    focusComposer: () => followUpBox.current?.focus(),
+    onNeedsObjective: () => setGoalHint(t('goal.needsObjective')),
+    onApply: applyGoalObjective,
+    onError: setActionError,
+  });
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [dropping, setDropping] = useState(false);
   return (
@@ -211,7 +230,7 @@ export function JobComposer({
             </div>
           ) : (
             <form
-              onSubmit={(event) => void submitFollowUp(event)}
+              onSubmit={(event) => void submitFollowUp(event, goalCommand.submit)}
               onDragOver={(event) => {
                 if (contextLost || submitting || !event.dataTransfer.types.includes('Files'))
                   return;
@@ -264,7 +283,7 @@ export function JobComposer({
                   if (event.defaultPrevented) return;
                   if (queue.canSendNow && isSteerChord(event)) {
                     event.preventDefault();
-                    void steerNow();
+                    void steerNow(goalCommand.submit);
                   }
                 }}
                 // The list is this box's own popup, and the highlighted
@@ -351,7 +370,7 @@ export function JobComposer({
                   steerTitle={t('composer.steerHint', { keys: chordLabel('Enter', apple) })}
                   onSteer={
                     queue.canSendNow && attachments.entries.length === 0
-                      ? () => void steerNow()
+                      ? () => void steerNow(goalCommand.submit)
                       : undefined
                   }
                   disabled={

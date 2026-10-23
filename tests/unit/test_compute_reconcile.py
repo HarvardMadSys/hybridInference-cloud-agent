@@ -15,12 +15,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from tests.support.compute_snapshot import snapshot_repository
 
 from cloud_agent.application import compute_reconcile
 from cloud_agent.application.compute_reconcile import ComputeReconciler
 from cloud_agent.application.compute_setup import HostRelease
 from cloud_agent.domain.compute import autoscaling_acquire_can_cancel, fingerprint, public_operation
 from cloud_agent.host_pool import hash_secret
+from cloud_agent.ports.compute_resources import ComputeSchedulingSnapshot
 from cloud_agent.ports.external.compute_provider import (
     AcquisitionResolution,
     NodeObservation,
@@ -56,6 +58,21 @@ PROFILE = DeploymentProfile(
     deployment_sha="b" * 40,
     environment_ref="deployment:host",
 )
+
+
+@pytest.mark.parametrize("count", [1, 100])
+async def test_schedule_reads_one_snapshot_without_per_allocation_queries(monkeypatch, count):
+    h = harness(monkeypatch, identified=True)
+    rows = [{**h.allocation, "id": f"allocation-{index}"} for index in range(count)]
+    h.repository.scheduling_inventory = AsyncMock(
+        return_value=ComputeSchedulingSnapshot(rows, {}, {})
+    )
+    h.repository.list_allocations.side_effect = AssertionError("must use the bulk snapshot")
+    h.repository.list_operations.side_effect = AssertionError("per-allocation query")
+    await h.reconciler.schedule()
+    h.repository.scheduling_inventory.assert_awaited_once_with()
+    h.repository.list_allocations.assert_not_awaited()
+    h.repository.list_operations.assert_not_awaited()
 
 
 def observed(*, state="ready", expires=NOW + timedelta(hours=4)):
@@ -149,7 +166,7 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
         operation["result"].update(kwargs.get("result") or {})
         return True
 
-    repository = SimpleNamespace(
+    repository = snapshot_repository(
         get_allocation=AsyncMock(side_effect=lambda _id: allocation),
         list_allocations=AsyncMock(return_value=[allocation]),
         list_operations=AsyncMock(return_value=[]),

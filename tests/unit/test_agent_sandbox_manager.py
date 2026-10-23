@@ -27,7 +27,10 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient
 from cloud_agent.schemas import RetainedSandboxStop
-from cloud_agent_host import sandbox_manager as sandbox_manager_mod
+from cloud_agent_host import (
+    base_bundle_request as base_bundle_request_mod,
+    sandbox_manager as sandbox_manager_mod,
+)
 from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
     ChatSandboxManager,
@@ -51,16 +54,12 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
 )
 from cloud_agent_host.sandbox_manager import (
-    MAX_TERMINAL_BUFFER_BYTES,
-    MAX_TERMINAL_BUFFER_EVENTS,
     MAX_TERMINAL_SESSIONS_PER_WORKSPACE,
     SharedIdleStopRequest,
     SharedTurnRequest,
     _run_sandbox,
     _terminal_sse_frame,
-    _TerminalLimits,
     _TerminalManager,
-    _TerminalSession,
     create_app,
 )
 from cloud_agent_host.session_supervisor_client import (
@@ -72,7 +71,19 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedSessionLease,
     SharedTurnTelemetry,
 )
+from cloud_agent_host.terminal_session import (
+    MAX_TERMINAL_BUFFER_BYTES,
+    MAX_TERMINAL_BUFFER_EVENTS,
+    _TerminalLimits,
+    _TerminalSession,
+)
 from cloud_agent_host.tool_windows import ToolMark
+from cloud_agent_shared.git.base_bundle_stream import (
+    BASE_BUNDLE_CONTENT_TYPE,
+    BASE_BUNDLE_STREAM_CAPABILITY,
+    LEGACY_BASE_BUNDLE_CONTENT_TYPE,
+    encode_base_bundle_metadata,
+)
 from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values
 
 
@@ -293,8 +304,9 @@ class _WorkspaceBackend(RetainedChatBackend):
             stderr_text=lambda: "",
         )
 
-    def _import_base_bundle(self, _spec, bundle: bytes, *, commit: str, env):
-        self.imports.append((bundle, commit, env))
+    def _import_base_bundle(self, _spec, bundle, *, commit: str, env):
+        self.imports.append((bundle.read(), commit, env))
+        bundle.seek(0)
 
 
 def _descriptor(thread_id: str = "athr_source") -> SharedSessionDescriptor:
@@ -333,6 +345,8 @@ class _SharedSupervisor:
     def __init__(self, *, events: list[str] | None = None) -> None:
         self.workspace_backend = _WorkspaceBackend()
         self.calls: list[tuple] = []
+        # The proof time the last backend was handed, from its admission.
+        self.network_proved_at: float | None = None
         self.start_seqs: list[int | None] = []
         self.restores: list[object] = []
         self.imports = self.workspace_backend.imports
@@ -401,7 +415,7 @@ class _SharedSupervisor:
             raise SandboxError("unknown member")
         return _descriptor(thread_id)
 
-    def list(self):
+    def list(self, *, background_recovery=False):
         return [_descriptor("athr_source"), _descriptor("athr_child")]
 
     def list_for_thread(self, thread_id: str):
@@ -469,9 +483,10 @@ class _SharedSupervisor:
         self.calls.append(("terminal_closed", thread_id, token, kwargs))
         return _descriptor(thread_id)
 
-    def backend(self, thread_id: str):
+    def backend(self, thread_id: str, *, network_proved_at: float | None = None):
         assert self.owns(thread_id)
         self.calls.append(("backend", thread_id))
+        self.network_proved_at = network_proved_at
         return self.workspace_backend
 
     def capture_snapshot(self, thread_id: str, *, capture, start_seq: int | None = None):
@@ -950,6 +965,7 @@ async def test_health_and_sandbox_inventory_are_authenticated_and_shared_only():
 
     assert denied.status_code == 401
     assert health.json()["ok"] is True
+    assert BASE_BUNDLE_STREAM_CAPABILITY in health.json()["capabilities"]
     rows = listed.json()["sandboxes"]
     assert len(rows) == 1
     assert rows[0]["shared_live"] is True
@@ -976,7 +992,8 @@ async def test_targeted_inventory_is_authenticated_and_isolated_from_full_invent
     supervisor = _SharedSupervisor()
     calls = []
 
-    def failed_inventory():
+    def failed_inventory(*, background_recovery=False):
+        assert background_recovery is True
         calls.append(("list",))
         raise SandboxError("unrelated sandbox reconciliation failed")
 
@@ -1010,7 +1027,7 @@ async def test_targeted_inventory_is_authenticated_and_isolated_from_full_invent
 @pytest.mark.asyncio
 async def test_targeted_inventory_rejects_unknown_members_without_falling_back_to_full_inventory():
     supervisor = _SharedSupervisor()
-    supervisor.list = lambda: pytest.fail("targeted inventory must not list the host")
+    supervisor.list = lambda **_kwargs: pytest.fail("targeted inventory must not list the host")
     app = _app(supervisor)
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://sandbox_manager"
@@ -1092,7 +1109,7 @@ async def test_sandbox_inventory_reports_terminals_across_all_shared_members(
         replace(_descriptor("athr_source"), terminal_count=origin_count),
         replace(_descriptor("athr_child"), terminal_count=child_count),
     ]
-    supervisor.list = lambda: descriptors
+    supervisor.list = lambda **_kwargs: descriptors
     supervisor.list_for_thread = lambda _thread_id: descriptors
     app = _app(supervisor)
     async with AsyncClient(
@@ -1202,7 +1219,7 @@ async def test_native_question_reads_require_a_bounded_owner(params):
 @pytest.mark.parametrize("running", [True, False])
 async def test_inventory_syncs_one_group_and_reads_only_cached_resources(running):
     supervisor = _SharedSupervisor()
-    supervisor.list = lambda: [
+    supervisor.list = lambda **_kwargs: [
         replace(_descriptor("athr_source"), running=running),
         replace(_descriptor("athr_child"), running=running),
     ]
@@ -1635,6 +1652,17 @@ async def test_shared_registration_snapshot_and_base_import_keep_identity():
     identity = _identity()
     bundle = b"trusted-git-bundle"
     commit_sha = "b" * 40
+    prefix = encode_base_bundle_metadata({**identity, "snapshot_id": 9, "commit_sha": commit_sha})
+
+    async def streamed_bundle():
+        # Fragment the frame header and combine the metadata tail with bundle
+        # bytes so neither side can depend on HTTP chunk boundaries.
+        yield prefix[:3]
+        yield prefix[3:-2]
+        yield prefix[-2:] + bundle[:4]
+        yield bundle[4:]
+
+    import_headers = {**headers, "Content-Type": BASE_BUNDLE_CONTENT_TYPE}
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://sandbox_manager"
@@ -1649,13 +1677,8 @@ async def test_shared_registration_snapshot_and_base_import_keep_identity():
         )
         imported = await client.post(
             "/shared-sandboxes/athr_source/import-base",
-            headers=headers,
-            json={
-                **identity,
-                "snapshot_id": 9,
-                "commit_sha": commit_sha,
-                "bundle_b64": base64.b64encode(bundle).decode(),
-            },
+            headers=import_headers,
+            content=streamed_bundle(),
         )
 
     patch = "diff --git a/a.txt b/a.txt\n"
@@ -1674,6 +1697,120 @@ async def test_shared_registration_snapshot_and_base_import_keep_identity():
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_base_import_accepts_old_control_plane_json_during_rollout():
+    """A new host incrementally accepts the exact previous JSON request."""
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    bundle = b"legacy-trusted-git-bundle"
+    commit_sha = "b" * 40
+    legacy = json.dumps(
+        {
+            **_identity(),
+            "snapshot_id": 9,
+            "commit_sha": commit_sha,
+            "bundle_b64": base64.b64encode(bundle).decode("ascii"),
+        },
+        separators=(",", ":"),
+    ).encode("ascii")
+    marker = legacy.index(b',"bundle_b64":"')
+
+    async def old_request():
+        # TCP/ASGI chunks need not preserve the old client's JSON field boundary.
+        yield legacy[: marker + 5]
+        yield legacy[marker + 5 : marker + 19]
+        yield legacy[marker + 19 : -3]
+        yield legacy[-3:]
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        imported = await client.post(
+            "/shared-sandboxes/athr_source/import-base",
+            headers={
+                "X-Agent-Workspace-Token": "sandbox-manager-secret",
+                "Content-Type": LEGACY_BASE_BUNDLE_CONTENT_TYPE,
+            },
+            content=old_request(),
+        )
+
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["workspace_head_preserved"] is True
+    assert supervisor.imports[0][:2] == (bundle, commit_sha)
+
+
+@pytest.mark.asyncio
+async def test_base_import_refuses_over_limit_before_consuming_the_stream_tail(monkeypatch):
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    identity = _identity()
+    prefix = encode_base_bundle_metadata({**identity, "snapshot_id": 9, "commit_sha": "b" * 40})
+    monkeypatch.setattr(base_bundle_request_mod, "DEFAULT_MAX_BASE_BUNDLE_BYTES", 8)
+    consumed_tail = False
+
+    async def oversized():
+        nonlocal consumed_tail
+        yield prefix
+        yield b"12345678"
+        yield b"9"
+        consumed_tail = True
+        yield b"must-not-be-consumed"
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.post(
+            "/shared-sandboxes/athr_source/import-base",
+            headers={
+                "X-Agent-Workspace-Token": "sandbox-manager-secret",
+                "Content-Type": BASE_BUNDLE_CONTENT_TYPE,
+            },
+            content=oversized(),
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "base bundle exceeds the import limit"
+    assert consumed_tail is False
+    assert supervisor.imports == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_base_import_refuses_over_limit_before_consuming_the_tail(monkeypatch):
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    metadata = json.dumps(
+        {**_identity(), "snapshot_id": 9, "commit_sha": "b" * 40},
+        separators=(",", ":"),
+    ).encode("ascii")
+    prefix = metadata[:-1] + b',"bundle_b64":"'
+    monkeypatch.setattr(base_bundle_request_mod, "DEFAULT_MAX_BASE_BUNDLE_BYTES", 8)
+    consumed_tail = False
+
+    async def oversized():
+        nonlocal consumed_tail
+        yield prefix
+        yield base64.b64encode(b"123456789")
+        consumed_tail = True
+        yield b'"}'
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.post(
+            "/shared-sandboxes/athr_source/import-base",
+            headers={
+                "X-Agent-Workspace-Token": "sandbox-manager-secret",
+                "Content-Type": LEGACY_BASE_BUNDLE_CONTENT_TYPE,
+            },
+            content=oversized(),
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "base bundle exceeds the import limit"
+    assert consumed_tail is False
+    assert supervisor.imports == []
 
 
 @pytest.mark.asyncio
@@ -1769,12 +1906,12 @@ def _workspace_with_imported_bases(
     monkeypatch.setattr(chat_sandbox, "ACTIVATION_TMPFS", str(activation_tmpfs))
     manager = ChatSandboxManager(ContainerBackend(image="img"))
 
-    def exec_here(_spec, argv, *, env, workdir, timeout_s, input_bytes):
+    def exec_here(_spec, argv, *, env, workdir, timeout_s, stdin):
         return subprocess.run(
             argv,
             cwd=workspace,
             env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), **env},
-            input=input_bytes,
+            stdin=stdin,
             capture_output=True,
             timeout=timeout_s,
             check=False,
@@ -1782,7 +1919,7 @@ def _workspace_with_imported_bases(
 
     monkeypatch.setattr(manager, "exec_capture", exec_here)
 
-    def import_base(bundle: bytes, commit: str) -> None:
+    def import_base(bundle, commit: str) -> None:
         manager.import_base_bundle(SimpleNamespace(), bundle, commit=commit, env={})
 
     published: list[str] = []
@@ -1803,6 +1940,7 @@ def _workspace_with_imported_bases(
         )
         assert result.base_bundle
         import_base(result.base_bundle, result.commit_sha)
+        result.base_bundle.close()
         published.append(result.commit_sha)
         current = result.commit_sha
     refs = _hermetic_git(["for-each-ref"], workspace)
@@ -1912,7 +2050,7 @@ async def test_the_import_retry_brings_back_a_base_git_pruned_with_the_one_befor
             return setup.origin
 
     class _Host:
-        async def import_shared_base(self, _row, *, commit_sha: str, bundle: bytes):
+        async def import_shared_base(self, _row, *, commit_sha: str, bundle):
             await asyncio.to_thread(setup.import_base, bundle, commit_sha)
             return {"ok": True}
 
@@ -1988,7 +2126,11 @@ async def test_base_import_resolves_its_workspace_off_the_event_loop(monkeypatch
 
     monkeypatch.setattr(supervisor, "backend", backend)
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    headers = {
+        "X-Agent-Workspace-Token": "sandbox-manager-secret",
+        "Content-Type": BASE_BUNDLE_CONTENT_TYPE,
+    }
+    prefix = encode_base_bundle_metadata({**_identity(), "snapshot_id": 9, "commit_sha": "b" * 40})
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://sandbox_manager"
@@ -1996,12 +2138,7 @@ async def test_base_import_resolves_its_workspace_off_the_event_loop(monkeypatch
         imported = await client.post(
             "/shared-sandboxes/athr_source/import-base",
             headers=headers,
-            json={
-                **_identity(),
-                "snapshot_id": 9,
-                "commit_sha": "b" * 40,
-                "bundle_b64": base64.b64encode(b"trusted-git-bundle").decode(),
-            },
+            content=prefix + b"trusted-git-bundle",
         )
 
     assert imported.status_code == 200
@@ -2355,9 +2492,55 @@ def _git_transcript(spec) -> list[str]:
     """A clean Git inspection's output, using the tags the script asked for."""
     tags = {
         kind: tag
-        for tag, kind in re.findall(r"(__HYI_[0-9a-f]{32}_(DIFF|COMMITS|STATUS)__)", spec.argv[-1])
+        for tag, kind in re.findall(
+            r"(__HYI_[0-9a-f]{32}_(REVISION|RAW|STAT|DIFF|COMMITS|STATUS)__)", spec.argv[-1]
+        )
     }
-    return ["## main\n", f"\n{tags['DIFF']}\n", f"\n{tags['COMMITS']}\n", f"\n{tags['STATUS']}0\n"]
+    transcript = [
+        "## main\0",
+        f"\n{tags['REVISION']}\n",
+        f"\n{tags['RAW']}\n",
+        f"\n{tags['STAT']}\n",
+    ]
+    if "DIFF" in tags:
+        transcript.extend((f"\n{tags['DIFF']}\n", f"\n{tags['COMMITS']}\n"))
+    transcript.append(f"\n{tags['STATUS']}0\n")
+    return transcript
+
+
+@pytest.mark.asyncio
+async def test_git_metadata_endpoint_skips_patch_and_commit_log(monkeypatch):
+    supervisor = _SharedSupervisor()
+    scripts: list[str] = []
+
+    def spawn(spec):
+        scripts.append(spec.argv[-1])
+        return SimpleNamespace(
+            lines=lambda: iter(_git_transcript(spec)),
+            kill=lambda: None,
+            wait=lambda: 0,
+            stderr_text=lambda: "",
+        )
+
+    monkeypatch.setattr(supervisor.workspace_backend, "spawn", spawn)
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.get(
+            "/workspaces/athr_source/git", params={"metadata": "true"}, headers=headers
+        )
+
+    assert response.status_code == 200
+    assert set(response.json()) == {"available", "revision", "branch", "changes", "change_count"}
+    assert len(response.json()["revision"]) == 64
+    assert response.json()["change_count"] == 0
+    assert len(scripts) == 1
+    assert scripts[0].count("git --no-pager diff") == 1
+    assert "git add -A -N" not in scripts[0]
+    assert "--binary" not in scripts[0]
+    assert "git --no-pager log" not in scripts[0]
 
 
 def test_lower_terminal_output_limits_apply_to_existing_terminals():
@@ -2827,40 +3010,14 @@ class _RunningTerminalProcess(_SuspendableTerminalProcess):
         self._killed.set()
 
 
-def test_a_shortened_terminal_lifetime_closes_terminals_already_past_it():
-    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
-    process = _RunningTerminalProcess()
-    session = _TerminalSession(
-        terminal_id="term_old",
-        process=process,
-        workdir=None,
-        rows=24,
-        cols=80,
-        now=time.monotonic() - 600,
-        idle_ttl_s=None,
-        on_closed=None,
-    )
-    session.start()
-    terminals._sessions["athr_source"] = {"term_old": session}
-
-    terminals.reap()
-    assert "athr_source" in terminals._sessions, "ten minutes is inside half an hour"
-
-    terminals.configure(idle_ttl_s=300, hard_ttl_s=28800, max_sessions=8)
-    assert terminals._reap_interval() == 30.0
-    terminals.reap()
-    assert "athr_source" not in terminals._sessions
-    assert process.killed
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("method", "path", "body"),
     [
         ("GET", "/workspaces/athr_source/terminals", None),
-        ("POST", "/workspaces/athr_source/terminals/suspend", {"lease_generation": 1}),
-        ("POST", "/workspaces/athr_source/terminals/resume", {"lease_generation": 1}),
-        ("POST", "/workspaces/athr_source/terminals/resume-settled", {}),
+        ("POST", "/workspaces/athr_source/terminals/suspend", {"job_id": "job-1"}),
+        ("POST", "/workspaces/athr_source/terminals/resume", {"job_id": "job-1"}),
+        ("POST", "/workspaces/athr_source/terminals/resume-settled", {"job_id": "job-1"}),
         ("GET", "/workspaces/athr_source/terminals/term_missing/stream", None),
         ("GET", "/workspaces/athr_source/terminals/term_missing/output", None),
         ("POST", "/workspaces/athr_source/terminals/term_missing/input", {"data": "eA=="}),
@@ -2985,34 +3142,24 @@ def test_terminal_limits_are_refused_outside_the_bounds_the_sandbox_manager_star
 def test_terminal_suspensions_are_reference_counted_per_concurrent_turn():
     terminals = _TerminalManager(idle_ttl_s=30, hard_ttl_s=60, max_sessions=8)
 
-    terminals.suspend("athr_source", lease_generation=2, job_id="job-parent")
-    terminals.suspend("athr_source", lease_generation=1, job_id="job-child")
-    assert terminals.resume("athr_source", lease_generation=2, job_id="job-parent") == {
+    terminals.suspend("athr_source", job_id="job-parent")
+    terminals.suspend("athr_source", job_id="job-child")
+    assert terminals.resume("athr_source", job_id="job-parent") == {
         "ok": True,
         "resumed": 0,
     }
     assert "athr_source" in terminals._suspended_workspaces
-    assert terminals.resume_settled("athr_source", job_id="job-parent") == {
+    # The parent's settled release, after its own resume, thaws nothing.
+    assert terminals.resume("athr_source", job_id="job-parent") == {
         "ok": True,
         "resumed": 0,
     }
     assert "athr_source" in terminals._suspended_workspaces
-    assert terminals.resume("athr_source", lease_generation=1, job_id="job-child") == {
+    assert terminals.resume("athr_source", job_id="job-child") == {
         "ok": True,
         "resumed": 0,
     }
     assert "athr_source" not in terminals._suspended_workspaces
-
-
-def test_legacy_settled_resume_resets_its_per_job_generation():
-    terminals = _TerminalManager(idle_ttl_s=30, hard_ttl_s=60, max_sessions=8)
-
-    terminals.suspend("athr_source", lease_generation=2)
-    assert terminals.resume_settled("athr_source") == {"ok": True, "resumed": 0}
-    terminals.suspend("athr_source", lease_generation=1)
-
-    assert terminals._workspace_generations["athr_source"] == 1
-    assert "athr_source" in terminals._suspended_workspaces
 
 
 def test_partial_terminal_resume_refreezes_every_process(tmp_path):
@@ -3031,10 +3178,10 @@ def test_partial_terminal_resume_refreezes_every_process(tmp_path):
         for index, process in enumerate(processes)
     ]
     terminals._sessions["athr_source"] = {session.id: session for session in sessions}
-    terminals.suspend("athr_source", lease_generation=1, job_id="job-parent")
+    terminals.suspend("athr_source", job_id="job-parent")
 
     with pytest.raises(HTTPException) as raised:
-        terminals.resume("athr_source", lease_generation=1, job_id="job-parent")
+        terminals.resume("athr_source", job_id="job-parent")
 
     assert raised.value.status_code == 503
     assert all(process.suspended for process in processes)
@@ -3082,9 +3229,7 @@ def test_a_slow_terminal_suspension_never_holds_up_another_workspace(tmp_path):
     _listed_session(terminals, "athr_source", slow, tmp_path)
     other = _listed_session(terminals, "athr_other", _TerminalProcess(), tmp_path)
     suspension = threading.Thread(
-        target=functools.partial(
-            terminals.suspend, "athr_source", lease_generation=1, job_id="job-parent"
-        ),
+        target=functools.partial(terminals.suspend, "athr_source", job_id="job-parent"),
         daemon=True,
     )
     suspension.start()
@@ -3144,9 +3289,7 @@ def test_a_slow_terminal_creation_never_holds_up_another_workspace(tmp_path):
     creation.start()
     assert spawner.spawning.wait(2)
     own_suspension = threading.Thread(
-        target=functools.partial(
-            terminals.suspend, "athr_source", lease_generation=1, job_id="job-source"
-        ),
+        target=functools.partial(terminals.suspend, "athr_source", job_id="job-source"),
         daemon=True,
     )
 
@@ -3156,7 +3299,7 @@ def test_a_slow_terminal_creation_never_holds_up_another_workspace(tmp_path):
             lambda: (
                 terminals.get_for_control("athr_other", other.id),
                 terminals.list("athr_other"),
-                terminals.suspend("athr_other", lease_generation=1, job_id="job-other"),
+                terminals.suspend("athr_other", job_id="job-other"),
             ),
         )
         own_suspension.start()
@@ -3219,17 +3362,13 @@ def test_a_resume_waits_for_its_own_workspaces_suspension_to_finish(tmp_path):
     for process in processes:
         _listed_session(terminals, "athr_source", process, tmp_path)
     suspension = threading.Thread(
-        target=functools.partial(
-            terminals.suspend, "athr_source", lease_generation=1, job_id="job-parent"
-        ),
+        target=functools.partial(terminals.suspend, "athr_source", job_id="job-parent"),
         daemon=True,
     )
     suspension.start()
     assert slow.stopping.wait(2)
     resumption = threading.Thread(
-        target=functools.partial(
-            terminals.resume, "athr_source", lease_generation=1, job_id="job-parent"
-        ),
+        target=functools.partial(terminals.resume, "athr_source", job_id="job-parent"),
         daemon=True,
     )
     resumption.start()
@@ -3707,7 +3846,7 @@ async def test_inventory_rows_carry_each_groups_latest_checkpoint(tmp_path):
         base_image="sha256:" + "b" * 64,
         runtime_id="claude-code",
         runtime_version=None,
-        object_key="key",
+        object_key="cloud-agent/sandbox/v2/" + "d" * 64 + "/g1/" + "c" * 32 + ".oci.tar",
         version_id="v1",
         sha256="e" * 64,
         size_bytes=10,

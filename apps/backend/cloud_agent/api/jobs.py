@@ -23,7 +23,7 @@ from cloud_agent.api._job_views import (
     _iso,
     _job_response,
 )
-from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
+from cloud_agent.api._owner_auth import _owned_job, _require_owned_job, require_agent_owner
 from cloud_agent.api._project_filter import TemporaryFilter, require_single_project_filter
 from cloud_agent.api._workspace_access import _sandbox_manager_for_job, _workspace_id
 from cloud_agent.api.deps import (
@@ -80,7 +80,7 @@ if TYPE_CHECKING:
         PendingMessageRepository,
         SandboxRepository,
         SkillRepository,
-        SnapshotRepository,
+        SnapshotRequestRepository,
         SourceControlRepository as SourceControlPort,
     )
     from cloud_agent.source_control_runtime import GitHubAppSource
@@ -125,7 +125,12 @@ class _JobsStorage(Protocol):
     pending_messages: PendingMessageRepository
     sandbox: SandboxRepository
     skills: SkillRepository
-    snapshot: SnapshotRepository
+
+    @property
+    def snapshot(self) -> SnapshotRequestRepository:
+        """Snapshot persistence needed by this flow."""
+        ...
+
     source_control: SourceControlPort
 
 
@@ -291,7 +296,7 @@ async def get_agent_attempt_telemetry(
 ) -> AgentAttemptTelemetry:
     """Read measurements for one attempt belonging to the caller's job."""
     job_store = _require_store(store)
-    await _owned_job(job_store.conversation_queries, job_id, user)
+    await _require_owned_job(job_store.conversation_queries, job_id, user)
     telemetry = await job_store.execution_queries.job_turn_telemetry(
         job_id=job_id, attempt_id=attempt_id
     )

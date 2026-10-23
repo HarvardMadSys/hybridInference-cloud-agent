@@ -17,7 +17,6 @@ from cloud_agent.schemas._host_reports import (
     _HostReportVersion,
     _HostVersionMenu,
 )
-from cloud_agent.schemas._sandbox_manager_wire import _SandboxManagerWireNames
 from cloud_agent.schemas.archive_settings import (
     HostSandboxArchiveSettings,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
@@ -30,6 +29,10 @@ from cloud_agent_shared.runtime_downloads import read_reports
 from cloud_agent_shared.sandbox_resources import (
     SandboxResourceSample,
     parse_sandbox_resource_sample,
+)
+from cloud_agent_shared.sandbox_restore import (
+    SandboxCheckpointMember as SandboxCheckpointMember,
+    SandboxCheckpointReceipt,
 )
 from cloud_agent_shared.shared_protocol import HOST_LAUNCH_ERROR_MAX_CHARS
 
@@ -120,6 +123,8 @@ class HostRegisterRequest(BaseModel):
     )
     sandbox_manager_url: str = Field(
         ...,
+        # COMPAT(remove-after=2026-11-30): every host sends sandbox_manager_url;
+        # hosts since #974 do.
         validation_alias=AliasChoices("sandbox_manager_url", "broker_url"),
         max_length=2048,
         description=(
@@ -135,7 +140,7 @@ class HostRegisterRequest(BaseModel):
     )
 
 
-class HostRegisterResponse(_SandboxManagerWireNames):
+class HostRegisterResponse(BaseModel):
     """The host's identity and the credential it authenticates with."""
 
     host: str
@@ -147,9 +152,6 @@ class HostRegisterResponse(_SandboxManagerWireNames):
         ),
     )
     status: str
-    broker_error: str | None = Field(
-        default=None, deprecated=True, description="Compatibility alias for sandbox_manager_error."
-    )
     sandbox_manager_error: str | None = Field(
         None,
         description=(
@@ -169,42 +171,8 @@ class ResidencyBeat(BaseModel):
     generation: int = Field(..., ge=1)
 
 
-class SandboxCheckpointMember(BaseModel):
-    """One chat's native-session position inside a checkpoint."""
-
-    thread_id: str = Field(..., min_length=1, max_length=128)
-    native_session_id: str | None = Field(None, max_length=256)
-    last_settled_job_id: str | None = Field(None, max_length=256)
-    context_status: str | None = Field(None, max_length=32)
-
-
-class SandboxCheckpointBeat(BaseModel):
+class SandboxCheckpointBeat(SandboxCheckpointReceipt):
     """The latest restorable checkpoint a host stored for one retained group."""
-
-    checkpoint_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
-    sandbox_id: str = Field(..., min_length=1, max_length=128)
-    generation: int = Field(..., ge=1)
-    container_id: str = Field(..., min_length=12, max_length=128)
-    base_image: str = Field(..., min_length=1, max_length=256)
-    runtime_id: str = Field(..., min_length=1, max_length=128)
-    runtime_version: str | None = Field(None, max_length=128)
-    object_key: str = Field(
-        ...,
-        pattern=r"^cloud-agent/sandbox/v2/[0-9a-f]{64}/g[0-9]+/[0-9a-f]{32}\.oci\.tar$",
-        max_length=256,
-    )
-    version_id: str | None = Field(None, max_length=1024)
-    sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
-    size_bytes: int = Field(..., ge=1)
-    new_layer_bytes: int = Field(..., ge=0)
-    layer_count: int = Field(..., ge=1, le=1024)
-    created_at: datetime
-    members: list[SandboxCheckpointMember] = Field(default_factory=list, max_length=128)
-    durations_ms: dict[str, int] = Field(default_factory=dict, max_length=16)
-    format_version: Literal[1] = 1
-    # The group's start fence when the checkpointed run began. Absent from
-    # managers that predate restore; such a receipt never covers its group.
-    start_seq: int | None = Field(None, ge=0)
 
 
 class RetainedSandboxBeat(BaseModel):
@@ -317,6 +285,8 @@ class HostHeartbeatRequest(BaseModel):
     sandbox_manager_url: str | None = Field(
         None,
         max_length=2048,
+        # COMPAT(remove-after=2026-11-30): every host sends sandbox_manager_url;
+        # hosts since #974 do.
         validation_alias=AliasChoices("sandbox_manager_url", "broker_url"),
     )
     capabilities: list[_HostCapability] | None = Field(None, max_length=64)
@@ -368,16 +338,6 @@ class HostHeartbeatRequest(BaseModel):
             "runner that does not collect it simply omits the field, and one "
             "whose block is unusable has the block dropped rather than the "
             "heartbeat refused."
-        ),
-    )
-    residencies: list[ResidencyBeat] | None = Field(
-        None,
-        max_length=128,
-        description=(
-            "The hot sandboxes this host still holds, generation-scoped. Each "
-            "listed residency's lease is extended; one that no longer holds "
-            "its generation comes back in residencies_lost and the host tears "
-            "that sandbox down (design §7)."
         ),
     )
     retained_sandboxes: list[RetainedSandboxBeat] | None = Field(
@@ -476,15 +436,14 @@ class HostResidencyEstablishResponse(BaseModel):
     mcp_credential: str = Field(
         "",
         description=(
-            "The MCP relay credential for this residency's process. It names the "
-            "residency, not this attempt, so the process keeps it for every later "
-            "turn it serves. Empty from a control plane that predates it; the "
-            "host then uses the turn's own MCP token."
+            "The MCP relay credential for this residency's process, and the only "
+            "one the host gives it. It names the residency, not this attempt, so "
+            "the process keeps it for every later turn it serves."
         ),
     )
 
 
-class HostHeartbeatResponse(_SandboxManagerWireNames):
+class HostHeartbeatResponse(BaseModel):
     """What the control plane thinks of this host after the heartbeat."""
 
     host: str
@@ -535,9 +494,6 @@ class HostHeartbeatResponse(_SandboxManagerWireNames):
             "Settled-idle or failed-attempt Docker stop commands fenced to the "
             "durable container and activation generations reported by this host."
         ),
-    )
-    broker_error: str | None = Field(
-        default=None, deprecated=True, description="Compatibility alias for sandbox_manager_error."
     )
     sandbox_manager_error: str | None = Field(
         None,

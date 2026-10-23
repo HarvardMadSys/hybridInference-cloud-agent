@@ -423,6 +423,47 @@ def test_preflight_installs_and_reads_back_the_host_rules_before_claiming(monkey
     assert ensured == [{"max_age_s": 0}]
 
 
+@pytest.mark.parametrize("adopted", [True, False])
+def test_a_turns_child_checks_the_network_on_its_hosts_verification_of_the_rules(
+    monkeypatch, adopted
+):
+    """The Docker version and relay network as ever; the rules as an activation trusts them.
+
+    A verification the child could not adopt leaves it nothing to rely on, so
+    its check makes a fresh one, as every other caller's does.
+    """
+    from cloud_agent_host.network_guard import VERIFICATION_KEY, NetworkGuardError
+
+    calls, ensured = _network_preflight(monkeypatch)
+    handed: list[object] = []
+
+    def adopt(verification: object) -> None:
+        handed.append(verification)
+        if not adopted:
+            raise NetworkGuardError("the host service verified the sandbox network rules 61s ago")
+
+    monkeypatch.setattr(
+        ContainerBackend,
+        "network_guard",
+        lambda self: SimpleNamespace(ensure=lambda **kwargs: ensured.append(kwargs), adopt=adopt),
+    )
+    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
+    turn = {"job_id": "ajob_1", VERIFICATION_KEY: {"verified_at": 1.0}}
+    if adopted:
+        backend.adopt_rules_verification(turn)
+    else:
+        with pytest.raises(SandboxError, match="61s ago"):
+            backend.adopt_rules_verification(turn)
+
+    backend.preflight()
+
+    assert handed == [{"verified_at": 1.0}]
+    assert [argv[1:4] for argv in calls if argv[1:3] == ["network", "inspect"]] == [
+        ["network", "inspect", "agent-relays"]
+    ]
+    assert ensured == ([{}] if adopted else [{"max_age_s": 0}])
+
+
 def test_a_relay_network_that_routes_out_is_refused(monkeypatch):
     """It is where the relays are found, never a route a sandbox could use."""
     _, ensured = _network_preflight(monkeypatch, internal="false")
@@ -466,7 +507,7 @@ def test_every_probe_runs_under_the_runtime_jobs_will_use(monkeypatch):
         {"AGENT_SANDBOX_BACKEND": "kata", "AGENT_SANDBOX_IMAGE": "img:1", **_NET_ENV}
     )
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.ChatSandboxManager.relay_addresses",
+        "cloud_agent_host.chat_sandbox_network.ChatSandboxNetwork.relay_addresses",
         lambda self, network: {"agent-gateway": "10.2.0.2"},
     )
     calls = _probe_returns(monkeypatch, "ok")

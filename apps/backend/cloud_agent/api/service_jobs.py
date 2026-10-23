@@ -45,7 +45,7 @@ from cloud_agent.api._job_views import (
     _event_response,
     _job_response,
 )
-from cloud_agent.api._owner_auth import _owned_job
+from cloud_agent.api._owner_auth import _owned_job, _require_owned_job
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
@@ -255,7 +255,7 @@ async def list_oncall_job_events(
     the analysis grounded rather than hallucinated.
     """
     job_store = _require_store(store)
-    await _owned_job(job_store.conversation_queries, job_id, _oncall_owner())
+    await _require_owned_job(job_store.conversation_queries, job_id, _oncall_owner())
     events = await job_store.execution_queries.list_events_after(
         job_id=job_id, after_id=after, limit=limit
     )

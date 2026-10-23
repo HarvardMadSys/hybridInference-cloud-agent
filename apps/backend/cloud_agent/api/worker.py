@@ -59,6 +59,7 @@ from cloud_agent.application.ssh_servers import (
 )
 from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
 from cloud_agent.attachments.selection import prompt_with_attachments
+from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATES
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import EnvironmentAccessRevoked, EnvironmentEncryptionError
@@ -100,8 +101,6 @@ from cloud_agent.schemas import (
     WorkerClaimResponse,
     WorkerContinuityRequest,
     WorkerEnvironmentSnapshotReport,
-    WorkerEventRequest,
-    WorkerEventResponse,
     WorkerFinishRequest,
     WorkerHeartbeatRequest,
     WorkerHeartbeatResponse,
@@ -123,11 +122,10 @@ from cloud_agent.schemas import (
     WorkerWaitResponse,
 )
 from cloud_agent.skills.selection import prompt_with_skills
-from cloud_agent.source_control import SourceControlError
 from cloud_agent.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
-from cloud_agent.task_titles import generate_thread_title
+from cloud_agent.task_titles import schedule_thread_title
 from cloud_agent.tokens import (
     SCOPE_FULL,
     SCOPE_MCP,
@@ -1011,25 +1009,24 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
             )
             if environment.required:
                 if ENVIRONMENT_CAPABILITY not in capabilities:
-                    raise SourceControlError("Host cannot execute environment configuration")
+                    raise SandboxManagerError(503, "Host cannot execute environment configuration")
                 if (
                     uses_inference_names(environment)
                     and ENVIRONMENT_INFERENCE_CAPABILITY not in capabilities
                 ):
-                    raise SourceControlError("Host cannot keep inference variables from the CLI")
-                from cloud_agent.sandbox_manager_client import SandboxManagerError
+                    raise SandboxManagerError(503, "Host cannot isolate inference variables")
                 from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
                 try:
                     broker = await sandbox_manager_for_job(job_store.host_pool, claim["id"])
                     if broker is None:
-                        raise SourceControlError("Sandbox manager is unavailable")
+                        raise SandboxManagerError(503, "Sandbox manager is unavailable")
                     await broker.require_environment_capability(environment)
                 except (SandboxManagerError, httpx.HTTPError):
-                    raise SourceControlError("Sandbox manager must be upgraded") from None
+                    raise SandboxManagerError(503, "Sandbox manager must be upgraded") from None
             else:
                 environment = None
-        except (SourceControlError, EnvironmentEncryptionError):
+        except (SandboxManagerError, EnvironmentEncryptionError):
             await job_store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
             raise HTTPException(
                 503, "Waiting for environment-capable host or available encryption"
@@ -1074,9 +1071,9 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         capabilities = attestation.runner_capabilities if attestation else []
         try:
             if SSH_ACCESS_CAPABILITY not in capabilities:
-                raise SourceControlError("Host cannot apply SSH access")
+                raise SandboxManagerError(503, "Host cannot apply SSH access")
             ssh_access = build_ssh_access(ssh_state, ssh_key_cipher())
-        except (SourceControlError, ValueError):
+        except (SandboxManagerError, CredentialCipherError, ValueError):
             await job_store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
             raise HTTPException(
                 503, "Waiting for an SSH-capable host or available encryption"
@@ -1099,14 +1096,10 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
     token = mint_worker_token(**fence, scope=SCOPE_FULL)
     sandbox_token = await _mint_sandbox_grant(job_store, grants, claim)
 
-    # The sandbox's *second* credential, and this one is ours to mint: MCP is
-    # served by this service's relay, against this service's registry and this
-    # service's attempt fence. Scoped `mcp` so it opens the relay and nothing
-    # else — not the worker surface, and certainly not the gateway.
-    #
-    # Two credentials rather than one because they authorize at two services
-    # now. A leak is bounded by whichever it was: the grant buys models it
-    # names, this buys tools the job asked for, and neither buys the other.
+    # COMPAT(remove-after=2026-11-30): no host reads the claim's mcp_token, as
+    # none since #974 does: each member's CLI reaches the MCP relay with its
+    # residency's mcp_credential. Then this attempt-scoped token, its claim
+    # field and the relay's SCOPE_MCP branch go together.
     mcp_token = mint_worker_token(**fence, scope=SCOPE_MCP)
     # A third credential, weaker than either: read-only, this repository only,
     # one hour. The runner needs it to check the repository out — a runner that
@@ -1256,7 +1249,7 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         thread_sandbox=claim.get("thread_sandbox"),
         worker_token=token,
         sandbox_token=sandbox_token,
-        mcp_token=mcp_token,
+        mcp_token=mcp_token,  # COMPAT(remove-after=2026-11-30): as at its mint above.
         clone_token=clone_token,
         github_token=github_token,
         # Aliases, because that is what the runtime config addresses: the relay
@@ -1265,17 +1258,12 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         mcp_bindings=mcp_aliases,
         metadata=claim["metadata"],
     )
-    if claim.get("title_generation_pending") is True:
-        # FastAPI sends the claim first; title inference cannot delay the runner.
-        # Only unnamed/contaminated conversations are eligible. A later claim
-        # can recover a failed generation using the original conversation prompt.
-        background_tasks.add_task(
-            generate_thread_title,
-            job_store.conversation_commands,
-            **fence,
-            model=claim["model"],
-            sandbox_token=sandbox_token,
-        )
+    schedule_thread_title(
+        background_tasks,
+        job_store.conversation_commands,
+        claim,
+        sandbox_token=sandbox_token,
+    )
     return response
 
 
@@ -1331,37 +1319,6 @@ async def worker_heartbeat(
     return WorkerHeartbeatResponse(
         ok=True, state=beat["state"], cancel_requested=beat["cancel_requested"]
     )
-
-
-@router.post("/worker/jobs/{job_id}/events", response_model=WorkerEventResponse, status_code=201)
-async def worker_append_event(
-    job_id: str,
-    body: WorkerEventRequest,
-    authorization: str | None = Header(None),
-    store: _WorkerStorage | None = Depends(get_storage),
-) -> WorkerEventResponse:
-    """Append one normalized event to the job's append-only log."""
-    job_store = _require_store(store)
-    claims = _worker_claims(authorization)
-    _match_job(claims, job_id)
-    event_id = await job_store.attempt_commands.append_event(
-        attempt_id=claims["attempt_id"],
-        lease_generation=claims["lease_generation"],
-        event_type=body.event_type,
-        payload=body.payload,
-        event_seq=body.event_seq,
-    )
-    if event_id is None:
-        raise _lease_lost()
-    if (
-        body.event_type == "lifecycle"
-        and body.payload
-        and body.payload.get("phase") == "environment_prepared"
-    ):
-        await job_store.environments.record_worker_environment_preparation(
-            job_id, claims["attempt_id"], claims["lease_generation"], body.payload
-        )
-    return WorkerEventResponse(event_id=event_id)
 
 
 #: How long after its attempt ends a startup measurement is still accepted.

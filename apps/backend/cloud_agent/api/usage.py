@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Path, Response
 from pydantic import BaseModel
 
-from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
+from cloud_agent.api._owner_auth import _owned_job, _require_owned_job, require_agent_owner
 from cloud_agent.api.deps import get_grant_client, get_storage, require_store
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.gateway import GatewayError
@@ -147,13 +147,13 @@ async def job_usage_response(
     return usage
 
 
-async def _owner_usage(store: _UsageStorage, job: dict[str, Any]) -> JobUsageResponse:
-    usage = await job_usage_response(store, job_id=job["id"], user_id=job["user_id"])
+async def _owner_usage(store: _UsageStorage, *, job_id: str, user_id: str) -> JobUsageResponse:
+    usage = await job_usage_response(store, job_id=job_id, user_id=user_id)
     if usage is None:
         # Deleted between the ownership check and the read.
         raise HTTPException(
             status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job['id']}"}},
+            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
         )
     return usage
 
@@ -186,6 +186,6 @@ async def refresh_job_usage(
 ) -> JobUsageResponse:
     """Queue a bounded refresh and return cached data without waiting for HTTP."""
     job_store = _require_store(store)
-    job = await _owned_job(job_store.conversation_queries, job_id, user)
+    await _require_owned_job(job_store.conversation_queries, job_id, user)
     await job_store.ledger.queue_job_ledger_refresh(job_id=job_id)
-    return await _owner_usage(job_store, job)
+    return await _owner_usage(job_store, job_id=job_id, user_id=user["user_id"])

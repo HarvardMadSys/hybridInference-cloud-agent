@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
-from cloud_agent.api import environments, host_profiling, hosts, worker
+from cloud_agent.api import environments, host_profiling, hosts, worker, worker_events
 from cloud_agent.api._body_limits import MAX_HOST_REQUEST_BODY_BYTES
 from cloud_agent.api.deps import get_storage
 
@@ -103,6 +103,7 @@ _OVERSIZED = b"oversized-body-sentinel" + b"x" * MAX_HOST_REQUEST_BODY_BYTES
 def _host_app():
     app = FastAPI()
     app.include_router(worker.router)
+    app.include_router(worker_events.router)
     app.include_router(hosts.router)
     app.include_router(host_profiling.router)
     app.include_router(environments.router)
@@ -118,6 +119,7 @@ def _host_app():
         "/v1/agent/worker/environment-snapshots/retired",
         "/v1/agent/worker/environment-snapshots/snapshot-body-limit/deleted",
         "/v1/agent/worker/jobs/job-body-limit/events",
+        "/v1/agent/worker/jobs/job-body-limit/events:batch",
         "/v1/agent/worker/jobs/job-body-limit/finish",
         "/v1/agent/worker/claim",
         "/v1/agent/host/heartbeat",

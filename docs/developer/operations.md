@@ -873,20 +873,18 @@ MCP calls pass through the control plane. The sandbox holds a scoped relay
 credential; upstream credentials stay outside it:
 
 ```text
-sandbox ──[residency or attempt mcp credential]──▶ MCP-only relay ──[owner credential]──▶ MCP server
+sandbox ──[residency mcp credential]──▶ MCP-only relay ──[owner credential]──▶ MCP server
 ```
 
 A chat member's CLI process serves several turns, so it holds its residency's
 credential (`amr.…`), returned when the residency is established. On every
 call the relay resolves it to the attempt of that chat running under that
-residency, then applies the same fence as a turn's own token: the attempt must
-be current and leased, its job running and not stopped, its host enrolled.
-Between turns, or once the residency rotates, expires or is released, the
-credential authorizes nothing. A follow-up whose MCP servers did not change
-therefore keeps the live process; adding or removing a connection still
-restarts it, because a CLI reads its servers once at start. A process started
-with a turn's own token (from a control plane that predates residency
-credentials) restarts at the next turn, as before.
+residency, then fences that attempt: it must be current and leased, its job
+running and not stopped, its host enrolled. Between turns, or once the
+residency rotates, expires or is released, the credential authorizes nothing.
+A follow-up whose MCP servers did not change therefore keeps the live process;
+adding or removing a connection still restarts it, because a CLI reads its
+servers once at start.
 
 Each request keeps the attempt and residency generation captured at authentication.
 After waiting for OAuth, an approval or an upstream session, the relay checks
@@ -1945,7 +1943,9 @@ is never accepted from the browser. The destination is a source constant
 so a distribution archiving to another bucket changes it there; the IAM
 policy below names the same bucket and prefix. An administrator atomically saves the
 enabled state, AWS region, maximum compressed archive size, multipart
-threshold, and part size. Authentication is either an AWS access key or the
+threshold, and part size. An object above the threshold is uploaded in parts
+of that size, eight at a time, so an upload holds up to eight parts in memory:
+64 MiB at the default 8 MiB part size. Authentication is either an AWS access key or the
 workload-identity pair: a customer-managed KMS key ARN and the expected
 12-digit bucket owner. An access key makes that pair optional; uploads then
 use SSE-S3 unless a KMS key is also set. The secret is write-only, encrypted
@@ -2094,13 +2094,14 @@ see [Restoring a removed host's sandboxes](#restoring-a-removed-hosts-sandboxes)
   file, terminal, Git or environment request, a Fork, a snapshot capture or a
   base import) advances the fence first and sends the value it took with the
   request itself: in its body, or for a workspace request in an
-  `X-Agent-Start-Seq` header. The Sandbox Manager labels a run only with the
-  fences of the requests it admitted to that run. Once the run stops, a
-  request at or below its label that would start the container again is
-  refused (409), and the control plane advances the fence and retries. A
-  running container clears the restore point too. A receipt covers its group
-  only while its fence is still current; receipts from sandbox managers that
-  predate restore carry none and never cover a group.
+  `X-Agent-Start-Seq` header. An open terminal's input, resize and close
+  cannot start the container, so they take no fence. The Sandbox Manager
+  labels a run only with the fences of the requests it admitted to that run.
+  Once the run stops, a request at or below its label that would start the
+  container again is refused (409), and the control plane advances the fence
+  and retries. A running container clears the restore point too. A receipt
+  covers its group only while its fence is still current; receipts from
+  sandbox managers that predate restore carry none and never cover a group.
 - The policy omits the default and carries only an opt-out
   (`checkpoints_enabled: false`), which is sent only to hosts that advertise
   `sandbox-checkpoints-v1`. Older sandbox managers parse the policy unchanged
@@ -3589,9 +3590,15 @@ rules, not the host's.
   startup preflight install the tables and read them back — every chain, its
   hook and its rule count, the protected set, the registered pool — and any
   difference stops the runner claiming and the sandbox manager starting. Group network
-  work repeats the check and trusts a pass for 60 seconds. The sandbox manager's
-  sweep renews that pass after 45 seconds, whether or not a group runs, so a
-  start or wake never waits for the install and read-back itself.
+  work repeats the check and trusts a pass for 60 seconds. While anything of this
+  deployment runs — a group, one that is stopping, or an environment test or
+  prebuild — the sandbox manager's sweep renews that pass after 45 seconds, so a
+  start or wake never waits for the install and read-back itself. A host where
+  nothing runs starts no helper for it: the next start or wake renews a lapsed
+  pass before its group joins a bridge. The runner renews its own pass when it
+  hands a turn over and that pass is 45 seconds old. The turn's process runs no
+  helper of its own: it takes the runner's pass, and declines the turn unless
+  that pass is less than 60 seconds old.
 - **Scoped to this deployment.** The tables recognise traffic by the bridge
   interface prefix. They never flush or edit another deployment's rules, so
   several deployments can share a host.

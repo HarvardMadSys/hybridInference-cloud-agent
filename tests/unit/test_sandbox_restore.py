@@ -25,6 +25,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxStatus,
     SandboxRestoreFailed,
 )
+from cloud_agent_host.chat_sandbox_network import ChatSandboxNetwork
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveDownloadError,
@@ -97,6 +98,19 @@ def _prepare(archive: bytes, **overrides: Any) -> tuple[Any, bytes]:
 
 
 # -- the archive a restoring host loads --------------------------------------
+
+
+def test_checkpoint_archive_bytes_stay_stable_across_the_codec_split():
+    exported = _checkpoint_archive()
+    _, prepared = _prepare(exported)
+
+    assert len(exported) == len(prepared) == 20_480
+    assert hashlib.sha256(exported).hexdigest() == (
+        "cb85aafdf8bfbd7c71fbad702c7aa02e41fd8f90750ad59e360d8942f9112048"
+    )
+    assert hashlib.sha256(prepared).hexdigest() == (
+        "0790b2e6b69305cccebe140d8c806369877a49ee1c418e07cac8f7622c241d7f"
+    )
 
 
 def test_a_checkpoint_is_rewritten_under_its_own_name_only():
@@ -418,9 +432,17 @@ def test_a_failed_load_is_a_failed_restore(tmp_path):
         )
 
 
-def test_a_restore_needs_a_pullable_base_image():
+def test_a_restore_needs_a_pullable_base_image(tmp_path):
+    invalid = _restore().model_copy(update={"base_image": "cloud-agent-sandbox@sha256:" + "a" * 64})
+
     with pytest.raises(SandboxCheckpointError, match="pullable"):
-        replace(_restore(), base_image="cloud-agent-sandbox@sha256:" + "a" * 64)
+        _capture(tmp_path, _Docker(present=set())).restore(
+            "asbx_shared",
+            invalid,
+            download=_serve(_checkpoint_archive()),
+            max_bytes=10**6,
+            deadline=1e3,
+        )
 
 
 # -- the container a restore creates ------------------------------------------
@@ -575,7 +597,7 @@ def test_a_container_that_fails_its_checks_once_created_is_removed_with_its_volu
     """
     spec = _moved_spec()
     manager = ChatSandboxManager(ContainerBackend(image="img"))
-    monkeypatch.setattr(ChatSandboxManager, "require_host_rules", lambda _self: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "require_host_rules", lambda _self: None)
     volume = [{"Type": "volume", "Name": "anonymous", "Destination": "/data"}]
     built = _stopped_container(spec, checkpoint_id=_CHECKPOINT, status="created", mounts=volume)
     daemon = _Daemon(None, created=built)
@@ -696,7 +718,7 @@ def test_a_restore_refused_once_created_leaves_neither_container_nor_image(monke
     """The container goes first, so Docker lets the image it ran go after it."""
     spec = _moved_spec()
     manager = ChatSandboxManager(ContainerBackend(image="img"))
-    monkeypatch.setattr(ChatSandboxManager, "require_host_rules", lambda _self: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "require_host_rules", lambda _self: None)
     volume = [{"Type": "volume", "Name": "anonymous", "Destination": "/data"}]
     built = _stopped_container(spec, checkpoint_id=_CHECKPOINT, status="created", mounts=volume)
     daemon = _Daemon(None, created=built)

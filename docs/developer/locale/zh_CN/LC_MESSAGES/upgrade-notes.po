@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-22 00:11-0400\n"
+"POT-Creation-Date: 2026-10-22 19:03-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -38,7 +38,7 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0094_thread_message_pages`. The supported deployment scripts run "
+"`0105_job_event_usage_summary`. The supported deployment scripts run "
 "migrations before replacing the API; every migration listed here is "
 "additive and safe under the running previous release unless it says "
 "otherwise. The few transitions that need stopped writers are listed in "
@@ -46,7 +46,7 @@ msgid ""
 "#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0094_thread_message_pages`。官方支持的部署脚本会在替换 API "
+"`0105_job_event_usage_summary`。官方支持的部署脚本会在替换 API "
 "之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数几个需要先停掉所有写入的迁移，列在[执行不向后兼容的迁移](operations.md"
 "#applying-migrations-that-are-not-backwards-compatible)里。"
 
@@ -74,7 +74,11 @@ msgid ""
 "maximum `limit` is 100, and the serialized response is at most 512 KiB. "
 "`current_job_id` identifies the newest turn independently of the page; "
 "`anchor=true` starts at the selected job instead."
-msgstr "本次发布将 `GET /v1/agent/jobs/{job_id}/thread` 改为 `history_version: 2`。前端必须与 API 一起部署：原有的消息和 job 数组及其时间顺序不变，但返回的是有界的一页，不再是整个对话。较短的历史仍会完整返回。每页默认最多包含 50 条轮次或消息记录，`limit` 最大为 100，序列化响应最多为 512 KiB。`current_job_id` 独立于分页标识最新轮次；设置 `anchor=true` 则从选中的 job 开始读取。"
+msgstr ""
+"本次发布将 `GET /v1/agent/jobs/{job_id}/thread` 改为 `history_version: 2`。前端必须与 "
+"API 一起部署：原有的消息和 job 数组及其时间顺序不变，但返回的是有界的一页，不再是整个对话。较短的历史仍会完整返回。每页默认最多包含 50"
+" 条轮次或消息记录，`limit` 最大为 100，序列化响应最多为 512 KiB。`current_job_id` "
+"独立于分页标识最新轮次；设置 `anchor=true` 则从选中的 job 开始读取。"
 
 #: ../developer/upgrade-notes.md:32
 msgid ""
@@ -86,7 +90,11 @@ msgid ""
 "preserving turn order and placing each opening prompt before its replies "
 "and mid-turn messages. Cursors are scoped to the owned, undeleted "
 "conversation on every request."
-msgstr "将 `next_cursor` 作为 `cursor` 传入，按需加载更早的历史。刷新时保留已加载的旧页，将 `sync_cursor` 作为 `after` 传入，再把每次返回的 `next_cursor` 继续作为 `after` 传入，直到它为 null。这样会重读末尾两个仍可能变化的轮次，避免尚未提交的写入落在新分配的 ID 之前而被漏掉。消息按 ID 合并，job 按 ID 和版本合并，保留轮次顺序，并将每轮的起始提示放在回复和轮中消息之前。每次请求都会检查游标属于当前所有者且对话未被删除。"
+msgstr ""
+"将 `next_cursor` 作为 `cursor` 传入，按需加载更早的历史。刷新时保留已加载的旧页，将 `sync_cursor` 作为 "
+"`after` 传入，再把每次返回的 `next_cursor` 继续作为 `after` 传入，直到它为 "
+"null。这样会重读末尾两个仍可能变化的轮次，避免尚未提交的写入落在新分配的 ID 之前而被漏掉。消息按 ID 合并，job 按 ID "
+"和版本合并，保留轮次顺序，并将每轮的起始提示放在回复和轮中消息之前。每次请求都会检查游标属于当前所有者且对话未被删除。"
 
 #: ../developer/upgrade-notes.md:40
 #, python-brace-format
@@ -101,7 +109,14 @@ msgid ""
 "endpoint, `GET /v1/agent/threads/{thread_id}/messages`; an omitted queue "
 "snapshot is not an empty queue. This changes the owner-facing read API "
 "only, never runtime session recovery or transcript replay."
-msgstr "超过 4,096 个 Unicode 字符的消息会带上 `content_truncated` 和 `next_offset`。通过 `GET /v1/agent/jobs/{job_id}/thread/messages/{message_id}?offset=...` 继续读取；每次请求最多返回 16,384 个字符，偏移量按 Unicode 字符计算，而不是 UTF-8 字节或 JavaScript UTF-16 单元。job 带有 `thread_preview` 时，需要通过现有的单个 job 详情接口读取被省略的长字段。`pending_messages_complete` 为 false 时，改用未变更的队列接口 `GET /v1/agent/threads/{thread_id}/messages`；省略队列快照不代表队列为空。这只改变面向所有者的读取 API，不影响运行时会话恢复或转录回放。"
+msgstr ""
+"超过 4,096 个 Unicode 字符的消息会带上 `content_truncated` 和 `next_offset`。通过 `GET "
+"/v1/agent/jobs/{job_id}/thread/messages/{message_id}?offset=...` "
+"继续读取；每次请求最多返回 16,384 个字符，偏移量按 Unicode 字符计算，而不是 UTF-8 字节或 JavaScript "
+"UTF-16 单元。job 带有 `thread_preview` 时，需要通过现有的单个 job "
+"详情接口读取被省略的长字段。`pending_messages_complete` 为 false 时，改用未变更的队列接口 `GET "
+"/v1/agent/threads/{thread_id}/messages`；省略队列快照不代表队列为空。这只改变面向所有者的读取 "
+"API，不影响运行时会话恢复或转录回放。"
 
 #: ../developer/upgrade-notes.md:51
 msgid "Recent migrations"
@@ -120,6 +135,196 @@ msgid "What it changes"
 msgstr "改了什么"
 
 #: ../developer/upgrade-notes.md
+msgid "`0105_job_event_usage_summary`"
+msgstr "`0105_job_event_usage_summary`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds a nullable `usage_summary` column to `agent_job_events`. Adding it "
+"rewrites no rows and holds its lock only for the catalog change. New "
+"events store the projection of their payload that usage reads need, and "
+"those reads take it from there; events stored before the column existed "
+"are projected when read, as before. A downgrade drops the column, and "
+"usage reads project every payload again."
+msgstr ""
+"给 `agent_job_events` 新增一个可为空的 `usage_summary` "
+"列。加这一列不会重写任何行，只在修改系统目录时短暂持锁。新事件会把用量读取所需的那部分负载（payload）投影存进这一列，用量读取直接从这里取；这一列出现之前存下的事件，仍像以前一样在读取时计算投影。降级会删掉这一列，用量读取会重新对每条负载做投影。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0104_notification_change_keyset`"
+msgstr "`0104_notification_change_keyset`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Builds a `(user_id, kind, change_xid, entity_id)` index concurrently "
+"before dropping the preceding owner/XID index, so notification delta "
+"continuation pages seek directly instead of scanning the whole snapshot "
+"interval. It changes no row and does not block foreground writes. "
+"Existing v1 continuations finish in their previous kind/identity order "
+"before advancing to v2. The previous API remains functionally compatible "
+"during migration, although its delta reads may use a less selective index"
+" until it is replaced. A downgrade restores the preceding index "
+"concurrently."
+msgstr ""
+"先并发构建 `(user_id, kind, change_xid, entity_id)` 索引，再删除原来的所有者/XID "
+"索引，让通知增量的续页直接定位，不再扫描整个快照区间。这个迁移不改动任何行，也不阻塞前台写入。已有的 v1 "
+"续页会继续按原先的 kind/identity 顺序读完，再升级到 v2。迁移期间旧版 API 的功能仍兼容，但在替换前，它的增量读取可能使用选择性较差的索引。降级会并发恢复原索引。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0103_terminal_resume_keyset`"
+msgstr "`0103_terminal_resume_keyset`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Rebuilds the partial terminal-resume index on `(updated_at, id)`, "
+"matching the replay keyset so every bounded continuation seeks directly "
+"instead of sorting equal-time rows again. The online build does not block"
+" foreground writes and changes no row. A downgrade restores the preceding"
+" one-column index."
+msgstr ""
+"把终端恢复的部分索引重建为 `(updated_at, "
+"id)`，与重放所用的键集一致，使每个有界续页都能直接定位，不必再次排序时间相同的记录。在线构建不会阻塞前台写入，也不会改动任何行。降级会恢复之前的单列索引。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0102_admin_sandbox_marker_order`"
+msgstr "`0102_admin_sandbox_marker_order`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Replaces revision 0097's membership trigger so that it locks a "
+"membership's sandbox group before marking the group changed, the order "
+"every write to the group already takes. Before it, settling, abandoning, "
+"ending, releasing or reaping a turn could deadlock with the admin "
+"terminal check or a workspace start on the same group, and Postgres "
+"aborted one of the two. Only the trigger function changes: no table is "
+"locked or rewritten, and the previous release's statements run unchanged "
+"under it. A downgrade restores the 0097 trigger."
+msgstr ""
+"替换修订 0097 "
+"的成员关系触发器：先锁住成员关系所属的沙箱组，再把这个沙箱组标记为已变更，和每次写入沙箱组时的顺序一致。在此之前，结算、放弃、结束、释放或回收一个轮次时，可能和同一沙箱组上的管理员终端检查或工作区启动互相死锁，Postgres"
+" 会中止其中一个。只替换触发器函数：不锁表，也不重写任何表；上一个发布的语句不用改，照常在新函数下运行。降级会恢复 0097 的触发器。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0101_notification_state_deltas`"
+msgstr "`0101_notification_state_deltas`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds coalesced per-owner job/thread change markers, an active-job index, "
+"and a partial recent-terminal marker index. Notification clients "
+"bootstrap active and recent terminal work in bounded keyset pages from a "
+"request-time database clock baseline, then request bounded snapshot "
+"deltas; no historical jobs are backfilled or replayed. Markers age out "
+"lazily after 24 hours and stale cursors explicitly rebuild. The previous "
+"push stream remains available. A downgrade drops only derived state and "
+"restores push-only trigger behavior."
+msgstr ""
+"新增按所有者合并的作业和对话变更标记、活动作业索引，以及近期终态标记的部分索引。通知客户端以数据库收到请求的时间为基线，先按有界的键集页读取活动作业和近期终态作业，再请求有界的快照增量；不会回填或重放历史作业。标记在"
+" 24 小时后惰性清理；游标过期时会明确触发重建。原有推送流仍然可用。降级只删除派生状态，并恢复仅推送的触发器行为。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0100_memory_archive_pages`"
+msgstr "`0100_memory_archive_pages`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Builds partial owner/scope indexes for active memories and archive cursor"
+" pages concurrently. Existing memory rows are unchanged. Online builds "
+"avoid blocking foreground writes; interrupted builds can be retried. "
+"Offline SQL uses ordinary index builds. Downgrade drops only these "
+"indexes."
+msgstr ""
+"并发创建按 owner 和 scope 组织的活跃记忆及归档游标分页部分索引，不修改已有记忆行。在线构建不阻塞前台写入；中断后可以重试。离线 "
+"SQL 使用普通索引构建。降级只删除这些索引。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0099_thread_stats_rollups`"
+msgstr "`0099_thread_stats_rollups`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds a derived, versioned per-attempt cache for owner thread statistics. "
+"Missing or stale attempts reduce their compact event projections in "
+"bounded 1,000-row pages; unchanged reads compare the newest indexed "
+"sequence and reuse the cache without transferring historical event rows. "
+"Event storage and the authoritative billing ledger are unchanged. A "
+"downgrade drops only this rebuildable cache."
+msgstr ""
+"为所有者的对话统计新增按尝试存储、带版本的派生缓存。缺失或过期的尝试会按每页 1,000 "
+"行的固定上限归约紧凑事件投影；未变更的读取会比较带索引的最新序号并复用缓存，不再传输历史事件行。事件存储和权威计费账本均不变。降级只删除这份可重建缓存。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0098_measurement_counts`"
+msgstr "`0098_measurement_counts`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Backfills exact profiling counts into at most 64 counter shards per run "
+"and installs transactional accounting triggers. The historical scan holds"
+" a write-conflicting lock on measurements until migration commit; "
+"schedule this one-time write pause for the size of retained history. Raw "
+"samples and whole-run summaries are unchanged. Downgrade removes only "
+"counters and triggers."
+msgstr ""
+"将每次 profiling 运行的精确计数回填到最多 64 "
+"个分片，并安装事务内计数触发器。历史扫描会持有与测量写入冲突的锁，直到迁移提交；应按保留历史的规模安排这次写入暂停。原始样本和整次运行的统计不变。降级只删除计数表和触发器。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0097_admin_sandbox_deltas`"
+msgstr "`0097_admin_sandbox_deltas`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds coalesced metadata-change markers and short-lived, content-free "
+"admin inventory snapshot pages. Admin refreshes request only changed "
+"identities after their initial snapshot; expired cursors explicitly "
+"resynchronize. Triggers cover sandboxes, membership counts, origin "
+"titles, and host heartbeats without a fleet-wide write lock. Deploy the "
+"migration before enabling the new UI; older list clients remain "
+"supported. A downgrade discards only derived inventory state and its "
+"triggers."
+msgstr "新增合并的元数据变更标记，以及短期保留、不含内容的管理员清单快照分页。首次快照之后，管理员刷新只请求发生变化的标识；游标过期时会明确要求重新同步。触发器覆盖沙箱、成员计数、原始对话标题和主机心跳，不引入全局写锁。启用新界面之前先执行迁移；旧版列表客户端仍受支持。降级只删除派生清单状态及其触发器。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0096_snapshot_title_context`"
+msgstr "`0096_snapshot_title_context`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds a bounded JSON title context to immutable sandbox snapshots, so a "
+"publisher claim never rebuilds or transfers the sandbox's unbounded "
+"transcript. Each capture continues from the newest earlier snapshot of "
+"its group that has a context, adding the turns of every snapshot since, "
+"including one whose capture failed. Existing snapshots start with an "
+"empty context; a snapshot still holding it when a publisher claims it, "
+"captured before this migration or by the previous release during the "
+"rollout, has its context built and stored at that claim, so its draft is "
+"titled from the conversation rather than from its changed files. These "
+"reads look back over at most 24 earlier snapshots and read the newest 24 "
+"turns; the older turns of a longer gap are left out of the title. A "
+"downgrade drops only this derived context."
+msgstr ""
+"为不可变沙箱快照添加有界的 JSON "
+"标题上下文，使发布者认领快照时不再重建或传输沙箱中无界增长的对话记录。每次捕获都以沙箱组里更早的、最新一个带有上下文的快照为起点，补入此后每个快照的轮次，包括捕获失败的那个快照。现有快照以空上下文开始；发布者认领快照时，如果它仍是空上下文（在这次迁移之前捕获，或在滚动发布期间由上一个发布捕获），就在这次认领时构建并保存它的上下文，使它的草稿"
+" PR 以对话而不是变更的文件来命名。这些读取最多回看 24 个更早的快照，只读取最新的 24 "
+"个轮次；间隔更长时，较早的轮次不会进入标题。降级只会删除这份派生上下文。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0095_memory_retention`"
+msgstr "`0095_memory_retention`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Builds partial archived-time and non-null superseded-by indexes "
+"concurrently, without changing memory rows or the 90-day retention "
+"policy. Online builds avoid blocking foreground writes; interrupted "
+"builds can be retried. Offline SQL uses ordinary index builds. Downgrade "
+"drops only these indexes."
+msgstr ""
+"并发创建归档时间和非空 superseded_by 的部分索引，不修改记忆行或 90 天保留规则。在线构建不阻塞前台写入；中断后可以重试。离线 "
+"SQL 使用普通索引构建。降级只删除这些索引。"
+
+#: ../developer/upgrade-notes.md
 msgid "`0094_thread_message_pages`"
 msgstr "`0094_thread_message_pages`"
 
@@ -130,15 +335,25 @@ msgid ""
 "reading bodies. Changes no row. An interrupted online build is dropped "
 "and retried; offline conversion builds the index plainly inside its "
 "transaction. A downgrade drops the index concurrently."
-msgstr "按现有的起始提示优先顺序，为每个 job 的消息并发建立索引，使历史分页先定位数量有上限的消息 ID，再读取正文。不修改任何行。在线建索引中断后，会删除该索引再重试；离线转换则在事务内普通建索引。降级会并发删除索引。"
+msgstr ""
+"按现有的起始提示优先顺序，为每个 job 的消息并发建立索引，使历史分页先定位数量有上限的消息 "
+"ID，再读取正文。不修改任何行。在线建索引中断后，会删除该索引再重试；离线转换则在事务内普通建索引。降级会并发删除索引。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0093_recent_requests`"
 msgstr "`0093_recent_requests`"
 
 #: ../developer/upgrade-notes.md
-msgid "Adds an owner/time-indexed projection of eligible recent requests and message/thread maintenance triggers. Backfills existing eligible messages once; trigger installation holds write-conflicting locks while the backfill runs, so schedule for a low-write period on a large history. Source messages are unchanged. Downgrade removes only the projection and triggers."
-msgstr "新增按 owner 和时间索引的近期请求投影，以及消息和会话维护触发器。一次性回填已有的符合条件的消息；安装触发器后，回填期间持有与写入冲突的锁，历史较大时应安排在写入较少的时段执行。原始消息不变。降级只删除投影和触发器。"
+msgid ""
+"Adds an owner/time-indexed projection of eligible recent requests and "
+"message/thread maintenance triggers. Backfills existing eligible messages"
+" once; trigger installation holds write-conflicting locks while the "
+"backfill runs, so schedule for a low-write period on a large history. "
+"Source messages are unchanged. Downgrade removes only the projection and "
+"triggers."
+msgstr ""
+"新增按 owner "
+"和时间索引的近期请求投影，以及消息和会话维护触发器。一次性回填已有的符合条件的消息；安装触发器后，回填期间持有与写入冲突的锁，历史较大时应安排在写入较少的时段执行。原始消息不变。降级只删除投影和触发器。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0092_targeted_work_wakes`"
@@ -152,8 +367,8 @@ msgid ""
 "or row. A control plane from the previous release ignores the name and "
 "wakes every host, as before. A downgrade restores the empty notification."
 msgstr ""
-"替换 `agent_work_available` 的触发器函数：通知里会点名唯一能接手某个保留对话轮次的主机，只有这台主机上等待中的 runner "
-"会被唤醒。不改动任何表或行。上一版本的控制平面会忽略这个名字，像以前一样唤醒所有主机。降级会恢复为不带名字的通知。"
+"替换 `agent_work_available` 的触发器函数：通知里会点名唯一能接手某个保留对话轮次的主机，只有这台主机上等待中的 "
+"runner 会被唤醒。不改动任何表或行。上一版本的控制平面会忽略这个名字，像以前一样唤醒所有主机。降级会恢复为不带名字的通知。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0091_env_queued_runs_index`"
@@ -518,7 +733,7 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:88
+#: ../developer/upgrade-notes.md:100
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
@@ -532,11 +747,11 @@ msgstr ""
 "之前已退役的旧迁移链，就无法直接升级；见[保留旧迁移链的数据库](operations.md#preserving-an-old-chain-"
 "database)。"
 
-#: ../developer/upgrade-notes.md:94
+#: ../developer/upgrade-notes.md:106
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:96
+#: ../developer/upgrade-notes.md:108
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"

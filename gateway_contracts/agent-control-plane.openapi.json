@@ -2220,6 +2220,115 @@
         "title": "AdminSandboxDetail",
         "type": "object"
       },
+      "AdminSandboxHostObservation": {
+        "description": "One host heartbeat change, shared by all its sandbox rows.",
+        "properties": {
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "last_heartbeat_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Heartbeat At"
+          }
+        },
+        "required": [
+          "host"
+        ],
+        "title": "AdminSandboxHostObservation",
+        "type": "object"
+      },
+      "AdminSandboxInventoryPage": {
+        "description": "A snapshot page or bounded upserts/removals; counts belong to snapshots.",
+        "properties": {
+          "change_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Cursor"
+          },
+          "deleted_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deleted Ids",
+            "type": "array"
+          },
+          "hosts": {
+            "items": {
+              "$ref": "#/components/schemas/AdminSandboxHostObservation"
+            },
+            "title": "Hosts",
+            "type": "array"
+          },
+          "mode": {
+            "default": "snapshot",
+            "enum": [
+              "snapshot",
+              "delta"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "reset_required": {
+            "default": false,
+            "title": "Reset Required",
+            "type": "boolean"
+          },
+          "sandboxes": {
+            "items": {
+              "$ref": "#/components/schemas/AdminSandbox"
+            },
+            "title": "Sandboxes",
+            "type": "array"
+          },
+          "total_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Count"
+          }
+        },
+        "required": [
+          "observed_at"
+        ],
+        "title": "AdminSandboxInventoryPage",
+        "type": "object"
+      },
       "AdminSandboxList": {
         "description": "A bounded page of the current inventory, ordered by sandbox identity.",
         "properties": {
@@ -4198,6 +4307,50 @@
         "title": "AgentGitCommit",
         "type": "object"
       },
+      "AgentGitWorkspaceMetadataResponse": {
+        "description": "Cheap status and revision data for invalidating an on-demand Git view.",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "branch": {
+            "default": "",
+            "title": "Branch",
+            "type": "string"
+          },
+          "change_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Change Count",
+            "type": "integer"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/AgentGitChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "title": "AgentGitWorkspaceMetadataResponse",
+        "type": "object"
+      },
       "AgentGitWorkspaceResponse": {
         "description": "Live diff, status, and commit data from the retained workspace.",
         "properties": {
@@ -4209,6 +4362,12 @@
             "default": "",
             "title": "Branch",
             "type": "string"
+          },
+          "change_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Change Count",
+            "type": "integer"
           },
           "changes": {
             "items": {
@@ -4228,6 +4387,18 @@
             "default": "",
             "title": "Patch",
             "type": "string"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
           }
         },
         "required": [
@@ -5764,6 +5935,17 @@
             "title": "Archived",
             "type": "array"
           },
+          "archived_next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived Next Cursor"
+          },
           "enabled": {
             "title": "Enabled",
             "type": "boolean"
@@ -5894,6 +6076,210 @@
           "updated_at"
         ],
         "title": "AgentMemoryView",
+        "type": "object"
+      },
+      "AgentNotificationJob": {
+        "description": "The small job state needed for completion and question notices.",
+        "properties": {
+          "cancel_requested": {
+            "title": "Cancel Requested",
+            "type": "boolean"
+          },
+          "current_attempt_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Attempt Id"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "queued",
+              "waiting",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "thread_revision": {
+            "title": "Thread Revision",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "id",
+          "thread_id",
+          "title",
+          "thread_revision",
+          "repo",
+          "state",
+          "turn_no",
+          "revision",
+          "cancel_requested"
+        ],
+        "title": "AgentNotificationJob",
+        "type": "object"
+      },
+      "AgentNotificationStateResponse": {
+        "description": "An active-job bootstrap page or durable owner-change page.",
+        "properties": {
+          "change_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Cursor"
+          },
+          "deleted_job_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deleted Job Ids",
+            "type": "array"
+          },
+          "deleted_thread_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deleted Thread Ids",
+            "type": "array"
+          },
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/AgentNotificationJob"
+            },
+            "title": "Jobs",
+            "type": "array"
+          },
+          "mode": {
+            "enum": [
+              "snapshot",
+              "delta"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "reset_required": {
+            "default": false,
+            "title": "Reset Required",
+            "type": "boolean"
+          },
+          "threads": {
+            "items": {
+              "$ref": "#/components/schemas/AgentNotificationThread"
+            },
+            "title": "Threads",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mode",
+          "observed_at"
+        ],
+        "title": "AgentNotificationStateResponse",
+        "type": "object"
+      },
+      "AgentNotificationThread": {
+        "description": "A changed title for a conversation still visible to its owner.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "revision"
+        ],
+        "title": "AgentNotificationThread",
         "type": "object"
       },
       "AgentOperationProfilingFragment": {
@@ -6648,19 +7034,6 @@
           "active": {
             "title": "Active",
             "type": "boolean"
-          },
-          "broker_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "deprecated": true,
-            "description": "Compatibility alias for sandbox_manager_url.",
-            "title": "Broker Url"
           },
           "capabilities": {
             "description": "What this machine can run. A job may only go to a host declaring all of it.",
@@ -11827,22 +12200,6 @@
             "description": "Physical server name for admin grouping only; never a scheduling or credential identity.",
             "title": "Physical Host"
           },
-          "residencies": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/ResidencyBeat"
-                },
-                "maxItems": 128,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The hot sandboxes this host still holds, generation-scoped. Each listed residency's lease is extended; one that no longer holds its generation comes back in residencies_lost and the host tears that sandbox down (design §7).",
-            "title": "Residencies"
-          },
           "retained_sandboxes": {
             "anyOf": [
               {
@@ -12048,19 +12405,6 @@
       "HostHeartbeatResponse": {
         "description": "What the control plane thinks of this host after the heartbeat.",
         "properties": {
-          "broker_error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "deprecated": true,
-            "description": "Compatibility alias for sandbox_manager_error.",
-            "title": "Broker Error"
-          },
           "heartbeat_interval_seconds": {
             "description": "How often to report in. Missing three consecutive intervals is what moves a host to offline.",
             "title": "Heartbeat Interval Seconds",
@@ -12238,19 +12582,6 @@
       "HostRegisterResponse": {
         "description": "The host's identity and the credential it authenticates with.",
         "properties": {
-          "broker_error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "deprecated": true,
-            "description": "Compatibility alias for sandbox_manager_error.",
-            "title": "Broker Error"
-          },
           "credential": {
             "description": "Long-lived host credential. Shown once; only its hash is stored. Revoking the host clears that hash and the credential dies.",
             "title": "Credential",
@@ -12305,7 +12636,7 @@
           },
           "mcp_credential": {
             "default": "",
-            "description": "The MCP relay credential for this residency's process. It names the residency, not this attempt, so the process keeps it for every later turn it serves. Empty from a control plane that predates it; the host then uses the turn's own MCP token.",
+            "description": "The MCP relay credential for this residency's process, and the only one the host gives it. It names the residency, not this attempt, so the process keeps it for every later turn it serves.",
             "title": "Mcp Credential",
             "type": "string"
           },
@@ -19377,6 +19708,41 @@
         "title": "WorkerAttachmentListResponse",
         "type": "object"
       },
+      "WorkerBatchEvent": {
+        "description": "One event of a batch, which always carries the worker's number for it.",
+        "properties": {
+          "event_seq": {
+            "description": "The worker's own number for this event within its attempt. A batch whose answer was lost is sent again whole, and each number already stored is answered with that event's id instead of a duplicate row.",
+            "minimum": 1.0,
+            "title": "Event Seq",
+            "type": "integer"
+          },
+          "event_type": {
+            "description": "thinking|message|tool_use|...|lifecycle",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "payload": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payload"
+          }
+        },
+        "required": [
+          "event_type",
+          "event_seq"
+        ],
+        "title": "WorkerBatchEvent",
+        "type": "object"
+      },
       "WorkerClaimAttestation": {
         "description": "Runtime evidence collected by this exact claiming runner replica.",
         "properties": {
@@ -19630,7 +19996,7 @@
           },
           "mcp_token": {
             "default": "",
-            "description": "The sandbox's *second* credential, for this service's MCP relay. Scoped `mcp`, so it opens the relay and nothing else — not the worker surface, and not the gateway. The relay's address is the claiming host's own, the one its network rules admit; the claim names none.",
+            "description": "Deprecated, and used by no host: each member's CLI reaches this service's MCP relay with its residency's `mcp_credential` from the sandbox residency route. This attempt-scoped credential is scoped `mcp`, so it opens that relay and nothing else.",
             "title": "Mcp Token",
             "type": "string"
           },
@@ -19869,6 +20235,43 @@
           "outcome"
         ],
         "title": "WorkerEnvironmentSnapshotReport",
+        "type": "object"
+      },
+      "WorkerEventBatchRequest": {
+        "description": "Normalized events a worker reports together, oldest first.",
+        "properties": {
+          "events": {
+            "description": "Stored in this order, so their numbers must increase.",
+            "items": {
+              "$ref": "#/components/schemas/WorkerBatchEvent"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Events",
+            "type": "array"
+          }
+        },
+        "required": [
+          "events"
+        ],
+        "title": "WorkerEventBatchRequest",
+        "type": "object"
+      },
+      "WorkerEventBatchResponse": {
+        "description": "The id of each event in the batch, in the order it was sent.",
+        "properties": {
+          "event_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Event Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "event_ids"
+        ],
+        "title": "WorkerEventBatchResponse",
         "type": "object"
       },
       "WorkerEventRequest": {
@@ -26176,7 +26579,7 @@
             "schema": {
               "anyOf": [
                 {
-                  "maxLength": 2048,
+                  "maxLength": 32768,
                   "type": "string"
                 },
                 {
@@ -26231,6 +26634,16 @@
             }
           },
           {
+            "in": "query",
+            "name": "sync",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Sync",
+              "type": "boolean"
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,
@@ -26252,7 +26665,15 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AdminSandboxList"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/AdminSandboxList"
+                    },
+                    {
+                      "$ref": "#/components/schemas/AdminSandboxInventoryPage"
+                    }
+                  ],
+                  "title": "Response List Admin Sandboxes Admin Agent Sandboxes Get"
                 }
               }
             },
@@ -31309,6 +31730,62 @@
         "summary": "Get Agent Job Git Workspace"
       }
     },
+    "/v1/agent/jobs/{job_id}/git/metadata": {
+      "get": {
+        "description": "Read a cheap live-workspace revision and changed-path summary.",
+        "operationId": "get_agent_job_git_workspace_metadata_v1_agent_jobs__job_id__git_metadata_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGitWorkspaceMetadataResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Job Git Workspace Metadata"
+      }
+    },
     "/v1/agent/jobs/{job_id}/pin": {
       "delete": {
         "description": "Unpin the entire task thread containing an owned job.",
@@ -34161,6 +34638,23 @@
             }
           },
           {
+            "in": "query",
+            "name": "archive_cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Archive Cursor"
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,
@@ -34677,6 +35171,83 @@
         "tags": [
           "model-preference"
         ]
+      }
+    },
+    "/v1/agent/notifications/state": {
+      "get": {
+        "description": "Bootstrap live turns, then page only durable owner changes.",
+        "operationId": "get_agent_notification_state_v1_agent_notifications_state_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32768,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentNotificationStateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Notification State"
       }
     },
     "/v1/agent/profile": {
@@ -39632,6 +40203,72 @@
           }
         },
         "summary": "Worker Append Event"
+      }
+    },
+    "/v1/agent/worker/jobs/{job_id}/events:batch": {
+      "post": {
+        "description": "Append several normalized events, oldest first, in one fenced transaction.\n\nWhat a runner sends instead of one request per event: one token check, one\nlease check and one commit for the batch. Every event is stored or none\nis, and a replayed ``event_seq`` answers with the stored event's id, so a\nbatch whose answer was lost is sent again whole. A control plane without\nthis route answers 404, and the runner then posts each event on its own.",
+        "operationId": "worker_append_events_v1_agent_worker_jobs__job_id__events_batch_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkerEventBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerEventBatchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Worker Append Events"
       }
     },
     "/v1/agent/worker/jobs/{job_id}/finish": {

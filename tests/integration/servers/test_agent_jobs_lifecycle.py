@@ -246,6 +246,51 @@ async def test_reaped_worker_token_is_rejected_end_to_end(api):
     assert [event["event_type"] for event in events] == ["attempt_superseded", "message"]
 
 
+async def test_a_runners_batch_is_stored_in_order_through_the_real_endpoint(api):
+    """One request, the real fence and store: in order, and sent again whole without duplicates."""
+    client, _store, pool = api
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "batched task", "model": "glm-5.1"},
+    )
+    job_id = created.json()["id"]
+    claim = await client.post("/v1/agent/worker/claim", json=_claim_body("w1"))
+    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+    path = f"/v1/agent/worker/jobs/{job_id}/events:batch"
+    batch = {
+        "events": [
+            {"event_type": "lifecycle", "payload": {"phase": "turn_started"}, "event_seq": 1},
+            {"event_type": "message", "payload": {"text": "done"}, "event_seq": 2},
+            {"event_type": "tool_use", "payload": {"name": "ls"}, "event_seq": 3},
+        ]
+    }
+
+    first = await client.post(path, json=batch, headers=auth)
+    replay = await client.post(path, json=batch, headers=auth)
+
+    assert first.status_code == replay.status_code == 201
+    assert first.json() == replay.json()
+    events = (await client.get(f"/v1/agent/jobs/{job_id}/events")).json()["events"]
+    assert [event["id"] for event in events] == first.json()["event_ids"]
+    assert [(event["seq"], event["event_type"]) for event in events] == [
+        (1, "lifecycle"),
+        (2, "message"),
+        (3, "tool_use"),
+    ]
+
+    # Once the lease has run out, a batch is refused whole.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_attempts SET lease_expires_at = NOW() - INTERVAL '1 second' "
+            "WHERE id = $1",
+            claim.json()["attempt_id"],
+        )
+    late = {"events": [{"event_type": "message", "payload": {"text": "late"}, "event_seq": 4}]}
+    assert (await client.post(path, json=late, headers=auth)).status_code == 409
+    events = (await client.get(f"/v1/agent/jobs/{job_id}/events")).json()["events"]
+    assert len(events) == 3
+
+
 async def test_environment_maintenance_lock_does_not_delay_attempt_reaper(api, monkeypatch):
     """A real maintenance query blocked on PostgreSQL cannot hold up lease recovery."""
     client, store, pool = api

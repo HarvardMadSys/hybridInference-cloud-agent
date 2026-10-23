@@ -20,7 +20,7 @@ pytestmark = pytest.mark.dbtest
 _BEFORE = "0057_admin_sandbox_trajectory"
 _THIS = "0058_mcp_connector_invariant"
 _NEXT = "0059_counter_constraints"
-_HEAD = "0094_thread_message_pages"
+_HEAD = "0105_job_event_usage_summary"
 _OWNER = "user-owner"
 _OTHER = "user-other"
 _PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=UTC)
@@ -97,7 +97,37 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert script.get_revision("0088_sandbox_retry_budget").down_revision == (
         "0087_sandbox_deletion_attempts"
     )
-    assert script.get_revision(_HEAD).down_revision == "0093_recent_requests"
+    assert script.get_revision(_HEAD).down_revision == "0104_notification_change_keyset"
+    assert script.get_revision("0104_notification_change_keyset").down_revision == (
+        "0103_terminal_resume_keyset"
+    )
+    assert script.get_revision("0103_terminal_resume_keyset").down_revision == (
+        "0102_admin_sandbox_marker_order"
+    )
+    assert script.get_revision("0102_admin_sandbox_marker_order").down_revision == (
+        "0101_notification_state_deltas"
+    )
+    assert script.get_revision("0101_notification_state_deltas").down_revision == (
+        "0100_memory_archive_pages"
+    )
+    assert script.get_revision("0100_memory_archive_pages").down_revision == (
+        "0099_thread_stats_rollups"
+    )
+    assert (
+        script.get_revision("0099_thread_stats_rollups").down_revision == "0098_measurement_counts"
+    )
+    assert script.get_revision("0098_measurement_counts").down_revision == (
+        "0097_admin_sandbox_deltas"
+    )
+    assert (
+        script.get_revision("0097_admin_sandbox_deltas").down_revision
+        == "0096_snapshot_title_context"
+    )
+    assert (
+        script.get_revision("0096_snapshot_title_context").down_revision == "0095_memory_retention"
+    )
+    assert script.get_revision("0095_memory_retention").down_revision == "0094_thread_message_pages"
+    assert script.get_revision("0094_thread_message_pages").down_revision == "0093_recent_requests"
     assert script.get_revision("0093_recent_requests").down_revision == "0092_targeted_work_wakes"
     assert (
         script.get_revision("0092_targeted_work_wakes").down_revision

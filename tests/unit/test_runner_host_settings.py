@@ -209,7 +209,9 @@ def _run_new_chat(
     control = Mock(spec=runner_mod.ControlPlane)
     control.mark_chat_sandbox_running.return_value = {}
     if job.thread_attachment_count:
-        control.list_attachments.return_value = [{"id": 17}]
+        control.list_attachments.return_value = [
+            {"id": 17, "path": "replacement.txt", "size_bytes": len(b"replacement")}
+        ]
         control.read_attachment.return_value = ("replacement.txt", b"replacement")
 
     def reserve(seed):
@@ -302,7 +304,10 @@ def _run_new_chat(
     )
 
 
-def test_recovered_initial_archive_imports_a_replacement_jobs_new_uploads(monkeypatch):
+def test_recovered_initial_archive_imports_a_replacement_jobs_new_uploads(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "cloud_agent_host.upload_import.credential_path", lambda: tmp_path / "host.json"
+    )
     recovered_base = "c" * 40
     replacement = replace(
         _JOB,
@@ -621,7 +626,6 @@ def test_a_turn_with_tools_reaches_them_through_this_hosts_own_mcp_relay(monkeyp
         {
             **_PAYLOAD,
             "runtime_version": _JOB.runtime_version,
-            "mcp_token": "mcp-token",
             "mcp_bindings": ["deepwiki"],
             "mcp_base_url": "http://stale-copy:9000",
         }
@@ -657,11 +661,7 @@ def test_a_host_without_a_relay_runs_a_turn_that_carries_only_platform_tools(mon
     platform's tools are left out of that turn instead.
     """
     monkeypatch.delenv("AGENT_SANDBOX_MCP_URL", raising=False)
-    job = replace(
-        _JOB,
-        mcp_token="mcp-token",
-        mcp_bindings=[":platform:memory", ":platform:web-search"],
-    )
+    job = replace(_JOB, mcp_bindings=[":platform:memory", ":platform:web-search"])
 
     run = _run_new_chat(monkeypatch, None, job)
 
@@ -692,7 +692,7 @@ def test_a_turn_with_tools_on_a_host_without_a_relay_says_the_site_is_misconfigu
 
     result = runner_mod._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
-        job=replace(_JOB, mcp_token="mcp-token", mcp_bindings=["deepwiki", ":platform:memory"]),
+        job=replace(_JOB, mcp_bindings=["deepwiki", ":platform:memory"]),
         control=control,
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,

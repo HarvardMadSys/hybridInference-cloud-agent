@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager_routing import (
     hydrate_shared_sandbox_manager,
+    sandbox_manager_for_host,
     sandbox_manager_for_job,
 )
 from cloud_agent.workspace_errors import (
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from typing import Any
 
     from cloud_agent.ports import HostPoolRepository, SandboxRepository
+    from cloud_agent.ports.sandbox import TerminalControlRoute
     from cloud_agent.sandbox_manager_client import SandboxManagerClient
 
 
@@ -135,6 +137,29 @@ async def _sandbox_manager_for_job(
         return await hydrate_shared_sandbox_manager(job, sandbox_manager, start_seq=start_seq)
     except SandboxManagerError as exc:
         raise _sandbox_manager_http_error(exc) from exc
+
+
+def _terminal_control_manager(route: TerminalControlRoute) -> SandboxManagerClient | None:
+    """The manager an attached terminal's input, resize or kill goes to as it is.
+
+    None of the three can start the container: the manager only finds the
+    terminal in its memory. So they skip both steps of
+    :func:`_sandbox_manager_for_job`: the start fence, a write to the group's
+    row, and the manifest registration, a second trip over the host tunnel.
+    ``None`` sends the call the general way, which answers as it always has:
+    the chat has no group, a checkpoint holds it, its host was removed, a
+    settled turn's terminals still wait to be resumed, or no manager is
+    reachable.
+    """
+    if (
+        route.group_state is None
+        or route.group_state in _RESTORE_STATES
+        or route.host_revoked
+        or route.terminal_resume_pending
+        or route.host is None
+    ):
+        return None
+    return sandbox_manager_for_host(route.host)
 
 
 def _workspace_not_ready() -> HTTPException:

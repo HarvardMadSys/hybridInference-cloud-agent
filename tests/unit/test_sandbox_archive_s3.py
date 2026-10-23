@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -463,7 +465,11 @@ def test_multipart_upload_streams_bounded_parts_and_completes_with_checksums() -
     assert created["ExpectedBucketOwner"] == _ACCOUNT
     assert created["ChecksumAlgorithm"] == "SHA256"
 
-    part_calls = [kwargs for name, kwargs in client.calls if name == "upload_part"]
+    # Parts are sent several at once, so S3 can see them in any order.
+    part_calls = sorted(
+        (kwargs for name, kwargs in client.calls if name == "upload_part"),
+        key=lambda call: call["PartNumber"],
+    )
     assert [call["PartNumber"] for call in part_calls] == [1, 2]
     assert [len(call["Body"]) for call in part_calls] == [part_size, 5]
     for call in part_calls:
@@ -495,7 +501,12 @@ def test_multipart_upload_streams_bounded_parts_and_completes_with_checksums() -
     assert not [call for call in client.calls if call[0] == "abort_multipart_upload"]
 
 
-def test_deadline_expiring_between_multipart_parts_stops_without_another_request() -> None:
+def test_deadline_expiring_between_multipart_parts_stops_without_another_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One part in flight at a time, so part 2 can only start after part 1;
+    # with several at once, see the in-flight deadline test below.
+    monkeypatch.setattr(archive_s3, "_PART_UPLOAD_WORKERS", 1)
     part_size = MIN_MULTIPART_PART_BYTES
     payload = b"a" * part_size + b"final"
     now = 0.0
@@ -533,6 +544,295 @@ def test_deadline_expiring_between_multipart_parts_stops_without_another_request
     # Once the absolute deadline has elapsed, even cleanup must not add another
     # synchronous network request; bucket lifecycle handles the abandoned MPU.
     assert not [call for call in client.calls if call[0] == "abort_multipart_upload"]
+
+
+def _parts_payload(parts: int) -> bytes:
+    """``parts`` minimum-size parts, each of its own byte, so a misplaced part shows."""
+    return b"".join(bytes([65 + number]) * MIN_MULTIPART_PART_BYTES for number in range(parts))
+
+
+def _multipart_uploader(
+    client: RecordingS3Client, *, parts: int, **kwargs: Any
+) -> SandboxArchiveS3Uploader:
+    return SandboxArchiveS3Uploader(
+        _config(
+            max_archive_bytes=parts * MIN_MULTIPART_PART_BYTES,
+            multipart_threshold_bytes=1,
+            multipart_part_bytes=MIN_MULTIPART_PART_BYTES,
+        ),
+        client=client,
+        **kwargs,
+    )
+
+
+def _part_numbers(client: RecordingS3Client) -> list[int]:
+    return sorted(kwargs["PartNumber"] for name, kwargs in client.calls if name == "upload_part")
+
+
+def test_parts_are_sent_at_once_and_completed_in_part_order() -> None:
+    payload = _parts_payload(3)
+
+    class LastPartFirstClient(RecordingS3Client):
+        """Answer part 1 only once the parts sent after it have been answered."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.answered: list[int] = []
+            self.lock = threading.Lock()
+            self.later_parts_answered = threading.Event()
+
+        def upload_part(self, **kwargs: Any) -> dict[str, Any]:
+            if kwargs["PartNumber"] == 1:
+                # One part at a time would wait here for good: parts 2 and 3
+                # are sent only while part 1 is still in flight.
+                assert self.later_parts_answered.wait(timeout=10)
+            response = super().upload_part(**kwargs)
+            with self.lock:
+                self.answered.append(kwargs["PartNumber"])
+                if {2, 3} <= set(self.answered):
+                    self.later_parts_answered.set()
+            return response
+
+    client = LastPartFirstClient()
+
+    receipt = _upload(
+        _multipart_uploader(client, parts=3),
+        phase="final",
+        body=io.BytesIO(payload),
+        size=len(payload),
+    )
+
+    assert client.answered[-1] == 1
+    part_size = MIN_MULTIPART_PART_BYTES
+    checksums = [
+        base64.b64encode(hashlib.sha256(payload[start : start + part_size]).digest()).decode()
+        for start in range(0, len(payload), part_size)
+    ]
+    assert client.one_call("complete_multipart_upload")["MultipartUpload"] == {
+        "Parts": [
+            {"ETag": f'"part-{number}"', "PartNumber": number, "ChecksumSHA256": checksum}
+            for number, checksum in enumerate(checksums, start=1)
+        ]
+    }
+    assert receipt.sha256 == hashlib.sha256(payload).hexdigest()
+    assert receipt.multipart is True
+
+
+def test_parts_beyond_the_workers_are_neither_read_nor_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(archive_s3, "_PART_UPLOAD_WORKERS", 2)
+    payload = _parts_payload(4)
+    body = io.BytesIO(payload)
+    read_while_busy: list[int] = []
+
+    class CountingClient(RecordingS3Client):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lock = threading.Lock()
+            self.in_flight = 0
+            self.most_in_flight = 0
+            # Parts 1 and 2 are answered only once both are in flight; the
+            # action sees how much of the body has been read by then.
+            self.both_sent = threading.Barrier(
+                2, action=lambda: read_while_busy.append(body.tell()), timeout=10
+            )
+
+        def upload_part(self, **kwargs: Any) -> dict[str, Any]:
+            with self.lock:
+                self.in_flight += 1
+                self.most_in_flight = max(self.most_in_flight, self.in_flight)
+            try:
+                if kwargs["PartNumber"] <= 2:
+                    self.both_sent.wait()
+                return super().upload_part(**kwargs)
+            finally:
+                with self.lock:
+                    self.in_flight -= 1
+
+    client = CountingClient()
+
+    receipt = _upload(
+        _multipart_uploader(client, parts=4), phase="final", body=body, size=len(payload)
+    )
+
+    assert client.most_in_flight == 2
+    # Memory holds the parts in flight: the third is read once one finishes.
+    assert read_while_busy == [2 * MIN_MULTIPART_PART_BYTES]
+    assert _part_numbers(client) == [1, 2, 3, 4]
+    assert receipt.sha256 == hashlib.sha256(payload).hexdigest()
+
+
+def test_no_part_starts_once_the_deadline_passes_with_parts_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(archive_s3, "_PART_UPLOAD_WORKERS", 2)
+    payload = _parts_payload(4)
+    now = 0.0
+
+    def expire() -> None:
+        nonlocal now
+        now = 2.0
+
+    class ExpiringClient(RecordingS3Client):
+        def __init__(self) -> None:
+            super().__init__()
+            # The two parts in flight are answered after the deadline.
+            self.both_sent = threading.Barrier(2, action=expire, timeout=10)
+
+        def upload_part(self, **kwargs: Any) -> dict[str, Any]:
+            response = super().upload_part(**kwargs)
+            self.both_sent.wait()
+            return response
+
+    client = ExpiringClient()
+
+    with pytest.raises(SandboxArchiveDeadlineExceeded, match="deadline exceeded"):
+        _upload(
+            _multipart_uploader(client, parts=4, clock=lambda: now),
+            phase="final",
+            body=io.BytesIO(payload),
+            size=len(payload),
+            deadline=1.0,
+        )
+
+    assert _part_numbers(client) == [1, 2]
+    assert not [call for call in client.calls if call[0] == "complete_multipart_upload"]
+    assert not [call for call in client.calls if call[0] == "abort_multipart_upload"]
+
+
+def test_a_failed_part_stops_later_parts_and_aborts_after_the_parts_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(archive_s3, "_PART_UPLOAD_WORKERS", 2)
+    payload = _parts_payload(4)
+
+    class FailingClient(RecordingS3Client):
+        def __init__(self) -> None:
+            super().__init__()
+            self.part_two_sent = threading.Event()
+            self.part_two_answered = threading.Event()
+            self.answered_before_abort: bool | None = None
+
+        def upload_part(self, **kwargs: Any) -> dict[str, Any]:
+            response = super().upload_part(**kwargs)
+            if kwargs["PartNumber"] == 1:
+                assert self.part_two_sent.wait(timeout=10)
+                raise RuntimeError("simulated part failure")
+            self.part_two_sent.set()
+            # Still in flight when part 1 fails.
+            time.sleep(0.05)
+            self.part_two_answered.set()
+            return response
+
+        def abort_multipart_upload(self, **kwargs: Any) -> dict[str, Any]:
+            self.answered_before_abort = self.part_two_answered.is_set()
+            return super().abort_multipart_upload(**kwargs)
+
+    client = FailingClient()
+
+    with pytest.raises(RuntimeError, match="simulated part failure"):
+        _upload(
+            _multipart_uploader(client, parts=4),
+            phase="final",
+            body=io.BytesIO(payload),
+            size=len(payload),
+        )
+
+    assert _part_numbers(client) == [1, 2]
+    assert not [call for call in client.calls if call[0] == "complete_multipart_upload"]
+    # S3 may keep a part that lands after an abort; this one finished first.
+    assert client.one_call("abort_multipart_upload")["UploadId"] == "upload-1"
+    assert client.answered_before_abort is True
+
+
+def test_a_multipart_body_unlike_its_digest_is_aborted_not_completed() -> None:
+    payload = _parts_payload(2)
+    client = RecordingS3Client()
+
+    with pytest.raises(SandboxArchiveUploadError, match="changed before upload"):
+        _multipart_uploader(client, parts=2).upload(
+            namespace=_NAMESPACE,
+            sandbox_id=_SANDBOX_ID,
+            generation=_GENERATION,
+            phase="final",
+            body=io.BytesIO(payload),
+            size=len(payload),
+            sha256=hashlib.sha256(payload[::-1]).hexdigest(),
+        )
+
+    assert _part_numbers(client) == [1, 2]
+    assert not [call for call in client.calls if call[0] == "complete_multipart_upload"]
+    assert client.one_call("abort_multipart_upload")["UploadId"] == "upload-1"
+
+
+def test_a_spool_file_is_read_by_offset_without_moving_its_position(tmp_path) -> None:
+    payload = _parts_payload(3)
+    client = RecordingS3Client()
+
+    with (tmp_path / "spool").open("w+b") as spool:
+        spool.write(payload)
+        spool.seek(0)
+        receipt = _upload(
+            _multipart_uploader(client, parts=3), phase="final", body=spool, size=len(payload)
+        )
+        # Each worker read its own part with os.pread; no read moved the file.
+        assert spool.tell() == 0
+
+    part_calls = sorted(
+        (kwargs for name, kwargs in client.calls if name == "upload_part"),
+        key=lambda call: call["PartNumber"],
+    )
+    assert b"".join(call["Body"] for call in part_calls) == payload
+    assert receipt.sha256 == hashlib.sha256(payload).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("stored", "message"),
+    [("longer", "exceeds its declared size"), ("shorter", "ended before its declared size")],
+)
+def test_a_spool_file_unlike_its_declared_size_is_aborted_not_completed(
+    tmp_path, stored: str, message: str
+) -> None:
+    payload = _parts_payload(2)
+    client = RecordingS3Client()
+
+    with (tmp_path / "spool").open("w+b") as spool:
+        spool.write(payload + b"trailing" if stored == "longer" else payload[:-1])
+        spool.seek(0)
+        with pytest.raises(SandboxArchiveUploadError, match=message):
+            _multipart_uploader(client, parts=3).upload(
+                namespace=_NAMESPACE,
+                sandbox_id=_SANDBOX_ID,
+                generation=_GENERATION,
+                phase="final",
+                body=spool,
+                size=len(payload),
+                sha256=hashlib.sha256(payload).hexdigest(),
+            )
+
+    assert not [call for call in client.calls if call[0] == "complete_multipart_upload"]
+    assert client.one_call("abort_multipart_upload")["UploadId"] == "upload-1"
+
+
+def test_a_read_that_returns_every_byte_is_used_without_a_copy() -> None:
+    whole = b"x" * 4096
+
+    class OneRead:
+        def read(self, _amount: int) -> bytes:
+            return whole
+
+    class Trickle:
+        def __init__(self, data: bytes) -> None:
+            self.data = data
+
+        def read(self, amount: int) -> bytes:
+            piece, self.data = self.data[: min(amount, 3)], self.data[3:]
+            return piece
+
+    assert archive_s3._read_exact(OneRead(), len(whole)) is whole  # type: ignore[arg-type]
+    # Short reads are still put together into exactly the bytes asked for.
+    assert archive_s3._read_exact(Trickle(b"abcdefgh"), 8) == b"abcdefgh"  # type: ignore[arg-type]
 
 
 def test_deadline_is_checked_before_and_after_a_single_s3_request() -> None:

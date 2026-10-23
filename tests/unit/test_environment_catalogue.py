@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
+from cloud_agent import settings
 from cloud_agent.storage.repositories import environments
 
 
@@ -153,3 +154,29 @@ async def test_unreadable_globals_fail_closed_without_poisoning_team_fingerprint
     expected = {"e0": None, "e1": "ve1"}
     assert await repository.current_setup_fingerprints("u", ["e0", "e1"]) == expected
     assert await repository.current_setup_fingerprints("u", ["e0", "e1"]) == expected
+
+
+async def test_missing_key_fingerprint_recovers_after_live_settings_setup(monkeypatch):
+    settings.reset_settings()
+    monkeypatch.delenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", raising=False)
+    monkeypatch.setenv(
+        "AGENT_SETTINGS_ENCRYPTION_KEY", "test-master-key-longer-than-thirty-two-bytes"
+    )
+    repository = environments.PostgresEnvironmentRepository(Connection(1))
+    monkeypatch.setattr(repository, "_environment_decode", lambda values: [])
+    try:
+        assert await repository.current_setup_fingerprints("u", ["e0"]) == {"e0": None}
+        settings.apply_settings(
+            1,
+            settings.encode_changes(
+                {
+                    "source_control_encryption_key": (
+                        "test-user-credential-key-longer-than-thirty-two-bytes"
+                    )
+                }
+            ),
+        )
+        recovered = await repository.current_setup_fingerprints("u", ["e0"])
+        assert recovered["e0"] == environments.setup_fingerprint("install", [])
+    finally:
+        settings.reset_settings()

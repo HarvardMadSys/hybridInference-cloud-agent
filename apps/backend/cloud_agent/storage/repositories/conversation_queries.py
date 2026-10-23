@@ -12,7 +12,6 @@ import hashlib
 import json
 from typing import TYPE_CHECKING
 
-from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
 from cloud_agent.domain.thread_history import THREAD_PAGE_SIZE
 from cloud_agent.storage._sql.jobs import (
@@ -32,6 +31,7 @@ from cloud_agent.storage._sql.sessions import (
     session_query,
 )
 from cloud_agent.storage._sql.thread_history import read_message_chunk, read_thread_page
+from cloud_agent.storage.notification_state import read_notification_state
 
 if TYPE_CHECKING:
     from typing import Any
@@ -45,6 +45,16 @@ class PostgresConversationQueries:
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
+
+    async def notification_state(
+        self, *, user_id: str, cursor: str | None = None, limit: int = 200
+    ) -> dict[str, Any]:
+        """Bootstrap active jobs, then read only durable owner changes."""
+        if not 1 <= limit <= 200:
+            raise ValueError("Notification-state page size must be between 1 and 200")
+        return await read_notification_state(
+            self._pool, user_id=user_id, cursor_value=cursor, limit=limit
+        )
 
     async def list_read_receipts(
         self, *, user_id: str, after: int | None = None, limit: int = READ_RECEIPT_BATCH_SIZE
@@ -126,20 +136,28 @@ class PostgresConversationQueries:
         async with self._pool.acquire() as conn:
             return await read_job(conn, job_id)
 
-    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
-        """Read only an owned job's state and publication URL for its event stream.
+    async def owns_job(self, *, job_id: str, user_id: str) -> bool:
+        """Whether the job is this owner's and its conversation is not deleted.
 
-        Stream admission checks the full job's ownership and visibility first.
-        Subsequent reads stay scoped to that owner without loading the prompt,
-        conversation configuration, or shared sandbox on each event wake-up.
+        :meth:`get_job` answers the same question for a route that checks
+        ownership and then reads nothing of the job, at the price of the job's
+        summary columns, its skills, and every sandbox subquery. This is two
+        primary-key probes, under the same join and the same conditions.
         """
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT state, published_pr_url FROM agent_jobs WHERE id = $1 AND user_id = $2",
+            owned = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM agent_jobs j
+                    LEFT JOIN agent_threads t ON t.id = j.thread_id
+                    WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL
+                )
+                """,
                 job_id,
                 user_id,
             )
-        return JobStreamState(row["state"], row["published_pr_url"]) if row else None
+        return bool(owned)
 
     async def owner_changes(
         self, *, user_id: str, job_ids: list[str], thread_ids: list[str]

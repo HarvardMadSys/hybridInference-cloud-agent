@@ -123,6 +123,7 @@ services:
       AGENT_SANDBOX_NAMESPACE: ${LOCAL_PROJECT_NAME:-freeinference-local}
       AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:?derived by deploy/local/dev.sh}
       AGENT_SHARED_LIVE_READY_FILE: /var/lib/freeinference/agent-host/shared-live-ready
+      AGENT_UPLOAD_RECEIPT_DIR: /var/lib/freeinference/upload-receipts
       # The same one network as production: a guarded bridge per group, public
       # IPv4 on TCP 80/443, this resolver, and the two relays below. A second
       # local stack on the same Docker engine needs its own pool; the host
@@ -143,6 +144,7 @@ services:
       AGENT_OPERATION_PROFILING_DEPLOYMENT: ${AGENT_OPERATION_PROFILING_DEPLOYMENT:-default}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - local-upload-receipts:/var/lib/freeinference/upload-receipts
     networks:
       control-plane:
         aliases: [workspace-broker]
@@ -174,6 +176,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - local-host-state:/var/lib/freeinference/agent-host
+      - local-upload-receipts:/var/lib/freeinference/upload-receipts
     depends_on:
       local-bootstrap:
         condition: service_completed_successfully
@@ -214,3 +217,4 @@ networks:
 volumes:
   local-empty-github-key:
   local-host-state:
+  local-upload-receipts:

@@ -400,6 +400,10 @@ class FakeManager:
             argv, result.returncode, result.stdout.encode(), result.stderr.encode()
         )
 
+    @property
+    def network(self) -> FakeManager:
+        return self
+
     def sync_ssh_targets(self, spec, endpoints: set[tuple[str, int]]) -> None:
         self.targets.append(set(endpoints))
 

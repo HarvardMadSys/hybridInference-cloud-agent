@@ -24,6 +24,7 @@ import json as json_module
 import math
 import re
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -34,6 +35,7 @@ import httpx
 import jwt
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
+from cloud_agent.github_cache import RepositoryCache
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting
 from cloud_agent.source_control import SourceControlCipher
@@ -56,6 +58,9 @@ _TOKEN_REFRESH_MARGIN_S = 300
 # gives the repository a new installation, and an id kept for the life of the
 # process minted against one that no longer exists until a restart.
 _INSTALLATION_TTL_S = 300.0
+# Holder-scoped tokens have one slot per resident conversation. Keep their
+# aggregate memory and secret lifetime bounded even while conversations churn.
+_INSTALLATION_TOKEN_CACHE_MAX = 4096
 # What the token endpoint answers for an installation it no longer knows: gone
 # (404), refused for this repository (422), or the JWT refused (401). Each is
 # worth exactly one fresh look at which installation covers the repository.
@@ -331,19 +336,25 @@ class GitHubAppCredentials:
         """
         self._config = config
         self._timeout_override = timeout_s
-        self._tokens: dict[tuple[int, str], _CachedToken] = {}
+        self._tokens: OrderedDict[tuple[int, str], _CachedToken] = OrderedDict()
         #: Per repository: when its installation was looked up, and the id.
-        self._installations: dict[str, tuple[float, int]] = {}
+        self._installations = RepositoryCache[str, int]("installations")
         #: Per user, per set of connected installations: when the answer was
         #: read, and the repositories it named.
-        self._user_repositories: dict[tuple[str, tuple[int, ...]], tuple[float, list[str]]] = {}
+        self._user_repositories = RepositoryCache[tuple[str, tuple[int, ...]], list[str]](
+            "user_repositories"
+        )
         #: Successful bounded listings for one installation survive a grant-set
         #: change, so a picker refresh only asks GitHub about newly connected
         #: ones. Entitlement treats these as positive witnesses, never denials.
-        self._user_installation_repositories: dict[tuple[str, int], tuple[float, list[str]]] = {}
+        self._user_installation_repositories = RepositoryCache[tuple[str, int], list[str]](
+            "user_installation_repositories"
+        )
         #: A single-repository check is not a complete installation listing.
         #: Cache that narrower answer separately for the same revocation bound.
-        self._user_repository_permissions: dict[tuple[str, int, str], tuple[float, bool]] = {}
+        self._user_repository_permissions = RepositoryCache[tuple[str, int, str], bool](
+            "user_repository_permissions", max_size=_USER_REPOSITORY_PERMISSIONS_MAX
+        )
         self._cipher: SourceControlCipher | None = None
         self._client = client
         self._owned: httpx.AsyncClient | None = None
@@ -368,6 +379,10 @@ class GitHubAppCredentials:
         loop, and this object is built during application startup.
         """
         effective_timeout_s = self._timeout_s if timeout_s is None else timeout_s
+        # Token state and the owned client belong to the first loop that uses
+        # these credentials. Bind borrowed-client instances too, so retirement
+        # from a dependency worker can marshal cache cleanup back here.
+        self._loop = asyncio.get_running_loop()
         if self._client is not None:
             yield self._client
             return
@@ -379,7 +394,6 @@ class GitHubAppCredentials:
             async with httpx.AsyncClient(timeout=effective_timeout_s) as client:
                 yield client
             return
-        self._loop = asyncio.get_running_loop()
         if self._owned is None:
             self._owned = httpx.AsyncClient(timeout=effective_timeout_s)
         else:
@@ -395,8 +409,23 @@ class GitHubAppCredentials:
     def retire(self) -> None:
         """Release this configuration's pool after its current calls finish."""
         self._retired = True
-        if self._loop is not None and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(self._schedule_retirement)
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            self._clear_tokens()
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            self._retire_on_loop()
+        else:
+            try:
+                loop.call_soon_threadsafe(self._retire_on_loop)
+            except RuntimeError:
+                # A loop can close between the check and the thread-safe call.
+                # It is no longer able to touch the cache, so inline cleanup is safe.
+                self._clear_tokens()
 
     @property
     def _timeout_s(self) -> float:
@@ -409,7 +438,9 @@ class GitHubAppCredentials:
         """Effective deadline used for the next provider request."""
         return self._timeout_s
 
-    def _schedule_retirement(self) -> None:
+    def _retire_on_loop(self) -> None:
+        """Clear loop-owned secrets and close an idle owned client."""
+        self._clear_tokens()
         if not self._active_http and self._owned is not None:
             self._retire_task = asyncio.create_task(self.aclose())
 
@@ -418,9 +449,35 @@ class GitHubAppCredentials:
 
         A borrowed client belongs to whoever passed it in and is left open.
         """
+        self._clear_tokens()
         owned, self._owned = self._owned, None
         if owned is not None:
             await owned.aclose()
+
+    def _discard_token(self, key: tuple[int, str]) -> None:
+        """Drop one cached token and release this object's plaintext reference."""
+        cached = self._tokens.pop(key, None)
+        if cached is not None:
+            cached.token = ""
+
+    def _clear_tokens(self) -> None:
+        """Release every cached plaintext token reference."""
+        for cached in self._tokens.values():
+            cached.token = ""
+        self._tokens.clear()
+
+    def _prune_tokens(self, now: float) -> None:
+        """Drop expired tokens before any cache access or remote mint."""
+        for key in [key for key, cached in self._tokens.items() if cached.expires_at <= now]:
+            self._discard_token(key)
+
+    def _remember_token(self, key: tuple[int, str], cached: _CachedToken) -> None:
+        """Keep a newly minted token in a bounded least-recently-used cache."""
+        self._discard_token(key)
+        self._tokens[key] = cached
+        while len(self._tokens) > _INSTALLATION_TOKEN_CACHE_MAX:
+            _, evicted = self._tokens.popitem(last=False)
+            evicted.token = ""
 
     @property
     def cipher(self) -> SourceControlCipher:
@@ -485,9 +542,10 @@ class GitHubAppCredentials:
         cache when the id is serving as an authorization fence; the answer still
         refreshes that cache for subsequent minting.
         """
-        cached = self._installations.get(repo)
-        if not fresh and cached is not None and time.monotonic() - cached[0] < _INSTALLATION_TTL_S:
-            return cached[1]
+        if not fresh:
+            cached = self._installations.get(repo, ttl=_INSTALLATION_TTL_S)
+            if cached is not None:
+                return cached
         owner, _, name = repo.partition("/")
         if not owner or not name:
             raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
@@ -506,7 +564,7 @@ class GitHubAppCredentials:
         installation_id = body.get("id")
         if not isinstance(installation_id, int):
             raise AppNotInstalled(f"no App installation covers {repo}")
-        self._installations[repo] = (time.monotonic(), installation_id)
+        self._installations.remember(repo, installation_id, ttl=_INSTALLATION_TTL_S)
         return installation_id
 
     async def token_for(
@@ -609,9 +667,13 @@ class GitHubAppCredentials:
         scope_key = json_module.dumps(
             {"h": holder, "p": permissions, "r": repository}, sort_keys=True
         )
-        cached = self._tokens.get((installation_id, scope_key))
+        token_key = (installation_id, scope_key)
+        now = time.time()
+        self._prune_tokens(now)
+        cached = self._tokens.get(token_key)
         margin = max(_TOKEN_REFRESH_MARGIN_S, min_ttl_s)
-        if cached and cached.expires_at - margin > time.time():
+        if not self._retired and cached and cached.expires_at - margin > now:
+            self._tokens.move_to_end(token_key)
             return cached.token, False
 
         payload: dict[str, Any] = {}
@@ -634,11 +696,9 @@ class GitHubAppCredentials:
         expires_at = now + 3600
         if raw_expiry := body.get("expires_at"):
             expires_at = _parse_expiry(raw_expiry, default=expires_at)
-        # Holders come and go with conversations, and so do their slots. One
-        # whose token has expired is never served again.
-        for key in [key for key, held in self._tokens.items() if held.expires_at <= now]:
-            del self._tokens[key]
-        self._tokens[installation_id, scope_key] = _CachedToken(token=token, expires_at=expires_at)
+        self._prune_tokens(now)
+        if not self._retired and expires_at > now:
+            self._remember_token(token_key, _CachedToken(token=token, expires_at=expires_at))
         return token, True
 
     async def exchange_user_code(self, code: str) -> UserTokens:
@@ -737,75 +797,74 @@ class GitHubAppCredentials:
         self, user_id: str, installation_ids: tuple[int, ...]
     ) -> list[str] | None:
         """This user's repositories if read within the last minute, else ``None``."""
-        cached = self._user_repositories.get((user_id, installation_ids))
-        if cached is None or time.monotonic() - cached[0] > number_setting(
-            "github_repository_cache_s"
-        ):
-            return None
-        return list(cached[1])
+        cached = self._user_repositories.get(
+            (user_id, installation_ids),
+            ttl=number_setting("github_repository_cache_s"),
+        )
+        return list(cached) if cached is not None else None
 
     def remember_user_repositories(
         self, user_id: str, installation_ids: tuple[int, ...], repositories: list[str]
     ) -> None:
         """Keep one user's answer for the next minute's reads."""
-        self._user_repositories[user_id, installation_ids] = (time.monotonic(), list(repositories))
+        self._user_repositories.remember(
+            (user_id, installation_ids),
+            list(repositories),
+            ttl=number_setting("github_repository_cache_s"),
+        )
 
     def cached_user_installation_repositories(
         self, user_id: str, installation_id: int
     ) -> list[str] | None:
         """Return one recent bounded installation listing."""
-        cached = self._user_installation_repositories.get((user_id, installation_id))
-        if cached is None or time.monotonic() - cached[0] > number_setting(
-            "github_repository_cache_s"
-        ):
-            return None
-        return list(cached[1])
+        cached = self._user_installation_repositories.get(
+            (user_id, installation_id),
+            ttl=number_setting("github_repository_cache_s"),
+        )
+        return list(cached) if cached is not None else None
 
     def remember_user_installation_repositories(
         self, user_id: str, installation_id: int, repositories: list[str]
     ) -> None:
         """Remember one successful bounded listing for picker reuse."""
-        self._user_installation_repositories[user_id, installation_id] = (
-            time.monotonic(),
+        self._user_installation_repositories.remember(
+            (user_id, installation_id),
             list(repositories),
+            ttl=number_setting("github_repository_cache_s"),
         )
 
     def cached_user_repository_permission(
         self, user_id: str, installation_id: int, repo: str
     ) -> bool | None:
         """Return a recent targeted permission answer, including a refusal."""
-        cached = self._user_repository_permissions.get((user_id, installation_id, repo.casefold()))
-        if cached is None or time.monotonic() - cached[0] > number_setting(
-            "github_repository_cache_s"
-        ):
-            return None
-        return cached[1]
+        return self._user_repository_permissions.get(
+            (user_id, installation_id, repo.casefold()),
+            ttl=number_setting("github_repository_cache_s"),
+        )
 
     def remember_user_repository_permission(
         self, user_id: str, installation_id: int, repo: str, allowed: bool
     ) -> None:
         """Remember one targeted answer without treating it as a full listing."""
         key = (user_id, installation_id, repo.casefold())
-        self._user_repository_permissions[key] = (
-            time.monotonic(),
+        self._user_repository_permissions.remember(
+            key,
             allowed,
+            ttl=number_setting("github_repository_cache_s"),
         )
-        while len(self._user_repository_permissions) > _USER_REPOSITORY_PERMISSIONS_MAX:
-            oldest = next(iter(self._user_repository_permissions))
-            self._user_repository_permissions.pop(oldest, None)
 
     def forget_user(self, user_id: str) -> None:
         """Drop a user's remembered answer, when their connection changed."""
         for combined_key in [key for key in self._user_repositories if key[0] == user_id]:
-            self._user_repositories.pop(combined_key, None)
+            self._user_repositories.pop(combined_key)
         for installation_key in [
             key for key in self._user_installation_repositories if key[0] == user_id
         ]:
-            self._user_installation_repositories.pop(installation_key, None)
+            self._user_installation_repositories.pop(installation_key)
         for permission_key in [
             key for key in self._user_repository_permissions if key[0] == user_id
         ]:
-            self._user_repository_permissions.pop(permission_key, None)
+            self._user_repository_permissions.pop(permission_key)
 
     async def create_personal_repository(
         self, user_token: str, *, name: str, description: str, private: bool
@@ -1272,11 +1331,10 @@ class GitHubAppCredentials:
 
     def forget(self, repo: str) -> None:
         """Drop cached state for a repo, e.g. after the App is uninstalled."""
-        cached = self._installations.pop(repo, None)
-        if cached is not None:
-            installation_id = cached[1]
+        installation_id = self._installations.pop(repo)
+        if installation_id is not None:
             for key in [k for k in self._tokens if k[0] == installation_id]:
-                self._tokens.pop(key, None)
+                self._discard_token(key)
 
     def forget_token(self, token: str) -> None:
         """Stop serving a token GitHub refused before it expired.
@@ -1286,7 +1344,7 @@ class GitHubAppCredentials:
         replacement another caller has already minted stays.
         """
         for key in [key for key, cached in self._tokens.items() if cached.token == token]:
-            del self._tokens[key]
+            self._discard_token(key)
 
 
 def _parse_expiry(raw: str, *, default: float) -> float:

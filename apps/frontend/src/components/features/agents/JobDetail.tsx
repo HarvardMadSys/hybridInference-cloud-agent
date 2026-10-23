@@ -44,14 +44,14 @@ import { hasLostContext, isActiveConversationState, isBusyJob, latestJob } from 
 import { useFirstRun } from './firstRun';
 import { isGoalRevisionConflict, writeGoal } from './goal/goalApi';
 import { hasLiveWork } from './goal/liveWork';
-import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
+import { GOAL_COMMAND_PREFIX, type GoalCommandControls } from './goal/useGoalCommand';
 import { useThreadComposerMcp } from './mcp/useThreadComposerMcp';
 import { useThreadComposerSsh } from './ssh/useComposerSsh';
 import { createRecordedOutputsSelector } from './recordedTurnOutputs';
 import { useTranscriptPresentation } from './transcriptPresentation';
 import type { AgentJob } from './types';
 import { isActiveWorkspacePublicationState } from './useAgentJobs';
-import { useComposerDraft } from './useComposerDraft';
+import { useComposerDraftStore } from './useComposerDraft';
 import { usePendingMessages } from './usePendingMessages';
 import { watchPullRequestPrompt, watchPullRequestRequestId } from './watchPullRequest';
 
@@ -62,6 +62,9 @@ export {
 
 const EMPTY_STORED_EVENTS: (AgentJobEventApi | AgentThreadEventApi)[] = [];
 const EMPTY_THREAD_JOBS: AgentJobApi[] = [];
+
+/** The composer's `/goal` command, run before a send: true when the draft was one. */
+type GoalCommand = GoalCommandControls['submit'];
 
 // The rail needs room to sit beside the text rather than over it, and a band
 // tall enough that its marks mean something. Otherwise the transcript keeps
@@ -132,8 +135,9 @@ export function JobDetail({
   }, [job.id]);
   const [title, setTitle] = useState(job.title);
   useEffect(() => setTitle(job.title), [job.title, job.threadId]);
-  const draft = useComposerDraft({ userId, threadId });
-  const { value: followUp, setValue: setFollowUp } = draft;
+  // Only the composer reads the text, so a keystroke does not draw this page again.
+  const draft = useComposerDraftStore({ userId, threadId });
+  const { setValue: setFollowUp } = draft;
   const currentDraftScope = useRef(draft.capture().scope);
   currentDraftScope.current = draft.capture().scope;
   const composerMounted = useRef(true);
@@ -201,14 +205,6 @@ export function JobDetail({
   // goes, and says where its draft PR is when it has one.
   const { onlyThreadId } = useFirstRun();
   const firstRun = (job.turnNo ?? 1) === 1 && onlyThreadId === threadId;
-  const goalCommand = useGoalCommand({
-    value: followUp,
-    setValue: setFollowUp,
-    focusComposer: () => followUpBox.current?.focus(),
-    onNeedsObjective: () => setGoalHint(t('goal.needsObjective')),
-    onApply: applyGoalObjective,
-    onError: setActionError,
-  });
   useEffect(() => setAttemptNo(liveAttempt), [liveAttempt]);
 
   // Edit & rewind creates the native child immediately, then leaves the
@@ -326,13 +322,13 @@ export function JobDetail({
     onReload?.();
   }
 
-  async function submitFollowUp(event: FormEvent<HTMLFormElement>) {
+  async function submitFollowUp(event: FormEvent<HTMLFormElement>, command: GoalCommand) {
     event.preventDefault();
-    await sendDraft();
+    await sendDraft(command);
   }
 
   /** Send what the composer holds; the result, or `null` if nothing went. */
-  async function sendDraft(): Promise<ThreadMessageResultApi | null> {
+  async function sendDraft(command: GoalCommand): Promise<ThreadMessageResultApi | null> {
     if (
       sendRequestedRef.current ||
       rewriting ||
@@ -353,7 +349,7 @@ export function JobDetail({
     setActionError(null);
     try {
       // Commands use their own operation and are never queued as messages.
-      if (await goalCommand.submit()) return null;
+      if (await command()) return null;
       // One request whatever the conversation is doing: idle, the message is
       // the next turn when this returns; busy, it waits in the queue above the
       // composer. ``queue.apply`` shows the card or, for a turn, moves to it.
@@ -390,9 +386,9 @@ export function JobDetail({
    * draft: what already waits was left for after the turn, and each has its
    * own ↑ for changing that.
    */
-  async function steerNow() {
-    const scope = draft.capture().scope;
-    const drafted = followUp.trim() ? await sendDraft() : null;
+  async function steerNow(command: GoalCommand) {
+    const { scope, value } = draft.capture();
+    const drafted = value.trim() ? await sendDraft(command) : null;
     if (!composerMounted.current || currentDraftScope.current !== scope) return;
     // Nothing to add, or nothing running: the draft simply became the next turn.
     if (!drafted?.pending || (drafted.pending.attachments ?? []).length) return;
@@ -499,9 +495,13 @@ export function JobDetail({
     );
   }, [events, openSubagent, openSubagentJobId, subagentScope, threadJobs]);
   const showingSubagent = tab === 'chat' && openSubagent !== undefined;
+  // Every delegating call reads this through context. It keeps one identity while
+  // the run streams, and reads the turns as they are whenever a call's row is drawn.
+  const turnOfRef = useRef(turnOf);
+  turnOfRef.current = turnOf;
   const subagentOfCall = useCallback<SubagentOfCall>(
     (jobId, event) => {
-      const turn = turnOf(jobId);
+      const turn = turnOfRef.current(jobId);
       const agent = turn && subagentStartedBy(turnActivityOverview(turn.events), event);
       if (!agent) return undefined;
       return {
@@ -512,7 +512,7 @@ export function JobDetail({
         },
       };
     },
-    [setSubagent, setTab, turnOf],
+    [setSubagent, setTab],
   );
   // Every turn's subagents, for narrowing the trajectory to one of them.
   const trajectorySubagents = useMemo(() => {
@@ -822,7 +822,7 @@ export function JobDetail({
                 mcp={mcp}
                 ssh={ssh}
                 queue={queue}
-                goalCommand={goalCommand}
+                applyGoalObjective={applyGoalObjective}
                 composerRef={scroll.composerRef}
                 followUpBox={followUpBox}
                 questionTurn={questionTurn}

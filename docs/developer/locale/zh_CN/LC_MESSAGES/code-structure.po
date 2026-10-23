@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-21 04:54+0000\n"
+"POT-Creation-Date: 2026-10-22 06:00+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -13,7 +13,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.10.3\n"
+"Generated-By: Babel 2.18.0\n"
 
 #: ../developer/code-structure.md:1
 msgid "Code structure"
@@ -331,14 +331,14 @@ msgid "Teams, members, invitations, and join requests"
 msgstr "团队、成员、邀请和加入申请"
 
 #: ../developer/code-structure.md
-msgid "`_host_reports`, `_sandbox_manager_wire`, `_prompts`"
+msgid "`_host_reports`, `_prompts`"
 msgstr ""
 
 #: ../developer/code-structure.md
 msgid ""
-"Private helpers: bounds for host and worker reports, Sandbox Manager "
-"field-name compatibility, and the prompt text rule"
-msgstr "私有辅助模块：主机和 worker 上报内容的上下限、Sandbox Manager 字段名兼容，以及提示词文本规则"
+"Private helpers: bounds for host and worker reports, and the prompt text "
+"rule"
+msgstr "私有辅助模块：主机和 worker 上报内容的上下限，以及提示词文本规则"
 
 #: ../developer/code-structure.md:100
 msgid ""
@@ -359,13 +359,14 @@ msgid ""
 "`control_plane_client.py` owns attempt-scoped worker HTTP calls, request "
 "deadlines, and event replay. The runner explicitly re-exports their "
 "existing public names and keeps client construction at its orchestration "
-"boundary."
+"boundary. The client queues a turn's events on the ordered sender in "
+"`event_sender.py`, which uploads them in batches."
 msgstr ""
 "`runner.py` 负责认领任务、attempt 租约、执行轮次、心跳和排空。`claimed_job.py` "
 "定义认领的数据结构和租约错误；`control_plane_client.py` 负责以 attempt 为范围的 worker HTTP "
-"调用、请求超时和事件重放。runner 会显式地把这两个模块原有的公开名称再导出一遍，客户端的创建仍留在 runner 的编排层。"
+"调用、请求超时和事件重放。runner 会显式地把这两个模块原有的公开名称再导出一遍，客户端的创建仍留在 runner 的编排层。客户端把一个轮次的事件放进 `event_sender.py` 里的有序发送器排队，由它分批上传。"
 
-#: ../developer/code-structure.md:112
+#: ../developer/code-structure.md:114
 msgid ""
 "`chat_sandbox_models.py` holds retained-container specs, "
 "inspection/status values, ownership labels, and identity bounds. Group "
@@ -397,7 +398,7 @@ msgstr ""
 "或读写标记文件之前，会先占住这一个沙箱组的生命周期；拿到结果后，先重新核对组、成员、容器和生命周期的身份，核对通过才采纳。其他沙箱组不受影响。核对失败会释放临时占用，但持久的归档屏障和原生刷新屏障依然有效。原来通过"
 " `chat_sandbox` 导入公开沙箱模型的写法照样可用。"
 
-#: ../developer/code-structure.md:129
+#: ../developer/code-structure.md:131
 msgid "The runtime adapters are a package under `cloud_agent_host/runtimes/`:"
 msgstr "运行时适配器是 `cloud_agent_host/runtimes/` 下的一个包："
 
@@ -465,7 +466,7 @@ msgstr ""
 msgid "Adapter lookup and construction"
 msgstr "查找和创建适配器"
 
-#: ../developer/code-structure.md:141
+#: ../developer/code-structure.md:143
 msgid ""
 "Existing callers use `cloud_agent_host.runtimes`; the package explicitly "
 "exports its public API. Runtime discovery facts live in the immutable "
@@ -479,11 +480,11 @@ msgstr ""
 "ID、是否支持 MCP 和可选的推理强度。运行时的版本固定仍在 `cloud_agent_shared/shared_protocol.py` "
 "和镜像文件里。"
 
-#: ../developer/code-structure.md:147
+#: ../developer/code-structure.md:149
 msgid "Shared operation profiling"
 msgstr "共用的操作性能剖析"
 
-#: ../developer/code-structure.md:149
+#: ../developer/code-structure.md:151
 msgid ""
 "Producers continue to import `cloud_agent_shared.operation_profiling`. "
 "The implementation is organized under `cloud_agent_shared/profiling/` by "
@@ -496,7 +497,7 @@ msgstr ""
 "`cloud_agent_shared/profiling/` 下，按 "
 "schema、模型、运行解析、策略、测量采集、阶段观察器、进程上下文、导出和时钟访问分成几个模块。详见这个包的[职责与契约说明](../../apps/backend/cloud_agent_shared/profiling/README.md)。"
 
-#: ../developer/code-structure.md:155
+#: ../developer/code-structure.md:157
 msgid ""
 "The facade keeps the existing producer API and operational diagnostics. "
 "Clock access respects its replaceable `time` object, keeping "
@@ -506,11 +507,11 @@ msgstr ""
 "门面保留了原有的 API 和运维诊断功能。时钟访问会用它那个可替换的 `time` "
 "对象，所以测试结果仍然确定，默认关闭的路径也不受影响。新的剖析逻辑放进对应的模块里，不要往门面里堆。"
 
-#: ../developer/code-structure.md:160
+#: ../developer/code-structure.md:162
 msgid "Follow a browser action"
 msgstr "跟着一次浏览器操作走"
 
-#: ../developer/code-structure.md:162
+#: ../developer/code-structure.md:164
 msgid ""
 "Next.js route files live under `apps/frontend/src/app/`. Shared feature "
 "UI lives under `components/features/` (`agents` for tasks and "
@@ -525,7 +526,7 @@ msgstr ""
 "`teams`、`profile` 和 `auth`。可复用的展示组件在 `components/` 下，浏览器端的工具函数和 API 客户端在 "
 "`lib/` 下。只能在服务端运行的集成放在现有的服务端模块里；浏览器组件的导入链里绝不能带进服务端凭据。"
 
-#: ../developer/code-structure.md:170
+#: ../developer/code-structure.md:172
 msgid ""
 "`lib/api/agents.ts` is the explicit public API facade. It delegates to "
 "focused modules under `lib/api/agents/`: jobs, threads, sessions, goals, "
@@ -539,7 +540,7 @@ msgstr ""
 "下各管一摊的模块：任务、对话、会话、目标、配置、集成、资源和用量查询、工作区文件、终端和事件流。创建和 Fork "
 "共用的幂等响应处理只在这个包内部使用。端点路径、重试、凭据、游标处理和通知，都跟着它所属的那个操作放。"
 
-#: ../developer/code-structure.md:177
+#: ../developer/code-structure.md:179
 msgid ""
 "`components/features/agents/JobDetail.tsx` composes the job page. Its "
 "extracted implementation lives under `job-detail/`:"
@@ -611,7 +612,7 @@ msgstr ""
 msgid "Stop, Fork, and restore actions with request guards"
 msgstr "停止、Fork 和恢复操作，带防重复请求的保护"
 
-#: ../developer/code-structure.md:191
+#: ../developer/code-structure.md:193
 msgid ""
 "Keep state with the concern that owns it. Retained panels preserve "
 "terminals, file previews, and drafts while hidden; scope changes must "
@@ -621,47 +622,47 @@ msgstr ""
 "状态放在负责它的那一块里。保留的面板在隐藏时也会留住终端、文件预览和草稿；切换作用范围时，必须把相关状态重置掉。拆组件时，hook "
 "的依赖要写明，延迟加载也要保留。"
 
-#: ../developer/code-structure.md:196
+#: ../developer/code-structure.md:198
 msgid "Add a feature without losing the structure"
 msgstr "加功能时别把结构弄乱"
 
-#: ../developer/code-structure.md:198
+#: ../developer/code-structure.md:200
 msgid ""
 "Identify the service and concern that owns the behavior using the maps "
 "above."
 msgstr "对照上面的几张表，确定这项行为归哪个服务、哪一块负责。"
 
-#: ../developer/code-structure.md:199
+#: ../developer/code-structure.md:201
 msgid ""
 "Add or update its domain rule, wire model, and port only where the "
 "behavior requires them. Implement durable operations inside storage."
 msgstr "领域规则、传输模型和 port，确实需要时才新增或修改。持久化操作在 storage 里实现。"
 
-#: ../developer/code-structure.md:201
+#: ../developer/code-structure.md:203
 msgid ""
 "Put orchestration in an application flow or owning service, then call it "
 "from the HTTP adapter or worker. Wire new resources through bootstrap."
 msgstr "编排逻辑放在应用流程或负责它的服务里，再由 HTTP 适配器或 worker 去调用。新的资源通过 bootstrap 接入。"
 
-#: ../developer/code-structure.md:203
+#: ../developer/code-structure.md:205
 msgid ""
 "Add public facade exports deliberately. Import implementation modules "
 "directly within a package to keep its dependency graph clear."
 msgstr "门面的公开导出要想清楚再加。包内部直接导入实现模块，这样依赖关系一目了然。"
 
-#: ../developer/code-structure.md:205
+#: ../developer/code-structure.md:207
 msgid ""
 "Exercise observable behavior and affected boundaries. For structural "
 "refactors, compare contracts and reuse existing behavioral tests."
 msgstr "测试要覆盖外部可观察的行为和受影响的边界。做结构性重构时，比对前后的契约，并复用已有的行为测试。"
 
-#: ../developer/code-structure.md:207
+#: ../developer/code-structure.md:209
 msgid ""
 "Run the relevant complete gates and update the maintained guide for "
 "changed ownership, commands, or behavior."
 msgstr "跑完相关的完整检查；如果职责归属、命令或行为变了，就更新对应的维护中指南。"
 
-#: ../developer/code-structure.md:210
+#: ../developer/code-structure.md:212
 msgid ""
 "Backend architecture checks enforce service-image independence, API "
 "import direction, domain/port independence, and repository isolation. "

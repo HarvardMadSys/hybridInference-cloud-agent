@@ -182,17 +182,12 @@ def test_shared_live_attestation_requires_every_pinned_runtime_and_helper(monkey
     assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == []
 
 
-def test_a_claim_names_protocol_v2_for_a_control_plane_older_than_this_release(monkeypatch):
-    """Hosts roll out before the API, so a replacement runner polls the old one.
-
-    That control plane refuses every claim without the image's shared-sandbox
-    protocol, which this image no longer labels. The runner states the v2 its
-    image would have declared, and only once its own checks have passed.
-    """
+def test_a_claim_without_the_fork_helper_attests_no_shared_capability(monkeypatch):
+    """The capabilities are stated only once the image's own checks have passed."""
     _configure_host(monkeypatch)
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
-    assert runner_mod._claim_attestation(backend)["shared_sandbox_protocol"] == "v2"
+    assert runner_mod._claim_attestation(backend)["runner_capabilities"]
 
     def without_fork_helper() -> dict:
         stamp = _stamp()
@@ -200,9 +195,7 @@ def test_a_claim_names_protocol_v2_for_a_control_plane_older_than_this_release(m
         return stamp
 
     monkeypatch.setattr(backend, "version_stamp", without_fork_helper)
-    refused = runner_mod._claim_attestation(backend)
-    assert refused["runner_capabilities"] == []
-    assert "shared_sandbox_protocol" not in refused
+    assert runner_mod._claim_attestation(backend)["runner_capabilities"] == []
 
 
 def test_shared_live_attestation_refuses_a_non_container_backend(monkeypatch):
@@ -915,11 +908,7 @@ def _probe_then_replace(control, supervisor, *, residency: dict) -> None:
 
 @pytest.mark.parametrize(
     ("residency", "opened_with"),
-    [
-        ({"mcp_credential": "amr.residency-12"}, "amr.residency-12"),
-        # A control plane from before residency credentials: this turn's own token.
-        ({}, "ajt.turn-token"),
-    ],
+    [({"mcp_credential": "amr.residency-12"}, "amr.residency-12")],
 )
 def test_a_live_probe_carries_no_mcp_credential_and_a_new_process_gets_one(
     monkeypatch, residency, opened_with
@@ -934,7 +923,7 @@ def test_a_live_probe_carries_no_mcp_credential_and_a_new_process_gets_one(
         configure=lambda control, supervisor, _finish: _probe_then_replace(
             control, supervisor, residency=residency
         ),
-        job_changes={"mcp_bindings": [":platform:memory"], "mcp_token": "ajt.turn-token"},
+        job_changes={"mcp_bindings": [":platform:memory"]},
     )
 
     assert result == 0
@@ -958,7 +947,7 @@ def test_a_turn_without_mcp_opens_its_process_with_no_mcp_credential(monkeypatch
         configure=lambda control, supervisor, _finish: _probe_then_replace(
             control, supervisor, residency={"mcp_credential": "amr.residency-12"}
         ),
-        job_changes={"mcp_bindings": [], "mcp_token": "ajt.turn-token"},
+        job_changes={"mcp_bindings": []},
     )
 
     opened = supervisor.ensure_shared_resident.mock_calls[-1].kwargs["launch"]
@@ -1579,11 +1568,16 @@ class _Supervisor:
 
 
 class _Control:
+    lease_lost = False
+
     def __init__(self):
         self.events = []
 
     def append_event(self, event):
         self.events.append((event.event_type, event.payload))
+
+    def flush(self):
+        """Each event is recorded as it is appended, so nothing is left to deliver."""
 
 
 @pytest.mark.parametrize(
@@ -1845,119 +1839,6 @@ def _event_control(endpoint) -> runner_mod.ControlPlane:
     control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
     control.job_id = _JOB.job_id
     return control
-
-
-def test_a_control_plane_restart_mid_turn_does_not_lose_the_turn(monkeypatch):
-    """Events refused for ten seconds are replayed; the turn still settles.
-
-    A deploy recreates the control-plane container, so connections are refused
-    for a while. That used to escape the stream after one immediate retry, and
-    the turn failed with its native context marked lost.
-    """
-    clock = _virtual_clock(monkeypatch)
-    delivered: list[dict[str, Any]] = []
-    refused: list[int] = []
-
-    def endpoint(request):
-        body = json.loads(request.content)
-        if body["event_type"] == "assistant" and clock.now < 10:
-            refused.append(body["event_seq"])
-            raise httpx.ConnectError("connection refused", request=request)
-        delivered.append(body)
-        return httpx.Response(201, json={"event_id": len(delivered)})
-
-    events = _event_control(endpoint)
-    stream = _Stream(
-        [
-            {"kind": "event", "event_type": "assistant", "payload": {"text": "hi"}},
-            {"kind": "result", "status": "completed", "exit_code": 0},
-        ]
-    )
-    stream_turn = runner_mod._stream_shared_agent_turn
-
-    def configure(control, supervisor, _finish):
-        control.append_event.side_effect = events.append_event
-        supervisor.start_shared_turn.return_value = stream
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream_turn)
-
-    try:
-        result, control, supervisor, finish = _run_shared_boundary_case(
-            monkeypatch, 0, None, "claude-code", configure=configure
-        )
-    finally:
-        events.close()
-
-    assert result == 0
-    finish.assert_called_once()
-    assert finish.call_args.args[0] == "succeeded"
-    supervisor.abandon_shared.assert_not_called()
-    control.abandon_chat_sandbox.assert_not_called()
-    assert len(refused) > 2 and clock.now >= 10
-    # Every try carried the same number, so the owner's stream holds it once.
-    assistant = [body for body in delivered if body["event_type"] == "assistant"]
-    assert [body["event_seq"] for body in assistant] == [refused[0]]
-    assert set(refused) == {refused[0]}
-    assert [body["event_seq"] for body in delivered] == list(range(1, len(delivered) + 1))
-
-
-@pytest.mark.parametrize(
-    ("answers", "outcome", "requests"),
-    [
-        ([httpx.ConnectError("refused"), 502, 503, 201], None, 4),
-        ([408, 429, 500, 504, 201], None, 5),
-        ([409], LeaseLost, 1),
-        ([422], httpx.HTTPStatusError, 1),
-        ([401], httpx.HTTPStatusError, 1),
-    ],
-)
-def test_event_upload_retries_only_what_a_replay_can_fix(monkeypatch, answers, outcome, requests):
-    """Transient refusals back off and replay; a fence or a rejection does not."""
-    clock = _virtual_clock(monkeypatch)
-    pending = list(answers)
-    bodies: list[dict[str, Any]] = []
-
-    def endpoint(request):
-        bodies.append(json.loads(request.content))
-        answer = pending.pop(0)
-        if isinstance(answer, Exception):
-            raise answer
-        return httpx.Response(answer, json={"event_id": 1})
-
-    control = _event_control(endpoint)
-    event = runner_mod.NormalizedEvent("assistant", {"text": "hi"})
-    try:
-        if outcome is None:
-            control.append_event(event)
-        else:
-            with pytest.raises(outcome):
-                control.append_event(event)
-    finally:
-        control.close()
-
-    assert len(bodies) == requests
-    assert all(body["event_seq"] == 1 for body in bodies)
-    assert clock.sleeps == ([1.0, 2.0, 4.0, 8.0][: requests - 1] if outcome is None else [])
-
-
-def test_event_upload_gives_up_inside_its_budget(monkeypatch):
-    """A control plane that never answers ends the turn before the lease would."""
-    clock = _virtual_clock(monkeypatch)
-    tries: list[float] = []
-
-    def endpoint(request):
-        tries.append(clock.now)
-        raise httpx.ConnectError("refused", request=request)
-
-    control = _event_control(endpoint)
-    try:
-        with pytest.raises(httpx.ConnectError):
-            control.append_event(runner_mod.NormalizedEvent("assistant", {"text": "hi"}))
-    finally:
-        control.close()
-
-    assert len(tries) > 2
-    assert max(clock.sleeps) == control_plane_client._EVENT_RETRY_MAX_DELAY_S
-    assert clock.now <= control_plane_client._EVENT_RETRY_BUDGET_S < runner_mod.DEFAULT_LEASE_TTL_S
 
 
 def test_a_turn_can_end_with_a_reason_its_sandbox_printed():
@@ -2358,7 +2239,9 @@ def test_stream_helper_closes_the_measurement_at_the_prompt_handoff(monkeypatch,
     code, _tail, _errors, _frame, _reported = runner_mod._stream_shared_agent_turn(
         supervisor=SimpleNamespace(start_shared_turn=start_shared_turn),
         job=_JOB,
-        control=SimpleNamespace(append_event=lambda _event: None),
+        control=SimpleNamespace(
+            append_event=lambda _event: None, flush=lambda: None, lease_lost=False
+        ),
         heart=SimpleNamespace(lease_lost=False, cancel_requested=False),
         lease_token="lease",
         timeout_s=5,

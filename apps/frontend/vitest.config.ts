@@ -1,9 +1,12 @@
-import { configDefaults, defineConfig } from 'vitest/config';
 import { resolve } from 'node:path';
+import { defineConfig } from 'vitest/config';
+
+import { VITEST_TEST_EXCLUDE, VITEST_TEST_INCLUDE } from './test-discovery.mjs';
 
 export default defineConfig({
   test: {
-    exclude: [...configDefaults.exclude, 'e2e/**'],
+    include: VITEST_TEST_INCLUDE,
+    exclude: VITEST_TEST_EXCLUDE,
     setupFiles: ['./vitest.setup.ts'],
     // Use every available CPU for the isolated workers. Vitest otherwise
     // reserves one, slowing the jsdom-heavy suite on small CI runners.

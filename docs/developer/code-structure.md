@@ -95,7 +95,7 @@ than importing the facade back into themselves.
 | `runtime_upgrades` | Agent CLI updates started from the admin Settings page |
 | `integrations`, `mcp`, `session` | Source control, MCP selection, identity, and user preferences |
 | `teams` | Teams, members, invitations, and join requests |
-| `_host_reports`, `_sandbox_manager_wire`, `_prompts` | Private helpers: bounds for host and worker reports, Sandbox Manager field-name compatibility, and the prompt text rule |
+| `_host_reports`, `_prompts` | Private helpers: bounds for host and worker reports, and the prompt text rule |
 
 Keep model names and serialized behavior stable during structural refactors.
 Cross-domain annotations must resolve immediately after import. Intentional
@@ -107,7 +107,9 @@ wire changes require the contract update described in the developer guide.
 `claimed_job.py` defines claim payloads and lease errors;
 `control_plane_client.py` owns attempt-scoped worker HTTP calls, request
 deadlines, and event replay. The runner explicitly re-exports their existing
-public names and keeps client construction at its orchestration boundary.
+public names and keeps client construction at its orchestration boundary. The
+client queues a turn's events on the ordered sender in `event_sender.py`, which
+uploads them in batches.
 
 `chat_sandbox_models.py` holds retained-container specs, inspection/status
 values, ownership labels, and identity bounds. Group bridges, relay membership,

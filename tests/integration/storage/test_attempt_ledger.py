@@ -1171,19 +1171,23 @@ async def test_usage_reads_fetch_only_what_their_summaries_read(db, store):
             )
         ]
     reads = await store.ledger.job_usage_reads(job_id=job["id"], user_id=job["user_id"])
-    thread = await store.execution_queries.thread_stats_inputs(
-        job_id=job["id"], user_id=job["user_id"]
-    )
+    thread = await store.execution_queries.thread_stats(job_id=job["id"], user_id=job["user_id"])
     assert reads is not None and thread is not None
 
-    for inputs in (reads["inputs"], thread):
-        assert max(len(json.dumps(event["payload"])) for event in inputs["events"]) < 256
-        summary = summarize_thread(
-            job_ids=inputs["job_ids"], attempts=inputs["attempts"], events=inputs["events"]
+    inputs = reads["inputs"]
+    assert max(len(json.dumps(event["payload"])) for event in inputs["events"]) < 256
+    expected = summarize_thread(job_ids=inputs["job_ids"], attempts=inputs["attempts"], events=full)
+    assert summarize_thread(**inputs) == expected
+    assert thread["stats"] == expected
+    async with db.acquire() as conn:
+        cached = await conn.fetch(
+            "SELECT rollup::text AS rollup FROM agent_attempt_thread_stats "
+            "WHERE attempt_id = ANY($1::bigint[]) ORDER BY attempt_id",
+            [first, retry],
         )
-        assert summary == summarize_thread(
-            job_ids=inputs["job_ids"], attempts=inputs["attempts"], events=full
-        )
+    assert len(cached) == 2
+    assert all(len(row["rollup"]) < 512 for row in cached)
+    assert all(output not in row["rollup"] for row in cached)
     usage = summarize_job_usage(
         ledger_rows=reads["ledger_rows"],
         runtime_inputs=reads["inputs"],

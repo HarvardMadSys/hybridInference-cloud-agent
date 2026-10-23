@@ -110,11 +110,22 @@ def _failure(exc: ValueError) -> HTTPException:
 @router.get("", response_model=AgentMemoryScopeView)
 async def list_memories(
     repo: str | None = _REPO,
+    archive_cursor: str | None = Query(None, max_length=256),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _MemoryStorage | None = Depends(get_storage),
 ) -> AgentMemoryScopeView:
     """Read the owner's memories for every project, or for one repository."""
-    values = await require_store(store).agent_memory.list_memories(user["user_id"], repo)
+    repository = require_store(store).agent_memory
+    try:
+        values = (
+            await repository.list_memories(user["user_id"], repo)
+            if archive_cursor is None
+            else await repository.list_memories(
+                user["user_id"], repo, archive_cursor=archive_cursor
+            )
+        )
+    except ValueError:
+        raise HTTPException(422, "Invalid archive cursor") from None
     return AgentMemoryScopeView.model_validate(values)
 
 

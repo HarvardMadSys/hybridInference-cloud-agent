@@ -35,6 +35,7 @@ from cloud_agent.ports.ledger import LedgerRepository
 from cloud_agent.ports.mcp import McpConnectionRepository
 from cloud_agent.ports.mcp_catalog import McpCatalogRepository
 from cloud_agent.ports.model_preferences import ModelPreferenceRepository
+from cloud_agent.ports.notification_maintenance import NotificationMaintenanceRepository
 from cloud_agent.ports.operation_measurements import (
     MeasurementWriteResult,
     OperationMeasurements,
@@ -47,7 +48,15 @@ from cloud_agent.ports.sandbox import SandboxRepository
 from cloud_agent.ports.session_fork import SessionForkRepository
 from cloud_agent.ports.settings import SettingsRepository
 from cloud_agent.ports.skills import SkillRepository
-from cloud_agent.ports.snapshot import SnapshotRepository
+from cloud_agent.ports.snapshot import (
+    SnapshotBaseImportRepository,
+    SnapshotCaptureRepository,
+    SnapshotPublicationRepository,
+    SnapshotPublishWorkerRepository,
+    SnapshotReapingRepository,
+    SnapshotRepository,
+    SnapshotRequestRepository,
+)
 from cloud_agent.ports.source_control import SourceControlRepository
 from cloud_agent.ports.ssh_servers import SshServerRepository
 from cloud_agent.ports.team_admin import TeamAdminQueries
@@ -83,6 +92,7 @@ __all__ = [
     "McpConnectionRepository",
     "MeasurementWriteResult",
     "ModelPreferenceRepository",
+    "NotificationMaintenanceRepository",
     "OperationMeasurements",
     "OwnerUsageQueries",
     "PendingMessageRepository",
@@ -92,7 +102,13 @@ __all__ = [
     "SessionForkRepository",
     "SettingsRepository",
     "SkillRepository",
+    "SnapshotBaseImportRepository",
+    "SnapshotCaptureRepository",
+    "SnapshotPublicationRepository",
+    "SnapshotPublishWorkerRepository",
+    "SnapshotReapingRepository",
     "SnapshotRepository",
+    "SnapshotRequestRepository",
     "SourceControlRepository",
     "SshServerRepository",
     "TeamAdminQueries",
