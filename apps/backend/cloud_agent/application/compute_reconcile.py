@@ -7,7 +7,6 @@ fixed resource identity and request parameters bound the external effects.
 
 from __future__ import annotations
 
-import asyncio
 import re
 import secrets
 from contextlib import suppress
@@ -18,7 +17,12 @@ from uuid import UUID
 from pydantic import SecretStr
 
 from cloud_agent.application.compute_rotation import ComputeRotation
-from cloud_agent.application.compute_setup import HostRelease, load_control_plane_host_release
+from cloud_agent.application.compute_setup import (
+    HostRelease,
+    host_release_blocks_rotation,
+    load_control_plane_host_release,
+    load_host_release_for_allocations,
+)
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.application.release_inventory import quiesce_and_scan
 from cloud_agent.application.superseded_removal import superseded_refusal
@@ -408,8 +412,10 @@ class ComputeReconciler:
         """Observe leases and submit renewals even while retirement is blocked."""
         now = _now()
         observation_seconds = current_observation_seconds(self.commands.configuration)
-        release = await asyncio.to_thread(load_control_plane_host_release)
         snapshot = await self.repository.scheduling_inventory()
+        release = await load_host_release_for_allocations(
+            snapshot.allocations, load_control_plane_host_release
+        )
         for row in snapshot.allocations:
             if row.get("observed_state") == "terminated":
                 await self._lose_reclaimed_groups(row)
@@ -457,7 +463,7 @@ class ComputeReconciler:
             trigger = self.rotation.due(row, policy, lifecycle, now, expires)
             # A rollout already occupies this machine. Keep renewing the lease
             # it is still serving; do not start a node replacement beside it.
-            release_moving = self._host_release_blocks_rotation(operations, release)
+            release_moving = host_release_blocks_rotation(operations, release)
             started = (
                 trigger is not None
                 and not release_moving
@@ -1139,20 +1145,6 @@ class ComputeReconciler:
             "compute_host_release_blocked",
             host=hosts[0]["host"],
             reason="deployment drain fence active",
-        )
-
-    @staticmethod
-    def _host_release_blocks_rotation(
-        operations: list[dict[str, Any]], release: HostRelease | None
-    ) -> bool:
-        """Keep a node where it is while its release is moving or needs attention."""
-        if release is None:
-            return False
-        return any(
-            op.get("kind") == "upgrade"
-            and (op.get("parameters") or {}).get("deployment_sha") == release.sha
-            and op.get("state") not in {"succeeded", "cancelled"}
-            for op in operations
         )
 
     async def _upgrade(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:  # noqa: PLR0912 complexity baseline, #771

@@ -7,6 +7,7 @@ allocation until every tunnel is provisioned. Retries reuse those exact inputs.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -182,6 +183,38 @@ def load_control_plane_host_release(directory: Path | None = None) -> HostReleas
         return None
     _HOST_RELEASE_MEMO[str(directory)] = (key, release)
     return release
+
+
+async def load_host_release_for_allocations(
+    allocations: list[dict[str, Any]],
+    loader: Callable[[], HostRelease | None] = load_control_plane_host_release,
+) -> HostRelease | None:
+    """Load the bundle off-loop when a live allocation may need its protection.
+
+    Retiring allocations can still have an unfinished upgrade whose release
+    must block rotation, even though they should not receive a new upgrade.
+    """
+    if not any(
+        not allocation.get("release_committed_at")
+        and allocation.get("observed_state") not in {"terminated", "absent"}
+        for allocation in allocations
+    ):
+        return None
+    return await asyncio.to_thread(loader)
+
+
+def host_release_blocks_rotation(
+    operations: list[dict[str, Any]], release: HostRelease | None
+) -> bool:
+    """Whether an unfinished upgrade for this release must hold rotation."""
+    if release is None:
+        return False
+    return any(
+        operation.get("kind") == "upgrade"
+        and (operation.get("parameters") or {}).get("deployment_sha") == release.sha
+        and operation.get("state") not in {"succeeded", "cancelled"}
+        for operation in operations
+    )
 
 
 class AutomaticComputeSetup:
