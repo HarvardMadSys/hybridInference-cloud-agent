@@ -154,10 +154,14 @@ export async function getAgentJobThread(
 }
 
 /** Load a thread's aggregate stats. Old standalone jobs return null. */
-export async function getAgentThreadStats(jobId: string): Promise<AgentThreadStatsApi | null> {
+export async function getAgentThreadStats(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<AgentThreadStatsApi | null> {
   const resp = await fetchWithAuth(
     API_BASE,
     `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread/stats`,
+    { signal },
   );
   if (resp.status === 404) return null;
   return jsonOrThrow<AgentThreadStatsApi>(resp);
