@@ -64,8 +64,12 @@ function AgentsHeader({
   const onTasks =
     !pathname.startsWith('/admin') && pathname !== '/approvals' && !isSettingsPath(pathname);
 
+  // One row at every width: on a phone a second row for the nav cost the
+  // conversation a touch target's height. Below `md` the nav is sized first and
+  // the app name truncates into what is left, down to the toggle and the mark;
+  // from `md` the name is sized first and the nav scrolls instead.
   return (
-    <header className="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 border-b border-border bg-surface px-3 py-1.5 sm:px-4 md:grid-cols-[minmax(0,auto)_minmax(0,1fr)_auto]">
+    <header className="grid shrink-0 grid-cols-[minmax(4.75rem,1fr)_minmax(0,auto)_auto] items-center gap-x-2 border-b border-border bg-surface px-3 py-1.5 sm:px-4 md:grid-cols-[minmax(0,auto)_minmax(0,1fr)_auto]">
       <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
         {sidebarToggle}
         <Link
@@ -101,12 +105,12 @@ function AgentsHeader({
       </div>
       {/* Signing out, the theme and the language stay within reach when the
           task list is hidden: the sidebar's account row goes with it. */}
-      <div className="flex min-h-8 items-center md:col-start-3 md:row-start-1">
+      <div className="col-start-3 row-start-1 flex min-h-8 items-center">
         {accountMenu ? <AccountMenu variant="header" /> : null}
       </div>
       <nav
         aria-label={t('nav.aria')}
-        className="col-span-2 flex min-w-0 max-w-full items-center gap-1 overflow-x-auto text-xs font-medium md:col-span-1 md:col-start-2 md:row-start-1 md:justify-self-end"
+        className="col-start-2 row-start-1 flex min-w-0 max-w-full items-center gap-1 overflow-x-auto justify-self-end text-xs font-medium"
       >
         {/* Guarded like every other external link here, and for a sharper
             reason than tidiness: an anchor with an empty `href` resolves to the
@@ -472,7 +476,9 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
             >
               {children}
             </AgentsShell>
-            <DeploymentFooter />
+            {/* Two wrapped lines of credits and build details on a phone, under
+                every page, came out of the conversation's height. */}
+            <DeploymentFooter className="max-md:hidden" />
           </div>
         </McpApprovalsProvider>
       </ProtectedRoute>
