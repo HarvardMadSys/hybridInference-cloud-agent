@@ -19,6 +19,7 @@ from cloud_agent_host.archive_failure_diagnostics import (
     _record_archive_failure_diagnostics,
     _safe_error_type,
     archive_failure_http_detail,
+    logged_stopped_archive_failure,
 )
 from cloud_agent_host.chat_sandbox import (
     CHAT_SHARED_LABEL,
@@ -965,30 +966,18 @@ class SharedChatSessionSupervisor:
                 return inspection
             group.stop_archive_pending = True
             group.stop_archive_members = members
-        try:
+        with logged_stopped_archive_failure("final_archive", group.spec, inspection.container_id):
             self._stopped_archive_hook(group.spec, inspection, members)
-        except Exception as exc:
-            logger.error(
-                "stopped sandbox final archive failed",
-                extra={
-                    "event": "sandbox_final_archive_failed",
-                    "sandbox_id": group.spec.sandbox_id,
-                    "generation": group.spec.generation,
-                    "detail": _archive_failure_diagnostic("fail_stop_final", exc).render(),
-                },
-            )
-            raise
         # The owned bridge is the durable marker that a stopped container has
         # not completed its final archive. Release it only after the upload
         # returned successfully, using the same exact-container fence as the
         # original stop. A cleanup failure leaves ``stop_archive_pending`` and
         # the bridge intact so this operation is retried rather than reported
         # as a clean stop.
-        released = self._manager.stop(
-            group.spec,
-            expected_container_id=inspection.container_id,
-            release_networks=True,
-        )
+        with logged_stopped_archive_failure("network_release", group.spec, inspection.container_id):
+            released = self._manager.stop(
+                group.spec, expected_container_id=inspection.container_id, release_networks=True
+            )
         with self._lock:
             self._accept_inspection_locked(group, released)
             group.stop_archive_pending = False

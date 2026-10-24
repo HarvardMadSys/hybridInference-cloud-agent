@@ -21,6 +21,7 @@ from cloud_agent.application.compute_rotation import ComputeRotation
 from cloud_agent.application.compute_setup import HostRelease, load_control_plane_host_release
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.application.release_inventory import quiesce_and_scan
+from cloud_agent.application.superseded_removal import superseded_refusal
 from cloud_agent.compute_config import current_observation_seconds, current_registration_url
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import (
@@ -1971,6 +1972,7 @@ class ComputeReconciler:
         )
         if not superseded:
             return held
+        refusals: list[ProviderError] = []
         for container in superseded:
             request_id = container["request_id"]
             try:
@@ -1984,27 +1986,22 @@ class ComputeReconciler:
                     },
                 )
             except SandboxManagerError as exc:
-                status = exc.status_code
-                # Busy, unreachable or overloaded passes; the request is the
-                # same one next time. A refusal of the request itself waits
-                # for an administrator.
-                retryable = status <= 0 or status in {408, 409, 425, 429} or status >= 500
-                raise ProviderError(
-                    "superseded_container_not_removed",
-                    "A container this Host's groups left behind could not be removed yet"
-                    if retryable
-                    else "The Host refused to remove a container its groups left behind",
-                    retryable=retryable,
-                ) from None
+                refusals.append(
+                    superseded_refusal(host, container, exc, operation_id=str(operation["id"]))
+                )
+                continue
             if (
                 receipt.get("deleted") is not True
                 or receipt.get("request_id") != request_id
                 or receipt.get("container_id") != container["container_id"]
             ):
-                raise ProviderError(
-                    "superseded_container_not_removed",
-                    "The Host did not confirm removing a container its groups left behind",
+                refusals.append(
+                    ProviderError(
+                        "superseded_container_not_removed",
+                        "The Host did not confirm removing a container its groups left behind",
+                    )
                 )
+                continue
             await self.repository.record_superseded_removal(request_id=request_id)
             logger.info(
                 "superseded_container_removed",
@@ -2015,6 +2012,9 @@ class ComputeReconciler:
                     "generation": container["generation"],
                 },
             )
+        if refusals:
+            # One that waits for an administrator outranks one that may pass.
+            raise next((item for item in refusals if not item.retryable), refusals[0])
         return await sandbox_manager.list_sandboxes()
 
     async def _count_superseded(
