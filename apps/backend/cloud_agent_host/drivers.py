@@ -36,7 +36,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
-from cloud_agent_host.bounded_output import OutputPump
+from cloud_agent_host import bounded_output, question_change_signals
 from cloud_agent_host.runtimes import (
     DIFF,
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -434,7 +434,7 @@ class LaunchContext:
     claude_config_dir: str | None = None
 
 
-class HarnessTurn(Generic[_RuntimeT]):
+class HarnessTurn(question_change_signals.QuestionChangeTrackable, Generic[_RuntimeT]):
     """One executing turn: its event stream, cancellation, and result."""
 
     def __init__(self, session: HarnessSession[_RuntimeT], process: SandboxProcess) -> None:
@@ -445,7 +445,7 @@ class HarnessTurn(Generic[_RuntimeT]):
         self._final_messages: list[str] = []
         self._result: TurnResult | None = None
         self._questions_lock = threading.Lock()
-        self._questions: dict[str, _PendingQuestion] = {}
+        self._questions: dict[str, _PendingQuestion] = question_change_signals.ChangeTrackedDict()
         self._question_records: dict[str, _PendingQuestion] = {}
         self._question_keys: dict[str, str] = {}
         self._questions_closed = False
@@ -2783,7 +2783,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         # Reading with a deadline takes a thread that reads stdout into this
         # queue from then on; ``None`` in it is the end of the stream. Started
         # only when a turn needs one, which is rare.
-        self._stdout: OutputPump[str] | None = None
+        self._stdout: bounded_output.OutputPump[str] | None = None
         self._stdout_ended = False
         self._pushed_back: deque[str] = deque()
         self._model: str | None = None
@@ -2820,7 +2820,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         if self._stdout is None:
             if timeout is None:
                 return next(self._lines, None)
-            self._stdout = OutputPump(self._lines, name="claude-resident-output")
+            self._stdout = bounded_output.OutputPump(self._lines, name="claude-resident-output")
         line = self._stdout.get(timeout=timeout)
         if line is None:
             self._stdout_ended = True

@@ -10,12 +10,9 @@ import { getErrorMessage } from '@/lib/utils/errors';
 import type { QuestionReadScope } from '@/lib/api/questionReadScope';
 import { useQuestionReads } from './AgentReadProvider';
 
-/**
- * How often the conversation on screen reads its questions. Nothing pushes a
- * new question yet, and the owner is looking at this one.
- */
+/** How often the conversation on screen reads its questions. */
 export const QUESTION_POLL_MS = 2_000;
-/** How often a conversation that is not on screen does: a sidebar row, a notification. */
+/** How often a conversation that is not on screen reads its questions. */
 export const QUESTION_BACKGROUND_POLL_MS = 12_000;
 
 interface QuestionView {

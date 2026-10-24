@@ -157,9 +157,9 @@ async def test_resource_checkpoint_is_forwarded_before_any_native_event():
         "athr_source", SharedTurnRequest(token="lease", prompt="work", model="model")
     )
     try:
-        first = json.loads(await asyncio.wait_for(anext(response.body_iterator), timeout=1))
-        assert first["kind"] == "resource_checkpoint"
-        assert first["turn_resources"]["state"] == "collecting"
+        checkpoint = json.loads(await asyncio.wait_for(anext(response.body_iterator), timeout=1))
+        assert checkpoint["kind"] == "resource_checkpoint"
+        assert checkpoint["turn_resources"]["state"] == "collecting"
         assert turn_started.wait(1)
         assert not gate.is_set()
     finally:

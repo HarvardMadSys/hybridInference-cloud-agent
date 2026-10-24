@@ -34,7 +34,6 @@ from cloud_agent.execution_profiles import (
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import stored_archive_policy
-from cloud_agent.storage._sql.attempts import lock_live_attempt
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent.storage._sql.environment_runs import env_run_blocks_host, env_runs_holding_slots
 from cloud_agent.storage._sql.event_batches import append_attempt_events
@@ -67,6 +66,7 @@ from cloud_agent.storage._sql.sandbox import (
     restore_claim_due,
 )
 from cloud_agent.storage.deadlocks import retry_deadlock_victim
+from cloud_agent.storage.repositories.attempt_question_changes import AttemptQuestionChanges
 from cloud_agent.task_titles import thread_title_needs_generation
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
@@ -93,17 +93,12 @@ logger = get_logger(__name__)
 TurnSummaryDecision = Literal["accept", "duplicate", "conflict"]
 
 
-class PostgresAttemptCommands:
+class PostgresAttemptCommands(AttemptQuestionChanges):
     """Claim, heartbeat, transition and reap -- every fenced write a worker makes."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
-
-    @staticmethod
-    async def _lock_live_attempt(conn: Any, attempt_id: int, lease_generation: int | None) -> bool:
-        """Lock an attempt first, then test its lease against the post-wait wall clock."""
-        return await lock_live_attempt(conn, attempt_id, lease_generation) is not None
 
     async def sweep_queued_follow_ups(self) -> None:
         """Fail queued follow-ups whose earlier native context is unavailable.

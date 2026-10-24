@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Response
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_storage, require_store
@@ -100,6 +100,26 @@ async def worker_append_events(
     for event in body.events:
         await _record_environment_preparation(job_store, job_id, claims, event)
     return WorkerEventBatchResponse(event_ids=event_ids)
+
+
+@router.post("/worker/jobs/{job_id}/questions:changed", status_code=204)
+async def worker_notify_question_change(
+    job_id: str,
+    authorization: str | None = Header(None),
+    store: _EventStorage | None = Depends(get_storage),
+) -> Response:
+    """Wake owner question readers for this attempt's exact conversation."""
+    job_store = require_store(store)
+    claims = _worker_claims(authorization)
+    _match_job(claims, job_id)
+    notified = await job_store.attempt_commands.notify_question_change(
+        job_id=job_id,
+        attempt_id=claims["attempt_id"],
+        lease_generation=claims["lease_generation"],
+    )
+    if not notified:
+        raise _lease_lost()
+    return Response(status_code=204)
 
 
 async def _record_environment_preparation(
