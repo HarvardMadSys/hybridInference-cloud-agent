@@ -6,6 +6,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import tarfile
 from dataclasses import replace
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from cloud_agent_host import sandbox_deletion_backup as deletion_backup
 from cloud_agent_host.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxSpec,
@@ -137,9 +139,9 @@ def _upload(service, identity, receipt, monkeypatch, *, status=200, handler=None
 
 
 def test_discard_removes_stopped_container_without_export_and_replays(archive_setup):
-    manager, supervisor, service, identity, _spec, _members = archive_setup
+    manager, supervisor, service, identity, spec, _members = archive_setup
     discard = replace(identity, request_id="discard-1", archive_key="")
-    result = service.discard(discard)
+    result = service.discard(discard, sandbox_id=spec.sandbox_id)
     assert result == {
         "request_id": "discard-1",
         "container_id": "container-1",
@@ -154,15 +156,15 @@ def test_discard_removes_stopped_container_without_export_and_replays(archive_se
     assert (directory / "discarded.json").exists()
     assert not (directory / "archive.tar").exists()
     (directory / "discarded.json").unlink()
-    assert service.discard(discard)["deleted"] is True
+    assert service.discard(discard, sandbox_id=spec.sandbox_id)["deleted"] is True
     assert manager.removals == 1
 
 
 def test_discard_refuses_a_request_that_already_prepared_an_archive(archive_setup):
-    manager, _supervisor, service, identity, _spec, _members = archive_setup
+    manager, _supervisor, service, identity, spec, _members = archive_setup
     service.prepare(identity)
     with pytest.raises(SessionLeaseLost, match="cannot be discarded"):
-        service.discard(replace(identity, archive_key=""))
+        service.discard(replace(identity, archive_key=""), sandbox_id=spec.sandbox_id)
     assert manager.removals == 0
     assert manager.exports == 1
 
@@ -172,13 +174,13 @@ def test_discard_refuses_a_request_that_already_prepared_an_archive(archive_setu
 def test_deletion_retry_checks_absence_after_status_marks_container_lost(
     archive_setup, monkeypatch, discard, remaining
 ):
-    manager, supervisor, service, identity, _spec, _members = archive_setup
+    manager, supervisor, service, identity, spec, _members = archive_setup
     original = manager.current
     if discard:
         identity = replace(identity, request_id="discard-1", archive_key="")
 
         def delete():
-            return service.discard(identity)
+            return service.discard(identity, sandbox_id=spec.sandbox_id)
 
     else:
         receipt = service.prepare(identity)
@@ -225,13 +227,20 @@ def test_deletion_retry_checks_absence_after_status_marks_container_lost(
     assert manager.removals == 1
 
 
-def test_discard_completes_stale_membership_after_proving_container_absent(archive_setup):
+def test_discard_completes_stale_membership_after_proving_container_absent(
+    archive_setup, monkeypatch
+):
     manager, _supervisor, service, identity, spec, _members = archive_setup
     manager.current = None
     restarted = SandboxDeletionBackupService(
         SharedChatSessionSupervisor(manager), state_dir=service._state_dir
     )
     discard = replace(identity, request_id="discard-absent", archive_key="")
+    forgotten: list[str] = []
+    monkeypatch.setattr(
+        "cloud_agent_host.sandbox_deletion_backup.forget_deleted_container_uploads",
+        forgotten.append,
+    )
 
     result = restarted.discard(discard, sandbox_id=spec.sandbox_id)
 
@@ -244,15 +253,45 @@ def test_discard_completes_stale_membership_after_proving_container_absent(archi
     assert json.loads((directory / "discard.json").read_text())["target_absent"] is True
     assert (directory / "discarded.json").exists()
     assert manager.removals == 0
+    assert forgotten == [spec.container_name]
     # Replay from the authorization record after a crash before the final
     # acknowledgement; absence is proved again before completing.
     (directory / "discarded.json").unlink()
     with pytest.raises(SessionLeaseLost, match="identity changed"):
         restarted.discard(discard, sandbox_id="another-sandbox")
     assert not (directory / "discarded.json").exists()
-    # An older control-plane retry uses the identity in the durable record.
-    assert restarted.discard(discard) == result
+    assert restarted.discard(discard, sandbox_id=spec.sandbox_id) == result
     assert json.loads((directory / "discarded.json").read_text())["sandbox_id"] == spec.sandbox_id
+    assert forgotten == [spec.container_name, spec.container_name]
+
+
+def test_absent_discard_retries_when_upload_receipt_cleanup_fails(archive_setup, monkeypatch):
+    manager, _supervisor, service, identity, spec, _members = archive_setup
+    manager.current = None
+    restarted = SandboxDeletionBackupService(
+        SharedChatSessionSupervisor(manager), state_dir=service._state_dir
+    )
+    discard = replace(identity, request_id="discard-cleanup-retry", archive_key="")
+    forgotten: list[str] = []
+
+    def fail_once(container_name: str) -> None:
+        forgotten.append(container_name)
+        if len(forgotten) == 1:
+            raise OSError("cleanup failed")
+
+    monkeypatch.setattr(
+        "cloud_agent_host.sandbox_deletion_backup.forget_deleted_container_uploads",
+        fail_once,
+    )
+
+    with pytest.raises(OSError, match="cleanup failed"):
+        restarted.discard(discard, sandbox_id=spec.sandbox_id)
+
+    directory = restarted._directory(discard)
+    assert (directory / "discard.json").exists()
+    assert not (directory / "discarded.json").exists()
+    assert restarted.discard(discard, sandbox_id=spec.sandbox_id)["deleted"] is True
+    assert forgotten == [spec.container_name, spec.container_name]
 
 
 @pytest.mark.parametrize("replacement", [False, True])
@@ -277,9 +316,24 @@ def test_complete_native_backup_keeps_container_until_verified_commit(archive_se
     receipt = service.prepare(identity)
     assert manager.exports == 1
     assert manager.removals == 0
-    archive = service._directory(identity) / "archive.tar"
-    assert archive.stat().st_mode & 0o777 == 0o600
-    with tarfile.open(archive) as bundle:
+    # The archive is uploaded from the export and the tar bytes around it,
+    # kept private until the request ends.
+    kept = [
+        service._directory(identity) / name for name in ("archive.head", "container-rootfs.tar")
+    ]
+    assert [path.stat().st_mode & 0o777 for path in kept] == [0o600, 0o600]
+    for action in (
+        lambda: supervisor.operation_opened("thread-peer"),
+        lambda: supervisor.terminal_opened("thread-origin"),
+        lambda: supervisor.register_manifest(spec, members, expected_container_id="container-1"),
+    ):
+        with pytest.raises(SessionBusy):
+            action()
+    calls, uploaded = _upload(service, identity, receipt, monkeypatch)
+    assert uploaded["uploaded"]
+    assert hashlib.sha256(calls[0].content).hexdigest() == receipt["sha256"]
+    assert len(calls[0].content) == receipt["size_bytes"]
+    with tarfile.open(fileobj=io.BytesIO(calls[0].content)) as bundle:
         manifest = json.load(bundle.extractfile("manifest.json"))
         rootfs = bundle.extractfile("container-rootfs.tar").read()
     assert manifest["rootfs_sha256"] == hashlib.sha256(rootfs).hexdigest()
@@ -295,28 +349,140 @@ def test_complete_native_backup_keeps_container_until_verified_commit(archive_se
             == b"native session state"
         )
         assert not any(path.startswith("run/agent-members") for path in bundle.getnames())
-    for action in (
-        lambda: supervisor.operation_opened("thread-peer"),
-        lambda: supervisor.terminal_opened("thread-origin"),
-        lambda: supervisor.register_manifest(spec, members, expected_container_id="container-1"),
-    ):
-        with pytest.raises(SessionBusy):
-            action()
-    calls, uploaded = _upload(service, identity, receipt, monkeypatch)
-    assert uploaded["uploaded"]
-    assert hashlib.sha256(calls[0].content).hexdigest() == receipt["sha256"]
     assert manager.removals == 0
     result = service.commit(identity, sha256=receipt["sha256"], size_bytes=receipt["size_bytes"])
     assert result["deleted"]
     assert manager.removals == 1
     assert not supervisor.owns("thread-origin")
     assert not supervisor.owns("thread-peer")
-    assert not archive.exists()
+    assert not any(path.exists() for path in kept)
     assert (service._directory(identity) / "deleted.json").exists()
     assert (
         service.commit(identity, sha256=receipt["sha256"], size_bytes=receipt["size_bytes"])
         == result
     )
+
+
+def _whole_tar(manifest: bytes, rootfs) -> bytes:
+    """The archive as ``tarfile`` writes it whole, as prepare once did to ``archive.tar``."""
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as bundle:
+        info = tarfile.TarInfo("manifest.json")
+        info.size = len(manifest)
+        info.mode = 0o600
+        bundle.addfile(info, io.BytesIO(manifest))
+        bundle.add(rootfs, arcname="container-rootfs.tar", recursive=False)
+    return output.getvalue()
+
+
+def test_the_archive_sent_in_pieces_is_byte_for_byte_the_whole_tar(tmp_path):
+    manifest = b'{"format":"cloud-agent-sandbox-archive-v1"}'
+    rootfs = tmp_path / "rootfs.partial"
+    rootfs.write_bytes(b"")
+    head_bytes = len(deletion_backup._archive_head(manifest, rootfs))
+    # An export that ends the tar exactly on a record boundary, and others
+    # around every block and record edge.
+    exact = -(head_bytes + 2 * tarfile.BLOCKSIZE) % tarfile.RECORDSIZE
+    sizes = {0, 1, 511, 512, 513, exact - 1, exact, exact + 1, tarfile.RECORDSIZE + 7}
+    for size in sorted(sizes):
+        rootfs.write_bytes(bytes(range(256)) * (size // 256) + b"x" * (size % 256))
+        head = deletion_backup._archive_head(manifest, rootfs)
+        tail = deletion_backup._archive_tail(len(head), size)
+        assert head + rootfs.read_bytes() + tail == _whole_tar(manifest, rootfs), size
+
+
+def test_prepare_receipt_names_the_exact_archive_the_upload_sends(archive_setup, monkeypatch):
+    _manager, _supervisor, service, identity, *_ = archive_setup
+    receipt = service.prepare(identity)
+    directory = service._directory(identity)
+
+    calls, _ = _upload(service, identity, receipt, monkeypatch)
+
+    with tarfile.open(fileobj=io.BytesIO(calls[0].content)) as bundle:
+        manifest = bundle.extractfile("manifest.json").read()
+    assert calls[0].content == _whole_tar(manifest, directory / "container-rootfs.tar")
+    assert receipt["size_bytes"] == len(calls[0].content)
+    assert receipt["sha256"] == hashlib.sha256(calls[0].content).hexdigest()
+
+
+def test_the_receipt_follows_the_durable_archive_it_names(archive_setup, monkeypatch):
+    _manager, _supervisor, service, identity, *_ = archive_setup
+    events: list[str] = []
+    fsync, link, rename = os.fsync, os.link, os.replace
+
+    def recording_fsync(descriptor):
+        events.append("fsync " + os.path.basename(os.readlink(f"/proc/self/fd/{descriptor}")))
+        fsync(descriptor)
+
+    def recording_link(source, target, *args, **kwargs):
+        events.append("link " + os.path.basename(target))
+        link(source, target, *args, **kwargs)
+
+    def recording_rename(source, target, *args, **kwargs):
+        events.append("rename " + os.path.basename(target))
+        rename(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(deletion_backup.os, "fsync", recording_fsync)
+    monkeypatch.setattr(deletion_backup.os, "link", recording_link)
+    monkeypatch.setattr(deletion_backup.os, "replace", recording_rename)
+
+    service.prepare(identity)
+
+    receipt = events.index("link prepare.json")
+    renamed = events.index("rename container-rootfs.tar")
+    assert "fsync rootfs.partial" in events[:renamed]
+    assert "fsync archive.head" in events[:receipt]
+    # The new names are durable too before the receipt that relies on them.
+    assert f"fsync {service._directory(identity).name}" in events[renamed:receipt]
+
+
+def test_upload_leaves_the_checksum_to_s3_instead_of_hashing_again(archive_setup, monkeypatch):
+    manager, _supervisor, service, identity, *_ = archive_setup
+    receipt = service.prepare(identity)
+    export = service._directory(identity) / "container-rootfs.tar"
+    original = export.read_bytes()
+
+    def s3(request: httpx.Request) -> httpx.Response:
+        digest = base64.b64encode(hashlib.sha256(request.content).digest()).decode()
+        return httpx.Response(200 if digest == request.headers["x-amz-checksum-sha256"] else 400)
+
+    def unhashed(_path):
+        raise AssertionError("the upload hashed the archive again")
+
+    monkeypatch.setattr(service, "_digest", unhashed)
+    # The same size, other bytes: only S3's check of the signed checksum
+    # stands between them and the object.
+    export.write_bytes(b"X" + original[1:])
+    with monkeypatch.context() as patch, pytest.raises(SandboxError, match="rejected"):
+        _upload(service, identity, receipt, patch, handler=s3)
+    export.write_bytes(original + b"!")
+    with monkeypatch.context() as patch, pytest.raises(SandboxError, match="changed on disk"):
+        _upload(service, identity, receipt, patch, handler=s3)
+    export.write_bytes(original)
+    _calls, uploaded = _upload(service, identity, receipt, monkeypatch, handler=s3)
+    assert uploaded["uploaded"]
+    assert manager.removals == 0
+
+
+def test_a_whole_archive_an_earlier_version_prepared_still_uploads(archive_setup, monkeypatch):
+    _manager, _supervisor, service, identity, *_ = archive_setup
+    receipt = service.prepare(identity)
+    directory = service._directory(identity)
+    head = directory / "archive.head"
+    export = directory / "container-rootfs.tar"
+    with tarfile.open(fileobj=io.BytesIO(head.read_bytes()), mode="r|") as bundle:
+        manifest = bundle.extractfile(bundle.next()).read()
+    whole = _whole_tar(manifest, export)
+    (directory / "archive.tar").write_bytes(whole)
+    head.unlink()
+    export.unlink()
+
+    calls, uploaded = _upload(service, identity, receipt, monkeypatch)
+
+    assert uploaded["uploaded"]
+    assert calls[0].content == whole
+    service.commit(identity, sha256=receipt["sha256"], size_bytes=receipt["size_bytes"])
+    assert not (directory / "archive.tar").exists()
 
 
 @pytest.mark.parametrize("change", ["running", "generation", "container"])
@@ -383,6 +549,8 @@ def test_upload_failure_never_deletes_and_abort_releases_barrier(archive_setup, 
     assert service.abort(identity) == aborted
     supervisor.register_manifest(spec, members, expected_container_id="container-1")
     assert not (service._directory(identity) / "archive.tar").exists()
+    assert not (service._directory(identity) / "archive.head").exists()
+    assert not (service._directory(identity) / "container-rootfs.tar").exists()
     with pytest.raises(SessionLeaseLost, match="aborted"):
         service.prepare(identity)
 
@@ -432,6 +600,7 @@ def test_oversized_backup_releases_barrier_without_upload_or_delete(archive_setu
     assert manager.removals == 0
     supervisor.register_manifest(spec, members, expected_container_id="container-1")
     assert not (service._directory(identity) / "archive.tar").exists()
+    assert not list(service._directory(identity).iterdir())
 
 
 def test_lost_upload_receipt_412_still_needs_verified_commit(archive_setup, monkeypatch):

@@ -56,6 +56,39 @@ async def test_the_lifespan_gives_both_gateway_clients_one_pool(monkeypatch) -> 
     assert shared.is_closed, "the pool outlived the application that owned it"
 
 
+async def test_the_shared_pool_keeps_no_cookies(monkeypatch) -> None:
+    """One owner's answer must not set a cookie that rides on the next owner's request.
+
+    The pool carries owners' grants to the gateway and repositories' tokens to
+    GitHub. Each per-call client it replaced had a jar of its own.
+    """
+    monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
+    monkeypatch.delenv("GATEWAY_BASE_URL", raising=False)
+    monkeypatch.delenv("GATEWAY_ISSUER", raising=False)
+    monkeypatch.setattr(asyncpg, "create_pool", AsyncMock(return_value=AsyncMock()))
+    monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
+    monkeypatch.setattr(
+        "cloud_agent.identity_namespace.ensure_gateway_namespace", AsyncMock(return_value=None)
+    )
+    app = FastAPI()
+    url = "https://gateway.example/v1/chat/completions"
+
+    async with lifespan(app, background=False):
+        shared = app.state.http
+        # What the client does with every answer it receives.
+        shared.cookies.extract_cookies(
+            httpx.Response(
+                200,
+                headers={"set-cookie": "session=owner-a; Path=/"},
+                request=httpx.Request("POST", url),
+            )
+        )
+        follow_up = shared.build_request("POST", url)
+
+    assert not shared.cookies
+    assert "cookie" not in follow_up.headers
+
+
 async def test_the_lifespan_opens_its_database_pool_without_jit(monkeypatch) -> None:
     """Every database session the service opens leaves PostgreSQL's JIT compiler off.
 
@@ -279,6 +312,35 @@ async def test_host_removal_retires_only_after_completion(monkeypatch, outcome, 
     await HostCommands(SimpleNamespace(remove_host=AsyncMock(return_value=outcome))).remove(
         host="host-a"
     )
+    assert retirement.call_args_list == ([((["host-a"],), {})] if retired else [])
+
+
+@pytest.mark.parametrize(
+    "outcome, retired",
+    [
+        ("deleted", True),
+        ("active", False),
+        ("fenced", False),
+        ("unknown", False),
+        ("retained_groups_present", False),
+    ],
+)
+async def test_host_forget_retires_only_after_deletion(monkeypatch, outcome, retired) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from cloud_agent.application.host_commands import HostCommandError, HostCommands
+
+    retirement = Mock()
+    monkeypatch.setattr(
+        "cloud_agent.application.host_commands.retire_sandbox_manager_hosts", retirement
+    )
+    command = HostCommands(SimpleNamespace(forget_runner_host=AsyncMock(return_value=outcome)))
+    if outcome == "deleted":
+        await command.forget("host-a")
+    else:
+        with pytest.raises(HostCommandError):
+            await command.forget("host-a")
     assert retirement.call_args_list == ([((["host-a"],), {})] if retired else [])
 
 

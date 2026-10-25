@@ -22,13 +22,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
-from cloud_agent.api.deps import get_grant_client, get_storage
+from cloud_agent.api.deps import get_grant_client, get_renewal_schedule, get_storage
 from cloud_agent.application.grant_revocation import revoke_detached_grants
+from cloud_agent.grants import (
+    RenewalSchedule,  # noqa: TC001 — FastAPI resolves annotations at runtime.
+)
 from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
@@ -46,11 +49,16 @@ from cloud_agent.schemas import (
     HostRegisterResponse,
     HostSandboxArchiveSettings,
     ResidencyBeat,
+    RetainedSandboxBeat,
     RetainedSandboxStop,
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
 from cloud_agent_shared.host_settings import merge_admin_values, reported_values
-from cloud_agent_shared.sandbox_archive_settings import SANDBOX_CHECKPOINT_CAPABILITY
+from cloud_agent_shared.sandbox_archive_settings import (
+    SANDBOX_ARCHIVE_DESTINATION_CAPABILITY,
+    SANDBOX_ARCHIVE_S3_URI,
+    SANDBOX_CHECKPOINT_CAPABILITY,
+)
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -274,12 +282,15 @@ async def register_host(
 
 
 @router.post("/heartbeat", response_model=HostHeartbeatResponse)
-async def heartbeat_host(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+async def heartbeat_host(
     body: HostHeartbeatRequest,
     background_tasks: BackgroundTasks,
     host: dict[str, Any] = Depends(authenticate_host),
     store: _HostsStorage | None = Depends(get_storage),
     grants: Any = Depends(get_grant_client),
+    # Annotated rather than a `Depends` default, so the handler called
+    # directly, outside a request, is given no schedule and renews every grant.
+    schedule: Annotated[RenewalSchedule | None, Depends(get_renewal_schedule)] = None,
 ) -> HostHeartbeatResponse:
     """Report liveness, and whatever about this machine has changed.
 
@@ -325,155 +336,63 @@ async def heartbeat_host(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #
         # mid-request. Refusing is right: this credential now names nothing,
         # and the residencies below must not be extended on its word.
         raise _unauthorized("This host credential is no longer valid.")
-    # Residency beats ride the host heartbeat (design §7): one wire message
-    # says "I am here" and "these sandboxes are still mine", generation-scoped
-    # so a beat from a taken-over residency extends nothing — it comes back in
-    # residencies_lost and the host tears that sandbox down.
+    # A live retained member's residency rides the host heartbeat (design §7),
+    # generation-scoped so a beat from a taken-over residency extends nothing:
+    # it comes back in residencies_lost, with its generation echoed so a stale
+    # answer cannot kill a successor, and the host tears that member down.
     lost: list[ResidencyBeat] = []
     # The grants of every residency this beat extends, once each, renewed after
     # the reply: see ``_renew_residency_grants``.
     renewals: dict[str, None] = {}
-    revocations: list[str] = []
-    for residency_beat in body.residencies or []:
-        extended = await job_store.residency.heartbeat_residency(
-            thread_id=residency_beat.thread_id,
-            generation=residency_beat.generation,
-            host=updated["host"],
-            ttl_seconds=residency_ttl_s(),
-        )
-        if extended:
-            # The credential lives exactly as long as the residency_beat: the residency_beat
-            # that extends the lease extends the grant.
-            renewals[extended] = None
-        if extended is None:
-            # Echo the generation back (review finding 5): a residency_beat carrying
-            # gen N can be answered after the host re-established gen N+1,
-            # and a thread-id-only loss would let the stale answer kill the
-            # successor. The host drops only on an exact generation match.
-            lost.append(residency_beat)
     # Docker is the lifecycle authority for retained chat containers; the
     # database is the scheduling/fencing authority.  Heartbeats join those
     # views without treating absence as deletion. In particular, a sandbox manager's
     # settled idle sweep can stop Docker after the worker token that settled
     # the turn has expired, so host authentication is the durable path for
-    # recording that STOPPED transition.
-    retained_stops: list[RetainedSandboxStop] = []
-    for retained in body.retained_sandboxes or []:
-        diagnostics: dict[str, Any] = {}
-        if retained.resource_usage is not None:
-            diagnostics["resource_usage"] = retained.resource_usage.model_dump(mode="json")
-        if retained.terminal_count is not None:
-            diagnostics["terminal_count"] = retained.terminal_count
-        await job_store.sandbox.reconcile_thread_sandbox_observation(
-            thread_id=retained.thread_id,
-            host=updated["host"],
-            sandbox_id=retained.sandbox_id,
-            container_id=retained.container_id,
-            sandbox_generation=retained.generation,
-            running=retained.running,
-            activity_active=retained.activity_active,
-            idle_remaining_seconds=retained.idle_remaining_seconds,
-            members=[member.model_dump() for member in retained.members],
-            **diagnostics,
-        )
-        if retained.checkpoint is not None:
-            # Repeated on every beat until the group is gone; recording is
-            # idempotent and fenced to this host's current generation. A
-            # bookkeeping failure must not cost the host its liveness beat.
-            try:
-                await job_store.sandbox.record_sandbox_checkpoint(
-                    host=updated["host"],
-                    thread_id=retained.thread_id,
-                    checkpoint=retained.checkpoint.model_dump(mode="json"),
-                )
-            except Exception:
-                logger.warning(
-                    "sandbox checkpoint receipt could not be recorded",
-                    extra={
-                        "event": "sandbox_checkpoint_record_failed",
-                        "host": updated["host"],
-                        "sandbox_id": retained.sandbox_id,
-                    },
-                    exc_info=True,
-                )
-        for member in retained.members:
-            if member.residency_generation <= 0:
-                continue
-            # A stopped group has no process that can legitimately use a
-            # residency credential. Release and revoke it instead of renewing
-            # it forever. The database fences this against concurrent starts.
-            if not retained.running or member.resident_state in {"stopped", "lost"}:
-                released = await job_store.residency.release_shared_residency_if_quiescent(
-                    thread_id=member.thread_id,
-                    generation=member.residency_generation,
-                    process_generation=member.process_generation,
-                    host=updated["host"],
-                    sandbox_id=retained.sandbox_id,
-                )
-                if released and grants is not None:
-                    revocations.append(released)
-                continue
-            # Starting/restarting is a bounded launch window. Renew only a
-            # process that has proved itself LIVE.
-            if member.resident_state != "live":
-                continue
-            extended = await job_store.residency.heartbeat_residency(
-                thread_id=member.thread_id,
-                generation=member.residency_generation,
-                host=updated["host"],
-                ttl_seconds=residency_ttl_s(),
-            )
-            if extended:
-                renewals[extended] = None
-            if extended is None and not any(
-                item.thread_id == member.thread_id
-                and item.generation == member.residency_generation
-                for item in lost
-            ):
-                lost.append(
-                    ResidencyBeat(
-                        thread_id=member.thread_id,
-                        generation=member.residency_generation,
-                    )
-                )
-        if retained.running:
-            due = await job_store.sandbox.due_thread_sandbox_stop(
-                thread_id=retained.thread_id,
-                host=updated["host"],
-                sandbox_id=retained.sandbox_id,
-                container_id=retained.container_id,
-                sandbox_generation=retained.generation,
-            )
-            if due is not None:
-                # Fence the stop to the activation this beat reported idle. The
-                # sandbox manager refuses any other activation, so a database
-                # placeholder made every control-plane stop of a used chat
-                # stale; a newer activation still refuses this one.
-                retained_stops.append(
-                    RetainedSandboxStop.model_validate(
-                        {**due, "activation_generation": retained.activation_generation}
-                    )
-                )
+    # recording that STOPPED transition. Stopped containers stay listed until
+    # their chats are deleted, and an observation that changes nothing writes
+    # nothing (``reconcile_thread_sandbox_observations``).
+    retained_rows = body.retained_sandboxes or []
+    await job_store.sandbox.reconcile_thread_sandbox_observations(
+        host=updated["host"],
+        observations=[_sandbox_observation(retained) for retained in retained_rows],
+    )
+    await _record_checkpoints(job_store, updated["host"], retained_rows)
+    revocations = await _release_stopped_residencies(
+        job_store, updated["host"], retained_rows, grants
+    )
+    # Starting/restarting is a bounded launch window. Renew only a process that
+    # has proved itself LIVE.
+    live = [
+        (member.thread_id, member.residency_generation)
+        for retained in retained_rows
+        if retained.running
+        for member in retained.members
+        if member.residency_generation > 0 and member.resident_state == "live"
+    ]
+    for beat in await _extend_residencies(
+        job_store, updated["host"], live, ttl_seconds=residency_ttl_s(), renewals=renewals
+    ):
+        if beat not in lost:
+            lost.append(beat)
+    retained_stops = await _due_retained_stops(job_store, updated["host"], retained_rows)
     if revocations:
         background_tasks.add_task(revoke_detached_grants, grants, revocations)
     if renewals and grants is not None:
-        background_tasks.add_task(_renew_residency_grants, grants, list(renewals))
-    # This beat may carry the last report an agent update was waiting for.
-    # Bookkeeping, so a failure here costs the host nothing but a later switch.
-    try:
-        switched = await job_store.host_pool.activate_ready_runtime_upgrades()
-    except Exception:
-        logger.warning(
-            "agent runtime upgrade activation failed",
-            extra={"event": "agent_runtime_upgrade_activation_failed", "host": updated["host"]},
-            exc_info=True,
-        )
-    else:
-        for runtime in switched:
-            logger.info(
-                "agent runtime upgrade activated",
-                extra={"event": "agent_runtime_upgrade_activated", "runtime": runtime},
-            )
+        background_tasks.add_task(_renew_residency_grants, grants, list(renewals), schedule)
+    # The answer is made of the policy the beat's own write read, under the
+    # same lock, rather than of four more reads of it. A part of it that did
+    # not decode is None and is read again here, now that the beat's own work
+    # is done and any agent update it completes has switched: that read fails
+    # the answer with its error, as it did before the beat read the policy.
+    policy = updated["runner_policy"]
+    runtime_downloads = await _runtime_downloads(job_store, updated["host"], policy)
+    host_settings = policy["host_settings"]
+    if host_settings is None:
+        host_settings = await job_store.host_pool.host_settings()
+    archive = policy["sandbox_archive_settings"]
+    if archive is None:
+        archive = await job_store.host_pool.sandbox_archive_settings()
     return HostHeartbeatResponse(
         host=updated["host"],
         status=updated["status"],
@@ -485,15 +404,12 @@ async def heartbeat_host(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #
         slots_desired=updated.get("slots_desired"),
         # The whole set every time: this server's values over global values
         # and built-in defaults, so clearing an override never revives its .env.
-        settings=merge_admin_values(
-            await job_store.host_pool.host_settings(),
-            updated.get("settings_desired"),
-        ),
+        settings=merge_admin_values(host_settings, updated.get("settings_desired")),
         sandbox_archive_settings=_host_archive_settings(
-            await job_store.host_pool.sandbox_archive_settings(),
+            archive,
             updated.get("capabilities") or body.capabilities or [],
         ),
-        runtime_downloads=await job_store.host_pool.runtime_download_targets(),
+        runtime_downloads=runtime_downloads,
         residencies_lost=lost,
         retained_sandboxes_stop=retained_stops,
         heartbeat_interval_seconds=HEARTBEAT_INTERVAL_S,
@@ -511,7 +427,228 @@ async def heartbeat_host(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #
 from cloud_agent.application.residency import residency_ttl_s
 
 
-async def _renew_residency_grants(grants: Any, grant_ids: list[str]) -> None:
+def _sandbox_observation(retained: RetainedSandboxBeat) -> dict[str, Any]:
+    """What the store reconciles of one reported group, the host aside."""
+    observation: dict[str, Any] = {
+        "thread_id": retained.thread_id,
+        "sandbox_id": retained.sandbox_id,
+        "container_id": retained.container_id,
+        "sandbox_generation": retained.generation,
+        "running": retained.running,
+        "activity_active": retained.activity_active,
+        "idle_remaining_seconds": retained.idle_remaining_seconds,
+        "members": [member.model_dump() for member in retained.members],
+    }
+    if retained.resource_usage is not None:
+        observation["resource_usage"] = retained.resource_usage.model_dump(mode="json")
+    if retained.terminal_count is not None:
+        observation["terminal_count"] = retained.terminal_count
+    return observation
+
+
+async def _extend_residencies(
+    store: _HostsStorage,
+    host: str,
+    residencies: list[tuple[str, int]],
+    *,
+    ttl_seconds: float,
+    renewals: dict[str, None],
+) -> list[ResidencyBeat]:
+    """Extend these ``(thread_id, generation)`` residencies together; return those lost.
+
+    One transaction for all of them, which raises rather than answer a
+    database failure as "not extended". The grant of each one extended joins
+    ``renewals``: the credential lives exactly as long as the residency, so the
+    beat that extends the lease extends the grant. A lost one echoes its
+    generation back (review finding 5): a beat carrying gen N can be answered
+    after the host re-established gen N+1, and a thread-id-only loss would let
+    the stale answer kill the successor. The host drops only on an exact
+    generation match.
+    """
+    if not residencies:
+        return []
+    extended = await store.residency.heartbeat_residencies(
+        residencies=residencies, host=host, ttl_seconds=ttl_seconds
+    )
+    lost: list[ResidencyBeat] = []
+    for thread_id, generation in residencies:
+        grant = extended.get((thread_id, generation))
+        if grant:
+            renewals[grant] = None
+        elif grant is None:
+            lost.append(ResidencyBeat(thread_id=thread_id, generation=generation))
+    return lost
+
+
+async def _release_stopped_residencies(
+    store: _HostsStorage, host: str, retained_rows: list[RetainedSandboxBeat], grants: Any
+) -> list[str]:
+    """Release the residencies of members with no process to use them; return their grants.
+
+    A stopped group has no process that can legitimately use a residency
+    credential, nor a stopped or lost member of a running one. Release it
+    instead of renewing it forever; the database fences this against
+    concurrent starts. Most were released on an earlier beat, so one read
+    finds the generations still open, and only those are offered. The caller
+    revokes the returned grants after the reply (``revoke_detached_grants``).
+    """
+    quiescent = [
+        (retained, member)
+        for retained in retained_rows
+        for member in retained.members
+        if member.residency_generation > 0
+        and (not retained.running or member.resident_state in {"stopped", "lost"})
+    ]
+    if not quiescent:
+        return []
+    still_open = await store.residency.open_shared_residencies(
+        residencies=[
+            (retained.sandbox_id, member.thread_id, member.residency_generation)
+            for retained, member in quiescent
+        ]
+    )
+    revocations: list[str] = []
+    for retained, member in quiescent:
+        if (retained.sandbox_id, member.thread_id, member.residency_generation) not in still_open:
+            continue
+        released = await store.residency.release_shared_residency_if_quiescent(
+            thread_id=member.thread_id,
+            generation=member.residency_generation,
+            process_generation=member.process_generation,
+            host=host,
+            sandbox_id=retained.sandbox_id,
+        )
+        if released and grants is not None:
+            revocations.append(released)
+    return revocations
+
+
+async def _due_retained_stops(
+    store: _HostsStorage, host: str, retained_rows: list[RetainedSandboxBeat]
+) -> list[RetainedSandboxStop]:
+    """The exact stop fence of every running group whose stop the database says is due."""
+    stops: list[RetainedSandboxStop] = []
+    for retained in retained_rows:
+        if not retained.running:
+            continue
+        due = await store.sandbox.due_thread_sandbox_stop(
+            thread_id=retained.thread_id,
+            host=host,
+            sandbox_id=retained.sandbox_id,
+            container_id=retained.container_id,
+            sandbox_generation=retained.generation,
+        )
+        if due is not None:
+            # Fence the stop to the activation this beat reported idle. The
+            # sandbox manager refuses any other activation, so a database
+            # placeholder made every control-plane stop of a used chat stale;
+            # a newer activation still refuses this one.
+            stops.append(
+                RetainedSandboxStop.model_validate(
+                    {**due, "activation_generation": retained.activation_generation}
+                )
+            )
+    return stops
+
+
+async def _runtime_downloads(
+    store: _HostsStorage, host: str, policy: dict[str, Any]
+) -> list[dict[str, str]]:
+    """What the answer tells the host to hold, once any update this beat completes switches.
+
+    This beat may carry the last report an agent update was waiting for, so
+    the switch is tried whenever one may be waiting, including when the beat's
+    read of the updates did not decode. The targets are read again after a
+    switch, since hosts now hold what it made current, and when the beat's
+    read of them did not decode, which then fails the answer.
+    """
+    targets = policy["runtime_download_targets"]
+    switched = (
+        []
+        if policy["runtime_upgrade_waiting"] is False
+        else await _switch_ready_runtime_upgrades(store, host)
+    )
+    if switched or targets is None:
+        return await store.host_pool.runtime_download_targets()
+    return list(targets)
+
+
+async def _switch_ready_runtime_upgrades(store: _HostsStorage, host: str) -> list[str]:
+    """Switch new chats to each update every online host holds; return the runtimes switched.
+
+    Bookkeeping, so a failure here costs the host nothing but a later switch.
+    """
+    try:
+        switched = await store.host_pool.activate_ready_runtime_upgrades()
+    except Exception:
+        logger.warning(
+            "agent runtime upgrade activation failed",
+            extra={"event": "agent_runtime_upgrade_activation_failed", "host": host},
+            exc_info=True,
+        )
+        return []
+    for runtime in switched:
+        logger.info(
+            "agent runtime upgrade activated",
+            extra={"event": "agent_runtime_upgrade_activated", "runtime": runtime},
+        )
+    return switched
+
+
+async def _record_checkpoints(
+    store: _HostsStorage, host: str, retained_rows: list[RetainedSandboxBeat]
+) -> None:
+    """Record the checkpoint receipts a beat carries, the new ones only.
+
+    A host repeats a group's latest receipt on every beat until the group is
+    gone. Recording is idempotent and fenced to this host's current
+    generation, but it takes the compute fence and the group's lock to find
+    that out, so one read first sets aside every receipt already recorded. A
+    bookkeeping failure must not cost the host its liveness beat.
+    """
+    receipts = [
+        (retained, retained.checkpoint)
+        for retained in retained_rows
+        if retained.checkpoint is not None
+    ]
+    if not receipts:
+        return
+    try:
+        recorded = await store.sandbox.recorded_sandbox_checkpoints(
+            checkpoint_ids=[checkpoint.checkpoint_id for _, checkpoint in receipts]
+        )
+    except Exception:
+        # Each is then offered as before: recording one twice changes nothing.
+        logger.warning(
+            "sandbox checkpoint receipts could not be looked up",
+            extra={"event": "sandbox_checkpoint_lookup_failed", "host": host},
+            exc_info=True,
+        )
+        recorded = set()
+    for retained, checkpoint in receipts:
+        if checkpoint.checkpoint_id in recorded:
+            continue
+        try:
+            await store.sandbox.record_sandbox_checkpoint(
+                host=host,
+                thread_id=retained.thread_id,
+                checkpoint=checkpoint.model_dump(mode="json"),
+            )
+        except Exception:
+            logger.warning(
+                "sandbox checkpoint receipt could not be recorded",
+                extra={
+                    "event": "sandbox_checkpoint_record_failed",
+                    "host": host,
+                    "sandbox_id": retained.sandbox_id,
+                },
+                exc_info=True,
+            )
+
+
+async def _renew_residency_grants(
+    grants: Any, grant_ids: list[str], schedule: RenewalSchedule | None = None
+) -> None:
     """Renew the grants a heartbeat extended, together, after its reply was sent.
 
     Each renewal may take the gateway's whole request timeout, and the host
@@ -519,11 +656,22 @@ async def _renew_residency_grants(grants: Any, grant_ids: list[str]) -> None:
     the reply, two slow renewals were enough for the host never to receive the
     stops and lost residencies that answer carries. Best-effort, as before: a
     missed renewal starves hot turns into warm, never into an outage.
+
+    Only the grants that are running low, though. Every beat extends every
+    residency it names, and renewing each one's grant every thirty seconds
+    asked the gateway ten times for every step it granted. The beat has just
+    extended these residencies, which is all the store says about their grants,
+    so the schedule decides only *when*: a grant whose last renewal has plenty
+    left waits for a later beat. Without a schedule, every one is renewed.
     """
 
     async def renew(grant_id: str) -> None:
+        if schedule is not None and not schedule.due(grant_id):
+            return
         with contextlib.suppress(Exception):
-            await grants.renew(grant_id)
+            renewal = await grants.renew(grant_id)
+            if schedule is not None:
+                schedule.record(grant_id, renewal)
 
     await asyncio.gather(*(renew(grant_id) for grant_id in grant_ids))
 
@@ -531,14 +679,32 @@ async def _renew_residency_grants(grants: Any, grant_ids: list[str]) -> None:
 def _host_archive_settings(
     values: dict[str, Any],
     capabilities: list[str],
-) -> HostSandboxArchiveSettings:
-    """Return the policy one host can apply.
+) -> HostSandboxArchiveSettings | None:
+    """Return the policy one host can apply, or ``None`` for one that cannot.
 
     A host whose sandbox manager predates checkpoints rejects the unknown key,
     so an opt-out is reduced to the default (which serializes to nothing) for
     it. It receives the same revision and keeps archiving without checkpoints.
+
+    A host whose sandbox manager predates the bucket setting refuses any bucket
+    but the default. A disabled policy is reduced to the default bucket for it:
+    it creates no S3 service and starts no new archive (a final already fenced
+    under an earlier enabled revision still uploads under that revision), and
+    the host confirms the revision and keeps taking work. An enabled one has no
+    such reduction, since archiving to the default would write somewhere the
+    policy does not say, so that host gets no policy. Until it is redeployed,
+    its sandbox manager keeps the last policy it applied and goes on archiving
+    the groups it holds, checkpoints included, into the previous bucket, and
+    with no confirmed revision the host takes no work at all.
     """
     settings = HostSandboxArchiveSettings.model_validate(values)
+    if (
+        settings.s3_uri != SANDBOX_ARCHIVE_S3_URI
+        and SANDBOX_ARCHIVE_DESTINATION_CAPABILITY not in capabilities
+    ):
+        if settings.enabled:
+            return None
+        settings = settings.model_copy(update={"s3_uri": SANDBOX_ARCHIVE_S3_URI})
     if SANDBOX_CHECKPOINT_CAPABILITY not in capabilities:
         settings = settings.model_copy(update={"checkpoints_enabled": settings.enabled})
     return settings

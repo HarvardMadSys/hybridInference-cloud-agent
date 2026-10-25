@@ -210,7 +210,7 @@ class Lab:
         return self.manager.backend.network_guard()
 
     def bridge(self, group: str) -> str:
-        return self.network.bridge_name(self.manager.network_for(self.groups[group]))
+        return self.network.bridge_name(self.manager.network.network_for(self.groups[group]))
 
     def probe(self, group: str, targets: list[tuple[str, int, str]]) -> dict[str, str]:
         """Verdicts as the sandbox user sees them, through the product exec path."""
@@ -379,7 +379,7 @@ def lab():
             "Networks"
         ]
         for name, spec in groups.items():
-            bridge = manager.network_for(spec)
+            bridge = manager.network.network_for(spec)
             inspected = json.loads(_docker("inspect", spec.container_name).stdout)[0]
             lab.addresses[name] = inspected["NetworkSettings"]["Networks"][bridge]["IPAddress"]
             lab.addresses[f"gateway-{name}"] = relay_networks[bridge]["IPAddress"]
@@ -389,7 +389,9 @@ def lab():
             "-4", "route", "get", "1.1.1.1",
         ).stdout.split()  # fmt: skip
         lab.addresses["host"] = route[route.index("src") + 1]
-        ipam = json.loads(_docker("network", "inspect", manager.network_for(groups["a"])).stdout)[0]
+        ipam = json.loads(
+            _docker("network", "inspect", manager.network.network_for(groups["a"])).stdout
+        )[0]
         config = ipam["IPAM"]["Config"][0]
         lab.addresses["bridge-gateway"] = config.get("Gateway") or str(
             next(ipaddress.IPv4Network(config["Subnet"]).hosts())
@@ -694,7 +696,10 @@ def test_relays_keep_their_way_out_while_groups_come_and_go(lab: Lab) -> None:
     lab.manager.start(visitor)
     lab.manager.stop(visitor)
     _docker(
-        "network", "disconnect", lab.manager.network_for(lab.groups["a"]), lab.relays["gateway"]
+        "network",
+        "disconnect",
+        lab.manager.network.network_for(lab.groups["a"]),
+        lab.relays["gateway"],
     )
     lab.manager.require_network(lab.groups["a"])
 
@@ -715,7 +720,9 @@ def test_a_stopped_group_leaves_no_exception_and_comes_back_guarded(lab: Lab) ->
     bridge = lab.bridge("b")
     lab.manager.stop(spec)
     assert lab.guard.relay_endpoints(bridge) == set()
-    listed = _docker("network", "ls", "-q", "--filter", f"name={lab.manager.network_for(spec)}")
+    listed = _docker(
+        "network", "ls", "-q", "--filter", f"name={lab.manager.network.network_for(spec)}"
+    )
     assert listed.stdout.strip() == ""
     lab.manager.start(spec)  # the guest check runs again on this cold start
     verdicts = lab.probe(

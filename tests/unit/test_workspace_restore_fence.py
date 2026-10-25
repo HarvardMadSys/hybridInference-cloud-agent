@@ -1,4 +1,7 @@
-"""Workspace requests fence a stopped group's restore point and wait for a moved one."""
+"""Workspace requests fence a stopped group's restore point and wait for a moved one.
+
+A terminal's input, resize and kill cannot start the container, and take no fence.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +11,9 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 
-from cloud_agent.api._workspace_access import fence_workspace_start
+from cloud_agent import sandbox_manager_routing
+from cloud_agent.api._workspace_access import _terminal_control_manager, fence_workspace_start
+from cloud_agent.ports.sandbox import TerminalControlRoute
 
 
 class _Sandbox:
@@ -110,3 +115,56 @@ async def test_the_manifest_names_the_fence_taken_after_the_job_was_read(monkeyp
     # the fences of the requests it admitted.
     assert fenced == [27]
     assert job["thread_sandbox"]["start_seq"] == 26
+
+
+def _route(**changes: Any) -> TerminalControlRoute:
+    values: dict[str, Any] = {
+        "thread_id": "athr_one",
+        "workspace_ready": True,
+        "terminal_resume_pending": False,
+        "group_state": "running",
+        "host_revoked": False,
+        "host": {"host": "runner-a", "sandbox_manager_url": "http://runner-a.test:8092"},
+    }
+    return TerminalControlRoute(**{**values, **changes})
+
+
+@pytest.mark.parametrize("state", ["running", "stopped"])
+def test_a_terminal_control_call_reaches_its_manager_unfenced(monkeypatch, state):
+    """Its read names the host, and nothing it sends can start the container."""
+    manager = object()
+    reached: list[dict[str, Any]] = []
+
+    def client_for(host: dict[str, Any]) -> Any:
+        reached.append(host)
+        return manager
+
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", client_for)
+
+    assert _terminal_control_manager(_route(group_state=state)) is manager
+    assert reached == [_route().host]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"group_state": None},
+        {"group_state": "cold"},
+        {"group_state": "restoring"},
+        {"host_revoked": True},
+        {"terminal_resume_pending": True},
+        {"host": None},
+    ],
+)
+def test_a_terminal_control_call_the_general_path_answers(monkeypatch, changes):
+    """No group, one a checkpoint holds or on a removed host, a pending resume, no host.
+
+    Each keeps the answer the fence or the resume gives it.
+    """
+
+    def client_for(_host: dict[str, Any]) -> Any:
+        raise AssertionError("routed past the general path")
+
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", client_for)
+
+    assert _terminal_control_manager(_route(**changes)) is None

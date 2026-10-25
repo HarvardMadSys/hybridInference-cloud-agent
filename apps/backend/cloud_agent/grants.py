@@ -25,7 +25,8 @@ whether an attempt may run or how much inference it may request.
 no attempt or lease state at all, so nothing there can notice that an attempt
 was superseded. This service notices, and stops renewing. Anything that makes
 renewal automatic — a background loop that does not consult the store — quietly
-removes the fence.
+removes the fence. :class:`RenewalSchedule`, which spaces renewals out by what
+each one bought, does not: it can only hold a renewal back, never ask for one.
 """
 
 from __future__ import annotations
@@ -33,9 +34,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import re
+import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 import httpx
@@ -50,6 +54,9 @@ from cloud_agent.grant_usage import (
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, setting_env
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = get_logger(__name__)
 
@@ -168,6 +175,139 @@ GRANT_TTL_S = int(RENEWAL_INTERVAL_S * RENEWAL_HEADROOM_PASSES)
 #: asserts our numbers stay inside them.
 GATEWAY_MAX_TTL_S = 900
 GATEWAY_RENEWAL_STEP_S = 300
+
+#: How much life a grant may have left for a pass to renew it; a pass that
+#: finds more leaves it alone and asks again on the next one. **Derived, never
+#: typed**, for the reason :data:`GRANT_TTL_S` is: the pass that first finds a
+#: grant due comes one interval after a pass that found more than this, so it
+#: still holds the whole lifetime a grant is minted with --
+#: :data:`RENEWAL_HEADROOM_PASSES` passes -- and one pass to spare. At today's
+#: numbers, against the gateway's step, a live grant is renewed about every two
+#: minutes rather than on every thirty-second pass.
+RENEWAL_DUE_WITHIN_S = GRANT_TTL_S + 2 * RENEWAL_INTERVAL_S
+
+
+def _utc_now() -> datetime:
+    """Read this process's wall clock, the one ``expires_at`` is compared with."""
+    return datetime.now(UTC)
+
+
+def _lifetime_left(grant: object, now: datetime) -> float | None:
+    """Read how long a grant the gateway just answered for has left, in seconds.
+
+    Capped at one renewal step. ``None`` when the answer gives nothing usable:
+    no ``expires_at``, one that does not parse or carries no UTC offset, or one
+    that is not ahead of ``now``. :class:`RenewalSchedule` explains why the cap
+    is what makes a skewed clock safe.
+    """
+    raw = grant.get("expires_at") if isinstance(grant, Mapping) else None
+    if not isinstance(raw, str):
+        return None
+    try:
+        expires_at = datetime.fromisoformat(raw)
+        if expires_at.utcoffset() is None:
+            return None
+        lifetime = (expires_at - now).total_seconds()
+    except (ValueError, OverflowError):
+        return None
+    if lifetime <= 0:
+        return None
+    return min(lifetime, float(GATEWAY_RENEWAL_STEP_S))
+
+
+class RenewalSchedule:
+    """When each live grant next needs renewing, by what its last renewal bought.
+
+    Passes come every :data:`RENEWAL_INTERVAL_S` and a renewal buys
+    :data:`GATEWAY_RENEWAL_STEP_S`, so renewing every live grant on every pass
+    asked the gateway ten times for each step it granted -- for every running
+    attempt, from the renewal task, and for every resident member, from its
+    host's heartbeat -- and made renewal the control plane's largest steady
+    stream of gateway calls. This keeps what the gateway answered, so a grant
+    is renewed only once it has :data:`RENEWAL_DUE_WITHIN_S` or less left.
+
+    **It only ever holds a renewal back.** Both callers ask about a grant only
+    once the store has said it is live -- the renewal pass through the query
+    that is the fence, on every pass; a heartbeat for a residency it has just
+    extended -- so nothing recorded here can renew a grant the store stopped
+    returning. A grant with nothing recorded is due, as is every grant on the
+    first pass after its mint or after a restart.
+
+    **Deadlines are kept on this process's monotonic clock.** ``expires_at`` is
+    the gateway's wall clock, and compared with ours on every pass, a clock
+    running behind the gateway's would see minutes the grant does not have. So
+    the lifetime is read once, against our wall clock, as the answer arrives;
+    it is capped at one renewal step and kept as a monotonic deadline. A clock
+    behind the gateway's can then make a grant look no longer-lived than a
+    fresh renewal, which is what it was just given; a clock ahead only renews
+    it sooner; and a gateway that shortens its step is renewed sooner on its
+    own numbers. A lifetime that is missing, unreadable or already over is not
+    recorded, so that grant is renewed on every pass, as before this existed.
+
+    One per process, shared by the renewal task and the host heartbeat, which
+    only the main listener receives. Neither sees every grant -- the task lists
+    attempts, a heartbeat one host's residencies -- so neither can prune by
+    absence without erasing the other's entries. An entry goes instead once its
+    grant falls due, from when it answers exactly what no entry would.
+    """
+
+    def __init__(
+        self,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], datetime] = _utc_now,
+    ) -> None:
+        """Start with nothing recorded: every grant is due until it is renewed.
+
+        Args:
+            monotonic: The clock deadlines are kept on.
+            wall_clock: The clock ``expires_at`` is read against, as an answer
+                arrives and never after.
+        """
+        self._monotonic = monotonic
+        self._wall_clock = wall_clock
+        self._deadlines: dict[str, float] = {}
+        self._next_sweep = -math.inf
+
+    def __contains__(self, grant_id: object) -> bool:
+        """Whether a deadline is recorded for this grant."""
+        return grant_id in self._deadlines
+
+    def due(self, grant_id: str) -> bool:
+        """Whether this grant should be renewed now.
+
+        It should, unless the last renewal recorded for it has more than
+        :data:`RENEWAL_DUE_WITHIN_S` left.
+        """
+        deadline = self._deadlines.get(grant_id)
+        return deadline is None or deadline - self._monotonic() <= RENEWAL_DUE_WITHIN_S
+
+    def record(self, grant_id: str, grant: object) -> None:
+        """Remember how long a renewal the gateway has just answered bought.
+
+        Args:
+            grant_id: The grant renewed.
+            grant: The gateway's answer. Only ``expires_at`` is read, and an
+                answer without a usable one leaves the grant due every pass.
+        """
+        now = self._monotonic()
+        lifetime = _lifetime_left(grant, self._wall_clock())
+        if lifetime is None:
+            self._deadlines.pop(grant_id, None)
+        else:
+            self._deadlines[grant_id] = now + lifetime
+        if now >= self._next_sweep:
+            # A grant nobody renews any more -- its attempt finished, its
+            # residency ended -- is never recorded again, and nothing else
+            # would drop its entry. Recording is the only way the record grows,
+            # so it is also where it sheds what has fallen due, at most once a
+            # pass.
+            self._next_sweep = now + RENEWAL_INTERVAL_S
+            self._deadlines = {
+                known: deadline
+                for known, deadline in self._deadlines.items()
+                if deadline - now > RENEWAL_DUE_WITHIN_S
+            }
 
 
 class GrantClient:

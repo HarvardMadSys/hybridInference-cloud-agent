@@ -390,6 +390,18 @@ jobs:
       # Moving a Host is systemd, sshd's forced command, rsync and Docker's
       # on-disk state between two machines. Unit doubles replace all of them.
       # Run the control plane's own steps over SSH between two systemd nodes.
+      #
+      # Their image apt-installs systemd, Docker and sshd from Ubuntu's mirror.
+      # When the test built it, the build used up the test's whole 300s pytest
+      # timeout before the move began (#985), most likely on a slow mirror.
+      # Built here, within a limit of its own, the image takes as long as the
+      # mirror needs, a broken build fails under this step's name, and the
+      # test's own build then takes every layer from the cache.
+      - name: Build the node image for the Host move
+        if: matrix.shard == 1
+        timeout-minutes: 15
+        run: docker build -t cloud-agent-test-compute-node:local tests/external/compute_node
+
       - name: A Host moves between two nodes over SSH
         if: matrix.shard == 1
         timeout-minutes: 10
@@ -848,6 +860,8 @@ jobs:
         working-directory: ./apps/frontend
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright
+          # Runtime site config intentionally leaves a verified root artifact.
+          CLOUD_AGENT_E2E_SKIP_BUILD: '1'
         run: |
           set -euo pipefail
           # Only disposable hosted runners may install OS packages. Shared

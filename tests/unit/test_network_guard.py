@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host.network_guard import HostNetworkGuard, NetworkGuardError
+from cloud_agent_host.network_guard import GUARD_RECHECK_S, HostNetworkGuard, NetworkGuardError
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 
 _ENV = {
@@ -707,12 +708,205 @@ def test_the_managers_host_rule_check_reads_the_kernel_every_time() -> None:
     nft = FakeNft()
     guard = _guard(nft)
     manager = ChatSandboxManager(SimpleNamespace(network_guard=lambda: guard))  # type: ignore[arg-type]
-    manager.verify_host_rules()
+    manager.network.verify_host_rules()
     nft.tables.clear()
 
-    manager.verify_host_rules()
+    manager.network.verify_host_rules()
 
     assert ("inet", guard.network.table) in nft.tables
+
+
+# ── a turn's child, on its host service's verification ──────────────────
+
+
+def _host_guard(monkeypatch) -> tuple[FakeNft, HostNetworkGuard]:
+    """The host service's guard after its startup check, its image found as deployed."""
+    nft = FakeNft()
+    monkeypatch.setenv("HOSTNAME", "runner-1")
+    guard = HostNetworkGuard(_network(), run=nft)
+    guard.ensure(max_age_s=0)
+    return nft, guard
+
+
+def _child_guard(host: FakeNft) -> tuple[FakeNft, HostNetworkGuard]:
+    """A turn's child's guard: helper runs of its own, on the host's kernel."""
+    nft = FakeNft()
+    nft.tables = host.tables
+    return nft, HostNetworkGuard(_network(), run=nft)
+
+
+def _steps(calls: list[tuple[list[str], str | None]]) -> list[str]:
+    """Each Docker process a guard ran: the inspect for its image, or a helper's entrypoint."""
+    return [
+        argv[argv.index("--entrypoint") + 1] if "--entrypoint" in argv else "inspect"
+        for argv, _stdin in calls
+    ]
+
+
+def test_a_handover_reuses_a_recent_verification_and_renews_an_older_one(monkeypatch) -> None:
+    """Never one per turn, and never one so old that the child's start would outlast it."""
+    from cloud_agent_host import network_guard
+
+    nft, guard = _host_guard(monkeypatch)
+    handed = guard.handover()
+    made = handed["verified_at"]
+    monkeypatch.setattr(
+        network_guard.time, "monotonic", lambda: made + network_guard.GUARD_RENEW_S - 0.001
+    )
+
+    assert guard.handover() == handed == {"verified_at": made, "helper_image": _IMAGE}
+    assert _steps(nft.calls) == ["inspect", "python3", "ip"], "only the startup check ran"
+
+    later = made + network_guard.GUARD_RENEW_S + 0.001
+    monkeypatch.setattr(network_guard.time, "monotonic", lambda: later)
+
+    assert guard.handover() == {"verified_at": later, "helper_image": _IMAGE}
+    assert _steps(nft.calls) == ["inspect", "python3", "ip", "python3", "ip"]
+
+
+@pytest.mark.parametrize("failure", ["nft", "unexpected"])
+def test_a_check_that_fails_at_a_handover_is_handed_over_as_its_reason(failure) -> None:
+    """For the child to decline with: a raise would strand a turn that never started."""
+    runs: list[list[str]] = []
+
+    def run(argv: list[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+        runs.append(argv)
+        if failure == "unexpected":
+            raise RuntimeError("the Docker client crashed")
+        return subprocess.CompletedProcess(argv, 1, "", "Error: Could not process rule")
+
+    guard = HostNetworkGuard(_network(), helper_image=_IMAGE, run=run)
+
+    handed = guard.handover()
+
+    assert list(handed) == ["error"]
+    assert ("Could not process rule" if failure == "nft" else "client crashed") in handed["error"]
+    guard.handover()
+    assert len(runs) == 2, "nothing was trusted, so the next handover checks again"
+
+
+def test_a_child_adopts_its_hosts_verification_and_starts_no_helper_for_it(monkeypatch) -> None:
+    """Nor the inspect that finds the helpers' image: the host hands that over as well."""
+    host_nft, host = _host_guard(monkeypatch)
+    handed = json.loads(json.dumps(host.handover()))  # as the turn payload carries it
+    nft, child = _child_guard(host_nft)
+
+    assert child.adopt(handed) is True
+
+    assert child.ensure() is None, "trusted as the host's own guard trusts it"
+    assert nft.calls == []
+    bridge = child.network.bridge_name("freeinference-chat-net-x")
+    child.sync_relays(bridge, {("10.240.0.3", 8080)})
+    assert _steps(nft.calls) == ["python3"]
+    assert _IMAGE in nft.calls[0][0]
+
+
+def test_an_adopted_verification_lapses_when_the_hosts_own_does(monkeypatch) -> None:
+    """A minute after the host made it, as for every activation; not after the child took it."""
+    from cloud_agent_host import network_guard
+
+    host_nft, host = _host_guard(monkeypatch)
+    handed = host.handover()
+    made = handed["verified_at"]
+    nft, child = _child_guard(host_nft)
+    monkeypatch.setattr(
+        network_guard.time, "monotonic", lambda: made + network_guard.GUARD_RECHECK_S - 1
+    )
+    child.adopt(handed)
+    assert child.ensure() is None
+    assert nft.calls == []
+    monkeypatch.setattr(
+        network_guard.time, "monotonic", lambda: made + network_guard.GUARD_RECHECK_S + 0.001
+    )
+
+    child.ensure()
+
+    assert _steps(nft.calls) == ["python3", "ip"], "the full check, on the image it was handed"
+
+
+_NOW = 10_000.0
+
+
+@pytest.mark.parametrize(
+    ("verification", "reason"),
+    [
+        pytest.param(None, "without verifying", id="missing"),
+        pytest.param("2026-10-21T05:00:00Z", "without verifying", id="not-a-mapping"),
+        pytest.param({}, "unreadable", id="empty"),
+        pytest.param(
+            {"error": "nft failed: Error: Could not process rule"},
+            "could not verify the sandbox network rules: nft failed",
+            id="failed",
+        ),
+        pytest.param(
+            {"error": "nft failed", "verified_at": _NOW - 1, "helper_image": _IMAGE},
+            "could not verify",
+            id="failed-with-a-time",
+        ),
+        pytest.param({"verified_at": "recently", "helper_image": _IMAGE}, "unreadable", id="text"),
+        pytest.param({"verified_at": True, "helper_image": _IMAGE}, "unreadable", id="bool"),
+        pytest.param({"verified_at": 10**400, "helper_image": _IMAGE}, "unreadable", id="huge"),
+        pytest.param({"verified_at": float("nan"), "helper_image": _IMAGE}, "unreadable", id="nan"),
+        pytest.param({"verified_at": _NOW + 1, "helper_image": _IMAGE}, "unreadable", id="future"),
+        pytest.param({"verified_at": _NOW - 1}, "unreadable", id="no-image"),
+        pytest.param({"verified_at": _NOW - 1, "helper_image": "runner:1"}, "unreadable", id="tag"),
+        pytest.param(
+            {"verified_at": 1.0, "helper_image": "runner:1"}, "unreadable", id="tag-past-the-window"
+        ),
+    ],
+)
+def test_a_child_refuses_a_verification_it_cannot_trust_and_holds_nothing(
+    monkeypatch, verification, reason
+) -> None:
+    from cloud_agent_host import network_guard
+
+    monkeypatch.setattr(network_guard.time, "monotonic", lambda: _NOW)
+    monkeypatch.setenv("HOSTNAME", "runner-1")
+    nft = FakeNft()
+    child = HostNetworkGuard(_network(), run=nft)
+
+    with pytest.raises(NetworkGuardError, match=reason):
+        child.adopt(verification)
+
+    assert nft.calls == []
+    child.ensure()
+    assert _steps(nft.calls) == ["inspect", "python3", "ip"], "nothing adopted, nothing trusted"
+
+
+@pytest.mark.parametrize(
+    "age", [pytest.param(GUARD_RECHECK_S, id="at-the-window"), pytest.param(90.0, id="past-it")]
+)
+def test_a_child_slow_to_start_adopts_nothing_of_a_sound_verification_and_says_why(
+    monkeypatch, caplog, age
+) -> None:
+    """The host's check aged out on the way, nothing more: no reason to decline the turn.
+
+    Neither its time nor its helper image is adopted, so the child's own check
+    is the full one every child made before the host handed its check over.
+    """
+    from cloud_agent_host import network_guard
+
+    monkeypatch.setattr(network_guard.time, "monotonic", lambda: _NOW)
+    monkeypatch.setenv("HOSTNAME", "runner-1")
+    nft = FakeNft()
+    child = HostNetworkGuard(_network(), run=nft)
+    handed_image = "sha256:" + "b" * 64
+
+    with caplog.at_level(logging.WARNING):
+        adopted = child.adopt({"verified_at": _NOW - age, "helper_image": handed_image})
+
+    assert adopted is False
+    assert nft.calls == []
+    (warned,) = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "network_guard_verification_aged_out"
+    ]
+    assert warned.age_s == age
+    assert f"rules {age:.0f}s ago" in warned.detail
+    child.ensure()
+    assert _steps(nft.calls) == ["inspect", "python3", "ip"], "nothing adopted, nothing trusted"
+    assert not [argv for argv, _stdin in nft.calls if handed_image in argv]
 
 
 # ── remembered relay exceptions ─────────────────────────────────────────

@@ -69,7 +69,7 @@ class MemberWindow:
     checkpoints: CheckpointSchedule
     #: How far the window's journal has been read. Only the offset is kept:
     #: the accumulator carries identity between slices, so retaining every byte
-    #: read would grow without bound and re-parse it all on each tick.
+    #: read would grow without bound and re-parse it all on each checkpoint.
     journal_offset: int
     #: The number of the last census the sampler took.
     census_seq: int = 0
@@ -141,10 +141,11 @@ class MemberWindow:
     ) -> int:
         """Fold this window's journal, read so far, into its accumulator.
 
-        The slice read is the new tail only -- reading the whole journal once a
-        second for the length of a turn would be wasteful -- but it is handed
-        on top of what was read before, because identity has to be derived from
-        the whole history rather than from whichever slice a record landed in.
+        The slice read is the new tail only -- re-reading the whole journal at
+        every checkpoint for the length of a turn would be wasteful -- but it is
+        handed on top of what was read before, because identity has to be
+        derived from the whole history rather than from whichever slice a
+        record landed in.
         """
         scoped = replace(cursor, offset=self.journal_offset)
         payload, new_offset = read(spec, scoped)

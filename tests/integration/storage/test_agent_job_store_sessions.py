@@ -368,10 +368,7 @@ async def test_session_mutations_are_atomic_owner_scoped_and_irreversible(pool, 
         await store.execution_queries.list_thread_events_after(job_id=mine["id"], user_id="user-1")
         is None
     )
-    assert (
-        await store.execution_queries.thread_stats_inputs(job_id=mine["id"], user_id="user-1")
-        is None
-    )
+    assert await store.execution_queries.thread_stats(job_id=mine["id"], user_id="user-1") is None
     assert (
         await store.conversation_commands.set_thread_archived(
             job_id=mine["id"], user_id="user-1", archived=False

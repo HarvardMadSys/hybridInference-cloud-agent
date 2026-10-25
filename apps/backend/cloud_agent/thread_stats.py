@@ -35,6 +35,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import pairwise
+from math import isfinite
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -129,6 +130,316 @@ class ThreadStats:
     #: today; per-tool hook markers would add a more precise value without
     #: changing this field's meaning.
     timing_source: str = "message_events"
+
+
+#: Stored attempt rollups name their reducer. A future semantic change bumps
+#: this value so an unchanged event stream is recomputed instead of serving a
+#: result written by an older reducer.
+ATTEMPT_ROLLUP_VERSION = 1
+
+
+@dataclass(frozen=True)
+class AttemptStatsRollup:
+    """The additive and ordering facts one attempt contributes to a thread.
+
+    This is deliberately not the public summary. Cache-hit ratios, TTFT means,
+    false zero suppression and token rates all need their numerators and
+    denominators retained until every attempt in the thread is combined.
+    """
+
+    attempt_id: int
+    job_id: str
+    tool_calls: int
+    failed_tool_calls: int
+    wall_seconds: float
+    tool_seconds: float
+    first_output_at: datetime | None
+    input_tokens: int | None
+    output_tokens: int | None
+    cache_read_tokens: int | None
+    cache_write_tokens: int | None
+    saw_usage: bool
+    produced_text: bool
+    rate_tokens: int
+    rate_seconds: float
+
+
+class AttemptStatsAccumulator:
+    """Reduce one attempt from already ordered, bounded event pages.
+
+    Event rows themselves never survive add(). The retained state is
+    only what can cross a page boundary semantically: open tool calls,
+    completed tool intervals, and provisional usage identities. Callers
+    must add one attempt's events in ledger sequence order.
+    """
+
+    def __init__(self, *, attempt_id: int, job_id: str) -> None:
+        self.attempt_id = attempt_id
+        self.job_id = job_id
+        self.tool_calls = 0
+        self.failed_tool_calls = 0
+        self.first_output_at: datetime | None = None
+        self.produced_text = False
+        self._timestamp_count = 0
+        self._first_timestamp: datetime | None = None
+        self._last_timestamp: datetime | None = None
+        self._opened_tools: dict[str, datetime] = {}
+        self._tool_windows: list[tuple[datetime, datetime]] = []
+        self._provisional_usage = _TokenTotals()
+        self._usage_by_response: dict[str, dict[str, int]] = {}
+        self._attempt_usage: dict[str, int] | None = None
+
+    def add(self, event: Mapping[str, Any]) -> None:
+        """Fold one next-sequence event into the attempt state."""
+        event_type = event.get("event_type")
+        payload = _payload(event)
+        timestamp = _timestamp(event)
+        self._record_timestamp(event_type, timestamp)
+        self._record_tool(event_type, payload, timestamp)
+
+        if event_type == _MESSAGE and (
+            payload.get("has_text") is True or bool(str(payload.get("text") or "").strip())
+        ):
+            self.produced_text = True
+        self._record_usage(event)
+
+    def _record_timestamp(self, event_type: Any, timestamp: datetime | None) -> None:
+        """Retain sequence-first span and first-output timing."""
+        if timestamp is not None:
+            if self._first_timestamp is None:
+                self._first_timestamp = timestamp
+            self._last_timestamp = timestamp
+            self._timestamp_count += 1
+            if self.first_output_at is None and event_type in _FIRST_OUTPUT_KINDS:
+                self.first_output_at = timestamp
+
+    def _record_tool(
+        self, event_type: Any, payload: Mapping[str, Any], timestamp: datetime | None
+    ) -> None:
+        """Retain counts and pairing state for one tool event."""
+        if event_type == _TOOL_USE:
+            self.tool_calls += 1
+            call_id = payload.get("id")
+            if timestamp is not None and call_id is not None:
+                self._opened_tools[str(call_id)] = timestamp
+        elif event_type == _TOOL_RESULT:
+            if payload.get("is_error"):
+                self.failed_tool_calls += 1
+            call_id = payload.get("tool_use_id")
+            started = (
+                self._opened_tools.pop(str(call_id), None)
+                if timestamp is not None and call_id is not None
+                else None
+            )
+            if started is not None and timestamp is not None and timestamp >= started:
+                self._tool_windows.append((started, timestamp))
+
+    def _record_usage(self, event: Mapping[str, Any]) -> None:
+        """Retain the canonical totals or provisional response maxima."""
+        record = _normalized_usage(event)
+        if record is None:
+            return
+        usage_payload, usage = record
+        if usage_payload.get("usage_scope") == "attempt":
+            # The last completed attempt total replaces every provisional
+            # response counter, exactly as _distinct_usage does.
+            self._attempt_usage = usage
+            self._provisional_usage = _TokenTotals()
+            self._usage_by_response.clear()
+            return
+        if self._attempt_usage is not None:
+            return
+        response_id = usage_payload.get("usage_id")
+        if not isinstance(response_id, str) or not response_id:
+            self._provisional_usage.add(usage)
+            return
+        current = self._usage_by_response.setdefault(response_id, {})
+        for key, value in usage.items():
+            current[key] = max(current.get(key, 0), value)
+
+    def extend(self, events: Iterable[Mapping[str, Any]]) -> None:
+        """Fold an ordered page without retaining it."""
+        for event in events:
+            self.add(event)
+
+    def finish(self) -> AttemptStatsRollup:
+        """Return the exact version-one rollup for all events added so far."""
+        totals = _TokenTotals()
+        if self._attempt_usage is not None:
+            totals.add(self._attempt_usage)
+        else:
+            totals.add(
+                {
+                    key: value
+                    for key, value in (
+                        ("input_tokens", self._provisional_usage.input_tokens),
+                        ("output_tokens", self._provisional_usage.output_tokens),
+                        ("cache_read_input_tokens", self._provisional_usage.cache_read_tokens),
+                        ("cache_creation_input_tokens", self._provisional_usage.cache_write_tokens),
+                    )
+                    if value is not None
+                }
+            )
+            for usage in self._usage_by_response.values():
+                totals.add(usage)
+        span = (
+            (self._last_timestamp - self._first_timestamp).total_seconds()
+            if self._timestamp_count >= 2
+            and self._first_timestamp is not None
+            and self._last_timestamp is not None
+            else 0.0
+        )
+        in_tools = _union_seconds(self._tool_windows)
+        output = totals.output_tokens
+        model = max(0.0, span - in_tools)
+        contributes_rate = (
+            output is not None and model > 0 and not (output == 0 and self.produced_text)
+        )
+        return AttemptStatsRollup(
+            attempt_id=self.attempt_id,
+            job_id=self.job_id,
+            tool_calls=self.tool_calls,
+            failed_tool_calls=self.failed_tool_calls,
+            wall_seconds=span,
+            tool_seconds=in_tools,
+            first_output_at=self.first_output_at,
+            input_tokens=totals.input_tokens,
+            output_tokens=totals.output_tokens,
+            cache_read_tokens=totals.cache_read_tokens,
+            cache_write_tokens=totals.cache_write_tokens,
+            saw_usage=totals.saw_usage,
+            produced_text=self.produced_text,
+            rate_tokens=output if contributes_rate and output is not None else 0,
+            rate_seconds=model if contributes_rate else 0.0,
+        )
+
+
+def summarize_attempt_rollup(
+    *,
+    attempt_id: int,
+    job_id: str,
+    events: Iterable[Mapping[str, Any]],
+) -> AttemptStatsRollup:
+    """Reduce one attempt while retaining the facts a thread aggregate needs."""
+    accumulator = AttemptStatsAccumulator(attempt_id=attempt_id, job_id=job_id)
+    accumulator.extend(sorted(events, key=_event_sort_key))
+    return accumulator.finish()
+
+
+def summarize_thread_rollups(
+    *,
+    job_ids: Sequence[str],
+    attempts: Iterable[Mapping[str, Any]],
+    rollups: Iterable[AttemptStatsRollup],
+) -> ThreadStats:
+    """Combine cached attempt facts with the exact public thread semantics."""
+    by_job: dict[str, list[AttemptStatsRollup]] = {job_id: [] for job_id in job_ids}
+    for rollup in rollups:
+        by_job.setdefault(rollup.job_id, []).append(rollup)
+    first_attempt_start = _earliest_attempt_start_per_job(attempts)
+    totals = _TokenTotals()
+    tool_calls = failed_tool_calls = rate_tokens = 0
+    wall_seconds = tool_seconds = rate_seconds = 0.0
+    produced_text = False
+    ttft_samples: list[float] = []
+
+    for job_id, job_rollups in by_job.items():
+        ordered = sorted(job_rollups, key=lambda item: item.attempt_id)
+        for item in ordered:
+            # Keep the legacy reducer's per-execution addition order. Besides
+            # semantics, this preserves the exact IEEE-754 result stored and
+            # returned before rollups existed.
+            tool_calls += item.tool_calls
+            failed_tool_calls += item.failed_tool_calls
+            wall_seconds += item.wall_seconds
+            tool_seconds += item.tool_seconds
+            rate_tokens += item.rate_tokens
+            rate_seconds += item.rate_seconds
+            produced_text = produced_text or item.produced_text
+            totals.add(_rollup_usage(item))
+        started_at = first_attempt_start.get(job_id)
+        first_output = next(
+            (item.first_output_at for item in ordered if item.first_output_at is not None), None
+        )
+        if started_at is not None and first_output is not None:
+            delta = (first_output - started_at).total_seconds()
+            if delta >= 0:
+                ttft_samples.append(delta)
+
+    output_tokens = totals.output_tokens
+    if output_tokens == 0 and produced_text:
+        output_tokens = None
+    model_seconds = max(0.0, wall_seconds - tool_seconds)
+    return ThreadStats(
+        turns=len(job_ids),
+        tool_calls=tool_calls,
+        failed_tool_calls=failed_tool_calls,
+        wall_seconds=wall_seconds,
+        tool_seconds=tool_seconds,
+        model_seconds=model_seconds,
+        ttft_seconds=(sum(ttft_samples) / len(ttft_samples)) if ttft_samples else None,
+        input_tokens=totals.input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=totals.cache_read_tokens,
+        cache_hit_ratio=totals.cache_hit_ratio(),
+        output_tokens_per_second=(
+            _rate(rate_tokens, rate_seconds) if output_tokens is not None else None
+        ),
+        tokens_source="runtime" if totals.saw_usage else "unavailable",
+    )
+
+
+def attempt_rollup_payload(rollup: AttemptStatsRollup) -> dict[str, Any]:
+    """Encode one rollup as versioned cache data, excluding relational ids."""
+    return {
+        "tool_calls": rollup.tool_calls,
+        "failed_tool_calls": rollup.failed_tool_calls,
+        "wall_seconds": rollup.wall_seconds,
+        "tool_seconds": rollup.tool_seconds,
+        "first_output_at": (
+            rollup.first_output_at.isoformat() if rollup.first_output_at is not None else None
+        ),
+        "input_tokens": rollup.input_tokens,
+        "output_tokens": rollup.output_tokens,
+        "cache_read_tokens": rollup.cache_read_tokens,
+        "cache_write_tokens": rollup.cache_write_tokens,
+        "saw_usage": rollup.saw_usage,
+        "produced_text": rollup.produced_text,
+        "rate_tokens": rollup.rate_tokens,
+        "rate_seconds": rollup.rate_seconds,
+    }
+
+
+def attempt_rollup_from_payload(
+    *, attempt_id: int, job_id: str, payload: Mapping[str, Any]
+) -> AttemptStatsRollup:
+    """Decode trusted versioned cache data; malformed rows fail closed."""
+    first_output = payload.get("first_output_at")
+    if first_output is not None and not isinstance(first_output, str):
+        raise ValueError("invalid first output timestamp")
+    first_output_at = datetime.fromisoformat(first_output) if first_output is not None else None
+    if first_output_at is not None and first_output_at.tzinfo is None:
+        raise ValueError("cached first output timestamp has no timezone")
+    return AttemptStatsRollup(
+        attempt_id=attempt_id,
+        job_id=job_id,
+        tool_calls=_cache_int(payload, "tool_calls"),
+        failed_tool_calls=_cache_int(payload, "failed_tool_calls"),
+        # The legacy reducer follows ledger sequence rather than wall-clock
+        # order. Old clock skew can therefore produce a negative span, and
+        # the cache must retain it rather than rescan that attempt forever.
+        wall_seconds=_cache_float(payload, "wall_seconds", allow_negative=True),
+        tool_seconds=_cache_float(payload, "tool_seconds"),
+        first_output_at=first_output_at,
+        input_tokens=_cache_optional_int(payload, "input_tokens"),
+        output_tokens=_cache_optional_int(payload, "output_tokens"),
+        cache_read_tokens=_cache_optional_int(payload, "cache_read_tokens"),
+        cache_write_tokens=_cache_optional_int(payload, "cache_write_tokens"),
+        saw_usage=_cache_bool(payload, "saw_usage"),
+        produced_text=_cache_bool(payload, "produced_text"),
+        rate_tokens=_cache_int(payload, "rate_tokens"),
+        rate_seconds=_cache_float(payload, "rate_seconds"),
+    )
 
 
 def summarize_thread(
@@ -317,16 +628,10 @@ def _distinct_usage(events: Sequence[Mapping[str, Any]]) -> Iterable[Mapping[str
     """
     by_attempt: dict[Any, list[tuple[Mapping[str, Any], dict[str, int]]]] = {}
     for event in events:
-        usage = _usage_of(event)
-        if not usage:
+        record = _normalized_usage(event)
+        if record is None:
             continue
-        normalized = {
-            keys[0]: value
-            for keys in TOKEN_KEY_GROUPS
-            if (value := _first_int(usage, keys)) is not None
-        }
-        if normalized:
-            by_attempt.setdefault(event.get("attempt_id"), []).append((_payload(event), normalized))
+        by_attempt.setdefault(event.get("attempt_id"), []).append(record)
 
     for records in by_attempt.values():
         final = next(
@@ -350,6 +655,21 @@ def _distinct_usage(events: Sequence[Mapping[str, Any]]) -> Iterable[Mapping[str
             for key, value in usage.items():
                 current[key] = max(current.get(key, 0), value)
         yield from by_response.values()
+
+
+def _normalized_usage(
+    event: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], dict[str, int]] | None:
+    """Return one compact usage record in the reducer's canonical key shape."""
+    usage = _usage_of(event)
+    if not usage:
+        return None
+    normalized = {
+        keys[0]: value
+        for keys in TOKEN_KEY_GROUPS
+        if (value := _first_int(usage, keys)) is not None
+    }
+    return (_payload(event), normalized) if normalized else None
 
 
 def _earliest_attempt_start_per_job(
@@ -453,17 +773,26 @@ def _time_to_first_output(
     """Seconds from execution starting to the model's first output."""
     if attempt_started_at is None:
         return None
-    for event in ordered:
-        if event.get("event_type") not in _FIRST_OUTPUT_KINDS:
-            continue
-        timestamp = _timestamp(event)
-        if timestamp is None:
-            continue
-        delta = (timestamp - attempt_started_at).total_seconds()
+    first_output = _first_output_at(ordered)
+    if first_output is not None:
+        delta = (first_output - attempt_started_at).total_seconds()
         # A negative delta means the two clocks disagree, which makes this
         # sample meaningless rather than fast.
         return delta if delta >= 0 else None
     return None
+
+
+def _first_output_at(ordered: Sequence[Mapping[str, Any]]) -> datetime | None:
+    """Return the first sequenced model-output timestamp that is usable."""
+    return next(
+        (
+            timestamp
+            for event in ordered
+            if event.get("event_type") in _FIRST_OUTPUT_KINDS
+            if (timestamp := _timestamp(event)) is not None
+        ),
+        None,
+    )
 
 
 def _usage_of(event: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -517,6 +846,49 @@ def _first_int(usage: Mapping[str, Any], keys: Sequence[str]) -> int | None:
         if isinstance(value, float) and value >= 0 and value.is_integer():
             return int(value)
     return None
+
+
+def _rollup_usage(rollup: AttemptStatsRollup) -> dict[str, int]:
+    """Put retained counters back in the canonical shape ``_TokenTotals`` reads."""
+    values = {
+        "input_tokens": rollup.input_tokens,
+        "output_tokens": rollup.output_tokens,
+        "cache_read_input_tokens": rollup.cache_read_tokens,
+        "cache_creation_input_tokens": rollup.cache_write_tokens,
+    }
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def _cache_int(payload: Mapping[str, Any], key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"invalid cached {key}")
+    return value
+
+
+def _cache_optional_int(payload: Mapping[str, Any], key: str) -> int | None:
+    value = payload.get(key)
+    return None if value is None else _cache_int(payload, key)
+
+
+def _cache_float(payload: Mapping[str, Any], key: str, *, allow_negative: bool = False) -> float:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"invalid cached {key}")
+    try:
+        decoded = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"invalid cached {key}") from exc
+    if not isfinite(decoded) or (decoded < 0 and not allow_negative):
+        raise ValueError(f"invalid cached {key}")
+    return decoded
+
+
+def _cache_bool(payload: Mapping[str, Any], key: str) -> bool:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"invalid cached {key}")
+    return value
 
 
 def _rate(amount: int | None, seconds: float) -> float | None:

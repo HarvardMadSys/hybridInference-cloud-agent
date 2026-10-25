@@ -17,7 +17,6 @@ from cloud_agent.schemas._host_reports import (
     _HostReportVersion,
     _HostVersionMenu,
 )
-from cloud_agent.schemas._sandbox_manager_wire import _SandboxManagerWireNames
 from cloud_agent.schemas.archive_settings import (
     HostSandboxArchiveSettings,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
@@ -124,6 +123,8 @@ class HostRegisterRequest(BaseModel):
     )
     sandbox_manager_url: str = Field(
         ...,
+        # COMPAT(remove-after=2026-11-30): every host sends sandbox_manager_url;
+        # hosts since #974 do.
         validation_alias=AliasChoices("sandbox_manager_url", "broker_url"),
         max_length=2048,
         description=(
@@ -139,7 +140,7 @@ class HostRegisterRequest(BaseModel):
     )
 
 
-class HostRegisterResponse(_SandboxManagerWireNames):
+class HostRegisterResponse(BaseModel):
     """The host's identity and the credential it authenticates with."""
 
     host: str
@@ -151,9 +152,6 @@ class HostRegisterResponse(_SandboxManagerWireNames):
         ),
     )
     status: str
-    broker_error: str | None = Field(
-        default=None, deprecated=True, description="Compatibility alias for sandbox_manager_error."
-    )
     sandbox_manager_error: str | None = Field(
         None,
         description=(
@@ -287,6 +285,8 @@ class HostHeartbeatRequest(BaseModel):
     sandbox_manager_url: str | None = Field(
         None,
         max_length=2048,
+        # COMPAT(remove-after=2026-11-30): every host sends sandbox_manager_url;
+        # hosts since #974 do.
         validation_alias=AliasChoices("sandbox_manager_url", "broker_url"),
     )
     capabilities: list[_HostCapability] | None = Field(None, max_length=64)
@@ -338,16 +338,6 @@ class HostHeartbeatRequest(BaseModel):
             "runner that does not collect it simply omits the field, and one "
             "whose block is unusable has the block dropped rather than the "
             "heartbeat refused."
-        ),
-    )
-    residencies: list[ResidencyBeat] | None = Field(
-        None,
-        max_length=128,
-        description=(
-            "The hot sandboxes this host still holds, generation-scoped. Each "
-            "listed residency's lease is extended; one that no longer holds "
-            "its generation comes back in residencies_lost and the host tears "
-            "that sandbox down (design §7)."
         ),
     )
     retained_sandboxes: list[RetainedSandboxBeat] | None = Field(
@@ -446,15 +436,14 @@ class HostResidencyEstablishResponse(BaseModel):
     mcp_credential: str = Field(
         "",
         description=(
-            "The MCP relay credential for this residency's process. It names the "
-            "residency, not this attempt, so the process keeps it for every later "
-            "turn it serves. Empty from a control plane that predates it; the "
-            "host then uses the turn's own MCP token."
+            "The MCP relay credential for this residency's process, and the only "
+            "one the host gives it. It names the residency, not this attempt, so "
+            "the process keeps it for every later turn it serves."
         ),
     )
 
 
-class HostHeartbeatResponse(_SandboxManagerWireNames):
+class HostHeartbeatResponse(BaseModel):
     """What the control plane thinks of this host after the heartbeat."""
 
     host: str
@@ -478,7 +467,14 @@ class HostHeartbeatResponse(_SandboxManagerWireNames):
             "override returns the next level's value, never a legacy environment value."
         ),
     )
-    sandbox_archive_settings: HostSandboxArchiveSettings
+    sandbox_archive_settings: HostSandboxArchiveSettings | None = Field(
+        ...,
+        description=(
+            "The archive policy this host should apply. Null for a host that cannot "
+            "apply it: an enabled policy with a bucket other than the default goes "
+            "only to a host advertising sandbox-archive-destination-v1."
+        ),
+    )
     runtime_downloads: list[dict[str, str]] = Field(
         default_factory=list,
         description=(
@@ -505,9 +501,6 @@ class HostHeartbeatResponse(_SandboxManagerWireNames):
             "Settled-idle or failed-attempt Docker stop commands fenced to the "
             "durable container and activation generations reported by this host."
         ),
-    )
-    broker_error: str | None = Field(
-        default=None, deprecated=True, description="Compatibility alias for sandbox_manager_error."
     )
     sandbox_manager_error: str | None = Field(
         None,

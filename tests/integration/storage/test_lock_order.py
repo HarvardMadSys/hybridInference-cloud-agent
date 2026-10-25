@@ -42,9 +42,11 @@ from tests.integration.storage.test_sandbox_restore_store import (
 )
 from tests.support.follow_ups import append_follow_up
 
+from cloud_agent.storage._sql import event_batches
 from cloud_agent.storage._sql.sandbox import fence_sandbox_start
 from cloud_agent.storage.repositories import (
     attempt_commands as attempt_module,
+    session_fork as session_fork_module,
     snapshot as snapshot_module,
 )
 
@@ -763,7 +765,7 @@ async def test_titling_a_thread_does_not_deadlock_with_its_streaming_reply(
     assert claim is not None and claim["title_generation_pending"]
     held, release = asyncio.Event(), asyncio.Event()
     append_pid: list[int] = []
-    original = attempt_module.insert_event
+    original = event_batches.insert_event
 
     async def hold_the_attempt(conn, **fields):
         if fields["event_type"] == "message":
@@ -772,7 +774,7 @@ async def test_titling_a_thread_does_not_deadlock_with_its_streaming_reply(
             await release.wait()
         return await original(conn, **fields)
 
-    monkeypatch.setattr(attempt_module, "insert_event", hold_the_attempt)
+    monkeypatch.setattr(event_batches, "insert_event", hold_the_attempt)
     # A deadlock the append lost would otherwise be retried out of sight.
     monkeypatch.setattr(attempt_module, "retry_deadlock_victim", _first_try_only)
     append = title = None
@@ -1340,3 +1342,214 @@ async def test_deleting_snapshots_does_not_deadlock_with_a_build_receipt(
             )
         )
     assert states == {older: "deleting", newer: "deleting"}
+
+
+_LOCK_MEMBER = (
+    "SELECT thread_id FROM agent_thread_sandbox_memberships WHERE thread_id = $1 FOR UPDATE"
+)
+
+
+async def _forked(store: Storage, monkeypatch, *, target_sorts_first: bool) -> tuple[dict, dict]:
+    """A Fork of a settled chat, its coordinator claimed and both residencies established.
+
+    A new chat's id is random, so a Fork's target sorts before its source half
+    the time; this one's sorts first, or last, as asked.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    await _run_turn(store, job, claim, sandbox)
+    target = "athr_" + ("0" if target_sorts_first else "f") * 16
+    monkeypatch.setattr(session_fork_module, "new_thread_id", lambda: target)
+    operation = await store.session_fork.prepare_session_fork(
+        source_job_id=job["id"], user_id=job["user_id"], idempotency_key="lock-order-fork"
+    )
+    assert operation is not None and operation.get("error") is None, operation
+    assert (operation["target_thread_id"] < job["thread_id"]) is target_sorts_first
+    assert await store.session_fork.claim_session_fork_materialization(
+        operation_id=operation["id"], coordinator_token="coordinator", lease_seconds=990
+    )
+    residencies = await store.session_fork.establish_session_fork_residencies(
+        operation_id=operation["id"], coordinator_token="coordinator", ttl_seconds=120
+    )
+    assert residencies is not None
+    return {**operation, "residencies": residencies}, job
+
+
+async def _materialized(store: Storage, operation: dict) -> None:
+    """Record the host's receipt for the Fork, as its coordinator does."""
+    residencies = operation["residencies"]
+    receipt = {
+        key: operation[key]
+        for key in (
+            "sandbox_id",
+            "sandbox_generation",
+            "container_id",
+            "runtime_id",
+            "runtime_version",
+            "source_thread_id",
+            "source_native_session_id",
+            "target_thread_id",
+            "target_resident_slot_id",
+        )
+    }
+    recorded = await store.session_fork.record_session_fork_materialized(
+        operation_id=operation["id"],
+        coordinator_token="coordinator",
+        receipt={
+            **receipt,
+            "operation_id": operation["id"],
+            "target_native_session_id": "native-child",
+            "source_residency_generation": residencies["source"]["generation"],
+            "target_residency_generation": residencies["target"]["generation"],
+            "source_process_generation": 2,
+            "target_process_generation": 1,
+        },
+    )
+    assert recorded is not None and recorded["state"] == "materialized"
+
+
+@pytest.mark.parametrize("target_sorts_first", [True, False], ids=["target-first", "source-first"])
+@pytest.mark.parametrize("writer", ["establish", "finalize", "reap", "delete"])
+async def test_a_write_to_both_fork_members_takes_them_in_a_heartbeats_order(
+    pool, store: Storage, monkeypatch, writer: str, target_sorts_first: bool
+):
+    """A write to both members of a Fork takes them in thread order, as a heartbeat does.
+
+    A heartbeat extending both residencies locks the two members in thread
+    order. Fork's writers took the source's and then the target's, and the
+    target's random id sorts first half the time: a beat holding the target
+    then waited for the source while the Fork held the source and waited for
+    the target. Owner deletion of both chats updated their members in
+    whatever order its plan met them. The heartbeat retries as a deadlock's
+    victim; the owner's Fork and deletion do not, and failed with a 500. The
+    rival here is the beat part-way through its lock: it holds the member
+    first in thread order and then asks for the other one, which the writer
+    must not be holding while it waits.
+    """
+    operation, job = await _forked(store, monkeypatch, target_sorts_first=target_sorts_first)
+    if writer in {"finalize", "delete"}:
+        await _materialized(store, operation)
+    if writer == "delete":
+        assert await store.session_fork.finalize_session_fork(operation_id=operation["id"])
+    if writer == "reap":
+        # Its coordinator stopped before the host's receipt was recorded.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_session_forks "
+                "SET coordinator_lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+                operation["id"],
+            )
+    members = (job["thread_id"], operation["target_thread_id"])
+    writes = {
+        "establish": lambda: store.session_fork.establish_session_fork_residencies(
+            operation_id=operation["id"], coordinator_token="coordinator", ttl_seconds=120
+        ),
+        "finalize": lambda: store.session_fork.finalize_session_fork(operation_id=operation["id"]),
+        "reap": lambda: store.session_fork.reap_stalled_session_forks(stall_seconds=0),
+        "delete": lambda: store.conversation_commands.delete_sessions(
+            thread_ids=list(members), user_id=job["user_id"]
+        ),
+    }
+    first, second = sorted(members)
+    write = None
+    async with pool.acquire() as beat:
+        try:
+            async with beat.transaction():
+                await beat.execute(_LOCK_MEMBER, first)
+                write = asyncio.create_task(writes[writer]())
+                await _blocked_by(pool, await beat.fetchval("SELECT pg_backend_pid()"))
+                await _close_a_cycle(beat, _LOCK_MEMBER, second)
+            written = await asyncio.wait_for(write, timeout=10)
+        finally:
+            await _settle(write)
+    assert written
+    if writer == "delete":
+        assert sorted(written["thread_ids"]) == sorted(members)
+        assert len(written["released_residencies"]) == 2
+
+
+_LOCK_CONVERSATION = "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE"
+
+
+@pytest.mark.parametrize("target_sorts_first", [True, False], ids=["target-first", "source-first"])
+async def test_fork_finalization_takes_both_conversations_in_id_order(
+    pool, store: Storage, monkeypatch, target_sorts_first: bool
+):
+    """Finalizing a Fork takes its two conversations in id order, as an archive does.
+
+    An owner archiving or deleting several chats locks their conversations in
+    id order. Finalization locked the source's and then the target's, and the
+    target's random id sorts first half the time: an archive holding the
+    target then waited for the source while finalization held the source and
+    waited for the target, and Postgres aborted one of them. The rival here is
+    that archive part-way through its lock: it holds the conversation first
+    in id order and then asks for the other one, which finalization must not
+    be holding while it waits.
+    """
+    operation, job = await _forked(store, monkeypatch, target_sorts_first=target_sorts_first)
+    await _materialized(store, operation)
+    first, second = sorted((job["thread_id"], operation["target_thread_id"]))
+    finalize = None
+    async with pool.acquire() as owner:
+        try:
+            async with owner.transaction():
+                await owner.execute(_LOCK_CONVERSATION, first)
+                finalize = asyncio.create_task(
+                    store.session_fork.finalize_session_fork(operation_id=operation["id"])
+                )
+                await _blocked_by(pool, await owner.fetchval("SELECT pg_backend_pid()"))
+                await _close_a_cycle(owner, _LOCK_CONVERSATION, second)
+            anchor = await asyncio.wait_for(finalize, timeout=10)
+        finally:
+            await _settle(finalize)
+    assert anchor is not None and anchor["thread_id"] == operation["target_thread_id"]
+
+
+@pytest.mark.parametrize("in_fork_order", [False, True], ids=["reversed", "in-order"])
+async def test_the_fork_reaper_takes_the_targets_it_fails_in_id_order(
+    pool, store: Storage, monkeypatch, in_fork_order: bool
+):
+    """A reaper pass that fails several Forks takes their targets in id order.
+
+    A Fork left preparing with no live coordinator is failed, and its hidden
+    target tombstoned. The reaper tombstoned each target as it reached its
+    Fork, in Fork id order, which the targets' random ids need not share:
+    holding one target, it waited for the other while an owner archiving or
+    deleting both held that one and waited for the first. The rival here is
+    that archive part-way through its lock.
+    """
+    # A finalized Fork is a chat of its own, which can be forked in turn.
+    operation, job = await _forked(store, monkeypatch, target_sorts_first=False)
+    await _materialized(store, operation)
+    child = await store.session_fork.finalize_session_fork(operation_id=operation["id"])
+    assert child is not None
+    # The reaper meets the Fork of the origin first. Its target sorts first,
+    # as the Forks do, or last.
+    targets = ["athr_" + "1" * 16, "athr_" + "2" * 16]
+    fork_ids = iter(["asfork_" + "1" * 32, "asfork_" + "2" * 32])
+    target_ids = iter(targets if in_fork_order else reversed(targets))
+    monkeypatch.setattr(session_fork_module, "new_session_fork_id", lambda: next(fork_ids))
+    monkeypatch.setattr(session_fork_module, "new_thread_id", lambda: next(target_ids))
+    stalled = []
+    for source in (job, child):
+        fork = await store.session_fork.prepare_session_fork(
+            source_job_id=source["id"], user_id=job["user_id"], idempotency_key=source["id"]
+        )
+        assert fork is not None and fork.get("error") is None, fork
+        stalled.append(fork)
+    first, second = sorted(fork["target_thread_id"] for fork in stalled)
+    reap = None
+    async with pool.acquire() as owner:
+        try:
+            async with owner.transaction():
+                await owner.execute(_LOCK_CONVERSATION, first)
+                reap = asyncio.create_task(
+                    store.session_fork.reap_stalled_session_forks(stall_seconds=0)
+                )
+                await _blocked_by(pool, await owner.fetchval("SELECT pg_backend_pid()"))
+                await _close_a_cycle(owner, _LOCK_CONVERSATION, second)
+            reaped = await asyncio.wait_for(reap, timeout=10)
+        finally:
+            await _settle(reap)
+    assert [(action["id"], action["recovery_action"]) for action in reaped] == [
+        (fork["id"], "cleanup") for fork in stalled
+    ]

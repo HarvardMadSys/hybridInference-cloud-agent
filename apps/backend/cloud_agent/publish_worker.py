@@ -70,7 +70,7 @@ from cloud_agent.workers.background_wake import PUBLISH
 from cloud_agent_shared.git.patch_gate import branch_name_for
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from typing import BinaryIO
 
     from cloud_agent.grants import GrantClient
@@ -316,6 +316,16 @@ class GitHubCredential:
         }
 
 
+@contextlib.asynccontextmanager
+async def _borrowed(client: httpx.AsyncClient | None) -> AsyncIterator[httpx.AsyncClient]:
+    """``client``, borrowed and left open, or a client of the call's own, closed after it."""
+    if client is not None:
+        yield client
+        return
+    async with httpx.AsyncClient() as own:
+        yield own
+
+
 async def create_draft_pull_request(
     *,
     repo: str,
@@ -325,15 +335,16 @@ async def create_draft_pull_request(
     body: str,
     credential: GitHubCredential,
     timeout_s: float | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> str:
     """Open a draft PR and return its URL.
 
     Draft is not a nicety: the whole safety story assumes a human reads the
     change before it can merge, so this must never open a ready-for-review PR.
+
+    ``client`` is borrowed and left open; without one, the call opens its own.
     """
-    async with httpx.AsyncClient(
-        timeout=timeout_s if timeout_s is not None else number_setting("publish_pr_timeout_s")
-    ) as client:
+    async with _borrowed(client) as client:
         response = await client.post(
             f"{credential.api_base}/repos/{repo}/pulls",
             headers=_github_headers(credential),
@@ -344,6 +355,9 @@ async def create_draft_pull_request(
                 "body": body,
                 "draft": True,
             },
+            timeout=timeout_s if timeout_s is not None else number_setting("publish_pr_timeout_s"),
+            # A borrowed client's own setting must not decide where the token goes.
+            follow_redirects=False,
         )
     if response.status_code == 422:
         # An earlier create can have committed while its response was lost,
@@ -384,6 +398,7 @@ async def ensure_draft_pull_request(
     title: str,
     body: str,
     credential: GitHubCredential,
+    client: httpx.AsyncClient | None = None,
     create_if_missing: Literal[True] = True,
 ) -> str: ...
 
@@ -397,6 +412,7 @@ async def ensure_draft_pull_request(
     title: str,
     body: str,
     credential: GitHubCredential,
+    client: httpx.AsyncClient | None = None,
     create_if_missing: Literal[False],
 ) -> str | None: ...
 
@@ -409,6 +425,7 @@ async def ensure_draft_pull_request(
     title: str,
     body: str,
     credential: GitHubCredential,
+    client: httpx.AsyncClient | None = None,
     create_if_missing: bool = True,
 ) -> str | None:
     """Refresh an open branch PR, or create a new draft after closure/merge.
@@ -423,14 +440,21 @@ async def ensure_draft_pull_request(
     ``base_branch`` is only for a draft this creates. Optional enrichment sets
     ``create_if_missing=False``: if the owner closed the already-created draft
     while its title was generated, a cosmetic update must not open another.
+
+    The lookup, the refresh and the create share one client: ``client``,
+    borrowed and left open, or one this call opens. The create used to open a
+    second connection right after the lookup closed the first.
     """
     headers = _github_headers(credential)
     endpoint = f"{credential.api_base}/repos/{repo}/pulls"
-    async with httpx.AsyncClient(timeout=number_setting("publish_pr_timeout_s")) as client:
+    timeout = number_setting("publish_pr_timeout_s")
+    async with _borrowed(client) as client:
         response = await client.get(
             endpoint,
             headers=headers,
             params={"state": "open", "head": f"{repo.split('/')[0]}:{head_branch}"},
+            timeout=timeout,
+            follow_redirects=False,
         )
         if response.status_code >= 400:
             raise _github_api_error("the PR lookup", response)
@@ -449,7 +473,11 @@ async def ensure_draft_pull_request(
             if not isinstance(number, int) or not isinstance(url, str) or not url.strip():
                 raise TransientPublishError("GitHub returned an open PR without its number or URL")
             updated = await client.patch(
-                f"{endpoint}/{number}", headers=headers, json={"title": title, "body": body}
+                f"{endpoint}/{number}",
+                headers=headers,
+                json={"title": title, "body": body},
+                timeout=timeout,
+                follow_redirects=False,
             )
             if updated.status_code >= 400:
                 raise _github_api_error("the PR update", updated)
@@ -463,16 +491,17 @@ async def ensure_draft_pull_request(
                 # The owner can close/merge while publication is updating it.
                 break
             return url
-    if not create_if_missing:
-        return None
-    return await create_draft_pull_request(
-        repo=repo,
-        head_branch=head_branch,
-        base_branch=base_branch,
-        title=title,
-        body=body,
-        credential=credential,
-    )
+        if not create_if_missing:
+            return None
+        return await create_draft_pull_request(
+            repo=repo,
+            head_branch=head_branch,
+            base_branch=base_branch,
+            title=title,
+            body=body,
+            credential=credential,
+            client=client,
+        )
 
 
 def _github_headers(credential: GitHubCredential) -> dict[str, str]:
@@ -577,11 +606,16 @@ def _pr_title(job: dict[str, Any], changed_files: list[str]) -> str:
     # Share the title budget across summaries when several chats settle together.
     fragments = list(lines)
     try:
-        summary_count = max(len(fragments), int(job.get("session_summary_count", 0)))
+        summary_count = int(job.get("session_summary_count", 0))
     except (TypeError, ValueError):
-        summary_count = len(fragments)
-    if summary_count > 5:
-        fragments = [*fragments[:4], f"+{summary_count - 4} more"]
+        summary_count = 0
+    # A collapsed duplicate or an unreadable summary is no further work; one
+    # the claim did not keep (it keeps the newest few) may be.
+    kept = len(summaries) if isinstance(summaries, list) else 0
+    total = len(fragments) + max(0, summary_count - kept)
+    if total > 5 and fragments:
+        shown = fragments[:4]
+        fragments = [*shown, f"+{total - len(shown)} more"]
     budget = (70 - 2 * (len(fragments) - 1)) // max(1, len(fragments))
     summary = "; ".join(
         line if len(line) <= budget else line[: budget - 1].rstrip() + "…" for line in fragments
@@ -883,6 +917,7 @@ async def _publish_due(
     app_credentials: Any | None,
     grants: GrantClient | None = None,
     base_branch: str,
+    http: httpx.AsyncClient | None = None,
 ) -> None:
     """Publish every captured snapshot, past any that fails.
 
@@ -891,12 +926,21 @@ async def _publish_due(
     Snapshots behind either still go out in this pass. Claims enter entitlement
     preflight in storage order; once each check has started, independent remote
     work proceeds concurrently.
+
+    A claim that raises stops this pass's claiming, and its error is raised
+    once the publications already claimed have finished: cancelling them would
+    defer each one, spending one of its five attempts on that error.
     """
     in_flight: set[asyncio.Task[str | None]] = set()
+    claim_error: Exception | None = None
     try:
         while True:
-            while len(in_flight) < _PUBLISH_CONCURRENCY:
-                job = await store.snapshot.claim_for_publish()
+            while claim_error is None and len(in_flight) < _PUBLISH_CONCURRENCY:
+                try:
+                    job = await store.snapshot.claim_for_publish()
+                except Exception as exc:
+                    claim_error = exc
+                    break
                 if job is None:
                     break
                 admission_started = asyncio.Event()
@@ -909,6 +953,7 @@ async def _publish_due(
                         grants=grants,
                         base_branch=base_branch,
                         admission_started=admission_started,
+                        http=http,
                     ),
                     name=f"snapshot-publish-{job.get('snapshot_id', 'unknown')}",
                 )
@@ -918,6 +963,8 @@ async def _publish_due(
                 in_flight.add(task)
                 await admission_started.wait()
             if not in_flight:
+                if claim_error is not None:
+                    raise claim_error
                 return
             done, in_flight = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
@@ -995,6 +1042,7 @@ async def _publish_claimed(
     base_branch: str,
     allow_workflow_changes: bool = False,
     admission_started: asyncio.Event | None = None,
+    http: httpx.AsyncClient | None = None,
 ) -> str | None:
     """Publish under a claim heartbeat spanning every local and remote phase."""
     snapshot_id = int(job["snapshot_id"])
@@ -1030,6 +1078,7 @@ async def _publish_claimed(
             base_branch=base_branch,
             allow_workflow_changes=allow_workflow_changes,
             admission_started=admission_started,
+            http=http,
         )
     except asyncio.CancelledError:
         # A control-plane stop must not leave this claim `publishing` until the
@@ -1067,8 +1116,13 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
     base_branch: str,
     allow_workflow_changes: bool = False,
     admission_started: asyncio.Event | None = None,
+    http: httpx.AsyncClient | None = None,
 ) -> str | None:
-    """Publish one claimed snapshot. Returns the PR URL, or ``None``."""
+    """Publish one claimed snapshot. Returns the PR URL, or ``None``.
+
+    ``http`` is the control plane's shared pool, for the title's model calls
+    and GitHub's pull-request API; without it each opens its own client.
+    """
     job_id = job["job_id"]
     base_sha = job["base_sha"]
     pr_base = _pr_base_branch(job, base_branch)
@@ -1196,7 +1250,9 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
 
                 async def generated_title() -> str | None:
                     try:
-                        return await generate_pr_title(job, result.changed_files, grants=grants)
+                        return await generate_pr_title(
+                            job, result.changed_files, grants=grants, client=http
+                        )
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
@@ -1229,6 +1285,7 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
                         title=opened_title,
                         body=_pr_body(job, result.changed_files),
                         credential=credential,
+                        client=http,
                     )
                     if not title_task.done():
                         title = await title_task
@@ -1241,6 +1298,7 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
                                 title=title,
                                 body=_pr_body(job, result.changed_files),
                                 credential=credential,
+                                client=http,
                                 create_if_missing=False,
                             )
                             if enriched_url is not None:
@@ -1343,6 +1401,7 @@ async def publish_loop(
     base_branch: str | None = None,
     interval_seconds: float | None = None,
     wake: BackgroundWake | None = None,
+    http: httpx.AsyncClient | None = None,
 ) -> None:
     """Drain the publish queue forever.
 
@@ -1360,6 +1419,9 @@ async def publish_loop(
     ``github_app`` is asked for the App's credentials once per pass, for the
     same reason: a loop that captured them at startup published nothing for
     the rest of the process after one failed load (issue #47).
+
+    ``http`` is the control plane's shared pool, lent to each publication's
+    title and pull-request calls; the lifespan closes it after this loop stops.
     """
     without_source = False
     while True:
@@ -1407,6 +1469,7 @@ async def publish_loop(
                 base_branch=base_branch
                 if base_branch is not None
                 else setting_env("AGENT_PUBLISH_BASE_BRANCH") or "dev",
+                http=http,
             )
         except asyncio.CancelledError:
             raise

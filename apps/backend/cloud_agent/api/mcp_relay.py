@@ -8,23 +8,23 @@ this whole surface across.
 
 **Two credentials, deliberately not interchangeable.** A sandbox carries an
 ``agr`` grant for model calls, which the gateway mints and verifies, and an
-``ajt`` token scoped ``mcp`` for tools, which this service mints and verifies.
-A leaked grant buys no tools; a leaked MCP token buys no inference, no event
-log, no patch and no terminal state.
+MCP credential for tools, which this service mints and verifies. A leaked
+grant buys no tools; a leaked MCP credential buys no inference, no event log,
+no patch and no terminal state.
 
-**A resident process carries a residency credential instead.** A chat's
-process outlives the turn it was started for and serves the next ones, which
-are other jobs, so a per-attempt token would force a restart at every message.
-Its ``amr.`` credential names the chat's residency, and the fence resolves it on
+**The MCP credential names a residency, not a turn.** A chat's process
+outlives the turn it was started for and serves the next ones, which are other
+jobs, so a per-attempt token would force a restart at every message. Its
+``amr.`` credential names the chat's residency, and the fence resolves it on
 every call to the turn that residency is running; with none running it buys
 nothing. From there it is fenced exactly like a turn's own token.
 
-**The scope check is positive.** ``parse_worker_token`` reads a token minted
-before scopes existed as ``full`` — the conservative reading for signing, and
-exactly the wrong one here: a check written as "not full" would admit every
-such token to the tool surface. So this requires ``scope == SCOPE_MCP`` and
-refuses everything else, ``full`` included. A runner has no business making
-tool calls.
+**The scope check is positive.** It covers an attempt's ``ajt`` token, which
+the claim still mints. ``parse_worker_token`` reads a token minted before
+scopes existed as ``full`` — the conservative reading for signing, and exactly
+the wrong one here: a check written as "not full" would admit every such
+token to the tool surface. So this requires ``scope == SCOPE_MCP`` and refuses
+everything else, ``full`` included. A runner has no business making tool calls.
 
 **The upstream credential never travels.** A server's URL and headers stay in
 this process; the sandbox addresses the relay, and the relay addresses the
@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from cloud_agent import memory_tool, web_search
 from cloud_agent.agent_memory import MemoryTask
-from cloud_agent.api.deps import get_mcp_decision_signal, get_storage
+from cloud_agent.api.deps import get_http_client, get_mcp_decision_signal, get_storage
 from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol
@@ -333,18 +333,15 @@ async def _authorize_fence(
                 401, "invalid_request_error", "This chat has no running turn for tool calls."
             )
     else:
+        # COMPAT(remove-after=2026-11-30): no host reads the claim's mcp_token;
+        # this branch goes with its mint in api/worker.py.
         try:
             claims = parse_worker_token(token)
         except InvalidAgentToken as exc:
             raise _refused(401, "invalid_request_error", str(exc)) from exc
 
-        # **Positive, and it has to be.** `parse_worker_token` reads a token
-        # minted before scopes existed as `full`, which is the conservative
-        # reading when deciding whether a signature is trustworthy and
-        # precisely the wrong one here -- a check written as "not full" would
-        # admit every such token. A runner's full-scope token is refused too:
-        # reporting events and driving terminal transitions is not a reason to
-        # be able to call somebody's tools.
+        # Positive, as the module docstring explains: a token minted before
+        # scopes reads as `full`, and a runner's full-scope token buys no tools.
         if claims.get("scope") != SCOPE_MCP:
             raise _refused(403, "insufficient_scope", "This endpoint requires an MCP-scoped token.")
         store = _require_relay_store(store)
@@ -1520,8 +1517,8 @@ async def _host_web_search(
     request_id: Any,
     identity: dict[str, Any],
     store: _McpRelayStorage,
-    authorization: str | None,
     stateless: bool,
+    client: Any = None,
 ) -> dict[str, Any]:
     """Dispatch the platform search tool without exposing its provider key."""
     search_arguments = arguments if isinstance(arguments, dict) else {}
@@ -1605,7 +1602,7 @@ async def _host_web_search(
 
     try:
         await _recheck_fence(identity, store)
-        result = await web_search.search(search_arguments)
+        result = await web_search.search(search_arguments, client=client)
     except HTTPException as exc:
         return _binding_error(request_id, exc)
     except web_search.WebSearchError as exc:
@@ -1689,8 +1686,8 @@ async def _host_call(
             request_id=request_id,
             identity=identity,
             store=store,
-            authorization=authorization,
             stateless=stateless,
+            client=get_http_client(request) if request is not None else None,
         )
     catalogue = await _host_catalogue(protocol.presenting(identity, name), store)
     entry = catalogue.get(name)

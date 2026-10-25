@@ -46,7 +46,7 @@ def _wrapper_script(monkeypatch) -> str:
     monkeypatch.setattr(
         manager,
         "_require",
-        lambda _spec: SimpleNamespace(running=True),
+        lambda _spec: SimpleNamespace(running=True, container_id="container-01"),
     )
     captured: list[list[str]] = []
 

@@ -164,7 +164,6 @@ class FakeHostStore(AllCapabilities):
             return None
         self.archive_settings = {
             **settings,
-            "s3_uri": "s3://freeinference/cloud-agent/sandbox",
             "revision": expected_revision + 1,
             "updated_at": datetime.now(UTC),
         }
@@ -754,6 +753,7 @@ async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client)
         "new_revision": 1,
         "old_settings": {
             "enabled": False,
+            "s3_uri": "s3://freeinference/cloud-agent/sandbox",
             "region": "",
             "kms_key_arn": "",
             "expected_bucket_owner": "",
@@ -768,6 +768,7 @@ async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client)
             key: value for key, value in _archive_policy().items() if key != "revision"
         }
         | {
+            "s3_uri": "s3://freeinference/cloud-agent/sandbox",
             "aws_access_key_id": "",
             "aws_secret_access_key_configured": False,
             "checkpoints_enabled": True,
@@ -793,6 +794,43 @@ async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client)
     assert no_op.json()["revision"] == retry.json()["revision"] == 1
     assert future.status_code == 409
     assert len(store.audit) == 1
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_saves_another_bucket_and_keeps_it_when_omitted(admin_client):
+    client, store = admin_client
+    uri = "s3://example-archives/cloud-agent/sandbox"
+
+    saved = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json={**_archive_policy(), "s3_uri": uri},
+        headers=ADMIN,
+    )
+    assert saved.status_code == 200
+    assert saved.json()["s3_uri"] == uri
+    assert store.audit[-1]["details"]["old_settings"]["s3_uri"] == (
+        "s3://freeinference/cloud-agent/sandbox"
+    )
+    assert store.audit[-1]["details"]["new_settings"]["s3_uri"] == uri
+
+    # An editor that does not send the destination keeps it, rather than
+    # moving archives back to the default bucket.
+    kept = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(revision=1, max_archive_bytes=1024**3),
+        headers=ADMIN,
+    )
+    assert kept.status_code == 200
+    assert kept.json()["s3_uri"] == uri
+    assert kept.json()["revision"] == 2
+
+    elsewhere = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json={**_archive_policy(revision=2), "s3_uri": "s3://example-archives/other-prefix"},
+        headers=ADMIN,
+    )
+    assert elsewhere.status_code == 422
+    assert store.archive_settings["s3_uri"] == uri
 
 
 @pytest.mark.asyncio

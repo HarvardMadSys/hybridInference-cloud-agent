@@ -25,7 +25,13 @@ Names inherited from HybridInference remain in use.
 
 The service is named **Sandbox Manager** (`sandbox-manager` in Compose and
 `cloud_agent_host.sandbox_manager` in Python). Use `AGENT_SANDBOX_MANAGER_*`
-names for new deployments. Existing values remain accepted:
+names for new deployments. The previous names remain accepted until 2026-12-31.
+When one supplies a value, the host or local deployment script that reads it
+prints a warning naming the variable, never its value, and a Python service
+that reads one itself, as from a deployment profile's Host environment, logs
+`sandbox_manager_legacy_env`. The fallbacks in the Compose files themselves
+are silent, the control plane's among them, so check each deployment's `.env`
+for these names before then:
 
 | Current name | Previous name |
 | --- | --- |
@@ -44,13 +50,15 @@ invoking Compose. For a direct `docker compose` invocation, provide
 `AGENT_SANDBOX_MANAGER_TOKEN`; the recipe still refuses to render without it.
 
 Host activation drains and removes the old service before creating its
-replacement. Its old DNS alias and Python entry point remain available for
-mixed-version deployments. Saved credentials keep their existing encryption
-domain; no secret rotation or database migration is needed for this rename.
-The physical `broker_url` database column, old host wire fields, and telemetry
-producer ID remain compatibility details. New API fields and code use
-`sandbox_manager_url`; the UI displays **Sandbox Manager**, including for old
-measurement records.
+replacement. In the host and local Compose files the `sandbox-manager` service
+keeps `workspace-broker` as a network alias; the old
+`cloud_agent_host.workspace_broker` Python entry point is gone. Saved
+credentials keep their existing encryption domain; no secret rotation or
+database migration is needed for this rename. The physical `broker_url`
+database column, the `broker_url` field in which hosts of the previous release
+still report their address, and the telemetry producer ID remain compatibility
+details. New API fields and code use `sandbox_manager_url`; the UI displays
+**Sandbox Manager**, including for old measurement records.
 
 Durable archive markers and deletion receipts also keep their existing paths
 (`/var/lib/freeinference-broker` inside retained sandboxes and
@@ -73,7 +81,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0098_measurement_counts`) before
+Run `alembic upgrade head` (through `0105_job_event_usage_summary`) before
 starting this release; the [upgrade notes](docs/developer/upgrade-notes.md)
 say what each recent migration changes. The main control-plane listener then
 initializes the settings document once from its existing environment. The
@@ -108,10 +116,10 @@ environment variable sets that policy or its destination. The
 `AGENT_SANDBOX_ARCHIVE_S3_*` variables under *Sandbox deletion archives* are a
 one-time import for the separate archive the **Archive to S3 and delete**
 control takes, and `AGENT_SANDBOX_ARCHIVE_STATE_DIR` is where a Sandbox Manager
-keeps the local state of both, restorable checkpoints included. The lifecycle
-archive destination is fixed at
-`s3://freeinference/cloud-agent/sandbox`. The saved policy contains enablement,
-region, bounded upload sizes, and either an AWS access key or the workload
+keeps the local state of both, restorable checkpoints included. Lifecycle
+archives go to `s3://<bucket>/cloud-agent/sandbox`, and the bucket defaults to
+`freeinference`. The saved policy contains enablement, the bucket, region,
+bounded upload sizes, and either an AWS access key or the workload
 identity fields (customer-managed KMS key ARN and expected bucket owner). The
 secret access key is encrypted with the settings encryption key and is not
 returned by the admin API. With no access key, sandbox managers authenticate
@@ -338,7 +346,7 @@ relay reachability and connection target policy.
 | `AGENT_MCP_ALLOW_PLAIN_HTTP` | Whether a user-added MCP connection may use `http://` as well as `https://`. Off by default because the credential would travel in the clear. A deployment whose connector bridge is genuinely HTTP inside a private network turns it on deliberately; it is a separate variable from the private-target one because it is a separate risk. |
 | `AGENT_DEFAULT_MODEL` | *Optional legacy import.* The model a new task starts on when its owner has not chosen one — their pinned model in My Settings outranks it, and so does the model their last task used. A model this deployment's gateway does not offer to a user is skipped rather than forced, so a value that is wrong for someone cannot strand them: they are asked to choose instead. Defaults to `deepseek-v4-flash`, which is what the composer hardcoded before this setting existed. Empty means this deployment offers no default and every new owner picks. Imported once; after that, edit it in Admin Settings → Sandbox execution. |
 | `AGENT_MCP_SERVERS` | **Not operator-set — listed so nobody provisions it.** The name the runner publishes the relay endpoints under for the image-shipped wrappers, as one JSON object of `{alias: url}`. The wrappers merge it into the CLI config they already write, under whichever key their CLI spells MCP with, and add the token reference in that CLI's own syntax — which is not portable between them. A value put here by hand would point a sandbox at servers nobody connected. |
-| `AGENT_MCP_TOKEN` | **Not operator-set — listed so nobody provisions it.** The name the generated sandbox runtime config *references* (`${AGENT_MCP_TOKEN}`) for the relay credential the runner injects at launch: a chat process's residency credential, or a turn's own token. A value put here by hand would be a static tool credential shared by every job, which is the thing these scoped credentials exist to avoid. |
+| `AGENT_MCP_TOKEN` | **Not operator-set — listed so nobody provisions it.** The name the generated sandbox runtime config *references* (`${AGENT_MCP_TOKEN}`) for the relay credential the runner injects at launch: the chat process's residency credential. A value put here by hand would be a static tool credential shared by every job, which is the thing these scoped credentials exist to avoid. |
 
 ### Sandbox settings from the admin pages
 
@@ -490,6 +498,7 @@ compose, because they name the stack rather than configure it.
 | `AGENT_TERMINAL_MAX_SESSIONS` | How many interactive terminals the sandbox manager holds open at once across all chats (default 64, accepted 1–4096). Can be set from the admin pages, which win over this value; see *Sandbox settings from the admin pages*. |
 | `AGENT_RETAINED_DOCKER_DATA_ROOT` | Expected daemon-side `DockerRootDir`. Supported host/local Compose default: `/var/lib/docker`; direct sandbox manager execution only checks it when configured. A mismatch at sandbox manager startup fails retained mode closed. For same-host disk durability, bind `<disk>/docker` onto `/var/lib/docker` and `<disk>/containerd` onto `/var/lib/containerd`, and leave this value at `/var/lib/docker`. A non-default daemon `data-root` or containerd `root` is rejected. Bootstrap verifies the mount with `findmnt` and persists the binds in `/etc/fstab` plus systemd `RequiresMountsFor` drop-ins. See [Retained Docker storage](docs/developer/operations.md#retained-docker-storage-on-a-host). The path is never mounted into sandbox managers or sandboxes; Docker alone manages container layers. This supports stop/start and host reboots. Automatic CloudLab replacement uses a separate stopped-daemon transfer protocol; this setting is not a checkpoint or off-node backup. |
 | `AGENT_CONTAINERD_CONTENT_DIR` | Sandbox Manager path of containerd's content store (`<root>/io.containerd.content.v1.content`), mounted read-only. Code and host Compose default `/var/lib/hybridinference/containerd-content`; host Compose binds `AGENT_HOST_CONTAINERD_CONTENT_DIR` (default `/var/lib/containerd/io.containerd.content.v1.content`, the system containerd that Docker uses with its containerd image store) there. A restorable checkpoint then copies only the commit's new layers. When the mount is absent, empty or from another daemon, the checkpoint falls back to streaming the whole image through `docker image save`, which is slower but equivalent. Docker's own managed containerd keeps the store under `/var/lib/docker/containerd/daemon/io.containerd.content.v1.content`. |
+| `AGENT_UPLOAD_RECEIPT_DIR` | Host-private attachment-import receipt directory shared read-write by the runner and sandbox manager. Supported host Compose sets `/var/lib/hybridinference/upload-receipts` in both containers and binds only `${AGENT_HOST_STATE_ROOT}/upload-receipts` into the sandbox manager, not the parent containing the host credential. Keep it durable so retained-container imports remain incremental across service replacement and so deletion can retire their receipts. When unset, direct/legacy execution keeps the prior `AGENT_HOST_CREDENTIAL_FILE` parent plus `upload-receipts` default. |
 | `AGENT_SANDBOX_ARCHIVE_STATE_DIR` | Sandbox Manager-only directory for temporary stopped-container exports and immutable per-request deletion receipts. Code default `/var/lib/hybridinference/broker-archives`; host Compose binds `${AGENT_HOST_STATE_ROOT}/sandbox-archives` there. Keep this directory on durable storage so a sandbox manager replacement can finish a verified deletion after a lost response. It must never be mounted into a sandbox. Exports use mode 0600 within mode 0700 request directories; the full archive contains repository files and native session state, while credential tmpfs and secret-bearing Docker configuration fields are omitted. Archives over 5 GiB are refused and the original retained; at most four requests retain pending archives per sandbox manager. Temporary files are removed after abort or successful deletion, and phase receipts remain. Restorable checkpoints keep their latest receipt per sandbox in `checkpoints/` and spool their exports in `checkpoint-spool/` here. |
 | `AGENT_SHARED_RESIDENT_CAPACITY` | Number of credential-isolated member UID/private-tmpfs slots built into each new shared container. Default 8; accepted range 2–128. Fork reserves a free slot before any native mutation. This bounds resident chats in one group, while `AGENT_HOST_SLOTS` separately bounds simultaneously claimed turns on the machine. Can be set from the admin pages, which win over this value; see *Sandbox settings from the admin pages*. |
 | `AGENT_CHAT_IDLE_TIMEOUT_S` | The single product-level inactivity clock for a retained chat group. Defaults to 1800 seconds (30 minutes). Turn/file/Git completion and terminal activity advance the same group deadline; activity tokens prevent a mid-operation stop without stacking another full timeout. When the settled clock expires, the host issues `docker stop`, releases that group's bridge, and retains the same container/writable layer. It never authorizes `docker rm`. Wake rebuilds the group's bridge, host rules first, before `docker start`. `AGENT_TIMEOUT_S` and terminal TTLs are resource watchdogs, not alternate chat lifecycle clocks. Can be set from the admin pages, which win over this value; see *Sandbox settings from the admin pages*. |

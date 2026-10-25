@@ -18,14 +18,17 @@ import asyncio
 import contextlib
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from functools import partial
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from cloud_agent.logging_utils import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Hashable, Iterator
 
 logger = get_logger(__name__)
+
+_T = TypeVar("_T")
 
 CHANNEL = "agent_owner_changes"
 #: Kinds the stream forwards as a hint, without reading anything: the tab reads
@@ -42,6 +45,9 @@ class OwnerChanges:
     threads: set[str] = field(default_factory=set)
     hints: dict[str, set[str]] = field(default_factory=dict)
     resync: bool = False
+    #: The newest notification among these changes, by the signal's count: a
+    #: read made for them must have started at or after it.
+    sequence: int = 0
 
 
 class OwnerSubscription:
@@ -52,8 +58,8 @@ class OwnerSubscription:
         self.woken = asyncio.Event()
         self._pending = OwnerChanges()
 
-    def add(self, kind: str, row_id: str) -> None:
-        """Record one changed row."""
+    def add(self, kind: str, row_id: str, sequence: int = 0) -> None:
+        """Record one changed row, notified as the signal's ``sequence``-th."""
         if kind == "job":
             self._pending.jobs.add(row_id)
         elif kind == "thread":
@@ -62,6 +68,7 @@ class OwnerSubscription:
             self._pending.hints.setdefault(kind, set()).add(row_id)
         else:
             return
+        self._pending.sequence = max(self._pending.sequence, sequence)
         self.woken.set()
 
     def resync(self) -> None:
@@ -85,6 +92,48 @@ class OwnerSubscription:
         return True
 
 
+class SharedReads:
+    """One read per key at a time, shared by the streams that need it.
+
+    Every tab an owner has open is woken by the same notification, and each
+    would otherwise make the same read. A stream joins a read already under way
+    only if that read started at or after the newest notification the stream
+    is answering: one that started earlier may not include what it was told
+    changed. The read runs as its own task, so a stream that goes away does not
+    cancel it for the others.
+    """
+
+    def __init__(self, clock: Callable[[], int]) -> None:
+        """Date each read by ``clock``, the count of notifications delivered."""
+        self._clock = clock
+        self._running: dict[Hashable, tuple[int, asyncio.Task[Any]]] = {}
+
+    async def read(self, key: Hashable, *, after: int, read: Callable[[], Awaitable[_T]]) -> _T:
+        """Return ``read()``, or the same read another stream started since ``after``."""
+        running = self._running.get(key)
+        if running is None or running[0] < after:
+            started = self._clock()
+            task: asyncio.Task[Any] = asyncio.ensure_future(read())
+            running = (started, task)
+            self._running[key] = running
+            task.add_done_callback(partial(self._finished, key))
+        result: _T = await asyncio.shield(running[1])
+        return result
+
+    def _finished(self, key: Hashable, task: asyncio.Task[Any]) -> None:
+        running = self._running.get(key)
+        if running is not None and running[1] is task:
+            del self._running[key]
+        if not task.cancelled():
+            # Every stream that wanted it may be gone; the error is not lost
+            # on them, so do not report it as never retrieved.
+            task.exception()
+
+    def running(self) -> int:
+        """How many reads are under way; for tests and diagnostics."""
+        return len(self._running)
+
+
 class OwnerChangeSignal:
     """Per-owner change sets for the change streams of this process."""
 
@@ -96,6 +145,10 @@ class OwnerChangeSignal:
         #: Whether a connection is listening now. While it is not, nothing can
         #: be pushed, and tabs keep reading on their own clocks.
         self.listening = False
+        #: How many notifications this process has been handed.
+        self.sequence = 0
+        #: Reads the owner's streams share; see :class:`SharedReads`.
+        self.reads = SharedReads(lambda: self.sequence)
 
     @contextlib.contextmanager
     def subscribe(self, user_id: str) -> Iterator[OwnerSubscription]:
@@ -121,8 +174,9 @@ class OwnerChangeSignal:
                 "agent_owner_change_unreadable", extra={"event": "agent_owner_change_unreadable"}
             )
             return
+        self.sequence += 1
         for subscription in self._waiting.get(user_id, ()):
-            subscription.add(kind, row_id)
+            subscription.add(kind, row_id, self.sequence)
 
     def reset(self, *, listening: bool) -> None:
         """The connection opened or was lost: every stream resynchronises."""

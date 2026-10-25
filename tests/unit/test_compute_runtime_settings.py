@@ -147,6 +147,47 @@ async def test_endpoint_rotation_affects_next_request_and_preserves_request_in_p
     ]
 
 
+async def test_cloudlab_borrows_the_control_planes_pool():
+    """Its requests ride the shared pool, not a connection and a TLS handshake each."""
+    requests = []
+
+    async def credential(_):
+        return "private-token"
+
+    def handler(request):
+        requests.append(str(request.url))
+        return httpx.Response(200, json={"experiments": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as shared:
+        registry = build_registry(
+            ComputeConfiguration(cloudlab_api_url="https://portal.example/api"),
+            resolver=SimpleNamespace(resolve=credential),
+            transport=AsyncMock(),
+            client=shared,
+        )
+        for _ in range(2):
+            await registry.get("cloudlab").provider.validate_connection("connection")
+        assert not shared.is_closed, "the pool belongs to the lifespan that lent it"
+    assert requests == ["https://portal.example/api/experiments/"] * 2
+
+
+def test_the_compute_runtime_lends_its_registry_the_shared_pool(monkeypatch):
+    from cloud_agent.bootstrap import compute as bootstrap_compute
+
+    lent: dict[str, object] = {}
+
+    def registry(configuration, **kwargs):
+        lent.update(kwargs)
+        return build_registry(configuration, **kwargs)
+
+    monkeypatch.setattr(bootstrap_compute, "build_registry", registry)
+    shared = object()
+    bootstrap_compute.build_compute_runtime(
+        repository=AsyncMock(), host_pool=AsyncMock(), http=shared
+    )
+    assert lent["client"] is shared
+
+
 def test_explicit_configuration_stays_fixed_while_runtime_reads_current_saved_values():
     fixed = ComputeConfiguration(
         poll_seconds=17,

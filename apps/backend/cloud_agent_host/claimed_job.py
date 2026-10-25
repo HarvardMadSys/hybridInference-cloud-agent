@@ -62,11 +62,6 @@ class ClaimedJob:
     # CLI runs on its own residency grant from `establish_shared_residency`.
     sandbox_token: str
     execution_profile: str = "trusted-v1"
-    # The MCP credential. A *second* credential, because tools and inference
-    # are two services now: a leaked MCP token buys no inference and a leaked
-    # grant buys no tools. The relay it opens is this host's own, from
-    # `_sandbox_mcp_url`, not anything the claim says.
-    mcp_token: str = ""
     # How hard the model should think on this turn, in the runtime's own
     # vocabulary. None is Auto: no flag, whatever the CLI and model default to.
     # Defaulted rather than required, because absent and Auto are the same
@@ -150,7 +145,6 @@ class ClaimedJob:
             reasoning_effort=body.get("reasoning_effort"),
             worker_token=body["worker_token"],
             sandbox_token=body["sandbox_token"],
-            mcp_token=body.get("mcp_token") or "",
             clone_token=body.get("clone_token") or None,
             github_token=body.get("github_token") or None,
             mcp_bindings=list(body.get("mcp_bindings") or []),

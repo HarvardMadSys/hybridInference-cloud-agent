@@ -11,7 +11,7 @@ const easternTime = new Intl.DateTimeFormat('en-US', {
   timeZoneName: 'short',
 });
 
-export function DeploymentFooter() {
+export function DeploymentFooter({ className = '' }: { className?: string }) {
   const { deployment } = useSiteConfig();
   const t = useT();
   const version = deployment?.version ?? '';
@@ -21,7 +21,9 @@ export function DeploymentFooter() {
   const deployedTimeEastern = deployedAt ? easternTime.format(new Date(deployedAt)) : null;
 
   return (
-    <footer className="flex shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-0.5 border-t border-border bg-surface-muted px-3 py-1 text-[11px] text-muted">
+    <footer
+      className={`flex shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-0.5 border-t border-border bg-surface-muted px-3 py-1 text-[11px] text-muted ${className}`}
+    >
       <a
         href="https://seas.harvard.edu/"
         target="_blank"

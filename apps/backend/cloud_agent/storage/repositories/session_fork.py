@@ -21,6 +21,7 @@ from cloud_agent.storage._sql.sandbox import (
     FENCE_START_SQL,
     NATIVE_FORK_CAPABLE,
     THREAD_SANDBOX_SOURCE,
+    lock_memberships,
     quiet_idle_deadline,
 )
 from cloud_agent.storage.repositories.goals import new_goal_id
@@ -460,6 +461,10 @@ class PostgresSessionForkRepository:
             )
             if sandbox_host is None:
                 return None
+            # Both members before either, in thread order: the target's id is
+            # as likely to sort first as the source's, and a heartbeat
+            # extending both takes them in that order.
+            await lock_memberships(conn, list(thread_ids.values()))
             for role, thread_id in thread_ids.items():
                 current = await conn.fetchrow(
                     """
@@ -754,6 +759,15 @@ class PostgresSessionForkRepository:
                 # order. Locking the source job first here while a concurrent
                 # follow-up held the thread row produced a real PostgreSQL
                 # deadlock cycle (each transaction then waited for the other).
+                # The two conversations come first, lower id first, as an
+                # owner archiving or deleting both takes them: the target's id
+                # is as likely to sort first as the source's. The source is
+                # locked for update. The copied turns reference the target,
+                # which share-locks it: take that share here.
+                target_lock = "SELECT 1 FROM agent_threads WHERE id = $1 FOR KEY SHARE"
+                target_first = operation["target_thread_id"] < operation["source_thread_id"]
+                if target_first:
+                    await conn.execute(target_lock, operation["target_thread_id"])
                 thread = await conn.fetchrow(
                     "SELECT repo, title, setup_script, execution_profile "
                     "FROM agent_threads WHERE id = $1 FOR UPDATE",
@@ -761,9 +775,17 @@ class PostgresSessionForkRepository:
                 )
                 if thread is None:
                     return None
+                if not target_first:
+                    await conn.execute(target_lock, operation["target_thread_id"])
                 source = await conn.fetchrow(
                     f"{JOB_SELECT} WHERE j.id = $1 FOR UPDATE OF j",
                     operation["source_job_id"],
+                )
+                # Then both members, in thread order, before either: the
+                # target's is written below, and a heartbeat extending both
+                # takes them in that order.
+                await lock_memberships(
+                    conn, [operation["source_thread_id"], operation["target_thread_id"]]
                 )
                 membership = await conn.fetchrow(
                     """
@@ -971,13 +993,42 @@ class PostgresSessionForkRepository:
                 """,
                 stall_seconds,
             )
+            operations = []
             for candidate in candidates:
                 operation = await conn.fetchrow(
                     "SELECT * FROM agent_session_forks WHERE id = $1 FOR UPDATE SKIP LOCKED",
                     candidate["id"],
                 )
-                if operation is None:
-                    continue
+                if operation is not None:
+                    operations.append(operation)
+            # A failed operation's target is tombstoned below, and a pass may
+            # fail several: their conversations come before any member, in id
+            # order, as an owner archiving or deleting several takes them.
+            # This is the lock the tombstone itself takes, taken earlier.
+            targets = [
+                operation["target_thread_id"]
+                for operation in operations
+                if operation["state"] == "preparing"
+            ]
+            if targets:
+                await conn.execute(
+                    "SELECT id FROM agent_threads WHERE id = ANY($1::text[]) "
+                    "ORDER BY id FOR NO KEY UPDATE",
+                    targets,
+                )
+            # A failed operation's two members are written below, and a pass
+            # may fail several: every one of them, in thread order, before any.
+            # A heartbeat extending several takes them in that order.
+            await lock_memberships(
+                conn,
+                [
+                    operation[column]
+                    for operation in operations
+                    if operation["state"] == "preparing"
+                    for column in ("source_thread_id", "target_thread_id")
+                ],
+            )
+            for operation in operations:
                 if operation["state"] == "materialized":
                     item = dict(operation)
                     item["recovery_action"] = "finalize"

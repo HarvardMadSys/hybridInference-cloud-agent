@@ -19,6 +19,18 @@
       }
     },
     {
+      "files": ["scripts/check-runtime-site-config.mjs"],
+      "rules": {
+        "complexity": ["error", 22],
+        "max-lines": [
+          "error",
+          {
+            "max": 950
+          }
+        ]
+      }
+    },
+    {
       "files": [
         "src/app/(agents)/admin/database/DatabaseExplorer.tsx",
         "src/app/(agents)/admin/usage/page.tsx",
@@ -62,6 +74,7 @@
     {
       "files": [
         "src/app/(agents)/admin/measurements/present.ts",
+        "src/app/(agents)/admin/settings/settingValues.ts",
         "src/components/features/agents/AddWorkspace.tsx",
         "src/components/features/agents/agentPush.ts",
         "src/lib/workspaceLink.ts"
@@ -73,9 +86,9 @@
     {
       "files": [
         "src/app/(agents)/admin/runs/Resources.tsx",
-        "src/app/(agents)/admin/settings/settingValues.ts",
         "src/components/features/agents/recordedTurnOutputs.ts",
         "src/components/features/agents/useConversationReadState.ts",
+        "src/components/features/agents/useNativeQuestions.ts",
         "src/components/features/teams/JoinTeamView.tsx"
       ],
       "rules": {
@@ -84,8 +97,8 @@
     },
     {
       "files": [
+        "src/components/features/agents/AgentNotifications.tsx",
         "src/components/features/agents/environment/EnvironmentManager.tsx",
-        "src/components/features/agents/useNativeQuestions.ts",
         "src/components/features/settings/UsageSettings.tsx"
       ],
       "rules": {
@@ -95,7 +108,6 @@
     {
       "files": [
         "src/components/features/agents/environment/EnvironmentPicker.tsx",
-        "src/components/features/agents/job-detail/JobDetailSidePanels.tsx",
         "src/lib/api/agents/events.ts"
       ],
       "rules": {
@@ -140,7 +152,6 @@
     {
       "files": [
         "src/app/(agents)/admin/sandboxes/SandboxResults.tsx",
-        "src/components/features/agents/AgentNotifications.tsx",
         "src/components/features/agents/mcp/McpSessionPanel.tsx",
         "src/lib/api/agentChanges.ts"
       ],

@@ -54,16 +54,12 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
 )
 from cloud_agent_host.sandbox_manager import (
-    MAX_TERMINAL_BUFFER_BYTES,
-    MAX_TERMINAL_BUFFER_EVENTS,
     MAX_TERMINAL_SESSIONS_PER_WORKSPACE,
     SharedIdleStopRequest,
     SharedTurnRequest,
     _run_sandbox,
     _terminal_sse_frame,
-    _TerminalLimits,
     _TerminalManager,
-    _TerminalSession,
     create_app,
 )
 from cloud_agent_host.session_supervisor_client import (
@@ -74,6 +70,12 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedSessionDescriptor,
     SharedSessionLease,
     SharedTurnTelemetry,
+)
+from cloud_agent_host.terminal_session import (
+    MAX_TERMINAL_BUFFER_BYTES,
+    MAX_TERMINAL_BUFFER_EVENTS,
+    _TerminalLimits,
+    _TerminalSession,
 )
 from cloud_agent_host.tool_windows import ToolMark
 from cloud_agent_shared.git.base_bundle_stream import (
@@ -142,7 +144,7 @@ async def test_resource_checkpoint_is_forwarded_before_any_native_event():
     supervisor.start_turn = lambda *_args, **_kw: QuietTurn()  # type: ignore[attr-defined]
     pending = [{"measurement_id": "sample", "state": "collecting", "report_seq": 1}]
     supervisor.take_reported_checkpoint = (  # type: ignore[attr-defined]
-        lambda _thread_id: pending.pop() if pending else None
+        lambda _thread_id, _turn: pending.pop() if pending else None
     )
     supervisor.abort_turn = lambda *_args: gate.set()  # type: ignore[attr-defined]
     app = _app(supervisor)
@@ -343,6 +345,8 @@ class _SharedSupervisor:
     def __init__(self, *, events: list[str] | None = None) -> None:
         self.workspace_backend = _WorkspaceBackend()
         self.calls: list[tuple] = []
+        # The proof time the last backend was handed, from its admission.
+        self.network_proved_at: float | None = None
         self.start_seqs: list[int | None] = []
         self.restores: list[object] = []
         self.imports = self.workspace_backend.imports
@@ -479,9 +483,10 @@ class _SharedSupervisor:
         self.calls.append(("terminal_closed", thread_id, token, kwargs))
         return _descriptor(thread_id)
 
-    def backend(self, thread_id: str):
+    def backend(self, thread_id: str, *, network_proved_at: float | None = None):
         assert self.owns(thread_id)
         self.calls.append(("backend", thread_id))
+        self.network_proved_at = network_proved_at
         return self.workspace_backend
 
     def capture_snapshot(self, thread_id: str, *, capture, start_seq: int | None = None):
@@ -3005,40 +3010,14 @@ class _RunningTerminalProcess(_SuspendableTerminalProcess):
         self._killed.set()
 
 
-def test_a_shortened_terminal_lifetime_closes_terminals_already_past_it():
-    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
-    process = _RunningTerminalProcess()
-    session = _TerminalSession(
-        terminal_id="term_old",
-        process=process,
-        workdir=None,
-        rows=24,
-        cols=80,
-        now=time.monotonic() - 600,
-        idle_ttl_s=None,
-        on_closed=None,
-    )
-    session.start()
-    terminals._sessions["athr_source"] = {"term_old": session}
-
-    terminals.reap()
-    assert "athr_source" in terminals._sessions, "ten minutes is inside half an hour"
-
-    terminals.configure(idle_ttl_s=300, hard_ttl_s=28800, max_sessions=8)
-    assert terminals._reap_interval() == 30.0
-    terminals.reap()
-    assert "athr_source" not in terminals._sessions
-    assert process.killed
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("method", "path", "body"),
     [
         ("GET", "/workspaces/athr_source/terminals", None),
-        ("POST", "/workspaces/athr_source/terminals/suspend", {"lease_generation": 1}),
-        ("POST", "/workspaces/athr_source/terminals/resume", {"lease_generation": 1}),
-        ("POST", "/workspaces/athr_source/terminals/resume-settled", {}),
+        ("POST", "/workspaces/athr_source/terminals/suspend", {"job_id": "job-1"}),
+        ("POST", "/workspaces/athr_source/terminals/resume", {"job_id": "job-1"}),
+        ("POST", "/workspaces/athr_source/terminals/resume-settled", {"job_id": "job-1"}),
         ("GET", "/workspaces/athr_source/terminals/term_missing/stream", None),
         ("GET", "/workspaces/athr_source/terminals/term_missing/output", None),
         ("POST", "/workspaces/athr_source/terminals/term_missing/input", {"data": "eA=="}),
@@ -3163,34 +3142,24 @@ def test_terminal_limits_are_refused_outside_the_bounds_the_sandbox_manager_star
 def test_terminal_suspensions_are_reference_counted_per_concurrent_turn():
     terminals = _TerminalManager(idle_ttl_s=30, hard_ttl_s=60, max_sessions=8)
 
-    terminals.suspend("athr_source", lease_generation=2, job_id="job-parent")
-    terminals.suspend("athr_source", lease_generation=1, job_id="job-child")
-    assert terminals.resume("athr_source", lease_generation=2, job_id="job-parent") == {
+    terminals.suspend("athr_source", job_id="job-parent")
+    terminals.suspend("athr_source", job_id="job-child")
+    assert terminals.resume("athr_source", job_id="job-parent") == {
         "ok": True,
         "resumed": 0,
     }
     assert "athr_source" in terminals._suspended_workspaces
-    assert terminals.resume_settled("athr_source", job_id="job-parent") == {
+    # The parent's settled release, after its own resume, thaws nothing.
+    assert terminals.resume("athr_source", job_id="job-parent") == {
         "ok": True,
         "resumed": 0,
     }
     assert "athr_source" in terminals._suspended_workspaces
-    assert terminals.resume("athr_source", lease_generation=1, job_id="job-child") == {
+    assert terminals.resume("athr_source", job_id="job-child") == {
         "ok": True,
         "resumed": 0,
     }
     assert "athr_source" not in terminals._suspended_workspaces
-
-
-def test_legacy_settled_resume_resets_its_per_job_generation():
-    terminals = _TerminalManager(idle_ttl_s=30, hard_ttl_s=60, max_sessions=8)
-
-    terminals.suspend("athr_source", lease_generation=2)
-    assert terminals.resume_settled("athr_source") == {"ok": True, "resumed": 0}
-    terminals.suspend("athr_source", lease_generation=1)
-
-    assert terminals._workspace_generations["athr_source"] == 1
-    assert "athr_source" in terminals._suspended_workspaces
 
 
 def test_partial_terminal_resume_refreezes_every_process(tmp_path):
@@ -3209,10 +3178,10 @@ def test_partial_terminal_resume_refreezes_every_process(tmp_path):
         for index, process in enumerate(processes)
     ]
     terminals._sessions["athr_source"] = {session.id: session for session in sessions}
-    terminals.suspend("athr_source", lease_generation=1, job_id="job-parent")
+    terminals.suspend("athr_source", job_id="job-parent")
 
     with pytest.raises(HTTPException) as raised:
-        terminals.resume("athr_source", lease_generation=1, job_id="job-parent")
+        terminals.resume("athr_source", job_id="job-parent")
 
     assert raised.value.status_code == 503
     assert all(process.suspended for process in processes)
@@ -3260,9 +3229,7 @@ def test_a_slow_terminal_suspension_never_holds_up_another_workspace(tmp_path):
     _listed_session(terminals, "athr_source", slow, tmp_path)
     other = _listed_session(terminals, "athr_other", _TerminalProcess(), tmp_path)
     suspension = threading.Thread(
-        target=functools.partial(
-            terminals.suspend, "athr_source", lease_generation=1, job_id="job-parent"
-        ),
+        target=functools.partial(terminals.suspend, "athr_source", job_id="job-parent"),
         daemon=True,
     )
     suspension.start()
@@ -3322,9 +3289,7 @@ def test_a_slow_terminal_creation_never_holds_up_another_workspace(tmp_path):
     creation.start()
     assert spawner.spawning.wait(2)
     own_suspension = threading.Thread(
-        target=functools.partial(
-            terminals.suspend, "athr_source", lease_generation=1, job_id="job-source"
-        ),
+        target=functools.partial(terminals.suspend, "athr_source", job_id="job-source"),
         daemon=True,
     )
 
@@ -3334,7 +3299,7 @@ def test_a_slow_terminal_creation_never_holds_up_another_workspace(tmp_path):
             lambda: (
                 terminals.get_for_control("athr_other", other.id),
                 terminals.list("athr_other"),
-                terminals.suspend("athr_other", lease_generation=1, job_id="job-other"),
+                terminals.suspend("athr_other", job_id="job-other"),
             ),
         )
         own_suspension.start()
@@ -3397,17 +3362,13 @@ def test_a_resume_waits_for_its_own_workspaces_suspension_to_finish(tmp_path):
     for process in processes:
         _listed_session(terminals, "athr_source", process, tmp_path)
     suspension = threading.Thread(
-        target=functools.partial(
-            terminals.suspend, "athr_source", lease_generation=1, job_id="job-parent"
-        ),
+        target=functools.partial(terminals.suspend, "athr_source", job_id="job-parent"),
         daemon=True,
     )
     suspension.start()
     assert slow.stopping.wait(2)
     resumption = threading.Thread(
-        target=functools.partial(
-            terminals.resume, "athr_source", lease_generation=1, job_id="job-parent"
-        ),
+        target=functools.partial(terminals.resume, "athr_source", job_id="job-parent"),
         daemon=True,
     )
     resumption.start()

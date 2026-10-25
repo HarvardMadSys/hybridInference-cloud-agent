@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+from cloud_agent_host.chat_sandbox_inspect import containers_by_ref, inspect_each
 from cloud_agent_host.chat_sandbox_models import (
     CHAT_GENERATION_LABEL,
     CHAT_NAMESPACE_LABEL,
@@ -33,6 +34,7 @@ from cloud_agent_host.chat_sandbox_models import (
     RetainedChatFailStopped,
     RetainedChatLost,
 )
+from cloud_agent_host.idle_host_rules import deployment_running
 from cloud_agent_host.network_guard import GUARD_RENEW_S
 from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
 
@@ -165,6 +167,8 @@ class ChatNetworkContainers(Protocol):
     ) -> subprocess.CompletedProcess[str]: ...
 
     def _require(self, spec: ChatSandboxSpec) -> ChatSandboxInspection: ...
+
+    def _require_exact(self, spec: ChatSandboxSpec, container_id: str) -> ChatSandboxInspection: ...
 
     def _verify_identity(
         self, inspection: ChatSandboxInspection, spec: ChatSandboxSpec, *, require_name: bool = True
@@ -324,49 +328,8 @@ class ChatSandboxNetwork:
         )
 
     def _inspect_containers(self, container_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
-        """Inspect many containers in one call, keyed by the id asked for.
-
-        ``docker container inspect`` takes any number of ids and answers for
-        all of them at once, and the marginal cost of an extra id is a few
-        hundred microseconds against roughly twelve milliseconds for the
-        process itself. Asking once per container — which is what the callers
-        below used to do — made a reconcile's cost scale with the size of the
-        relay network for no reason.
-
-        An id that does not resolve is simply absent from the result. Docker
-        exits non-zero when *any* id is missing while still answering for the
-        rest, so the output is parsed regardless of the exit code: a partial
-        answer is the normal case here, since Compose replacement can remove
-        an endpoint between the network inspection and this one.
-        """
-        wanted = list(dict.fromkeys(str(container_id) for container_id in container_ids))
-        if not wanted:
-            return {}
-        result = self._containers._run(
-            [self.backend.docker_binary, "container", "inspect", *wanted], timeout=30
-        )
-        try:
-            payload = json.loads(result.stdout or "[]")
-        except json.JSONDecodeError:
-            return {}
-        if not isinstance(payload, list):
-            return {}
-
-        found: dict[str, dict[str, Any]] = {}
-        for raw in payload:
-            if not isinstance(raw, dict):
-                continue
-            identifier = str(raw.get("Id") or "")
-            name = str(raw.get("Name") or "").removeprefix("/")
-            for container_id in wanted:
-                if container_id in found:
-                    continue
-                # A caller may hold a full id, a short id, or a name; Docker
-                # always answers with the full id and the name.
-                if container_id in (identifier, name) or identifier.startswith(container_id):
-                    found[container_id] = raw
-                    break
-        return found
+        """Inspect many containers in one call, keyed by the id asked for."""
+        return containers_by_ref(self._containers._run, self.backend.docker_binary, container_ids)
 
     @staticmethod
     def _endpoint_aliases(raw: dict[str, Any], network: str) -> set[str] | None:
@@ -671,8 +634,8 @@ class ChatSandboxNetwork:
                         "stale relay could not leave the group network: "
                         + disconnected.stderr.strip()[:300]
                     )
-
-        refreshed = self._inspect_network(network)
+        # Only a detach changed the bridge since it was read; an activation still rereads it.
+        refreshed = self._inspect_network(network) if unexpected else inspected
         if refreshed is None:
             raise SandboxError("group network disappeared during reconciliation")
         self._verify_group_network(refreshed, spec)
@@ -884,13 +847,12 @@ class ChatSandboxNetwork:
         self.backend.network_guard().ensure()
 
     def renew_host_rules(self) -> None:
-        """Renew the host-rule verification before it lapses, for the sweep.
+        """Renew the host-rule verification before it lapses, while anything runs behind it.
 
-        A host with no sandbox network configured has nothing to keep warm.
+        The idle sweep calls this (:mod:`cloud_agent_host.idle_host_rules`); no network, no-op.
         """
-        if self.backend.sandbox_network is None:
-            return
-        self.backend.network_guard().ensure(max_age_s=GUARD_RENEW_S)
+        if self.backend.sandbox_network is not None and deployment_running(self._containers):
+            self.backend.network_guard().ensure(max_age_s=GUARD_RENEW_S)
 
     def _ensure_group_network(
         self,
@@ -976,7 +938,7 @@ class ChatSandboxNetwork:
                 f"{(network_name or network)!r}: " + disconnected.stderr.strip()[:300]
             )
 
-    def _release_owned_network(  # noqa: PLR0912 complexity baseline, #771
+    def _release_owned_network(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         network_name: str,
         spec: ChatSandboxSpec,
@@ -986,6 +948,18 @@ class ChatSandboxNetwork:
         expected_container_id: str | None = None,
     ) -> None:
         """Disconnect exact owned endpoints and delete one inactive bridge."""
+        sandbox: ChatSandboxInspection | None
+        if expected_container_id is not None:
+            sandbox = self._containers._require_exact(spec, expected_container_id)
+            if sandbox.running:
+                raise SandboxError("chat sandbox restarted during network release")
+            named = self._containers.inspect(spec.container_name)
+            if named is not None and named.container_id != expected_container_id:
+                raise RetainedChatLost("sandbox identity changed during network release")
+        else:
+            sandbox = self._containers.inspect(spec.container_name)
+            if sandbox is not None:
+                self._containers._verify_identity(sandbox, spec)
         network = self._inspect_network(network_name)
         if network is None:
             return
@@ -1008,13 +982,6 @@ class ChatSandboxNetwork:
         containers = network.get("Containers") or {}
         if not isinstance(containers, dict):
             raise SandboxError("Docker returned invalid group-network endpoints")
-        sandbox = self._containers.inspect(spec.container_name)
-        if sandbox is not None:
-            self._containers._verify_identity(sandbox, spec)
-        if expected_container_id is not None and (
-            sandbox is None or sandbox.container_id != expected_container_id
-        ):
-            raise RetainedChatLost("chat sandbox container identity changed during network release")
         sandbox_id = sandbox.container_id if sandbox is not None else None
         if only_if_sandbox_unattached and sandbox_id in containers:
             # Opportunistic orphan pruning must never detach a sandbox that
@@ -1125,23 +1092,17 @@ class ChatSandboxNetwork:
         expected_container_id: str | None = None,
     ) -> ChatSandboxInspection:
         """Release the group bridge after the retained container stops."""
+        if expected_container_id is not None:
+            current = self._containers._require_exact(spec, expected_container_id)
         if current.running:
             raise SandboxError("refusing to release networking from a running chat sandbox")
-        if expected_container_id is not None:
-            named = self._containers._require(spec)
-            if named.container_id != expected_container_id:
-                raise RetainedChatLost(
-                    "chat sandbox container identity changed during network release"
-                )
+        network_ids = dict(current.network_ids)
         for network_name in current.networks:
             if network_name == CHAT_NULL_NETWORK:
-                # There is no connectivity here to withdraw. Docker reports the
-                # null network for a container whose last endpoint has gone, so
-                # this is what a release that already succeeded looks like --
-                # and reading it as a network nobody owns made every
-                # later stop of an already-released sandbox raise. Because the
-                # supervisor stops every retained sandbox while reconciling, one
-                # such container was enough to keep the sandbox manager from starting.
+                # Docker reports null after its last endpoint is gone, so there is
+                # no connectivity to withdraw. This is an already-successful release:
+                # treating it as ownerless made reconcile stops fail and could block
+                # the sandbox manager from starting.
                 continue
             if (
                 network_name == CHAT_BOOTSTRAP_NETWORK
@@ -1157,17 +1118,12 @@ class ChatSandboxNetwork:
                 self._release_owned_network(
                     network_name,
                     spec,
+                    expected_network_id=network_ids.get(network_name, ""),
                     expected_container_id=expected_container_id,
                 )
                 continue
-            # A network that no longer exists cannot be an ownership violation:
-            # there is nothing left to release and nothing left to leak. The
-            # group bridge is pruned on its own grace timer, so a container that
-            # stopped before that timer can outlive its network and keep a stale
-            # endpoint record. Reading that record as an unknown network failed
-            # this sandbox's stop -- and with it the whole reconcile, and with
-            # that the sandbox manager's startup -- over a bridge the platform had
-            # already removed itself.
+            # A stopped container can retain an endpoint after its bridge was
+            # pruned. Nothing remains to release or treat as an ownership breach.
             if self._inspect_network(network_name) is None:
                 self._disconnect_endpoint(network_name, current.container_id)
                 continue
@@ -1176,9 +1132,13 @@ class ChatSandboxNetwork:
                 "group bridge; a sandbox from before the single-network change needs the "
                 "one-time cleanup"
             )
-        released = self._containers._require(spec)
-        if expected_container_id is not None and released.container_id != expected_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed during network release")
+        released = (
+            self._containers._require_exact(spec, expected_container_id)
+            if expected_container_id is not None
+            else self._containers._require(spec)
+        )
+        if released.running:
+            raise SandboxError("chat sandbox restarted during network release")
         return released
 
     @staticmethod
@@ -1220,12 +1180,19 @@ class ChatSandboxNetwork:
                 return True
         return False
 
-    def prune_orphan_networks(self, specs: builtins.list[ChatSandboxSpec]) -> None:
+    def prune_orphan_networks(
+        self,
+        specs: builtins.list[ChatSandboxSpec],
+        observed: Sequence[ChatSandboxInspection] | None = None,
+    ) -> None:
         """Remove stale owned bridges without racing a create or activation.
 
-        A bridge that cannot be examined or removed is logged and left for the
-        next pass; it never keeps the others, or the caller's reconciliation,
-        from going on.
+        Only this namespace's bridges are listed, and they are inspected
+        together, or one by one when that fails. ``observed``, the containers
+        the caller just listed, says which bridge each retained container is
+        on; without it, each one is inspected here. A bridge that cannot be
+        examined or removed is logged and left for the next pass; it never
+        keeps the others, or the caller's reconciliation, from going on.
         """
         result = self._containers._run(
             [
@@ -1235,18 +1202,26 @@ class ChatSandboxNetwork:
                 "--quiet",
                 "--filter",
                 f"label={CHAT_NETWORK_LABEL}=true",
+                "--filter",
+                f"label={CHAT_NAMESPACE_LABEL}={self.backend.sandbox_namespace}",
             ],
             timeout=30,
         )
         if result.returncode != 0:
             raise SandboxError("group network listing failed: " + result.stderr.strip()[:300])
+        networks, unread = inspect_each(
+            self._containers._run, self.backend.docker_binary, "network", result.stdout.split()
+        )
+        for ref, exc in unread.items():
+            logger.warning(
+                "chat_network_prune_failed", extra={"network": ref, "detail": str(exc)[:300]}
+            )
         by_identity = {(spec.sandbox_id, str(spec.generation)): spec for spec in specs}
+        sandboxes = None if observed is None else {item.name: item for item in observed}
         prefix = self._network().interface_prefix
-        for network_id in result.stdout.split():
+        for network in networks:
+            network_id = str(network.get("Id") or "")
             try:
-                network = self._inspect_network(network_id)
-                if network is None:
-                    continue
                 labels = network.get("Labels") or {}
                 namespace = labels.get(CHAT_NAMESPACE_LABEL)
                 if namespace != self.backend.sandbox_namespace:
@@ -1271,7 +1246,11 @@ class ChatSandboxNetwork:
                 )
                 spec = by_identity.get(identity)
                 if spec is not None:
-                    sandbox = self._containers.inspect(spec.container_name)
+                    sandbox = (
+                        self._containers.inspect(spec.container_name)
+                        if sandboxes is None
+                        else sandboxes.get(spec.container_name)
+                    )
                     if sandbox is not None and str(network["Name"]) in sandbox.networks:
                         # This is the live bridge of a retained container, not an
                         # orphan. reconcile() also runs for status polling, so

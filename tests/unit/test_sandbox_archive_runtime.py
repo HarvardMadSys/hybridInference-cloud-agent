@@ -228,6 +228,51 @@ def test_maximum_valid_uploaded_final_marker_fits_durable_bound() -> None:
     assert archive_runtime._FinalArchiveMarker.decode(payload) == uploaded
 
 
+@pytest.mark.parametrize(
+    ("receipt_bucket", "accepted"), [("example-archives", True), ("freeinference", False)]
+)
+def test_a_final_receipt_must_come_from_the_policys_bucket(
+    receipt_bucket: str, accepted: bool
+) -> None:
+    """The bucket the marker's policy names, and no other, even the default."""
+    policy = SandboxArchivePolicy(
+        enabled=True,
+        bucket="example-archives",
+        region="us-east-1",
+        kms_key_arn=f"arn:aws:kms:us-east-1:{_ACCOUNT}:key/archive",
+        expected_bucket_owner=_ACCOUNT,
+        revision=4,
+    )
+    spec = SimpleNamespace(sandbox_id="sandbox-1", generation=3)
+    pending = archive_runtime._FinalArchiveMarker.create(
+        namespace="pool-east",
+        spec=spec,
+        inspection=SimpleNamespace(container_id="container-1"),
+        policy=policy,
+    )
+    receipt = SandboxArchiveReceipt(
+        phase="final",
+        bucket=receipt_bucket,
+        key=(
+            f"cloud-agent/sandbox/v1/{hashlib.sha256(b'pool-east').hexdigest()}/"
+            f"{hashlib.sha256(b'sandbox-1').hexdigest()}/g3/final.tar.gz"
+        ),
+        size=123,
+        sha256="a" * 64,
+        etag="etag",
+        version_id="version-1",
+        s3_checksum_sha256="checksum",
+        multipart=False,
+    )
+
+    if accepted:
+        uploaded = pending.with_receipt(receipt)
+        assert archive_runtime._FinalArchiveMarker.decode(uploaded.encode()) == uploaded
+    else:
+        with pytest.raises(SandboxError, match="unexpected destination"):
+            pending.with_receipt(receipt)
+
+
 def test_unknown_policy_is_distinct_from_explicit_disabled_policy() -> None:
     controller, services = _controller()
     controller.start()

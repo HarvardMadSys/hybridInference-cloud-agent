@@ -51,6 +51,7 @@ from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.model_preference import ModelPreferenceView
 from cloud_agent.storage.repositories.conversation_commands import _goal_round_metadata
 from cloud_agent.storage.repositories.goals import _pause_detail
+from cloud_agent.thread_stats import summarize_thread
 from cloud_agent.tokens import mint_worker_token, parse_residency_mcp_token
 
 pytestmark = pytest.mark.asyncio
@@ -1461,7 +1462,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "queue_paused_reason": self.queue_paused.get(thread_id),
         }
 
-    async def thread_stats_inputs(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
+    async def thread_stats(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         job = self.jobs.get(job_id)
         # The real read joins the thread and refuses a deleted conversation.
         if job is None or job["user_id"] != user_id or job.get("deleted_at") is not None:
@@ -1472,16 +1473,14 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             key=lambda item: item["turn_no"],
         )
         job_ids = [item["id"] for item in thread_jobs]
+        attempts = [{"job_id": item["id"], "started_at": None} for item in thread_jobs]
+        events = [event for event in self.events if event["job_id"] in set(job_ids)]
+        # This stand-in stamps no clocks (``append_event`` stores
+        # ``created_at: None``), so timings are zero; the reducer's arithmetic
+        # is pinned by ``tests/unit/test_thread_stats.py``.
         return {
             "thread_id": thread_id,
-            "job_ids": job_ids,
-            # This stand-in stamps no clocks (``append_event`` stores
-            # ``created_at: None``), so the timings come back zero here and
-            # the arithmetic is pinned by ``tests/unit/test_thread_stats.py``
-            # instead. What this fake is for is the HTTP contract: ownership,
-            # shape, and the counts that need no clock.
-            "attempts": [{"job_id": item["id"], "started_at": None} for item in thread_jobs],
-            "events": [event for event in self.events if event["job_id"] in set(job_ids)],
+            "stats": summarize_thread(job_ids=job_ids, attempts=attempts, events=events),
         }
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
@@ -1498,11 +1497,14 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "goal": self.thread_goals.get(str(job["thread_id"])),
         }
 
-    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
+    async def job_stream_page(
+        self, *, job_id: str, user_id: str, after_id: int, limit: int
+    ) -> tuple[list[dict[str, Any]], JobStreamState] | None:
         job = self.jobs.get(job_id)
         if job is None or job["user_id"] != user_id:
             return None
-        return JobStreamState(job["state"], job.get("published_pr_url"))
+        events = await self.list_events_after(job_id=job_id, after_id=after_id, limit=limit)
+        return events, JobStreamState(job["state"], job.get("published_pr_url"))
 
     async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
         said = [
@@ -2026,6 +2028,29 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
                 }
             )
         return event["id"]
+
+    async def append_events(
+        self,
+        *,
+        attempt_id: int,
+        lease_generation: int,
+        events: list[tuple[str, dict[str, Any] | None, int | None]],
+    ) -> list[int] | None:
+        # Mirror the store: one fence for the batch, each event as a single append stores it.
+        if not self._fenced(attempt_id, lease_generation):
+            return None
+        stored = []
+        for event_type, payload, event_seq in events:
+            event_id = await self.append_event(
+                attempt_id=attempt_id,
+                lease_generation=lease_generation,
+                event_type=event_type,
+                payload=payload,
+                event_seq=event_seq,
+            )
+            assert event_id is not None
+            stored.append(event_id)
+        return stored
 
     async def transition(
         self,
@@ -4540,64 +4565,6 @@ async def test_terminal_list_passes_the_sandbox_managers_advertised_limits_throu
 
     assert listed.status_code == 200
     assert listed.json() == advertised
-
-
-async def test_terminal_controls_use_the_attached_session_capability(
-    store: FakeStorage, monkeypatch
-):
-    """Attached PTY controls skip entitlement and never replay the event log."""
-    sandbox_manager = _TerminalSessionSandboxManager()
-    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
-
-    async def unexpected_entitlement_recheck(**_kwargs):
-        raise AssertionError("attached terminal controls must not call external entitlement")
-
-    monkeypatch.setattr(
-        agent_workspace,
-        "_require_workspace_entitlement",
-        unexpected_entitlement_recheck,
-    )
-
-    async def unexpected_event_query(**_kwargs):
-        raise AssertionError("terminal input must use the attempt readiness field")
-
-    monkeypatch.setattr(store, "list_events_after", unexpected_event_query)
-    app = _build_app(store)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as local_client:
-        job_id = await _create_job(local_client)
-        workspace_id = _attach_shared_workspace(store, job_id)
-        claimed = await store.attempt_commands.claim_job(
-            worker_id="worker-1",
-            lease_ttl_seconds=60,
-            host="runner-test",
-            host_credential_hash="test-credential-hash",
-        )
-        assert claimed is not None
-        await store.attempt_commands.append_event(
-            attempt_id=claimed["attempt_id"],
-            lease_generation=claimed["lease_generation"],
-            event_type="lifecycle",
-            payload={"phase": "workspace_ready"},
-        )
-        wrote = await local_client.post(
-            f"/v1/agent/jobs/{job_id}/terminals/term_1/input",
-            json={"data": "eA=="},
-        )
-        resized = await local_client.post(
-            f"/v1/agent/jobs/{job_id}/terminals/term_1/resize",
-            json={"rows": 30, "cols": 100},
-        )
-        killed = await local_client.delete(f"/v1/agent/jobs/{job_id}/terminals/term_1")
-
-    assert wrote.status_code == 200
-    assert resized.status_code == 200
-    assert killed.status_code == 200
-    assert sandbox_manager.calls == [
-        ("input", workspace_id, "term_1", "eA=="),
-        ("resize", workspace_id, "term_1", 30, 100),
-        ("delete", workspace_id, "term_1"),
-    ]
 
 
 async def test_interactive_terminal_stream_is_relayed_byte_for_byte(

@@ -32,8 +32,8 @@ from cloud_agent.host_pool import (
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import (
     archive_settings_payload,
-    load_stored_archive_policy,
     seal_archive_storage,
+    stored_archive_policy,
 )
 from cloud_agent.settings import number_setting
 from cloud_agent.storage._sql.compute_admission import (
@@ -47,6 +47,7 @@ from cloud_agent.storage._sql.hosts import (
     HOST_CAPACITY_COLUMNS,
     HOST_COLUMNS,
     HOST_RETAINED_GROUP,
+    JOB_HOST_SQL,
     QUALIFIED_HOST_COLUMNS,
     lock_revocation_rows,
     release_late_covered_sandboxes,
@@ -59,7 +60,14 @@ from cloud_agent.storage._sql.move_out import (
     UNMOVED_GROUP_SQL,
     move_out_possible,
 )
-from cloud_agent.storage._sql.rows import load_json, stored_archive_settings
+from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage._sql.runner_policy import (
+    HEARTBEAT_POLICY_COLUMNS,
+    archive_settings,
+    download_of,
+    download_targets,
+    heartbeat_policy,
+)
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.storage.repositories.host_capacity import insert_capacity_history_point
 from cloud_agent_shared.host_settings import (
@@ -210,11 +218,6 @@ def _before(stamp: datetime) -> str:
     return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _download_of(record: Mapping[str, Any]) -> dict[str, str]:
-    """The part of a stored record a heartbeat answer carries."""
-    return {key: str(record.get(key) or "") for key in ("version", "before", "nonce")}
-
-
 def _replaced(earlier: object, selected: object) -> dict[str, Any]:
     """What a new update returns to on Roll back, and how hosts hold it meanwhile.
 
@@ -229,7 +232,7 @@ def _replaced(earlier: object, selected: object) -> dict[str, Any]:
         }
     held = None
     if isinstance(earlier, dict) and selected is not None and earlier.get("version") == selected:
-        held = _download_of(earlier)
+        held = download_of(earlier)
     return {"previous_version": selected, "previous_download": held}
 
 
@@ -560,15 +563,20 @@ class PostgresHostPoolRepository:
 
         Returns:
             The updated host row, or ``None`` when the host no longer exists
-            or no longer holds ``credential_hash``.
+            or no longer holds ``credential_hash``. The row also carries
+            ``runner_policy``, what the heartbeat answer needs of the policy
+            read that share-locks it (``heartbeat_policy``): the global
+            ``host_settings``, the ``sandbox_archive_settings``, the
+            ``runtime_download_targets`` and ``runtime_upgrade_waiting``, each
+            ``None`` when its stored value does not decode.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             # Match the admin writer's lock order: policy before host. Once
             # defaults are authoritative, a legacy observation is imported at
-            # most once and cannot resurrect an explicitly reset setting.
+            # most once and cannot resurrect an explicitly reset setting. The
+            # same read carries the policy the heartbeat answer is made of.
             policy = await conn.fetchrow(
-                "SELECT host_settings, host_settings_import_excluded "
-                "FROM agent_runner_policy WHERE id FOR SHARE"
+                f"SELECT {HEARTBEAT_POLICY_COLUMNS} FROM agent_runner_policy WHERE id FOR SHARE"
             )
             global_settings = (load_json(policy["host_settings"]) or {}) if policy else {}
             global_exclusions = set(policy["host_settings_import_excluded"]) if policy else set()
@@ -686,7 +694,7 @@ class PostgresHostPoolRepository:
                     capacity=capacity,
                     sample_age_ms=capacity_sample_age_ms,
                 )
-        return self._host_row_to_dict(row)
+        return {**self._host_row_to_dict(row), "runner_policy": heartbeat_policy(policy)}
 
     async def set_host_status(self, *, host: str, status: str, force: bool = False) -> str:
         """Move a host to ``status``, refusing transitions the table forbids.
@@ -1099,6 +1107,8 @@ class PostgresHostPoolRepository:
         operator had just decided it must not take. Drain is an instruction,
         not an observation, so nothing here overwrites it; ``remove`` is what
         ends a drained host's life.
+        A released drain receipt survives too: the next rollout finds its
+        predecessor by that token, and the status change rotates the epoch.
 
         Returns the hosts it changed.
         """
@@ -1107,10 +1117,7 @@ class PostgresHostPoolRepository:
             rows = await conn.fetch(
                 f"""
                 UPDATE agent_runner_hosts
-                SET status = '{HOST_OFFLINE}',
-                    drain_fence_token = NULL,
-                    drain_fence_status_before = NULL,
-                    drain_fence_active = FALSE
+                SET status = '{HOST_OFFLINE}'
                 WHERE credential_hash IS NOT NULL
                   AND status IN ('{HOST_ENROLLING}', '{HOST_ONLINE}')
                   AND COALESCE(last_heartbeat_at, first_seen_at)
@@ -1141,13 +1148,8 @@ class PostgresHostPoolRepository:
         return None if row is None else self._host_row_to_dict(row)
 
     async def host_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        """The job's running attempt's host, else its retained thread's durable host.
-
-        A finished attempt names where the turn ran, which is not where the
-        group is once a restore has moved it to another host; the group's own
-        host is. Only a thread without a group falls back to that attempt.
-        """
-        owner = "COALESCE(CASE WHEN a.status = 'running' THEN a.host_id END, s.host, a.host_id)"
+        """The host holding the job's workspace, by the rule of ``JOB_HOST_SQL``."""
+        owner = JOB_HOST_SQL.format(attempt="a", group="s")
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
@@ -1347,7 +1349,7 @@ class PostgresHostPoolRepository:
             )
 
             try:
-                archive_policy = SandboxArchivePolicy.from_mapping(stored_archive_settings(policy))
+                archive_policy = stored_archive_policy(policy)
             except SandboxArchivePolicyError:
                 archive_policy = None
 
@@ -1491,7 +1493,7 @@ class PostgresHostPoolRepository:
                 """
             )
             try:
-                archive_policy = load_stored_archive_policy(stored_archive_settings(archive_row))
+                archive_policy = stored_archive_policy(archive_row)
                 archive_required = archive_policy.enabled
                 archive_revision = archive_policy.revision
             except SandboxArchivePolicyError:
@@ -1655,25 +1657,7 @@ class PostgresHostPoolRepository:
             policy = await conn.fetchrow(
                 "SELECT runtime_versions, runtime_upgrades FROM agent_runner_policy WHERE id"
             )
-        selection = {} if policy is None else dict(load_json(policy["runtime_versions"]) or {})
-        upgrades = {} if policy is None else dict(load_json(policy["runtime_upgrades"]) or {})
-        targets: list[dict[str, str]] = []
-        for runtime, record in sorted(upgrades.items()):
-            if not isinstance(record, dict):
-                continue
-            own = {"runtime": runtime, **_download_of(record)}
-            held = record.get("previous_download")
-            if not isinstance(held, dict) or held.get("version") == record.get("version"):
-                targets.append(own)
-            elif not record.get("activated_at"):
-                if held.get("version") == selection.get(runtime):
-                    targets.append({"runtime": runtime, **_download_of(held)})
-                targets.append(own)
-            else:
-                targets.append(own)
-                if held.get("version") == record.get("previous_version"):
-                    targets.append({"runtime": runtime, **_download_of(held)})
-        return targets
+        return download_targets(policy)
 
     async def request_runtime_upgrade(
         self, *, runtime: str, version: str, requested_by: str
@@ -1885,12 +1869,7 @@ class PostgresHostPoolRepository:
                 FROM agent_runner_policy WHERE id
                 """
             )
-        if row is None:
-            # The baseline normally creates the singleton. Keep a missing row
-            # readable during restore/bootstrap; the first write recreates it.
-            return archive_settings_payload(SandboxArchivePolicy(), None)
-        policy = load_stored_archive_policy(stored_archive_settings(row))
-        return archive_settings_payload(policy, row["sandbox_archive_updated_at"])
+        return archive_settings(row)
 
     async def set_sandbox_archive_settings(
         self,
@@ -1911,7 +1890,7 @@ class PostgresHostPoolRepository:
                 """
             )
             assert current is not None
-            current_policy = load_stored_archive_policy(stored_archive_settings(current))
+            current_policy = stored_archive_policy(current)
             requested = SandboxArchivePolicy.from_mapping(
                 {**dict(settings), "revision": current_policy.revision}
             )

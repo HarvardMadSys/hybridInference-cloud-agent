@@ -3,15 +3,17 @@
 The sandbox manager is the trust boundary for this module.  It may export an
 already-built ``tar.gz`` stream, but a sandbox never receives the S3 client or
 its workload credentials.  Object names are generated here instead of being
-accepted from a caller.  The API has no object-body read, restore, list, or
-delete operation; its only read is an exact-key metadata check after an
-immutable initial write loses an ``If-None-Match`` race.
+accepted from a caller, and a key read back or deleted is checked against
+them.  Nothing lists the bucket.  Object bodies are read only to restore a
+checkpoint or load an environment snapshot, at the version their record
+names, and the only delete removes an environment snapshot's object.
 
 ``boto3`` is imported only when an upload needs a default client.  Tests and
 other callers can inject the small protocol below.  A deployed sandbox manager uses a
 saved access key when the policy has one, and otherwise the SDK's ordinary
 workload-identity/default credential chain.  There is still no custom endpoint
-option: archive bytes go to the fixed AWS bucket.
+option: archive bytes go to the AWS bucket the policy names, under the fixed
+prefix.
 """
 
 from __future__ import annotations
@@ -20,24 +22,27 @@ import base64
 import hashlib
 import importlib
 import math
+import os
+import queue
 import re
 import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, BinaryIO, Final, Literal, Protocol, cast
 
 from cloud_agent_shared.environment_snapshots import snapshot_object_key
 from cloud_agent_shared.sandbox_archive_settings import (
     DEFAULT_MULTIPART_PART_BYTES,
     MAX_MULTIPART_PARTS,
-    SANDBOX_ARCHIVE_BUCKET,
     SANDBOX_ARCHIVE_PREFIX,
-    SANDBOX_ARCHIVE_S3_URI,
     SandboxArchivePolicy,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from concurrent.futures import Future
 
 S3_CONNECT_TIMEOUT_S: Final = 5
 S3_READ_TIMEOUT_S: Final = 30
@@ -53,6 +58,11 @@ _CHECKPOINT_KEY_RE: Final = re.compile(
     re.escape(SANDBOX_ARCHIVE_PREFIX) + r"/v2/([0-9a-f]{64})/g[1-9][0-9]*/[0-9a-f]{32}\.oci\.tar"
 )
 _DOWNLOAD_CHUNK_BYTES: Final = 1024 * 1024
+# Parts of one multipart upload in flight at once. Each stays in memory until
+# S3 answers it, so an upload holds at most eight parts: 64 MiB at the default
+# part size, 512 MiB at the largest. Eight connections also fit botocore's
+# default pool of ten.
+_PART_UPLOAD_WORKERS: Final = 8
 CHECKPOINT_FORMAT: Final = "oci-layer-archive-v1"
 _SHA256_RE: Final = re.compile(r"[0-9a-f]{64}")
 _MAX_IDENTITY_BYTES: Final = 1024
@@ -87,7 +97,7 @@ class S3ArchiveClient(Protocol):
     """The narrow subset of the boto3 S3 client used by the uploader."""
 
     def get_bucket_versioning(self, **kwargs: Any) -> Mapping[str, Any]:
-        """Read versioning state for the one fixed archive bucket."""
+        """Read versioning state for the policy's archive bucket."""
 
     def head_object(self, **kwargs: Any) -> Mapping[str, Any]:
         """Read metadata for one exact immutable-initial key."""
@@ -167,13 +177,13 @@ class SandboxArchiveS3Config:
 
     @property
     def uri(self) -> str:
-        """Return the fixed destination; it is never caller-selected."""
-        return SANDBOX_ARCHIVE_S3_URI
+        """Return the policy's destination; it is never caller-selected."""
+        return self.policy.s3_uri
 
     @property
     def bucket(self) -> str:
-        """Return the fixed bucket; it is never caller-selected."""
-        return SANDBOX_ARCHIVE_BUCKET
+        """Return the policy's bucket; it is never caller-selected."""
+        return self.policy.bucket
 
     @property
     def prefix(self) -> str:
@@ -298,10 +308,11 @@ class SandboxArchiveS3Uploader:
         """Upload exactly ``size`` bytes with transfer and application checksums.
 
         Streams at or below the configured threshold use one ``PutObject``.
-        Larger streams use consecutive multipart chunks.  Any failure after a
-        multipart upload is created attempts an abort before the original
-        exception is re-raised, unless the operation deadline already elapsed
-        and another synchronous network request would extend it.
+        Larger streams use consecutively numbered multipart chunks, several
+        sent at once.  Any failure after a multipart upload is created
+        attempts an abort before the original exception is re-raised, unless
+        the operation deadline already elapsed and another synchronous network
+        request would extend it.
         """
         _validate_deadline(deadline)
         self._check_deadline(deadline)
@@ -829,48 +840,9 @@ class SandboxArchiveS3Uploader:
         completed = False
         try:
             self._check_deadline(deadline)
-            digest = hashlib.sha256()
-            parts: list[dict[str, object]] = []
-            remaining = size
-            part_number = 1
-            while remaining:
-                self._check_deadline(deadline)
-                chunk = _read_exact(
-                    body,
-                    min(remaining, self.config.multipart_part_bytes),
-                    deadline=deadline,
-                    clock=self._clock,
-                )
-                remaining -= len(chunk)
-                digest.update(chunk)
-                part_checksum = base64.b64encode(hashlib.sha256(chunk).digest()).decode("ascii")
-                uploaded = client.upload_part(
-                    Bucket=self.config.bucket,
-                    Key=key,
-                    UploadId=upload_id,
-                    PartNumber=part_number,
-                    Body=chunk,
-                    ContentLength=len(chunk),
-                    ChecksumAlgorithm="SHA256",
-                    ChecksumSHA256=part_checksum,
-                    **self._owner_arguments(),
-                )
-                self._check_deadline(deadline)
-                returned_checksum = _optional_response_string(uploaded, "ChecksumSHA256")
-                if returned_checksum is not None and returned_checksum != part_checksum:
-                    raise SandboxArchiveUploadError(
-                        f"S3 returned a different SHA-256 checksum for part {part_number}"
-                    )
-                parts.append(
-                    {
-                        "ETag": _required_response_string(uploaded, "ETag"),
-                        "PartNumber": part_number,
-                        "ChecksumSHA256": part_checksum,
-                    }
-                )
-                part_number += 1
-            _require_eof(body, deadline=deadline, clock=self._clock)
-            completed_digest = digest.digest()
+            parts, completed_digest = self._upload_parts(
+                client, key=key, upload_id=upload_id, body=body, size=size, deadline=deadline
+            )
             if completed_digest.hex() != expected_digest:
                 raise SandboxArchiveUploadError("sandbox archive SHA-256 changed before upload")
             try:
@@ -922,6 +894,115 @@ class SandboxArchiveS3Uploader:
                     # A bucket lifecycle rule should also reap abandoned MPUs.
                     pass
             raise
+
+    def _upload_parts(
+        self,
+        client: S3ArchiveClient,
+        *,
+        key: str,
+        upload_id: str,
+        body: BinaryIO,
+        size: int,
+        deadline: float | None,
+    ) -> tuple[list[dict[str, object]], bytes]:
+        """Send ``body`` as numbered parts, several at once; return them in order.
+
+        Each worker reads its own part by offset, then checksums and sends it.
+        This thread hashes every part as it is read, in order, so the object's
+        SHA-256 is of exactly the bytes sent. A part starts only while fewer
+        than ``_PART_UPLOAD_WORKERS`` are in flight. After a failure no further
+        part starts, and the ones in flight finish before this raises, so an
+        abort never races a part upload.
+        """
+        source = _PartReader(body)
+        part_bytes = self.config.multipart_part_bytes
+        digest = hashlib.sha256()
+        handoff: queue.SimpleQueue[bytes | BaseException] = queue.SimpleQueue()
+        stop = threading.Event()
+        uploaded: dict[int, dict[str, object]] = {}
+        in_flight: set[Future[tuple[int, dict[str, object]]]] = set()
+
+        def settle(until: str) -> None:
+            nonlocal in_flight
+            done, in_flight = wait(in_flight, return_when=until)
+            for future in done:
+                number, part = future.result()
+                uploaded[number] = part
+
+        with ThreadPoolExecutor(
+            max_workers=_PART_UPLOAD_WORKERS, thread_name_prefix="sandbox-archive-part"
+        ) as pool:
+            try:
+                for number, offset in enumerate(range(0, size, part_bytes), start=1):
+                    if len(in_flight) >= _PART_UPLOAD_WORKERS:
+                        settle(FIRST_COMPLETED)
+                    self._check_deadline(deadline)
+                    sending = pool.submit(
+                        self._send_part,
+                        client,
+                        key=key,
+                        upload_id=upload_id,
+                        number=number,
+                        read=partial(source.read, offset, min(part_bytes, size - offset)),
+                        handoff=handoff.put,
+                        deadline=deadline,
+                        stop=stop,
+                    )
+                    in_flight.add(sending)
+                    digest.update(_handed_over(handoff.get()))
+                source.require_end(size)
+                while in_flight:
+                    settle(FIRST_EXCEPTION)
+            except BaseException:
+                stop.set()
+                raise
+        return [uploaded[number] for number in sorted(uploaded)], digest.digest()
+
+    def _send_part(
+        self,
+        client: S3ArchiveClient,
+        *,
+        key: str,
+        upload_id: str,
+        number: int,
+        read: Callable[[], bytes],
+        handoff: Callable[[bytes | BaseException], None],
+        deadline: float | None,
+        stop: threading.Event,
+    ) -> tuple[int, dict[str, object]]:
+        """Read one part, hand it over to be hashed, then checksum and send it."""
+        try:
+            chunk = read()
+        except BaseException as exc:
+            handoff(exc)
+            raise
+        handoff(chunk)
+        part_checksum = base64.b64encode(hashlib.sha256(chunk).digest()).decode("ascii")
+        if stop.is_set():
+            raise SandboxArchiveUploadError("sandbox archive multipart upload already failed")
+        self._check_deadline(deadline)
+        uploaded = client.upload_part(
+            Bucket=self.config.bucket,
+            Key=key,
+            UploadId=upload_id,
+            PartNumber=number,
+            Body=chunk,
+            ContentLength=len(chunk),
+            ChecksumAlgorithm="SHA256",
+            ChecksumSHA256=part_checksum,
+            **self._owner_arguments(),
+        )
+        self._check_deadline(deadline)
+        returned_checksum = _optional_response_string(uploaded, "ChecksumSHA256")
+        if returned_checksum is not None and returned_checksum != part_checksum:
+            raise SandboxArchiveUploadError(
+                f"S3 returned a different SHA-256 checksum for part {number}"
+            )
+        return number, {
+            "ETag": _required_response_string(uploaded, "ETag"),
+            "PartNumber": number,
+            "ChecksumSHA256": part_checksum,
+        }
 
     def _raise_if_matching_initial(
         self,
@@ -1224,10 +1305,12 @@ def _read_exact(
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> bytes:
-    payload = bytearray()
-    while len(payload) < size:
+    """Read exactly ``size`` bytes, without copying a read that returns them all."""
+    pieces: list[bytes | bytearray | memoryview] = []
+    received = 0
+    while received < size:
         _check_deadline(deadline, clock)
-        chunk = body.read(size - len(payload))
+        chunk = body.read(size - received)
         _check_deadline(deadline, clock)
         if chunk is None:
             raise SandboxArchiveUploadError("sandbox archive stream returned no bytes")
@@ -1235,10 +1318,13 @@ def _read_exact(
             raise SandboxArchiveUploadError("sandbox archive stream must return bytes")
         if len(chunk) == 0:
             raise SandboxArchiveUploadError("sandbox archive stream ended before its declared size")
-        if len(chunk) > size - len(payload):
+        if len(chunk) > size - received:
             raise SandboxArchiveUploadError("sandbox archive stream exceeded its requested read")
-        payload.extend(chunk)
-    return bytes(payload)
+        pieces.append(chunk)
+        received += len(chunk)
+    if len(pieces) == 1 and isinstance(pieces[0], bytes):
+        return pieces[0]
+    return b"".join(pieces)
 
 
 def _require_eof(
@@ -1256,6 +1342,59 @@ def _require_eof(
         raise SandboxArchiveUploadError("sandbox archive stream must return bytes")
     if trailing:
         raise SandboxArchiveUploadError("sandbox archive stream exceeds its declared size")
+
+
+class _PartReader:
+    """Read a body's parts by offset, from several threads at once.
+
+    A file is read with ``os.pread``, which leaves its shared position alone,
+    so a part is one read and no copy. Any other stream is read under a lock.
+    """
+
+    def __init__(self, body: BinaryIO) -> None:
+        self._body = body
+        self._lock = threading.Lock()
+        self._start = body.tell()
+        try:
+            # Bytes still in a writer's buffer are not yet in the file.
+            body.flush()
+            self._fd: int | None = body.fileno()
+        except (AttributeError, OSError):
+            self._fd = None
+
+    def read(self, offset: int, length: int) -> bytes:
+        """Return the ``length`` bytes at ``offset`` past where the body started."""
+        if self._fd is None:
+            with self._lock:
+                self._body.seek(self._start + offset)
+                return _read_exact(self._body, length)
+        pieces: list[bytes] = []
+        while length:
+            piece = os.pread(self._fd, length, self._start + offset)
+            if not piece:
+                raise SandboxArchiveUploadError(
+                    "sandbox archive stream ended before its declared size"
+                )
+            pieces.append(piece)
+            offset += len(piece)
+            length -= len(piece)
+        return pieces[0] if len(pieces) == 1 else b"".join(pieces)
+
+    def require_end(self, size: int) -> None:
+        """Refuse a body that has bytes past its declared ``size``."""
+        if self._fd is None:
+            with self._lock:
+                self._body.seek(self._start + size)
+                _require_eof(self._body)
+        elif os.pread(self._fd, 1, self._start + size):
+            raise SandboxArchiveUploadError("sandbox archive stream exceeds its declared size")
+
+
+def _handed_over(read: bytes | BaseException) -> bytes:
+    """Return a part a worker read, or raise what stopped it reading."""
+    if isinstance(read, BaseException):
+        raise read
+    return read
 
 
 def _required_response_string(response: Mapping[str, Any], name: str) -> str:

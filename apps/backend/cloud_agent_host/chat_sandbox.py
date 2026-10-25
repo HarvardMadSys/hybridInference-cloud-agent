@@ -41,6 +41,13 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host import chat_sandbox_markers as markers, chat_sandbox_writers as writers
 from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines, text_chunks
+from cloud_agent_host.chat_sandbox_exec import (
+    ProvenContainers,
+    checked_exec,
+    exec_target,
+    spawn_target,
+)
+from cloud_agent_host.chat_sandbox_inspect import container_inspection, inspect_many
 from cloud_agent_host.chat_sandbox_markers import (
     FINAL_ARCHIVE_MARKER_MAX_BYTES,
     FINAL_ARCHIVE_MARKER_NAME,
@@ -113,6 +120,7 @@ from cloud_agent_host.guest_observer import (
     GuestObserverRuntimeError,
     GuestObserverSnapshot,
 )
+from cloud_agent_host.guest_observer_locks import GuestObserverLocks
 from cloud_agent_host.install_locks import install_lock
 from cloud_agent_host.network_guard import GUARD_RECHECK_S
 from cloud_agent_host.sandbox import (
@@ -137,13 +145,12 @@ from cloud_agent_shared.operation_profiling import StageObserver, substage
 
 if TYPE_CHECKING:
     import builtins
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterator
     from typing import BinaryIO
 
     from _typeshed import SupportsWrite
 
-#: A probe older than this was abandoned by a process killed mid-probe. Since
-#: discovery no longer stops it, the next probe in the namespace removes it.
+#: A probe older than this was abandoned; the next namespace probe removes it.
 PROBE_ABANDONED_AFTER_S = 3600
 CHAT_WORKDIR = "/workspace"
 #: Where a task's uploaded files land. Outside the worktree on purpose: the
@@ -183,12 +190,22 @@ LEGACY_MEMBER_HOME_COLLECTIONS = tuple(
 #: full, where installation runs after this step. A directory of theirs the
 #: sandbox user cannot search is skipped rather than failing the turn.
 _NOT_OURS_AND_UNSEARCHABLE = '\\( -type d ! -uid "$me" ! \\( -readable -executable \\) -prune \\)'
+#: What both permission passes do to an entry they reach: open a directory to
+#: the group (rwx and setgid, ``-2070``) or a file (rw, ``-0060``) unless it
+#: already is. One walk does both, and an entry that already has its bits is
+#: left alone, so a pass over a tree that has not changed since the last one
+#: changes nothing: no chmod, and no new ctime for Git's index to re-check.
+#: The two branches are one parenthesized group so that a ``-uid`` written
+#: before it applies to both: ``find`` binds an implicit AND tighter than
+#: ``-o``.
+_OPEN_TO_GROUP = (
+    "\\( \\( -type d ! -perm -2070 -exec chmod g+rwx,g+s -- {} + \\) "
+    "-o \\( -type f ! -perm -0060 -exec chmod g+rw -- {} + \\) \\)"
+)
 SHARED_WORKSPACE_PERMISSIONS_SCRIPT = (
     "set -eu; me=$(id -u); "
     f"find {CHAT_WORKDIR} {CHAT_STATE_DIR} -xdev {_NOT_OURS_AND_UNSEARCHABLE} "
-    '-o \\( -type d -uid "$me" -exec chmod g+rwx,g+s -- {} + \\); '
-    f"find {CHAT_WORKDIR} {CHAT_STATE_DIR} -xdev {_NOT_OURS_AND_UNSEARCHABLE} "
-    '-o \\( -type f -uid "$me" -exec chmod g+rw -- {} + \\); '
+    f'-o -uid "$me" {_OPEN_TO_GROUP}; '
     f"git -C {CHAT_WORKDIR} config core.sharedRepository group"
 )
 #: This module is a library boundary: it reports what it observed and
@@ -392,115 +409,30 @@ class ChatSandboxManager:
         self._network_lifecycle = ChatSandboxNetwork(self)
         # Multiple fork siblings may admit turns concurrently. Singleton
         # observer startup/rotation and its live cursors therefore need one
-        # sandbox-manager-wide critical section per manager.
-        self._guest_observer_lock = threading.RLock()
-        self._guest_observer_active: dict[str, dict[int, int]] = {}
-        # Containers this manager ran ``docker start`` on that have not since
-        # passed the in-guest network check. A start that fails in between
-        # stops its guest; if even that fails, the next activation finds the
-        # guest running and must prove it before reusing it.
+        # critical section per container; other containers do not wait on it.
+        self._guest_observers = GuestObserverLocks()
+        # Track started guests that have not passed network proof; failed stops
+        # remain here so the next reuse must prove them again.
         self._unproven_guests: set[str] = set()
         self._unproven_guests_lock = threading.Lock()
+        # What each spec's last start or network proof verified, which a
+        # bounded exec then enters by id (cloud_agent_host.chat_sandbox_exec).
+        self._proven = ProvenContainers()
 
     # ── the group network ──────────────────────────────────────────────
     #
-    # Delegates preserve the manager surface. The network component owns the
-    # routable bridge per sandbox group, used by setup, the agent and every
-    # fork member alike, named from the group's identity and guarded on the
-    # host by the deployment's rule set (cloud_agent_shared.egress). Docker
-    # routes and masquerades it; the host's rules decide what it reaches. The
-    # only other endpoints on it are the two relays, copied from the relay
-    # network, and the host holds an exact exception for each of them.
+    # The network component owns the routable bridge per sandbox group, used
+    # by setup, the agent and every fork member alike, named from the group's
+    # identity and guarded on the host by the deployment's rule set
+    # (cloud_agent_shared.egress). Docker routes and masquerades it; the host's
+    # rules decide what it reaches. The only other endpoints on it are the two
+    # relays, copied from the relay network, and the host holds an exact
+    # exception for each of them.
 
-    def network_for(self, spec: ChatSandboxSpec) -> str:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.network_for(spec)
-
-    def relay_addresses(self, network: str) -> dict[str, str]:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.relay_addresses(network)
-
-    def _sync_kata_guest_network(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        addresses: dict[str, str] | None = None,
-    ) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._sync_kata_guest_network(spec, current, addresses)
-
-    def sync_ssh_targets(self, spec: ChatSandboxSpec, endpoints: set[tuple[str, int]]) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.sync_ssh_targets(spec, endpoints)
-
-    def require_host_rules(self) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.require_host_rules()
-
-    def renew_host_rules(self) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.renew_host_rules()
-
-    def _release_owned_network(
-        self,
-        network_name: str,
-        spec: ChatSandboxSpec,
-        *,
-        only_if_sandbox_unattached: bool = False,
-        expected_network_id: str | None = None,
-        expected_container_id: str | None = None,
-    ) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._release_owned_network(
-            network_name,
-            spec,
-            only_if_sandbox_unattached=only_if_sandbox_unattached,
-            expected_network_id=expected_network_id,
-            expected_container_id=expected_container_id,
-        )
-
-    def _release_sandbox_networks(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        *,
-        expected_container_id: str | None = None,
-    ) -> ChatSandboxInspection:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._release_sandbox_networks(
-            spec, current, expected_container_id=expected_container_id
-        )
-
-    def prune_orphan_networks(self, specs: builtins.list[ChatSandboxSpec]) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.prune_orphan_networks(specs)
-
-    def _require_group_network(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        snapshot: _GroupNetworkSnapshot | None = None,
-    ) -> ChatSandboxInspection:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._require_group_network(spec, current, snapshot)
-
-    def _verify_guest_network(
-        self,
-        spec: ChatSandboxSpec,
-        *,
-        expected_container_id: str | None = None,
-        defer_network_release: bool = False,
-    ) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle._verify_guest_network(
-            spec,
-            expected_container_id=expected_container_id,
-            defer_network_release=defer_network_release,
-        )
-
-    def verify_host_rules(self, running: Sequence[ChatSandboxSpec] = ()) -> None:
-        """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.verify_host_rules(running)
+    @property
+    def network(self) -> ChatSandboxNetwork:
+        """Expose the group-network lifecycle owner to host collaborators."""
+        return self._network_lifecycle
 
     def require_docker_data_root(self, expected: str) -> str:
         """Verify retained state is owned by the intended Docker data root.
@@ -687,7 +619,7 @@ class ChatSandboxManager:
         cannot show them refuses before any container exists.
         """
         with substage(observer, "host_rules"):
-            self.require_host_rules()
+            self._network_lifecycle.require_host_rules()
         existing = self.inspect(spec.container_name)
         if existing is not None:
             # Idempotent adoption, not a creation. No action is noted here:
@@ -695,6 +627,7 @@ class ChatSandboxManager:
             # `docker start`, and that is what classifies the path.
             self._verify_identity(existing, spec)
             return existing
+        self._proven.forget(spec)
         command = self.build_create_command(
             spec,
             image=image,
@@ -792,6 +725,7 @@ class ChatSandboxManager:
             raise SandboxError(
                 "superseded chat sandbox could not be removed: " + removed.stderr.strip()[:300]
             )
+        self._proven.forget(spec)
         checkpoint_id = labels.get(CHAT_CHECKPOINT_LABEL)
         if checkpoint_id and checkpoint_id != keep_checkpoint:
             self.remove_checkpoint_image(spec, checkpoint_id)
@@ -957,6 +891,7 @@ class ChatSandboxManager:
         result = self._run([self.backend.docker_binary, "rm", container_id], timeout=120)
         if result.returncode:
             raise SandboxError("Environment test cleanup failed")
+        self._proven.forget(spec)
 
     def remove_stopped_archived(self, spec: ChatSandboxSpec, *, container_id: str) -> None:
         """Remove only a verified archive's exact stopped container, without force."""
@@ -969,6 +904,7 @@ class ChatSandboxManager:
             raise SandboxError("archived sandbox removal failed")
         if self.inspect(container_id) is not None:
             raise SandboxError("archived sandbox still exists after removal")
+        self._proven.forget(spec)
         # Remove first, without force: a start after the stopped fence makes
         # Docker refuse removal. Generic stop/network release before rm could
         # stop a newly running original and discard post-backup writes.
@@ -977,7 +913,7 @@ class ChatSandboxManager:
             if network_name in {CHAT_NULL_NETWORK, CHAT_BOOTSTRAP_NETWORK}:
                 continue
             try:
-                self._release_owned_network(
+                self._network_lifecycle._release_owned_network(
                     network_name,
                     spec,
                     only_if_sandbox_unattached=True,
@@ -1030,44 +966,10 @@ class ChatSandboxManager:
                 return None
             raise SandboxError("chat sandbox inspect failed: " + result.stderr.strip()[:300])
         try:
-            payload = json.loads(result.stdout)
-            raw = payload[0]
-            config = raw.get("Config") or {}
-            labels = config.get("Labels") or {}
-            mounts = raw.get("Mounts") or []
-            state = raw.get("State") or {}
-            network_settings = (raw.get("NetworkSettings") or {}).get("Networks") or {}
-            networks = network_settings.keys()
-            status = self._status(state)
-            inspection = ChatSandboxInspection(
-                container_id=str(raw["Id"]),
-                name=str(raw.get("Name") or "").removeprefix("/"),
-                status=status,
-                running=bool(state.get("Running")),
-                # Config.Image is the exact reference passed to ``docker
-                # create``. ``Image`` is Docker's resolved local layer id and
-                # cannot be compared directly with a registry repo digest.
-                image=str(config.get("Image") or raw.get("Image") or ""),
-                labels={str(key): str(value) for key, value in labels.items()},
-                mounts=tuple(dict(mount) for mount in mounts),
-                networks=tuple(sorted(str(network) for network in networks)),
-                network_ids=tuple(
-                    sorted(
-                        (
-                            str(network),
-                            str((endpoint or {}).get("NetworkID") or ""),
-                        )
-                        for network, endpoint in network_settings.items()
-                    )
-                ),
-                sandbox_runtime=str((raw.get("HostConfig") or {}).get("Runtime") or ""),
-                tmpfs=tuple(
-                    sorted(str(path) for path in (raw.get("HostConfig") or {}).get("Tmpfs") or {})
-                ),
-                started_at=str(state.get("StartedAt") or ""),
-            )
-        except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raw = json.loads(result.stdout)[0]
+        except (IndexError, KeyError, TypeError, json.JSONDecodeError) as exc:
             raise SandboxError("Docker returned an invalid chat sandbox inspection") from exc
+        inspection = container_inspection(raw)
         if verify_mounts:
             self._verify_mounts(inspection)
         return inspection
@@ -1082,7 +984,11 @@ class ChatSandboxManager:
         return inspection.labels.get(CHAT_NAMESPACE_LABEL) == self.backend.sandbox_namespace
 
     def list(self) -> builtins.list[ChatSandboxInspection]:
-        """List retained containers owned by this deployment namespace."""
+        """List retained containers owned by this deployment namespace.
+
+        The owned ones are inspected together, in as few Docker processes as
+        :func:`inspect_many` needs, rather than one process per container.
+        """
         result = self._run(
             [
                 self.backend.docker_binary,
@@ -1103,7 +1009,7 @@ class ChatSandboxManager:
         )
         if result.returncode != 0:
             raise SandboxError("chat sandbox listing failed: " + result.stderr.strip()[:300])
-        found: builtins.list[ChatSandboxInspection] = []
+        owned: builtins.list[str] = []
         for line in result.stdout.splitlines():
             try:
                 row = json.loads(line)
@@ -1118,13 +1024,15 @@ class ChatSandboxManager:
             # Read ownership from ls before making a per-container RPC: a
             # wedged foreign Kata shim can block even docker inspect. A probe
             # belongs to the process running it and is never a chat to adopt.
-            if namespace != self.backend.sandbox_namespace or probe:
-                continue
+            if namespace == self.backend.sandbox_namespace and not probe:
+                owned.append(container_id)
+        found: builtins.list[ChatSandboxInspection] = []
+        for raw in inspect_many(self._run, self.backend.docker_binary, "container", owned):
             # A foreign namespace cannot make this sandbox manager fail startup by
             # carrying policy-invalid mounts. Apply this stack's mount fence
             # only after ownership is established.
-            item = self.inspect(container_id, verify_mounts=False)
-            if item is not None and self._belongs_to_namespace(item):
+            item = container_inspection(raw)
+            if self._belongs_to_namespace(item):
                 self._verify_mounts(item)
                 if not item.labels.get(ENVIRONMENT_TEST_LABEL):
                     found.append(item)
@@ -1143,8 +1051,8 @@ class ChatSandboxManager:
         """Start the exact stopped container and verify it reached RUNNING.
 
         A cold start is also where the network is proved from inside: nothing
-        from the repository runs in a guest that has not passed
-        :meth:`_verify_guest_network`. A start that fails after ``docker
+        from the repository runs in a guest that has not passed the network
+        lifecycle's in-guest check. A start that fails after ``docker
         start`` stops its guest again; a running guest whose proof never
         finished is proved before it is reused.
         """
@@ -1154,7 +1062,9 @@ class ChatSandboxManager:
             raise RetainedChatLost("chat sandbox container identity changed before start")
         network_snapshot = _GroupNetworkSnapshot()
         with substage(observer, "group_network"):
-            current = self._require_group_network(spec, current, network_snapshot)
+            current = self._network_lifecycle._require_group_network(
+                spec, current, network_snapshot
+            )
         if current.container_id != exact_container_id:
             raise RetainedChatLost("chat sandbox container identity changed during start")
         if current.running:
@@ -1174,8 +1084,10 @@ class ChatSandboxManager:
                     addresses=network_snapshot.addresses,
                 )
             with substage(observer, "guest_network_sync"):
-                self._sync_kata_guest_network(spec, current, network_snapshot.addresses)
-            return current
+                self._network_lifecycle._sync_kata_guest_network(
+                    spec, current, network_snapshot.addresses
+                )
+            return self._proven.record(spec, current)
         if current.status is ChatSandboxStatus.PAUSED:
             raise SandboxError("a paused chat sandbox is not a valid stopped activation")
         if current.status is ChatSandboxStatus.DEAD:
@@ -1214,14 +1126,9 @@ class ChatSandboxManager:
         defer_network_release: bool,
         addresses: dict[str, str] | None = None,
     ) -> ChatSandboxInspection:
-        """Sync and prove a guest Docker has started, or stop it trying.
+        """Prove a started guest or exact-stop it on any network-check failure.
 
-        Any failure on the way -- a relay rollout, a guest helper timing out,
-        the check itself not answering -- stops the exact container, keeping
-        its bridge when ``defer_network_release``, and raises
-        :class:`RetainedChatFailStopped`, as a failed check does. If the stop
-        fails too, the original error is raised and the guest stays recorded
-        as unproven, so :meth:`start` proves it before any reuse.
+        A stop failure leaves the guest marked unproven before any reuse.
         """
         try:
             started = self._require(spec)
@@ -1232,13 +1139,15 @@ class ChatSandboxManager:
                     f"chat sandbox started into unexpected state {started.status.value!r}"
                 )
             with substage(observer, "guest_network_sync"):
-                self._sync_kata_guest_network(spec, started, addresses)
+                self._network_lifecycle._sync_kata_guest_network(spec, started, addresses)
             with substage(observer, "guest_network_check"):
-                self._verify_guest_network(
+                self._network_lifecycle._verify_guest_network(
                     spec,
                     expected_container_id=container_id,
                     defer_network_release=defer_network_release,
                 )
+            with substage(observer, "host_rules_recheck"):
+                self._network_lifecycle.verify_host_rules([spec])
         except RetainedChatFailStopped:
             raise
         except Exception as exc:
@@ -1250,8 +1159,11 @@ class ChatSandboxManager:
                     release_networks=not defer_network_release,
                 )
             except Exception as stop_exc:
+                from cloud_agent_host.guarded_workloads import exact_stop_unidentified
+
+                exact_stop_unidentified(self, container_id)
                 logger.warning(
-                    "chat_unproven_guest_left_running",
+                    "chat_unproven_guest_structured_stop_failed",
                     extra={
                         "sandbox_id": spec.sandbox_id,
                         "detail": str(exc)[:300],
@@ -1269,7 +1181,7 @@ class ChatSandboxManager:
         verified = self._require(spec)
         if verified.container_id != container_id:
             raise RetainedChatLost("chat sandbox container identity changed during start")
-        return verified
+        return self._proven.record(spec, verified)
 
     def stop(
         self,
@@ -1279,10 +1191,12 @@ class ChatSandboxManager:
         release_networks: bool = True,
     ) -> ChatSandboxInspection:
         """Deactivate, release private networking, and retain the writable layer."""
-        current = self._require(spec)
-        exact_container_id = expected_container_id or current.container_id
-        if current.container_id != exact_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed before stop")
+        current = (
+            self._require_exact(spec, expected_container_id)
+            if expected_container_id is not None
+            else self._require(spec)
+        )
+        exact_container_id = current.container_id
         if current.status is ChatSandboxStatus.PAUSED:
             raise SandboxError("refusing to treat a paused chat sandbox as cleanly stopped")
         if not current.running:
@@ -1304,9 +1218,10 @@ class ChatSandboxManager:
         )
         if result.returncode != 0:
             raise SandboxError("chat sandbox could not be stopped: " + result.stderr.strip()[:300])
-        stopped = self._require(spec)
-        if stopped.container_id != exact_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed during stop")
+        try:
+            stopped = self._require_exact(spec, exact_container_id)
+        except RetainedChatLost as exc:
+            raise RetainedChatLost("chat sandbox container identity changed during stop") from exc
         if stopped.running or stopped.status not in {
             ChatSandboxStatus.STOPPED,
             ChatSandboxStatus.CREATED,
@@ -1329,12 +1244,10 @@ class ChatSandboxManager:
         expected_container_id: str,
     ) -> ChatSandboxInspection:
         """Release networking only for one exact, already-stopped container."""
-        current = self._require(spec)
-        if current.container_id != expected_container_id:
-            raise RetainedChatLost("chat sandbox container identity changed during stop")
+        current = self._require_exact(spec, expected_container_id)
         if current.running:
             raise SandboxError("refusing to release networking from a running chat sandbox")
-        released = self._release_sandbox_networks(
+        released = self._network_lifecycle._release_sandbox_networks(
             spec,
             current,
             expected_container_id=expected_container_id,
@@ -1348,8 +1261,10 @@ class ChatSandboxManager:
     ) -> None:
         """Prove this container is on exactly its guarded group bridge.
 
-        Called before every terminal and sandbox manager workspace operation, and by a
-        turn's commands once its last proof is a minute old, so it is cheap: the
+        The same proof :meth:`start` makes of a running container, for work
+        that does not go through a start: an SSH-access change, a request
+        whose admission only retried an archive completion, and a command
+        whose backend holds no proof under a minute old. So it is cheap: the
         guard's last verification is reused for a minute, and the relays and
         their host exceptions are reconciled against what Docker reports now.
         A guest whose in-guest check never passed is refused until
@@ -1357,8 +1272,10 @@ class ChatSandboxManager:
         """
         snapshot = _GroupNetworkSnapshot()
         with substage(observer, "network_ensure"):
-            current = self._require_group_network(spec, self._require(spec), snapshot)
-        expected = self.network_for(spec)
+            current = self._network_lifecycle._require_group_network(
+                spec, self._require(spec), snapshot
+            )
+        expected = self._network_lifecycle.network_for(spec)
         if set(current.networks) != {expected}:
             raise SandboxError(
                 f"retained chat network is {list(current.networks)!r}, not its group "
@@ -1372,7 +1289,8 @@ class ChatSandboxManager:
                 "activated again before anything runs in it"
             )
         with substage(observer, "guest_network_sync"):
-            self._sync_kata_guest_network(spec, current, snapshot.addresses)
+            self._network_lifecycle._sync_kata_guest_network(spec, current, snapshot.addresses)
+        self._proven.record(spec, current)
 
     def build_exec_command(
         self,
@@ -1444,9 +1362,7 @@ class ChatSandboxManager:
         process_pidfile: str | None = None,
     ) -> SandboxProcess:
         """Run an attached command inside the retained container."""
-        current = self._require(spec)
-        if not current.running:
-            raise SandboxError("chat sandbox must be started before exec")
+        current = spawn_target(self, spec)
         exec_argv = argv
         if process_pidfile is not None:
             self._validate_member_pidfile(spec, process_pidfile, user_uid=user_uid)
@@ -1479,6 +1395,7 @@ class ChatSandboxManager:
             interactive=live_input,
             user_uid=user_uid,
             user_gid=user_gid,
+            container_id=current.container_id,
         )
         process = subprocess.Popen(
             command,
@@ -1902,14 +1819,13 @@ class ChatSandboxManager:
         # /home/agent-member-N/.claude-members, outside this traversal. Only projects/
         # remains shared; never widen other legacy shared Claude files.
         # Normalize shared roots while pruning every private-home collection.
+        # This runs at the end of every turn, so it walks each root once and
+        # touches only what the turn left without its group bits.
         trusted_prunes = "".join(f"-o -path {path} " for path in PRIVATE_MEMBER_HOME_COLLECTIONS)
         script = (
             "set -eu; uid=$1; "
-            'normalize_dirs() { find "$@" -xdev -uid "$uid" -type d '
-            "-exec chmod g+rwx,g+s -- {} +; }; "
-            'normalize_files() { find "$@" -xdev -uid "$uid" -type f '
-            "-exec chmod g+rw -- {} +; }; "
-            f"normalize_dirs {CHAT_WORKDIR}; normalize_files {CHAT_WORKDIR}; "
+            f'normalize() {{ find "$@" -xdev -uid "$uid" {_OPEN_TO_GROUP}; }}; '
+            f"normalize {CHAT_WORKDIR}; "
             f"find {CHAT_STATE_DIR} -xdev "
             f"\\( -path {CHAT_STATE_DIR}/.platform "
             f"-o -path {CHAT_STATE_DIR}/claude "
@@ -1917,18 +1833,9 @@ class ChatSandboxManager:
             f"-o -path {CHAT_STATE_DIR}/opencode-members "
             f"-o -path {CHAT_STATE_DIR}/kilo-members "
             f"{trusted_prunes}\\) -prune -o "
-            '-uid "$uid" -type d -exec chmod g+rwx,g+s -- {} +; '
-            f"find {CHAT_STATE_DIR} -xdev "
-            f"\\( -path {CHAT_STATE_DIR}/.platform "
-            f"-o -path {CHAT_STATE_DIR}/claude "
-            f"-o -path {CHAT_STATE_DIR}/codex-members "
-            f"-o -path {CHAT_STATE_DIR}/opencode-members "
-            f"-o -path {CHAT_STATE_DIR}/kilo-members "
-            f"{trusted_prunes}\\) -prune -o "
-            '-uid "$uid" -type f -exec chmod g+rw -- {} +; '
+            f'-uid "$uid" {_OPEN_TO_GROUP}; '
             f"if test -d {CLAUDE_SHARED_PROJECTS_DIR}; then "
-            f"normalize_dirs {CLAUDE_SHARED_PROJECTS_DIR}; "
-            f"normalize_files {CLAUDE_SHARED_PROJECTS_DIR}; fi"
+            f"normalize {CLAUDE_SHARED_PROJECTS_DIR}; fi"
         )
         result = self.exec_capture(
             spec,
@@ -2080,9 +1987,9 @@ class ChatSandboxManager:
         user_uid: int | None = None,
     ) -> TerminalProcess:
         """Attach a PTY to one shell without creating or killing a container."""
-        current = self._require(spec)
-        if not current.running:
-            raise SandboxError("chat sandbox must be started before terminal exec")
+        current = spawn_target(
+            self, spec, not_running="chat sandbox must be started before terminal exec"
+        )
         token = secrets.token_hex(16)
         if user_uid is not None:
             from cloud_agent_host.environment_process import (
@@ -2158,6 +2065,7 @@ class ChatSandboxManager:
             tty=True,
             user_uid=user_uid,
             user_gid=self.backend.gid if user_uid is not None else None,
+            container_id=current.container_id,
         )
         master_fd, slave_fd = os.openpty()
         try:
@@ -2257,14 +2165,12 @@ class ChatSandboxManager:
         reported as one: it is never presented as pure disk-read time, and
         splitting it further would need the exec'd helper to report its own
         sub-durations rather than a second exec to probe them.
+
+        ``expected_container_id`` fences an archive or lifecycle read on that
+        exact container, inspected first; otherwise a proven container is
+        entered by id without an inspection (:func:`exec_target`).
         """
-        current = (
-            self._require_exact(spec, expected_container_id)
-            if expected_container_id is not None
-            else self._require(spec)
-        )
-        if not current.running:
-            raise SandboxError("chat sandbox must be started before exec")
+        current, proven = exec_target(self, spec, expected_container_id)
         interactive = interactive_input(input_bytes, stdin, self.backend.runtime == KATA_RUNTIME)
         command = self.build_exec_command(
             spec,
@@ -2278,7 +2184,7 @@ class ChatSandboxManager:
         )
         try:
             with substage(observer, "exec"):
-                return subprocess.run(
+                result = subprocess.run(
                     command,
                     env=self.exec_client_env(env),
                     input=input_bytes,
@@ -2289,6 +2195,7 @@ class ChatSandboxManager:
                 )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SandboxError(f"chat sandbox exec failed: {exc}") from exc
+        return checked_exec(self, spec, proven, result)
 
     def pipe_member_exec(
         self,
@@ -2309,9 +2216,7 @@ class ChatSandboxManager:
         one inspected container. Returns ``(source, target)`` results carrying
         each command's bounded stderr tail; the target's stdout is discarded.
         """
-        current = self._require(spec)
-        if not current.running:
-            raise SandboxError("chat sandbox must be started before exec")
+        current, proven = exec_target(self, spec)
         commands = (
             self.build_exec_command(
                 spec,
@@ -2379,6 +2284,8 @@ class ChatSandboxManager:
             ):
                 stderr.seek(max(0, stderr.seek(0, os.SEEK_END) - 4096))
                 results.append(subprocess.CompletedProcess(command, code, b"", stderr.read()))
+        # Either exec that failed is explained as a lone exec's failure would be.
+        checked_exec(self, spec, proven, results[0] if results[0].returncode else results[1])
         return results[0], results[1]
 
     def _kata_privileged_exec(
@@ -2398,11 +2305,12 @@ class ChatSandboxManager:
         """
         if self.backend.runtime != KATA_RUNTIME:
             raise SandboxError("guest-root platform helpers require the Kata runtime")
-        current = self._require(spec)
+        not_running = "chat sandbox must be started before guest observation"
+        current, proven = exec_target(self, spec, not_running=None)
         if current.sandbox_runtime != KATA_RUNTIME:
             raise SandboxError("guest-root platform helpers require an inspected Kata container")
-        if not current.running:
-            raise SandboxError("chat sandbox must be started before guest observation")
+        if proven is None and not current.running:
+            raise SandboxError(not_running)
         command = [self.backend.docker_binary, "exec"]
         if detach:
             command.append("--detach")
@@ -2415,7 +2323,8 @@ class ChatSandboxManager:
             current.container_id,
             *argv,
         ]
-        return self._run(command, timeout=timeout_s)
+        result = self._run(command, timeout=timeout_s)
+        return checked_exec(self, spec, proven, result, not_running=not_running)
 
     def probe_guest_observer(self) -> str | None:
         """Prove the guest kernel, retained exec isolation and real eBPF delivery.
@@ -2768,8 +2677,9 @@ class ChatSandboxManager:
         """This guest's boot identifier, or an empty string when unreadable.
 
         A task's identity is only unique within one boot, so every instance key
-        carries it. The observer controller caches the read, so asking once per
-        window costs one guest exec rather than one per census.
+        carries it. A window normally takes it from its cursor, whose opening
+        read already carried it; this costs one guest exec, once per window,
+        only for a cursor without one.
         """
         if self.backend.runtime != KATA_RUNTIME:
             return ""
@@ -2804,8 +2714,17 @@ class ChatSandboxManager:
             user_gid=0,
         )
 
-    def _guest_observer_controller(self, spec: ChatSandboxSpec) -> GuestObserverController:
-        """Bind the shared observer contract to this label-verified container."""
+    def _guest_observer_controller(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        lock: threading.RLock | None = None,
+    ) -> GuestObserverController:
+        """Bind the shared observer contract to this label-verified container.
+
+        ``lock`` is that container's observer lock, for a controller that may
+        start or rotate the helper.
+        """
 
         def capture(
             argv: builtins.list[str], timeout_s: float
@@ -2832,7 +2751,7 @@ class ChatSandboxManager:
         return GuestObserverController(
             capture=capture,
             privileged=privileged,
-            lock=self._guest_observer_lock,
+            lock=lock,
         )
 
     def begin_guest_observation(
@@ -2851,33 +2770,21 @@ class ChatSandboxManager:
         """
         if self.backend.runtime != KATA_RUNTIME:
             return GuestObserverCursor.unavailable(user_uid, "sandbox is not a Kata guest")
-        controller = self._guest_observer_controller(spec)
-        key = spec.container_name
-        with self._guest_observer_lock:
-            active = self._guest_observer_active.setdefault(key, {})
-            if not active:
-                controller.rotate_if_needed(threshold=GUEST_OBSERVER_ROTATE_BYTES)
+        with self._guest_observers.container(spec.container_name) as observers:
+            controller = self._guest_observer_controller(spec, lock=observers.lock)
+            idle = not observers.active
             cursor = controller.begin(
                 user_uid=user_uid,
                 # Never sacrifice concurrent member observations to admit one
                 # more turn. If the singleton is temporarily unreadable, this
                 # cursor is explicitly unavailable; cleanup of existing owners
                 # makes a later idle begin eligible to restart it.
-                restart_if_missing=not active,
+                restart_if_missing=idle,
+                # Rotation restarts the helper too: never under an open cursor.
+                rotate_threshold=GUEST_OBSERVER_ROTATE_BYTES if idle else None,
                 measurement_id=measurement_id,
             )
-            if cursor.available:
-                # A restart invalidates every old-pid cursor already; do not
-                # let abandoned bookkeeping suppress future safe rotations.
-                active = {
-                    token: observer_pid
-                    for token, observer_pid in active.items()
-                    if observer_pid == cursor.observer_pid
-                }
-                active[id(cursor)] = cursor.observer_pid
-                self._guest_observer_active[key] = active
-            elif not active:
-                self._guest_observer_active.pop(key, None)
+            observers.admit(cursor)
             return cursor
 
     def finish_guest_observation(
@@ -2890,13 +2797,8 @@ class ChatSandboxManager:
             return self._guest_observer_controller(spec).finish(cursor)
         finally:
             if cursor is not None:
-                key = spec.container_name
-                with self._guest_observer_lock:
-                    active = self._guest_observer_active.get(key)
-                    if active is not None:
-                        active.pop(id(cursor), None)
-                        if not active:
-                            self._guest_observer_active.pop(key, None)
+                with self._guest_observers.container(spec.container_name) as observers:
+                    observers.release(cursor)
 
     def tool_mark_reader(self, spec: ChatSandboxSpec) -> ToolMarkReader:
         """Return a bounded reader for hook marks inside one retained container."""
@@ -3546,18 +3448,6 @@ class ChatSandboxManager:
         return current
 
     @staticmethod
-    def _status(state: dict[str, Any]) -> ChatSandboxStatus:
-        if bool(state.get("Paused")):
-            return ChatSandboxStatus.PAUSED
-        raw = str(state.get("Status") or "").lower()
-        if raw == "exited":
-            return ChatSandboxStatus.STOPPED
-        try:
-            return ChatSandboxStatus(raw)
-        except ValueError:
-            return ChatSandboxStatus.UNKNOWN
-
-    @staticmethod
     def _verify_mounts(inspection: ChatSandboxInspection) -> None:
         """Chat state must be in the writable layer, never a host/volume mount.
 
@@ -4037,8 +3927,8 @@ class RetainedChatBackend(SandboxBackend):
         self.spec = spec
         self.image = spec.sandbox_image_digest or manager.backend.image
         self.runtime = manager.backend.runtime
-        # Monotonic time the group bridge was last proved, for a turn's backend
-        # only; ``None`` checks before every command.
+        # Monotonic time the group bridge was last proved, for a turn's or a
+        # workspace operation's backend; ``None`` checks before every command.
         self._network_proved_at = network_proved_at
 
     @property
@@ -4098,8 +3988,9 @@ class RetainedChatBackend(SandboxBackend):
         """Prove the container is on its guarded group bridge before running anything.
 
         A turn's backend starts from the proof its activation made: the sandbox manager
-        checked exactly this when it acquired the turn, moments before. That
-        proof, and each one this backend makes itself, stands for
+        checked exactly this when it acquired the turn, moments before. A
+        workspace operation's backend starts from its admission's proof the
+        same way. That proof, and each one this backend makes itself, stands for
         :data:`TURN_NETWORK_PROOF_S`; a command after that, such as one after a
         long setup script or at the end of a long turn, checks again. A backend
         built without a proof checks before every command.

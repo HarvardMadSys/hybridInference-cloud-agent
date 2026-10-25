@@ -188,7 +188,7 @@ export function PromptRewrite({
               d="m4 16 9-9 3-3-2-2-3 3-9 9v2h2Zm6-10 2 2M5 2v4M3 4h4M15 12v5M12.5 14.5h5"
             />
           </svg>
-          {t('rewrite.button')}
+          <RewriteLabel inline={inline}>{t('rewrite.button')}</RewriteLabel>
         </button>
         <label
           className={`flex ${compact ? 'min-h-7' : 'min-h-9'} cursor-pointer items-center gap-2 text-xs text-gray-500 dark:text-gray-400 [@media(pointer:coarse)]:min-h-11`}
@@ -297,4 +297,13 @@ export function PromptRewrite({
       ) : null}
     </div>
   );
+}
+
+/**
+ * Inline, the button shares the composer's toolbar, and on a phone its label
+ * wrapped that toolbar onto another row. The icon stays; the label is still the
+ * button's name.
+ */
+function RewriteLabel({ inline, children }: { inline: boolean; children: string }) {
+  return <span className={inline ? 'max-sm:sr-only' : undefined}>{children}</span>;
 }

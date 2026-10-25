@@ -10,7 +10,7 @@ import {
 import { listThreadQuestions, type AgentQuestionsApi } from '@/lib/api/questions';
 import { resetAgentPush } from './agentPush';
 import { McpApprovalsProvider, useMcpApprovals } from './mcp/McpApprovalsProvider';
-import { QUESTION_POLL_MS } from './useNativeQuestions';
+import { QUESTION_BACKGROUND_POLL_MS, QUESTION_POLL_MS } from './useNativeQuestions';
 import { useSessionReview } from './useSessionReview';
 
 const auth = vi.hoisted(() => ({ ownerId: 'owner-1' }));
@@ -144,7 +144,14 @@ describe('session human review markers', () => {
       .mockResolvedValue(questionSnapshot({ questions: [] }));
     await act(async () => render(<App />));
     expectReview('question');
+    // A row is not the conversation on screen, so it does not read at that pace.
     await act(async () => vi.advanceTimersByTimeAsync(QUESTION_POLL_MS));
+    expect(questions).toHaveBeenCalledOnce();
+    expectReview('question');
+    await act(async () =>
+      vi.advanceTimersByTimeAsync(QUESTION_BACKGROUND_POLL_MS - QUESTION_POLL_MS),
+    );
+    expect(questions).toHaveBeenCalledTimes(2);
     expectReview('none');
   });
 
@@ -168,7 +175,7 @@ describe('session human review markers', () => {
       view = render(<App />);
     });
     expectReview('question');
-    await act(async () => vi.advanceTimersByTimeAsync(QUESTION_POLL_MS));
+    await act(async () => vi.advanceTimersByTimeAsync(QUESTION_BACKGROUND_POLL_MS));
     view.rerender(<App currentJob={{ ...job, currentAttemptId: 2 }} />);
     expectReview('none');
     await act(async () => oldPoll.resolve(questionSnapshot()));
@@ -192,7 +199,7 @@ describe('session human review markers', () => {
     view.rerender(<App currentJob={{ ...job, ...transition }} />);
     expectReview('none');
     questions.mockClear();
-    await act(async () => vi.advanceTimersByTimeAsync(QUESTION_POLL_MS * 2));
+    await act(async () => vi.advanceTimersByTimeAsync(QUESTION_BACKGROUND_POLL_MS * 2));
     expect(questions).not.toHaveBeenCalled();
     expectReview('none');
   });
@@ -204,7 +211,7 @@ describe('session human review markers', () => {
       .mockResolvedValue(questionSnapshot({ questions: [] }));
     await act(async () => render(<App />));
     expectReview('question');
-    await act(async () => vi.advanceTimersByTimeAsync(QUESTION_POLL_MS));
+    await act(async () => vi.advanceTimersByTimeAsync(QUESTION_BACKGROUND_POLL_MS));
     expectReview('approval');
   });
 

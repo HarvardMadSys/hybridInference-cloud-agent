@@ -489,9 +489,24 @@ class _Manager:
 
 @pytest.fixture(autouse=True)
 def _upload_receipts(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_UPLOAD_RECEIPT_DIR", raising=False)
     monkeypatch.setattr(
         "cloud_agent_host.upload_import.credential_path", lambda: tmp_path / "host.json"
     )
+
+
+def test_upload_receipt_directory_can_be_shared_without_host_credential(tmp_path, monkeypatch):
+    from cloud_agent_host import upload_import
+
+    shared = tmp_path / "shared-upload-receipts"
+    monkeypatch.setenv("AGENT_UPLOAD_RECEIPT_DIR", str(shared))
+    monkeypatch.setattr(
+        upload_import,
+        "credential_path",
+        lambda: pytest.fail("the dedicated receipt path must not read the host credential path"),
+    )
+
+    assert {path.parent for path in upload_import._paths("sandbox")} == {shared}
 
 
 @pytest.mark.parametrize(
@@ -715,3 +730,66 @@ def test_a_sibling_overwrite_is_restored_even_without_new_uploads(tmp_path):
     receipt = next((tmp_path / "upload-receipts").glob("*.json"))
     receipt.unlink()
     assert run("origin", original) == 1
+
+
+def test_deleted_container_forgets_only_its_upload_receipt(tmp_path):
+    from types import SimpleNamespace
+
+    from cloud_agent_host.upload_import import (
+        _paths,
+        forget_deleted_container_uploads,
+        import_uploads,
+    )
+
+    manager = _Manager()
+
+    def import_for(container_name):
+        return import_uploads(
+            job=_job(thread_attachment_count=1, turn_attachment_count=1),
+            control=_Control([("notes.md", b"hello")]),
+            manager=manager,
+            spec=SimpleNamespace(container_name=container_name),
+            fresh_container=True,
+            container_id=f"id-{container_name}",
+        )
+
+    assert import_for("deleted") == 1
+    assert import_for("retained") == 1
+    root = tmp_path / "upload-receipts"
+    deleted = set(_paths("deleted"))
+    retained = set(_paths("retained"))
+    assert set(root.iterdir()) == deleted | retained
+
+    forget_deleted_container_uploads("deleted")
+
+    assert set(root.iterdir()) == retained
+    forget_deleted_container_uploads("deleted")
+    assert set(root.iterdir()) == retained
+
+
+def test_upload_receipt_cleanup_retries_a_failed_directory_sync(tmp_path, monkeypatch):
+    from cloud_agent_host import upload_import
+
+    path, lock_path = upload_import._paths("deleted")
+    path.parent.mkdir(parents=True)
+    path.write_text("{}")
+    lock_path.touch()
+    syncs = 0
+
+    def fsync(_descriptor):
+        nonlocal syncs
+        syncs += 1
+        if syncs == 1:
+            raise OSError("directory sync failed")
+
+    monkeypatch.setattr(upload_import.os, "fsync", fsync)
+
+    with pytest.raises(OSError, match="directory sync"):
+        upload_import.forget_deleted_container_uploads("deleted")
+
+    assert not path.exists()
+    assert not lock_path.exists()
+    upload_import.forget_deleted_container_uploads("deleted")
+    assert syncs == 2
+    assert not path.exists()
+    assert not lock_path.exists()

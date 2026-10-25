@@ -23,6 +23,7 @@ from cloud_agent.workers.background_wake import BackgroundWake
 from cloud_agent.workers.environment_maintenance import run_environment_maintenance
 from cloud_agent.workers.job_event_signal import JobEventSignal
 from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
+from cloud_agent.workers.notification_maintenance import run_notification_maintenance
 from cloud_agent.workers.notifications import listen
 from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
 from cloud_agent.workers.recovery_maintenance import (
@@ -39,6 +40,7 @@ from cloud_agent.workers.work_signal import WorkSignal
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine
 
+    import asyncpg
     from fastapi import FastAPI
 
     from cloud_agent.publish_worker import PublishStorage
@@ -62,6 +64,42 @@ ENV_DATABASE_URL = "AGENT_DATABASE_URL"
 #: that ran in 85 ms, and each reaper pass spent 170 ms compiling a check that
 #: ran in under one.
 DATABASE_SESSION_SETTINGS = {"jit": "off"}
+
+#: The connections the control plane holds open to its database: asyncpg's own
+#: default, written down so that changing it is a decision.
+DATABASE_POOL_SIZE = 10
+
+
+async def _release_as_is(_connection: asyncpg.Connection) -> None:
+    """Return a pooled connection to the pool without asyncpg's reset query.
+
+    The default reset runs ``SELECT pg_advisory_unlock_all(); CLOSE ALL;
+    UNLISTEN *; RESET ALL;`` on every release: one more round trip for every
+    repository call, since each acquires a connection per call. asyncpg still
+    rolls back a transaction left open, and drops its listeners, before this.
+
+    **No session state on a pooled connection.** That is what makes this safe.
+    Settings are ``SET LOCAL``; LISTEN has its own connection
+    (``workers/notifications.py``); and the one session advisory lock
+    (``storage/repositories/source_control.py``) is released, or its
+    connection reset, before the connection goes back. A session-level
+    ``SET``, LISTEN, advisory lock or cursor taken on a pooled connection would
+    outlive the caller that took it.
+    """
+
+
+async def create_database_pool(dsn: str) -> asyncpg.Pool:
+    """Open the control plane's connection pool."""
+    import asyncpg
+
+    pool: asyncpg.Pool = await asyncpg.create_pool(
+        dsn,
+        min_size=DATABASE_POOL_SIZE,
+        max_size=DATABASE_POOL_SIZE,
+        server_settings=DATABASE_SESSION_SETTINGS,
+        reset=_release_as_is,
+    )
+    return pool
 
 
 ENV_PUBLISH_BASE_BRANCH = "AGENT_PUBLISH_BASE_BRANCH"
@@ -109,6 +147,7 @@ _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "mcp_catalog_task",
     "reaper_task",
     "environment_maintenance_task",
+    "notification_maintenance_task",
     "queued_follow_up_maintenance_task",
     "goal_wakeup_maintenance_task",
     "goal_scheduling_maintenance_task",
@@ -175,6 +214,7 @@ def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
             credential_provider=credential_provider,
             github_app=app.state.source_control.github,
             grants=app.state.grants,
+            http=app.state.http,
             wake=getattr(app.state, "background_wake", None),
         ),
     )
@@ -351,13 +391,14 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     or record anything, so it refuses to start rather than serving an API that
     fails at every call.
     """
-    import asyncpg
+    from http.cookiejar import CookieJar, DefaultCookiePolicy
+
     import httpx
 
     from cloud_agent.application.profiling_control import ProfilingControlService
     from cloud_agent.capacity_history import prune_host_capacity_history
     from cloud_agent.gateway import GatewayClient
-    from cloud_agent.grants import GrantClient
+    from cloud_agent.grants import GrantClient, RenewalSchedule
     from cloud_agent.ledger import collect_usage_snapshots
     from cloud_agent.mcp.catalog import McpCatalog
     from cloud_agent.mcp.runtime import close_host, maintain_host_sessions
@@ -380,7 +421,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
 
     # One region after the pool exists: any later failure still releases what
     # startup opened, and a cleanup error must not replace that failure.
-    pool = await asyncpg.create_pool(dsn, server_settings=DATABASE_SESSION_SETTINGS)
+    pool = await create_database_pool(dsn)
     http = None
     local_measurement_writer = None
     writer_installed = False
@@ -408,9 +449,22 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # client and pay a connect — and a TLS handshake, where the gateway is
         # behind TLS — and admission is not an occasional call: `require_agent_owner`
         # is a dependency of every owner route, terminal input and resize included.
-        # Both clients pass their own deadline per request, so this one carries no
-        # default timeout of its own.
-        http = httpx.AsyncClient()
+        # Pull-request titles, web search, draft pull requests and CloudLab borrow
+        # it for the same reason, each at a bounded rate. Thread titles and prompt
+        # rewrites do not: an owner sets those off, a model call holds its
+        # connection for the whole answer, and a burst of them could leave
+        # admission and grant calls waiting for one of this pool's hundred
+        # connections. Every borrower passes its own deadline per request, so
+        # this one carries no default timeout of its own.
+        #
+        # It keeps no cookies. A cookie one answer set would go out with every
+        # later request to that host, and these requests carry owners' grants and
+        # repositories' tokens; the per-call clients they replaced kept none.
+        #
+        # Idle connections still expire at httpx's five seconds: no upstream here
+        # documents a longer idle timeout, and a gateway served straight from
+        # uvicorn, as in deploy/local, closes its connections at five.
+        http = httpx.AsyncClient(cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])))
         app.state.http = http
         app.state.gateway = GatewayClient(client=http)
         # The sandbox's credential is minted at the gateway now, so the claim
@@ -418,6 +472,11 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # building their own per call. They take the same seam; until this was
         # wired, the comment here described sharing that was not happening.
         app.state.grants = GrantClient(client=http)
+        # What each grant's last renewal bought, so a grant with plenty left is
+        # not renewed again on every pass. One per process, read and fed by the
+        # renewal task below and by the host heartbeat, which only this main
+        # listener receives; `get_renewal_schedule` hands it to the heartbeat.
+        app.state.renewal_schedule = RenewalSchedule()
         if background:
             _build_source_control(app)
         else:
@@ -446,11 +505,24 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             _spawn(app, "compute_resource_task", compute_worker.run())
             app.state.mcp_catalog = McpCatalog(storage.mcp_catalog, http)
             _spawn(app, "mcp_catalog_task", app.state.mcp_catalog.run())
-            _spawn(app, "reaper_task", reap_expired_attempts(storage, grants=app.state.grants))
+            _spawn(
+                app,
+                "reaper_task",
+                reap_expired_attempts(
+                    storage,
+                    grants=app.state.grants,
+                    schedule=app.state.renewal_schedule,
+                ),
+            )
             _spawn(
                 app,
                 "environment_maintenance_task",
                 run_environment_maintenance(storage.environments, storage.environment_snapshots),
+            )
+            _spawn(
+                app,
+                "notification_maintenance_task",
+                run_notification_maintenance(storage.notification_maintenance),
             )
             _spawn(
                 app, "queued_follow_up_maintenance_task", run_queued_follow_up_maintenance(storage)

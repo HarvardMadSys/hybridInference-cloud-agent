@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field, StrictInt, field_validator
 from cloud_agent.capacity_protocol import (
     AgentHostCapacity,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
-from cloud_agent.schemas._sandbox_manager_wire import _SandboxManagerWireNames
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS,
     MAX_SETTINGS_KEYS,
@@ -25,7 +24,7 @@ from cloud_agent_shared.shared_protocol import (
 )
 
 
-class AgentRunnerHost(_SandboxManagerWireNames):
+class AgentRunnerHost(BaseModel):
     """One machine in the agent runner pool.
 
     Most fields below ``seconds_since_seen`` arrived with the dynamic pool
@@ -94,9 +93,6 @@ class AgentRunnerHost(_SandboxManagerWireNames):
     sandbox_manager_url: str | None = Field(
         None,
         description="Where this host's sandbox manager listens, as the control plane reaches it.",
-    )
-    broker_url: str | None = Field(
-        default=None, deprecated=True, description="Compatibility alias for sandbox_manager_url."
     )
     last_heartbeat_at: datetime | None = None
     drain_fence_token: UUID | None = Field(

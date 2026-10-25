@@ -386,7 +386,11 @@ def _client_for(host: dict[str, Any]) -> SandboxManagerClient | None:
 
 
 def sandbox_manager_for_host(host: dict[str, Any]) -> SandboxManagerClient | None:
-    """Reach a registered Host for administrative readiness and inventory checks."""
+    """Reach a Host whose row the caller already read.
+
+    For administrative readiness and inventory checks, and for an attached
+    terminal's control calls, whose one read names the job's host itself.
+    """
     return _client_for(host)
 
 

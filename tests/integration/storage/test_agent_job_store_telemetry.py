@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
 from tests.integration.storage.test_agent_job_store import (  # noqa: F401 - pytest fixtures
@@ -15,6 +17,44 @@ from tests.integration.storage.test_agent_job_store import (  # noqa: F401 - pyt
 )
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
+
+
+async def test_thread_stats_keep_output_presence_when_omitting_long_transcripts(
+    pool,
+    store: Storage,
+):
+    """Exercise the cached SQL rollup without retaining transcript text."""
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    for text in [" \n\t", "long answer " * 1000]:
+        assert await store.attempt_commands.append_event(
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            event_type="message",
+            payload={
+                "text": text,
+                "usage_id": "msg_answer",
+                "usage": {"input_tokens": 100, "output_tokens": 0},
+            },
+        )
+
+    result = await store.execution_queries.thread_stats(job_id=job["id"], user_id=job["user_id"])
+
+    assert result is not None
+    stats = result["stats"]
+    assert stats.input_tokens == 100
+    assert stats.output_tokens is None
+    assert stats.output_tokens_per_second is None
+    async with pool.acquire() as conn:
+        encoded = await conn.fetchval(
+            "SELECT rollup::text FROM agent_attempt_thread_stats WHERE attempt_id = $1",
+            claim["attempt_id"],
+        )
+    cached = json.loads(encoded)
+    assert cached["produced_text"] is True
+    assert "long answer" not in encoded
+    assert len(encoded) < 512
 
 
 async def test_a_resource_rollup_upserts_rather_than_accumulating(store: Storage):

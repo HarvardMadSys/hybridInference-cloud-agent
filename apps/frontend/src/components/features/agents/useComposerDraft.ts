@@ -3,8 +3,9 @@
 import {
   useCallback,
   useEffect,
-  useReducer,
+  useMemo,
   useRef,
+  useSyncExternalStore,
   type Dispatch,
   type SetStateAction,
 } from 'react';
@@ -13,6 +14,20 @@ export interface ComposerDraftSnapshot {
   readonly scope: string;
   readonly value: string;
   readonly revision: number;
+}
+
+/**
+ * A chat's draft without its text: what a page needs to send it.
+ *
+ * Holding this does not draw anything again when the text changes. Only the
+ * component that shows the text reads it, with `useComposerDraftValue`, so a
+ * keystroke redraws the composer and not the conversation around it.
+ */
+export interface ComposerDraftStore {
+  setValue: Dispatch<SetStateAction<string>>;
+  capture: () => ComposerDraftSnapshot;
+  acknowledge: (sent: ComposerDraftSnapshot) => void;
+  subscribe: (onChange: () => void) => () => void;
 }
 
 interface DraftEntry {
@@ -82,12 +97,7 @@ const mountedComposers = new Set<
   (sent: ComposerDraftSnapshot, cleared: ComposerDraftSnapshot) => void
 >();
 
-/** Text only. Uploads keep their existing lifecycle outside the draft store. */
-export function useComposerDraft({
-  userId,
-  threadId,
-  onSentElsewhere,
-}: {
+interface ComposerDraftOptions {
   userId?: string;
   threadId: string;
   /**
@@ -95,9 +105,43 @@ export function useComposerDraft({
    * with a send made by a composer that has since been left.
    */
   onSentElsewhere?: () => void;
-}) {
+}
+
+/** Text only. Uploads keep their existing lifecycle outside the draft store. */
+export function useComposerDraft(options: ComposerDraftOptions) {
+  const draft = useComposerDraftStore(options);
+  const value = useComposerDraftValue(draft);
+  const { setValue, capture, acknowledge } = draft;
+  return { value, setValue, capture, acknowledge };
+}
+
+/** The draft's current text, for the component that draws it. */
+export function useComposerDraftValue(draft: ComposerDraftStore): string {
+  // Each change replaces the snapshot, so a new one is exactly a change.
+  return useSyncExternalStore(draft.subscribe, draft.capture, draft.capture).value;
+}
+
+/**
+ * `useComposerDraft` without the text: its owner is not drawn again on every
+ * keystroke. The composer that shows the text subscribes to it instead.
+ */
+export function useComposerDraftStore({
+  userId,
+  threadId,
+  onSentElsewhere,
+}: ComposerDraftOptions): ComposerDraftStore {
   const entries = useRef(new Map<string, DraftEntry>());
-  const [, rerender] = useReducer((revision: number) => revision + 1, 0);
+  const listeners = useRef(new Set<() => void>());
+  // Redraws what shows the text — the subscribers — and nothing else.
+  const rerender = useCallback(() => {
+    for (const listener of [...listeners.current]) listener();
+  }, []);
+  const subscribe = useCallback((onChange: () => void) => {
+    listeners.current.add(onChange);
+    return () => {
+      listeners.current.delete(onChange);
+    };
+  }, []);
   const storageKey = userId ? composerDraftStorageKey(userId, threadId) : null;
   const scope = storageKey ?? `anonymous:${encodeURIComponent(threadId)}`;
   const activeScope = useRef(scope);
@@ -144,17 +188,15 @@ export function useComposerDraft({
       mounted.current = false;
       mountedComposers.delete(clearIfSent);
     };
-  }, []);
+  }, [rerender]);
 
-  let entry = entries.current.get(scope);
-  if (!entry) {
+  if (!entries.current.has(scope)) {
     const saved = readDraft(storageKey);
-    entry = {
+    entries.current.set(scope, {
       snapshot: { scope, value: saved.value, revision: saved.revision },
       storageKey,
       persisted: saved.persisted,
-    };
-    entries.current.set(scope, entry);
+    });
   }
 
   const setValue: Dispatch<SetStateAction<string>> = useCallback(
@@ -167,7 +209,7 @@ export function useComposerDraft({
       persist(current);
       if (activeScope.current === scope) rerender();
     },
-    [scope],
+    [rerender, scope],
   );
 
   // The ref also sees typing and functional updates in the same event, before
@@ -177,34 +219,40 @@ export function useComposerDraft({
     [scope],
   );
 
-  const acknowledge = useCallback((sent: ComposerDraftSnapshot) => {
-    const current = entries.current.get(sent.scope);
-    if (
-      !current ||
-      current.snapshot.revision !== sent.revision ||
-      current.snapshot.value !== sent.value
-    )
-      return;
-
-    if (current.persisted && current.storageKey) {
-      const saved = readDraft(current.storageKey);
-      // Another mounted composer or browser tab may have edited this draft
-      // while the request was in flight. Its stored revision wins.
-      if (saved.persisted && (saved.revision !== sent.revision || saved.value !== sent.value)) {
-        current.snapshot = { scope: sent.scope, value: saved.value, revision: saved.revision };
-        if (activeScope.current === sent.scope) rerender();
+  const acknowledge = useCallback(
+    (sent: ComposerDraftSnapshot) => {
+      const current = entries.current.get(sent.scope);
+      if (
+        !current ||
+        current.snapshot.revision !== sent.revision ||
+        current.snapshot.value !== sent.value
+      )
         return;
+
+      if (current.persisted && current.storageKey) {
+        const saved = readDraft(current.storageKey);
+        // Another mounted composer or browser tab may have edited this draft
+        // while the request was in flight. Its stored revision wins.
+        if (saved.persisted && (saved.revision !== sent.revision || saved.value !== sent.value)) {
+          current.snapshot = { scope: sent.scope, value: saved.value, revision: saved.revision };
+          if (activeScope.current === sent.scope) rerender();
+          return;
+        }
       }
-    }
 
-    current.snapshot = { scope: sent.scope, value: '', revision: sent.revision + 1 };
-    persist(current);
-    if (activeScope.current === sent.scope) rerender();
-    // Left while the send was out, so the draft on screen is another composer's.
-    if (!mounted.current) {
-      for (const composer of [...mountedComposers]) composer(sent, current.snapshot);
-    }
-  }, []);
+      current.snapshot = { scope: sent.scope, value: '', revision: sent.revision + 1 };
+      persist(current);
+      if (activeScope.current === sent.scope) rerender();
+      // Left while the send was out, so the draft on screen is another composer's.
+      if (!mounted.current) {
+        for (const composer of [...mountedComposers]) composer(sent, current.snapshot);
+      }
+    },
+    [rerender],
+  );
 
-  return { value: entry.snapshot.value, setValue, capture, acknowledge };
+  return useMemo(
+    () => ({ setValue, capture, acknowledge, subscribe }),
+    [setValue, capture, acknowledge, subscribe],
+  );
 }

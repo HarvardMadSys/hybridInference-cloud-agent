@@ -30,6 +30,16 @@ seconds while groups run) confirms or forgets those remembered exceptions, so
 the memory is never trusted longer than the rules themselves are, and a stalled
 sweep sends the next update back to the kernel.
 
+**A turn's child starts no helper.** The host service hands each turn's child
+its own verification (:meth:`HostNetworkGuard.handover`), made again first once
+it is :data:`GUARD_RENEW_S` old. The child adopts it
+(:meth:`HostNetworkGuard.adopt`) and trusts it as an activation trusts its own,
+until :data:`GUARD_RECHECK_S` after it was made. A verification missing, failed
+or malformed declines the turn before it is accepted. One that is sound but
+older than that means the child was slow to start, not that the rules are
+wrong: the child adopts nothing from it and installs and reads back the rules
+itself, as every child did before it was handed one.
+
 **A reinstalled table holds no exceptions.** A table someone deleted (a
 firewall reload's ``flush ruleset``) is installed again with empty relay and
 SSH sets. Every read-back reports what each bridge still holds
@@ -49,6 +59,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import os
 import re
 import subprocess
@@ -89,8 +100,15 @@ GUARD_RENEW_S = 45.0
 #: while the sweep keeps reading in its place, not while a long sweep step
 #: (a final-archive upload) holds the sweep back.
 HELD_RELAYS_TRUST_S = 10.0
+#: The turn-payload key the host service's verification travels under. The
+#: parent adds it after the claim's underscore keys are stripped, so a claim can
+#: never supply one.
+VERIFICATION_KEY = "_network"
 
 _HELPER_TIMEOUT_S = 60
+#: How much of a failed check's reason a child repeats when it declines. The
+#: whole answer is one line the host reads at most 4 KiB of.
+_HANDED_REASON_MAX = 1000
 _RULE = re.compile(r"^add rule (\w+) (\S+) (\w+) ")
 _BASE_CHAIN = re.compile(r"^add chain (\w+) (\S+) (\w+) \{ type filter hook (\w+) ")
 
@@ -421,6 +439,93 @@ class HostNetworkGuard:
         with self._lock, self._state:
             self._verified_at = None
             self._held = {}
+
+    def handover(self) -> dict[str, Any]:
+        """This guard's verification, for the child a turn is handed to (:meth:`adopt`).
+
+        Made again first once it is :data:`GUARD_RENEW_S` old. The child
+        trusts it only while it is younger than :data:`GUARD_RECHECK_S`, so
+        this leaves the child the difference to start in; a child that takes
+        longer checks the rules itself.
+
+        A check that fails is handed over as its reason, for the child to
+        decline the turn with. This never raises: an exception here would
+        reach the host as an uncertain launch, and a turn that never started
+        would wait out its lease instead of going straight back.
+        """
+        try:
+            with self._lock:
+                self.ensure(max_age_s=GUARD_RENEW_S)
+                with self._state:
+                    verified_at = self._verified_at
+                image = self._image()
+        except Exception as exc:
+            return {"error": str(exc) or type(exc).__name__}
+        if verified_at is None:
+            # The sweep found the tables changed after that check, which it
+            # may do without the helper lock, and stopped trusting them.
+            return {"error": "the sandbox network rules changed while the turn was handed over"}
+        return {"verified_at": verified_at, "helper_image": image}
+
+    def adopt(self, verification: object) -> bool:
+        """Hold the host service's verification (:meth:`handover`) as this guard's own.
+
+        For a turn's child, which then starts no helper before it accepts the
+        turn. The verification is trusted exactly as long as the host's guard
+        trusts it, until :data:`GUARD_RECHECK_S` after it was made: the host
+        service started the child, on the same kernel, so both read the same
+        monotonic clock. Raises when the verification is missing, failed or
+        malformed, and the child declines. Returns ``False``, holding nothing
+        of it, when it is sound but older than that: the child was slow to
+        start, so its own check installs and reads back the rules instead.
+        """
+        if not isinstance(verification, dict):
+            raise NetworkGuardError(
+                "the host service handed this turn over without verifying the sandbox network rules"
+            )
+        if "error" in verification:
+            raise NetworkGuardError(
+                "the host service could not verify the sandbox network rules: "
+                + str(verification["error"])[:_HANDED_REASON_MAX]
+            )
+        verified_at = verification.get("verified_at")
+        image = verification.get("helper_image")
+        now = time.monotonic()
+        if (
+            # A monotonic time, as the host's guard read it.
+            not isinstance(verified_at, float)
+            or not math.isfinite(verified_at)
+            or verified_at > now
+            or not isinstance(image, str)
+            or not image.startswith("sha256:")
+        ):
+            raise NetworkGuardError(
+                "the host service handed over an unreadable verification of the sandbox "
+                "network rules"
+            )
+        age = now - verified_at
+        if age >= GUARD_RECHECK_S:
+            logger.warning(
+                "network_guard_verification_aged_out",
+                extra={
+                    "event": "network_guard_verification_aged_out",
+                    "table": self.network.table,
+                    "age_s": round(age, 1),
+                    "detail": (
+                        f"the host service verified the sandbox network rules {age:.0f}s ago "
+                        f"and a turn trusts a verification for {GUARD_RECHECK_S:.0f}s; this "
+                        "turn's child was slow to start, so it checks the rules itself"
+                    ),
+                },
+            )
+            return False
+        with self._lock:
+            self._helper_image = self._helper_image or image
+            with self._state:
+                self._verified_at = float(verified_at)
+                # Nothing this guard remembers was read back with that verification.
+                self._held = {}
+        return True
 
     def sync_relays(
         self,
@@ -873,4 +978,10 @@ class HostNetworkGuard:
         return image
 
 
-__all__ = ["GUARD_RECHECK_S", "HeldExceptions", "HostNetworkGuard", "NetworkGuardError"]
+__all__ = [
+    "GUARD_RECHECK_S",
+    "VERIFICATION_KEY",
+    "HeldExceptions",
+    "HostNetworkGuard",
+    "NetworkGuardError",
+]

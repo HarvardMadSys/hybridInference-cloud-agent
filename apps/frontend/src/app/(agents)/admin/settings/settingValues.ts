@@ -8,20 +8,25 @@ type ParsedValue =
   | { value: AdminSettingValue; additionalChanges?: Record<string, AdminSettingValue> }
   | { error: string };
 
+/** Whether S3 accepts `bucket` as the name of a general purpose bucket. */
+export function isS3BucketName(bucket: string): boolean {
+  return (
+    /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) &&
+    !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(bucket) &&
+    !/\.\.|\.-|-\./.test(bucket) &&
+    // Prefixes and suffixes S3 reserves for names it gives out itself.
+    !/^(?:xn--|sthree-|amzn-s3-demo-)/.test(bucket) &&
+    !/(?:-s3alias|--ol-s3|\.mrap|--x-s3|--table-s3)$/.test(bucket)
+  );
+}
+
 function parseArchiveBucket(draft: string): ParsedValue {
   if (!draft) return { value: '' };
   const uri = draft.startsWith('s3://');
   // Keep raw components: URL parsers can silently normalize unsafe path segments.
   const components = uri ? /^s3:\/\/([^/]+)(?:\/(.*))?$/.exec(draft) : null;
   const bucket = uri ? (components?.[1] ?? '') : draft;
-  if (
-    /\s/.test(draft) ||
-    !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) ||
-    /^\d{1,3}(?:\.\d{1,3}){3}$/.test(bucket) ||
-    /\.\.|\.-|-\./.test(bucket) ||
-    /^(?:xn--|sthree-|amzn-s3-demo-)/.test(bucket) ||
-    /(?:-s3alias|--ol-s3|\.mrap|--x-s3|--table-s3)$/.test(bucket)
-  ) {
+  if (/\s/.test(draft) || !isS3BucketName(bucket)) {
     return { error: 'Enter a valid S3 bucket name or an S3 URI such as s3://bucket/prefix.' };
   }
   if (!uri) return { value: bucket };

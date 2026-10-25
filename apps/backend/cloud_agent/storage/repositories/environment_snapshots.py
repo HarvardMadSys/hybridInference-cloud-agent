@@ -14,10 +14,10 @@ import secrets
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.execution_profiles import default_execution_profile
-from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
+from cloud_agent.sandbox_archive_credentials import stored_archive_policy
 from cloud_agent.storage._sql.environment_runs import env_run_holds_slot
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
-from cloud_agent.storage._sql.rows import load_json, stored_archive_settings
+from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage.repositories.environments import (
     lock_environment_snapshots,
     lock_team_environment_snapshots,
@@ -120,7 +120,7 @@ class PostgresEnvironmentSnapshotRepository:
         if row is None:
             return False
         try:
-            policy = load_stored_archive_policy(stored_archive_settings(row))
+            policy = stored_archive_policy(row)
         except ValueError:
             return False
         return bool(policy.enabled and policy.checkpoints_enabled)

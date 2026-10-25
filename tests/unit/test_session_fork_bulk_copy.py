@@ -146,20 +146,25 @@ async def test_finalize_session_fork_batches_a_thousand_turns_and_preserves_line
     with patch("cloud_agent.storage.repositories.session_fork.read_job", read_job):
         assert await repository.finalize_session_fork(operation_id=operation["id"]) == copied_anchor
 
-    # Four locked reads, two history reads, two driver batches and five fixed
-    # finalization statements: the connection-await count does not grow with
-    # the 1,000-turn history.
+    # Four locked reads, two history reads, two driver batches, two locks
+    # (the target conversation, then both members in thread order) and five
+    # fixed finalization statements: the connection-await count does not grow
+    # with the 1,000-turn history.
     assert len(connection.fetchrow_calls) == 4
     assert len(connection.fetch_calls) == 2
-    assert len(connection.execute_calls) == 5
+    assert len(connection.execute_calls) == 7
     assert len(connection.executemany_calls) == 2
     assert (
         len(connection.fetchrow_calls)
         + len(connection.fetch_calls)
         + len(connection.execute_calls)
         + len(connection.executemany_calls)
-        == 13
+        == 15
     )
+    assert [args for _sql, args in connection.execute_calls[:2]] == [
+        ("target-thread",),
+        (["source-thread", "target-thread"],),
+    ]
 
     turn_sql, copied_turns = connection.executemany_calls[0]
     assert "INSERT INTO agent_jobs" in turn_sql

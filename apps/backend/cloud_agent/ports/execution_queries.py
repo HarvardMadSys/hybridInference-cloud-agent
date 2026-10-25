@@ -9,7 +9,10 @@ operations it needs rather than on the whole persistence surface.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from cloud_agent.domain.execution import JobStreamState
 
 
 class ExecutionQueries(Protocol):
@@ -34,15 +37,12 @@ class ExecutionQueries(Protocol):
         """
         ...
 
-    async def thread_stats_inputs(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
-        """Return everything needed to summarize the thread containing a job.
+    async def thread_stats(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
+        """Return the thread id and its incrementally persisted summary.
 
-        The event rows come back with their bulky text fields stripped in
-        SQL: the summary reads identity, pairing and usage keys only, and a
-        long thread's transcript is megabytes we would otherwise pull across
-        the wire to throw away. Nothing is filtered by event type — wall
-        time is measured from a turn's first to last event, so a Tier-2
-        thread whose only events are ``raw`` still gets its duration.
+        Unchanged attempt rollups are reused. Only attempts whose newest event
+        sequence differs from the stored reducer version load compact events,
+        so a repeat read never transfers the thread's historical event rows.
 
         :returns: ``None`` when the job does not exist or is not the
             caller's, matching :meth:`get_thread_for_job`.
@@ -97,4 +97,15 @@ class ExecutionQueries(Protocol):
         self, *, job_id: str, after_id: int = 0, limit: int = 500
     ) -> list[dict[str, Any]]:
         """Return events for a job with a global id strictly greater than the cursor."""
+        ...
+
+    async def job_stream_page(
+        self, *, job_id: str, user_id: str, after_id: int, limit: int
+    ) -> tuple[list[dict[str, Any]], JobStreamState] | None:
+        """One wake-up of a job's event stream: its next events and its state.
+
+        The events are :meth:`list_events_after`'s, and the state is the owned
+        job's, read together so they come from one snapshot. ``None`` when the
+        job is not this owner's.
+        """
         ...
