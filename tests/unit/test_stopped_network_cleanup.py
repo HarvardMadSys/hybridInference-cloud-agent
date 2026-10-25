@@ -327,7 +327,9 @@ def test_a_known_same_name_replacement_and_its_peer_are_never_touched(monkeypatc
     assert _record(docker, name)["NetworkID"] == old_id
 
 
-@pytest.mark.parametrize("mutate", [_restart, _replace_container, _relabel_generation, _pending_record, _other_record])
+@pytest.mark.parametrize(
+    "mutate", [_restart, _replace_container, _relabel_generation, _pending_record, _other_record]
+)
 def test_a_changed_record_on_an_existing_bridge_refuses_before_disconnect(monkeypatch, mutate):
     spec = _network_spec()
     manager, docker, name, old_id = _world(monkeypatch, spec)
@@ -345,7 +347,9 @@ def test_a_changed_record_on_an_existing_bridge_refuses_before_disconnect(monkey
     with pytest.raises(SandboxError):
         manager.release_stopped_networks(spec, expected_container_id=SANDBOX)
     assert docker.network(name)["Id"] == old_id
-    assert not [call for call in docker.calls if call[1:3] in (["network", "disconnect"], ["network", "rm"])]
+    assert not [
+        call for call in docker.calls if call[1:3] in (["network", "disconnect"], ["network", "rm"])
+    ]
 
 
 def test_opportunistic_pruning_never_detaches_a_stopped_sandbox(monkeypatch):
