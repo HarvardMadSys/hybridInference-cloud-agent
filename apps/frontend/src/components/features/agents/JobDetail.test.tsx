@@ -3194,17 +3194,16 @@ describe('JobDetail', () => {
   });
 
   it('keeps the empty workspace free of change and absent-PR placeholders', () => {
-    render(
-      <JobDetail
-        job={makeJob({
-          state: 'done',
-          workspaceDiffAvailable: true,
-          diffFiles: [],
-          diffStat: undefined,
-        })}
-      />,
-    );
+    const job = makeJob({
+      state: 'done',
+      workspaceDiffAvailable: true,
+      diffFiles: [],
+      diffStat: undefined,
+      workspaceUnpublishedChanges: true,
+    });
+    render(<JobDetail job={job} userId="user-1" />);
     expect(screen.queryByRole('button', { name: 'View changes' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Create PR' })).not.toBeInTheDocument();
     expect(screen.queryByText(/0 files changed|No pull request yet/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open workspace' })).toBeInTheDocument();
   });

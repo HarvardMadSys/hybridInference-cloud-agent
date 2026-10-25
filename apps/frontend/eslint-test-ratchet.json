@@ -18,7 +18,7 @@
     },
     {
       "files": ["src/components/features/agents/JobDetail.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 6673 }] }
+      "rules": { "max-lines": ["error", { "max": 6672 }] }
     },
     {
       "files": ["src/components/features/agents/TaskComposer.test.tsx"],
