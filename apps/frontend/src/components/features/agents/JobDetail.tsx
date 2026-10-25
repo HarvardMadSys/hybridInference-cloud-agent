@@ -6,6 +6,7 @@ import { JobComposer } from './job-detail/JobComposer';
 import { JobDetailHeader } from './job-detail/JobDetailHeader';
 import { JobDetailSidePanels } from './job-detail/JobDetailSidePanels';
 import { JobTranscript } from './job-detail/JobTranscript';
+import { hasPublishableWorkspaceChanges } from './job-detail/RunOutcome';
 import { TrajectoryView } from './job-detail/LazyPanels';
 import { useJobComposerSettings } from './job-detail/useJobComposerSettings';
 import { useJobConversation } from './job-detail/useJobConversation';
@@ -17,7 +18,6 @@ import { WorkspaceLinkProvider } from '@/components/ui/Markdown';
 import { basePath } from '@/config/env';
 import { publishAgentThread } from '@/lib/api/agents';
 import { submitThreadMessage, type ThreadMessageResultApi } from '@/lib/api/pendingMessages';
-import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import { APIError } from '@/lib/utils/errors';
 
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
@@ -618,12 +618,11 @@ export function JobDetail({
   );
 
   // The platform publishes only when the owner asks: Create PR, then Update PR.
-  // The newest turn offers it once nothing runs in the workspace; a request
-  // already on its way shows as the publication state instead.
+  // The newest turn offers it once the workspace has Git changes and nothing
+  // runs there; a request already on its way shows as the publication state.
   const canPublish = Boolean(
     userId &&
-    job.repo &&
-    !isTemporaryWorkspace(job.repo) &&
+    hasPublishableWorkspaceChanges(job) &&
     !parentTurn &&
     !isActive &&
     !contextLost &&

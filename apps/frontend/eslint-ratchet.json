@@ -357,7 +357,7 @@
     {
       "files": ["src/components/features/agents/JobDetail.tsx"],
       "rules": {
-        "complexity": ["error", 99]
+        "complexity": ["error", 98]
       }
     },
     {
@@ -449,7 +449,7 @@
         "max-lines": [
           "error",
           {
-            "max": 943
+            "max": 942
           }
         ]
       }
