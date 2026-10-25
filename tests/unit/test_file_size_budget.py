@@ -39,7 +39,7 @@ BASELINE = {
     "apps/backend/cloud_agent/api/mcp_relay.py": 1798,
     "apps/backend/cloud_agent/storage/repositories/snapshot.py": 1673,
     "apps/backend/cloud_agent_host/host_capacity.py": 1636,
-    "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1574,
+    "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1571,
 }
 
 #: Exact line counts of test modules over their calibrated limit after #894's

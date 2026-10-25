@@ -151,6 +151,26 @@ def _caused(error: BaseException, cause: BaseException) -> BaseException:
         ),
         (SandboxError(f"Docker network inspect failed: {_PRIVATE}"), "inspect", {}),
         (
+            SandboxError("stopped chat sandbox network identity changed during release"),
+            "network_identity",
+            {},
+        ),
+        (
+            SandboxError("group network reappeared during stopped intent cleanup"),
+            "network_identity",
+            {},
+        ),
+        (
+            SandboxError("stopped chat sandbox network intent could not be cleared"),
+            "network_intent",
+            {},
+        ),
+        (
+            SandboxError("stopped chat sandbox still retains its group network intent"),
+            "network_intent",
+            {},
+        ),
+        (
             SandboxError("group network 'cagent-x' contains an unexpected peer"),
             "unexpected_peer",
             {},
