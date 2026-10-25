@@ -101,10 +101,7 @@ class PostgresAttemptCommands(AttemptQuestionChanges):
         """Wrap the pool the control plane already owns."""
         self._pool = pool
 
-    @staticmethod
-    async def _lock_live_attempt(conn: Any, attempt_id: int, lease_generation: int | None) -> bool:
-        """Lock an attempt when its recorded lease is still live."""
-        return await lock_live_attempt(conn, attempt_id, lease_generation) is not None
+    _lock_live_attempt = staticmethod(lock_live_attempt)
 
     async def sweep_queued_follow_ups(self) -> None:
         """Fail queued follow-ups whose earlier native context is unavailable.
