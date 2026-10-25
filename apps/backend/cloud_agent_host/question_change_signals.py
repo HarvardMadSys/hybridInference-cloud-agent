@@ -77,12 +77,12 @@ def question_change_frames(turn: Any) -> Iterator[str]:
 def question_change_frame_kind(frame: dict[str, Any], control: Any, job: Any) -> str | None:
     """Report a question wake-up and return ordinary frame kinds unchanged."""
     kind = frame.get("kind")
-    if not isinstance(kind, str):
-        return None
     if kind == "question_changed":
         job_id = getattr(job, "job_id", None)
         if not isinstance(job_id, str) or not job_id:
             raise ValueError("question-change frame has no job identity")
         control.report_question_change(job_id)
         return None
-    return kind
+    # Keep malformed frames on the runner's unknown-frame failure path. Only
+    # a handled question notification is consumed from the shared stream.
+    return kind if isinstance(kind, str) else ""

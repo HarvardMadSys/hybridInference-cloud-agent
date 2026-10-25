@@ -29,7 +29,8 @@ if TYPE_CHECKING:
 
 # Heartbeats must answer before ordinary lifecycle requests consume the lease.
 _HEARTBEAT_TIMEOUT_S = 10.0
-# A question notification is only a wake-up; the 60 s poll is its recovery path.
+# A question notification is a wake-up; owner views still poll every 2 s while
+# active and every 12 s in the background if a hint is missed.
 _QUESTION_HINT_TIMEOUT_S = 2.0
 # Attachments may need longer than the client's default deadline for transfer.
 _ATTACHMENT_TIMEOUT_S = 120.0

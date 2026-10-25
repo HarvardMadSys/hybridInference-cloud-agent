@@ -139,6 +139,20 @@ async def test_question_change_notifies_only_for_the_current_live_attempt(store,
     ]
 
 
+async def test_question_change_for_deleted_thread_is_a_noop_not_lease_loss(store, pool):
+    job, fence = await _claimed(store)
+    await pool.execute(
+        "UPDATE agent_threads SET deleted_at = clock_timestamp() WHERE id = $1",
+        job["thread_id"],
+    )
+    heard = await _listen(OWNER_CHANGES)
+    try:
+        assert await store.attempt_commands.notify_question_change(job_id=job["id"], **fence)
+        assert await heard.until_quiet(pool) == []
+    finally:
+        await heard.connection.close()
+
+
 async def test_a_batch_that_fails_part_way_stores_none_of_it(store, pool, monkeypatch):
     job, fence = await _claimed(store)
     original = event_batches.insert_event
