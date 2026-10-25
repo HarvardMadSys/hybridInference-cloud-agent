@@ -1676,10 +1676,11 @@ def test_final_network_release_leaves_a_same_name_bridge_replacement_alone(monke
         manager._network_lifecycle, "_release_owned_network", replace_before_release
     )
     docker.calls.clear()
-    released = manager.release_stopped_networks(spec, expected_container_id=original["Id"])
+    with pytest.raises(SandboxError, match="network intent"):
+        manager.release_stopped_networks(spec, expected_container_id=original["Id"])
 
     replacement = docker.network(name)
-    assert released.networks == (name,)
+    assert manager._require_exact(spec, original["Id"]).networks == (name,)
     assert replacement is not None and replacement["Id"] != old_id
     assert not any(
         call[1:3] in (["network", "disconnect"], ["network", "rm"]) for call in docker.calls
