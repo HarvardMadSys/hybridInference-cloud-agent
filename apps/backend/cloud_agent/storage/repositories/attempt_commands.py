@@ -34,6 +34,7 @@ from cloud_agent.execution_profiles import (
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import stored_archive_policy
+from cloud_agent.storage._sql.attempts import lock_live_attempt
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent.storage._sql.environment_runs import env_run_blocks_host, env_runs_holding_slots
 from cloud_agent.storage._sql.event_batches import append_attempt_events
@@ -99,6 +100,11 @@ class PostgresAttemptCommands(AttemptQuestionChanges):
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
+
+    @staticmethod
+    async def _lock_live_attempt(conn: Any, attempt_id: int, lease_generation: int | None) -> bool:
+        """Lock an attempt when its recorded lease is still live."""
+        return await lock_live_attempt(conn, attempt_id, lease_generation) is not None
 
     async def sweep_queued_follow_ups(self) -> None:
         """Fail queued follow-ups whose earlier native context is unavailable.
