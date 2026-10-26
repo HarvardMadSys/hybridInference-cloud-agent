@@ -2,8 +2,9 @@
 
 Both run as root through :class:`~cloud_agent.providers.compute.host_bootstrap.SshHostBootstrap`,
 which owns the SSH command line and the answers. ``_QUIESCE`` stops the
-releasing node's runner and removes the self-test sandboxes it left;
-``_INVENTORY`` then reads everything Docker and the Host's state still hold.
+releasing node's runner and removes the self-test sandboxes and runtime
+download work it left; ``_INVENTORY`` then reads everything Docker and the
+Host's state still hold.
 Real Docker runs both in ``tests/external/test_host_release_real_docker.py``.
 """
 
@@ -16,6 +17,15 @@ from __future__ import annotations
 # The sandbox manager keeps running: the release still removes through it.
 # A self-test sandbox carries its own label in this deployment's namespace and
 # runs no one's chat; one its runner was stopped in the middle of is removed.
+# So is the install and check work of a runtime download the runner was
+# stopped in (``RuntimeDownloads``, which only the runner runs). Docker finds
+# it by this deployment's work label. It is made from the sandbox image or
+# one committed from it, so it carries only that image's runtime and helper
+# labels and the download's own. Any other label of this platform's marks a
+# container someone else owns, such as a chat, snapshot or copy source made
+# from a version an earlier release kept with the work label still on it.
+# Those, another deployment's check, and Compose services stay for the
+# inventory to count. `probes_removed` stays the count of self-tests only.
 _QUIESCE = r"""
 import json, shutil, subprocess, sys
 from pathlib import Path
@@ -40,6 +50,24 @@ probe = (
     '--filter', 'label=org.freeinference.sandbox-namespace=' + project,
     '--filter', 'label=org.freeinference.chat-runtime=preflight',
 )
+work = ('-a', '--filter', 'label=org.freeinference.runtime-download.work=' + project)
+download = {
+    'org.freeinference.runtime-download.work', 'org.freeinference.runtime-download.namespace',
+    'org.freeinference.runtime-download.runtime', 'org.freeinference.runtime-download.version',
+}
+inherited = ('org.freeinference.runtime.', 'org.freeinference.helper.')
+def own_work(labels):
+    if not isinstance(labels, dict):
+        raise TypeError(labels)
+    if labels.get('org.freeinference.runtime-download.work') != project:
+        return False
+    if labels.get('org.freeinference.runtime-download.namespace', project) != project:
+        return False
+    return not any(
+        key.startswith(('com.docker.compose.', 'hybridinference.'))
+        or (key.startswith('org.freeinference.') and key not in download and not key.startswith(inherited))
+        for key in labels
+    )
 try:
     running = listed(*runner)
     if running:
@@ -49,7 +77,19 @@ try:
     probes = listed(*probe)
     if probes:
         subprocess.check_call(['docker', 'rm', '--force', *probes], **quiet)
-except (subprocess.SubprocessError, OSError):
+    found = listed(*work)
+    if found:
+        # Each one's labels whole: the listing's filter names one of them. One
+        # that went meanwhile fails the read, and the release asks again.
+        read = [json.loads(line) for line in subprocess.check_output(
+            ['docker', 'container', 'inspect', '--format', '{"id":{{json .Id}},"labels":{{json .Config.Labels}}}', *found],
+            stderr=subprocess.DEVNULL, text=True).splitlines()]
+        if [entry['id'] for entry in read] != found:
+            raise ValueError('inspected containers differ from those listed')
+        owned = [entry['id'] for entry in read if own_work({} if entry['labels'] is None else entry['labels'])]
+        if owned:
+            subprocess.check_call(['docker', 'rm', '--force', *owned], **quiet)
+except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError):
     answer(quiesced=False, reason='host_quiesce_failed')
 answer(quiesced=True, probes_removed=len(probes))
 """
