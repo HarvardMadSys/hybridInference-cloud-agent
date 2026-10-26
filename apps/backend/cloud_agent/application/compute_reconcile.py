@@ -16,12 +16,14 @@ from uuid import UUID
 
 from pydantic import SecretStr
 
-from cloud_agent.application.compute_rotation import ComputeRotation
+from cloud_agent.application.compute_rotation import (
+    ComputeRotation,
+    host_release_blocks_rotation,
+    load_host_release_for_allocations,
+)
 from cloud_agent.application.compute_setup import (
     HostRelease,
-    host_release_blocks_rotation,
     load_control_plane_host_release,
-    load_host_release_for_allocations,
 )
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.application.release_inventory import quiesce_and_scan
