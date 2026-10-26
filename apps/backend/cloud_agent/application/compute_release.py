@@ -177,20 +177,25 @@ class ComputeRelease:
             await self.released(operation, release_evidence(operation, acknowledged))
             return
         provider = r.commands.registry.get(allocation["provider_id"]).provider
-        observation = await r._inspect(operation, allocation)
-        if observation.state == "terminated":
-            await self.released(operation, release_evidence(operation, observation))
-            return
-        if operation.get("result", {}).get("release_requested") and observation.state != "ready":
-            await r._finish(
-                operation,
-                "waiting",
-                "confirming_release",
-                "Release was submitted; checking provider state before declaring success.",
-                result={"external_pending": True},
-                retry=30,
-            )
-            return
+        # The durable commit already passed the inventory and fencing gates.
+        # An extra read must not prevent the first DELETE of that exact identity.
+        # Once submitted, however, its unknown outcome still requires observation
+        # before replay; only a proven rejection clears this marker below.
+        if operation.get("result", {}).get("release_requested"):
+            observation = await r._inspect(operation, allocation)
+            if observation.state == "terminated":
+                await self.released(operation, release_evidence(operation, observation))
+                return
+            if observation.state != "ready":
+                await r._finish(
+                    operation,
+                    "waiting",
+                    "confirming_release",
+                    "Release was submitted; checking provider state before declaring success.",
+                    result={"external_pending": True},
+                    retry=30,
+                )
+                return
         await r._checkpoint(
             operation, "releasing", {"release_requested": True, "external_pending": True}
         )
