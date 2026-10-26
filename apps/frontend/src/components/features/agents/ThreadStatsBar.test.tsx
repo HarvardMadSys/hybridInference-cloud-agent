@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getAgentThreadStats, type AgentThreadStatsApi } from '@/lib/api/agents';
@@ -96,6 +96,191 @@ describe('statSegments', () => {
     );
 
     expect(segments.some((segment) => segment.key === 'speed')).toBe(false);
+  });
+});
+
+describe('ThreadStatsBar live totals', () => {
+  const running = { id: 'ajob_1', state: 'running' } as AgentJob;
+
+  async function tick(ms = 0) {
+    await act(() => vi.advanceTimersByTimeAsync(ms));
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(getAgentThreadStats).mockReset();
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('updates calls, both timings and both token counts without a job state change', async () => {
+    vi.mocked(getAgentThreadStats)
+      .mockResolvedValueOnce(
+        makeStats({
+          turns: 1,
+          tool_calls: 0,
+          model_seconds: 0,
+          tool_seconds: 0,
+          input_tokens: null,
+          output_tokens: null,
+          tokens_source: 'unavailable',
+        }),
+      )
+      .mockResolvedValueOnce(
+        makeStats({
+          turns: 1,
+          tool_calls: 15,
+          model_seconds: 30,
+          tool_seconds: 5,
+          input_tokens: 384_800,
+          output_tokens: 1500,
+        }),
+      );
+    render(<ThreadStatsBar job={running} />);
+    await tick();
+    expect(screen.getByText('1 turn · 0 tool calls')).toBeInTheDocument();
+    expect(screen.getByText('Tokens —')).toBeInTheDocument();
+
+    await tick(2_000);
+
+    expect(screen.getByText('1 turn · 15 tool calls')).toBeInTheDocument();
+    expect(screen.getByText('Model 30s · Tools 5s')).toBeInTheDocument();
+    expect(screen.getByText('Input 385k tok · Output 1.5k tok')).toBeInTheDocument();
+  });
+
+  it('refreshes while the job is queued', async () => {
+    vi.mocked(getAgentThreadStats).mockResolvedValue(makeStats());
+    render(<ThreadStatsBar job={{ ...running, state: 'queued' }} />);
+    await tick(4_000);
+    expect(getAgentThreadStats).toHaveBeenCalledTimes(3);
+  });
+
+  it('refreshes a historical turn while another turn in its conversation is active', async () => {
+    vi.mocked(getAgentThreadStats).mockResolvedValue(makeStats());
+    const { rerender } = render(
+      <ThreadStatsBar job={{ ...makeJob(), conversationState: 'running' }} />,
+    );
+    await tick(2_000);
+    expect(getAgentThreadStats).toHaveBeenCalledTimes(2);
+
+    rerender(<ThreadStatsBar job={{ ...makeJob(), conversationState: 'idle' }} />);
+    await tick(10_000);
+    expect(getAgentThreadStats).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['done', 'failed', 'cancelled'] as const)(
+    'loads final totals immediately on %s, then stops polling',
+    async (state) => {
+      vi.mocked(getAgentThreadStats)
+        .mockResolvedValueOnce(makeStats({ tool_calls: 15 }))
+        .mockResolvedValueOnce(makeStats({ tool_calls: 16 }));
+      const { rerender } = render(<ThreadStatsBar job={running} />);
+      await tick();
+
+      rerender(<ThreadStatsBar job={{ ...running, state }} />);
+      await tick();
+      expect(screen.getByText('3 turns · 16 tool calls')).toBeInTheDocument();
+      await tick(10_000);
+      expect(getAgentThreadStats).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('does not overlap slow requests', async () => {
+    let resolve!: (value: AgentThreadStatsApi) => void;
+    vi.mocked(getAgentThreadStats).mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    render(<ThreadStatsBar job={running} />);
+    await tick(6_000);
+    expect(getAgentThreadStats).toHaveBeenCalledTimes(1);
+
+    await act(async () => resolve(makeStats()));
+    vi.mocked(getAgentThreadStats).mockResolvedValue(makeStats({ tool_calls: 57 }));
+    await tick(2_000);
+    expect(screen.getByText('3 turns · 57 tool calls')).toBeInTheDocument();
+  });
+
+  it('retains totals on a transient failure and recovers at the next refresh', async () => {
+    vi.mocked(getAgentThreadStats)
+      .mockResolvedValueOnce(makeStats({ tool_calls: 15 }))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(makeStats({ tool_calls: 16 }));
+    render(<ThreadStatsBar job={running} />);
+    await tick(2_000);
+    expect(screen.getByText('3 turns · 15 tool calls')).toBeInTheDocument();
+
+    await tick(2_000);
+    expect(screen.getByText('3 turns · 16 tool calls')).toBeInTheDocument();
+  });
+
+  it('pauses hidden-tab polling and refreshes immediately on return', async () => {
+    vi.mocked(getAgentThreadStats).mockResolvedValue(makeStats());
+    render(<ThreadStatsBar job={running} />);
+    await tick();
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    await tick(6_000);
+    expect(getAgentThreadStats).toHaveBeenCalledTimes(1);
+
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(getAgentThreadStats).toHaveBeenCalledTimes(2);
+  });
+
+  it('hides the previous conversation totals when the next conversation cannot load', async () => {
+    vi.mocked(getAgentThreadStats)
+      .mockResolvedValueOnce(makeStats())
+      .mockRejectedValueOnce(new Error('offline'));
+    const { rerender } = render(<ThreadStatsBar job={running} />);
+    await tick();
+    expect(screen.getByLabelText('Conversation totals')).toBeInTheDocument();
+
+    rerender(<ThreadStatsBar job={{ ...running, id: 'ajob_2' }} />);
+    expect(screen.queryByLabelText('Conversation totals')).not.toBeInTheDocument();
+    await tick();
+    expect(screen.queryByLabelText('Conversation totals')).not.toBeInTheDocument();
+  });
+
+  it('ignores a late running response after the final totals arrive', async () => {
+    let resolve!: (value: AgentThreadStatsApi) => void;
+    vi.mocked(getAgentThreadStats)
+      .mockReturnValueOnce(
+        new Promise((done) => {
+          resolve = done;
+        }),
+      )
+      .mockResolvedValueOnce(makeStats({ tool_calls: 16 }));
+    const { rerender } = render(<ThreadStatsBar job={running} />);
+    const signal = vi.mocked(getAgentThreadStats).mock.calls[0][1];
+
+    rerender(<ThreadStatsBar job={makeJob()} />);
+    await tick();
+    expect(signal?.aborted).toBe(true);
+    await act(async () => resolve(makeStats({ tool_calls: 1 })));
+    expect(screen.getByText('3 turns · 16 tool calls')).toBeInTheDocument();
+  });
+
+  it('aborts pending requests and removes polling and visibility listeners on unmount', async () => {
+    vi.mocked(getAgentThreadStats).mockReturnValue(new Promise(() => undefined));
+    const { unmount } = render(<ThreadStatsBar job={running} />);
+    const signal = vi.mocked(getAgentThreadStats).mock.calls[0][1];
+    unmount();
+
+    expect(signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await tick(4_000);
+    expect(getAgentThreadStats).toHaveBeenCalledTimes(1);
   });
 });
 

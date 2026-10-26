@@ -21,6 +21,7 @@
 import { useEffect, useState } from 'react';
 
 import { formatDuration } from './TurnFooter';
+import { isActiveConversationState, isActiveJobState } from './conversationJob';
 import type { AgentJob } from './types';
 import { getAgentThreadStats, type AgentThreadStatsApi } from '@/lib/api/agents';
 
@@ -132,25 +133,49 @@ export function statSegments(stats: AgentThreadStatsApi): Segment[] {
 }
 
 export function ThreadStatsBar({ job }: { job: AgentJob }) {
-  const [stats, setStats] = useState<AgentThreadStatsApi | null>(null);
+  const [snapshot, setSnapshot] = useState<{
+    jobId: string;
+    stats: AgentThreadStatsApi | null;
+  } | null>(null);
+  const active = isActiveJobState(job.state) || isActiveConversationState(job.conversationState);
 
-  // Reloads when the turn ends: `job.state` changes on the reload that the
-  // finished-stream handler triggers, which is the same signal the workspace
-  // panels refresh on.
+  // The aggregate endpoint includes the running turn, but streaming events
+  // do not change job.state. Refresh all totals together while work is active,
+  // including a follow-up running while an older turn is selected.
   useEffect(() => {
-    let cancelled = false;
-    getAgentThreadStats(job.id)
-      .then((next) => {
-        if (!cancelled) setStats(next);
-      })
-      // A summary that cannot load is not worth an error banner over the
-      // composer; the bar simply stays absent.
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
+    const controller = new AbortController();
+    let inFlight = false;
+    const refresh = async () => {
+      if (inFlight || controller.signal.aborted) return;
+      inFlight = true;
+      try {
+        const stats = await getAgentThreadStats(job.id, controller.signal);
+        if (!controller.signal.aborted) setSnapshot({ jobId: job.id, stats });
+      } catch {
+        // Keep the last snapshot through a transient failure and retry on the
+        // next tick. An unavailable summary does not need a composer banner.
+      } finally {
+        inFlight = false;
+      }
     };
-  }, [job.id, job.state]);
+    const refreshVisible = () => {
+      if (!document.hidden) void refresh();
+    };
 
+    // State transitions also fetch immediately, including the final totals.
+    void refresh();
+    const timer = active ? setInterval(refreshVisible, 2_000) : undefined;
+    if (active) document.addEventListener('visibilitychange', refreshVisible);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', refreshVisible);
+    };
+  }, [job.id, job.state, job.conversationState, active]);
+
+  // A delayed response or failed load for another conversation must never
+  // leave that conversation displaying the previous one's totals.
+  const stats = snapshot?.jobId === job.id ? snapshot.stats : null;
   if (!stats) return null;
   const segments = statSegments(stats);
   if (segments.length === 0) return null;
