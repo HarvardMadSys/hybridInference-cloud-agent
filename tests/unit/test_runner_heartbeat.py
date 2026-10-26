@@ -430,3 +430,33 @@ def test_question_hint_is_best_effort_and_uses_a_short_deadline():
     assert requests[0].extensions["timeout"] == dict.fromkeys(
         ("connect", "read", "write", "pool"), 2
     )
+
+
+def test_question_hint_swallows_a_5xx_and_a_timeout_but_keeps_a_lost_lease():
+    """The hint is recoverable by polling, so only a lost lease may raise.
+
+    A server error or a timed-out request is swallowed; a 409 means the lease
+    is gone, and LeaseLost still terminates the turn as everywhere else.
+    """
+    outcomes = []
+
+    def endpoint(request):
+        outcomes.append(request)
+        if len(outcomes) == 1:
+            return httpx.Response(503, json={"detail": "busy"})
+        if len(outcomes) == 2:
+            raise httpx.ConnectTimeout("no route", request=request)
+        return httpx.Response(409, json={"detail": "lease expired"})
+
+    control = runner.ControlPlane("https://control.test", "test-token")
+    control.close()
+    control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
+    try:
+        control.report_question_change("ajob_flaky_hint")
+        control.report_question_change("ajob_flaky_hint")
+        with pytest.raises(runner.LeaseLost):
+            control.report_question_change("ajob_flaky_hint")
+    finally:
+        control.close()
+
+    assert len(outcomes) == 3
