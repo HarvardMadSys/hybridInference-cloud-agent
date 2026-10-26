@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import SecretStr
 
+from cloud_agent.application.compute_release import NEVER_CREATED, release_evidence
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import ComputeRefusal, discard_request_id, fingerprint
@@ -1224,12 +1225,8 @@ class ComputeRotation:
                 },
                 **self.reconciler._fence(operation),
             )
-            await self.reconciler._finish(
-                operation,
-                "succeeded",
-                "released",
-                "The replacement node was never created.",
-                result={"external_pending": False, "blocked_reasons": []},
+            await self.reconciler.release.released(
+                operation, NEVER_CREATED, "The replacement node was never created."
             )
             return
         # It never ran its Host, so its node scope needs no review: a failed
@@ -1246,12 +1243,10 @@ class ComputeRotation:
             )
             return
         await self.reconciler._save_observation(operation, allocation, observation)
-        await self.reconciler._finish(
+        await self.reconciler.release.released(
             operation,
-            "succeeded",
-            "released",
+            release_evidence(operation, observation),
             "The replacement node was released.",
-            result={"external_pending": False, "blocked_reasons": []},
         )
 
     # ---- shared ----------------------------------------------------------
