@@ -33,13 +33,17 @@ from cloud_agent.storage._sql.compute_inventory import (
     load_hosts,
     load_scheduling_operations,
 )
+from cloud_agent.storage._sql.compute_observation import (
+    release_terminated_groups,
+    resume_blocked_retirement,
+    terminal_proof_stands,
+)
 from cloud_agent.storage._sql.hosts import (
     GROUP_TURN_CLAIMED_SQL,
     HANDED_OVER_GROUP_SQL,
     HOST_RETAINED_GROUP,
     authorize_superseded_removals,
     lock_hosts_for_revocation,
-    release_covered_sandboxes,
     revoke_host_credentials,
 )
 from cloud_agent.storage._sql.jobs import fail_unrunnable_follow_ups
@@ -605,7 +609,7 @@ class PostgresComputeResourceRepository:
                     and allocation["revision"] != expected_revision
                 ):
                     raise ValueError("revision_conflict")
-                if allocation["release_committed_at"] is not None:
+                if allocation["release_committed_at"] is not None and kind != "inspect":
                     raise ValueError("release_committed")
                 if kind == "retire":
                     existing = await self._existing_request(conn, request_id, fingerprint)
@@ -932,8 +936,7 @@ class PostgresComputeResourceRepository:
             ids = [
                 row["id"]
                 for row in allocations
-                if not row.get("release_committed_at")
-                and row.get("observed_state") not in {"terminated", "absent"}
+                if row.get("observed_state") not in {"terminated", "absent"}
             ]
             operations, lifecycle = await load_scheduling_operations(conn, ids, _row)
             return ComputeSchedulingSnapshot(allocations, operations, lifecycle)
@@ -1694,7 +1697,7 @@ class PostgresComputeResourceRepository:
             await lock_compute_entry(conn, exclusive=True)
             await self._fence(conn, operation_id, generation, worker_id, allocation_id)
             await conn.execute(
-                "UPDATE agent_compute_allocations SET observation_error=$2,updated_at=NOW() WHERE id=$1",
+                "UPDATE agent_compute_allocations SET observation_error=$2,updated_at=NOW() WHERE id=$1 AND NOT (observed_state IN ('terminated','absent') AND external_id IS NOT NULL)",
                 allocation_id,
                 message,
             )
@@ -1919,13 +1922,12 @@ class PostgresComputeResourceRepository:
         generation: int | None = None,
         worker_id: str | None = None,
     ) -> dict[str, Any]:
-        """Save a fenced observation, preserving a known deadline when renewal is unknown."""
+        """Save a fenced observation, keeping a known deadline and any terminal proof."""
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn, exclusive=True)
             await self._fence(conn, operation_id, generation, worker_id, allocation_id)
             allocation = await conn.fetchrow(
-                "SELECT external_id,desired_state,release_committed_at FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
-                allocation_id,
+                "SELECT * FROM agent_compute_allocations WHERE id=$1 FOR UPDATE", allocation_id
             )
             if allocation is None:
                 raise ValueError("allocation_not_found")
@@ -1935,6 +1937,8 @@ class PostgresComputeResourceRepository:
                 current_identity,
             ):
                 raise ValueError("resource_identity_changed")
+            if terminal_proof_stands(allocation, observation):
+                return _row(allocation)
             nodes = observation.get("nodes")
             if nodes is not None and observation.get("observed_state") not in (
                 "terminated",
@@ -2009,56 +2013,13 @@ class PostgresComputeResourceRepository:
             if row["observed_state"] in {"terminated", "absent"}:
                 await self._release_terminal_autoscaling_reservation(conn, allocation_id)
                 if row["observed_state"] == "terminated":
-                    await self._release_terminated_groups(conn, allocation_id)
+                    await release_terminated_groups(conn, allocation_id)
                 if row["desired_state"] == "absent" and row["release_committed_at"] is None:
-                    await self._resume_blocked_retirement(conn, allocation_id)
+                    await resume_blocked_retirement(conn, allocation_id)
                 row = await conn.fetchrow(
                     "SELECT * FROM agent_compute_allocations WHERE id=$1", allocation_id
                 )
             return _row(row)
-
-    @staticmethod
-    async def _resume_blocked_retirement(conn: Any, allocation_id: str) -> None:
-        """Queue again a release that stopped for attention once its machine is gone.
-
-        A release blocked by what the Host still held waits for an
-        administrator, but the provider ending the machine settles it: the
-        next run finds the resource terminal and commits the release
-        (``_settle_terminal_retirement``). Without this the operation stayed
-        blocked, and the allocation unreleased, after the machine was gone.
-        A pool member's terminal release settles through its reservation.
-        """
-        await conn.execute(
-            """UPDATE agent_compute_operations o
-               SET state='pending',next_attempt_at=NOW(),completed_at=NULL,updated_at=NOW()
-               WHERE o.allocation_id=$1 AND o.kind='retire' AND o.state='blocked'
-                 AND NOT EXISTS (
-                     SELECT 1 FROM agent_cloudlab_autoscaling_members m
-                     WHERE m.allocation_id=o.allocation_id
-                 )""",
-            allocation_id,
-        )
-
-    @staticmethod
-    async def _release_terminated_groups(conn: Any, allocation_id: str) -> None:
-        """The provider ended this machine: hand each covered stopped group elsewhere.
-
-        Its Hosts keep their rows, credentials and any deployment fence for
-        the administrator's removal. Only the groups move: a group can never
-        start again on a machine that is gone, and the claim of a ``cold``
-        group refuses the Host that still names its container.
-        """
-        hosts = [
-            row["host"]
-            for row in await conn.fetch(
-                """SELECT h.host FROM agent_compute_nodes n
-                   JOIN agent_runner_hosts h ON h.compute_node_id=n.id
-                   WHERE n.allocation_id=$1 ORDER BY h.host""",
-                allocation_id,
-            )
-        ]
-        if hosts:
-            await release_covered_sandboxes(conn, hosts)
 
     async def _upsert_node(
         self, conn: Any, allocation_id: str, node: dict[str, Any]

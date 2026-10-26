@@ -946,9 +946,11 @@ async def test_retryable_failed_rotation_preserves_live_source_and_candidate(
     db, store, hosts, target
 ):
     source_id, candidate_id, _, _ = await rotation_pair(db, store, hosts, rotation_state="failed")
-    await store.compute_resources.observe_allocation(
-        allocation_id=source_id, observation={"observed_state": "ready"}
-    )
+    # No observation brings back a terminated resource; the fixture's source is live.
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_compute_allocations SET observed_state='ready' WHERE id=$1", source_id
+        )
     allocation_id = source_id if target == "source" else candidate_id
     with pytest.raises(ValueError, match=r"^rotation_in_progress$"):
         await remove_current(store, allocation_id)
