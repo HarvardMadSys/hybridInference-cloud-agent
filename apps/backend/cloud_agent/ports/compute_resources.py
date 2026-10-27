@@ -519,11 +519,15 @@ class ComputeResourceRepository(Protocol):
         operation_id: str,
         generation: int,
         worker_id: str,
+        refused_acquisition_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Stop a replacement node's pending work and queue its release.
 
         Returns the release operation, or None while the candidate's own work is
         executing or its outcome is unknown and it cannot be stopped safely.
+        Naming ``refused_acquisition_id`` stops it only while that acquisition,
+        locked and read in the same transaction, still shows a capacity refusal
+        that created nothing.
         """
         ...
 

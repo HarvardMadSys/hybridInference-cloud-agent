@@ -8,6 +8,7 @@ import * as api from '@/lib/api/compute';
 import type { AutomaticComputeSetupRequest, ComputeConnection } from '@/lib/api/compute';
 
 import ComputeSetup from './ComputeSetup';
+import { chooseOption, optionNames } from '@/components/ui/__tests__/select';
 
 vi.mock('@/lib/api/compute', () => ({
   getComputeAutomaticSetup: vi.fn(),
@@ -67,12 +68,11 @@ function fillAutomaticSetup() {
   fireEvent.change(screen.getByLabelText('Control-plane SSH username'), {
     target: { value: 'operator' },
   });
-  fireEvent.change(screen.getByLabelText('Gateway SSH connection'), {
-    target: { value: 'gateway-key' },
-  });
-  fireEvent.change(screen.getByLabelText('Control-plane SSH connection'), {
-    target: { value: 'control-key' },
-  });
+  chooseOption(screen.getByLabelText('Gateway SSH connection'), 'Gateway administration');
+  chooseOption(
+    screen.getByLabelText('Control-plane SSH connection'),
+    'Control-plane administration',
+  );
   fireEvent.change(screen.getByLabelText('Sandbox network pool'), {
     target: { value: '172.29.0.0/16' },
   });
@@ -137,7 +137,8 @@ describe('Server setup', () => {
     await waitFor(() => expect(configure).toBeEnabled());
     expect(screen.queryByLabelText('Release bundle')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Host environment')).not.toBeInTheDocument();
-    expect(screen.queryByRole('option', { name: 'CloudLab portal' })).not.toBeInTheDocument();
+    for (const field of ['Gateway SSH connection', 'Control-plane SSH connection'])
+      expect(optionNames(screen.getByLabelText(field))).not.toContain('CloudLab portal');
     expect(screen.getByLabelText('Server setup capacity')).toHaveValue(2);
     fillAutomaticSetup();
     fireEvent.click(configure);
@@ -250,7 +251,9 @@ describe('Server setup', () => {
     const retry = await screen.findByRole('button', { name: 'Retry automatic setup' });
     expect(screen.getByLabelText('Gateway host address')).toHaveValue('gateway.example.org');
     expect(screen.getByLabelText('Control-plane host address')).toHaveValue('control.example.org');
-    expect(screen.getByLabelText('Control-plane SSH connection')).toHaveValue('control-key');
+    expect(screen.getByLabelText('Control-plane SSH connection')).toHaveTextContent(
+      'Control-plane administration',
+    );
     expect(screen.getByLabelText('Sandbox network pool')).toHaveValue('172.29.0.0/16');
     expect(api.createAutomaticComputeSetup).not.toHaveBeenCalled();
     fireEvent.click(retry);

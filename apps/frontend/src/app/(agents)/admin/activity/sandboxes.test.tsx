@@ -50,6 +50,7 @@ vi.mock('@/lib/api/adminSandboxes', () => ({
 }));
 
 import ActivityPage from './page';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 const since = '2026-10-01T08:00:00Z';
 const until = '2026-10-02T08:00:00Z';
@@ -156,7 +157,7 @@ describe('sandboxes in admin activity', () => {
     render(<ActivityPage />);
     await screen.findByRole('link', { name: 'Linked session' });
     expect(screen.getByText(/User: linked-owner/)).toBeInTheDocument();
-    expect(screen.getByLabelText('Turn result')).toHaveValue('failed');
+    expect(screen.getByLabelText('Turn result')).toHaveTextContent('failed');
 
     fireEvent.click(screen.getByRole('button', { name: 'Sandboxes' }));
     await screen.findByText('sandbox-one');
@@ -165,7 +166,7 @@ describe('sandboxes in admin activity', () => {
     expect(screen.queryByLabelText('Turn result')).not.toBeInTheDocument();
     expect(screen.queryByText(/User: linked-owner/)).not.toBeInTheDocument();
     expect(screen.queryByText('Oct 1 – Oct 2')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Sandbox state')).toHaveValue('running');
+    expect(screen.getByLabelText('Sandbox state')).toHaveTextContent('Running');
     expect(screen.getAllByRole('button', { name: 'Refresh' })).toHaveLength(1);
     expect(getAdminSandboxes).toHaveBeenCalledWith(
       { limit: 200, sync: true },
@@ -174,7 +175,7 @@ describe('sandboxes in admin activity', () => {
     expect(getAdminConversations).toHaveBeenCalledTimes(1);
     expect(getAdminRuns).not.toHaveBeenCalled();
 
-    fireEvent.change(screen.getByLabelText('Sandbox state'), { target: { value: 'all' } });
+    chooseOption(screen.getByLabelText('Sandbox state'), 'All states');
     await waitFor(() =>
       expect(getAdminSandboxes).toHaveBeenLastCalledWith(
         { limit: 200, state: 'all', sync: true },
@@ -184,8 +185,8 @@ describe('sandboxes in admin activity', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Turns' }));
     await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(1));
     expect(getAdminRuns).toHaveBeenCalledWith({ ...scope, limit: 50 }, expect.any(AbortSignal));
-    expect(screen.getByLabelText('Turn result')).toHaveValue('failed');
-    expect(screen.getByLabelText('Turn created')).toHaveValue('custom');
+    expect(screen.getByLabelText('Turn result')).toHaveTextContent('failed');
+    expect(screen.getByLabelText('Turn created')).toHaveTextContent('Custom');
     expect(screen.getByText(/User: linked-owner/)).toBeInTheDocument();
     expect(screen.queryByText('sandbox-one')).not.toBeInTheDocument();
 

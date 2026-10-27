@@ -1249,6 +1249,7 @@ class CloudLabProvider(ComputeProvider):
                 state="terminated",
                 raw_state="delete_acknowledged",
                 observed_at=datetime.now(UTC),
+                provider_http_status=response.status_code,
                 lease_known=True,
                 scope_complete=True,
             ),

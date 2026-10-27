@@ -80,6 +80,7 @@ import {
   formatMemoryBytes,
   UNKNOWN_REASON_SENTENCE,
 } from '../runs/presentTurnResources';
+import { chooseOption, optionNames } from '@/components/ui/__tests__/select';
 
 function run(overrides: Partial<AdminRun> = {}): AdminRun {
   return {
@@ -207,13 +208,16 @@ describe('turn level', () => {
     expect(within(row('job-1')).getByText('Inspect parser')).toBeInTheDocument();
     const filters = vi.mocked(getAdminRuns).mock.calls[0][0];
     expect(Date.parse(filters.until!) - Date.parse(filters.since!)).toBe(7 * 86_400_000);
-    expect(screen.getByLabelText('Turn created')).toHaveValue('7');
-    expect(screen.getByLabelText('Turn result')).toHaveValue('');
-    expect(
-      within(screen.getByLabelText('Turn result'))
-        .getAllByRole('option')
-        .map((option) => option.textContent),
-    ).toEqual(['All results', 'queued', 'running', 'succeeded', 'failed', 'cancelled']);
+    expect(screen.getByLabelText('Turn created')).toHaveTextContent('Last 7 days');
+    expect(screen.getByLabelText('Turn result')).toHaveTextContent('All results');
+    expect(optionNames(screen.getByLabelText('Turn result'))).toEqual([
+      'All results',
+      'queued',
+      'running',
+      'succeeded',
+      'failed',
+      'cancelled',
+    ]);
     const controls = within(screen.getByRole('group', { name: 'Filters' }));
     expect(controls.getAllByRole('combobox')).toHaveLength(2);
     expect(controls.getByRole('button', { name: 'Refresh' })).toBeInTheDocument();
@@ -255,7 +259,7 @@ describe('turn level', () => {
     });
     // The control names the window that is applied: a week that ended a month
     // ago is Custom, not "Last 7 days".
-    expect(screen.getByLabelText('Turn created')).toHaveValue('custom');
+    expect(screen.getByLabelText('Turn created')).toHaveTextContent('Custom');
     // No control shows the identities the link arrived with, so they are stated.
     expect(screen.getByText('User: owner-one · Model: model-a')).toBeInTheDocument();
   });
@@ -297,9 +301,9 @@ describe('turn level', () => {
       await screen.findByTitle('job-1');
 
       vi.setSystemTime(new Date('2026-09-10T08:06:00Z'));
-      fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
+      chooseOption(screen.getByLabelText('Turn result'), 'failed');
       await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
-      expect(screen.getByLabelText('Turn created')).toHaveValue('custom');
+      expect(screen.getByLabelText('Turn created')).toHaveTextContent('Custom');
 
       const refresh = screen.getByRole('button', { name: 'Refresh' });
       await waitFor(() => expect(refresh).toBeEnabled());
@@ -355,8 +359,8 @@ describe('turn level', () => {
     vi.mocked(getAdminRuns).mockResolvedValue(page());
     render(<SessionsPage />);
     await screen.findByTitle('job-1');
-    expect(screen.getByLabelText('Turn created')).toHaveValue('custom');
-    fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
+    expect(screen.getByLabelText('Turn created')).toHaveTextContent('Custom');
+    chooseOption(screen.getByLabelText('Turn result'), 'failed');
     await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
     expect(vi.mocked(getAdminRuns).mock.lastCall![0]).toMatchObject({
       since: '2026-09-09T00:00:00.000Z',
@@ -371,7 +375,7 @@ describe('turn level', () => {
     vi.mocked(getAdminRuns)
       .mockResolvedValueOnce(page([run()], 'cursor-2'))
       .mockResolvedValueOnce(page([run({ id: 'job-2', title: 'Second run' })]));
-    fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
+    chooseOption(screen.getByLabelText('Turn result'), 'failed');
     fireEvent.click(await screen.findByRole('button', { name: 'Load more turns' }));
     await screen.findByTitle('job-2');
     expect(getAdminRuns).toHaveBeenLastCalledWith(
@@ -394,7 +398,7 @@ describe('turn level', () => {
     vi.mocked(getAdminRuns)
       .mockResolvedValueOnce(page([run({ state: 'queued' })], 'group-cursor'))
       .mockResolvedValueOnce(page([run({ id: 'job-2', state: 'queued' })]));
-    fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'queued' } });
+    chooseOption(screen.getByLabelText('Turn result'), 'queued');
     fireEvent.click(await screen.findByRole('button', { name: 'Load more turns' }));
     await screen.findByTitle('job-2');
 
@@ -424,7 +428,7 @@ describe('turn level', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Load more turns' }));
     await screen.findByTitle('job-2');
 
-    fireEvent.change(screen.getByLabelText('Turn created'), { target: { value: '30' } });
+    chooseOption(screen.getByLabelText('Turn created'), 'Last 30 days');
     await screen.findByTitle('job-30-days');
     const timeFilters = vi.mocked(getAdminRuns).mock.lastCall![0];
     expect(Date.parse(timeFilters.until!) - Date.parse(timeFilters.since!)).toBe(30 * 86_400_000);
@@ -432,7 +436,7 @@ describe('turn level', () => {
     expect(screen.queryByTitle('job-1')).not.toBeInTheDocument();
     expect(screen.queryByTitle('job-2')).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
+    chooseOption(screen.getByLabelText('Turn result'), 'failed');
     await screen.findByTitle('job-failed');
     const statusFilters = vi.mocked(getAdminRuns).mock.lastCall![0];
     expect(statusFilters.state).toBe('failed');
@@ -455,7 +459,7 @@ describe('turn level', () => {
         .mockResolvedValueOnce(page([run({ id: 'refreshed-run', state: 'failed' })]));
       render(<SessionsPage />);
       await screen.findByTitle('job-1');
-      fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
+      chooseOption(screen.getByLabelText('Turn result'), 'failed');
       fireEvent.click(await screen.findByRole('button', { name: 'Load more turns' }));
       await screen.findByTitle('job-2');
 
@@ -467,7 +471,7 @@ describe('turn level', () => {
       expect(filters.until).toBe('2026-09-10T09:00:00.000Z');
       expect(filters.state).toBe('failed');
       expect(filters.cursor).toBeUndefined();
-      expect(screen.getByLabelText('Turn result')).toHaveValue('failed');
+      expect(screen.getByLabelText('Turn result')).toHaveTextContent('failed');
       expect(screen.queryByTitle('job-1')).not.toBeInTheDocument();
       expect(screen.queryByTitle('job-2')).not.toBeInTheDocument();
       expect(getAdminRuns).toHaveBeenCalledTimes(4);
@@ -482,7 +486,7 @@ describe('turn level', () => {
       .mockReturnValueOnce(pending.promise)
       .mockResolvedValueOnce(page([run({ id: 'current-match' })]));
     render(<SessionsPage />);
-    fireEvent.change(screen.getByLabelText('Turn created'), { target: { value: '30' } });
+    chooseOption(screen.getByLabelText('Turn created'), 'Last 30 days');
     await screen.findByTitle('current-match');
     await act(async () => pending.resolve(page([run({ id: 'stale-match' })])));
     expect(screen.queryByTitle('stale-match')).not.toBeInTheDocument();
@@ -497,7 +501,7 @@ describe('turn level', () => {
       .mockResolvedValueOnce(page([run({ id: 'current-match', state: 'failed' })]));
     render(<SessionsPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Load more turns' }));
-    fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
+    chooseOption(screen.getByLabelText('Turn result'), 'failed');
     await screen.findByTitle('current-match');
     expect(vi.mocked(getAdminRuns).mock.calls[1][1]?.aborted).toBe(true);
     expect(vi.mocked(getAdminRuns).mock.lastCall![0].cursor).toBeUndefined();
@@ -556,7 +560,7 @@ describe('turn level resource cells', () => {
     expect(within(row('job-1')).getByText('80 CPU-s')).toBeInTheDocument();
 
     // A filter change replaces the page; the old numbers must go with it.
-    fireEvent.change(screen.getByLabelText('Turn created'), { target: { value: '30' } });
+    chooseOption(screen.getByLabelText('Turn created'), 'Last 30 days');
     await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
     await waitFor(() =>
       expect(within(row('job-1')).queryByText('80 CPU-s')).not.toBeInTheDocument(),

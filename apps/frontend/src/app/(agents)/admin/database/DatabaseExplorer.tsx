@@ -8,6 +8,7 @@ import {
   type DatabaseQueryResult,
   type DatabaseTable,
 } from '@/lib/api/adminDatabase';
+import { Select } from '@/components/ui/Select';
 import { getErrorMessage } from '@/lib/utils/errors';
 import { accessDenied, trackedRequest, type DatabaseAccessProps } from './requests';
 
@@ -218,23 +219,21 @@ export function DatabaseExplorer({ trackRequest, onDenied }: DatabaseAccessProps
         <>
           <label className="mt-5 flex max-w-lg flex-col gap-2 text-sm text-gray-700 dark:text-gray-300">
             Table
-            <select
+            <Select
               className={INPUT}
               value={tableName}
-              onChange={(event) => {
+              onValueChange={(next) => {
                 clearResult();
-                setTableName(event.target.value);
+                setTableName(next);
                 setFilters([]);
                 setOrderBy('');
                 setDirection('asc');
               }}
-            >
-              {tables.map((candidate) => (
-                <option key={candidate.name} value={candidate.name}>
-                  {candidate.name}
-                </option>
-              ))}
-            </select>
+              options={tables.map((candidate) => ({
+                value: candidate.name,
+                label: candidate.name,
+              }))}
+            />
           </label>
           <details className="mt-4 text-sm text-gray-700 dark:text-gray-300">
             <summary className="ui-focus-ring cursor-pointer rounded py-3 font-medium">
@@ -292,35 +291,27 @@ export function DatabaseExplorer({ trackRequest, onDenied }: DatabaseAccessProps
                   <div key={index} className="mt-3 flex flex-wrap items-end gap-3">
                     <label className="flex flex-col gap-2 text-xs text-muted">
                       Column {index + 1}
-                      <select
+                      <Select
                         className={INPUT}
                         value={filter.column}
-                        onChange={(event) => updateFilter(index, { column: event.target.value })}
-                      >
-                        {table.columns.map((column) => (
-                          <option key={column.name} value={column.name}>
-                            {column.name}
-                          </option>
-                        ))}
-                      </select>
+                        onValueChange={(next) => updateFilter(index, { column: next })}
+                        options={table.columns.map((column) => ({
+                          value: column.name,
+                          label: column.name,
+                        }))}
+                      />
                     </label>
                     <label className="flex flex-col gap-2 text-xs text-muted">
                       Operator {index + 1}
-                      <select
+                      <Select
                         className={INPUT}
                         value={filter.operator}
-                        onChange={(event) =>
-                          updateFilter(index, {
-                            operator: event.target.value as DatabaseFilterOperator,
-                          })
-                        }
-                      >
-                        {operatorsFor(column?.data_type ?? '').map(([operator, name]) => (
-                          <option key={operator} value={operator}>
-                            {name}
-                          </option>
-                        ))}
-                      </select>
+                        onValueChange={(operator) => updateFilter(index, { operator })}
+                        options={operatorsFor(column?.data_type ?? '').map(([operator, name]) => ({
+                          value: operator,
+                          label: name,
+                        }))}
+                      />
                     </label>
                     {needsValue(filter.operator) && (
                       <div className="text-xs text-gray-600 dark:text-gray-400">
@@ -375,53 +366,49 @@ export function DatabaseExplorer({ trackRequest, onDenied }: DatabaseAccessProps
             <div className="mt-5 flex flex-wrap items-end gap-3">
               <label className="flex flex-col gap-2 text-xs text-muted">
                 Sort by
-                <select
+                <Select
                   className={INPUT}
                   value={orderBy}
-                  onChange={(event) => {
+                  onValueChange={(next) => {
                     clearResult();
-                    setOrderBy(event.target.value);
+                    setOrderBy(next);
                   }}
-                >
-                  <option value="">Default order</option>
-                  {table.columns.map((column) => (
-                    <option key={column.name} value={column.name}>
-                      {column.name}
-                    </option>
-                  ))}
-                </select>
+                  options={[
+                    { value: '', label: 'Default order' },
+                    ...table.columns.map((column) => ({ value: column.name, label: column.name })),
+                  ]}
+                />
               </label>
               <label className="flex flex-col gap-2 text-xs text-muted">
                 Sort direction
-                <select
+                <Select
                   className={INPUT}
                   value={direction}
                   disabled={!orderBy}
-                  onChange={(event) => {
+                  onValueChange={(next) => {
                     clearResult();
-                    setDirection(event.target.value as 'asc' | 'desc');
+                    setDirection(next);
                   }}
-                >
-                  <option value="asc">Ascending</option>
-                  <option value="desc">Descending</option>
-                </select>
+                  options={[
+                    { value: 'asc', label: 'Ascending' },
+                    { value: 'desc', label: 'Descending' },
+                  ]}
+                />
               </label>
               <label className="flex flex-col gap-2 text-xs text-muted">
                 Rows per page
-                <select
+                <Select
                   className={INPUT}
-                  value={limit}
-                  onChange={(event) => {
+                  value={String(limit)}
+                  onValueChange={(next) => {
                     clearResult();
-                    setLimit(Number(event.target.value));
+                    setLimit(Number(next));
                   }}
-                >
-                  {[25, 50, 100, 200].map((size) => (
-                    <option key={size} value={size}>
-                      {size}
-                    </option>
-                  ))}
-                </select>
+                  options={[25, 50, 100, 200].map((size) => ({
+                    value: String(size),
+                    label: String(size),
+                  }))}
+                />
               </label>
               <button
                 type="submit"

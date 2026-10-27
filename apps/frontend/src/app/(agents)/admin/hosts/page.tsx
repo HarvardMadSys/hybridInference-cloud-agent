@@ -35,6 +35,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
+import { Select } from '@/components/ui/Select';
 import type {
   AgentHostCapacityHistory,
   AgentRunnerHost,
@@ -80,7 +81,9 @@ import {
   curveSourceHosts,
   formatAge,
   hostStatusLabel,
+  placementLabel,
   serverInventory,
+  UNAVAILABLE_PLACEMENT,
 } from './format';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
@@ -1188,44 +1191,21 @@ function HostsView() {
                 <label htmlFor="server-placement" className="text-sm font-semibold text-foreground">
                   New sandbox location
                 </label>
-                <select
+                <Select
                   id="server-placement"
                   disabled={busy || pool === null}
                   value={activeHost ? (selectionUnavailable ? '__unavailable__' : activeHost) : ''}
-                  onChange={(event) => void handlePin(event.target.value || null)}
+                  onValueChange={(next) => void handlePin(next || null)}
                   className="ui-input min-h-11 w-full sm:w-auto sm:min-w-64"
-                >
-                  <option value="">Automatic — available servers</option>
-                  {selectionUnavailable && (
-                    <option value="__unavailable__" disabled>
-                      Selected server unavailable
-                    </option>
-                  )}
-                  {availableHosts.map((host) => {
-                    const physicalName = servers.find((server) =>
-                      server.members.some((member) => member.host === host.host),
-                    )?.name;
-                    const allocationId = computeInventory?.hosts.find(
-                      (item) => item.host === host.host,
-                    )?.allocation_id;
-                    const allocation = computeInventory?.allocations.find(
-                      (item) => item.id === allocationId,
-                    );
-                    const allocationHosts = allocation?.nodes.flatMap((node) => node.hosts) ?? [];
-                    const displayName = allocation
-                      ? allocationHosts.length > 1
-                        ? `${allocation.name} / ${host.host}`
-                        : allocation.name
-                      : physicalName && physicalName !== host.host
-                        ? `${physicalName} / ${host.host}`
-                        : host.host;
-                    return (
-                      <option key={host.host} value={host.host}>
-                        {displayName}
-                      </option>
-                    );
-                  })}
-                </select>
+                  options={[
+                    { value: '', label: 'Automatic — available servers' },
+                    ...(selectionUnavailable ? [UNAVAILABLE_PLACEMENT] : []),
+                    ...availableHosts.map((host) => ({
+                      value: host.host,
+                      label: placementLabel(host.host, servers, computeInventory),
+                    })),
+                  ]}
+                />
               </div>
               <p className="mt-3 text-sm leading-6 text-muted">
                 All new sandboxes use this location. Existing sandboxes stay on their current

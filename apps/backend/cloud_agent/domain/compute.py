@@ -7,6 +7,7 @@ import binascii
 import hashlib
 import json
 import re
+from datetime import datetime
 from typing import Any
 
 from cryptography.exceptions import UnsupportedAlgorithm
@@ -50,6 +51,29 @@ DEFAULT_MOVE_OUT_BEFORE_SECONDS = 7200
 #: provider neither applies nor refuses is awaited ten minutes, so the renewal
 #: has been granted or given up by the time the window opens.
 MOVE_OUT_RENEWAL_LEAD_SECONDS = 900
+
+
+def refused_for_capacity(operation: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """Whether a waiting acquisition's create was refused for capacity, creating nothing.
+
+    Only a definite rejection of the submission resets the step to ``pending``
+    and clears ``external_pending``; a create the provider answered with an
+    identity keeps that identity. A rate limit, an unknown outcome, or a
+    capacity message about a resource that has an identity does not qualify.
+    """
+    result = operation.get("result") or {}
+    reasons = result.get("blocked_reasons") or []
+    return (
+        operation.get("state") == "waiting"
+        and operation.get("step") == "pending"
+        and result.get("external_pending") is False
+        and bool(reasons)
+        and reasons[0].get("code") == "capacity_unavailable"
+        and not result.get("resource_ref")
+        and not result.get("external_id")
+        and not candidate.get("external_id")
+        and not candidate.get("nodes")
+    )
 
 
 def move_out_window_seconds(policy: dict[str, Any]) -> int:
@@ -329,6 +353,43 @@ def public_inventory(value: Any) -> list[dict[str, Any]]:
     return scans
 
 
+#: Where a release's proof came from; see ``cloud_agent.application.compute_release``.
+_RELEASE_EVIDENCE_SOURCES = {
+    "delete_acknowledged",
+    "provider_terminal",
+    "expired_not_found",
+    "never_created",
+}
+
+
+def public_release_evidence(value: Any) -> dict[str, Any] | None:
+    """A release's proof, field by field: its source, time, HTTP status and identity."""
+    if not isinstance(value, dict):
+        return None
+    source = value.get("source")
+    if not isinstance(source, str) or source not in _RELEASE_EVIDENCE_SOURCES:
+        return None
+    shown: dict[str, Any] = {"source": source}
+    for key in ("observed_at", "recorded_at"):
+        moment = value.get(key)
+        if isinstance(moment, str) and len(moment) <= 64:
+            try:
+                if datetime.fromisoformat(moment).tzinfo is not None:
+                    shown[key] = moment
+            except ValueError:
+                pass
+    status = value.get("http_status")
+    # bool is an int: a status must not be one.
+    if type(status) is int and 100 <= status <= 599:
+        shown["http_status"] = status
+    external_id = value.get("external_id")
+    if isinstance(external_id, str) and re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", external_id
+    ):
+        shown["external_id"] = external_id
+    return shown
+
+
 def public_operation(record: dict[str, Any], *, release_committed: bool = False) -> dict[str, Any]:
     """Expose progress, never private requests, worker fences, or profile contents."""
     result: dict[str, Any] = {
@@ -370,6 +431,9 @@ def public_operation(record: dict[str, Any], *, release_committed: bool = False)
     }
     if "inventory" in internal:
         result["result"]["inventory"] = public_inventory(internal["inventory"])
+    evidence = public_release_evidence(internal.get("release_evidence"))
+    if evidence is not None:
+        result["result"]["release_evidence"] = evidence
     result["blocked_reasons"] = internal.get("blocked_reasons", [])
     result["allowed_actions"] = []
     if record.get("state") in {"blocked", "failed", "unknown"}:

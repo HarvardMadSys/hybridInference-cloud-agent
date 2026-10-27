@@ -40,6 +40,7 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
 }));
 
 import { ArchivedTasksView } from './ArchivedTasksView';
+import { chooseOption, optionNames } from '@/components/ui/__tests__/select';
 
 function session(
   id: string,
@@ -178,12 +179,8 @@ describe('archived session management', () => {
       within(await screen.findByRole('link', { name: /Session busy/ })).getByText('Running'),
     ).toBeVisible();
     const status = screen.getByRole('combobox', { name: 'Filter by status' });
-    expect(
-      within(status)
-        .getAllByRole('option')
-        .map((option) => option.textContent),
-    ).toEqual(['All statuses', 'Queued', 'Running', 'Idle', 'Failed']);
-    fireEvent.change(status, { target: { value: 'idle' } });
+    expect(optionNames(status)).toEqual(['All statuses', 'Queued', 'Running', 'Idle', 'Failed']);
+    chooseOption(status, 'Idle');
     await waitFor(() =>
       expect(mocks.list).toHaveBeenCalledWith(
         expect.objectContaining({ state: 'idle' }),
@@ -259,7 +256,9 @@ describe('archived session management', () => {
     const alpha = await screen.findByRole('region', { name: 'owner/alpha' });
     await within(alpha).findByRole('link', { name: /Session 4 / });
     expect(within(alpha).getByText('55 sessions')).toBeVisible();
-    expect(screen.getByRole('combobox', { name: 'Filter by project' })).toContainHTML('other/beta');
+    expect(optionNames(screen.getByRole('combobox', { name: 'Filter by project' }))).toContain(
+      'other/beta',
+    );
     expect(screen.queryByRole('button', { name: /Show more/ })).not.toBeInTheDocument();
     await approachBoundary(alpha);
     expect(await within(alpha).findByRole('link', { name: /Session 9 / })).toBeVisible();
@@ -319,13 +318,9 @@ describe('archived session management', () => {
         expect.any(AbortSignal),
       ),
     );
-    fireEvent.change(screen.getByRole('combobox', { name: 'Filter by status' }), {
-      target: { value: 'failed' },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Filter by status' }), 'Failed');
     await screen.findByRole('link', { name: /Old timeout investigation/ });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Filter by project' }), {
-      target: { value: 'other/beta' },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Filter by project' }), 'other/beta');
     await waitFor(() =>
       expect(mocks.list).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -378,11 +373,11 @@ describe('archived session management', () => {
     expect(search).toHaveFocus();
     expect(pending[0].signal.aborted).toBe(true);
 
-    fireEvent.change(status, { target: { value: 'failed' } });
+    chooseOption(status, 'Failed');
     await waitFor(() => expect(pending).toHaveLength(3));
     expect(pending[1].signal.aborted).toBe(true);
     expect(project).toBeEnabled();
-    fireEvent.change(project, { target: { value: 'other/beta' } });
+    chooseOption(project, 'other/beta');
     await waitFor(() => expect(pending).toHaveLength(4));
     expect(pending[2].signal.aborted).toBe(true);
     expect(pending[3].options).toMatchObject({
@@ -414,9 +409,7 @@ describe('archived session management', () => {
     ];
     render(<ArchivedTasksView />);
     await screen.findByRole('link', { name: /Maintenance 1 / });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Filter by project' }), {
-      target: { value: 'owner/alpha' },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Filter by project' }), 'owner/alpha');
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Permanently delete filtered' })).toBeEnabled(),
     );
@@ -644,11 +637,8 @@ describe('archived session management', () => {
     await act(async () => {
       render(<ArchivedTasksView />);
     });
-    await act(async () => {
-      fireEvent.change(screen.getByRole('combobox', { name: 'Filter by status' }), {
-        target: { value: 'running' },
-      });
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Filter by status' }), 'Running');
+    await act(async () => {});
     expect(screen.getByRole('link', { name: /Session running/ })).toBeVisible();
     sessions = [session('running')];
     await act(async () => {

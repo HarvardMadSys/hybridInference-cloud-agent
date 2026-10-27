@@ -16,6 +16,8 @@ from pydantic import (
     ConfigDict,
     Field,
     SecretStr,
+    ValidatorFunctionWrapHandler,
+    WrapValidator,
     field_validator,
     model_validator,
 )
@@ -29,6 +31,21 @@ class ComputeRequest(BaseModel):
     """Reject misspelled commands rather than silently dropping controls."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+def _keep_exact_text(value: Any, handler: ValidatorFunctionWrapHandler) -> SecretStr:
+    # The model strips identifiers and labels, but deployment inputs are
+    # stored byte for byte: an OpenSSH key needs its final newline. A value
+    # that is only whitespace stays stripped, so the length limit refuses it.
+    secret = handler(value)
+    if isinstance(value, str) and secret.get_secret_value():
+        return SecretStr(value)
+    return secret
+
+
+DeploymentInput = Annotated[
+    SecretStr, WrapValidator(_keep_exact_text), Field(min_length=1, max_length=65536)
+]
 
 
 class CloudLabDefaults(ComputeRequest):
@@ -203,10 +220,8 @@ class AddDeploymentProfile(ComputeRequest):
     label: str = Field(min_length=1, max_length=120)
     deployment_sha: str = Field(pattern=r"^[a-f0-9]{40}$")
     deploy_root: str = Field(default="/opt/cloud-agent", pattern=r"^/[a-zA-Z0-9/_-]+$")
-    environment: SecretStr = Field(min_length=1, max_length=65536)
-    files: dict[str, Annotated[SecretStr, Field(min_length=1, max_length=65536)]] = Field(
-        min_length=1, max_length=24
-    )
+    environment: DeploymentInput
+    files: dict[str, DeploymentInput] = Field(min_length=1, max_length=24)
     source_bundle_base64: SecretStr = Field(min_length=1)
     install_prerequisites: bool = True
     timeout_seconds: int = Field(default=3600, ge=60, le=7200)

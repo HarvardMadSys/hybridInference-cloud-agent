@@ -962,8 +962,8 @@ class SshHostBootstrap:
                     "deployment_profile_invalid",
                     "Deployed credential files must be inside .compute-secrets/",
                 )
-            # OpenSSH refuses a private key without its final newline, and the
-            # Admin request models strip surrounding whitespace from every value.
+            # OpenSSH refuses a private key without its final newline, and
+            # profiles saved before inputs were kept exactly have lost it.
             assets[name] = ((await self._resolver.resolve(ref)).rstrip() + "\n").encode()
         for prefix in ("AGENT_TUNNEL", "AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
             for suffix in ("SSH_KEY", "SSH_KNOWN_HOSTS"):

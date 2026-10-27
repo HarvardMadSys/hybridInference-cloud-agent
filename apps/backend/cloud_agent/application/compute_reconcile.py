@@ -16,6 +16,14 @@ from uuid import UUID
 
 from pydantic import SecretStr
 
+from cloud_agent.application.compute_release import (
+    EXPIRED_NOT_FOUND,
+    NEVER_CREATED,
+    ComputeRelease,
+    acknowledged_release,
+    recorded_evidence,
+    release_evidence,
+)
 from cloud_agent.application.compute_rotation import (
     ComputeRotation,
     host_release_blocks_rotation,
@@ -405,13 +413,17 @@ class ComputeReconciler:
         self.host_pool = host_pool
         self.bootstrap = bootstrap
         self.rotation = ComputeRotation(self)
+        self.release = ComputeRelease(self)
         self._move_out_reminded: set[str] = set()
         self._move_out_blocked_reported: set[str] = set()
         self._release_fenced_since: dict[str, datetime] = {}
         self._release_fence_reported: set[str] = set()
 
     async def schedule(self) -> None:
-        """Observe leases and submit renewals even while retirement is blocked."""
+        """Observe leases and submit renewals even while retirement is blocked.
+
+        A released resource not yet seen gone is still read, and only read.
+        """
         now = _now()
         observation_seconds = current_observation_seconds(self.commands.configuration)
         snapshot = await self.repository.scheduling_inventory()
@@ -421,25 +433,13 @@ class ComputeReconciler:
         for row in snapshot.allocations:
             if row.get("observed_state") == "terminated":
                 await self._lose_reclaimed_groups(row)
-            if row.get("release_committed_at") or row.get("observed_state") in {
-                "terminated",
-                "absent",
-            }:
+            if row.get("observed_state") in {"terminated", "absent"}:
                 continue
             operations = snapshot.operations.get(row["id"], [])
             if row.get("external_id"):
-                observed = _moment(row.get("observed_at"))
-                due = observed is None or (now - observed).total_seconds() >= observation_seconds
-                active_inspect = any(
-                    op["kind"] in {"inspect", "acquire", "import"}
-                    and op["state"] in {"pending", "running", "waiting", "unknown"}
-                    for op in operations
-                )
-                if due and not active_inspect:
-                    slot = int(now.timestamp()) // observation_seconds
-                    await self.commands.queue_inspection(
-                        row, request_key=f"inspect:{row['id']}:{slot}"
-                    )
+                await self._queue_due_inspection(row, operations, now, observation_seconds)
+            if row.get("release_committed_at"):
+                continue
             if release is not None and row.get("desired_state") == "present":
                 await self._queue_host_release(row, operations, release, now)
             policy = RenewalPolicy.model_validate(row.get("policy") or {})
@@ -498,6 +498,25 @@ class ComputeReconciler:
             except (ComputeRefusal, ValueError):
                 # Concurrent schedulers may have already persisted a fixed target.
                 logger.warning("compute_renewal_not_submitted", extra={"allocation_id": row["id"]})
+
+    async def _queue_due_inspection(
+        self,
+        row: dict[str, Any],
+        operations: list[dict[str, Any]],
+        now: datetime,
+        observation_seconds: int,
+    ) -> None:
+        """Queue one read once the last observation is due and none is already queued."""
+        observed = _moment(row.get("observed_at"))
+        due = observed is None or (now - observed).total_seconds() >= observation_seconds
+        active_inspect = any(
+            op["kind"] in {"inspect", "acquire", "import"}
+            and op["state"] in {"pending", "running", "waiting", "unknown"}
+            for op in operations
+        )
+        if due and not active_inspect:
+            slot = int(now.timestamp()) // observation_seconds
+            await self.commands.queue_inspection(row, request_key=f"inspect:{row['id']}:{slot}")
 
     async def _report_blocked_move_out(
         self, row: dict[str, Any], policy: RenewalPolicy, now: datetime, expires: datetime
@@ -1387,7 +1406,7 @@ class ComputeReconciler:
         return ResourceObservation(
             ref=self._ref(allocation),
             state="terminated",
-            raw_state="expired_not_found",
+            raw_state=EXPIRED_NOT_FOUND,
             observed_at=_now(),
             expires_at=expires,
             lease_known=True,
@@ -1713,27 +1732,23 @@ class ComputeReconciler:
             )
 
     async def _settle_terminal_retirement(
-        self, operation: dict[str, Any], allocation: dict[str, Any]
+        self, operation: dict[str, Any], allocation: dict[str, Any], evidence: dict[str, Any] | None
     ) -> None:
         """Commit local fencing after the provider is already terminal."""
         await self.repository.commit_release(
             allocation_id=allocation["id"], **self._fence(operation)
         )
-        await self._finish(
-            operation,
-            "succeeded",
-            "released",
-            "Provider confirmed that the resource is terminated.",
-            result={"external_pending": False, "blocked_reasons": []},
-        )
+        await self.release.released(operation, evidence)
 
-    async def _retire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:  # noqa: PLR0912 complexity baseline, #771
+    async def _retire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
         if not allocation.get("release_committed_at"):
             if allocation.get("desired_state") == "absent" and allocation.get("observed_state") in {
                 "terminated",
                 "absent",
             }:
-                await self._settle_terminal_retirement(operation, allocation)
+                await self._settle_terminal_retirement(
+                    operation, allocation, recorded_evidence(operation, allocation)
+                )
                 return
             self.commands._require_managed(allocation, "release")
             await self.repository.begin_retirement(
@@ -1744,7 +1759,9 @@ class ComputeReconciler:
             if allocation.get("external_id"):
                 observation = await self._inspect(operation, allocation)
                 if observation.state == "terminated":
-                    await self._settle_terminal_retirement(operation, allocation)
+                    await self._settle_terminal_retirement(
+                        operation, allocation, release_evidence(operation, observation)
+                    )
                     return
                 allocation = await self._allocation(allocation["id"])
             impact = await self.repository.retirement_impact(allocation["id"])
@@ -1788,61 +1805,7 @@ class ComputeReconciler:
         if provider_resource_absent(allocation):
             await self._release_absent_provider_resource(operation, allocation)
             return
-        provider = self.commands.registry.get(allocation["provider_id"]).provider
-        observation = await self._inspect(operation, allocation)
-        if observation.state == "terminated":
-            await self._finish(
-                operation,
-                "succeeded",
-                "released",
-                "Provider confirmed that the resource is terminated.",
-                result={"external_pending": False, "blocked_reasons": []},
-            )
-            return
-        if operation.get("result", {}).get("release_requested") and observation.state != "ready":
-            await self._finish(
-                operation,
-                "waiting",
-                "confirming_release",
-                "Release was submitted; checking provider state before declaring success.",
-                result={"external_pending": True},
-                retry=30,
-            )
-            return
-        await self._checkpoint(
-            operation, "releasing", {"release_requested": True, "external_pending": True}
-        )
-        try:
-            receipt = await provider.release(
-                self._ref(allocation), self._intent(operation, allocation)
-            )
-        except (ProviderError, ComputeSecretError) as exc:
-            if getattr(exc, "code", "credential_unavailable") != "result_unknown":
-                await self._checkpoint(
-                    operation,
-                    "release_rejected",
-                    {"release_requested": False, "external_pending": False},
-                )
-            raise
-        observation = receipt.observation or await provider.inspect(self._ref(allocation))
-        await self._save_observation(operation, allocation, observation)
-        if observation.state == "terminated":
-            await self._finish(
-                operation,
-                "succeeded",
-                "released",
-                "Provider confirmed that the resource is terminated.",
-                result={"external_pending": False, "blocked_reasons": []},
-            )
-        else:
-            await self._finish(
-                operation,
-                "waiting",
-                "confirming_release",
-                "Waiting for provider termination confirmation.",
-                result={"external_pending": True},
-                retry=30,
-            )
+        await self.release.committed(operation, allocation)
 
     async def _release_absent_provider_resource(
         self, operation: dict[str, Any], allocation: dict[str, Any]
@@ -1869,13 +1832,7 @@ class ComputeReconciler:
                 )
                 return
             await self._save_observation(operation, allocation, observation)
-            await self._finish(
-                operation,
-                "succeeded",
-                "released",
-                "Provider confirmed that the resource is terminated.",
-                result={"external_pending": False, "blocked_reasons": []},
-            )
+            await self.release.released(operation, release_evidence(operation, observation))
             return
         await self.repository.observe_allocation(
             allocation_id=allocation["id"],
@@ -1887,12 +1844,10 @@ class ComputeReconciler:
             },
             **self._fence(operation),
         )
-        await self._finish(
+        await self.release.released(
             operation,
-            "succeeded",
-            "released",
+            NEVER_CREATED,
             "No provider resource exists for this server, so it was released locally.",
-            result={"external_pending": False, "blocked_reasons": []},
         )
 
     async def _provider_resource(self, allocation: dict[str, Any]) -> ResourceRef | None:
@@ -1920,7 +1875,11 @@ class ComputeReconciler:
         """Delete one resource by its exact identity and return what the provider reports.
 
         Its node scope is not reviewed: the caller knows no Host of ours ran there.
+        A DELETE this operation already saw acknowledged is not sent again.
         """
+        acknowledged = acknowledged_release(operation, ref)
+        if acknowledged is not None:
+            return acknowledged
         provider = self.commands.registry.get(allocation["provider_id"]).provider
         observation = await provider.inspect(ref)
         if observation.state != "terminated":
@@ -1928,6 +1887,7 @@ class ComputeReconciler:
                 operation, "releasing", {"release_requested": True, "external_pending": True}
             )
             receipt = await provider.release(ref, self._intent(operation, allocation))
+            await self.release.keep_receipt(operation, ref, receipt)
             observation = receipt.observation or await provider.inspect(ref)
         return observation
 
@@ -2108,7 +2068,7 @@ class ComputeReconciler:
                 raise ProviderError(
                     "resource_identity_changed", "The allocation's complete node scope has changed"
                 )
-        await self.repository.observe_allocation(
+        saved = await self.repository.observe_allocation(
             allocation_id=allocation["id"],
             observation={
                 "external_id": observation.ref.external_id,
@@ -2132,6 +2092,12 @@ class ComputeReconciler:
             },
             **self._fence(operation),
         )
+        if (
+            saved.get("observed_state") in {"terminated", "absent"}
+            and observation.state != "terminated"
+        ):
+            # The resource's terminal proof stood; this stale read sets no holds.
+            return
         policy = RenewalPolicy.model_validate(allocation.get("policy") or {})
         scope = None
         if observation.expires_at is not None:

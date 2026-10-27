@@ -357,7 +357,7 @@
     {
       "files": ["src/components/features/agents/JobDetail.tsx"],
       "rules": {
-        "complexity": ["error", 99]
+        "complexity": ["error", 98]
       }
     },
     {
@@ -372,7 +372,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1201
+            "max": 1192
           }
         ]
       }
@@ -394,7 +394,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1307
+            "max": 1287
           }
         ]
       }
@@ -405,7 +405,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1123
+            "max": 1118
           }
         ]
       }
@@ -449,7 +449,7 @@
         "max-lines": [
           "error",
           {
-            "max": 943
+            "max": 942
           }
         ]
       }
@@ -471,7 +471,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1001
+            "max": 999
           }
         ]
       }
@@ -504,7 +504,7 @@
         "max-lines": [
           "error",
           {
-            "max": 958
+            "max": 956
           }
         ]
       }

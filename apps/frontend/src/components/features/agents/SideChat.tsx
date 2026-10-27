@@ -1,5 +1,6 @@
 'use client';
 
+import { KEYBOARD_INPUT_SELECTOR } from '@/lib/keyboardShortcuts';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import { cancelAgentJob, type AgentConfigApi, type AgentJobApi } from '@/lib/api/agents';
@@ -364,7 +365,7 @@ function SideChatContent({
         event.repeat ||
         event.defaultPrevented ||
         !ownsFocus ||
-        target?.closest('input, textarea, select, [contenteditable="true"]')
+        target?.closest(KEYBOARD_INPUT_SELECTOR)
       )
         return;
       event.preventDefault();
@@ -392,8 +393,7 @@ function SideChatContent({
           event.key !== 'Escape' ||
           event.repeat ||
           event.defaultPrevented ||
-          (event.target instanceof Element &&
-            event.target.closest('input, textarea, select, [contenteditable="true"]'))
+          (event.target instanceof Element && event.target.closest(KEYBOARD_INPUT_SELECTOR))
         )
           return;
         event.preventDefault();

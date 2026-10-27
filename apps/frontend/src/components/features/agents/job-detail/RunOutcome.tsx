@@ -14,6 +14,11 @@ export function turnPullRequestUrl(job: AgentJob): string | undefined {
   return job.prUrl ?? job.workspacePrUrl;
 }
 
+/** Whether the retained repository has any base-relative Git changes to publish. */
+export function hasPublishableWorkspaceChanges(job: Pick<AgentJob, 'repo' | 'diffFiles'>): boolean {
+  return Boolean(job.repo && !isTemporaryWorkspace(job.repo) && job.diffFiles.length > 0);
+}
+
 function RunGuidance({ job }: { job: AgentJob }) {
   if (hasLostContext(job)) {
     return (

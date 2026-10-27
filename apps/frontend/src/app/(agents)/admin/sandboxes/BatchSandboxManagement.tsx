@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { getAdminSandbox, type AdminSandboxDetail } from '@/lib/api/adminSandboxes';
+import { Select } from '@/components/ui/Select';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { accessDenied, BUTTON } from '../runs/shared';
@@ -241,19 +242,14 @@ export function BatchSandboxManagement({
         <p className="text-sm text-gray-700 dark:text-gray-200">
           {selected.length} sandboxes selected
         </p>
-        <select
+        <Select
           aria-label="Batch sandbox action"
           value={kind}
           disabled={busy !== null}
           className="ui-input min-h-11"
-          onChange={(event) => setKind(event.target.value as SandboxAction)}
-        >
-          {ACTIONS.map(({ value, label }) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
+          onValueChange={setKind}
+          options={ACTIONS}
+        />
         <button
           type="button"
           className={BUTTON}

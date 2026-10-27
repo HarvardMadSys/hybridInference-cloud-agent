@@ -96,6 +96,7 @@ import {
   summarizeProfilingRun,
 } from '@/lib/api/adminMeasurements';
 import AdminMeasurementsPage from './page';
+import { chooseOption, optionNames } from '@/components/ui/__tests__/select';
 
 function run(overrides: Partial<ProfilingRun> = {}): ProfilingRun {
   return {
@@ -524,9 +525,7 @@ describe('admin measurements page', () => {
     render(<AdminMeasurementsPage />);
     await sampleButton('File listing');
 
-    fireEvent.change(within(samples()).getByLabelText('Operation'), {
-      target: { value: 'files.open' },
-    });
+    chooseOption(within(samples()).getByLabelText('Operation'), 'File opening');
     await waitFor(() => expect(listMeasurements).toHaveBeenCalledTimes(2));
     expect(vi.mocked(listMeasurements).mock.calls[1][0]).toMatchObject({
       run_id: 'run-1',
@@ -543,7 +542,7 @@ describe('admin measurements page', () => {
     search.value = 'operation=files.list&operation=files.open';
     render(<AdminMeasurementsPage />);
     await sampleButton('File listing');
-    expect(within(samples()).getByLabelText('Operation')).toHaveDisplayValue(
+    expect(within(samples()).getByLabelText('Operation')).toHaveTextContent(
       'File listing, File opening',
     );
   });
@@ -764,9 +763,7 @@ describe('admin measurements page', () => {
     expect(empty).toHaveAttribute('title', 'no stored samples match this selection');
     expect(screen.queryByText('0 µs')).not.toBeInTheDocument();
 
-    fireEvent.change(within(samples()).getByLabelText('Operation'), {
-      target: { value: 'files.open' },
-    });
+    chooseOption(within(samples()).getByLabelText('Operation'), 'File opening');
     expect(
       await within(samples()).findByText('No samples match these filters.'),
     ).toBeInTheDocument();
@@ -845,10 +842,10 @@ describe('admin measurements page', () => {
     const replace = vi.spyOn(window.history, 'replaceState');
     render(<AdminMeasurementsPage />);
     const picker = await within(await timings()).findByLabelText('Run');
-    expect(picker).toHaveDisplayValue('Sep 18, 09:30 UTC · all hosts');
+    expect(picker).toHaveTextContent('Sep 18, 09:30 UTC · all hosts');
     expect(vi.mocked(summarizeProfilingRun).mock.calls[0][0]).toBe('run-2');
 
-    fireEvent.change(picker, { target: { value: 'run-1' } });
+    chooseOption(picker, 'Sep 17, 10:00 UTC · host-a');
     await waitFor(() => expect(summarizeProfilingRun).toHaveBeenCalledTimes(2));
     expect(vi.mocked(summarizeProfilingRun).mock.calls[1][0]).toBe('run-1');
     await waitFor(() =>
@@ -889,9 +886,7 @@ describe('admin measurements page', () => {
     render(<AdminMeasurementsPage />);
     await sampleButton('File listing');
     vi.mocked(listMeasurements).mockRejectedValueOnce(new APIError('INVALID_TOKEN', 'no', 403));
-    fireEvent.change(within(samples()).getByLabelText('Operation'), {
-      target: { value: 'files.open' },
-    });
+    chooseOption(within(samples()).getByLabelText('Operation'), 'File opening');
     await screen.findByText('Admin access required');
     expect(screen.queryByRole('button', { name: 'File listing' })).not.toBeInTheDocument();
   });
@@ -909,9 +904,7 @@ describe('admin measurements page', () => {
     render(<AdminMeasurementsPage />);
     await sampleButton('File listing');
     vi.mocked(listMeasurements).mockRejectedValueOnce(new APIError('list_failed', 'boom', 500));
-    fireEvent.change(within(samples()).getByLabelText('Operation'), {
-      target: { value: 'files.open' },
-    });
+    chooseOption(within(samples()).getByLabelText('Operation'), 'File opening');
     await within(samples()).findByText('boom');
     expect(
       within(samples()).queryByRole('button', { name: 'File listing' }),
@@ -955,7 +948,7 @@ describe('measurement collection control', () => {
   /** Open the inline form and wait until the host menu it reads has arrived. */
   async function openForm(): Promise<void> {
     fireEvent.click(await screen.findByRole('button', { name: 'Turn on' }));
-    await screen.findByRole('option', { name: 'host-a' });
+    await waitFor(() => expect(optionNames(screen.getByLabelText('Host'))).toContain('host-a'));
   }
 
   /** The form's own primary button; the toggle is gone while the form is open. */
@@ -1010,12 +1003,14 @@ describe('measurement collection control', () => {
     expect(screen.getByRole('checkbox', { name: 'Terminal opening' })).toBeChecked();
     expect(screen.getByRole('checkbox', { name: 'File access' })).toBeChecked();
     // Nothing is preselected: the admin chooses, and there is no host default.
-    expect(screen.getByLabelText('Host')).toHaveValue('');
+    expect(screen.getByLabelText('Host')).toHaveTextContent('Choose a host…');
     expect(screen.queryByLabelText('Duration')).not.toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'Choose a host…' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'All hosts' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'host-a' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'host-b' })).toBeInTheDocument();
+    expect(optionNames(screen.getByLabelText('Host'))).toEqual([
+      'Choose a host…',
+      'All hosts',
+      'host-a',
+      'host-b',
+    ]);
     expect(within(card()).queryByRole('button', { name: /disable/i })).not.toBeInTheDocument();
   });
 
@@ -1033,10 +1028,11 @@ describe('measurement collection control', () => {
     });
     render(<AdminMeasurementsPage />);
     await openForm();
-    expect(screen.getByRole('option', { name: 'host-a' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'draining-runner' })).toBeInTheDocument();
-    expect(screen.queryByRole('option', { name: 'old-runner' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('option', { name: 'not-enrolled' })).not.toBeInTheDocument();
+    const hosts = optionNames(screen.getByLabelText('Host'));
+    expect(hosts).toContain('host-a');
+    expect(hosts).toContain('draining-runner');
+    expect(hosts).not.toContain('old-runner');
+    expect(hosts).not.toContain('not-enrolled');
   });
 
   it('turns on the chosen operations until turned off, with the revision it read', async () => {
@@ -1057,7 +1053,7 @@ describe('measurement collection control', () => {
     render(<AdminMeasurementsPage />);
     await openForm();
 
-    fireEvent.change(screen.getByLabelText('Host'), { target: { value: 'host-a' } });
+    chooseOption(screen.getByLabelText('Host'), 'host-a');
     fireEvent.click(screen.getByRole('checkbox', { name: 'Terminal opening' }));
     submit();
 
@@ -1108,8 +1104,7 @@ describe('measurement collection control', () => {
     render(<AdminMeasurementsPage />);
     await openForm();
 
-    const allHosts = screen.getByRole('option', { name: 'All hosts' }) as HTMLOptionElement;
-    fireEvent.change(screen.getByLabelText('Host'), { target: { value: allHosts.value } });
+    chooseOption(screen.getByLabelText('Host'), 'All hosts');
     submit();
 
     await waitFor(() => expect(startProfilingRun).toHaveBeenCalledTimes(1));
@@ -1141,13 +1136,13 @@ describe('measurement collection control', () => {
     await openForm();
 
     fireEvent.click(screen.getByRole('checkbox', { name: 'File access' }));
-    fireEvent.change(screen.getByLabelText('Host'), { target: { value: 'host-b' } });
+    chooseOption(screen.getByLabelText('Host'), 'host-b');
     submit();
 
     await screen.findByText('measurement storage is unavailable');
     // The form is still open with the values that produced the failure.
     expect(screen.getByRole('checkbox', { name: 'File access' })).not.toBeChecked();
-    expect(screen.getByLabelText('Host')).toHaveValue('host-b');
+    expect(screen.getByLabelText('Host')).toHaveTextContent('host-b');
     expect(screen.queryByLabelText('Duration')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Turn on' })).toBeInTheDocument();
     // And nothing was drawn as though a run had begun.
@@ -1164,7 +1159,7 @@ describe('measurement collection control', () => {
       });
     render(<AdminMeasurementsPage />);
     await openForm();
-    fireEvent.change(screen.getByLabelText('Host'), { target: { value: 'host-a' } });
+    chooseOption(screen.getByLabelText('Host'), 'host-a');
     submit();
     await screen.findByText(/Network error/);
 

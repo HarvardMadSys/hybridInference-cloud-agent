@@ -42,7 +42,6 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-
 class HostRelease:
     """One build-produced archive shared by every route slot of this release."""
 
@@ -183,8 +182,6 @@ def load_control_plane_host_release(directory: Path | None = None) -> HostReleas
         return None
     _HOST_RELEASE_MEMO[str(directory)] = (key, release)
     return release
-
-
 
 
 class AutomaticComputeSetup:

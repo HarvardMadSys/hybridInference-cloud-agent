@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
+import { Select } from '@/components/ui/Select';
 import { getAgentConfig } from '@/lib/api/agents';
 import {
   copyEnvironment,
@@ -438,17 +439,15 @@ export function EnvironmentManager() {
                         </label>
                         <label className="space-y-1 text-sm">
                           <span className="text-muted">{t('environment.repository')}</span>
-                          <select
-                            className="ui-input w-full"
+                          <Select
+                            className="ui-input block w-full"
                             value={copyRepo}
-                            onChange={(e) => setCopyRepo(e.target.value)}
-                          >
-                            {[...new Set([copyRepo, ...repos])].map((r) => (
-                              <option key={r} value={r}>
-                                {r}
-                              </option>
-                            ))}
-                          </select>
+                            onValueChange={setCopyRepo}
+                            options={[...new Set([copyRepo, ...repos])].map((r) => ({
+                              value: r,
+                              label: r,
+                            }))}
+                          />
                         </label>
                         {teams.length ? (
                           <OwnerSelect

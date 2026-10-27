@@ -14,7 +14,12 @@ import {
 import type { EnvironmentConfig } from '@/lib/api/environments';
 import { listTeams } from '@/lib/api/teams';
 import { EnvironmentManager } from './EnvironmentManager';
-vi.mock('@/components/providers', () => ({ useT: () => (key: string) => key }));
+import { chooseOption, optionNames } from '@/components/ui/__tests__/select';
+vi.mock('@/components/providers', () => ({
+  // A team choice names its team, so the copy targets can be told apart.
+  useT: () => (key: string, vars?: { team?: string }) =>
+    key === 'environment.ownerTeam' ? `${key} ${vars?.team}` : key,
+}));
 vi.mock('@/lib/api/agents', () => ({ getAgentConfig: vi.fn() }));
 vi.mock('@/lib/api/environments', () => ({
   copyEnvironment: vi.fn(),
@@ -347,12 +352,12 @@ it('copies into a team you administer, and offers only those teams', async () =>
   fireEvent.click(screen.getAllByRole('button', { name: 'environment.manageItem' })[0]);
   fireEvent.click(screen.getByRole('menuitem', { name: 'environment.copy' }));
   const target = await screen.findByLabelText('environment.copyTo');
-  expect(
-    within(target)
-      .getAllByRole('option')
-      .map((option) => option.getAttribute('value')),
-  ).toEqual(['', 'team-1', 'team-3']);
-  fireEvent.change(target, { target: { value: 'team-3' } });
+  expect(optionNames(target)).toEqual([
+    'environment.ownerSelf',
+    'environment.ownerTeam Platform',
+    'environment.ownerTeam Infra',
+  ]);
+  chooseOption(target, 'environment.ownerTeam Infra');
   fireEvent.click(screen.getByRole('button', { name: 'environment.copy' }));
   await screen.findByRole('dialog', { name: 'editing Copied' });
   expect(vi.mocked(copyEnvironment).mock.calls[0][5]).toBe('team-3');

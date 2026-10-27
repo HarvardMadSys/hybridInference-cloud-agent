@@ -45,6 +45,7 @@ vi.mock('@/lib/api/adminSandboxes', () => ({
 }));
 
 import AdminSandboxesPage from './page';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 type InventoryPage = Awaited<ReturnType<typeof getAdminSandboxes>>;
 const observedAt = '2026-10-10T10:00:00Z';
@@ -178,9 +179,10 @@ describe('running sandbox inventory', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select all visible sandboxes' }));
     expect(screen.getByRole('checkbox', { name: 'Select sandbox target-one' })).toBeChecked();
     expect(screen.getByRole('checkbox', { name: 'Select sandbox target-two' })).toBeChecked();
-    fireEvent.change(screen.getByRole('combobox', { name: 'Batch sandbox action' }), {
-      target: { value: 'stop' },
-    });
+    chooseOption(
+      screen.getByRole('combobox', { name: 'Batch sandbox action' }),
+      'Stop idle sandboxes',
+    );
     fireEvent.click(screen.getByRole('button', { name: 'Review selected sandboxes' }));
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Apply to 2 sandboxes' })).toBeEnabled(),
@@ -273,9 +275,10 @@ describe('running sandbox inventory', () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     render(<AdminSandboxesPage />);
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Select all visible sandboxes' }));
-    fireEvent.change(screen.getByRole('combobox', { name: 'Batch sandbox action' }), {
-      target: { value: 'stop' },
-    });
+    chooseOption(
+      screen.getByRole('combobox', { name: 'Batch sandbox action' }),
+      'Stop idle sandboxes',
+    );
     fireEvent.click(screen.getByRole('button', { name: 'Review selected sandboxes' }));
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Apply to 2 sandboxes' })).toBeEnabled(),
@@ -302,9 +305,7 @@ describe('running sandbox inventory', () => {
     await screen.findByText('sandbox-one');
     const next = deferred<InventoryPage>();
     vi.mocked(getAdminSandboxes).mockReturnValueOnce(next.promise);
-    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox state' }), {
-      target: { value: 'all' },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Sandbox state' }), 'All states');
     expect(screen.queryByText('sandbox-one')).not.toBeInTheDocument();
     await waitFor(() =>
       expect(getAdminSandboxes).toHaveBeenLastCalledWith(
@@ -353,7 +354,7 @@ describe('running sandbox inventory', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Stop idle sandbox' }));
     expect(await screen.findByText(/Stop requested\. Waiting for the host/)).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: 'Sandbox state' })).toHaveValue('all');
+    expect(screen.getByRole('combobox', { name: 'Sandbox state' })).toHaveTextContent('All states');
     expect(getAdminSandboxes).toHaveBeenLastCalledWith(
       { limit: 200, state: 'all', sync: true },
       expect.any(AbortSignal),
@@ -1076,13 +1077,9 @@ describe('sandbox inventory controls', () => {
     );
     render(<AdminSandboxesPage />);
     await screen.findByText('sandbox-a');
-    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox host' }), {
-      target: { value: 'host-one' },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Sandbox host' }), 'host-one');
     expect(inventoryTitles()).toEqual(['Alpha', 'Bravo']);
-    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox activity' }), {
-      target: { value: 'idle' },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Sandbox activity' }), 'Idle');
     expect(inventoryTitles()).toEqual(['Bravo']);
     fireEvent.change(screen.getByRole('searchbox', { name: 'Search sandboxes' }), {
       target: { value: ' BRAVO ' },
@@ -1093,39 +1090,36 @@ describe('sandbox inventory controls', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
     expect(screen.getByRole('searchbox', { name: 'Search sandboxes' })).toHaveValue('');
-    expect(
-      (screen.getByRole('combobox', { name: 'Sandbox host' }) as HTMLSelectElement).selectedIndex,
-    ).toBe(0);
-    expect(
-      (screen.getByRole('combobox', { name: 'Sandbox activity' }) as HTMLSelectElement)
-        .selectedIndex,
-    ).toBe(0);
+    expect(screen.getByRole('combobox', { name: 'Sandbox host' })).toHaveTextContent('All hosts');
+    expect(screen.getByRole('combobox', { name: 'Sandbox activity' })).toHaveTextContent(
+      'All activity',
+    );
     expect(inventoryTitles()).toEqual(['Alpha', 'Bravo', 'Charlie', 'Delta']);
     expect(getAdminSandboxes).toHaveBeenCalledTimes(1);
   });
 
-  it.each<AdminSandbox['state']>([
-    'provisioning',
-    'starting',
-    'stopping',
-    'stopped',
-    'stopped_dirty',
-    'lost',
-  ])('loads the selected %s lifecycle state from the server', async (state) => {
+  it.each<[AdminSandbox['state'], string]>([
+    ['provisioning', 'Provisioning'],
+    ['starting', 'Starting'],
+    ['stopping', 'Stopping'],
+    ['stopped', 'Stopped'],
+    ['stopped_dirty', 'Stopped dirty'],
+    ['lost', 'Lost'],
+  ])('loads the selected %s lifecycle state from the server', async (state, label) => {
     render(<AdminSandboxesPage />);
     await screen.findByText('sandbox-one');
     vi.mocked(getAdminSandboxes).mockResolvedValueOnce(
       page([sandbox({ id: 'filtered-sandbox', state })]),
     );
-    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox state' }), {
-      target: { value: state },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Sandbox state' }), label);
     await screen.findByText('filtered-sandbox');
     expect(getAdminSandboxes).toHaveBeenLastCalledWith(
       { limit: 200, state, sync: true },
       expect.any(AbortSignal),
     );
-    expect(screen.getByRole('combobox', { name: 'Sandbox state' })).toHaveValue(state);
+    expect(screen.getByRole('combobox', { name: 'Sandbox state' })).toHaveTextContent(
+      new RegExp(`^${label}$`),
+    );
   });
 
   it('requests removed sandboxes in the current state and ignores a superseded refresh', async () => {
@@ -1139,9 +1133,7 @@ describe('sandbox inventory controls', () => {
       .mockReturnValueOnce(oldRead.promise)
       .mockReturnValueOnce(includeRemovedRead.promise)
       .mockResolvedValue(page([stopped]));
-    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox state' }), {
-      target: { value: 'all' },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Sandbox state' }), 'All states');
     await screen.findByText('sandbox-one');
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(getAdminSandboxes).toHaveBeenCalledTimes(3));
@@ -1205,15 +1197,9 @@ describe('sandbox inventory controls', () => {
     fireEvent.change(screen.getByRole('searchbox', { name: 'Search sandboxes' }), {
       target: { value: 'target' },
     });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox host' }), {
-      target: { value: 'host-one' },
-    });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Sandbox activity' }), {
-      target: { value: 'idle' },
-    });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Sort sandboxes' }), {
-      target: { value: 'cpu' },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Sandbox host' }), 'host-one');
+    chooseOption(screen.getByRole('combobox', { name: 'Sandbox activity' }), 'Idle');
+    chooseOption(screen.getByRole('combobox', { name: 'Sort sandboxes' }), 'CPU');
     expect(inventoryTitles()).toEqual(['Target Bravo', 'Target Alpha']);
 
     vi.mocked(getAdminSandboxes).mockResolvedValueOnce(
@@ -1226,9 +1212,9 @@ describe('sandbox inventory controls', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(inventoryTitles()).toEqual(['Target Alpha', 'Target Bravo']));
     expect(screen.getByRole('searchbox', { name: 'Search sandboxes' })).toHaveValue('target');
-    expect(screen.getByRole('combobox', { name: 'Sandbox host' })).toHaveValue('host-one');
-    expect(screen.getByRole('combobox', { name: 'Sandbox activity' })).toHaveValue('idle');
-    expect(screen.getByRole('combobox', { name: 'Sort sandboxes' })).toHaveValue('cpu');
+    expect(screen.getByRole('combobox', { name: 'Sandbox host' })).toHaveTextContent('host-one');
+    expect(screen.getByRole('combobox', { name: 'Sandbox activity' })).toHaveTextContent('Idle');
+    expect(screen.getByRole('combobox', { name: 'Sort sandboxes' })).toHaveTextContent('CPU');
     expect(screen.getByRole('button', { name: 'Sort by CPU' }).closest('th')).toHaveAttribute(
       'aria-sort',
       'descending',

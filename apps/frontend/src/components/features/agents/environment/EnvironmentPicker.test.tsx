@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { listEnvironments } from '@/lib/api/environments';
 import { EnvironmentPicker } from './EnvironmentPicker';
 import { VariableEditor, variableEdits } from './VariableEditor';
+import { chooseOption } from '@/components/ui/__tests__/select';
 vi.mock('@/components/providers', () => ({ useT: () => (key: string) => key }));
 vi.mock('@/lib/api/environments', () => ({ listEnvironments: vi.fn() }));
 vi.mock('./EnvironmentDialog', () => ({
@@ -109,9 +110,7 @@ it('keeps a saved Secret blank and requires an explicit replacement when changin
   // A saved name is shown, not offered for editing.
   expect(screen.queryByLabelText('environment.variableName')).toBeNull();
   expect(screen.getByText('TOKEN')).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText('environment.type TOKEN'), {
-    target: { value: 'ordinary' },
-  });
+  chooseOption(screen.getByLabelText('environment.type TOKEN'), 'environment.ordinary');
   expect(change).toHaveBeenCalledWith([
     {
       name: 'TOKEN',

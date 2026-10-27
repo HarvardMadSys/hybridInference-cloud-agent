@@ -1,6 +1,7 @@
 'use client';
 
 import { useModalDialog } from '@/components/ui/useModalDialog';
+import { Select } from '@/components/ui/Select';
 
 import { useRef, useState } from 'react';
 import { McpImportStep } from './McpImportStep';
@@ -127,21 +128,22 @@ export function McpAddDialog({
           {selected.name === 'github' ? (
             <label className="mt-3 block text-xs font-medium text-gray-700 dark:text-gray-300">
               Connect with
-              <select
+              <Select<McpAuthKind>
                 disabled={saving}
                 value={authKind}
-                onChange={(event) => {
-                  setAuthKind(event.target.value as McpAuthKind);
+                onValueChange={(next) => {
+                  setAuthKind(next);
                   setSecret('');
                   setError(null);
                 }}
                 className={FIELD}
-              >
-                {selected.browser_sign_in_available ? (
-                  <option value="oauth">Sign in with GitHub (recommended)</option>
-                ) : null}
-                <option value="static">Personal access token</option>
-              </select>
+                options={[
+                  ...(selected.browser_sign_in_available
+                    ? [{ value: 'oauth' as const, label: 'Sign in with GitHub (recommended)' }]
+                    : []),
+                  { value: 'static', label: 'Personal access token' },
+                ]}
+              />
             </label>
           ) : null}
           {selected.name === 'github' && authKind === 'static' ? (
