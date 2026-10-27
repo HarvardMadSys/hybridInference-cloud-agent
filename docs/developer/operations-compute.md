@@ -652,6 +652,10 @@ move cannot outlast its lease.
 Failed candidates are released before trying the next type. Configuration or
 credential errors stop immediately; the same failure class across three types
 stops with an alert. Retry resumes the saved operation.
+A create the provider refuses for capacity, before naming any resource, moves
+on to the next type at once instead of waiting out the two-hour candidate
+limit. The last type to try keeps retrying. Rate limits and unknown outcomes
+never count as a capacity refusal.
 
 The candidate installs the host recipe and receives a live pre-copy without
 enrolling or claiming. Once it is prepared, the source waits for an idle moment.

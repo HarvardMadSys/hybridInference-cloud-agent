@@ -111,6 +111,29 @@ def classify_candidate_failure(
     return "setup_failed", code
 
 
+def refused_for_capacity(operation: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """Whether a waiting acquisition's create was refused for capacity, creating nothing.
+
+    Only a definite rejection of the submission resets the step to ``pending``
+    and clears ``external_pending``; a create the provider answered with an
+    identity keeps that identity. A rate limit, an unknown outcome, or a
+    capacity message about a resource that has an identity does not qualify.
+    """
+    result = operation.get("result") or {}
+    reasons = result.get("blocked_reasons") or []
+    return (
+        operation.get("state") == "waiting"
+        and operation.get("step") == "pending"
+        and result.get("external_pending") is False
+        and bool(reasons)
+        and reasons[0].get("code") == "capacity_unavailable"
+        and not result.get("resource_ref")
+        and not result.get("external_id")
+        and not candidate.get("external_id")
+        and not candidate.get("nodes")
+    )
+
+
 def next_node_type(
     policy: RenewalPolicy, attempts: list[dict[str, Any]]
 ) -> tuple[str | None, str | None]:
@@ -481,19 +504,63 @@ class ComputeRotation:
                 "Identify it with the provider before retrying.",
             )
             return None
-        elif _now() - (_moment(current["created_at"]) or _now()) > _CANDIDATE_TIMEOUT:
-            failure = ("setup_failed", "candidate_timeout")
         else:
-            await self.reconciler._finish(
-                operation,
-                "waiting",
-                "preparing_candidate",
-                f"Preparing a replacement node ({current['node_type']}).",
-                retry=30,
+            unfinished = await self._unfinished_failure(
+                operation, allocation, current, acquire, candidate
             )
-            return None
+            if unfinished is None:
+                await self.reconciler._finish(
+                    operation,
+                    "waiting",
+                    "preparing_candidate",
+                    f"Preparing a replacement node ({current['node_type']}).",
+                    retry=30,
+                )
+                return None
+            failure = unfinished
         await self._fail_candidate(operation, slot, current, *failure)
         return None
+
+    async def _unfinished_failure(
+        self,
+        operation: dict[str, Any],
+        allocation: dict[str, Any],
+        current: dict[str, Any],
+        acquire: dict[str, Any] | None,
+        candidate: dict[str, Any],
+    ) -> tuple[str, str] | None:
+        """Give up a replacement still being acquired, or return None to keep waiting.
+
+        A create refused for capacity moves on to the next type at once. The
+        store stops the acquisition first, and refuses while its retry runs:
+        that retry may create the node, so the move waits to see. The last
+        type to try keeps retrying, as an acquisition outside a move does.
+        """
+        if (
+            acquire is not None
+            and refused_for_capacity(acquire, candidate)
+            and self._another_type(operation, allocation, current)
+            and await self._abandon(operation, current) is not None
+        ):
+            return classify_candidate_failure(acquire, candidate)
+        if _now() - (_moment(current["created_at"]) or _now()) > _CANDIDATE_TIMEOUT:
+            return "setup_failed", "candidate_timeout"
+        return None
+
+    @staticmethod
+    def _another_type(
+        operation: dict[str, Any], allocation: dict[str, Any], current: dict[str, Any]
+    ) -> bool:
+        """Whether a type remains to try once this candidate counts as having no capacity."""
+        result = operation["result"]
+        policy = RenewalPolicy.model_validate(allocation.get("policy") or {})
+        attempts = [
+            attempt
+            for attempt in (result.get("attempts") or [])[result.get("attempt_floor", 0) :]
+            if attempt.get("candidate") != current["id"]
+        ]
+        attempts.append({"node_type": current["node_type"], "class": "no_capacity"})
+        return next_node_type(policy, attempts)[0] is not None
 
     async def _open_candidate(
         self, operation: dict[str, Any], allocation: dict[str, Any], slot: dict[str, Any]
@@ -640,13 +707,7 @@ class ComputeRotation:
             await self._alert(
                 operation, "compute_rotation_attempt_failed", host=slot["host"], reason=code
             )
-        parameters = {"allocation_id": current["id"]}
-        discard = await self.repository.abandon_candidate(
-            allocation_id=current["id"],
-            request_id=discard_request_id(current["id"]),
-            fingerprint=fingerprint("discard", parameters),
-            **self.reconciler._fence(operation),
-        )
+        discard = await self._abandon(operation, current)
         if discard is not None:
             await self.reconciler._checkpoint(
                 operation,
@@ -659,6 +720,18 @@ class ComputeRotation:
             "releasing_candidate",
             "Releasing a replacement node that could not be used.",
             retry=30,
+        )
+
+    async def _abandon(
+        self, operation: dict[str, Any], current: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Stop a candidate's work and queue its one release; None while its work runs."""
+        parameters = {"allocation_id": current["id"]}
+        return await self.repository.abandon_candidate(
+            allocation_id=current["id"],
+            request_id=discard_request_id(current["id"]),
+            fingerprint=fingerprint("discard", parameters),
+            **self.reconciler._fence(operation),
         )
 
     async def stage_candidate(
