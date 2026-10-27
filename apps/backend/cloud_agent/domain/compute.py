@@ -53,6 +53,29 @@ DEFAULT_MOVE_OUT_BEFORE_SECONDS = 7200
 MOVE_OUT_RENEWAL_LEAD_SECONDS = 900
 
 
+def refused_for_capacity(operation: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """Whether a waiting acquisition's create was refused for capacity, creating nothing.
+
+    Only a definite rejection of the submission resets the step to ``pending``
+    and clears ``external_pending``; a create the provider answered with an
+    identity keeps that identity. A rate limit, an unknown outcome, or a
+    capacity message about a resource that has an identity does not qualify.
+    """
+    result = operation.get("result") or {}
+    reasons = result.get("blocked_reasons") or []
+    return (
+        operation.get("state") == "waiting"
+        and operation.get("step") == "pending"
+        and result.get("external_pending") is False
+        and bool(reasons)
+        and reasons[0].get("code") == "capacity_unavailable"
+        and not result.get("resource_ref")
+        and not result.get("external_id")
+        and not candidate.get("external_id")
+        and not candidate.get("nodes")
+    )
+
+
 def move_out_window_seconds(policy: dict[str, Any]) -> int:
     """How long before expiry this allocation's Host moves its groups out; 0 never.
 
