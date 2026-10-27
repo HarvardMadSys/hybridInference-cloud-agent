@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 
 import { useModalDialog } from '@/components/ui/useModalDialog';
 import { Select } from '@/components/ui/Select';
+import { SuggestionInput } from '@/components/ui/SuggestionInput';
 import type {
   AdminSettingDefinition,
   AdminSettingValue,
@@ -407,7 +408,7 @@ export function ApplicationSettingGroup({
           const showInput = editable && (!field.secret || replacing[key]);
           const value = drafts[key] ?? incoming(field);
           const error = errors[key];
-          const hints = fieldHints(key, id, value, modelSuggestions);
+          const hints = fieldHints(key, value, modelSuggestions);
           const change = (next: string) => {
             setDrafts((previous) => {
               const updated = { ...previous };
@@ -515,7 +516,7 @@ export function ApplicationSettingGroup({
                         className={`${INPUT_CLASS} resize-y`}
                       />
                     ) : (
-                      <input
+                      <SuggestionInput
                         {...inputProps}
                         type={
                           field.secret ? 'password' : field.kind === 'string' ? 'text' : 'number'
@@ -526,7 +527,7 @@ export function ApplicationSettingGroup({
                         min={field.minimum}
                         max={field.maximum}
                         placeholder={field.secret ? 'Enter new secret' : undefined}
-                        list={hints.list}
+                        suggestions={hints.models}
                       />
                     )}
                   </div>
@@ -591,12 +592,7 @@ export function ApplicationSettingGroup({
                     Multiple lines
                   </label>
                 )}
-                <DefaultModelHints
-                  id={id}
-                  hints={hints}
-                  showInput={showInput}
-                  warn={Boolean(value.trim())}
-                />
+                <DefaultModelHints id={id} hints={hints} warn={Boolean(value.trim())} />
                 {error && (
                   <p id={`${id}-error`} role="alert" className="mt-2 text-sm text-status-error">
                     {error}

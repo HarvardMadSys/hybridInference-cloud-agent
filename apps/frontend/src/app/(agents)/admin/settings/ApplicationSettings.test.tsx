@@ -593,11 +593,11 @@ describe('application settings', () => {
     read.mockResolvedValue(modelSnapshot('deepseek-v4-flash'));
     render(<ApplicationSettings />);
     const field = await loadedField('Default model for new tasks');
-    const list = document.getElementById(field.getAttribute('list') ?? '');
-    expect([...(list?.querySelectorAll('option') ?? [])].map((option) => option.value)).toEqual([
-      'deepseek-v4-flash',
-      'glm-5.1',
-    ]);
+    fireEvent.keyDown(field, { key: 'ArrowDown' });
+    const names = screen.getAllByRole('option').map((option) => option.textContent);
+    expect(names).toEqual(['deepseek-v4-flash', 'glm-5.1']);
+    fireEvent.click(screen.getByRole('option', { name: 'glm-5.1' }));
+    expect(field).toHaveValue('glm-5.1');
     // A model id is one line; the generic multi-line toggle does not apply.
     expect(screen.queryByLabelText(/Use multiple lines/)).not.toBeInTheDocument();
     expect(screen.queryByText(/not offered this model/)).not.toBeInTheDocument();
@@ -641,7 +641,7 @@ describe('application settings', () => {
     render(<ApplicationSettings />);
     const field = await loadedField('Default model for new tasks');
     await waitFor(() => expect(getModelPreference).toHaveBeenCalled());
-    expect(field).not.toHaveAttribute('list');
+    expect(field).not.toHaveAttribute('role');
     expect(screen.queryByText(/not offered this model/)).not.toBeInTheDocument();
   });
 

@@ -17,7 +17,7 @@ import {
 import { createPortal } from 'react-dom';
 import { useT } from '@/components/providers/LocaleProvider';
 import { MODAL_POPUP } from './useModalDialog';
-import { useSelectPlacement } from './useSelectPlacement';
+import { keepInView, useSelectPlacement } from './useSelectPlacement';
 
 export interface SelectOption<T extends string = string> {
   value: T;
@@ -143,7 +143,7 @@ function Chevron({ open }: { open: boolean }) {
   );
 }
 
-function Check() {
+export function Check() {
   return (
     <svg
       aria-hidden
@@ -158,7 +158,11 @@ function Check() {
   );
 }
 
-function optionClass(selected: boolean, active: boolean, disabled: boolean) {
+/** The panel of a portalled menu, positioned by `useSelectPlacement`. */
+export const POPUP_CLASS =
+  'ui-popover fixed z-[100] m-0 flex w-max flex-col overflow-hidden rounded-lg border border-border bg-surface-raised text-foreground shadow-card';
+
+export function optionClass(selected: boolean, active: boolean, disabled: boolean) {
   const tone = disabled
     ? 'cursor-not-allowed text-muted opacity-60'
     : selected
@@ -296,7 +300,7 @@ function SelectMenu<T extends string>({
     <div
       ref={refs.popup}
       {...{ [MODAL_POPUP]: ids.trigger }}
-      className="ui-popover fixed z-[100] m-0 flex w-max flex-col overflow-hidden rounded-lg border border-border bg-surface-raised text-foreground shadow-card"
+      className={POPUP_CLASS}
       onKeyDown={onKeyDown}
       onPointerDown={(event) => {
         // Keep focus in the menu while pointing at it; only the search box takes focus.
@@ -390,14 +394,7 @@ function useMenuBehaviour(
   }, [visible, search, list]);
 
   useLayoutEffect(() => {
-    const viewport = list.current?.getBoundingClientRect();
-    const option = visible && activeId ? document.getElementById(activeId) : null;
-    if (!option || !viewport || !list.current) return;
-    // Scroll only the list, so opening a menu never moves the page.
-    const bounds = option.getBoundingClientRect();
-    if (bounds.top < viewport.top) list.current.scrollTop -= viewport.top - bounds.top;
-    else if (bounds.bottom > viewport.bottom)
-      list.current.scrollTop += bounds.bottom - viewport.bottom;
+    if (visible && activeId) keepInView(list.current, document.getElementById(activeId));
   }, [visible, activeId, list]);
 
   useEffect(() => {
@@ -453,12 +450,15 @@ function startValue<T extends string>(
 }
 
 /** The accessible name of a menu: its control's own label. */
-function menuName(node: HTMLButtonElement, ariaLabel?: string): string | undefined {
+export function menuName(
+  node: HTMLButtonElement | HTMLInputElement,
+  ariaLabel?: string,
+): string | undefined {
   const labels = [...(node.labels ?? [])].map((label) => label.textContent?.trim() ?? '');
   return ariaLabel ?? (labels.join(' ') || undefined);
 }
 
-function assignRef<E>(ref: ForwardedRef<E>, node: E | null) {
+export function assignRef<E>(ref: ForwardedRef<E>, node: E | null) {
   if (typeof ref === 'function') ref(node);
   else if (ref) ref.current = node;
 }

@@ -45,6 +45,15 @@ function place(trigger: HTMLElement, panel: HTMLElement) {
   if (landed.left !== left) style.left = `${2 * left - landed.left}px`;
 }
 
+/** Scroll only the list to show an option, so a menu never moves the page. */
+export function keepInView(list: HTMLElement | null, option: HTMLElement | null) {
+  const viewport = list?.getBoundingClientRect();
+  if (!list || !option || !viewport) return;
+  const bounds = option.getBoundingClientRect();
+  if (bounds.top < viewport.top) list.scrollTop -= viewport.top - bounds.top;
+  else if (bounds.bottom > viewport.bottom) list.scrollTop += bounds.bottom - viewport.bottom;
+}
+
 /**
  * Keep an open select menu beside its trigger and inside the visual viewport,
  * opening upward when there is more room above, and following scrolls of any

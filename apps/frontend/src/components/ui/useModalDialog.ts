@@ -8,7 +8,9 @@ const FOCUSABLE =
  * Marks a popup that a control inside the dialog opened, such as a select's
  * menu, with that control's id. The popup is portalled into the dialog's
  * panel, so it is neither inert nor outside focus containment; it handles its
- * own Escape, and Tab moves on from its control.
+ * own Escape, and Tab moves on from its control. A control that keeps focus
+ * while its popup is open, such as a text field's suggestions, takes Escape
+ * first too.
  */
 export const MODAL_POPUP = 'data-modal-popup';
 const dialogs: HTMLElement[] = [];
@@ -51,7 +53,15 @@ function popupOwner(element: Element | null): HTMLElement | null {
 /** Whether an open popup inside the dialog closes itself on this Escape first. */
 function popupTakesEscape(event: KeyboardEvent, panel: HTMLElement): boolean {
   const target = event.target instanceof Element ? event.target : null;
-  return event.key === 'Escape' && !!target?.closest(`[${MODAL_POPUP}]`) && panel.contains(target);
+  if (event.key !== 'Escape' || !target || !panel.contains(target)) return false;
+  if (target.closest(`[${MODAL_POPUP}]`)) return true;
+  return (
+    target.id !== '' &&
+    target.getAttribute('aria-expanded') === 'true' &&
+    [...panel.querySelectorAll(`[${MODAL_POPUP}]`)].some(
+      (popup) => popup.getAttribute(MODAL_POPUP) === target.id,
+    )
+  );
 }
 
 function controls(panel: HTMLElement): HTMLElement[] {
