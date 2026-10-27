@@ -548,7 +548,8 @@ function SandboxRowView({
           </span>
           <Link
             href="/admin/hosts"
-            className="mt-1 block text-gray-700 hover:underline dark:text-gray-200"
+            className="mt-1 block truncate text-gray-700 hover:underline dark:text-gray-200"
+            title={sandbox.host}
           >
             {sandbox.host}
           </Link>
