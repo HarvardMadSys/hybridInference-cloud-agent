@@ -12,6 +12,7 @@ import {
   testEnvironment,
 } from '@/lib/api/environments';
 import type { EnvironmentConfig } from '@/lib/api/environments';
+import { chooseOption, optionNames } from '@/components/ui/__tests__/select';
 vi.mock('@/components/providers', () => ({ useT: () => (key: string) => key }));
 vi.mock('@/lib/api/environments', () => ({
   cancelEnvironmentRun: vi.fn(),
@@ -62,9 +63,7 @@ it('requires explicit Plain classification before importing a short value', asyn
   const confirm = await screen.findByRole('button', { name: 'environment.confirmImport' });
   expect(confirm).toBeDisabled();
   expect(screen.getByRole('alert')).toHaveTextContent('environment.shortSecret');
-  fireEvent.change(screen.getByLabelText('environment.type DEBUG'), {
-    target: { value: 'ordinary' },
-  });
+  chooseOption(screen.getByLabelText('environment.type DEBUG'), 'environment.ordinary');
   expect(confirm).toBeEnabled();
   fireEvent.click(confirm);
   // Nothing unsaved, so the import applies to the saved version as it is.
@@ -245,12 +244,8 @@ it('creates an environment for a team you administer when you choose it', async 
   // Your own globals are shown as part of your own environment only.
   expect(screen.getByText('MINE')).toBeInTheDocument();
   const owner = screen.getByLabelText('environment.owner');
-  expect(
-    within(owner)
-      .getAllByRole('option')
-      .map((o) => o.textContent),
-  ).toEqual(['environment.ownerSelf', 'environment.ownerTeam']);
-  fireEvent.change(owner, { target: { value: 'team-1' } });
+  expect(optionNames(owner)).toEqual(['environment.ownerSelf', 'environment.ownerTeam']);
+  chooseOption(owner, 'environment.ownerTeam');
   expect(screen.getByText('environment.teamNew')).toBeInTheDocument();
   expect(screen.getByText('environment.teamSecrets')).toBeInTheDocument();
   expect(screen.queryByText('MINE')).toBeNull();

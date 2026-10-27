@@ -25,6 +25,7 @@ vi.mock('@/lib/api/adminSandboxes', () => ({
 
 import { BatchSandboxManagement } from './BatchSandboxManagement';
 import type { SandboxObservation } from './present';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 const observedAt = '2026-10-10T10:00:00Z';
 function detail(id: string, overrides: Partial<AdminSandbox> = {}): AdminSandboxDetail {
@@ -95,10 +96,18 @@ function controls(selected: SandboxObservation[], nowMs = 1_000) {
     />
   );
 }
+const ACTION_LABELS: Record<string, string> = {
+  stop: 'Stop idle sandboxes',
+  delete: 'Archive to S3 and delete',
+  discard: 'Delete without archive',
+  archive: 'Remove from inventory',
+  restore: 'Restore to inventory',
+};
 function choose(action: string) {
-  fireEvent.change(screen.getByRole('combobox', { name: 'Batch sandbox action' }), {
-    target: { value: action },
-  });
+  chooseOption(
+    screen.getByRole('combobox', { name: 'Batch sandbox action' }),
+    ACTION_LABELS[action],
+  );
 }
 async function review(count: number) {
   fireEvent.click(screen.getByRole('button', { name: 'Review selected sandboxes' }));

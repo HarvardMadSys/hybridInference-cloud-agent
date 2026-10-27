@@ -18,6 +18,7 @@ import AddComputeServer from './AddComputeServer';
 import ComputeConnectionForm from './ComputeConnectionForm';
 import ComputeResourcePanel from './ComputeResourcePanel';
 import ComputeResources from './ComputeResources';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 vi.mock('@/lib/api/compute', () => ({
   getComputeProviders: vi.fn(),
@@ -352,9 +353,10 @@ describe('server acquisition UI', () => {
   it('warns when connect-existing ignores a previously selected registration policy', () => {
     renderAdd();
     fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
-    fireEvent.change(screen.getByLabelText('SSH host-key checking'), {
-      target: { value: 'registration' },
-    });
+    chooseOption(
+      screen.getByLabelText('SSH host-key checking'),
+      'Registered by the node at first boot',
+    );
     expect(
       screen.queryByText('CloudLab SSH host identity will not be verified.'),
     ).not.toBeInTheDocument();
@@ -527,22 +529,18 @@ describe('server acquisition UI', () => {
     ]);
     fillSshForm();
     const picker = screen.getByRole('combobox', { name: 'Use SSH key' });
-    expect(picker).toHaveValue('');
-    fireEvent.change(picker, { target: { value: 'other-key' } });
+    expect(picker).toHaveTextContent('Select…');
+    chooseOption(picker, 'Other key');
     expect(screen.queryByRole('combobox', { name: 'Use SSH key' })).not.toBeInTheDocument();
     expect(screen.getByText('Other key')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Change SSH key' })).toHaveFocus();
     fireEvent.click(screen.getByRole('button', { name: 'Change SSH key' }));
     expect(screen.getByRole('combobox', { name: 'Use SSH key' })).toHaveFocus();
-    fireEvent.change(screen.getByRole('combobox', { name: 'Use SSH key' }), {
-      target: { value: '__new__' },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Use SSH key' }), 'Add a new SSH key…');
     fireEvent.change(screen.getByLabelText('SSH private key'), {
       target: { value: 'discard-this-key' },
     });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Use SSH key' }), {
-      target: { value: 'other-key' },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Use SSH key' }), 'Other key');
     fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
     await waitFor(() =>
       expect(api.createComputeServer).toHaveBeenCalledWith(
@@ -1928,9 +1926,7 @@ describe('resource dashboard', () => {
       target: { value: '/mnt/user-data' },
     });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Change SSH key' }));
-    fireEvent.change(within(dialog).getByLabelText('Use SSH key'), {
-      target: { value: '__new__' },
-    });
+    chooseOption(within(dialog).getByLabelText('Use SSH key'), 'Add a new SSH key…');
     fireEvent.change(within(dialog).getByLabelText('SSH private key'), {
       target: { value: 'private-key-input' },
     });

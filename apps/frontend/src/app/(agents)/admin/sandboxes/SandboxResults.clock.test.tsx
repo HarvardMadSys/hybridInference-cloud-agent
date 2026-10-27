@@ -8,6 +8,7 @@ import { getAdminSandbox, getAdminSandboxes, type AdminSandbox } from '@/lib/api
 import { SandboxResults } from './SandboxResults';
 import { summarizeSandboxes } from './present';
 import { selectSandboxes } from './inventory';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 vi.mock('@/lib/api/adminSandboxes', () => ({
   getAdminSandboxes: vi.fn(),
@@ -189,9 +190,10 @@ describe('sandbox inventory clock isolation', () => {
     await mount();
     fireEvent.click(screen.getByRole('button', { name: 'Show details for Session 0' }));
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select sandbox sandbox-0' }));
-    fireEvent.change(screen.getByRole('combobox', { name: 'Batch sandbox action' }), {
-      target: { value: 'stop' },
-    });
+    chooseOption(
+      screen.getByRole('combobox', { name: 'Batch sandbox action' }),
+      'Stop idle sandboxes',
+    );
     fireEvent.click(screen.getByRole('button', { name: 'Review selected sandboxes' }));
     await act(async () => {});
     expect(screen.getByRole('button', { name: 'Stop idle sandbox' })).toBeEnabled();
@@ -205,7 +207,9 @@ describe('sandbox inventory clock isolation', () => {
       'true',
     );
     expect(screen.getByRole('checkbox', { name: 'Select sandbox sandbox-0' })).toBeChecked();
-    expect(screen.getByRole('combobox', { name: 'Batch sandbox action' })).toHaveValue('stop');
+    expect(screen.getByRole('combobox', { name: 'Batch sandbox action' })).toHaveTextContent(
+      'Stop idle sandboxes',
+    );
     expect(screen.getByRole('region', { name: 'Sandbox management' })).toBe(management);
     expect(within(management).getByRole('button', { name: 'Stop idle sandbox' })).toBeDisabled();
     expect(

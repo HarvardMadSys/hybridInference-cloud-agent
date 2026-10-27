@@ -17,6 +17,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+from cloud_agent_host.chat_network_disconnect import (
+    disconnect_endpoint,
+    forget_stopped_network,
+    stopped_network_record,
+)
 from cloud_agent_host.chat_sandbox_inspect import containers_by_ref, inspect_each
 from cloud_agent_host.chat_sandbox_models import (
     CHAT_GENERATION_LABEL,
@@ -914,29 +919,7 @@ class ChatSandboxNetwork:
         *,
         network_name: str | None = None,
     ) -> None:
-        disconnected = self._containers._run(
-            [
-                self.backend.docker_binary,
-                "network",
-                "disconnect",
-                "--force",
-                network,
-                container_id,
-            ],
-            timeout=30,
-        )
-        if disconnected.returncode == 0:
-            return
-        if self._inspect_network(network) is None:
-            # An id-pinned cleanup can lose to another process that already
-            # removed the old bridge. A same-name replacement is unrelated.
-            return
-        aliases = self._container_network_aliases(container_id, network_name or network)
-        if aliases is not None:
-            raise SandboxError(
-                f"container {container_id[:12]} could not leave network "
-                f"{(network_name or network)!r}: " + disconnected.stderr.strip()[:300]
-            )
+        disconnect_endpoint(self, network, container_id, network_name=network_name)
 
     def _release_owned_network(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
@@ -962,6 +945,10 @@ class ChatSandboxNetwork:
                 self._containers._verify_identity(sandbox, spec)
         network = self._inspect_network(network_name)
         if network is None:
+            if expected_container_id is not None and not only_if_sandbox_unattached:
+                forget_stopped_network(
+                    self, spec, network_name, expected_network_id, expected_container_id
+                )
             return
         network_id = str(network.get("Id") or "")
         if expected_network_id is not None and network_id != expected_network_id:
@@ -1002,7 +989,15 @@ class ChatSandboxNetwork:
             endpoint_aliases = peer_aliases.get(container_id)
             if not endpoint_aliases or not endpoint_aliases.intersection(recorded_aliases):
                 raise SandboxError(f"group network {network_name!r} contains an unexpected peer")
-        for container_id in sorted(map(str, containers)):
+        endpoint_ids = set(map(str, containers))
+        # Network inspect omits stopped containers' saved network intent.
+        if (
+            expected_container_id is not None
+            and not only_if_sandbox_unattached
+            and stopped_network_record(self, spec, network_name, network_id, expected_container_id)
+        ):
+            endpoint_ids.add(expected_container_id)
+        for container_id in sorted(endpoint_ids):
             self._disconnect_endpoint(
                 network_ref,
                 container_id,
@@ -1139,6 +1134,8 @@ class ChatSandboxNetwork:
         )
         if released.running:
             raise SandboxError("chat sandbox restarted during network release")
+        if self.network_for(spec) in released.networks:
+            raise SandboxError("stopped chat sandbox still retains its group network intent")
         return released
 
     @staticmethod

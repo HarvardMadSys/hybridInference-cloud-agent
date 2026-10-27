@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import type { AgentDiffFile } from '../types';
 import { GitPanel } from './GitPanel';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 function diff(path: string, length: number): AgentDiffFile {
   return {
@@ -83,14 +84,14 @@ describe('Git panel diff length', () => {
     expect(drawnRows('package-lock.json')).toHaveLength(8000);
 
     const picker = screen.getByRole('combobox', { name: 'Changed file' });
-    fireEvent.change(picker, { target: { value: 'yarn.lock' } });
+    chooseOption(picker, /^yarn\.lock /);
     expect(drawnRows('yarn.lock')).toHaveLength(4000);
     expect(screen.getByText(note(4000, 4002))).toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: `Show the remaining ${count(2)} lines` }),
     ).toBeInTheDocument();
 
-    fireEvent.change(picker, { target: { value: 'package-lock.json' } });
+    chooseOption(picker, /^package-lock\.json /);
     expect(drawnRows('package-lock.json')).toHaveLength(4000);
     expect(screen.getByText(note(4000, 8001))).toBeInTheDocument();
   });

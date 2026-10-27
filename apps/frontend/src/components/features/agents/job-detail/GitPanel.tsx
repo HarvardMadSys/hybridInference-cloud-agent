@@ -1,6 +1,7 @@
 'use client';
 
 import { useT } from '@/components/providers';
+import { Select } from '@/components/ui/Select';
 import type { AgentGitWorkspaceApi } from '@/lib/api/agents';
 import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import { memo, useEffect, useId, useMemo, useRef, useState } from 'react';
@@ -307,18 +308,16 @@ export function GitPanel({
                 <span>
                   {files.length} changed file{files.length === 1 ? '' : 's'}
                 </span>
-                <select
+                <Select
                   aria-label="Changed file"
                   value={selected?.path ?? ''}
-                  onChange={(event) => setSelectedPath(event.target.value)}
-                  className="ui-input mt-1 w-full min-w-0 py-2 font-mono text-xs"
-                >
-                  {files.map((file) => (
-                    <option key={file.path} value={file.path}>
-                      {file.path} (+{file.add} −{file.del})
-                    </option>
-                  ))}
-                </select>
+                  onValueChange={setSelectedPath}
+                  className="ui-input mt-1 block w-full min-w-0 py-2 font-mono text-xs"
+                  options={files.map((file) => ({
+                    value: file.path,
+                    label: `${file.path} (+${file.add} −${file.del})`,
+                  }))}
+                />
               </label>
               <div className="agent-git-selected-path border-b border-gray-100 dark:border-white/5 px-4 py-2.5 font-mono text-xs text-gray-600 dark:text-gray-400">
                 {selected?.path}

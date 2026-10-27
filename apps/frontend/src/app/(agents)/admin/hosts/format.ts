@@ -8,6 +8,7 @@
 // for.
 
 import type { AgentRunnerHost } from '@/lib/api/admin';
+import type { ComputeServerSnapshot } from '@/lib/api/compute';
 
 /**
  * A host's status as an operator reads it.
@@ -161,4 +162,32 @@ export function curveSource(
     offered[0] ??
     null
   );
+}
+
+/** The placement shown while the chosen server cannot take new sandboxes. */
+export const UNAVAILABLE_PLACEMENT = {
+  value: '__unavailable__',
+  label: 'Selected server unavailable',
+  disabled: true,
+};
+
+/**
+ * A placement target by its allocation or server name, with the enrollment
+ * when the name covers several.
+ */
+export function placementLabel(
+  host: string,
+  servers: { name: string; members: { host: string }[] }[],
+  inventory: ComputeServerSnapshot | null,
+): string {
+  const physicalName = servers.find((server) =>
+    server.members.some((member) => member.host === host),
+  )?.name;
+  const allocationId = inventory?.hosts.find((item) => item.host === host)?.allocation_id;
+  const allocation = inventory?.allocations.find((item) => item.id === allocationId);
+  if (allocation) {
+    const allocationHosts = allocation.nodes.flatMap((node) => node.hosts);
+    return allocationHosts.length > 1 ? `${allocation.name} / ${host}` : allocation.name;
+  }
+  return physicalName && physicalName !== host ? `${physicalName} / ${host}` : host;
 }

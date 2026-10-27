@@ -19,6 +19,7 @@ import httpx
 
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.sandbox_deletion_diagnostics import log_discard_refusal
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.upload_import import forget_deleted_container_uploads
 
@@ -405,8 +406,28 @@ class SandboxDeletionBackupService:
                 "aborted": True,
             }
 
-    def discard(self, identity: ArchiveIdentity, *, sandbox_id: str) -> dict[str, Any]:  # noqa: PLR0912 complexity baseline, #771
+    def discard(self, identity: ArchiveIdentity, *, sandbox_id: str) -> dict[str, Any]:
         """Remove the exact stopped container without exporting or uploading it.
+
+        A refusal, or a receipt write the filesystem failed, is logged with the
+        group state the fences read (:func:`log_discard_refusal`) and raised
+        unchanged.
+        """
+        with self._lock:
+            try:
+                return self._discard(identity, sandbox_id=sandbox_id)
+            except (SandboxError, ValueError, OSError) as exc:
+                log_discard_refusal(
+                    self._supervisor,
+                    identity,
+                    sandbox_id=sandbox_id,
+                    directory=self._directory(identity),
+                    exc=exc,
+                )
+                raise
+
+    def _discard(self, identity: ArchiveIdentity, *, sandbox_id: str) -> dict[str, Any]:  # noqa: PLR0912 complexity baseline, #771
+        """Remove the exact stopped container; :meth:`discard` reports a refusal.
 
         The authorization record is fsynced before Docker removal, so a lost
         response retries the same request. A request that already prepared an

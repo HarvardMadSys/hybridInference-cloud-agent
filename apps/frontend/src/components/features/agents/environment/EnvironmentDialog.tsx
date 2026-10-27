@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useT } from '@/components/providers';
 import { useModalDialog } from '@/components/ui/useModalDialog';
+import { Select } from '@/components/ui/Select';
 import {
   cancelEnvironmentRun,
   getEnvironmentHistory,
@@ -24,7 +25,7 @@ import type {
 } from '@/lib/api/environments';
 import type { TranslationKey } from '@/lib/i18n/translate';
 import { ACTIVE_STATES, EnvironmentSteps, StateBadge } from './EnvironmentStatus';
-import { RemoveIcon, VariableEditor, variableEdits } from './VariableEditor';
+import { kindOptions, RemoveIcon, VariableEditor, variableEdits } from './VariableEditor';
 
 // The one place an environment is edited. Settings, the new-task picker and a
 // conversation's Environment panel all open this dialog rather than each
@@ -84,14 +85,18 @@ export function OwnerSelect({
   return (
     <label className="space-y-1 text-sm">
       <span className="text-muted">{label}</span>
-      <select className="ui-input w-full" value={value} onChange={(e) => onChange(e.target.value)}>
-        <option value="">{t('environment.ownerSelf')}</option>
-        {teams.map((team) => (
-          <option key={team.id} value={team.id}>
-            {t('environment.ownerTeam', { team: team.name })}
-          </option>
-        ))}
-      </select>
+      <Select
+        className="ui-input block w-full"
+        value={value}
+        onValueChange={onChange}
+        options={[
+          { value: '', label: t('environment.ownerSelf') },
+          ...teams.map((team) => ({
+            value: team.id,
+            label: t('environment.ownerTeam', { team: team.name }),
+          })),
+        ]}
+      />
     </label>
   );
 }
@@ -336,23 +341,19 @@ export function EnvironmentDialog({
                           ? t('environment.importReplace')
                           : t('environment.importAdd')}
                       </span>
-                      <select
+                      <Select
                         aria-label={`${t('environment.type')} ${v.name}`}
                         className="ui-input"
                         value={v.secret ? 'secret' : 'ordinary'}
-                        onChange={(event) =>
+                        onValueChange={(next) =>
                           setPreview(
                             preview.map((item) =>
-                              item.name === v.name
-                                ? { ...item, secret: event.target.value === 'secret' }
-                                : item,
+                              item.name === v.name ? { ...item, secret: next === 'secret' } : item,
                             ),
                           )
                         }
-                      >
-                        <option value="secret">{t('environment.secret')}</option>
-                        <option value="ordinary">{t('environment.ordinary')}</option>
-                      </select>
+                        options={kindOptions(t)}
+                      />
                       {v.secret && !v.secret_allowed ? (
                         <span role="alert" className="w-full text-xs text-status-error">
                           {t('environment.shortSecret')}
@@ -807,18 +808,15 @@ export function EnvironmentDialog({
               {isNew && !initial.repo ? (
                 <label className="space-y-1 text-sm">
                   <span className="text-muted">{t('environment.repository')}</span>
-                  <select
-                    className="ui-input w-full"
+                  <Select
+                    className="ui-input block w-full"
                     value={value.repo ?? ''}
-                    onChange={(e) => change({ ...value, repo: e.target.value })}
-                  >
-                    <option value="">{t('environment.chooseRepository')}</option>
-                    {repos.map((r) => (
-                      <option key={r} value={r}>
-                        {r}
-                      </option>
-                    ))}
-                  </select>
+                    onValueChange={(repo) => change({ ...value, repo })}
+                    options={[
+                      { value: '', label: t('environment.chooseRepository') },
+                      ...repos.map((r) => ({ value: r, label: r })),
+                    ]}
+                  />
                 </label>
               ) : null}
               {isNew && teams.length ? (

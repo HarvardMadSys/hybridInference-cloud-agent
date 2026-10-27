@@ -25,13 +25,13 @@ BASELINE = {
     "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5285,
     "apps/backend/cloud_agent_host/runner.py": 4902,
     "apps/backend/cloud_agent_host/chat_sandbox.py": 4085,
-    "apps/backend/cloud_agent/storage/repositories/compute_resources.py": 3856,
+    "apps/backend/cloud_agent/storage/repositories/compute_resources.py": 3815,
     "apps/backend/cloud_agent_host/sandbox_manager.py": 3545,
     "apps/backend/cloud_agent/storage/repositories/sandbox.py": 3403,
     "apps/backend/cloud_agent_host/drivers.py": 3052,
     "apps/backend/cloud_agent/api/worker.py": 2319,
     "apps/backend/cloud_agent/storage/repositories/host_pool.py": 2267,
-    "apps/backend/cloud_agent/application/compute_reconcile.py": 2253,
+    "apps/backend/cloud_agent/application/compute_reconcile.py": 2219,
     "apps/backend/cloud_agent/api/mcp_connections.py": 2220,
     "apps/backend/cloud_agent/storage/repositories/attempt_commands.py": 2019,
     "apps/backend/cloud_agent/storage/repositories/mcp.py": 1974,
@@ -39,7 +39,7 @@ BASELINE = {
     "apps/backend/cloud_agent/api/mcp_relay.py": 1798,
     "apps/backend/cloud_agent/storage/repositories/snapshot.py": 1673,
     "apps/backend/cloud_agent_host/host_capacity.py": 1636,
-    "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1574,
+    "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1571,
 }
 
 #: Exact line counts of test modules over their calibrated limit after #894's

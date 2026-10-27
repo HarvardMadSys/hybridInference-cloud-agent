@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-20 23:02-0400\n"
+"POT-Creation-Date: 2026-10-27 03:59-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -1702,10 +1702,14 @@ msgid ""
 "node extended so the move cannot outlast its lease. Failed candidates are"
 " released before trying the next type. Configuration or credential errors"
 " stop immediately; the same failure class across three types stops with "
-"an alert. Retry resumes the saved operation."
-msgstr "进入续期窗口后，先尝试延期。延期被拒或无法确认，就开始替换；节点到了最长使用期限时，只要迁移还来得及，就直接迁移而不再延期。如果到排空截止时间迁移还没完成，或者迁移被阻塞、失败或被取消，就让旧节点继续延期，保证迁移不会拖过它的租期。失败的候选节点会先释放，再去试下一个类型。遇到配置或凭据错误会立即停止；同一类错误在三个类型上都出现，也会停止并告警。重试会从已保存的操作接着做。"
+"an alert. Retry resumes the saved operation. A create the provider "
+"refuses for capacity, before naming any resource, is released at once "
+"instead of waiting out the two-hour candidate limit; with no type left, "
+"the move then stops as above. Rate limits, unknown outcomes and a retry "
+"that created its node never count as a capacity refusal."
+msgstr "进入续期窗口后，先尝试延期。延期被拒或无法确认，就开始替换；节点到了最长使用期限时，只要迁移还来得及，就直接迁移而不再延期。如果到排空截止时间迁移还没完成，或者迁移被阻塞、失败或被取消，就让旧节点继续延期，保证迁移不会拖过它的租期。失败的候选节点会先释放，再去试下一个类型。遇到配置或凭据错误会立即停止；同一类错误在三个类型上都出现，也会停止并告警。重试会从已保存的操作接着做。如果创建请求在提供方给出任何资源之前就因容量不足被拒，这个候选节点会立刻释放，不必等满两小时的候选时限；没有类型可试时，迁移随即按上面的规则停止。限流、结果未知，以及重试时已经建出节点的情况，都不算容量不足被拒。"
 
-#: ../developer/operations-compute.md:656
+#: ../developer/operations-compute.md:660
 msgid ""
 "The candidate installs the host recipe and receives a live pre-copy "
 "without enrolling or claiming. Once it is prepared, the source waits for "
@@ -1718,7 +1722,7 @@ msgstr ""
 "recipe，并在不注册、不认领的情况下，先接收一次在线的预复制。准备好之后，源节点会等一个空闲的时机。到了排空截止时间，即使候选节点还没准备好，也会暂停新的认领。正在跑的轮次照常跑完，新消息先排队；就算迁移很急，也绝不会杀掉正在进行的轮次。按默认一小时的轮次时限，这个截止时间是到期前"
 " 100 分钟。"
 
-#: ../developer/operations-compute.md:663
+#: ../developer/operations-compute.md:667
 msgid ""
 "The worker stops the source Host and container daemons, copies final "
 "changes, transfers the database binding, starts the replacement and "
@@ -1738,7 +1742,7 @@ msgstr ""
 "直接停掉、没经过 sandbox manager "
 "的沙箱，这次停止就没有最终归档，但它的对话仍会在替换节点上继续。只有成功接管这件事被持久记录下来之后，才会恢复认领。过了这个节点之后的恢复，可以清理源节点，但不能拿源节点上过时的副本去覆盖新的工作。"
 
-#: ../developer/operations-compute.md:674
+#: ../developer/operations-compute.md:678
 msgid ""
 "Before confirmed takeover, failures restore the source. If the "
 "replacement cannot be confirmed stopped, claims stay paused and the "
@@ -1756,11 +1760,11 @@ msgstr ""
 "或超时，会重试十分钟；重启还是失败，或者源节点开始停止之后出现任何意外错误，都会发出紧急的 `compute_rotation_failed` "
 "告警并阻塞，认领继续暂停。如果意外错误发生在停止之前，操作会阻塞，但认领会恢复。停止开始之前可以取消；之后再出错，就走恢复或重试。清理失败会自动重试，不会打断替换，但仍会作为失败显示出来。释放源节点时，仍然要通过保留状态和分配相关的检查。"
 
-#: ../developer/operations-compute.md:685
+#: ../developer/operations-compute.md:689
 msgid "Acceptance before enabling production traffic"
 msgstr "对生产流量开放之前的验收"
 
-#: ../developer/operations-compute.md:687
+#: ../developer/operations-compute.md:691
 msgid ""
 "Use disposable staging conversations and dedicated profiles. Record "
 "operation IDs, source/replacement node identities, release revision and "
@@ -1769,14 +1773,14 @@ msgstr ""
 "使用用完即弃的 staging 对话和专用的 profile。记录操作 "
 "ID、源节点和替换节点的身份、发布修订号，以及实际观察到的暂停时长，不要记录凭据。"
 
-#: ../developer/operations-compute.md:691
+#: ../developer/operations-compute.md:695
 msgid ""
 "Create a node through the deployed registration endpoint and verify its "
 "pinned key is used for SSH. A boot-script-only probe does not cover this "
 "path."
 msgstr "通过已部署的登记接口新建一个节点，确认 SSH 用的是它被锁定的那把密钥。只测启动脚本的探测，覆盖不到这条路径。"
 
-#: ../developer/operations-compute.md:693
+#: ../developer/operations-compute.md:697
 msgid ""
 "Run Claude Code, its Fork and Codex with files and distinct context "
 "markers. Use **Replace node now** and verify native continuation, Fork "
@@ -1785,14 +1789,14 @@ msgstr ""
 "分别在 Claude Code、它的 Fork 和 Codex 里跑带文件、带不同上下文标记的任务。点 **Replace node "
 "now**，然后确认：原生会话能接上，Fork 之间互不影响，文件都在，容器 ID 也对得上。在不同的 CloudLab 站点上各做一遍。"
 
-#: ../developer/operations-compute.md:696
+#: ../developer/operations-compute.md:700
 msgid ""
 "Submit a message during paused claims; it must queue and run once after "
 "takeover. Verify the source can no longer authenticate after re-"
 "enrollment."
 msgstr "在认领暂停期间发一条消息，它必须先排队，接管之后恰好运行一次。确认重新注册之后，源节点已经无法再通过认证。"
 
-#: ../developer/operations-compute.md:698
+#: ../developer/operations-compute.md:702
 msgid ""
 "Exercise refused renewal, an unavailable first hardware type, failed "
 "final copy, failed target startup and a control-plane restart. Verify "
@@ -1800,14 +1804,14 @@ msgid ""
 "of duplicate allocations or simultaneous serving copies."
 msgstr "实际演练这些情况：续期被拒、首选硬件类型没有容量、最终复制失败、目标节点启动失败，以及控制平面重启。确认能按已保存的步骤回滚或继续、失败的候选节点会被释放，并且不会出现重复的分配，也不会有两份副本同时对外服务。"
 
-#: ../developer/operations-compute.md:702
+#: ../developer/operations-compute.md:706
 msgid ""
 "Run policy for **two weeks with at least two automatic moves**, checking "
 "alerts, cleanup and retained chats. Unit tests and a manual migration do "
 "not replace elapsed-time acceptance."
 msgstr "让策略连续跑**两周，期间至少自动迁移两次**，检查告警、清理和保留的对话。单元测试和一次手动迁移，都代替不了这种需要时间积累的验收。"
 
-#: ../developer/operations-compute.md:706
+#: ../developer/operations-compute.md:710
 msgid ""
 "The [2026-10-10 manual staging drill](../agents/specs/2026-10-10"
 "-cloudlab-node-rotation-design.zh-CN.md#验证二结果2026-10-10staging) moved "
@@ -1821,7 +1825,7 @@ msgstr ""
 "Utah，中间暂停了 161 "
 "秒。那次演练是在自动流程上线之前做的。如果唯一的源磁盘突然坏掉，或者到期前找不到可用的替换容量，会话仍然可能丢失；有需要的话，请另外在节点之外做备份。"
 
-#: ../developer/operations-compute.md:712
+#: ../developer/operations-compute.md:716
 msgid ""
 "Before live traffic, verify the intended CloudLab profile through "
 "deployment, a real task, retained continuation and Fork on the same Host."

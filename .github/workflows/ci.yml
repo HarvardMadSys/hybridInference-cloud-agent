@@ -442,6 +442,7 @@ jobs:
           set -euo pipefail
           docker pull "${AGENT_HOST_NODE_TEST_IMAGE}"
           uv run pytest -q -m external tests/external/test_host_release_real_docker.py \
+            tests/external/test_stopped_network_release.py \
             --junitxml="${RUNNER_TEMP}/host-release.xml"
           uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/host-release.xml"
 

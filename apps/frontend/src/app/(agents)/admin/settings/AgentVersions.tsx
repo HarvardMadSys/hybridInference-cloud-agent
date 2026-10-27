@@ -3,6 +3,7 @@
 import { useState } from 'react';
 
 import type { RuntimeUpgradeItem, RuntimeVersions } from '@/lib/api/adminRuntimeUpgrades';
+import { Select, type SelectItem } from '@/components/ui/Select';
 
 import DinoProgress from './DinoProgress';
 import { SettingsSection } from '../SettingsSection';
@@ -39,6 +40,19 @@ function defaultLabel(servers: NamedHost[], runtime: string): string {
   if (versions.size === 1) return `Server default (${[...versions][0]})`;
   if (versions.size > 1) return 'Server default (varies by server)';
   return 'Server default';
+}
+
+function versionOptions(versions: string[]) {
+  return versions.map((version) => ({ value: version, label: version }));
+}
+
+/** Versions on servers, grouped apart from npm releases when there are any to download. */
+function versionChoices(versions: string[], fromNpm: string[]): SelectItem[] {
+  if (fromNpm.length === 0) return versionOptions(versions);
+  return [
+    { label: 'On servers', options: versionOptions(versions) },
+    { label: 'Download from npm', options: versionOptions(fromNpm) },
+  ];
 }
 
 /**
@@ -309,44 +323,20 @@ function VersionRow({
       </div>
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <select
+          <Select
             id={`agent-version-${runtime}`}
             disabled={busy}
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onValueChange={setDraft}
             className="ui-input min-h-11 min-w-0 flex-1 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <option value="">{defaultLabel(servers, runtime)}</option>
-            {unavailable && (
-              <option value={saved} disabled>
-                {saved} (unavailable)
-              </option>
-            )}
-            {fromNpm.length === 0 ? (
-              versions.map((version) => (
-                <option key={version} value={version}>
-                  {version}
-                </option>
-              ))
-            ) : (
-              <>
-                <optgroup label="On servers">
-                  {versions.map((version) => (
-                    <option key={version} value={version}>
-                      {version}
-                    </option>
-                  ))}
-                </optgroup>
-                <optgroup label="Download from npm">
-                  {fromNpm.map((version) => (
-                    <option key={version} value={version}>
-                      {version}
-                    </option>
-                  ))}
-                </optgroup>
-              </>
-            )}
-          </select>
+            options={[
+              { value: '', label: defaultLabel(servers, runtime) },
+              ...(unavailable
+                ? [{ value: saved, label: `${saved} (unavailable)`, disabled: true }]
+                : []),
+              ...versionChoices(versions, fromNpm),
+            ]}
+          />
           <button
             type="submit"
             disabled={busy || (downloads && updateBusy) || draft === saved}

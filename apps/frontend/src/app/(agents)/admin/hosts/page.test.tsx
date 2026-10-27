@@ -74,6 +74,7 @@ import {
 import { reasonLabel } from './capacity';
 import { formatAge, runtimeMenu } from './format';
 import AdminHostsPage from './page';
+import { chooseOption, openSelect, optionNames } from '@/components/ui/__tests__/select';
 
 // Exercise the parent's Host commands and polling through its scoped render contract.
 // ComputeResources.test verifies the real drawer selection and navigation.
@@ -398,10 +399,10 @@ describe('AdminHostsPage', () => {
     mocked.pin.mockResolvedValue(pool([host(), host({ host: 'runner-b' })]));
     renderPage();
     const select = await screen.findByLabelText('New sandbox location');
-    expect(select).toHaveValue('runner-a');
-    fireEvent.change(select, { target: { value: '' } });
+    expect(select).toHaveTextContent('runner-a');
+    chooseOption(select, 'Automatic — available servers');
     await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith(null));
-    expect(screen.getByLabelText('New sandbox location')).toHaveValue('');
+    expect(screen.getByLabelText('New sandbox location')).toHaveTextContent(/^Automatic/);
     expect(await screen.findByRole('status')).toHaveTextContent('assigned automatically');
   });
 
@@ -410,9 +411,7 @@ describe('AdminHostsPage', () => {
     mocked.list.mockResolvedValue(pool(rows));
     mocked.pin.mockResolvedValue(pool(rows, 'gpu-box-kata'));
     renderPage();
-    fireEvent.change(await screen.findByLabelText('New sandbox location'), {
-      target: { value: 'gpu-box-kata' },
-    });
+    chooseOption(await screen.findByLabelText('New sandbox location'), 'gpu-box / gpu-box-kata');
     await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith('gpu-box-kata'));
     expect(await screen.findByRole('status')).toHaveTextContent('Existing retained chats stay');
   });
@@ -426,10 +425,10 @@ describe('AdminHostsPage', () => {
     mocked.pin.mockResolvedValue(pool(rows, 'gpu-kata-b'));
     renderPage();
     const select = await screen.findByLabelText('New sandbox location');
-    await waitFor(() => expect(within(select).getAllByRole('option')).toHaveLength(3));
-    fireEvent.change(select, { target: { value: 'gpu-kata-b' } });
+    await waitFor(() => expect(optionNames(select)).toHaveLength(3));
+    chooseOption(select, 'gpu-box / gpu-kata-b');
     await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith('gpu-kata-b'));
-    expect(select).toHaveValue('gpu-kata-b');
+    expect(select).toHaveTextContent('gpu-box / gpu-kata-b');
   });
 
   it('allows clearing a stale selection even with only one available server', async () => {
@@ -456,8 +455,10 @@ describe('AdminHostsPage', () => {
       ),
     );
     renderPage();
-    expect(await screen.findByLabelText('New sandbox location')).toHaveValue('__unavailable__');
-    expect(screen.getByRole('option', { name: 'Selected server unavailable' })).toBeDisabled();
+    const select = await screen.findByLabelText('New sandbox location');
+    expect(select).toHaveTextContent('Selected server unavailable');
+    const option = within(openSelect(select)).getByRole('option', { name: /unavailable/ });
+    expect(option).toHaveAttribute('aria-disabled', 'true');
   });
 
   it('counts busy servers as placement choices and excludes disabled servers', async () => {
@@ -470,8 +471,7 @@ describe('AdminHostsPage', () => {
     );
     renderPage();
     const select = await screen.findByLabelText('New sandbox location');
-    expect(within(select).getAllByRole('option')).toHaveLength(3);
-    expect(within(select).queryByRole('option', { name: 'disabled' })).not.toBeInTheDocument();
+    expect(optionNames(select)).toEqual(['Automatic — available servers', 'runner-a', 'runner-b']);
   });
 
   it('removes a busy host once its turns finish, without asking or touching the pin', async () => {
@@ -1199,7 +1199,7 @@ describe('capacity panel', () => {
 
     // The default is the enrollment the row's own numbers came from.
     const switcher = await screen.findByLabelText('Curve source');
-    expect(switcher).toHaveValue('gpu-box-kata');
+    expect(switcher).toHaveTextContent('gpu-box-kata');
     await waitFor(() =>
       expect(mocked.history).toHaveBeenCalledWith('gpu-box-kata', '1h', expect.anything()),
     );
@@ -1208,7 +1208,7 @@ describe('capacity panel', () => {
     mocked.history.mockResolvedValue(
       history({ host: 'gpu-box-runc', capacity_epoch: '33333333-3333-4333-8333-333333333333' }),
     );
-    fireEvent.change(switcher, { target: { value: 'gpu-box-runc' } });
+    chooseOption(switcher, 'gpu-box-runc');
 
     await waitFor(() =>
       expect(mocked.history).toHaveBeenCalledWith('gpu-box-runc', '1h', expect.anything()),
@@ -1358,7 +1358,7 @@ describe('capacity panel', () => {
     );
     expect(screen.queryByText(/re-enrolled/)).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText('Curve source'), { target: { value: 'box-b' } });
+    chooseOption(screen.getByLabelText('Curve source'), 'box-b');
 
     await waitFor(() =>
       expect(mocked.history).toHaveBeenCalledWith('box-b', '1h', expect.anything()),
@@ -1444,7 +1444,7 @@ describe('capacity panel', () => {
     await openPanel('box');
 
     await vi.waitFor(() => expect(screen.getByLabelText('Curve source')).toBeInTheDocument());
-    expect(within(screen.getByLabelText('Curve source')).getAllByRole('option')).toHaveLength(2);
+    expect(optionNames(screen.getByLabelText('Curve source'))).toHaveLength(2);
   });
 
   it('moves off a source that is removed while the panel is open', async () => {
@@ -1470,7 +1470,7 @@ describe('capacity panel', () => {
 
     await openPanel('box');
     await vi.waitFor(() => expect(screen.getByLabelText('Curve source')).toBeInTheDocument());
-    fireEvent.change(screen.getByLabelText('Curve source'), { target: { value: 'box-b' } });
+    chooseOption(screen.getByLabelText('Curve source'), 'box-b');
     await vi.waitFor(() =>
       expect(mocked.history).toHaveBeenCalledWith('box-b', '1h', expect.anything()),
     );
@@ -1635,10 +1635,10 @@ describe('polling and actions', () => {
       expect(screen.getByRole('rowheader', { name: 'box' })).toBeInTheDocument(),
     );
     await openPanel('box');
-    await vi.waitFor(() =>
-      expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything()),
-    );
-    await vi.waitFor(() => expect(screen.getByLabelText('Curve source')).toHaveValue('box-a'));
+    await vi.waitFor(() => {
+      expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything());
+      expect(screen.getByLabelText('Curve source')).toHaveTextContent('box-a');
+    });
 
     // box-b becomes the newest reporter on the next poll.
     mocked.history.mockClear();
@@ -1650,7 +1650,7 @@ describe('polling and actions', () => {
     );
     await vi.advanceTimersByTimeAsync(30_000);
 
-    expect(screen.getByLabelText('Curve source')).toHaveValue('box-a');
+    expect(screen.getByLabelText('Curve source')).toHaveTextContent('box-a');
     expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything());
     expect(mocked.history).not.toHaveBeenCalledWith('box-b', '1h', expect.anything());
   });
@@ -1849,7 +1849,7 @@ describe('runtime settings', () => {
     const panel = screen.getByRole('region', { name: 'Sandbox settings for runner-a' });
     const input = within(panel).getByLabelText('Container CPU for runner-a');
     expect(input).toHaveAttribute('placeholder', '4');
-    expect(within(panel).getByLabelText('Container CPU for runner-a unit')).toHaveValue('vCPU');
+    expect(within(panel).getByLabelText(/^Container CPU .* unit$/)).toHaveTextContent(/^vCPU$/);
     expect(within(panel).getByText('2 vCPU')).toBeInTheDocument();
     fireEvent.change(input, { target: { value: '1.25' } });
     fireEvent.submit(input.closest('form')!);
@@ -1886,7 +1886,7 @@ describe('runtime settings', () => {
     const panel = screen.getByRole('region', { name: 'Sandbox settings for runner-a' });
     const input = within(panel).getByLabelText('Turn time limit for runner-a');
     expect(input).toHaveAttribute('placeholder', '1');
-    expect(within(panel).getByLabelText('Turn time limit for runner-a unit')).toHaveValue('h');
+    expect(within(panel).getByLabelText(/^Turn time limit .* unit$/)).toHaveTextContent(/^h$/);
     const timeout = within(panel)
       .getByRole('rowheader', { name: 'Turn time limit' })
       .closest('tr')!;

@@ -12,6 +12,7 @@
 
 import Link from 'next/link';
 import { useState } from 'react';
+import { Select } from '@/components/ui/Select';
 
 import type { AgentRunnerHost, HostSettingDefinition, HostSettingValues } from '@/lib/api/admin';
 
@@ -182,22 +183,18 @@ function SettingForm({
             a value to clear. A row with nothing to clear holds an inert,
             hidden button rather than none. */}
         {units.length > 0 ? (
-          <select
+          <Select
             aria-label={`${label} unit`}
-            value={unit ?? undefined}
-            onChange={(event) => {
-              setUnit(event.target.value as InputUnit);
+            // With no unit chosen yet, the field shows the first, as a native select did.
+            value={unit ?? units[0]}
+            onValueChange={(next) => {
+              setUnit(next);
               setError(null);
             }}
             disabled={busy || disabled}
             className={UNIT_CLASS}
-          >
-            {units.map((option) => (
-              <option key={option} value={option}>
-                {option}
-              </option>
-            ))}
-          </select>
+            options={units.map((option) => ({ value: option, label: option }))}
+          />
         ) : (
           <span aria-hidden className="hidden w-20 shrink-0 sm:block" />
         )}

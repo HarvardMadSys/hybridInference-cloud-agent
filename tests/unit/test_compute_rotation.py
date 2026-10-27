@@ -16,6 +16,7 @@ from cloud_agent.application.compute_rotation import (
     classify_candidate_failure,
     next_node_type,
 )
+from cloud_agent.domain.compute import refused_for_capacity
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
 from cloud_agent.schemas_compute import RenewalPolicy
 
@@ -152,6 +153,40 @@ def test_next_type_skips_tried_types_and_stops_on_hopeless_failures():
 def test_failures_are_classified_by_what_can_be_seen(code, nodes, expected):
     operation = {"state": "blocked", "result": {"blocked_reasons": [{"code": code}]}}
     assert classify_candidate_failure(operation, {"nodes": nodes}) == (expected, code)
+
+
+def refused(**changes):
+    """A candidate acquisition whose create was definitely refused for capacity."""
+    result = {
+        "external_pending": False,
+        "blocked_reasons": [{"code": "capacity_unavailable"}],
+        **changes.pop("result", {}),
+    }
+    return {"state": "waiting", "step": "pending", "result": result, **changes}
+
+
+@pytest.mark.parametrize(
+    ("operation", "candidate", "expected"),
+    [
+        (refused(), {"nodes": []}, True),
+        # Rate limits and ambiguous answers keep their type.
+        (refused(result={"blocked_reasons": [{"code": "rate_limited"}]}), {}, False),
+        (refused(result={"blocked_reasons": [{"code": "rate_limited_or_capacity"}]}), {}, False),
+        (refused(state="unknown"), {}, False),
+        (refused(state="running"), {}, False),
+        # A provider identity means something may exist: never given up for a message.
+        (refused(result={"resource_ref": {"external_id": "e"}}), {}, False),
+        (refused(result={"external_id": "e"}), {}, False),
+        (refused(), {"external_id": "e"}, False),
+        (refused(), {"nodes": [{"id": "n"}]}, False),
+        (refused(step="resource_identified"), {}, False),
+        (refused(result={"external_pending": True}), {}, False),
+    ],
+)
+def test_only_a_create_refused_for_capacity_before_any_identity_counts(
+    operation, candidate, expected
+):
+    assert refused_for_capacity(operation, candidate) is expected
 
 
 def test_replacement_request_keeps_scope_but_never_the_old_identity():

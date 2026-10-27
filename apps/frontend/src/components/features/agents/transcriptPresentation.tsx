@@ -154,7 +154,11 @@ export function TranscriptPresentationControl({
           <circle cx="17" cy="12" r="2" />
           <circle cx="8" cy="18" r="2" />
         </svg>
-        <span>{t('transcript.display', { mode: t(`transcript.${value}`) })}</span>
+        {/* On a phone the label pushed the run controls onto a third header
+            row; the icon stays, and the label remains the button's name. */}
+        <span className="max-sm:sr-only">
+          {t('transcript.display', { mode: t(`transcript.${value}`) })}
+        </span>
         <svg
           aria-hidden="true"
           className="h-3 w-3 shrink-0"

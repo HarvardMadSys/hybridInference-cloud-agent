@@ -14,7 +14,7 @@ import type { AgentEvent, AgentJob } from '../types';
 import { useResizablePane } from '../useResizablePane';
 import { useWorkspaceTabs, type SideChatTab, type WorkspaceTab } from '../useWorkspaceTabs';
 import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
-import { matchesShortcut } from '@/lib/keyboardShortcuts';
+import { KEYBOARD_INPUT_SELECTOR, matchesShortcut } from '@/lib/keyboardShortcuts';
 
 export const WORKSPACE_WIDTH_STORAGE_KEY = 'agents.workspace.width';
 const WORKSPACE_DEFAULT_WIDTH = 560;
@@ -351,7 +351,7 @@ export function useJobDetailPanels({
       const target = event.target instanceof Element ? event.target : null;
       if (
         target?.closest(
-          'input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"], #job-workspace-pane',
+          `${KEYBOARD_INPUT_SELECTOR}, [role="dialog"], [role="menu"], #job-workspace-pane`,
         )
       ) {
         return;

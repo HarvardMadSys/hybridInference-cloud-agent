@@ -22,9 +22,15 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import SecretStr
 
+from cloud_agent.application.compute_release import NEVER_CREATED, release_evidence
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.compute_secrets import ComputeSecretError
-from cloud_agent.domain.compute import ComputeRefusal, discard_request_id, fingerprint
+from cloud_agent.domain.compute import (
+    ComputeRefusal,
+    discard_request_id,
+    fingerprint,
+    refused_for_capacity,
+)
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.operational_health import deliver_event
 from cloud_agent.ports.external.compute_provider import NodeObservation, ProviderError
@@ -480,18 +486,45 @@ class ComputeRotation:
                 "Identify it with the provider before retrying.",
             )
             return None
-        elif _now() - (_moment(current["created_at"]) or _now()) > _CANDIDATE_TIMEOUT:
-            failure = ("setup_failed", "candidate_timeout")
         else:
-            await self.reconciler._finish(
-                operation,
-                "waiting",
-                "preparing_candidate",
-                f"Preparing a replacement node ({current['node_type']}).",
-                retry=30,
-            )
-            return None
+            unfinished = await self._unfinished_failure(operation, current, acquire, candidate)
+            if unfinished is None:
+                await self.reconciler._finish(
+                    operation,
+                    "waiting",
+                    "preparing_candidate",
+                    f"Preparing a replacement node ({current['node_type']}).",
+                    retry=30,
+                )
+                return None
+            failure = unfinished
         await self._fail_candidate(operation, slot, current, *failure)
+        return None
+
+    async def _unfinished_failure(
+        self,
+        operation: dict[str, Any],
+        current: dict[str, Any],
+        acquire: dict[str, Any] | None,
+        candidate: dict[str, Any],
+    ) -> tuple[str, str] | None:
+        """Give up a replacement still being acquired, or return None to keep waiting.
+
+        A create refused for capacity is given up at once, the last type to
+        try included: the move then tries the next type or stops with the
+        reason none is left. The store stops the acquisition only while,
+        locked, it still shows that refusal; a retry that ran since the read
+        keeps what it got, and the move looks again.
+        """
+        if (
+            acquire is not None
+            and refused_for_capacity(acquire, candidate)
+            and await self._abandon(operation, current, refused=True) is not None
+        ):
+            # What the store confirmed, not only what was read before.
+            return "no_capacity", "capacity_unavailable"
+        if _now() - (_moment(current["created_at"]) or _now()) > _CANDIDATE_TIMEOUT:
+            return "setup_failed", "candidate_timeout"
         return None
 
     async def _open_candidate(
@@ -639,13 +672,7 @@ class ComputeRotation:
             await self._alert(
                 operation, "compute_rotation_attempt_failed", host=slot["host"], reason=code
             )
-        parameters = {"allocation_id": current["id"]}
-        discard = await self.repository.abandon_candidate(
-            allocation_id=current["id"],
-            request_id=discard_request_id(current["id"]),
-            fingerprint=fingerprint("discard", parameters),
-            **self.reconciler._fence(operation),
-        )
+        discard = await self._abandon(operation, current)
         if discard is not None:
             await self.reconciler._checkpoint(
                 operation,
@@ -658,6 +685,23 @@ class ComputeRotation:
             "releasing_candidate",
             "Releasing a replacement node that could not be used.",
             retry=30,
+        )
+
+    async def _abandon(
+        self, operation: dict[str, Any], current: dict[str, Any], *, refused: bool = False
+    ) -> dict[str, Any] | None:
+        """Stop a candidate's work and queue its one release; None while it cannot stop.
+
+        ``refused`` stops it only while its acquisition still shows a capacity
+        refusal that created nothing, checked under the store's lock.
+        """
+        parameters = {"allocation_id": current["id"]}
+        return await self.repository.abandon_candidate(
+            allocation_id=current["id"],
+            request_id=discard_request_id(current["id"]),
+            fingerprint=fingerprint("discard", parameters),
+            refused_acquisition_id=current["operation_id"] if refused else None,
+            **self.reconciler._fence(operation),
         )
 
     async def stage_candidate(
@@ -1224,12 +1268,8 @@ class ComputeRotation:
                 },
                 **self.reconciler._fence(operation),
             )
-            await self.reconciler._finish(
-                operation,
-                "succeeded",
-                "released",
-                "The replacement node was never created.",
-                result={"external_pending": False, "blocked_reasons": []},
+            await self.reconciler.release.released(
+                operation, NEVER_CREATED, "The replacement node was never created."
             )
             return
         # It never ran its Host, so its node scope needs no review: a failed
@@ -1246,12 +1286,10 @@ class ComputeRotation:
             )
             return
         await self.reconciler._save_observation(operation, allocation, observation)
-        await self.reconciler._finish(
+        await self.reconciler.release.released(
             operation,
-            "succeeded",
-            "released",
+            release_evidence(operation, observation),
             "The replacement node was released.",
-            result={"external_pending": False, "blocked_reasons": []},
         )
 
     # ---- shared ----------------------------------------------------------

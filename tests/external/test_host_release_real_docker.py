@@ -12,7 +12,8 @@ line it would send over SSH. Inside the node:
 
 The self-test's labels are not written out here: they are captured from the
 runner's own probe (``_probe_guest_observer_once``), so this test follows
-any change to them.
+any change to them. So are those of a runtime download's install and check
+containers (``RuntimeDownloads``) and of a chat's copy source (``tree_copy``).
 
 Unit tests stand in for Docker with a fake whose stopped runner stays stopped
 and whose listing cannot race a removal. Staging found both false
@@ -30,11 +31,13 @@ import asyncio
 import json
 import os
 import secrets
+import shlex
 import shutil
 import subprocess
 import time
 from itertools import pairwise
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -48,7 +51,10 @@ from cloud_agent.ports.external.host_bootstrap import BootstrapIntent, Deploymen
 from cloud_agent.providers.compute.host_bootstrap import SshHostBootstrap
 from cloud_agent_host.chat_sandbox import ChatSandboxManager
 from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
+from cloud_agent_host.runtime_downloads import RuntimeDownloads
+from cloud_agent_host.runtime_images import NAMESPACE_LABEL, WORK_LABEL
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.tree_copy import staged_tree
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -127,6 +133,63 @@ def _sandbox_labels(namespace: str) -> list[str]:
     return _labels(manager.build_create_command(spec))
 
 
+def _download_work(namespace: str) -> tuple[list[str], list[str], list[str]]:
+    """What a runtime download gives the work it leaves, from ``RuntimeDownloads`` itself.
+
+    The labels of an install container (the fetch and the install scripts),
+    those of the container a kept tree is committed from, and the changes
+    that commit makes to the candidate image. Its check is given the install
+    containers' label (``_install``) on top of the candidate's.
+    """
+    downloads = RuntimeDownloads(
+        docker=shutil.which("true") or "/bin/true", image=BASE, namespace=namespace, image_menu=dict
+    )
+    commands: list[list[str]] = []
+
+    def record(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        commands.append(args)
+        # The kept tree's container and its commit go through; nothing else.
+        made = args[0] == "commit" or (args[0] == "create" and "/bin/true" in args)
+        return subprocess.CompletedProcess(args, 0 if made else 1, "tree\n", "captured")
+
+    downloads._docker_run = record  # type: ignore[method-assign]
+    with pytest.raises(Exception, match="install container"):
+        downloads._container(BASE, "none", "true")
+    target = SimpleNamespace(runtime="codex", version="0.1.0")
+    downloads._keep_tree("install", "/opt/codex/0.1.0", "candidate", target)  # type: ignore[arg-type]
+    install, tree = [c for c in commands if c[0] == "create"]
+    (commit,) = [c for c in commands if c[0] == "commit"]
+    changes = [
+        part for flag, value in pairwise(commit) if flag == "--change" for part in (flag, value)
+    ]
+    return _labels(install), _labels(tree), changes
+
+
+def _copy_source_labels(namespace: str) -> list[str]:
+    """The labels of the stopped container a chat copies a tree out of (``tree_copy``)."""
+    manager = ChatSandboxManager(ContainerBackend(image=BASE, sandbox_namespace=namespace))
+    created: list[list[str]] = []
+
+    def refuse(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        created.append(command)
+        return subprocess.CompletedProcess(command, 1, "", "captured")
+
+    manager._run = refuse  # type: ignore[method-assign]
+    manager._require = lambda spec: None  # type: ignore[method-assign,assignment,return-value]
+    spec = ChatSandboxSpec(
+        thread_id="athr_owner", sandbox_id="asbx_owner", generation=1, runtime_id="claude-code"
+    )
+    with (
+        pytest.raises(SandboxError),
+        staged_tree(
+            manager, spec, image=lambda: BASE, source="/x", stage="/y", what="it", copy_timeout_s=1
+        ),
+    ):
+        pass
+    (create,) = created
+    return _labels(create)
+
+
 class Node:
     """One disposable node: its own Docker daemon, reached with ``docker exec``."""
 
@@ -159,6 +222,11 @@ class Node:
             "--filter",
             "label=org.freeinference.sandbox-namespace=" + namespace,
         ).split()
+
+    def work(self, namespace: str = PROJECT) -> dict[str, str]:
+        """The runtime download work of ``namespace``, by name, with its state."""
+        found = self.containers("--filter", f"label={WORK_LABEL}={namespace}")
+        return {c["name"]: c["state"] for c in found}
 
     def service(self, name: str) -> dict[str, str]:
         (service,) = [c for c in self.containers() if c["service"] == name]
@@ -238,9 +306,17 @@ def node(node_image: str) -> Iterator[Node]:
         _docker("rm", "--force", "--volumes", name, check=False)
 
 
-def _start_stack(node: Node) -> None:
-    """The deployment's Compose project: a restarting runner and its sandbox manager."""
+def _start_stack(node: Node, *, self_tests: bool = True) -> None:
+    """The deployment's Compose project: a restarting runner and its sandbox manager.
+
+    Without ``self_tests`` the runner stays up and creates nothing, as one
+    that qualified the host and went on to download a runtime.
+    """
     probe = " ".join(_probe_labels(PROJECT))
+    # What a refused runner did on every start: qualify the host with a fresh
+    # self-test sandbox, then exit.
+    refused = f"docker run -d {probe} {BASE} sleep 1d; sleep 1"
+    working = 'trap "exit 0" TERM; while true; do sleep 1; done'
     compose = {
         "services": {
             "runner": {
@@ -250,15 +326,32 @@ def _start_stack(node: Node) -> None:
                     "/usr/local/bin/docker:/usr/local/bin/docker:ro",
                     "/var/run/docker.sock:/var/run/docker.sock",
                 ],
-                # What a refused runner did on every start: qualify the host
-                # with a fresh self-test sandbox, then exit.
-                "command": ["sh", "-c", f"docker run -d {probe} {BASE} sleep 1d; sleep 1"],
+                "command": ["sh", "-c", refused if self_tests else working],
             },
             "sandbox-manager": {"image": BASE, "command": ["sleep", "1d"]},
         }
     }
     node.sh(f"printf '%s' '{json.dumps(compose)}' > {ROOT}/compose.yml")
     node.sh(f"docker compose -p {PROJECT} -f {ROOT}/compose.yml up -d")
+
+
+def _leave_download_work(node: Node, namespace: str = PROJECT, prefix: str = "work") -> None:
+    """The work of a runtime download its runner was stopped in, one container per step."""
+    install, tree, changes = _download_work(namespace)
+    # The fetch, still running once the runner attached to it is gone.
+    node.sh(
+        shlex.join(
+            ["docker", "run", "-d", "--name", f"{prefix}-fetch", *install, BASE, "sleep", "1d"]
+        )
+    )
+    # The install scripts, finished before the runner could remove them.
+    node.sh(shlex.join(["docker", "run", "--name", f"{prefix}-scripts", *install, BASE, "true"]))
+    # The container the installed tree is kept from, and the check of the
+    # candidate image committed from it.
+    node.sh(shlex.join(["docker", "create", "--name", f"{prefix}-tree", *tree, BASE, "true"]))
+    candidate = f"{prefix}-candidate:check"
+    node.sh(shlex.join(["docker", "commit", *changes, f"{prefix}-tree", candidate]))
+    node.sh(shlex.join(["docker", "create", "--name", f"{prefix}-check", *install, candidate]))
 
 
 def _wait(condition, message: str, seconds: float = 60) -> None:
@@ -295,6 +388,31 @@ async def test_release_stops_a_restarting_runner_and_its_inventory_comes_back_cl
 
 
 @pytest.mark.asyncio
+async def test_release_removes_the_runtime_download_work_its_runner_was_stopped_in(node):
+    """A runner stopped mid-download left work the inventory refused (2026-10-26)."""
+    _start_stack(node, self_tests=False)
+    _wait(lambda: node.service("runner")["state"] == "running", "the runner never started")
+    _leave_download_work(node)
+    assert node.work() == {
+        "work-fetch": "running",
+        "work-scripts": "exited",
+        "work-tree": "created",
+        "work-check": "created",
+    }
+    bootstrap = SshHostBootstrap(transport=NodeTransport(node), resolver=None)
+
+    # The work is not a self-test, and is not counted as one.
+    assert await bootstrap.quiesce(NODE, PROFILE, INTENT) == 0
+
+    assert node.service("runner")["state"] == "exited"
+    assert node.work() == {}
+    assert node.service("sandbox-manager")["state"] == "running"
+    inventory = await bootstrap.inventory(NODE, PROFILE, INTENT)
+    assert inventory.complete
+    assert inventory.blocked_reasons == ()
+
+
+@pytest.mark.asyncio
 async def test_release_keeps_owner_sandboxes_and_other_deployments(node):
     _start_stack(node)
     _wait(lambda: len(node.probes()) >= 1, "the runner never created its self-test")
@@ -303,17 +421,43 @@ async def test_release_keeps_owner_sandboxes_and_other_deployments(node):
     elsewhere = " ".join(_probe_labels("ca-elsewhere"))
     node.sh(f"docker run -d --name other-self-test {elsewhere} {BASE} sleep 1d")
     node.sh(f"docker run -d --name unmanaged {BASE} sleep 1d")
+    # Another deployment's download on the same daemon, under its own check.
+    _leave_download_work(node, "ca-elsewhere", prefix="other")
+    # A chat's copy source, and one that, like a chat or a copy source made
+    # from a version an earlier release kept, still has this one's work label.
+    source = shlex.join(_copy_source_labels(PROJECT))
+    work = f"--label {WORK_LABEL}={PROJECT}"
+    node.sh(f"docker create --name copy-source {source} {BASE} true")
+    node.sh(f"docker create --name old-copy-source {source} {work} {BASE} true")
+    node.sh(f"docker run -d --name owner-from-work {owner} {work} {BASE} sleep 1d")
+    # A check that names another deployment's namespace.
+    node.sh(f"docker create --name foreign-check {work} --label {NAMESPACE_LABEL}=ca-x {BASE} true")
+    _leave_download_work(node)
     bootstrap = SshHostBootstrap(transport=NodeTransport(node), resolver=None)
 
     await bootstrap.quiesce(NODE, PROFILE, INTENT)
 
     names = {c["name"]: c["state"] for c in node.containers()}
     assert names["owner-sandbox"] == names["other-self-test"] == names["unmanaged"] == "running"
+    assert names["owner-from-work"] == names["other-fetch"] == "running"
+    assert names["copy-source"] == names["old-copy-source"] == names["foreign-check"] == "created"
     assert node.probes() == []
+    assert node.work() == {
+        "old-copy-source": "created",
+        "owner-from-work": "running",
+        "foreign-check": "created",
+    }
+    assert set(node.work("ca-elsewhere")) == {
+        "other-fetch",
+        "other-scripts",
+        "other-tree",
+        "other-check",
+    }
     inventory = await bootstrap.inventory(NODE, PROFILE, INTENT)
-    # Still found and still refused: quiescing excuses only its own self-tests.
+    # Still found and still refused: quiescing excuses only its own self-tests
+    # and download work.
     assert inventory.complete
-    assert (inventory.retained_containers, inventory.unknown_containers) == (2, 1)
+    assert (inventory.retained_containers, inventory.unknown_containers) == (3, 8)
     assert set(inventory.blocked_reasons) == {
         "retained_containers_present",
         "unmanaged_containers_present",

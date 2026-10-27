@@ -8,6 +8,7 @@ import type {
   ComputeField,
   ComputeOperation,
 } from '@/lib/api/compute';
+import { Select } from '@/components/ui/Select';
 
 export const inputClass =
   'ui-input min-h-11 w-full disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-status-error';
@@ -215,22 +216,25 @@ export function ProviderFields({
               .join(' ') || undefined,
           required: field.required,
           value: values[field.key] ?? '',
-          onChange: (
-            event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>,
-          ) => onChange({ ...values, [field.key]: event.target.value }),
+          onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+            onChange({ ...values, [field.key]: event.target.value }),
         };
         return (
           <div key={field.key}>
             <Field label={field.label}>
               {field.type === 'select' ? (
-                <select {...common}>
-                  <option value="">Select…</option>
-                  {field.options?.map((option) => (
-                    <option value={option.value} key={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
+                <Select
+                  className={common.className}
+                  aria-invalid={common['aria-invalid']}
+                  aria-describedby={common['aria-describedby']}
+                  required={common.required}
+                  value={common.value}
+                  onValueChange={(next) => onChange({ ...values, [field.key]: next })}
+                  options={[
+                    { value: '', label: 'Select…' },
+                    ...(field.options ?? []).map(({ value, label }) => ({ value, label })),
+                  ]}
+                />
               ) : isTextArea ? (
                 <textarea {...common} rows={4} spellCheck={false} />
               ) : (

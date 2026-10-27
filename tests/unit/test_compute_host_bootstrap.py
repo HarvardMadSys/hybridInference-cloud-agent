@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 from dotenv import dotenv_values
 from pydantic import SecretStr, ValidationError
-from tests.support.host_docker import Docker, probe, sandbox, service
+from tests.support.host_docker import Docker, probe, sandbox, service, work
 
 from cloud_agent.ports.external.compute_provider import (
     NodeObservation,
@@ -32,6 +32,14 @@ from cloud_agent.providers.compute.host_bootstrap import (
     _READINESS,
     _REQUIRED_ENV,
     SshHostBootstrap,
+)
+from cloud_agent_host.chat_sandbox_models import CHAT_NAMESPACE_LABEL
+from cloud_agent_host.runtime_images import (
+    NAMESPACE_LABEL,
+    RUNTIME_LABEL,
+    SOURCE_LABEL,
+    VERSION_LABEL,
+    WORK_LABEL,
 )
 
 NODE = NodeObservation(
@@ -1094,14 +1102,162 @@ def test_quiesce_stops_the_runner_and_removes_only_its_own_self_tests(
 
 
 def test_quiesce_reports_a_runner_still_running(tmp_path, monkeypatch, capsys):
-    docker = Docker(service("runner-1", _PROJECT, "runner"), probe("probe", _PROJECT), stops=False)
+    docker = Docker(
+        service("runner-1", _PROJECT, "runner"),
+        probe("probe", _PROJECT),
+        {**work("download", _PROJECT), "running": False},
+        stops=False,
+    )
 
     assert _quiesce(tmp_path, monkeypatch, capsys, docker) == {
         "quiesced": False,
         "reason": "host_quiesce_failed",
     }
     # Nothing is removed while something could still be making more.
-    assert "probe" in docker.containers
+    assert {"probe", "download"} <= set(docker.containers)
+    assert [change[1] for change in docker.changes] == ["stop"]
+
+
+def test_quiesce_removes_the_runtime_download_work_its_runner_left(tmp_path, monkeypatch, capsys):
+    """A runner stopped mid-download leaves its install and check containers behind.
+
+    The inventory counts each as unmanaged, so release refused a node no one
+    had used (2026-10-26).
+    """
+    docker = Docker(
+        service("runner-1", _PROJECT, "runner"),
+        service("manager", _PROJECT, "sandbox-manager"),
+        # The fetch, still running once the runner that attached to it is gone.
+        work("fetch", _PROJECT, **{"org.freeinference.runtime.codex.version": "0.1.0"}),
+        # The install scripts, finished before anything removed them.
+        {**work("scripts", _PROJECT), "running": False},
+        # The check, made from the candidate image, which names its namespace.
+        {
+            **work(
+                "check",
+                _PROJECT,
+                **{NAMESPACE_LABEL: _PROJECT, RUNTIME_LABEL: "codex", VERSION_LABEL: "0.2.0"},
+            ),
+            "running": False,
+        },
+        probe("probe", _PROJECT),
+    )
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker) == {
+        "quiesced": True,
+        # Self-tests only: the work is not counted as one.
+        "probes_removed": 1,
+    }
+    assert docker.changes[0] == ["docker", "stop", "-t", "60", "runner-1"]
+    removed = [change[3:] for change in docker.changes if change[1:3] == ["rm", "--force"]]
+    assert removed == [["probe"], ["fetch", "scripts", "check"]]
+    assert set(docker.containers) == {"runner-1", "manager"}
+
+
+def test_quiesce_removes_no_work_but_its_own_deployments(tmp_path, monkeypatch, capsys):
+    mine = {WORK_LABEL: _PROJECT}
+    docker = Docker(
+        service("runner-1", _PROJECT, "runner"),
+        work("mine", _PROJECT),
+        work("elsewhere", "ca-another"),
+        # Docker matches a label's value whole: this is a different namespace.
+        work("longer", _PROJECT + "0"),
+        {"id": "unlabeled", "running": False, "labels": {}},
+        # A container of a kept version: its image empties the work label.
+        {**work("kept", ""), "running": False},
+        # A chat's copy source, made from a version an earlier release kept
+        # with the work label of the container it was committed from.
+        {**work("source", _PROJECT, **{SOURCE_LABEL: _PROJECT}), "running": False},
+        # Chats, checkpoints and environment snapshots made from such an image.
+        sandbox("chat", _PROJECT, **mine),
+        {
+            "id": "snapshot",
+            "running": False,
+            "labels": {**mine, "org.freeinference.chat-environment-snapshot": "env-1"},
+        },
+        {"id": "namespaced", "running": False, "labels": {**mine, CHAT_NAMESPACE_LABEL: _PROJECT}},
+        # Another deployment's check, or a Compose service: never install work.
+        work("foreign-check", _PROJECT, **{NAMESPACE_LABEL: "ca-another"}),
+        {
+            **service("worker", _PROJECT, "worker"),
+            "labels": {**service("worker", _PROJECT, "worker")["labels"], **mine},
+        },
+        # Labels of this platform this script does not know are no one's work.
+        work("attestation", _PROJECT, **{"org.freeinference.storage-attestation": "true"}),
+        work("environment-test", _PROJECT, **{"hybridinference.environment-test": "1"}),
+    )
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker) == {
+        "quiesced": True,
+        "probes_removed": 0,
+    }
+    assert docker.changes[1:] == [["docker", "rm", "--force", "mine"]]
+    assert set(docker.containers) == {
+        "runner-1",
+        "elsewhere",
+        "longer",
+        "unlabeled",
+        "kept",
+        "source",
+        "chat",
+        "snapshot",
+        "namespaced",
+        "foreign-check",
+        "worker",
+        "attestation",
+        "environment-test",
+    }
+
+
+@pytest.mark.parametrize(
+    "refused",
+    [
+        # The listing of this deployment's work.
+        f"label={WORK_LABEL}=",
+        # Reading the labels of what it found, as when one went meanwhile.
+        "container inspect",
+        # Removing it.
+        "rm --force mine",
+    ],
+)
+def test_quiesce_that_cannot_remove_its_work_fails(tmp_path, monkeypatch, capsys, refused):
+    docker = Docker(
+        service("runner-1", _PROJECT, "runner"), work("mine", _PROJECT), fails=(refused,)
+    )
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker) == {
+        "quiesced": False,
+        "reason": "host_quiesce_failed",
+    }
+    assert "mine" in docker.containers
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "not json",
+        json.dumps({"id": "mine"}),
+        json.dumps({"id": "mine", "labels": ["not", "a", "map"]}),
+        json.dumps({"id": "mine", "labels": []}),
+        # The ID Docker reports must be the one listed.
+        json.dumps({"id": "other", "labels": {WORK_LABEL: _PROJECT}}),
+        "",
+    ],
+)
+def test_quiesce_that_cannot_read_its_works_labels_fails(tmp_path, monkeypatch, capsys, answer):
+    docker = Docker(service("runner-1", _PROJECT, "runner"), work("mine", _PROJECT))
+    listing = docker.check_output
+
+    def check_output(args, **kwargs):
+        return answer if args[1:3] == ["container", "inspect"] else listing(args, **kwargs)
+
+    monkeypatch.setattr(docker, "check_output", check_output)
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker) == {
+        "quiesced": False,
+        "reason": "host_quiesce_failed",
+    }
+    assert "mine" in docker.containers
 
 
 def test_quiesce_never_touches_another_deployment(tmp_path, monkeypatch, capsys):

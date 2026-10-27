@@ -1,3 +1,7 @@
+/** Fields own keyboard input, including themed select triggers and option lists. */
+export const KEYBOARD_INPUT_SELECTOR =
+  'input, textarea, select, [role="combobox"], [role="listbox"], [contenteditable="true"]';
+
 export const SHORTCUT_ACTIONS = ['search', 'sidebar', 'workspace'] as const;
 export type ShortcutAction = (typeof SHORTCUT_ACTIONS)[number];
 
