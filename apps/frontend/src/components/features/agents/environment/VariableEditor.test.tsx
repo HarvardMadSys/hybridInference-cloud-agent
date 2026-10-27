@@ -5,6 +5,7 @@ import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { VariableEditor, variableEdits } from './VariableEditor';
 import type { EnvironmentVariable, VariableEdit } from '@/lib/api/environments';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 vi.mock('@/components/providers', () => ({ useT: () => (key: string) => key }));
 afterEach(cleanup);
@@ -34,9 +35,9 @@ describe('a saved variable the owner returns to its saved state', () => {
   it('keeps a Secret switched to Ordinary and back, instead of saving it empty', () => {
     const latest = harness([secret]);
     const type = screen.getByLabelText('environment.type API_KEY');
-    fireEvent.change(type, { target: { value: 'ordinary' } });
+    chooseOption(type, 'environment.ordinary');
     expect(latest.edits[0]).toMatchObject({ operation: 'replace', value: '' });
-    fireEvent.change(type, { target: { value: 'secret' } });
+    chooseOption(type, 'environment.secret');
     expect(latest.edits[0]).toMatchObject({ secret: true, operation: 'keep' });
     expect(latest.edits[0].value).toBeUndefined();
   });
@@ -54,8 +55,8 @@ describe('a saved variable the owner returns to its saved state', () => {
   it('keeps an ordinary value marked Secret and then Ordinary again', () => {
     const latest = harness([ordinary]);
     const type = screen.getByLabelText('environment.type LOG_LEVEL');
-    fireEvent.change(type, { target: { value: 'secret' } });
-    fireEvent.change(type, { target: { value: 'ordinary' } });
+    chooseOption(type, 'environment.secret');
+    chooseOption(type, 'environment.ordinary');
     expect(latest.edits[0]).toMatchObject({ secret: false, operation: 'keep', value: 'debug' });
   });
 
@@ -65,9 +66,7 @@ describe('a saved variable the owner returns to its saved state', () => {
     fireEvent.change(screen.getByLabelText('environment.value'), {
       target: { value: 'typed-secret-value' },
     });
-    fireEvent.change(screen.getByLabelText('environment.type'), {
-      target: { value: 'ordinary' },
-    });
+    chooseOption(screen.getByLabelText('environment.type'), 'environment.ordinary');
     expect(latest.edits[0]).toMatchObject({ secret: false, operation: 'replace', value: '' });
   });
 });

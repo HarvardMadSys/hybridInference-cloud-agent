@@ -16,6 +16,7 @@ import {
 } from '@/lib/api/compute';
 import { DEFAULT_MOVE_OUT_BEFORE_SECONDS } from '@/lib/computeDefaults';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
+import { Select } from '@/components/ui/Select';
 
 import {
   absoluteTime,
@@ -79,6 +80,18 @@ function selectedNodeType(value: string, binding: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Saved connections to choose from; one not yet verified is listed but cannot be chosen. */
+function connectionOptions(connections: ComputeConnection[]) {
+  return [
+    { value: '', label: 'Select…' },
+    ...connections.map((connection) => ({
+      value: connection.id,
+      label: `${connection.name}${connection.status === 'verified' ? '' : ' (not verified)'}`,
+      disabled: connection.status !== 'verified',
+    })),
+  ];
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -685,54 +698,32 @@ export default function CloudLabAutoscaling({
 
         <Section title="Credentials and deployment profiles">
           <Field label="Verified CloudLab account">
-            <select
+            <Select
               className={inputClass}
               required={configurationStarted && !isPausing}
               value={policy.connection_id ?? ''}
-              onChange={(event) =>
+              onValueChange={(next) =>
                 changePolicy((current) => ({
                   ...current,
-                  connection_id: event.target.value || null,
+                  connection_id: next || null,
                 }))
               }
-            >
-              <option value="">Select…</option>
-              {accountConnections.map((connection) => (
-                <option
-                  key={connection.id}
-                  value={connection.id}
-                  disabled={connection.status !== 'verified'}
-                >
-                  {connection.name}
-                  {connection.status === 'verified' ? '' : ' (not verified)'}
-                </option>
-              ))}
-            </select>
+              options={connectionOptions(accountConnections)}
+            />
           </Field>
           <Field label="Verified SSH key">
-            <select
+            <Select
               className={inputClass}
               required={configurationStarted && !isPausing}
               value={policy.ssh_connection_id ?? ''}
-              onChange={(event) =>
+              onValueChange={(next) =>
                 changePolicy((current) => ({
                   ...current,
-                  ssh_connection_id: event.target.value || null,
+                  ssh_connection_id: next || null,
                 }))
               }
-            >
-              <option value="">Select…</option>
-              {sshConnections.map((connection) => (
-                <option
-                  key={connection.id}
-                  value={connection.id}
-                  disabled={connection.status !== 'verified'}
-                >
-                  {connection.name}
-                  {connection.status === 'verified' ? '' : ' (not verified)'}
-                </option>
-              ))}
-            </select>
+              options={connectionOptions(sshConnections)}
+            />
           </Field>
           <fieldset className="space-y-2">
             <legend className="text-sm font-medium">Deployment profiles</legend>

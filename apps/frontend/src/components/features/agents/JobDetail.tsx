@@ -1,5 +1,6 @@
 'use client';
 
+import { KEYBOARD_INPUT_SELECTOR } from '@/lib/keyboardShortcuts';
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import toast from 'react-hot-toast';
 import { JobComposer } from './job-detail/JobComposer';
@@ -12,7 +13,6 @@ import { useJobComposerSettings } from './job-detail/useJobComposerSettings';
 import { useJobConversation } from './job-detail/useJobConversation';
 import { useJobDetailPanels, type SubagentTarget } from './job-detail/useJobDetailPanels';
 import { useJobRunActions } from './job-detail/useJobRunActions';
-
 import { useT } from '@/components/providers';
 import { WorkspaceLinkProvider } from '@/components/ui/Markdown';
 import { basePath } from '@/config/env';
@@ -547,7 +547,7 @@ export function JobDetail({
         !target?.closest('#job-activity-window') ||
         // A maximized panel restores on Escape; only the floating one closes.
         target.closest('#job-activity-window[data-maximized]') ||
-        target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')
+        target.closest(`${KEYBOARD_INPUT_SELECTOR}, [role="dialog"]`)
       )
         return;
       event.preventDefault();

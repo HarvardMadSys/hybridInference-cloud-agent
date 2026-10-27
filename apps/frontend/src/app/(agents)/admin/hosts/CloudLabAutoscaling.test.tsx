@@ -14,6 +14,7 @@ import type {
 import { APIError } from '@/lib/utils/errors';
 
 import CloudLabAutoscaling from './CloudLabAutoscaling';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 vi.mock('@/lib/api/compute', () => ({
   getCloudLabAutoscaling: vi.fn(),
@@ -744,12 +745,8 @@ describe('CloudLab auto-scaling panel', () => {
     expect(screen.getByText('Select a verified CloudLab account connection.')).toBeInTheDocument();
     expect(screen.getByText('Select a verified SSH key connection.')).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText('Verified CloudLab account'), {
-      target: { value: 'cloudlab-account' },
-    });
-    fireEvent.change(screen.getByLabelText('Verified SSH key'), {
-      target: { value: 'ssh-key' },
-    });
+    chooseOption(screen.getByLabelText('Verified CloudLab account'), 'FAST CloudLab');
+    chooseOption(screen.getByLabelText('Verified SSH key'), 'CloudLab SSH key');
     fireEvent.change(screen.getByLabelText('CloudLab project'), {
       target: { value: 'FAST25' },
     });

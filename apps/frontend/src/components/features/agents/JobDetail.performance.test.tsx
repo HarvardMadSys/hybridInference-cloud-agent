@@ -9,6 +9,7 @@ import { getThreadQueue } from '@/lib/api/pendingMessages';
 
 import { JobDetail } from './JobDetail';
 import type { AgentDiffFile, AgentEvent, AgentHistoryTurn, AgentJob } from './types';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 // What an interaction draws again, counted where the page's costly parts render.
 const drawn = vi.hoisted(() => ({
@@ -374,9 +375,7 @@ describe('job page rendering work', () => {
       ),
     ).toBeInTheDocument();
 
-    fireEvent.change(screen.getByRole('combobox', { name: 'Changed file' }), {
-      target: { value: 'src/app.ts' },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Changed file' }), /^src\/app\.ts /);
     expect(screen.getByLabelText('Diff for src/app.ts')).toHaveTextContent(
       '+export const ready = true;',
     );

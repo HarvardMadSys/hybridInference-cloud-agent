@@ -18,6 +18,7 @@ import {
   previewMcpImport,
   saveMcpImport,
 } from '@/lib/api/mcp';
+import { chooseOption, optionNames } from '@/components/ui/__tests__/select';
 
 const template: McpTemplateApi = {
   name: 'github',
@@ -114,7 +115,7 @@ describe('McpAddDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: 'GitHub' }));
     expect(listMcpCatalog).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Docs' })).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Connect with')).toHaveValue('static');
+    expect(screen.getByLabelText('Connect with')).toHaveTextContent('Personal access token');
     expect(screen.getByRole('link', { name: 'Create a token on GitHub ↗' })).toHaveAttribute(
       'href',
       'https://github.com/settings/personal-access-tokens/new',
@@ -156,8 +157,8 @@ describe('McpAddDialog', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'GitHub' }));
     fireEvent.change(screen.getByLabelText('Access token'), { target: { value: 'private-token' } });
-    fireEvent.change(screen.getByLabelText('Connect with'), { target: { value: 'oauth' } });
-    fireEvent.change(screen.getByLabelText('Connect with'), { target: { value: 'static' } });
+    chooseOption(screen.getByLabelText('Connect with'), 'Sign in with GitHub (recommended)');
+    chooseOption(screen.getByLabelText('Connect with'), 'Personal access token');
     expect(screen.getByLabelText('Access token')).toHaveValue('');
     expect(screen.getByRole('button', { name: 'Connect GitHub' })).toBeDisabled();
   });
@@ -172,7 +173,9 @@ describe('McpAddDialog', () => {
       />,
     );
     fireEvent.click(await screen.findByRole('button', { name: 'GitHub' }));
-    expect(screen.getByLabelText('Connect with')).toHaveValue('oauth');
+    expect(screen.getByLabelText('Connect with')).toHaveTextContent(
+      'Sign in with GitHub (recommended)',
+    );
     expect(screen.getByText(/No token or app setup needed/)).toBeInTheDocument();
     expect(screen.queryByLabelText('Access token')).not.toBeInTheDocument();
     expect(
@@ -239,7 +242,7 @@ describe('McpAddDialog', () => {
       />,
     );
     fireEvent.click(await screen.findByRole('button', { name: 'GitHub' }));
-    expect(screen.getByLabelText('Connect with')).toHaveValue('static');
+    expect(screen.getByLabelText('Connect with')).toHaveTextContent('Personal access token');
     fireEvent.change(screen.getByLabelText('Access token'), { target: { value: 'private-token' } });
     fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub' }));
     await waitFor(() =>
@@ -288,10 +291,10 @@ describe('McpAddDialog', () => {
     const add = await screen.findByRole('button', { name: 'Add 1 server' });
     expect(add).toBeDisabled();
     expect(screen.getByText('npx -y package /my folder')).toBeInTheDocument();
-    expect(screen.queryByRole('option', { name: 'Remote server' })).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Run location for docs'), {
-      target: { value: 'managed-worker' },
-    });
+    expect(optionNames(screen.getByLabelText('Run location for docs'))).not.toContain(
+      'Remote server',
+    );
+    chooseOption(screen.getByLabelText('Run location for docs'), 'Cloud worker');
     fireEvent.change(screen.getByLabelText('docs · Value for API_KEY'), {
       target: { value: 'private-token' },
     });
