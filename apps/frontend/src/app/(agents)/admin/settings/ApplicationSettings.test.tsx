@@ -14,6 +14,7 @@ import { getModelPreference } from '@/lib/api/modelPreference';
 import { APIError } from '@/lib/utils/errors';
 
 import ApplicationSettings from './ApplicationSettings';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 vi.mock('@/lib/api/adminSettings', () => ({
   getAgentAdminSettings: vi.fn(),
@@ -179,7 +180,7 @@ function selectCategory(category: string) {
 
 function editField(label: string): HTMLElement {
   let field = screen.getByLabelText(label);
-  if (!field.matches('input,select,textarea')) {
+  if (!field.matches('input,select,textarea,[role="combobox"]')) {
     const group = field.closest('form')!.parentElement!;
     const edit = within(group).queryByRole('button', { name: /^Edit .* settings$/ });
     if (edit) fireEvent.click(edit);
@@ -288,7 +289,7 @@ describe('application settings', () => {
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Restore default/ })).not.toBeInTheDocument();
     fireEvent.change(editField('Product name'), { target: { value: 'Accidental edit' } });
-    fireEvent.change(editField('Default runtime'), { target: { value: 'claude-code' } });
+    chooseOption(editField('Default runtime'), 'claude-code');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel editing Site' }));
     expect(screen.getByLabelText('Product name')).toHaveTextContent('Cloud Agent');
     expect(screen.getByLabelText('Default runtime')).toHaveTextContent('codex');
@@ -308,7 +309,7 @@ describe('application settings', () => {
     );
     render(<ApplicationSettings />);
     fireEvent.change(await loadedField('Product name'), { target: { value: 'New app' } });
-    fireEvent.change(editField('Default runtime'), { target: { value: 'claude-code' } });
+    chooseOption(editField('Default runtime'), 'claude-code');
     fireEvent.submit(editField('Product name').closest('form')!);
     const dialog = screen.getByRole('dialog', { name: 'Review changes' });
     expect(within(dialog).getByText('Cloud Agent')).toBeVisible();
@@ -1109,9 +1110,9 @@ describe('application settings', () => {
   it('renders typed fields, category descriptions, hidden secret status, and read-only setup', async () => {
     render(<ApplicationSettings />);
     expect(await loadedField('Product name')).toHaveValue('Cloud Agent');
-    expect(editField('Default runtime')).toHaveValue('codex');
+    expect(editField('Default runtime')).toHaveTextContent('codex');
     selectCategory('Access');
-    expect(editField('Registration')).toHaveValue('true');
+    expect(editField('Registration')).toHaveTextContent('Enabled');
     selectCategory('Limits');
     expect(editField('Retry factor')).toHaveValue(1.5);
     expect(screen.getByRole('heading', { name: 'Limits', level: 3 })).toBeInTheDocument();
@@ -1129,7 +1130,7 @@ describe('application settings', () => {
     render(<ApplicationSettings />);
     await loadedField('Product name');
     selectCategory('Access');
-    fireEvent.change(editField('Registration'), { target: { value: 'false' } });
+    chooseOption(editField('Registration'), 'Disabled');
     saveField('Registration');
     await waitFor(() =>
       expect(write).toHaveBeenCalledWith({ enabled: false }, 1, expect.any(AbortSignal)),
@@ -1212,9 +1213,7 @@ describe('application settings', () => {
 
     selectCategory('Access');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    fireEvent.change(editField('Registration'), {
-      target: { value: 'false' },
-    });
+    chooseOption(editField('Registration'), 'Disabled');
     saveField('Registration');
     await screen.findByText('Access settings saved.');
     expect(write).toHaveBeenCalledExactlyOnceWith({ enabled: false }, 1, expect.any(AbortSignal));

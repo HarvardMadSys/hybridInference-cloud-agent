@@ -166,6 +166,23 @@
     @apply border-accent;
   }
 
+  /* The shared select trigger; its caller's classes set the field's frame. */
+  .ui-select {
+    @apply cursor-pointer text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .ui-select:hover:not(:disabled) {
+    @apply bg-surface-hover;
+  }
+
+  .ui-select[aria-expanded='true'] {
+    @apply border-accent/60;
+  }
+
+  .ui-select:focus-visible {
+    @apply outline outline-2 outline-offset-2 outline-focus;
+  }
+
   .ui-composer {
     @apply relative rounded-xl border border-border bg-surface text-foreground;
     box-shadow: 0 1px 2px rgb(var(--ui-foreground) / 0.05);

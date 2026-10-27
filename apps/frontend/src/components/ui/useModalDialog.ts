@@ -4,6 +4,13 @@ import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react';
 
 const FOCUSABLE =
   'button, input:not([type="hidden"]), select, textarea, a[href], summary, [tabindex]';
+/**
+ * Marks a popup that a control inside the dialog opened, such as a select's
+ * menu, with that control's id. The popup is portalled into the dialog's
+ * panel, so it is neither inert nor outside focus containment; it handles its
+ * own Escape, and Tab moves on from its control.
+ */
+export const MODAL_POPUP = 'data-modal-popup';
 const dialogs: HTMLElement[] = [];
 const isolated = new Map<HTMLElement, { count: number; previous: string | null }>();
 let previousOverflow = '';
@@ -35,8 +42,22 @@ function available(element: HTMLElement): boolean {
   return element.tabIndex >= 0 && visible(element);
 }
 
+/** The control that opened the popup an element is in. */
+function popupOwner(element: Element | null): HTMLElement | null {
+  const popup = element?.closest(`[${MODAL_POPUP}]`);
+  return popup ? document.getElementById(popup.getAttribute(MODAL_POPUP) ?? '') : null;
+}
+
+/** Whether an open popup inside the dialog closes itself on this Escape first. */
+function popupTakesEscape(event: KeyboardEvent, panel: HTMLElement): boolean {
+  const target = event.target instanceof Element ? event.target : null;
+  return event.key === 'Escape' && !!target?.closest(`[${MODAL_POPUP}]`) && panel.contains(target);
+}
+
 function controls(panel: HTMLElement): HTMLElement[] {
-  const candidates = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(available);
+  const candidates = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+    (element) => available(element) && !element.closest(`[${MODAL_POPUP}]`),
+  );
   return candidates.filter((element) => {
     if (!(element instanceof HTMLInputElement) || element.type !== 'radio' || !element.name)
       return true;
@@ -108,6 +129,7 @@ export function useModalDialog(
     };
     const keyboard = (event: KeyboardEvent) => {
       if (!isTop() || (event.key !== 'Escape' && event.key !== 'Tab')) return;
+      if (popupTakesEscape(event, node)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       if (event.key === 'Escape') {
@@ -116,7 +138,8 @@ export function useModalDialog(
       }
       const items = controls(node);
       const step = event.shiftKey ? -1 : 1;
-      const at = items.indexOf(document.activeElement as HTMLElement);
+      const focused = document.activeElement;
+      const at = items.indexOf(popupOwner(focused) ?? (focused as HTMLElement));
       let next = at < 0 ? (event.shiftKey ? items.length - 1 : 0) : at + step;
       // A control can still refuse focus for a reason the DOM does not show.
       // Go on to the next one rather than holding Tab where it was.

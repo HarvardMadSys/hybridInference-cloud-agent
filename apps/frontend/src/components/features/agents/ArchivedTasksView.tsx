@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
+import { Select } from '@/components/ui/Select';
 import {
   AGENT_SESSION_SELECTION_LIMIT as BULK_LIMIT,
   deleteAgentSessions,
@@ -25,6 +26,8 @@ import { ArchiveProjectSection, type ArchiveProject } from './ArchiveProjectSect
 import { projectTitle } from './conversations';
 import { CONVERSATION_STATE_KEYS, type ConversationState } from './conversationState';
 
+const FILTER_SELECT =
+  'flex min-w-0 rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-xs text-gray-700 dark:border-white/10 dark:bg-gray-900 dark:text-gray-200';
 const GROUPS_PER_PAGE = 6;
 const BULK_PAGE_SIZE = 100;
 const SOFT_BUTTON = `inline-flex items-center justify-center gap-1.5 rounded-lg bg-gray-100 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-white/5 dark:text-gray-200 dark:hover:bg-white/10 ${ARCHIVE_FOCUS}`;
@@ -443,51 +446,39 @@ export function ArchivedTasksView() {
             className="min-w-0 flex-1 bg-transparent py-2.5 text-xs text-gray-900 outline-none placeholder:text-gray-400 disabled:opacity-50 dark:text-gray-100 dark:placeholder:text-gray-500"
           />
         </label>
-        <label className="relative flex min-w-0 items-center gap-2 rounded-lg border border-gray-200 bg-white pl-3 text-gray-400 focus-within:border-crimson/40 focus-within:ring-2 focus-within:ring-crimson/10 dark:border-white/10 dark:bg-gray-900 dark:text-gray-500">
-          <ArchiveIcon name="filter" className="h-4 w-4 shrink-0" />
-          <span className="sr-only">{t('archive.statusFilter')}</span>
-          <select
-            value={state}
-            disabled={filtersDisabled}
-            onChange={(event) => setState(event.target.value as ConversationState | '')}
-            className="w-full min-w-0 cursor-pointer appearance-none bg-transparent py-2.5 pr-8 text-xs text-gray-700 outline-none disabled:opacity-50 dark:text-gray-200 dark:[color-scheme:dark]"
-          >
-            <option value="">{t('archive.allStates')}</option>
-            {Object.entries(CONVERSATION_STATE_KEYS).map(([value, key]) => (
-              <option key={value} value={value}>
-                {t(key)}
-              </option>
-            ))}
-          </select>
-          <ArchiveIcon
-            name="chevron"
-            className="pointer-events-none absolute right-3 h-3 w-3 rotate-90"
-          />
-        </label>
-        <label className="relative flex min-w-0 items-center gap-2 rounded-lg border border-gray-200 bg-white pl-3 text-gray-400 focus-within:border-crimson/40 focus-within:ring-2 focus-within:ring-crimson/10 dark:border-white/10 dark:bg-gray-900 dark:text-gray-500">
-          <ArchiveIcon name="folder" className="h-4 w-4 shrink-0" />
-          <span className="sr-only">{t('archive.projectFilter')}</span>
-          <select
-            value={repo}
-            disabled={filtersDisabled}
-            onChange={(event) => setRepo(event.target.value)}
-            className="w-full min-w-0 cursor-pointer appearance-none truncate bg-transparent py-2.5 pr-8 text-xs text-gray-700 outline-none disabled:opacity-50 dark:text-gray-200 dark:[color-scheme:dark]"
-          >
-            <option value="">{t('archive.allProjects')}</option>
-            {repo && !projects.some((project) => project.repo === repo) ? (
-              <option value={repo}>{projectTitle(repo, t)}</option>
-            ) : null}
-            {projects.map((project) => (
-              <option key={project.repo} value={project.repo}>
-                {projectTitle(project.repo, t)}
-              </option>
-            ))}
-          </select>
-          <ArchiveIcon
-            name="chevron"
-            className="pointer-events-none absolute right-3 h-3 w-3 rotate-90"
-          />
-        </label>
+        <Select
+          aria-label={t('archive.statusFilter')}
+          icon={<ArchiveIcon name="filter" className="h-4 w-4" />}
+          value={state}
+          disabled={filtersDisabled}
+          onValueChange={setState}
+          className={FILTER_SELECT}
+          options={[
+            { value: '', label: t('archive.allStates') },
+            ...Object.entries(CONVERSATION_STATE_KEYS).map(([value, key]) => ({
+              value: value as ConversationState,
+              label: t(key),
+            })),
+          ]}
+        />
+        <Select
+          aria-label={t('archive.projectFilter')}
+          icon={<ArchiveIcon name="folder" className="h-4 w-4" />}
+          value={repo}
+          disabled={filtersDisabled}
+          onValueChange={setRepo}
+          className={FILTER_SELECT}
+          options={[
+            { value: '', label: t('archive.allProjects') },
+            ...(repo && !projects.some((project) => project.repo === repo)
+              ? [{ value: repo, label: projectTitle(repo, t) }]
+              : []),
+            ...projects.map((project) => ({
+              value: project.repo,
+              label: projectTitle(project.repo, t),
+            })),
+          ]}
+        />
       </div>
 
       {loading ? (

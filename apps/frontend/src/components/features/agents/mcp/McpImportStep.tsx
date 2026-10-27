@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useId, useRef, useState } from 'react';
+import { Select } from '@/components/ui/Select';
 import {
   previewMcpImport,
   saveMcpImport,
@@ -251,23 +252,22 @@ export function McpImportStep({
                 <div className="mt-3">
                   <label className="block text-xs font-medium text-gray-600 dark:text-gray-400">
                     Run this command on
-                    <select
+                    <Select<McpLocation>
                       aria-label={`Run location for ${draft.label}`}
                       value={locations[draft.label] ?? draft.location}
                       disabled={saving}
-                      onChange={(event) =>
-                        setLocations((current) => ({
-                          ...current,
-                          [draft.label]: event.target.value as McpLocation,
-                        }))
+                      onValueChange={(next) =>
+                        setLocations((current) => ({ ...current, [draft.label]: next }))
                       }
                       className={`mt-1 ${FIELD}`}
-                    >
-                      <option value="user-connector">
-                        Your computer (requires a connected MCP connector)
-                      </option>
-                      <option value="managed-worker">Cloud worker</option>
-                    </select>
+                      options={[
+                        {
+                          value: 'user-connector',
+                          label: 'Your computer (requires a connected MCP connector)',
+                        },
+                        { value: 'managed-worker', label: 'Cloud worker' },
+                      ]}
+                    />
                   </label>
                   <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
                     Commands run where you choose. Files and packages on your computer are not

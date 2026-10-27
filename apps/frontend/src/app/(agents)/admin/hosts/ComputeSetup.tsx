@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 
+import { Select } from '@/components/ui/Select';
 import { config } from '@/config/env';
 import {
   createAutomaticComputeSetup,
@@ -343,19 +344,19 @@ function AutomaticComputeSetup({
               </label>
               <label className="block text-sm">
                 <span className="mb-1 block font-medium">{name} SSH connection</span>
-                <select
+                <Select
                   className={inputClass}
                   required
                   value={value.connection_id}
-                  onChange={(event) => update({ ...value, connection_id: event.target.value })}
-                >
-                  <option value="">Select an administrative SSH key</option>
-                  {sshConnections.map((connection) => (
-                    <option key={connection.id} value={connection.id}>
-                      {connection.name}
-                    </option>
-                  ))}
-                </select>
+                  onValueChange={(next) => update({ ...value, connection_id: next })}
+                  options={[
+                    { value: '', label: 'Select an administrative SSH key' },
+                    ...sshConnections.map((connection) => ({
+                      value: connection.id,
+                      label: connection.name,
+                    })),
+                  ]}
+                />
               </label>
               <details>
                 <summary className="cursor-pointer text-sm">Custom SSH port</summary>

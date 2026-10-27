@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useModalDialog } from '@/components/ui/useModalDialog';
+import { Select } from '@/components/ui/Select';
 import type {
   AdminSettingDefinition,
   AdminSettingValue,
@@ -407,26 +408,29 @@ export function ApplicationSettingGroup({
           const value = drafts[key] ?? incoming(field);
           const error = errors[key];
           const hints = fieldHints(key, id, value, modelSuggestions);
-          const inputProps = {
+          const change = (next: string) => {
+            setDrafts((previous) => {
+              const updated = { ...previous };
+              if (next === incoming(field)) delete updated[key];
+              else updated[key] = next;
+              return updated;
+            });
+            setErrors((previous) => ({ ...previous, [key]: '' }));
+          };
+          const selectProps = {
             id,
-            name: key,
             value,
             disabled: busy,
             'aria-invalid': !!error,
             'aria-describedby': describedBy(id, hints.note, error),
             className: INPUT_CLASS,
-            onChange: (
-              event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>,
-            ) => {
-              const next = event.target.value;
-              setDrafts((previous) => {
-                const updated = { ...previous };
-                if (next === incoming(field)) delete updated[key];
-                else updated[key] = next;
-                return updated;
-              });
-              setErrors((previous) => ({ ...previous, [key]: '' }));
-            },
+            onValueChange: change,
+          };
+          const inputProps = {
+            ...selectProps,
+            name: key,
+            onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+              change(event.target.value),
           };
           return (
             <div
@@ -484,19 +488,24 @@ export function ApplicationSettingGroup({
                         )}
                       </div>
                     ) : field.kind === 'boolean' ? (
-                      <select {...inputProps}>
-                        <option value="true">Enabled</option>
-                        <option value="false">Disabled</option>
-                      </select>
+                      <Select
+                        {...selectProps}
+                        options={[
+                          { value: 'true', label: 'Enabled' },
+                          { value: 'false', label: 'Disabled' },
+                        ]}
+                      />
                     ) : field.choices?.length ? (
-                      <select {...inputProps}>
-                        {!field.choices.includes(value) && <option value={value}>{value}</option>}
-                        {field.choices.map((choice) => (
-                          <option key={choice} value={choice}>
-                            {choice || '(empty)'}
-                          </option>
-                        ))}
-                      </select>
+                      <Select
+                        {...selectProps}
+                        options={[
+                          ...(field.choices.includes(value) ? [] : [{ value, label: value }]),
+                          ...field.choices.map((choice) => ({
+                            value: choice,
+                            label: choice || '(empty)',
+                          })),
+                        ]}
+                      />
                     ) : field.kind === 'string' && (multiline[key] ?? value.includes('\n')) ? (
                       <textarea
                         {...inputProps}

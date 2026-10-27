@@ -135,7 +135,7 @@ describe('sandbox setting organization', () => {
 
       fireEvent.click(within(advanced).getByText('Advanced'));
       fireEvent.change(screen.getByLabelText(label), { target: { value: '2' } });
-      expect(screen.getByLabelText(`${label} unit`)).toHaveValue('h');
+      expect(screen.getByLabelText(`${label} unit`)).toHaveTextContent('h');
       expect(screen.getByText('Open terminals older than 2 h will close.')).toBeVisible();
       fireEvent.click(within(advanced).getByText('Advanced'));
       rerender(view(2));
@@ -144,7 +144,7 @@ describe('sandbox setting organization', () => {
 
       const amount = screen.getByLabelText(label);
       expect(amount).toHaveValue(2);
-      expect(screen.getByLabelText(`${label} unit`)).toHaveValue('h');
+      expect(screen.getByLabelText(`${label} unit`)).toHaveTextContent('h');
       fireEvent.submit(amount.closest('form')!);
       expect(onChange).toHaveBeenCalledWith('terminal_hard_ttl_s', 7200);
     },

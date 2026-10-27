@@ -9,7 +9,7 @@ export const CARD = 'ui-card rounded-2xl';
 // Shared semantic controls retain a solid, offset theme-aware focus indicator.
 export const BUTTON = 'ui-button ui-button-secondary min-h-11';
 //: A compact select for a toolbar, sized to sit beside a segmented control.
-export const TOOLBAR_SELECT = 'ui-input min-h-11 pl-3 pr-8 transition-colors hover:border-accent';
+export const TOOLBAR_SELECT = 'ui-input min-h-11 px-3 transition-colors hover:border-accent';
 //: An icon-only toolbar button; its label lives in aria-label and the tooltip.
 export const ICON_BUTTON = 'ui-icon-button ui-button-ghost h-11 w-11 shrink-0';
 export const INPUT = 'ui-input min-h-11 w-full placeholder:text-muted';

@@ -351,7 +351,7 @@ export function useJobDetailPanels({
       const target = event.target instanceof Element ? event.target : null;
       if (
         target?.closest(
-          'input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"], #job-workspace-pane',
+          'input, textarea, select, [role="combobox"], [role="listbox"], [contenteditable="true"], [role="dialog"], [role="menu"], #job-workspace-pane',
         )
       ) {
         return;

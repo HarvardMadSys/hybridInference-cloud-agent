@@ -190,6 +190,7 @@ vi.mock('@/lib/api/attachments', () => ({
 }));
 
 import { listSkills } from '@/lib/api/skills';
+import { chooseOption, optionNames } from '@/components/ui/__tests__/select';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 
 vi.mock('@/lib/api/agents', () => ({
@@ -4257,7 +4258,7 @@ describe('JobDetail', () => {
       // While a subagent is open, the trajectory tab shows that subagent's steps.
       fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
       const filter = await screen.findByRole('combobox', { name: 'Show steps from' });
-      expect(filter).toHaveDisplayValue('Turn 1 · Audit old code');
+      expect(filter).toHaveTextContent('Turn 1 · Audit old code');
       const trajectory = screen.getByRole('region', { name: 'Trajectory' });
       expect(trajectory).toHaveTextContent('src/dead.ts');
       expect(trajectory).toHaveTextContent('Unused helpers remain');
@@ -4265,7 +4266,7 @@ describe('JobDetail', () => {
       expect(trajectory).not.toHaveTextContent('Main agent summary');
 
       // Choosing every agent there is choosing the main conversation in Chat too.
-      fireEvent.change(filter, { target: { value: '' } });
+      chooseOption(filter, 'All agents');
       expect(screen.getByRole('region', { name: 'Trajectory' })).toHaveTextContent('pytest -q');
       fireEvent.click(screen.getByRole('button', { name: 'chat' }));
       expect(screen.queryByRole('region', { name: /^Subagent: / })).not.toBeInTheDocument();
@@ -4911,11 +4912,9 @@ describe('JobDetail', () => {
 
     const git = screen.getByLabelText('Git workspace');
     await waitFor(() => expect(within(git).getByText('-plain text')).toBeInTheDocument());
-    expect(
-      within(git)
-        .getAllByRole('option')
-        .map((option) => option.textContent),
-    ).toEqual(['config.yml (+1 −1)']);
+    expect(optionNames(within(git).getByRole('combobox', { name: 'Changed file' }))).toEqual([
+      'config.yml (+1 −1)',
+    ]);
     expect(within(git).getByText('+shared/config.yml')).toBeInTheDocument();
   });
 
@@ -4959,12 +4958,8 @@ describe('JobDetail', () => {
     );
     openWorkspace();
     const picker = screen.getByRole('combobox', { name: 'Changed file' });
-    expect(
-      within(picker)
-        .getAllByRole('option')
-        .map((option) => option.textContent),
-    ).toEqual(['src/auth/index.ts (+1 −0)', 'src/ui/index.ts (+1 −0)']);
-    fireEvent.change(picker, { target: { value: 'src/ui/index.ts' } });
+    expect(optionNames(picker)).toEqual(['src/auth/index.ts (+1 −0)', 'src/ui/index.ts (+1 −0)']);
+    chooseOption(picker, 'src/ui/index.ts (+1 −0)');
     const diff = screen.getByRole('region', { name: 'Diff for src/ui/index.ts' });
     expect(diff).toHaveTextContent('+ui');
     expect(diff).not.toHaveTextContent('+auth');

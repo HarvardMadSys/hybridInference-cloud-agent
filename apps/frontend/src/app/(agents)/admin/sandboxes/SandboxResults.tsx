@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { conversationHref } from '@/lib/api/adminConversations';
+import { Select } from '@/components/ui/Select';
 import type { AdminSandboxState } from '@/lib/api/adminSandboxes';
 
 import { BUTTON, dateTime, ErrorNotice } from '../runs/shared';
@@ -28,6 +29,8 @@ import {
   type SandboxSortKey,
 } from './inventory';
 
+const FILTER_SELECT =
+  'mt-1 block rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground';
 const STATE_OPTIONS: { value: AdminSandboxState | 'all'; label: string }[] = [
   { value: 'running', label: 'Running' },
   { value: 'all', label: 'All states' },
@@ -161,23 +164,18 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
         <div className="flex flex-wrap items-center gap-3">
           <label className="text-sm text-gray-500 dark:text-gray-400">
             State
-            <select
+            <Select
               aria-label="Sandbox state"
               value={stateFilter}
               disabled={batchBusy}
               className="ui-input ml-2 min-h-11"
-              onChange={(event) => {
+              onValueChange={(next) => {
                 setSnapshot(null);
                 setLoading(true);
-                setStateFilter(event.target.value as AdminSandboxState | 'all');
+                setStateFilter(next);
               }}
-            >
-              {STATE_OPTIONS.map(({ value, label }) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
+              options={STATE_OPTIONS}
+            />
           </label>
           <label className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
             <input
@@ -218,55 +216,45 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
         </label>
         <label className="text-xs text-gray-500 dark:text-gray-400">
           Host
-          <select
+          <Select
             aria-label="Sandbox host"
             value={hostFilter}
             disabled={batchBusy}
-            onChange={(event) => setHostFilter(event.target.value)}
-            className="mt-1 block rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
-          >
-            <option value="">All hosts</option>
-            {hostFilter && !hosts.includes(hostFilter) && (
-              <option value={hostFilter}>{hostFilter}</option>
-            )}
-            {hosts.map((host) => (
-              <option key={host} value={host}>
-                {host}
-              </option>
-            ))}
-          </select>
+            onValueChange={setHostFilter}
+            className={FILTER_SELECT}
+            options={[
+              { value: '', label: 'All hosts' },
+              ...(hostFilter && !hosts.includes(hostFilter)
+                ? [{ value: hostFilter, label: hostFilter }]
+                : []),
+              ...hosts.map((host) => ({ value: host, label: host })),
+            ]}
+          />
         </label>
         <label className="text-xs text-gray-500 dark:text-gray-400">
           Activity
-          <select
+          <Select<SandboxActivityFilter>
             aria-label="Sandbox activity"
             value={activityFilter}
             disabled={batchBusy}
-            onChange={(event) => setActivityFilter(event.target.value as SandboxActivityFilter)}
-            className="mt-1 block rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
-          >
-            <option value="all">All activity</option>
-            <option value="executing">Executing</option>
-            <option value="idle">Idle</option>
-          </select>
+            onValueChange={setActivityFilter}
+            className={FILTER_SELECT}
+            options={[
+              { value: 'all', label: 'All activity' },
+              { value: 'executing', label: 'Executing' },
+              { value: 'idle', label: 'Idle' },
+            ]}
+          />
         </label>
         <label className="text-xs text-gray-500 dark:text-gray-400">
           Sort by
-          <select
+          <Select
             aria-label="Sort sandboxes"
             value={sort.key}
-            onChange={(event) => {
-              const key = event.target.value as SandboxSortKey;
-              setSort({ key, direction: defaultSortDirection(key) });
-            }}
-            className="mt-1 block rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
-          >
-            {SORT_OPTIONS.map(({ key, label }) => (
-              <option key={key} value={key}>
-                {label}
-              </option>
-            ))}
-          </select>
+            onValueChange={(key) => setSort({ key, direction: defaultSortDirection(key) })}
+            className={FILTER_SELECT}
+            options={SORT_OPTIONS.map(({ key, label }) => ({ value: key, label }))}
+          />
         </label>
         <button
           type="button"

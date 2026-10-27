@@ -60,6 +60,7 @@ vi.mock('@/lib/api/adminUsage', () => ({ getAdminUsage: vi.fn() }));
 
 import { getAdminUsage } from '@/lib/api/adminUsage';
 import AdminUsagePageComponent from './page';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 const DAY_MS = 86_400_000;
 
@@ -231,7 +232,7 @@ describe('admin usage page', () => {
     const comparison = vi.mocked(getAdminUsage).mock.calls[1][0];
     expect(comparison.until).toBe(selection.since);
     expect(Date.parse(comparison.until!) - Date.parse(comparison.since!)).toBe(7 * DAY_MS);
-    expect(screen.getByLabelText('Turn created')).toHaveValue('7');
+    expect(screen.getByLabelText('Turn created')).toHaveTextContent('Last 7 days');
     expect(
       within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('link', {
         name: 'Usage',
@@ -428,13 +429,13 @@ describe('admin usage page', () => {
     search.value = 'since=2026-08-01T00:00:00.000Z&until=2026-08-08T00:00:00.000Z&model=model-a';
     render(<AdminUsagePageComponent />);
     await loaded();
-    fireEvent.change(screen.getByLabelText('Turn created'), { target: { value: '30' } });
+    chooseOption(screen.getByLabelText('Turn created'), 'Last 30 days');
     await waitFor(() => expect(reads()).toHaveLength(2));
     const second = reads()[1];
     expect(Date.parse(second.until!) - Date.parse(second.since!)).toBe(30 * DAY_MS);
     expect(Date.now() - Date.parse(second.until!)).toBeLessThan(60_000);
     expect(second.model).toBe('model-a');
-    expect(screen.getByLabelText('Turn created')).toHaveValue('30');
+    expect(screen.getByLabelText('Turn created')).toHaveTextContent('Last 30 days');
   });
 
   it('re-anchors a window chosen here on Refresh', async () => {
@@ -490,7 +491,7 @@ describe('admin usage page', () => {
       (filters) => new Promise<AdminUsage>((resolve) => pending.push({ filters, resolve })),
     );
     render(<AdminUsagePageComponent />);
-    fireEvent.change(screen.getByLabelText('Turn created'), { target: { value: '30' } });
+    chooseOption(screen.getByLabelText('Turn created'), 'Last 30 days');
     await waitFor(() => expect(pending).toHaveLength(4));
     // The first selection's answer arrives last and must not be shown.
     pending[2].resolve(usage({ summary: aggregate({ run_count: 9 }) }));
@@ -546,7 +547,7 @@ describe('admin usage page', () => {
       user_id: 'owner-two',
     });
     expect(await screen.findByTitle('owner-two')).toBeInTheDocument();
-    expect(screen.getByLabelText('Turn created')).toHaveValue('custom');
+    expect(screen.getByLabelText('Turn created')).toHaveTextContent('Custom');
     expect(screen.getByText('Aug 1 – Aug 8')).toBeInTheDocument();
   });
 
@@ -580,7 +581,7 @@ describe('admin usage page', () => {
     const replace = vi.spyOn(window.history, 'replaceState');
     render(<AdminUsagePageComponent />);
     await screen.findByRole('alert');
-    fireEvent.change(screen.getByLabelText('Turn created'), { target: { value: '30' } });
+    chooseOption(screen.getByLabelText('Turn created'), 'Last 30 days');
     await waitFor(() => expect(reads()).toHaveLength(1));
     const [selection] = reads();
     expect(Date.parse(selection.until!) - Date.parse(selection.since!)).toBe(30 * DAY_MS);

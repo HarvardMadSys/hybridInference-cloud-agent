@@ -6,6 +6,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
+import { Select } from '@/components/ui/Select';
 import {
   getMeasurement,
   getMeasurementWriterStatus,
@@ -354,18 +355,15 @@ function TimingsPanel({
         {runs.length > 1 || (runs.length === 1 && !run) ? (
           <label className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
             Run
-            <select
+            <Select
               className={`${INPUT} w-64 py-1.5`}
               value={runId}
-              onChange={(event) => onPick(event.target.value)}
-            >
-              {!run && <option value={runId}>{runId}</option>}
-              {runs.map((entry) => (
-                <option key={entry.run_id} value={entry.run_id}>
-                  {runLabel(entry)}
-                </option>
-              ))}
-            </select>
+              onValueChange={onPick}
+              options={[
+                ...(run ? [] : [{ value: runId, label: runId }]),
+                ...runs.map((entry) => ({ value: entry.run_id, label: runLabel(entry) })),
+              ]}
+            />
           </label>
         ) : (
           <span className="text-xs text-gray-500 dark:text-gray-400" title={runId}>
@@ -594,29 +592,26 @@ function SamplesPanel({
         >
           Samples
         </h3>
-        <label className="w-52 shrink-0">
-          <span className="sr-only">Operation</span>
-          <select
-            className={`${INPUT} py-1.5`}
-            value={operationValue}
-            onChange={(event) => {
-              const value = event.target.value;
-              if (value === SEVERAL) return;
-              update({ operation: value ? [value] : [], measurement: null });
-            }}
-          >
-            <option value="">All operations</option>
-            {LISTED_OPERATIONS.map((operation) => (
-              <option key={operation} value={operation}>
-                {operationName(operation)}
-              </option>
-            ))}
-            {operationValue === SEVERAL && (
-              <option value={SEVERAL}>{selection.operation.map(operationName).join(', ')}</option>
-            )}
-            {unlistedOperation && <option value={operationValue}>{operationValue}</option>}
-          </select>
-        </label>
+        <Select
+          aria-label="Operation"
+          className={`${INPUT} w-52 shrink-0 py-1.5`}
+          value={operationValue}
+          onValueChange={(value) => {
+            if (value === SEVERAL) return;
+            update({ operation: value ? [value] : [], measurement: null });
+          }}
+          options={[
+            { value: '', label: 'All operations' },
+            ...LISTED_OPERATIONS.map((operation) => ({
+              value: operation,
+              label: operationName(operation),
+            })),
+            ...(operationValue === SEVERAL
+              ? [{ value: SEVERAL, label: selection.operation.map(operationName).join(', ') }]
+              : []),
+            ...(unlistedOperation ? [{ value: operationValue, label: operationValue }] : []),
+          ]}
+        />
       </div>
 
       {chips.length > 0 && (

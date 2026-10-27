@@ -6,6 +6,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
+import { Select } from '@/components/ui/Select';
 import {
   getAdminUsage,
   type AdminUsage,
@@ -244,21 +245,17 @@ function UsageView({
 
         <h2 className="sr-only">Usage</h2>
         <div className="ui-card mt-6 flex flex-wrap items-center gap-3 p-3">
-          <label className="shrink-0" title={BASIS}>
-            <span className="sr-only">Turn created</span>
-            <select
-              className={TOOLBAR_SELECT}
-              value={windowKey}
-              onChange={(e) => chooseWindow(e.target.value)}
-            >
-              {PRESETS.map((preset) => (
-                <option key={preset.key} value={preset.key}>
-                  {preset.label}
-                </option>
-              ))}
-              {windowKey === 'custom' && <option value="custom">Custom</option>}
-            </select>
-          </label>
+          <Select
+            aria-label="Turn created"
+            title={BASIS}
+            className={`${TOOLBAR_SELECT} shrink-0`}
+            value={windowKey}
+            onValueChange={chooseWindow}
+            options={[
+              ...PRESETS.map((preset) => ({ value: preset.key, label: preset.label })),
+              ...(windowKey === 'custom' ? [{ value: 'custom', label: 'Custom' }] : []),
+            ]}
+          />
           {windowKey === 'custom' && !linkError && (
             <span className="text-xs text-gray-500 dark:text-gray-400">
               {shortDay(filters.since)} – {shortDay(filters.until)}
