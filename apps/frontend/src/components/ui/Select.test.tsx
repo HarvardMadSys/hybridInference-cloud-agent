@@ -28,6 +28,7 @@ function Controlled({
   searchable?: boolean;
   disabled?: boolean;
   required?: boolean;
+  name?: string;
   placeholder?: string;
 }) {
   const [value, setValue] = useState(initial);
@@ -327,6 +328,40 @@ describe('Select', () => {
     fireEvent.click(trigger);
     fireEvent.click(screen.getByRole('option', { name: 'Key one' }));
     expect(form.checkValidity()).toBe(true);
+  });
+
+  it('keeps named form values and rejects a required choice removed by a refresh', () => {
+    const view = render(
+      <form>
+        <Controlled initial="apple" name="fruit" required />
+      </form>,
+    );
+    const form = screen.getByRole('combobox', { name: 'Fruit' }).closest('form')!;
+    expect(new FormData(form).get('fruit')).toBe('apple');
+    expect(form.checkValidity()).toBe(true);
+
+    view.rerender(
+      <form>
+        <Controlled initial="apple" name="fruit" required options={[]} />
+      </form>,
+    );
+    expect(form.checkValidity()).toBe(false);
+    expect(new FormData(form).get('fruit')).toBe('');
+
+    view.rerender(
+      <form>
+        <Controlled initial="apple" name="fruit" disabled required />
+      </form>,
+    );
+    expect(form.checkValidity()).toBe(true);
+    expect(new FormData(form).has('fruit')).toBe(false);
+
+    view.rerender(
+      <form>
+        <Controlled initial="apple" name="fruit" />
+      </form>,
+    );
+    expect(new FormData(form).get('fruit')).toBe('apple');
   });
 
   it('forwards its ref to the trigger', () => {

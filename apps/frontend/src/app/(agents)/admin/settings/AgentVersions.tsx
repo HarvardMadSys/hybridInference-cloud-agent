@@ -42,13 +42,6 @@ function defaultLabel(servers: NamedHost[], runtime: string): string {
   return 'Server default';
 }
 
-/**
- * Servers whose image lacks a version, with what their new sandboxes run instead.
- *
- * A selection a server cannot serve is not an error at claim time: that server
- * falls back to its own default (`resolve_runtime_version`). The page names
- * those servers so the fallback is not a surprise.
- */
 function versionOptions(versions: string[]) {
   return versions.map((version) => ({ value: version, label: version }));
 }
@@ -62,6 +55,13 @@ function versionChoices(versions: string[], fromNpm: string[]): SelectItem[] {
   ];
 }
 
+/**
+ * Servers whose image lacks a version, with what their new sandboxes run instead.
+ *
+ * A selection a server cannot serve is not an error at claim time: that server
+ * falls back to its own default (`resolve_runtime_version`). The page names
+ * those servers so the fallback is not a surprise.
+ */
 function lacking(servers: NamedHost[], runtime: string, version: string) {
   return servers.flatMap(({ name, host }) =>
     (host.runtime_versions_available?.[runtime] ?? []).includes(version)

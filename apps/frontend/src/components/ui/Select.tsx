@@ -37,6 +37,7 @@ export interface SelectProps<T extends string> {
   onValueChange: (value: T) => void;
   options: readonly SelectItem<T>[];
   id?: string;
+  name?: string;
   disabled?: boolean;
   /** Blocks form submission while the value is empty, as on a native select. */
   required?: boolean;
@@ -463,25 +464,32 @@ function assignRef<E>(ref: ForwardedRef<E>, node: E | null) {
 }
 
 /**
- * Native constraint validation for a required select's form: the browser
- * reports an empty value here, and focus goes on to the trigger.
+ * Preserve named form values and native required validation. The browser
+ * reports a missing selection here, and focus goes on to the trigger.
  */
 function ValidationProxy({
   value,
+  name,
+  required,
   disabled,
   onFocus,
 }: {
-  value: string;
+  value: string | undefined;
+  name?: string;
+  required: boolean;
   disabled: boolean;
   onFocus: () => void;
 }) {
+  if (!required && !name) return null;
   return (
     <input
+      type={required ? 'text' : 'hidden'}
+      name={name}
       tabIndex={-1}
       aria-hidden
-      required
+      required={required}
       disabled={disabled}
-      value={value}
+      value={value ?? ''}
       onChange={() => {}}
       onFocus={onFocus}
       className="pointer-events-none absolute h-px w-px opacity-0"
@@ -657,13 +665,13 @@ function SelectImpl<T extends string>(
           open={visible}
         />
       </button>
-      {required ? (
-        <ValidationProxy
-          value={value}
-          disabled={disabled}
-          onFocus={() => trigger.current?.focus()}
-        />
-      ) : null}
+      <ValidationProxy
+        value={selected?.value}
+        name={props.name}
+        required={required}
+        disabled={disabled}
+        onFocus={() => trigger.current?.focus()}
+      />
       {menu}
     </>
   );

@@ -594,7 +594,7 @@ function SamplesPanel({
         </h3>
         <Select
           aria-label="Operation"
-          className={`${INPUT} w-52 shrink-0 py-1.5`}
+          className="ui-input min-h-11 w-52 shrink-0 py-1.5"
           value={operationValue}
           onValueChange={(value) => {
             if (value === SEVERAL) return;

@@ -371,7 +371,7 @@ export function ApplicationSettingGroup({
             requestAnimationFrame(() =>
               form.current
                 ?.querySelector<HTMLElement>(
-                  'input:not([type="checkbox"]), select, textarea, [data-replace]',
+                  'input:not([type="checkbox"]):not([type="hidden"]), [role="combobox"], textarea, [data-replace]',
                 )
                 ?.focus(),
             );
@@ -417,18 +417,18 @@ export function ApplicationSettingGroup({
             });
             setErrors((previous) => ({ ...previous, [key]: '' }));
           };
-          const selectProps = {
+          const fieldProps = {
             id,
+            name: key,
             value,
             disabled: busy,
             'aria-invalid': !!error,
             'aria-describedby': describedBy(id, hints.note, error),
             className: INPUT_CLASS,
-            onValueChange: change,
           };
+          const selectProps = { ...fieldProps, onValueChange: change };
           const inputProps = {
-            ...selectProps,
-            name: key,
+            ...fieldProps,
             onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
               change(event.target.value),
           };

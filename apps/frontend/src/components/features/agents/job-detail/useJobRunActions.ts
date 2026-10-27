@@ -1,5 +1,6 @@
 'use client';
 
+import { KEYBOARD_INPUT_SELECTOR } from '@/lib/keyboardShortcuts';
 import { useT } from '@/components/providers';
 import { cancelAgentJob, forkAgentJob, restoreAgentJob } from '@/lib/api/agents';
 import { useRouter } from 'next/navigation';
@@ -73,9 +74,7 @@ export function useJobRunActions({
         event.key !== 'Escape' ||
         event.repeat ||
         event.defaultPrevented ||
-        target?.closest(
-          'input, textarea, select, [role="combobox"], [role="listbox"], [contenteditable="true"]',
-        ) ||
+        target?.closest(KEYBOARD_INPUT_SELECTOR) ||
         // The open mobile task list hides the conversation, and Escape closes
         // the list. It must not also stop a run the owner cannot see.
         document.getElementById('agents-workspace')?.hidden
