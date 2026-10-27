@@ -26,13 +26,18 @@ export const PLATFORM_EFFORTS = ['low', 'medium', 'high', 'max'];
  * The levels to show for a pair, weakest first, or `[]` for no control.
  *
  * The model's entry in `model_reasoning_efforts` is read as a yes/no — does
- * this model take the parameter — and not for its contents.
+ * this model take the parameter — and not for its contents. That list is the
+ * Gateway's, so a model on a personal connection never matches it by name.
  */
 export function offeredEfforts(
   config: AgentConfigApi | null,
   runtime: string,
   model: string,
+  connectionId: string | null = null,
 ): string[] {
+  // An owner's own connection runs at Auto: the Gateway's registry says which
+  // of its models take the parameter, and nothing says that of a provider's.
+  if (connectionId) return [];
   const runtimeLevels = config?.runtime_reasoning_efforts?.[runtime] ?? [];
   const modelTakesIt = (config?.model_reasoning_efforts?.[model] ?? []).length > 0;
   if (!modelTakesIt) return [];

@@ -12,6 +12,7 @@ from .base import (
     AgentRuntime,
     RuntimeCapabilities,
     RuntimeMCPConfig,
+    openai_base_url,
 )
 
 
@@ -54,7 +55,11 @@ class CodexRuntime(AgentRuntime):
         layer for app-server (which has no ``--ignore-user-config`` flag).
         """
         _ = (workdir, model, provides_isolation, resume_session_id, activation_dir)
-        base = gateway_base_url.rstrip("/").removesuffix("/v1")
+        # An owner connection's exact URL, or the Gateway's normalized one. The
+        # provider id stays the one ``CodexAppServerSession`` names in its
+        # thread RPC; only where it points changes. Both speak Responses,
+        # which is the only wire Codex has.
+        base_url = openai_base_url(gateway_base_url)
         provider = "hybridinference"
         argv = [
             self.binary,
@@ -65,7 +70,7 @@ class CodexRuntime(AgentRuntime):
             "-c",
             f'model_providers.{provider}.name="HybridInference"',
             "-c",
-            f'model_providers.{provider}.base_url="{base}/v1"',
+            f"model_providers.{provider}.base_url={json.dumps(base_url)}",
             "-c",
             f'model_providers.{provider}.env_key="CODEX_API_KEY"',
             "-c",
@@ -75,7 +80,7 @@ class CodexRuntime(AgentRuntime):
         env = {
             "CODEX_API_KEY": credential,
             MCP_TOKEN_ENV: mcp_config.credential,
-            "OPENAI_BASE_URL": f"{base}/v1",
+            "OPENAI_BASE_URL": base_url,
             "OPENAI_API_KEY": credential,
         }
         if session_state_dir:

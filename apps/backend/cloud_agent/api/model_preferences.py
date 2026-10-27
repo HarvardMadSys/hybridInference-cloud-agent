@@ -78,6 +78,9 @@ def _view(preference: ModelPreferenceView, models: list[str]) -> ModelPreference
     return ModelPreferenceResponse(
         default_model=preference.default_model,
         last_model=preference.last_model,
+        # Without it a model last run on the owner's connection reads as the
+        # Gateway model of that name, which a new task will not start on.
+        last_model_connection_id=preference.last_model_connection_id,
         effective_model=resolve_model(models, preference, deployment_default),
         deployment_default=(deployment_default if deployment_default in models else None),
         models=models,

@@ -205,6 +205,34 @@ describe('PendingMessageQueue', () => {
     );
   });
 
+  it('edits only the prompt, so a personal source stays with its message', async () => {
+    const personal = {
+      model: 'mine',
+      model_connection_id: 'mconn_0123456789abcdef0123456789abcdef',
+    };
+    queueWith([message(personal)]);
+    vi.mocked(editPendingMessage)
+      .mockResolvedValueOnce({
+        pending: stored(message({ ...personal, state: 'held', revision: 2 })),
+        job: null,
+      })
+      .mockResolvedValueOnce({ pending: stored(message({ ...personal, revision: 3 })), job: null });
+    render(<Harness />);
+    const card = (await screen.findAllByRole('listitem'))[0];
+    fireEvent.click(within(card).getByRole('button', { name: 'Edit queued message' }));
+    const editor = await within(card).findByRole('textbox', { name: 'Edit queued message' });
+    fireEvent.change(editor, { target: { value: 'A: reworded' } });
+    fireEvent.keyDown(editor, { key: 'Enter' });
+    // No `model`, so no source either: the server keeps both as stored. Sending
+    // the model without its connection would move the message to the Gateway.
+    await waitFor(() =>
+      expect(editPendingMessage).toHaveBeenLastCalledWith('athr_1', 'apmsg_a', 2, {
+        prompt: 'A: reworded',
+        state: 'queued',
+      }),
+    );
+  });
+
   it('cancelling an edit lets the message go unchanged', async () => {
     vi.mocked(editPendingMessage)
       .mockImplementationOnce(async () => ({

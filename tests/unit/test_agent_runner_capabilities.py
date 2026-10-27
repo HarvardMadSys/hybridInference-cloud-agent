@@ -99,4 +99,5 @@ def test_a_claim_attests_the_shared_live_capabilities(monkeypatch):
         "environment-inference-v1",
         "environment-snapshot-v1",
         "ssh-access-v1",
+        "model-connections-v1",
     ]

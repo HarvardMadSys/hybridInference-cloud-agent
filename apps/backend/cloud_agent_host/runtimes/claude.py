@@ -11,7 +11,9 @@ from .base import (
     EMPTY_RUNTIME_MCP_CONFIG,
     MCP_TOKEN_ENV,
     AgentRuntime,
+    ExactBaseUrl,
     RuntimeCapabilities,
+    RuntimeConnectionUnsupportedError,
     RuntimeMCPConfig,
 )
 from .events import (
@@ -93,6 +95,11 @@ class ClaudeCodeRuntime(AgentRuntime):
         an earlier native session after the resident process was replaced.
         """
         del workdir, provides_isolation
+        if isinstance(gateway_base_url, ExactBaseUrl):
+            # The control plane refuses this pairing; this is the last stop.
+            raise RuntimeConnectionUnsupportedError(
+                "Claude Code speaks Anthropic Messages, which no model connection offers"
+            )
         argv = [
             self.binary,
             "-p",

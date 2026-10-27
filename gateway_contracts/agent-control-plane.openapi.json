@@ -4079,6 +4079,18 @@
             "description": "The model a new task should start on, first available of: this owner's pin in My Settings, the model their newest turn used, the deployment default. Always one of `models`, so a retired model is never pre-selected. Null means none of the three resolves, or the catalog was unreadable — the composer then leaves its model control empty and asks, rather than choosing one for the owner.",
             "title": "Default Model"
           },
+          "default_model_connection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The source of `default_model`: the owner connection it last ran on, or null for the Gateway. When set, `default_model` is one of that connection's models, not necessarily one of `models`.",
+            "title": "Default Model Connection Id"
+          },
           "environment_limits": {
             "additionalProperties": true,
             "title": "Environment Limits",
@@ -4127,6 +4139,20 @@
             },
             "title": "Mcp Runtimes",
             "type": "array"
+          },
+          "model_connections": {
+            "description": "This owner's enabled model connections. A model chosen from one is submitted with its `model_connection_id`; the same id may also be a Gateway model, which is a different choice.",
+            "items": {
+              "$ref": "#/components/schemas/ModelConnectionOption"
+            },
+            "title": "Model Connections",
+            "type": "array"
+          },
+          "model_connections_enabled": {
+            "default": false,
+            "description": "Whether this deployment lets owners add and run on their own connections.",
+            "title": "Model Connections Enabled",
+            "type": "boolean"
           },
           "model_reasoning_efforts": {
             "additionalProperties": {
@@ -5022,10 +5048,23 @@
             "title": "Metadata"
           },
           "model": {
-            "description": "Gateway model id the runtime should use.",
+            "description": "Model id the runtime should use: a Gateway model, or one listed on `model_connection_id` when that is set.",
             "maxLength": 255,
             "title": "Model",
             "type": "string"
+          },
+          "model_connection_id": {
+            "anyOf": [
+              {
+                "pattern": "^mconn_[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The owner's own model connection the model runs on. Null is the Gateway. Together with `model` this names the source unambiguously: the same id may exist on the Gateway and on several connections.",
+            "title": "Model Connection Id"
           },
           "plugins": {
             "anyOf": [
@@ -5561,6 +5600,17 @@
               }
             ],
             "title": "Model Calls"
+          },
+          "model_connection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Connection Id"
           },
           "native_fork_available": {
             "default": false,
@@ -6435,6 +6485,17 @@
             ],
             "title": "Model"
           },
+          "model_connection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Connection Id"
+          },
           "position": {
             "title": "Position",
             "type": "integer"
@@ -6554,6 +6615,18 @@
               }
             ],
             "title": "Model"
+          },
+          "model_connection_id": {
+            "anyOf": [
+              {
+                "pattern": "^mconn_[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Connection Id"
           },
           "prompt": {
             "anyOf": [
@@ -7948,6 +8021,19 @@
             ],
             "description": "Optional model override for this turn.",
             "title": "Model"
+          },
+          "model_connection_id": {
+            "anyOf": [
+              {
+                "pattern": "^mconn_[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The source of `model`: the owner's connection, or null for the Gateway. Only with `model`; an omitted model inherits the previous turn's model and its source together.",
+            "title": "Model Connection Id"
           },
           "prompt": {
             "maxLength": 100000,
@@ -10201,6 +10287,11 @@
             "title": "Estimated Calls",
             "type": "integer"
           },
+          "external_provider": {
+            "default": false,
+            "title": "External Provider",
+            "type": "boolean"
+          },
           "incomplete": {
             "default": false,
             "title": "Incomplete",
@@ -10956,6 +11047,23 @@
           "revision"
         ],
         "title": "DefaultInput",
+        "type": "object"
+      },
+      "DiscoveredModels": {
+        "description": "The ids a provider's ``GET /models`` listed; a convenience, not a check.",
+        "properties": {
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          }
+        },
+        "required": [
+          "models"
+        ],
+        "title": "DiscoveredModels",
         "type": "object"
       },
       "EnableConnectionRequest": {
@@ -12659,6 +12767,17 @@
             ],
             "title": "Model"
           },
+          "model_connection_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Connection Revision"
+          },
           "thread_id": {
             "title": "Thread Id",
             "type": "string"
@@ -13540,6 +13659,11 @@
               }
             ]
           },
+          "external_provider": {
+            "default": false,
+            "title": "External Provider",
+            "type": "boolean"
+          },
           "ledger": {
             "$ref": "#/components/schemas/JobLedgerSummary"
           },
@@ -14061,6 +14185,411 @@
         "title": "MessageRequestDetail",
         "type": "object"
       },
+      "ModelConnectionAccess": {
+        "additionalProperties": false,
+        "description": "One connection, as the claim of a turn running on it hands it to a host.\n\n``revision`` is the connection's credential revision. It is part of the\nmember process's fixed launch, so a turn after the key, Base URL or\nprotocols changed starts a new process rather than borrowing one that holds\nthe old key. ``api_key`` is the owner's own secret; it is masked in every\ndurable output of the turn and written only into the member's private\nenvironment and activation tmpfs.",
+        "properties": {
+          "api_key": {
+            "title": "Api Key",
+            "type": "string"
+          },
+          "base_url": {
+            "maxLength": 512,
+            "minLength": 8,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "connection_id": {
+            "maxLength": 64,
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "protocol": {
+            "title": "Protocol",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "connection_id",
+          "revision",
+          "base_url",
+          "protocol",
+          "api_key"
+        ],
+        "title": "ModelConnectionAccess",
+        "type": "object"
+      },
+      "ModelConnectionCheckRequest": {
+        "additionalProperties": false,
+        "description": "Which model and protocol to check.",
+        "properties": {
+          "model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "protocol": {
+            "maxLength": 32,
+            "title": "Protocol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "protocol"
+        ],
+        "title": "ModelConnectionCheckRequest",
+        "type": "object"
+      },
+      "ModelConnectionCheckView": {
+        "description": "One check's result, as stored on the connection.",
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "checked_at": {
+            "title": "Checked At",
+            "type": "string"
+          },
+          "final_answer": {
+            "title": "Final Answer",
+            "type": "boolean"
+          },
+          "http_status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Status"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "protocol": {
+            "title": "Protocol",
+            "type": "string"
+          },
+          "recorded": {
+            "default": true,
+            "title": "Recorded",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "streaming": {
+            "title": "Streaming",
+            "type": "boolean"
+          },
+          "tool_call": {
+            "title": "Tool Call",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "status",
+          "category",
+          "message",
+          "protocol",
+          "model",
+          "streaming",
+          "tool_call",
+          "final_answer",
+          "checked_at"
+        ],
+        "title": "ModelConnectionCheckView",
+        "type": "object"
+      },
+      "ModelConnectionCreate": {
+        "additionalProperties": false,
+        "description": "A new connection; every field is required.",
+        "properties": {
+          "api_key": {
+            "maxLength": 4160,
+            "title": "Api Key",
+            "type": "string"
+          },
+          "base_url": {
+            "maxLength": 1024,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 256,
+            "title": "Models",
+            "type": "array"
+          },
+          "name": {
+            "maxLength": 200,
+            "title": "Name",
+            "type": "string"
+          },
+          "protocols": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 2,
+            "title": "Protocols",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "base_url",
+          "api_key",
+          "protocols",
+          "models"
+        ],
+        "title": "ModelConnectionCreate",
+        "type": "object"
+      },
+      "ModelConnectionList": {
+        "description": "The owner's connections, and whether this deployment can store keys at all.",
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "connections": {
+            "items": {
+              "$ref": "#/components/schemas/ModelConnectionView"
+            },
+            "title": "Connections",
+            "type": "array"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "configured",
+          "connections"
+        ],
+        "title": "ModelConnectionList",
+        "type": "object"
+      },
+      "ModelConnectionOption": {
+        "description": "One of the owner's enabled model connections, as the composer offers it.\n\nEverything needed to offer its models beside the Gateway's and to know\nwhich agents can use it; nothing about its key.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "runtimes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Runtimes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "models",
+          "runtimes"
+        ],
+        "title": "ModelConnectionOption",
+        "type": "object"
+      },
+      "ModelConnectionUpdate": {
+        "additionalProperties": false,
+        "description": "Change some fields; an omitted field keeps its value. ``api_key`` rotates the key.",
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "maxLength": 4160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "models": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 256,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Models"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "protocols": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 2,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocols"
+          }
+        },
+        "title": "ModelConnectionUpdate",
+        "type": "object"
+      },
+      "ModelConnectionView": {
+        "description": "A connection as its owner sees it: everything but the key.",
+        "properties": {
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "has_api_key": {
+            "title": "Has Api Key",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_check": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Check"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "protocols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Protocols",
+            "type": "array"
+          },
+          "runtimes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Runtimes",
+            "type": "array"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "base_url",
+          "protocols",
+          "models",
+          "enabled",
+          "has_api_key",
+          "runtimes",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ModelConnectionView",
+        "type": "object"
+      },
       "ModelPreferenceResponse": {
         "description": "The preference, resolved, beside the catalog it was resolved against.",
         "properties": {
@@ -14107,6 +14636,17 @@
               }
             ],
             "title": "Last Model"
+          },
+          "last_model_connection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Model Connection Id"
           },
           "models": {
             "description": "The models this owner may pin, in the gateway's order. Empty means the catalog could not be read, not that a pin has been retired.",
@@ -20036,6 +20576,16 @@
           "model": {
             "title": "Model",
             "type": "string"
+          },
+          "model_connection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelConnectionAccess"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "parent_job_id": {
             "anyOf": [
@@ -35083,6 +35633,361 @@
         "summary": "Restore Memory",
         "tags": [
           "agent-memory"
+        ]
+      }
+    },
+    "/v1/agent/model-connections": {
+      "get": {
+        "description": "The owner's live connections.",
+        "operationId": "list_connections_v1_agent_model_connections_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Connections",
+        "tags": [
+          "model-connections"
+        ]
+      },
+      "post": {
+        "description": "Add a connection; its key is encrypted before anything stores it.",
+        "operationId": "create_connection_v1_agent_model_connections_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelConnectionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Connection",
+        "tags": [
+          "model-connections"
+        ]
+      }
+    },
+    "/v1/agent/model-connections/{connection_id}": {
+      "delete": {
+        "description": "Delete a connection: its key is erased and its running processes are closed.\n\nTurns that name it are refused as deleted from now on, never moved elsewhere.",
+        "operationId": "delete_connection_v1_agent_model_connections__connection_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Connection",
+        "tags": [
+          "model-connections"
+        ]
+      },
+      "patch": {
+        "description": "Edit, rotate the key of, enable or disable a connection.",
+        "operationId": "update_connection_v1_agent_model_connections__connection_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelConnectionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Connection",
+        "tags": [
+          "model-connections"
+        ]
+      }
+    },
+    "/v1/agent/model-connections/{connection_id}/check": {
+      "post": {
+        "description": "Stream a tool call and its result through the connection, for one model and protocol.\n\nSpends the owner's own quota upstream. Answers what the check found; an\nunreachable or refusing provider is a result, not an error. The result is\nkept on the connection only if nothing it depends on -- key, Base URL,\nprotocols, models -- changed while it ran (``recorded``).",
+        "operationId": "check_v1_agent_model_connections__connection_id__check_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelConnectionCheckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionCheckView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Check",
+        "tags": [
+          "model-connections"
+        ]
+      }
+    },
+    "/v1/agent/model-connections/{connection_id}/discover-models": {
+      "post": {
+        "description": "List the ids the provider's ``GET /models`` offers, for the owner to choose from.",
+        "operationId": "discover_v1_agent_model_connections__connection_id__discover_models_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscoveredModels"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Discover",
+        "tags": [
+          "model-connections"
         ]
       }
     },

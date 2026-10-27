@@ -65,6 +65,9 @@ from cloud_agent_host.claimed_job import (
     ClaimUnreachable as ClaimUnreachable,
     LeaseLost as LeaseLost,
     WorkWaitUnsupported as WorkWaitUnsupported,
+    claim_secret_values as _claim_secret_values,
+    model_connection_launch,
+    require_residency_connection,
 )
 from cloud_agent_host.control_plane_client import (
     _EVENT_RETRY_MAX_DELAY_S,
@@ -186,6 +189,7 @@ from cloud_agent_shared.host_settings import (
     RUNNER_SETTING_KEYS,
     reported_values,
 )
+from cloud_agent_shared.model_connections import MODEL_CONNECTION_CAPABILITY
 from cloud_agent_shared.sandbox_manager_wire import member_manifest
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import (
@@ -1207,6 +1211,7 @@ def _environment_host_capabilities(backend: SandboxBackend, stamp: dict[str, Any
         ENVIRONMENT_INFERENCE_CAPABILITY,
         ENVIRONMENT_SNAPSHOT_CAPABILITY,
         SSH_ACCESS_CAPABILITY,
+        MODEL_CONNECTION_CAPABILITY,
     ]
 
 
@@ -1225,14 +1230,6 @@ def _advertised_host_capabilities(backend: SandboxBackend, stamp: dict[str, Any]
         PROFILING_CONTROL_CAPABILITY,
         HOST_SETTINGS_CAPABILITY,
     ]
-
-
-def _claim_secret_values(job: ClaimedJob) -> dict[str, str]:
-    """Every value the claim put in the sandbox that output must never show."""
-    values = job.environment.secrets() if job.environment else {}
-    if job.ssh_access is not None:
-        values = {**values, **job.ssh_access.secrets()}
-    return values
 
 
 def _shared_live_deployment_ready(
@@ -2768,6 +2765,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             mcp_credential="",
             slot_id=slot_id,
             residency_generation=int(running.get("residency_generation") or 0),
+            **model_connection_launch(job),
         )
         stage = _stage(measurement, "resident_start")
         resident_descriptor: dict[str, Any] | None = None
@@ -2803,6 +2801,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             grant_model = residency.get("model")
             if grant_model not in {None, job.model}:
                 raise SandboxError("shared residency grant model does not match this turn")
+            require_residency_connection(job, residency)
             launch = replace(
                 launch,
                 credential=credential,

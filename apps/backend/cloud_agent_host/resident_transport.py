@@ -43,7 +43,7 @@ from cloud_agent_host.drivers import (
 from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION
 from cloud_agent_host.other_plugins import install_other_runtime_plugins
 from cloud_agent_host.plugins import install_claude_plugins
-from cloud_agent_host.runtimes import RuntimeMCPConfig
+from cloud_agent_host.runtimes import ExactBaseUrl, RuntimeMCPConfig
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
 from cloud_agent_shared.environment import inference_handoff
 from cloud_agent_shared.plugins import validate_sandbox_plugins
@@ -174,10 +174,11 @@ class ResidentLaunch:
     model: str
     reasoning_effort: str | None
     gateway_base_url: str
-    credential: str | None
+    # Never in a repr: a Gateway grant, or an owner connection's own key.
+    credential: str | None = field(repr=False)
     mcp_server_ids: tuple[str, ...] = ()
     mcp_base_url: str = ""
-    mcp_credential: str = ""
+    mcp_credential: str = field(default="", repr=False)
     slot_id: int = 0
     residency_generation: int = 0
     plugins: tuple[dict[str, str], ...] = ()
@@ -186,10 +187,19 @@ class ResidentLaunch:
     github_token: str | None = field(default=None, repr=False)
     github_repo: str = ""
     environment: BoundEnvironment | None = field(default=None, repr=False)
+    # An owner model connection, when the member runs on one instead of the
+    # Gateway: its exact Base URL, protocol, and ``<connection>@<revision>``.
+    # ``credential`` is then that connection's key. All three are fixed at
+    # process start; the source is what tells a rotated key's process apart.
+    inference_base_url: str = ""
+    inference_protocol: str = ""
+    inference_source: str = ""
 
     def __post_init__(self) -> None:
         if not self.thread_id or not self.runtime_id or not self.model:
             raise ValueError("resident launch identity, runtime, and model are required")
+        if bool(self.inference_source) != bool(self.inference_base_url and self.inference_protocol):
+            raise ValueError("a model connection launch needs its URL, protocol and source")
         if not self.gateway_base_url:
             raise ValueError("resident launch gateway is required")
         if self.slot_id < 0:
@@ -324,9 +334,11 @@ class ResidentTransport(Generic[_RuntimeT_co]):
         residency, which the supervisor checks beside this, so a probe that
         carries none may borrow the process holding one. Everything else the
         CLI fixes at process start still participates, including model,
-        effort, the MCP servers and relay, a per-attempt MCP token and the
-        non-renewable GitHub token. A fresh GitHub token requires native
-        resume in a replacement process.
+        effort, the MCP servers and relay, a per-attempt MCP token, the
+        non-renewable GitHub token and the model connection's source. A fresh
+        GitHub token requires native resume in a replacement process, and so
+        does a connection whose key, endpoint or protocols changed: its source
+        names the credential revision, so the old key never serves a new turn.
         """
         held_mcp = self.launch.mcp_credential
         same_mcp = self.launch.mcp_server_ids == launch.mcp_server_ids and (
@@ -347,6 +359,9 @@ class ResidentTransport(Generic[_RuntimeT_co]):
             and self.launch.reasoning_effort == launch.reasoning_effort
             and self.launch.plugins == launch.plugins
             and self.launch.gateway_base_url == launch.gateway_base_url
+            and self.launch.inference_source == launch.inference_source
+            and self.launch.inference_base_url == launch.inference_base_url
+            and self.launch.inference_protocol == launch.inference_protocol
             and same_mcp
             and self.launch.github_token == launch.github_token
             and self.launch.github_repo == launch.github_repo
@@ -859,7 +874,13 @@ class ResidentTransportFactory:
         mcp_enabled = bool(launch.mcp_server_ids)
         return LaunchContext(
             workdir=CHAT_WORKDIR,
-            gateway_base_url=launch.gateway_base_url,
+            # An owner connection's URL is used exactly as written, never
+            # normalized like the Gateway relay's (``ExactBaseUrl``).
+            gateway_base_url=(
+                ExactBaseUrl(launch.inference_base_url)
+                if launch.inference_source
+                else launch.gateway_base_url
+            ),
             credential=credential,
             provides_isolation=True,
             spawn_live=spawn_live,

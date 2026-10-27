@@ -2,7 +2,7 @@
 // Domain modules own their wire types and operations; internal modules import
 // those directly rather than depending on this facade.
 
-export type { AgentConfigApi } from './agents/config';
+export type { AgentConfigApi, ModelConnectionOptionApi } from './agents/config';
 
 export { getAgentConfig } from './agents/config';
 

@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cloud_agent.model_preference import ModelPreferenceView
 
 if TYPE_CHECKING:
     import asyncpg
+
+
+#: The owner's newest turn's model and the source it ran on.
+_LAST_TURN_SQL = (
+    "SELECT model, model_connection_id FROM agent_jobs WHERE user_id = $1 "
+    "ORDER BY created_at DESC LIMIT 1"
+)
+
+
+def _view(pinned: str | None, last: Any) -> ModelPreferenceView:
+    if last is None:
+        return ModelPreferenceView.of(pinned, None)
+    return ModelPreferenceView.of(pinned, last["model"], last["model_connection_id"])
 
 
 class PostgresModelPreferenceRepository:
@@ -35,12 +48,9 @@ class PostgresModelPreferenceRepository:
                 "SELECT default_model FROM agent_user_model_preferences WHERE user_id = $1",
                 user_id,
             )
-            last_model = await conn.fetchval(
-                "SELECT model FROM agent_jobs WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
-                user_id,
-            )
+            last = await conn.fetchrow(_LAST_TURN_SQL, user_id)
         pinned = row["default_model"] if row is not None else None
-        return ModelPreferenceView.of(pinned, last_model)
+        return _view(pinned, last)
 
     async def set_default_model(self, user_id: str, model: str | None) -> ModelPreferenceView:
         """Pin a model, or clear the pin, and answer with the resolved choice.
@@ -60,8 +70,5 @@ class PostgresModelPreferenceRepository:
                 user_id,
                 model,
             )
-            last_model = await conn.fetchval(
-                "SELECT model FROM agent_jobs WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
-                user_id,
-            )
-        return ModelPreferenceView.of(model, last_model)
+            last = await conn.fetchrow(_LAST_TURN_SQL, user_id)
+        return _view(model, last)

@@ -194,7 +194,7 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   residency's MCP credential, which the relay resolves on every call to the
   turn that residency is running, so follow-ups keep the live process.
   **There is no per-task dollar budget** — that design was considered and
-  rejected. All inference spend stays subject to the gateway's existing
+  rejected. Gateway-backed inference spend stays subject to the gateway's existing
   per-user quota; a grant narrows *what* can be called, never re-implements
   *how much*. If a task seems to need a budget field, stop — the plan's C5
   section records the decision.
@@ -255,7 +255,8 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   stops reading, not writing: siblings share one writable workspace, `.git`
   included, so code a member plants there — a Git hook or `core.fsmonitor`,
   a build or test script — runs with the credentials of whichever member
-  executes it next. Spend remains governed by the gateway's per-user quota.
+  executes it next. Gateway-backed spend remains governed by the gateway's per-user quota;
+  owner model connections use the owner's separate provider key and billing.
   The runner also injects a separate short-lived GitHub App
   token as `GH_TOKEN` in the owning member's environment, restricted to
   `contents: write` and `pull_requests: write` on the job's repository. Account
@@ -273,8 +274,8 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   Git pushes. Same-owner Fork inherits the binding; the only cross-owner
   sharing is a team's environment, below. Reserved platform/host variable names and the existing fixed
   network and member credential boundaries still apply. An owner's
-  `OPENAI_*`/`ANTHROPIC_*` credentials never enter an agent CLI's own
-  environment, which keeps the platform grant; a member-private `BASH_ENV`
+  `OPENAI_*`/`ANTHROPIC_*` variables supplied through an environment binding never
+  replace an agent CLI's own inference credentials; a member-private `BASH_ENV`
   script gives them to the commands the CLI runs. See the
   [environment design](docs/agents/specs/2026-10-12-repository-environment-design.zh-CN.md).
 - **Team environments (2026-10-15).** A team's owner and admins may save an
@@ -308,6 +309,33 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   public-address rules, an hourly per-owner limit, and a 64 KB cap on what it
   reads back. See the
   [SSH server design](docs/agents/specs/2026-10-15-user-ssh-servers-design.zh-CN.md).
+- **Owner model connections (2026-10-27).** An owner may add their own
+  OpenAI-compatible endpoint (Base URL, API key, protocols, model ids) and run
+  their own tasks on it instead of the Gateway; they pay the provider. It is
+  private to them: never shared with a team, never reachable through another
+  owner's Fork, and every claim, residency, follow-up, waiting message, goal
+  round and Fork re-reads it as theirs. The key is encrypted under its own
+  domain, write-only, and handed to a host only in the claim and residency of
+  its owner's turn on it; the member's CLI holds it in its environment and
+  activation tmpfs, never in argv, and the runner masks it in durable output.
+  Repository code, dependencies and the agent can read and exfiltrate it
+  through the existing public egress, as with owner environment credentials.
+  Trusted snapshot and publication paths scan the exact sandbox group's used
+  key history, including rotations and same-owner Fork members. An encrypted
+  scanning copy is recorded only when a key is bound to a residency and kept
+  with the sandbox group record, even after connection deletion; execution
+  paths never select it. It remains a real provider secret, and deletion here
+  does not revoke it upstream. Other groups' keys never enter this scan;
+  exceeding its bounded history fails closed. Such a turn needs no
+  Gateway grant, catalog or quota, but login and Agent admission stay
+  Gateway-backed. Only runtimes whose own protocol the connection offers run
+  on it (Chat Completions: OpenCode, Kilo, pi; Responses: Codex; never
+  Claude Code), and nothing falls back to the Gateway or another model.
+  Rotating, disabling or deleting it closes every process still running on
+  the old state. The control plane's check dials only public IPv4 HTTPS under
+  the MCP connection policy and the sandbox's protected ranges, pinned, with no
+  redirects and no upstream body echoed. See the
+  [model connection design](docs/agents/specs/2026-10-27-user-model-connections.zh-CN.md).
 - Public multi-tenant use requires Kata isolation, non-root, dropped
   capabilities, seccomp, and resource limits — plain Docker containers are for
   trusted internal repositories only.

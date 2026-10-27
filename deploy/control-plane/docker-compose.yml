@@ -249,6 +249,10 @@ services:
       # separate variables because they are separate risks.
       AGENT_MCP_ALLOW_PRIVATE_TARGETS: ${AGENT_MCP_ALLOW_PRIVATE_TARGETS:-}
       AGENT_MCP_ALLOW_PLAIN_HTTP: ${AGENT_MCP_ALLOW_PLAIN_HTTP:-}
+      # Owners' own model connections. Off until every control-plane replica
+      # runs a release that knows them: an older one would run a turn on a
+      # connection as a Gateway turn. See ENVIRONMENT.md before turning it on.
+      AGENT_MODEL_CONNECTIONS_ENABLED: ${AGENT_MODEL_CONNECTIONS_ENABLED:-}
       # Imported once, then owned by Admin Settings → Sandbox execution. The
       # model a new task starts on when its owner has chosen nothing. Set
       # empty for no default; `-`, not `:-`, keeps that empty value.

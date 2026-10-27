@@ -142,6 +142,7 @@ async def job_usage_response(
         runtime=job.get("runtime"),
         terminal=job.get("state") in TERMINAL_STATES,
         conversation=summarize_conversation(reads["conversation_rows"]),
+        external_provider=bool(job.get("model_connection_id")),
     )
     usage.version = reads["version"]
     return usage

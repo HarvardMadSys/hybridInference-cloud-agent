@@ -637,6 +637,19 @@ describe('admin run observation', () => {
     expect(screen.queryByText('Usage details')).not.toBeInTheDocument();
   });
 
+  it('says the owner\u2019s provider bills a turn on their connection, with no cost figure', async () => {
+    const external = { ...usage(), external_provider: true };
+    vi.mocked(getAdminRun).mockResolvedValue(detail({ usage: external }));
+
+    render(<AdminRunPage />);
+    await screen.findByRole('heading', { name: 'Token usage' });
+    const totals = within(screen.getByRole('table', { name: 'Token usage totals' }));
+    expect(
+      totals.getByRole('row', { name: "Cost (USD) Billed by the owner's provider" }),
+    ).toBeVisible();
+    expect(screen.getByText(/ran on its owner.s own model connection/)).toBeVisible();
+  });
+
   it('keeps zero-coverage totals unavailable and exposes timing provenance and incomplete process evidence', async () => {
     render(<AdminRunPage />);
     await screen.findByText('Exact · hooks');

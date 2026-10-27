@@ -14,7 +14,7 @@ from cloud_agent.storage._sql.rows import load_json
 #: A pending message as every reader sees it.
 PENDING_MESSAGE_COLUMNS = (
     "id, thread_id, user_id, position, state, revision, prompt, skill_ids, "
-    "attachment_ids, model, reasoning_effort, client_request_id, "
+    "attachment_ids, model, model_connection_id, reasoning_effort, client_request_id, "
     "client_request_fingerprint, send_now_job_id, send_now_requested_at, "
     "last_error, created_at, updated_at"
 )

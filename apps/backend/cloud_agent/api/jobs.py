@@ -77,6 +77,7 @@ if TYPE_CHECKING:
         HostPoolRepository,
         LedgerRepository,
         McpConnectionRepository,
+        ModelConnectionRepository,
         PendingMessageRepository,
         SandboxRepository,
         SkillRepository,
@@ -122,6 +123,7 @@ class _JobsStorage(Protocol):
     host_pool: HostPoolRepository
     ledger: LedgerRepository
     mcp: McpConnectionRepository
+    model_connections: ModelConnectionRepository
     pending_messages: PendingMessageRepository
     sandbox: SandboxRepository
     skills: SkillRepository

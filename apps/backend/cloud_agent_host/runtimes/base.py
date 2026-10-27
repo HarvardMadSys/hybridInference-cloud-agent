@@ -39,6 +39,35 @@ MCP_SERVERS_ENV = "AGENT_MCP_SERVERS"
 MERGED_MCP_SERVER_NAME = "session"
 
 
+class ExactBaseUrl(str):
+    """An owner model connection's Base URL, to be used exactly as written.
+
+    The Gateway address a host is configured with may or may not end in
+    ``/v1``, so every adapter normalizes it to one that does. An owner's
+    provider decides its own path (``/v1``, ``/api/v1``, ``/v1beta/openai``),
+    and normalizing that would send the CLI somewhere the provider does not
+    serve. The type travels through the launch context unchanged, so the
+    adapters can tell the two apart without another parameter on every driver.
+    """
+
+    __slots__ = ()
+
+
+class RuntimeConnectionUnsupportedError(RuntimeError):
+    """Raised when a runtime is asked to run on an owner connection it cannot speak to."""
+
+
+def openai_base_url(base_url: str) -> str:
+    """The OpenAI-style base URL a CLI appends its own path to.
+
+    An owner connection's URL is used exactly; the Gateway's is normalized
+    to end in ``/v1``.
+    """
+    if isinstance(base_url, ExactBaseUrl):
+        return str(base_url)
+    return base_url.rstrip("/").removesuffix("/v1") + "/v1"
+
+
 def merged_mcp_server(tool_name: object, *, separator: str) -> dict[str, str]:
     """``{"mcp_server": ...}`` for a call named under the merged entry, else ``{}``.
 
@@ -318,7 +347,14 @@ class AgentRuntime:
         """The gateway and credential an image-shipped wrapper configures its CLI from.
 
         Both the OpenAI and the Anthropic spelling, and the MCP tool timeout.
+        An owner connection speaks only the OpenAI one, so it gets only that.
         """
+        if isinstance(gateway_base_url, ExactBaseUrl):
+            return {
+                "OPENAI_BASE_URL": openai_base_url(gateway_base_url),
+                "OPENAI_API_KEY": credential,
+                "MCP_TOOL_TIMEOUT": "1560000",
+            }
         base = gateway_base_url.rstrip("/").removesuffix("/v1")
         return {
             "OPENAI_BASE_URL": f"{base}/v1",

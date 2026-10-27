@@ -151,7 +151,8 @@ async def fetch_ledger_rows_for_conversation(
     """The owner's conversation snapshots around a job, in the caller's transaction."""
     rows = await conn.fetch(
         f"""
-        SELECT j.id AS job_id, j.state AS job_state, a.id AS attempt_id, a.attempt_no,
+        SELECT j.id AS job_id, j.state AS job_state, j.model_connection_id,
+               a.id AS attempt_id, a.attempt_no,
                l.id, l.grant_id, l.snapshot, l.queried_at,
                l.last_error_code, l.next_refresh_at,
                (l.id IS NOT NULL AND (

@@ -15,6 +15,13 @@ const MODEL_PREFERENCE = '/v1/agent/model-preference';
 export interface ModelPreference {
   default_model: string | null;
   last_model: string | null;
+  /**
+   * The owner's connection `last_model` ran on; null is the Gateway. While it
+   * is set and nothing is pinned, `effective_model` is null: the pin and the
+   * deployment default are Gateway models, and a new task offers the
+   * connection's model again only while that connection still lists it.
+   */
+  last_model_connection_id?: string | null;
   effective_model: string | null;
   /**
    * The deployment's starting point, shown to a user with no history of their

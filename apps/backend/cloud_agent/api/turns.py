@@ -84,6 +84,7 @@ if TYPE_CHECKING:
         ConversationQueries,
         GrantRepository,
         HostPoolRepository,
+        ModelConnectionRepository,
         PendingMessageRepository,
         ResidencyRepository,
         SessionForkRepository,
@@ -113,6 +114,7 @@ class _TurnsStorage(Protocol):
     conversation_queries: ConversationQueries
     grants: GrantRepository
     host_pool: HostPoolRepository
+    model_connections: ModelConnectionRepository
     pending_messages: PendingMessageRepository
     residency: ResidencyRepository
     session_fork: SessionForkRepository
@@ -511,6 +513,7 @@ async def submit_thread_message(
         attachment_ids=body.attachment_ids,
         runtime=None,
         model=body.model,
+        model_connection_id=body.model_connection_id,
         reasoning_effort=body.reasoning_effort,
         store=job_store,
         app_credentials=app_credentials,
@@ -525,6 +528,7 @@ async def submit_thread_message(
         # The canonical id the check resolved, never the alias typed: it is
         # checked again against whatever turn is newest when this is sent.
         model=prepared.model,
+        model_connection_id=prepared.model_connection_id,
         reasoning_effort=prepared.reasoning_effort if body.require_idle else body.reasoning_effort,
         client_request_id=idempotency_key,
         client_request_fingerprint=fingerprint,
@@ -642,6 +646,7 @@ async def edit_thread_message(
             attachment_ids=changes.get("attachment_ids"),
             runtime=None,
             model=changes.get("model"),
+            model_connection_id=changes.get("model_connection_id"),
             reasoning_effort=changes.get("reasoning_effort"),
             store=job_store,
             # Strict: without the App the repository check would see only the

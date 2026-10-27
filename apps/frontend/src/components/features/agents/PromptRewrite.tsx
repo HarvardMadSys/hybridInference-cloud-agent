@@ -6,8 +6,11 @@ import { rewritePrompt, type PromptClarificationAnswer } from '@/lib/api/promptR
 
 interface PromptRewriteProps {
   value: string;
+  /** A Gateway model; empty disables rewriting (see `disabledReason`). */
   model: string;
   disabled?: boolean;
+  /** Why rewriting is off, e.g. a personal connection is selected: it runs on the Gateway. */
+  disabledReason?: string;
   compact?: boolean;
   // Share the composer toolbar; expanded content occupies a full row below it.
   inline?: boolean;
@@ -19,6 +22,7 @@ export function PromptRewrite({
   value,
   model,
   disabled = false,
+  disabledReason,
   compact = false,
   inline = false,
   onApply,
@@ -171,6 +175,7 @@ export function PromptRewrite({
           ref={trigger}
           type="button"
           disabled={disabled || active || !value.trim() || !model}
+          title={disabledReason}
           onClick={() => void rewrite()}
           className={`ui-focus-ring inline-flex ${compact ? 'min-h-7' : 'min-h-9'} items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 [@media(pointer:coarse)]:min-h-11`}
         >

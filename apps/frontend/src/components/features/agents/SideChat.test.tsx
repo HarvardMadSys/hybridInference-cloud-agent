@@ -526,6 +526,38 @@ describe('Side Chat', () => {
     });
   });
 
+  it('keeps a personal source, and moving to the Gateway namesake is a change it sends', async () => {
+    const source = 'mconn_0123456789abcdef0123456789abcdef';
+    const personal = { ...anchor, model_connection_id: source };
+    jobs = jobs.map((job) => ({ ...job, model_connection_id: source }));
+    const withConnection = {
+      ...config,
+      runtimes: ['codex'],
+      model_connections: [{ id: source, name: 'Mine', models: ['model-a'], runtimes: ['codex'] }],
+    };
+    render(
+      <SideChat
+        {...props()}
+        sourceJob={toDisplayJob(personal)}
+        sourceJobs={[personal]}
+        config={withConnection}
+      />,
+    );
+    await ready();
+    expect(screen.getByRole('button', { name: 'Side chat model' })).toHaveAccessibleDescription(
+      'model-a · Mine',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Side chat model' }));
+    fireEvent.click(screen.getByRole('option', { name: 'model-a' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenCalledExactlyOnceWith('side', {
+        prompt: 'Why keep the files?',
+        model: 'model-a',
+      }),
+    );
+  });
+
   it('submits only the new prompt to the child, streams its response, and leaves the main URL alone', async () => {
     const push = vi.spyOn(window.history, 'pushState');
     render(<SideChat {...props()} />);

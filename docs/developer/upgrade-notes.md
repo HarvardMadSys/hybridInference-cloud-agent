@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0105_job_event_usage_summary`. The supported deployment scripts run migrations
+`0106_user_model_connections`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -54,6 +54,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0106_user_model_connections` | Adds `agent_model_connections`, `agent_model_connection_checks` and `agent_model_connection_scan_keys` for owners' own inference endpoints, and nullable source columns: `agent_jobs.model_connection_id`, `agent_pending_messages.model_connection_id` and two `residency_model_connection_*` columns on `agent_thread_sandbox_memberships`. Nothing is rewritten, and every existing turn reads as the Gateway's (NULL). The feature stays off until `AGENT_MODEL_CONNECTIONS_ENABLED` is set, which needs every host and control-plane replica on this release first. A downgrade refuses while any connection exists, or any turn, waiting message or resident member names one, finished conversations included, because without the columns they would continue on the Gateway ([owner model connections](operations.md#owner-model-connections)). |
 | `0105_job_event_usage_summary` | Adds a nullable `usage_summary` column to `agent_job_events`. Adding it rewrites no rows and holds its lock only for the catalog change. New events store the projection of their payload that usage reads need, and those reads take it from there; events stored before the column existed are projected when read, as before. A downgrade drops the column, and usage reads project every payload again. |
 | `0104_notification_change_keyset` | Builds a `(user_id, kind, change_xid, entity_id)` index concurrently before dropping the preceding owner/XID index, so notification delta continuation pages seek directly instead of scanning the whole snapshot interval. It changes no row and does not block foreground writes. Existing v1 continuations finish in their previous kind/identity order before advancing to v2. The previous API remains functionally compatible during migration, although its delta reads may use a less selective index until it is replaced. A downgrade restores the preceding index concurrently. |
 | `0103_terminal_resume_keyset` | Rebuilds the partial terminal-resume index on `(updated_at, id)`, matching the replay keyset so every bounded continuation seeks directly instead of sorting equal-time rows again. The online build does not block foreground writes and changes no row. A downgrade restores the preceding one-column index. |

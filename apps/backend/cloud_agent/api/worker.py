@@ -14,7 +14,6 @@ router's own, so a prefix here would double it.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import contextlib
 import os
@@ -28,7 +27,10 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from cloud_agent import memory_tool, web_search
-from cloud_agent.agent_memory import fit_task_memories, prompt_with_agent_memories
+from cloud_agent.agent_memory import (
+    claim_agent_memories as _claim_agent_memories,
+    prompt_with_agent_memories,
+)
 from cloud_agent.api._body_limits import (
     HostBodyLimitRoute,
     payload_too_large,
@@ -48,8 +50,9 @@ from cloud_agent.api.deps import (
     get_work_signal,
     require_store,
 )
+from cloud_agent.application.model_connections import claim_model_connection, residency_credential
 from cloud_agent.application.pending_messages import settle_queue_when_possible
-from cloud_agent.application.residency import _mint_residency_grant, residency_ttl_s
+from cloud_agent.application.residency import residency_ttl_s
 from cloud_agent.application.ssh_servers import (
     build_ssh_access,
     prompt_with_ssh_servers,
@@ -163,6 +166,7 @@ if TYPE_CHECKING:
         GrantRepository,
         HostPoolRepository,
         McpConnectionRepository,
+        ModelConnectionRepository,
         OperationMeasurements,
         PendingMessageRepository,
         ResidencyRepository,
@@ -178,28 +182,6 @@ if TYPE_CHECKING:
 
 #: Check the raw report before FastAPI parses JSON or validates its model.
 MAX_TURN_RESOURCES_BODY_BYTES = 16 * 1024
-
-# Memory must leave ample time inside the host's claim deadline.
-_MEMORY_TIMEOUT_SECONDS = 2.0
-
-
-async def _claim_agent_memories(
-    repository: AgentMemoryRepository, user_id: str, repo: str | None
-) -> dict[str, Any]:
-    """Read the memories that fit the task's prompt and mark only those used.
-
-    Unavailable memory leaves the lists empty and never blocks the claim.
-    """
-    try:
-        async with asyncio.timeout(_MEMORY_TIMEOUT_SECONDS):
-            kept = fit_task_memories(await repository.task_memories(user_id, repo))
-            await repository.mark_memories_used(
-                user_id, [memory["id"] for scope in ("project", "user") for memory in kept[scope]]
-            )
-            return kept
-    except Exception:
-        logger.warning("agent_claim_durable_memory_unavailable")
-        return {"repo": repo, "project": [], "user": []}
 
 
 class _BoundedTurnResourcesRoute(HostBodyLimitRoute):
@@ -274,6 +256,7 @@ class _WorkerStorage(Protocol):
     grants: GrantRepository
     host_pool: HostPoolRepository
     mcp: McpConnectionRepository
+    model_connections: ModelConnectionRepository
     operation_measurements: OperationMeasurements
     pending_messages: PendingMessageRepository
     residency: ResidencyRepository
@@ -1094,7 +1077,9 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
     # a ``SCOPE_MODEL`` token signed with a root the gateway does not know —
     # which bought nothing, and failed at the sandbox's first model call.)
     token = mint_worker_token(**fence, scope=SCOPE_FULL)
-    sandbox_token = await _mint_sandbox_grant(job_store, grants, claim)
+    # A turn on the owner's own connection runs on that key, not on a grant.
+    model_connection = await claim_model_connection(job_store, claim, capabilities)
+    sandbox_token = "" if model_connection else await _mint_sandbox_grant(job_store, grants, claim)
 
     # COMPAT(remove-after=2026-11-30): no host reads the claim's mcp_token, as
     # none since #974 does: each member's CLI reaches the MCP relay with its
@@ -1240,6 +1225,7 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         ),
         environment_snapshot=environment_snapshot,
         ssh_access=ssh_access,
+        model_connection=model_connection,
         plugins=claim.get("plugins") or [],
         runtime=claim["runtime"],
         model=claim["model"],
@@ -1258,12 +1244,10 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         mcp_bindings=mcp_aliases,
         metadata=claim["metadata"],
     )
-    schedule_thread_title(
-        background_tasks,
-        job_store.conversation_commands,
-        claim,
-        sandbox_token=sandbox_token,
-    )
+    if model_connection is None:  # A title is generated on the Gateway grant only.
+        schedule_thread_title(
+            background_tasks, job_store.conversation_commands, claim, sandbox_token=sandbox_token
+        )
     return response
 
 
@@ -1695,7 +1679,14 @@ async def worker_establish_shared_sandbox_residency(
     if previous_grant and grants is not None:
         with contextlib.suppress(Exception):
             await grants.revoke(previous_grant)
-    credential = await _mint_residency_grant(job_store.grants, grants, row=row)
+    credential, revision = await residency_credential(
+        job_store,
+        grants,
+        job=row,
+        row=row,
+        host=str(host["host"]),
+        fence={"job_id": job_id, **claims},
+    )
     if not credential:
         # Resident processes cannot safely outlive an attempt-scoped token, so
         # renewable residency is all-or-nothing at admission.
@@ -1730,6 +1721,7 @@ async def worker_establish_shared_sandbox_residency(
         ttl_seconds=residency_ttl_s(),
         credential=credential,
         model=row.get("model"),
+        model_connection_revision=revision,
         # The process this residency opens serves later turns too, which are
         # other jobs: a turn's own MCP token would die with this attempt and
         # force a restart at the next message. This one follows the residency.

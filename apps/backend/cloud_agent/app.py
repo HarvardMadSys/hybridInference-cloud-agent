@@ -180,6 +180,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         host_profiling,
         hosts,
         mcp_connections,
+        model_connections,
         model_preferences,
         owner_usage,
         routes,
@@ -257,6 +258,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     app.include_router(agent_memory.router)
     app.include_router(user_profile.router)
     app.include_router(model_preferences.router)
+    app.include_router(model_connections.router)
     app.include_router(teams.router)
     app.include_router(uploads.router)
     app.include_router(mcp_connections.router)

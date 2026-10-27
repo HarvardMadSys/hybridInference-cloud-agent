@@ -5,6 +5,15 @@ import type { SourceControlLoadStatus } from './integrations';
 
 const API_BASE = config.apiBase;
 
+/** One of the owner's enabled connections, as a composer offers it. */
+export interface ModelConnectionOptionApi {
+  id: string;
+  name: string;
+  models: string[];
+  /** The agents whose protocol this connection offers. */
+  runtimes: string[];
+}
+
 export interface AgentConfigApi {
   environment_limits?: Record<string, unknown>;
   skill_limits?: import('@/lib/skillLimits').SkillLimits;
@@ -40,6 +49,16 @@ export interface AgentConfigApi {
    * for the owner to choose, rather than picking the first model in the list.
    */
   default_model?: string | null;
+  /**
+   * The source of `default_model`: the owner's connection it last ran on, or
+   * null for the Gateway. When set, `default_model` is one of that
+   * connection's models and need not be in `models`.
+   */
+  default_model_connection_id?: string | null;
+  /** This owner's enabled model connections. Absent before the feature. */
+  model_connections?: ModelConnectionOptionApi[];
+  /** Whether this deployment lets owners add and run on their own connections. */
+  model_connections_enabled?: boolean;
   /**
    * Whether this user has done what the deployment asks before choosing a
    * repository: connected GitHub where users can, or been given a repository by

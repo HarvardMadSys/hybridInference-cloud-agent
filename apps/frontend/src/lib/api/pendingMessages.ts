@@ -48,6 +48,8 @@ export interface PendingMessageApi {
   attachment_ids?: number[] | null;
   attachments?: PendingMessageAttachmentApi[];
   model?: string | null;
+  /** The source of `model`; null is the Gateway, or no model override at all. */
+  model_connection_id?: string | null;
   reasoning_effort?: string | null;
   /** Why the platform held this message instead of sending it. */
   last_error?: string | null;
@@ -81,6 +83,11 @@ export interface ThreadMessageRequest {
   skill_ids?: number[];
   attachment_ids?: number[];
   model?: string;
+  /**
+   * The source of `model`, only ever with it; omitted with a model is the
+   * Gateway. Omitting both inherits the previous turn's model and source.
+   */
+  model_connection_id?: string;
   /** The literal `'auto'` resets an inherited effort; omitted inherits it. */
   reasoning_effort?: string;
 }
@@ -89,7 +96,9 @@ export interface PendingMessageEdit {
   prompt?: string;
   skill_ids?: number[] | null;
   attachment_ids?: number[] | null;
+  /** Leave both unset to keep the stored model and its source. */
   model?: string | null;
+  model_connection_id?: string | null;
   reasoning_effort?: string | null;
   /** `held` while an editor has it open; `queued` lets it go again. */
   state?: 'held' | 'queued';

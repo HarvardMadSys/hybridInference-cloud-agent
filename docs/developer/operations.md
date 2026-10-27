@@ -38,6 +38,7 @@ Start with the task you need:
 | Investigate a task | [Recorded events and audit](#reading-a-tasks-recorded-events) |
 | Choose the tests for a runtime or MCP change | [Runtime verification](#runtime-verification) |
 | Let owners reach their own servers | [SSH servers](#ssh-servers) |
+| Let owners run tasks on their own inference endpoint | [Owner model connections](#owner-model-connections) |
 | Operate environments and team environments | [Reusable cloud environments](#reusable-cloud-environments) |
 
 [ENVIRONMENT.md](../../ENVIRONMENT.md) documents configuration, and the
@@ -1499,7 +1500,7 @@ with no leader and no sharding.
 | `AGENT_RUNTIME_REGISTRY_URL` | public npm | Registry a host downloads updated agents from. Set the same value on the control plane, which reads the latest release from it. pi updates come from `@earendil-works/pi-coding-agent`; a private mirror must carry that package as well as the image's `@mariozechner` one |
 | `AGENT_EGRESS_CHAT_NETWORK_POOL` | required | This deployment's RFC1918 IPv4 pool, one daemon-arbitrated `/29` per active group bridge. No default: it must be disjoint from every other deployment's pool on the machine — of two that overlap, the host rules refuse the one installed later — and from the host's Docker, VPN and private-service routes. A group's bridge is removed on stop and rebuilt on wake |
 | `AGENT_EGRESS_DNS_SERVER` | required | The one IPv4 resolver sandboxes may use, on TCP and UDP 53. It is the only exception to the protected ranges, so a site resolver on a private address or on this host works. Not loopback, and not inside the pool; see _Choosing the resolver_ below |
-| `AGENT_EGRESS_PROTECTED_CIDRS` | — | Comma-separated IPv4 blocks to refuse on top of the built-in host, private, link-local/metadata, CGNAT, multicast and reserved ranges — an institution's services on public addresses, for example. It can only add protection. Set the same value on the control plane, where an owner's SSH server check refuses these blocks too |
+| `AGENT_EGRESS_PROTECTED_CIDRS` | — | Comma-separated IPv4 blocks to refuse on top of the built-in host, private, link-local/metadata, CGNAT, multicast and reserved ranges — an institution's services on public addresses, for example. It can only add protection. Set the same value on the control plane, where an owner's SSH server and model connection checks refuse these blocks too |
 | `AGENT_RELAY_NETWORK` | derived | Where lifecycle finds the two relays; the host stack derives `<COMPOSE_PROJECT>-agent-relays`. It must exist and be `internal`, or preflight refuses, and no sandbox group ever joins it. Set it only to name an existing network |
 | `AGENT_EGRESS_SETUP_TIER`, `_AGENT_TIER` | removed | Retired with the network tiers and the Squid proxy, together with `AGENT_EGRESS_ALLOWLIST`, `AGENT_EGRESS_NETWORK_*`, `AGENT_EGRESS_PROXY_*`, `AGENT_EGRESS_STOP_GRACE`, `AGENT_SANDBOX_NETWORK` and `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`. Nothing reads them, so setting one changes nothing; delete them from `.env` |
 | `AGENT_RUNNER_HOST` | host name | Enrolled execution environment, shared by every turn it runs — the unit the admin placement switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. After enrolment the persisted credential is authoritative, so editing this renames nothing. Unset keeps the environment out of the pool and changes nothing else. Distinct from `AGENT_PHYSICAL_HOST`, which is the display-only inventory name grouping environments that share one server |
@@ -4163,6 +4164,84 @@ and the owner SSH servers entry in [AGENTS.md](../../AGENTS.md) §7.
   control plane's memory.
 - **Owner firewalls.** A server that limits who may connect must allow both
   the control plane (for checks) and every host its chats may run on.
+
+## Owner model connections
+
+An owner adds their own OpenAI-compatible endpoint under **Settings → My
+settings → Personal model connections** (`/settings/my-settings`): a name, a
+Base URL, an API key, the protocols it offers and the model ids to use. Its
+models then appear in the composer beside the Gateway's, for the agents that
+speak one of its protocols. Such a turn runs on the owner's key and bill and
+needs no Gateway grant, catalog or quota; login and Agent admission still go
+through the Gateway. Design, protocol matrix and accepted risks:
+[model connection design](../agents/specs/2026-10-27-user-model-connections.zh-CN.md),
+and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
+
+- **Turning it on.** `AGENT_MODEL_CONNECTIONS_ENABLED` is off by default. Turn
+  it on only after every host **and every control-plane replica** runs this
+  release: an older control plane does not read the source columns, so it
+  would claim, resume or queue a turn on a connection as a Gateway turn, and
+  no host capability can stop that. The setting gates admission only. Turning
+  it off stops new connections, re-enabling one and new turns or messages on
+  one; turns already admitted still run on their connection or fail, never on
+  the Gateway. It is not a way to stop running work.
+- **Rolling back.** Once any owner has saved a connection, do not run an
+  older control plane, with or without the setting: conversations that ran on
+  a connection keep their source and would continue on the Gateway under older
+  code. Downgrading `0106` refuses while any connection, any turn or waiting
+  message that names one, or any member resident on one exists — finished
+  conversations included. Removing them is a data decision to make first.
+- **Migration and key.** `0106_user_model_connections` adds the tables and the
+  source columns. Keys are encrypted with `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`
+  under their own `hybridinference/model-connection-key/v1` domain; without
+  that key the page says so and nothing can be saved. No owner route returns a
+  key, and a refused request names the field without echoing it. The host's
+  authorized claim and residency responses do carry it: that is how the
+  member's CLI gets it.
+- **Protocols.** OpenCode, Kilo and pi need Chat Completions; Codex needs
+  Responses; Claude Code cannot run on a connection. Reasoning effort is Auto
+  only. A pairing a connection cannot serve is refused when the task or message
+  is submitted, and again at every claim; nothing falls back to the Gateway or
+  another model.
+- **Host rollout.** Runners advertise `model-connections-v1`. A claim for a
+  turn on a connection is released, without spending an attempt, to a runner
+  that does not attest it, so roll hosts out first. A disabled, deleted or no
+  longer suitable connection fails the turn at its claim with that reason.
+- **What a turn does.** The claim carries the connection's exact Base URL,
+  protocol, credential revision and key; the runner masks the key. The
+  residency binds the member to that revision and hands it the key instead of
+  minting a grant. The member's CLI is configured with the URL as written and
+  the key in its environment and activation tmpfs, never in argv. A later turn
+  after the key, Base URL or protocols changed starts a new process.
+- **Scan history.** When a key is bound to a residency, an encrypted scanning
+  copy is recorded under a separate domain against that sandbox group and
+  connection revision. Trusted snapshot and publication scans of the group
+  look for every key it used, including rotated and deleted ones and those of
+  same-owner Fork members, and nothing from other groups. The copy stays with
+  the sandbox group record after the connection is deleted; it is still a
+  real provider key, and deleting the connection here does not revoke it at
+  the provider. A group whose history exceeds the scan bound fails the scan
+  closed rather than skipping keys.
+- **Changes take effect at once.** Rotating the key, changing the Base URL or
+  protocols, disabling or deleting a connection releases every residency
+  started on the old state and closes its process, the same path a chat
+  deletion takes; a turn running on it stops. A host the control plane cannot
+  reach closes it when its next residency heartbeat is refused.
+- **Checks dial out from the control plane.** A check streams one tool call
+  and its result for a model and protocol the owner picks, and reports
+  supported, unsupported or failed for that pair only. It dials only public
+  IPv4 HTTPS on port 443: every resolved address must pass the MCP connection
+  policy and the sandbox's protected ranges (including
+  `AGENT_EGRESS_PROTECTED_CIDRS`), the connection is pinned to the checked
+  addresses, redirects are not followed and no upstream body is echoed. Each
+  owner may run 20 checks and model-list reads an hour, reserved atomically
+  across replicas; an owner's checks are not otherwise serialized.
+- **Usage.** The owner's provider bills these turns and the Gateway ledger
+  records none of them. A turn's usage shows runtime token counts and says the
+  cost is the provider's; conversation totals mark themselves incomplete, and
+  an admin's run detail says the owner's provider bills it. The owner and admin
+  usage aggregates still count such a turn as a run whose Gateway usage is
+  `unavailable` — never as zero cost, but without naming the provider either.
 
 ## Reusable cloud environments
 

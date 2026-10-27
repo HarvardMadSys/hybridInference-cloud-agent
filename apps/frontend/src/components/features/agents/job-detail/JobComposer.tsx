@@ -34,6 +34,13 @@ import { SkillSelectionDialog } from './LazyPanels';
 import type { useJobComposerSettings } from './useJobComposerSettings';
 import type { useJobRunActions } from './useJobRunActions';
 
+/** What the next message runs with, before the model: the thread's harness. */
+function runtimeNote(job: AgentJob, contextLost: boolean): string {
+  if (contextLost) return `Start a new chat · ${job.runtime}`;
+  if (job.state === 'cancelled') return `Restores any saved changes · ${job.runtime}`;
+  return `Inherits ${job.runtime}`;
+}
+
 /**
  * Composer controls and dialogs; request handling remains with the page.
  *
@@ -115,12 +122,12 @@ export function JobComposer({
   const contextLost = hasLostContext(job);
   const {
     config,
-    inherited,
-    model,
-    setChosenModel,
+    inheritedLabel,
+    inheritedUnavailable,
+    rewrite,
     effort,
     setChosenEffort,
-    modelOptions,
+    modelPicker,
     efforts,
   } = settings;
   const { restoring, unarchive } = runActions;
@@ -326,19 +333,13 @@ export function JobComposer({
                   disabled={contextLost || submitting}
                 />
                 <span aria-hidden="true" className="mx-1 h-5 w-px bg-border" />
-                {modelOptions.length > 0 ? (
+                {modelPicker ? (
                   <>
                     {/* The harness stays the thread's; the model is offered
                           again. A model change restarts this member's CLI and
                           native-resumes it in the same retained workspace; it
                           does not replace or clone the sandbox. */}
-                    <Picker
-                      compact
-                      label="Model for this turn"
-                      value={model}
-                      options={modelOptions}
-                      onChange={setChosenModel}
-                    />
+                    <Picker compact label="Model for this turn" {...modelPicker} />
                     <Picker
                       compact
                       label="Reasoning for this turn"
@@ -353,7 +354,8 @@ export function JobComposer({
                   compact
                   inline
                   value={followUp}
-                  model={model}
+                  // Gateway-only: off, with the reason, for a personal source.
+                  {...rewrite}
                   disabled={
                     contextLost || submitting || goalCommand.busy || /^\s*\//.test(followUp)
                   }
@@ -375,6 +377,7 @@ export function JobComposer({
                   }
                   disabled={
                     contextLost ||
+                    inheritedUnavailable ||
                     !followUp.trim() ||
                     submitting ||
                     rewriting ||
@@ -388,16 +391,19 @@ export function JobComposer({
                 />
               </div>
               <p className="px-3 pb-2 text-[11px] leading-4 text-muted">
-                {contextLost
-                  ? `Start a new chat · ${job.runtime}`
-                  : job.state === 'cancelled'
-                    ? `Restores any saved changes · ${job.runtime}`
-                    : `Inherits ${job.runtime}`}
-                {modelOptions.length === 0 ? ` · ${inherited.model}` : ''}
+                {runtimeNote(job, contextLost)}
+                {modelPicker ? '' : ` · ${inheritedLabel}`}
                 {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
                 {queue.canSendNow
                   ? ` · ${t('queue.steerHint', { keys: chordLabel('↵', apple) })}`
                   : ''}
+              </p>
+              <p
+                role="status"
+                hidden={!inheritedUnavailable}
+                className="px-3 pb-2 text-[11px] leading-4 text-status-error"
+              >
+                {t('modelSource.inheritedUnavailable', { label: inheritedLabel })}
               </p>
             </form>
           )}

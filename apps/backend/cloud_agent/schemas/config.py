@@ -18,6 +18,20 @@ from cloud_agent.source_control_runtime import (
 from cloud_agent_shared.environment import environment_limits
 
 
+class ModelConnectionOption(BaseModel):
+    """One of the owner's enabled model connections, as the composer offers it.
+
+    Everything needed to offer its models beside the Gateway's and to know
+    which agents can use it; nothing about its key.
+    """
+
+    id: str
+    name: str
+    models: list[str]
+    #: The agents whose protocol this connection offers.
+    runtimes: list[str]
+
+
 class AgentConfigResponse(BaseModel):
     """What this deployment will actually accept, for the task composer.
 
@@ -76,6 +90,26 @@ class AgentConfigResponse(BaseModel):
             "never pre-selected. Null means none of the three resolves, or the "
             "catalog was unreadable — the composer then leaves its model "
             "control empty and asks, rather than choosing one for the owner."
+        ),
+    )
+    model_connections: list[ModelConnectionOption] = Field(
+        default_factory=list,
+        description=(
+            "This owner's enabled model connections. A model chosen from one is "
+            "submitted with its `model_connection_id`; the same id may also be a "
+            "Gateway model, which is a different choice."
+        ),
+    )
+    model_connections_enabled: bool = Field(
+        default=False,
+        description="Whether this deployment lets owners add and run on their own connections.",
+    )
+    default_model_connection_id: str | None = Field(
+        default=None,
+        description=(
+            "The source of `default_model`: the owner connection it last ran on, "
+            "or null for the Gateway. When set, `default_model` is one of that "
+            "connection's models, not necessarily one of `models`."
         ),
     )
     mcp_runtimes: list[str] = Field(

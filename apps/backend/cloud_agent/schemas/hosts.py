@@ -431,8 +431,13 @@ class HostResidencyEstablishResponse(BaseModel):
     thread_id: str
     generation: int
     ttl_seconds: float
-    credential: str | None = None
+    #: A Gateway grant, or an owner connection's own long-lived key: never in a repr.
+    credential: str | None = Field(None, repr=False)
     model: str | None = None
+    #: For a residency on an owner model connection, the credential revision
+    #: ``credential`` (that connection's key) belongs to. The host refuses one
+    #: that differs from its claim's: the key changed during the turn.
+    model_connection_revision: int | None = None
     mcp_credential: str = Field(
         "",
         description=(

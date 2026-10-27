@@ -974,6 +974,11 @@ class SandboxManagerClient:
             "workspace_epoch": snapshot["workspace_epoch"],
             "base_sha": snapshot["base_sha"],
             **({"environment": snapshot["environment"]} if snapshot.get("environment") else {}),
+            **(
+                {"known_secrets": snapshot["known_secrets"]}
+                if snapshot.get("known_secrets")
+                else {}
+            ),
         }
         if snapshot.get("environment"):
             await self.require_environment_capability(snapshot["environment"])

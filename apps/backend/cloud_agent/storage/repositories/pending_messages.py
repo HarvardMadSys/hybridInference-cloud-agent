@@ -196,6 +196,7 @@ class PostgresPendingMessageRepository:
         reset_reasoning_effort: bool = False,
         skills: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        model_connection_id: str | None = None,
     ) -> dict[str, Any]:
         """Put one message at the end of the owner's thread's queue.
 
@@ -327,6 +328,7 @@ class PostgresPendingMessageRepository:
                         user_id=user_id,
                         prompt=prompt,
                         model=model,
+                        model_connection_id=model_connection_id,
                         reasoning_effort=reasoning_effort,
                         reset_reasoning_effort=reset_reasoning_effort,
                         skills=skills,
@@ -366,8 +368,9 @@ class PostgresPendingMessageRepository:
                     INSERT INTO agent_pending_messages
                         (id, thread_id, user_id, state, prompt, skill_ids, attachment_ids,
                          model, reasoning_effort, client_request_id,
-                         client_request_fingerprint)
-                    VALUES ($1, $2, $3, 'queued', $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)
+                         client_request_fingerprint, model_connection_id)
+                    VALUES ($1, $2, $3, 'queued', $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10,
+                            $11)
                     """,
                     message_id,
                     thread_id,
@@ -379,6 +382,8 @@ class PostgresPendingMessageRepository:
                     reasoning_effort,
                     client_request_id,
                     client_request_fingerprint,
+                    # Only with a model: an inherited model keeps its source.
+                    model_connection_id if model else None,
                 )
                 await _pin_attachments(
                     conn, message_id=message_id, user_id=user_id, attachment_ids=attachment_ids
@@ -483,7 +488,7 @@ class PostgresPendingMessageRepository:
                     """
                     UPDATE agent_pending_messages
                     SET prompt = $2, skill_ids = $3::jsonb, attachment_ids = $4::jsonb,
-                        model = $5, reasoning_effort = $6, state = $7,
+                        model = $5, reasoning_effort = $6, state = $7, model_connection_id = $8,
                         -- A message put back in line is being tried afresh, so
                         -- the refusal that held it no longer describes it.
                         last_error = CASE WHEN $7 = 'queued' THEN NULL ELSE last_error END,
@@ -503,6 +508,11 @@ class PostgresPendingMessageRepository:
                     if "reasoning_effort" in changes
                     else row["reasoning_effort"],
                     state,
+                    # The source travels with the model: a changed model takes
+                    # the source sent with it, null being the Gateway.
+                    (changes.get("model_connection_id") if changes.get("model") else None)
+                    if "model" in changes
+                    else row["model_connection_id"],
                 )
                 if "attachment_ids" in changes:
                     await _pin_attachments(
@@ -1131,6 +1141,7 @@ class PostgresPendingMessageRepository:
                         user_id=str(head["user_id"]),
                         prompt=str(head["prompt"]),
                         model=prepared.model,
+                        model_connection_id=prepared.model_connection_id,
                         reasoning_effort=prepared.reasoning_effort,
                         reset_reasoning_effort=prepared.reset_reasoning_effort,
                         skills=prepared.skills,

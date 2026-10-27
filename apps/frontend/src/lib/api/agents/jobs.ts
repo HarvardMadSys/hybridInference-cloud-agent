@@ -48,6 +48,8 @@ export interface AgentJobApi {
   task_prompt: string;
   runtime: string;
   model: string;
+  /** The owner's connection this turn runs on; null or absent is the Gateway. */
+  model_connection_id?: string | null;
   /** How hard the model was asked to think. Null is Auto — nobody chose. */
   reasoning_effort?: string | null;
   /** Requested branch/ref before the backend pinned it to base_sha. */
@@ -168,6 +170,8 @@ export interface CreateAgentJobRequest {
   repo: string | null;
   task_prompt: string;
   model: string;
+  /** The owner's connection `model` is listed on; omitted is the Gateway. */
+  model_connection_id?: string;
   runtime?: string;
   /** Omitted is Auto: the runtime and model decide for themselves. */
   reasoning_effort?: string;
