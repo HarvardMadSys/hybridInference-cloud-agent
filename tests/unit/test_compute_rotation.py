@@ -15,8 +15,8 @@ from cloud_agent.application.compute_rotation import (
     candidate_configuration,
     classify_candidate_failure,
     next_node_type,
-    refused_for_capacity,
 )
+from cloud_agent.domain.compute import refused_for_capacity
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
 from cloud_agent.schemas_compute import RenewalPolicy
 

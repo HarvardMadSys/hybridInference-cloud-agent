@@ -53,6 +53,7 @@ from cloud_agent.storage._sql.move_out import (
     move_out_blocker,
     move_out_possible,
 )
+from cloud_agent.storage._sql.rotation_candidates import candidate_work_stoppable
 from cloud_agent.storage._sql.rows import load_json
 
 if TYPE_CHECKING:
@@ -3023,11 +3024,12 @@ class PostgresComputeResourceRepository:
         operation_id: str,
         generation: int,
         worker_id: str,
+        refused_acquisition_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Stop a replacement node's pending work and queue its release.
 
-        Returns the release operation, or None while the candidate's own work is
-        executing or its outcome is unknown and it cannot be stopped safely.
+        Returns the release operation, or None while the candidate's own work
+        cannot be stopped safely (``candidate_work_stoppable``).
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn, exclusive=True)
@@ -3044,11 +3046,7 @@ class PostgresComputeResourceRepository:
             existing = await self._existing_request(conn, request_id, fingerprint)
             if existing is not None:
                 return existing
-            if await conn.fetchval(
-                """SELECT 1 FROM agent_compute_operations
-                WHERE allocation_id=$1 AND state IN ('running','unknown') LIMIT 1""",
-                allocation_id,
-            ):
+            if not await candidate_work_stoppable(conn, allocation_id, refused_acquisition_id):
                 return None
             await conn.execute(
                 """UPDATE agent_compute_operations

@@ -25,7 +25,12 @@ from pydantic import SecretStr
 from cloud_agent.application.compute_release import NEVER_CREATED, release_evidence
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.compute_secrets import ComputeSecretError
-from cloud_agent.domain.compute import ComputeRefusal, discard_request_id, fingerprint
+from cloud_agent.domain.compute import (
+    ComputeRefusal,
+    discard_request_id,
+    fingerprint,
+    refused_for_capacity,
+)
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.operational_health import deliver_event
 from cloud_agent.ports.external.compute_provider import NodeObservation, ProviderError
@@ -109,29 +114,6 @@ def classify_candidate_failure(
     if code in {"resource_failed", "capacity_unavailable"} and not candidate.get("nodes"):
         return "no_capacity", code
     return "setup_failed", code
-
-
-def refused_for_capacity(operation: dict[str, Any], candidate: dict[str, Any]) -> bool:
-    """Whether a waiting acquisition's create was refused for capacity, creating nothing.
-
-    Only a definite rejection of the submission resets the step to ``pending``
-    and clears ``external_pending``; a create the provider answered with an
-    identity keeps that identity. A rate limit, an unknown outcome, or a
-    capacity message about a resource that has an identity does not qualify.
-    """
-    result = operation.get("result") or {}
-    reasons = result.get("blocked_reasons") or []
-    return (
-        operation.get("state") == "waiting"
-        and operation.get("step") == "pending"
-        and result.get("external_pending") is False
-        and bool(reasons)
-        and reasons[0].get("code") == "capacity_unavailable"
-        and not result.get("resource_ref")
-        and not result.get("external_id")
-        and not candidate.get("external_id")
-        and not candidate.get("nodes")
-    )
 
 
 def next_node_type(
@@ -505,9 +487,7 @@ class ComputeRotation:
             )
             return None
         else:
-            unfinished = await self._unfinished_failure(
-                operation, allocation, current, acquire, candidate
-            )
+            unfinished = await self._unfinished_failure(operation, current, acquire, candidate)
             if unfinished is None:
                 await self.reconciler._finish(
                     operation,
@@ -524,43 +504,28 @@ class ComputeRotation:
     async def _unfinished_failure(
         self,
         operation: dict[str, Any],
-        allocation: dict[str, Any],
         current: dict[str, Any],
         acquire: dict[str, Any] | None,
         candidate: dict[str, Any],
     ) -> tuple[str, str] | None:
         """Give up a replacement still being acquired, or return None to keep waiting.
 
-        A create refused for capacity moves on to the next type at once. The
-        store stops the acquisition first, and refuses while its retry runs:
-        that retry may create the node, so the move waits to see. The last
-        type to try keeps retrying, as an acquisition outside a move does.
+        A create refused for capacity is given up at once, the last type to
+        try included: the move then tries the next type or stops with the
+        reason none is left. The store stops the acquisition only while,
+        locked, it still shows that refusal; a retry that ran since the read
+        keeps what it got, and the move looks again.
         """
         if (
             acquire is not None
             and refused_for_capacity(acquire, candidate)
-            and self._another_type(operation, allocation, current)
-            and await self._abandon(operation, current) is not None
+            and await self._abandon(operation, current, refused=True) is not None
         ):
-            return classify_candidate_failure(acquire, candidate)
+            # What the store confirmed, not only what was read before.
+            return "no_capacity", "capacity_unavailable"
         if _now() - (_moment(current["created_at"]) or _now()) > _CANDIDATE_TIMEOUT:
             return "setup_failed", "candidate_timeout"
         return None
-
-    @staticmethod
-    def _another_type(
-        operation: dict[str, Any], allocation: dict[str, Any], current: dict[str, Any]
-    ) -> bool:
-        """Whether a type remains to try once this candidate counts as having no capacity."""
-        result = operation["result"]
-        policy = RenewalPolicy.model_validate(allocation.get("policy") or {})
-        attempts = [
-            attempt
-            for attempt in (result.get("attempts") or [])[result.get("attempt_floor", 0) :]
-            if attempt.get("candidate") != current["id"]
-        ]
-        attempts.append({"node_type": current["node_type"], "class": "no_capacity"})
-        return next_node_type(policy, attempts)[0] is not None
 
     async def _open_candidate(
         self, operation: dict[str, Any], allocation: dict[str, Any], slot: dict[str, Any]
@@ -723,14 +688,19 @@ class ComputeRotation:
         )
 
     async def _abandon(
-        self, operation: dict[str, Any], current: dict[str, Any]
+        self, operation: dict[str, Any], current: dict[str, Any], *, refused: bool = False
     ) -> dict[str, Any] | None:
-        """Stop a candidate's work and queue its one release; None while its work runs."""
+        """Stop a candidate's work and queue its one release; None while it cannot stop.
+
+        ``refused`` stops it only while its acquisition still shows a capacity
+        refusal that created nothing, checked under the store's lock.
+        """
         parameters = {"allocation_id": current["id"]}
         return await self.repository.abandon_candidate(
             allocation_id=current["id"],
             request_id=discard_request_id(current["id"]),
             fingerprint=fingerprint("discard", parameters),
+            refused_acquisition_id=current["operation_id"] if refused else None,
             **self.reconciler._fence(operation),
         )
 

@@ -456,33 +456,65 @@ async def test_a_capacity_answer_about_a_created_experiment_keeps_that_experimen
     assert r.cloud.posts == ["first", "t1"]
 
 
-async def test_the_last_type_without_capacity_keeps_retrying_instead_of_stopping(
-    db, store, hosts, monkeypatch
+@pytest.mark.parametrize(
+    ("node_types", "refused_types", "stop"),
+    [
+        (("t1",), ("t1",), "candidates_exhausted"),
+        (("t1", "t2"), ("t1", "t2"), "candidates_exhausted"),
+        # Three refusals in a row stop before the fourth type is asked.
+        (("t1", "t2", "t3", "t4"), ("t1", "t2", "t3"), "systemic_no_capacity"),
+    ],
+)
+async def test_a_move_whose_types_all_lack_capacity_releases_them_and_stops(
+    db, store, hosts, monkeypatch, node_types, refused_types, stop
 ):
-    """With no further type to try, the last one waits for capacity as before."""
-    r = await rig(db, store, hosts, monkeypatch)
-    r.cloud.portal.update(t1=NO_CAPACITY, t2=NO_CAPACITY)
+    """No type waits out the candidate timeout, the last one included.
+
+    Every refused candidate is released as never created; then the move
+    blocks with the reason no further type is tried, and alerts once.
+    """
+    delivered: list[tuple[str, dict]] = []
+
+    async def deliver(event, details):
+        delivered.append((event, details))
+
+    monkeypatch.setattr("cloud_agent.application.compute_rotation.deliver_event", deliver)
+    r = await rig(db, store, hosts, monkeypatch, node_types=node_types)
+    r.cloud.portal.update(dict.fromkeys(refused_types, NO_CAPACITY))
     await move(r)
 
-    assert not await settle(r, db, passes=20)
+    settled = await settle(r, db)
 
     rotation = await rotation_of(r, r.allocation_id)
-    assert (rotation["state"], rotation["step"]) == ("waiting", "preparing_candidate")
-    assert [a["node_type"] for a in rotation["result"]["attempts"]] == ["t1"]
-    refused, last = await successor_of(db, r.allocation_id)
-    await assert_never_created_and_released(r, refused)
-    [acquire] = await operations_of(r, last["id"], "acquire")
-    assert acquire["state"] == "waiting"
-    assert await operations_of(r, last["id"], "discard") == []
-    assert r.cloud.posts[:3] == ["first", "t1", "t2"]
-    assert set(r.cloud.posts[3:]) == {"t2"}
-
-    del r.cloud.portal["t2"]
+    assert settled and rotation["state"] == "blocked", (
+        rotation["state"],
+        rotation["step"],
+        rotation["message"],
+        r.cloud.posts,
+    )
+    assert rotation["result"]["blocked_reasons"][0]["code"] == stop
+    assert [(a["node_type"], a["class"], a["code"]) for a in rotation["result"]["attempts"]] == [
+        (node_type, "no_capacity", "capacity_unavailable") for node_type in refused_types
+    ]
+    # One create per type, and none after the move stopped.
+    assert r.cloud.posts == ["first", *refused_types]
+    candidates = await successor_of(db, r.allocation_id)
+    assert len(candidates) == len(refused_types)
+    for candidate in candidates:
+        await assert_never_created_and_released(r, candidate)
+    assert ("compute_rotation_blocked", {"host": r.host, "reason": stop}) in delivered
+    # The Host keeps serving on its own node with claims open.
+    source = await r.repo.get_allocation(r.allocation_id)
+    assert [h["host"] for h in source["hosts"]] == [r.host]
+    assert source["release_committed_at"] is None
+    async with db.acquire() as conn:
+        holds = await conn.fetchval(
+            "SELECT count(*) FROM agent_host_admission_holds WHERE host=$1 AND purpose='rotation'",
+            r.host,
+        )
+    assert holds == 0
     assert await settle(r, db)
-    rotation = await rotation_of(r, r.allocation_id)
-    assert rotation["state"] == "succeeded"
-    target = await r.repo.get_allocation(last["id"])
-    assert [h["host"] for h in target["hosts"]] == [r.host]
+    assert r.cloud.posts == ["first", *refused_types]
 
 
 async def test_an_ordinary_acquisition_still_tries_its_types_in_one_pass_and_waits(
@@ -596,10 +628,107 @@ async def test_a_retry_running_when_the_move_gives_up_is_waited_for(
     assert target["external_id"] not in r.cloud.released
 
 
+@pytest.mark.parametrize("retry_answer", ["created", "unknown", "rate_limited", "refused_again"])
+async def test_a_retry_finished_between_the_read_and_the_abandon_is_judged_by_its_result(
+    db, store, hosts, monkeypatch, retry_answer
+):
+    """The candidate's retry ran to its end after the move read a refusal, before it gave up.
+
+    Giving up is decided on the acquisition as it is when the store stops it:
+    a created node, an unknown outcome or a rate limit keeps the candidate;
+    only a fresh capacity refusal is given up.
+    """
+    r = await rig(db, store, hosts, monkeypatch)
+    r.cloud.portal["t1"] = NO_CAPACITY
+    await move(r)
+    await run_next(r, db, "rotate")
+    child = await run_next(r, db, "acquire")
+    abandon = r.repo.abandon_candidate
+    raced: list[dict] = []
+
+    async def abandon_after_a_retry(**kwargs):
+        if not raced:
+            if retry_answer == "created":
+                del r.cloud.portal["t1"]
+            else:
+                r.cloud.portal["t1"] = {
+                    "unknown": SERVER_ERROR,
+                    "rate_limited": RATE_LIMITED,
+                    "refused_again": NO_CAPACITY,
+                }[retry_answer]
+            await wake(db, child["id"])
+            async with db.acquire() as conn:
+                await conn.execute(
+                    "UPDATE agent_compute_operations SET next_attempt_at=NOW()+interval '1 hour' "
+                    "WHERE id<>$1 AND state='waiting'",
+                    child["id"],
+                )
+            claimed = await r.repo.claim_operation(worker_id="racing-worker")
+            assert claimed is not None and claimed["id"] == child["id"]
+            await r.worker.execute_claimed(claimed)
+            raced.append(await r.repo.get_operation(child["id"]))
+        return await abandon(**kwargs)
+
+    monkeypatch.setattr(r.repo, "abandon_candidate", abandon_after_a_retry)
+    await run_next(r, db, "rotate")
+
+    assert raced, "the move did not try to give up the refused candidate"
+    assert raced[0]["generation"] > child["generation"]
+    assert r.cloud.posts == ["first", "t1", "t1"]
+    rotation = await rotation_of(r, r.allocation_id)
+    [candidate] = await successor_of(db, r.allocation_id)
+    [acquire] = await operations_of(r, candidate["id"], "acquire")
+    discards = await operations_of(r, candidate["id"], "discard")
+    if retry_answer == "refused_again":
+        assert acquire["state"] == "cancelled" and len(discards) == 1
+        assert [
+            (a["node_type"], a["class"], a["code"]) for a in rotation["result"]["attempts"]
+        ] == [("t1", "no_capacity", "capacity_unavailable")]
+    else:
+        assert acquire["state"] != "cancelled" and discards == [], (acquire["state"], discards)
+        assert rotation["result"]["attempts"] == []
+        held = await r.repo.get_allocation(candidate["id"])
+        assert held["release_committed_at"] is None
+
+    if retry_answer == "rate_limited":
+        del r.cloud.portal["t1"]
+    await settle(r, db)
+
+    rotation = await rotation_of(r, r.allocation_id)
+    if retry_answer == "unknown":
+        assert rotation["state"] == "blocked"
+        assert rotation["result"]["blocked_reasons"][0]["code"] == "candidate_acquisition_unknown"
+        [acquire] = await operations_of(r, candidate["id"], "acquire")
+        assert acquire["state"] == "unknown"
+        assert await operations_of(r, candidate["id"], "discard") == []
+        assert r.cloud.posts == ["first", "t1", "t1"]
+        return
+    assert rotation["state"] == "succeeded", rotation
+    successors = await successor_of(db, r.allocation_id)
+    if retry_answer == "refused_again":
+        assert r.cloud.posts == ["first", "t1", "t1", "t2"]
+        refused, replacement = successors
+        await assert_never_created_and_released(r, refused)
+    else:
+        assert r.cloud.posts == ["first", "t1", "t1"] + (
+            ["t1"] if retry_answer == "rate_limited" else []
+        )
+        [replacement] = successors
+        assert await operations_of(r, replacement["id"], "discard") == []
+        assert rotation["result"]["attempts"] == []
+    target = await r.repo.get_allocation(replacement["id"])
+    assert [h["host"] for h in target["hosts"]] == [r.host]
+    assert target["external_id"] not in r.cloud.released
+
+
 async def test_a_move_restarted_after_giving_up_a_candidate_releases_it_once(
     db, store, hosts, monkeypatch
 ):
-    """The worker lost its lease right after the store queued the release."""
+    """The process died after the store stopped the candidate, before the move's checkpoint.
+
+    The restarted move still records the original capacity refusal, keeps the
+    one release already queued and asks no type twice.
+    """
     r = await rig(db, store, hosts, monkeypatch)
     r.cloud.portal["t1"] = NO_CAPACITY
     await move(r)
@@ -630,8 +759,14 @@ async def test_a_move_restarted_after_giving_up_a_candidate_releases_it_once(
 
     rotation = await rotation_of(r, r.allocation_id)
     assert rotation["state"] == "succeeded", rotation
-    assert [a["node_type"] for a in rotation["result"]["attempts"]] == ["t1"]
     refused, replacement = await successor_of(db, r.allocation_id)
+    [attempt] = rotation["result"]["attempts"]
+    assert (attempt["candidate"], attempt["node_type"], attempt["class"], attempt["code"]) == (
+        refused["id"],
+        "t1",
+        "no_capacity",
+        "capacity_unavailable",
+    )
     await assert_never_created_and_released(r, refused)
     [discard] = await operations_of(r, refused["id"], "discard")
     assert discard["id"] == lost[0]

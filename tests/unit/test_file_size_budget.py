@@ -25,7 +25,7 @@ BASELINE = {
     "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5285,
     "apps/backend/cloud_agent_host/runner.py": 4902,
     "apps/backend/cloud_agent_host/chat_sandbox.py": 4085,
-    "apps/backend/cloud_agent/storage/repositories/compute_resources.py": 3817,
+    "apps/backend/cloud_agent/storage/repositories/compute_resources.py": 3815,
     "apps/backend/cloud_agent_host/sandbox_manager.py": 3545,
     "apps/backend/cloud_agent/storage/repositories/sandbox.py": 3403,
     "apps/backend/cloud_agent_host/drivers.py": 3052,
