@@ -138,8 +138,13 @@ describe('shared menu rows', () => {
   it('gives plain rows hover and focus feedback on the semantic surface', () => {
     expect(MENU_ROW).not.toContain('gray');
     expect(MENU_ROW).not.toContain('red-');
-    expect(MENU_ROW).toContain('enabled:hover:bg-surface-hover');
-    expect(MENU_ROW).toContain('enabled:focus:bg-surface-hover');
+    // Anchors and role=menuitem rows are not form controls, so `:enabled`
+    // would leave them unhighlighted.
+    expect(MENU_ROW).not.toContain('enabled:');
+    expect(MENU_ROW).toContain('hover:bg-surface-hover');
+    expect(MENU_ROW).toContain('focus:bg-surface-hover');
+    expect(MENU_ROW).toContain('aria-disabled:hover:bg-transparent');
+    expect(MENU_ROW).toContain('aria-disabled:opacity-50');
     expect(MENU_SURFACE).toContain('bg-surface-raised');
     expect(MENU_POSITIONED).toContain('fixed');
     expect(MENU_ACTIONS).toContain('overflow-y-auto');
@@ -147,11 +152,11 @@ describe('shared menu rows', () => {
 
   it('keeps selected and destructive states from being overridden by the plain hover', () => {
     expect(MENU_ROW_SELECTED).toContain('bg-accent-subtle');
-    expect(MENU_ROW_SELECTED).toContain('enabled:hover:bg-accent-subtle');
-    expect(MENU_ROW_SELECTED).not.toContain('enabled:hover:bg-surface-hover');
+    expect(MENU_ROW_SELECTED).toContain('hover:bg-accent-subtle');
+    expect(MENU_ROW_SELECTED).not.toContain('hover:bg-surface-hover');
     expect(MENU_ROW_DESTRUCTIVE).toContain('text-status-error');
-    expect(MENU_ROW_DESTRUCTIVE).not.toContain('enabled:hover:bg-surface-hover');
-    expect(MENU_ROW_DESTRUCTIVE).toContain('enabled:hover:bg-status-error/10');
+    expect(MENU_ROW_DESTRUCTIVE).not.toContain('hover:bg-surface-hover');
+    expect(MENU_ROW_DESTRUCTIVE).toContain('hover:bg-status-error/10');
   });
 
   it('marks a disabled row unclickable and dimmed, and leaves enabled rows unaffected', () => {

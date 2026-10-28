@@ -7,7 +7,7 @@ import {
   MENU_DIVIDER,
   MENU_EMPTY,
   MENU_FOOTER_ACTION,
-  MENU_ROW,
+  MENU_ROW_STATIC,
   MENU_SCROLL,
   MENU_SEARCH,
   MENU_SEARCH_INPUT,
@@ -95,7 +95,7 @@ export function McpSubmenu({
         ) : (
           <ul>
             {shown.map((choice) => (
-              <li key={choice.connection.id} className={`${MENU_ROW} cursor-default`}>
+              <li key={choice.connection.id} className={MENU_ROW_STATIC}>
                 <ServerMark label={choice.connection.label} />
                 <span className="min-w-0 flex-1">
                   <span

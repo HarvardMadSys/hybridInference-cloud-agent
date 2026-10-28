@@ -7,6 +7,7 @@ import {
   MENU_POSITIONED,
   MENU_ROW,
   MENU_ROW_DESTRUCTIVE,
+  menuRowClass,
 } from '@/components/ui/menuStyles';
 import { usePopupMenu } from '@/components/ui/usePopupMenu';
 
@@ -91,7 +92,7 @@ export function GoalActionsMenu({
               disabled={disabled}
               title={t('goal.editHint')}
               onClick={() => choose(onEdit)}
-              className={MENU_ROW}
+              className={disabled ? menuRowClass({ disabled: true }) : MENU_ROW}
             >
               <svg
                 aria-hidden="true"
@@ -117,7 +118,7 @@ export function GoalActionsMenu({
             disabled={disabled}
             title={t('goal.clearHint')}
             onClick={() => choose(onClear)}
-            className={MENU_ROW_DESTRUCTIVE}
+            className={disabled ? menuRowClass({ disabled: true }) : MENU_ROW_DESTRUCTIVE}
           >
             <svg
               aria-hidden="true"

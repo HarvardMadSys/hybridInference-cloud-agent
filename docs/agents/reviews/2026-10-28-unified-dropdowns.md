@@ -12,7 +12,7 @@ backend or gateway code was imported.
 
 | Primitive | Purpose |
 |---|---|
-| `src/components/ui/menuStyles.ts` | One surface (`MENU_SURFACE`) for menu panels, `MENU_ACTIONS` for row-only action panels that scroll as a whole, anchored/composer placement, headings, dividers, footers, search, empty/status, row density. Plain rows keep hover and focus backgrounds; selected rows own the accent background; destructive rows own the error tint; disabled rows dim and cannot be hovered. All values use `border`, `surface-raised`, `surface-muted`, `foreground`, `muted`, `accent`, `status-error`. |
+| `src/components/ui/menuStyles.ts` | One surface (`MENU_SURFACE`) for menu panels, `MENU_ACTIONS` for row-only action panels that scroll as a whole, anchored/composer placement, headings, dividers, footers, search, empty/status, row density. Plain rows keep hover and focus backgrounds for buttons, anchors, links and role=menuitem rows alike; selected rows own the accent background; destructive rows own the error tint; disabled controls and rows announcing aria-disabled dim and do not highlight. All values use `border`, `surface-raised`, `surface-muted`, `foreground`, `muted`, `accent`, `status-error`. |
 | `src/components/ui/anchoredPopover.ts` | `useAnchoredPopover`: fixed placement below/above the trigger, viewport/visual-viewport clamping, max height plus internal scrolling, follows scroll and resize, observes content/trigger resize for async options, and corrects for a transformed/filtered containing block (such as a dialog that animates in) instead of assuming the viewport origin. `popoverContainer` keeps a popup inside its modal dialog; `keepInView` scrolls only the list. |
 | `src/components/ui/usePopupMenu.ts` | Shared action-menu keyboard/dismissal contract: focuses the first/last/selected row only after placement makes the panel visible, arrow/Home/End wrapping, Escape closes the top menu and restores focus, Tab resumes the page order, outside press/focus dismissal, placement. |
 | `src/components/ui/useTopLayerEscape.ts` | The innermost popup owns Escape, in the capture phase, even when Chromium leaves focus on the trigger after a pointer press. A nested layer can consume the key first. |
@@ -72,12 +72,14 @@ Run on Node 22 in the frontend directory unless noted.
 - `npx prettier --check "src/**/*.{ts,tsx}" "e2e/**/*.ts"` — pass.
 - `npx tsc --noEmit` — pass.
 - `npm test` — 274 files / 4427 tests passed.
-- `npm run test:browser -- e2e/menus.spec.ts` — 10 passed: composer
+- `npm run test:browser -- e2e/menus.spec.ts` — 11 passed: composer
   model/agent pickers, repository menu, account menu, sidebar view menu, task
   actions menu and admin form `Select` in desktop light and mobile dark; plus
   real-browser first-row/End focus for action menus, a 50-repository mobile
   panel whose list scrolls while the footer stays visible, and a fixed picker
-  opened under a transformed ancestor. Screenshots are written by Playwright
+  opened under a transformed ancestor, and pointer hover on an actual Account
+  navigation link plus a repository footer anchor (not only class names).
+  Screenshots are written by Playwright
   to `test-results/<test>/…` as
   `composer-model-picker-{desktop-light,mobile-dark}.png`,
   `composer-agent-picker-…`, `repository-menu-…`, `account-menu-…`,

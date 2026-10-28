@@ -321,3 +321,47 @@ test('a transformed ancestor does not displace a fixed picker', async ({ page, r
   expect(box!.y).toBeGreaterThanOrEqual(0);
   expect(box!.y + box!.height).toBeLessThanOrEqual(900);
 });
+
+test('account navigation links and repository footer anchors highlight on hover', async ({
+  page,
+  request,
+}) => {
+  expect((await request.post('/__fixture/reset')).ok()).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/source');
+  await expect(page.getByLabel('Add a follow-up', { exact: true })).toBeVisible();
+  await settled(page);
+
+  const account = page.getByRole('button', { name: /^Account menu/ }).first();
+  await account.click();
+  const menu = page.getByRole('menu', { name: 'Account menu' });
+  await expect(menu).toBeVisible();
+  // A navigation row is a link, not a form control: :enabled never matched it.
+  const settings = menu.getByRole('menuitem', { name: 'Switch account', exact: true });
+  await page.mouse.move(0, 0);
+  expect(await settings.evaluate((element) => getComputedStyle(element).backgroundColor)).toBe(
+    'rgba(0, 0, 0, 0)',
+  );
+  await settings.hover();
+  await expect
+    .poll(() => settings.evaluate((element) => getComputedStyle(element).backgroundColor))
+    .toBe('rgb(240, 240, 243)');
+  await page.keyboard.press('Escape');
+
+  // The repository menu belongs to the new-task composer, not a conversation.
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: /^Repository:/ })).toBeVisible();
+  await settled(page);
+  await page.getByRole('button', { name: /^Repository:/ }).click();
+  const repository = page.getByRole('dialog', { name: 'Repository', exact: true });
+  const footer = repository.getByRole('link', { name: 'Create new repository', exact: true });
+  await page.mouse.move(0, 0);
+  expect(await footer.evaluate((element) => getComputedStyle(element).backgroundColor)).toBe(
+    'rgba(0, 0, 0, 0)',
+  );
+  await footer.hover();
+  await expect
+    .poll(() => footer.evaluate((element) => getComputedStyle(element).backgroundColor))
+    .toBe('rgb(240, 240, 243)');
+});

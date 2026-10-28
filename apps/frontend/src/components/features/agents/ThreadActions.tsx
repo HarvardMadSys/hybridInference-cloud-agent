@@ -4,7 +4,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import toast from 'react-hot-toast';
 import { useT } from '@/components/providers';
-import { MENU_ACTIONS, MENU_POSITIONED, MENU_ROW } from '@/components/ui/menuStyles';
+import { MENU_ACTIONS, MENU_POSITIONED, MENU_ROW, menuRowClass } from '@/components/ui/menuStyles';
 import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import {
   listAllAgentThreadEvents,
@@ -166,7 +166,7 @@ export function ThreadActions({
     }
   }
 
-  const itemClass = MENU_ROW;
+  const itemClass = (inactive: boolean) => (inactive ? menuRowClass({ disabled: true }) : MENU_ROW);
   return (
     <div className="relative shrink-0">
       <button
@@ -203,7 +203,7 @@ export function ThreadActions({
             role="menuitem"
             tabIndex={-1}
             disabled={busy}
-            className={itemClass}
+            className={itemClass(busy)}
             onClick={() => {
               setTitle(job.title);
               setError(null);
@@ -218,7 +218,7 @@ export function ThreadActions({
               type="button"
               role="menuitem"
               tabIndex={-1}
-              className={itemClass}
+              className={itemClass(false)}
               onClick={() => {
                 setOpen(false);
                 onEnvironment();
@@ -231,7 +231,7 @@ export function ThreadActions({
             role="menuitem"
             tabIndex={-1}
             disabled={busy}
-            className={itemClass}
+            className={itemClass(busy)}
             onClick={() => void togglePin()}
           >
             {t(pinned ? 'taskActions.unpin' : 'taskActions.pin')}
@@ -240,7 +240,7 @@ export function ThreadActions({
             role="menuitem"
             tabIndex={-1}
             disabled={!canFork || forking || busy}
-            className={itemClass}
+            className={itemClass(!canFork || forking || busy)}
             onClick={() => {
               close();
               onFork();
@@ -253,7 +253,7 @@ export function ThreadActions({
             tabIndex={-1}
             disabled={downloading}
             aria-busy={downloading}
-            className={itemClass}
+            className={itemClass(downloading)}
             onClick={() => void downloadSessionLog()}
           >
             {t(downloading ? 'taskActions.downloadingLog' : 'taskActions.downloadLog')}

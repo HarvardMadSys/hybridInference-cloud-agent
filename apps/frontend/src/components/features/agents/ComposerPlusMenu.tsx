@@ -8,6 +8,7 @@ import { SshSubmenu } from './ssh/SshSubmenu';
 import type { ComposerSsh } from './ssh/useComposerSsh';
 import { useComposerMenuLayout } from './useComposerMenuLayout';
 import type { McpChoice } from './mcp/useComposerMcp';
+import { menuRowClass } from '@/components/ui/menuStyles';
 import {
   COMPOSER_MENU_SURFACE,
   COMPOSER_MENU_HEADING,
@@ -151,6 +152,11 @@ function PaperclipIcon() {
       />
     </svg>
   );
+}
+
+/** A blocked MCP row reads as inert; an available one is an ordinary action. */
+function mcpRowClass(blocked: boolean): string {
+  return blocked ? menuRowClass({ disabled: true }) : COMPOSER_MENU_ROW;
 }
 
 export function ComposerPlusMenu({
@@ -440,7 +446,7 @@ export function ComposerPlusMenu({
                     tabIndex={-1}
                     aria-haspopup="dialog"
                     aria-disabled={mcpBlockedReason ? true : undefined}
-                    className={COMPOSER_MENU_ROW}
+                    className={mcpRowClass(Boolean(mcpBlockedReason))}
                     onClick={() => {
                       if (!mcpBlockedReason) setSubmenu('mcp');
                     }}

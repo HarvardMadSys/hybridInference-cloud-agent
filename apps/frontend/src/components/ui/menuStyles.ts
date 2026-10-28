@@ -60,6 +60,15 @@ export const MENU_EMPTY = 'px-2.5 py-5 text-center text-[13px] text-muted';
 export const MENU_FOOTER_ACTION =
   'flex min-h-9 min-w-0 flex-1 items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-foreground transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover focus-visible:outline-none [@media(pointer:coarse)]:min-h-11';
 
+/**
+ * The states every menu row shares. `hover:`/`focus:` work for buttons,
+ * anchors, links and role="menuitem" elements alike; `:enabled` would only
+ * match form controls and would leave link rows unhighlighted. Disabled
+ * controls and rows that announce `aria-disabled` opt back out of both.
+ */
+const SUPPRESS_HIGHLIGHT =
+  'disabled:hover:bg-transparent disabled:focus:bg-transparent aria-disabled:hover:bg-transparent aria-disabled:focus:bg-transparent disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50';
+
 export function menuRowClass({
   selected = false,
   active = false,
@@ -72,20 +81,19 @@ export function menuRowClass({
   destructive?: boolean;
 } = {}): string {
   const base =
-    'flex min-h-9 w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-50 [@media(pointer:coarse)]:min-h-11';
+    'flex min-h-9 w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/40 [@media(pointer:coarse)]:min-h-11';
   if (disabled) return `${base} cursor-not-allowed text-muted opacity-50`;
-  // Each state owns its background utilities outright. Combining a base
-  // `hover:bg-surface-hover` with `bg-accent-subtle` would leave the winner to
-  // Tailwind's stylesheet order rather than to the selected state.
+  // Each state names its own hover/focus background, so the selected and
+  // destructive treatments never fall back to the ordinary row tint.
   if (destructive)
-    return `${base} cursor-pointer text-status-error enabled:hover:bg-status-error/10 enabled:focus:bg-status-error/10`;
+    return `${base} cursor-pointer text-status-error hover:bg-status-error/10 focus:bg-status-error/10 ${SUPPRESS_HIGHLIGHT}`;
   if (selected)
-    return `${base} cursor-pointer bg-accent-subtle font-medium text-accent enabled:hover:bg-accent-subtle enabled:focus:bg-accent-subtle ${
+    return `${base} cursor-pointer bg-accent-subtle font-medium text-accent hover:bg-accent-subtle focus:bg-accent-subtle ${
       active ? 'ring-1 ring-inset ring-accent/30' : ''
-    }`;
-  return `${base} cursor-pointer text-foreground enabled:hover:bg-surface-hover enabled:focus:bg-surface-hover ${
+    } ${SUPPRESS_HIGHLIGHT}`;
+  return `${base} cursor-pointer text-foreground hover:bg-surface-hover focus:bg-surface-hover ${
     active ? 'bg-surface-hover' : ''
-  }`;
+  } ${SUPPRESS_HIGHLIGHT}`;
 }
 
 /** An option row for a listbox, where selection and keyboard highlight differ. */
@@ -98,6 +106,13 @@ export const MENU_ROW_DESTRUCTIVE = menuRowClass({ destructive: true });
 
 /** An ordinary item in an action menu. */
 export const MENU_ROW = menuRowClass();
+
+/**
+ * A non-interactive row inside a menu, such as an MCP server with a switch.
+ * It keeps the shared density and tokens but must not highlight like an action.
+ */
+export const MENU_ROW_STATIC =
+  'flex min-h-9 w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-5 text-foreground [@media(pointer:coarse)]:min-h-11';
 
 /** A selected (checkmarked) item in a menu. */
 export const MENU_ROW_SELECTED = menuRowClass({ selected: true });
