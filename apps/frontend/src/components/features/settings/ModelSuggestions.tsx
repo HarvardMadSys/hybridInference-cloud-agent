@@ -30,17 +30,20 @@ function Status({
   missing,
   shown,
   total,
+  draft,
 }: {
   suggestions: Suggestions | null;
   missing: 'details' | 'newKey' | null;
   shown: number;
   total: number;
+  draft: string;
 }) {
   const t = useT();
   if (suggestions?.phase === 'loading') return <>{t('connections.suggest.loading')}</>;
   if (suggestions?.phase === 'failed') return <>{t(PROBLEM_KEYS[suggestions.problem])}</>;
   if (suggestions?.phase === 'loaded') {
     if (!suggestions.models.length) return <>{t('connections.suggest.empty')}</>;
+    if (!shown && !draft.trim()) return <>{t('connections.suggest.allAdded')}</>;
     if (!shown) return <>{t('connections.suggest.noMatch')}</>;
     if (shown < total) return <>{t('connections.suggest.narrow', { shown, total })}</>;
     return <>{t('connections.suggest.listed', { total: suggestions.models.length })}</>;
@@ -104,6 +107,7 @@ export function ModelSuggestions({
           missing={missing}
           shown={shown.length}
           total={listed.length}
+          draft={draft}
         />
       </p>
       {suggestions?.phase === 'loaded' && shown.length ? (

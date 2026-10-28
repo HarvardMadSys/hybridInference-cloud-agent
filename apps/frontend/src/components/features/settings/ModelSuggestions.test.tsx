@@ -171,6 +171,19 @@ describe('a new connection', () => {
     expect(screen.getByText('Up to 8 models per connection.')).toBeVisible();
   });
 
+  it('explains when every listed model is added and still allows manual entry', async () => {
+    vi.mocked(api.discoverModels).mockResolvedValue(['only-model']);
+    await openNew();
+    type('Base URL', URL);
+    type('API key', KEY);
+    fireEvent.click(screen.getByRole('button', { name: LOAD }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add only-model' }));
+    expect(screen.getByText(/All listed models have been added/)).toBeVisible();
+    type('Model IDs', 'other-model');
+    expect(screen.getByText(/No listed model matches/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Verify and save' })).toBeEnabled();
+  });
+
   it('explains a failed or empty listing and keeps every input usable', async () => {
     vi.mocked(api.discoverModels).mockRejectedValueOnce(
       new APIError('model_connection_endpoint_missing', 'The provider has no such endpoint.', 422),
