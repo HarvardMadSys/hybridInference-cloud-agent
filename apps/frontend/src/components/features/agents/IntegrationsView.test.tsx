@@ -41,6 +41,11 @@ vi.mock('@/lib/api/modelPreference', () => ({
   getModelPreference: vi.fn(),
   saveModelPreference: vi.fn(),
 }));
+// My Settings also lists personal model connections; this deployment offers none.
+vi.mock('@/lib/api/modelConnections', () => ({
+  listModelConnections: () =>
+    Promise.resolve({ configured: true, enabled: false, connections: [] }),
+}));
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentConfig: vi.fn(),

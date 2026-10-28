@@ -249,11 +249,20 @@ msgstr ""
 msgid ""
 "Run `alembic upgrade head` (through `0106_local_accounts`) before "
 "starting this release; the [upgrade notes](docs/developer/upgrade-"
+
+"Run `alembic upgrade head` (through `0106_user_model_connections`) before"
+" starting this release; the [upgrade notes](docs/developer/upgrade-"
 "notes.md) say what each recent migration changes. The main control-plane "
 "listener then initializes the settings document once from its existing "
 "environment. The MCP-only listener waits for that document and uses the "
 "same saved values."
 msgstr "启动这个版本之前，先运行 `alembic upgrade head`（升级到 `0106_local_accounts`）；每个近期迁移改了什么，见[升级说明](docs/developer/upgrade-notes.md)。之后，主控制平面监听器会根据现有环境变量，将设置文档初始化一次。MCP 专用监听器会等这份文档准备好，并使用同样的已保存值。"
+
+msgstr ""
+"启动这个版本之前，先运行 `alembic upgrade head`（升级到 "
+"`0106_user_model_connections`）；每个近期迁移改了什么，见[升级说明](docs/developer/upgrade-"
+"notes.md)。之后，主控制平面监听器会根据它现有的环境变量，把设置文档初始化一次。MCP "
+"专用监听器会等这份文档准备好，并使用同样的已保存值。"
 
 #: ../../ENVIRONMENT.md:91
 msgid ""
@@ -1835,6 +1844,32 @@ msgstr ""
 " 桥接确实是在私有网络里走 HTTP，可以有意识地打开它。它和\"允许私有地址\"是两个独立的开关，因为这是两种不同的风险。"
 
 #: ../developer/configuration.md:1
+msgid "`AGENT_MODEL_CONNECTIONS_ENABLED`"
+msgstr ""
+
+#: ../developer/configuration.md:1
+msgid ""
+"Whether owners may add their own model connections (OpenAI Chat "
+"Completions or Responses, Anthropic Messages) and start turns on them. "
+"Off by default. Turn it on only once **every** control-plane replica, and"
+" every host, runs a release that knows connections: a turn on a "
+"connection stores its source in columns an older control plane does not "
+"read, so an older replica would claim, resume or queue it as a Gateway "
+"turn — a host capability cannot stop that, because the older control "
+"plane hands the host a claim that looks like a Gateway one. Once any "
+"owner has used a connection, do not roll the control plane back to an "
+"older release at all, even with this turned off: the conversations that "
+"ran on one keep their source and would continue on the Gateway under "
+"older code. Turning it off again stops new connections, edits that re-"
+"enable one, and new turns on one; turns already admitted still run on "
+"their connection or fail, never on the Gateway. See [owner model "
+"connections](docs/developer/operations.md#owner-model-connections)."
+msgstr ""
+"是否允许所有者添加自己的模型连接（OpenAI Chat Completions 或 Responses、Anthropic "
+"Messages），并在其上启动轮次。默认关闭。只有在**每个**控制平面副本和每台主机都运行支持连接的版本之后才能打开：连接上的轮次把来源存放在旧控制平面不读取的列里，旧副本会把它当作网关轮次来领取、恢复或排队——主机能力声明拦不住这一点，因为旧控制平面交给主机的领取结果看起来就是网关轮次。只要有任何所有者用过连接，就完全不要把控制平面回滚到旧版本，即使已经关闭此项也不行：在连接上运行过的会话保留着来源，在旧代码下会改为在网关上继续运行。再次关闭它会停止新建连接、重新启用连接的编辑以及在连接上的新轮次；已经准入的轮次仍在原连接上运行或失败，绝不会转到网关。见[所有者模型连接](docs/developer/operations.md"
+"#owner-model-connections)。"
+
+#: ../developer/configuration.md:1
 msgid "`AGENT_DEFAULT_MODEL`"
 msgstr ""
 
@@ -1898,6 +1933,34 @@ msgid "Sandbox settings from the admin pages"
 msgstr "在管理页面上设置的沙箱参数"
 
 #: ../../ENVIRONMENT.md:369
+
+#: ../developer/configuration.md:1
+msgid ""
+"`AGENT_COMPAT_CLIENT` / `AGENT_COMPAT_UPSTREAM_URL` / "
+"`AGENT_COMPAT_UPSTREAM_KEY` / `AGENT_COMPAT_MODEL` / `AGENT_COMPAT_TOKEN`"
+msgstr ""
+"`AGENT_COMPAT_CLIENT` / `AGENT_COMPAT_UPSTREAM_URL` "
+"/ `AGENT_COMPAT_UPSTREAM_KEY` / `AGENT_COMPAT_MODEL` "
+"/ `AGENT_COMPAT_TOKEN`"
+
+#: ../developer/configuration.md:1
+msgid ""
+"**Not operator-set — listed so nobody provisions it.** NEW. What a host "
+"hands the model protocol compatibility launcher when Codex or Claude Code"
+" runs on an owner's Chat Completions connection: the CLI's protocol, the "
+"connection's URL and key, the model it is locked to, and the member's "
+"loopback token, which the control plane issues with the claim. The "
+"launcher reads and removes all five before it becomes the CLI, so the CLI"
+" never holds the provider key. Set by hand they would start nothing: the "
+"launcher only runs in front of a translated member."
+msgstr ""
+"**不由运维设置——列在这里是为了不被误配。** 新增。Codex 或 Claude "
+"Code 在所有者的 Chat Completions 连接上运行时，主机交给模型协议兼容启动器的内容："
+"CLI 的协议、连接的 URL 和密钥、锁定的模型，以及控制面随领取签发的该成员回环令牌。"
+"启动器在变成 CLI 之前读取并移除这五个变量，所以 CLI 从不持有服务商密钥。"
+"手动设置它们不会启动任何东西：启动器只在需要转换的成员前运行。"
+
+#: ../../ENVIRONMENT.md:356
 msgid ""
 "Host settings can be set from the admin pages instead of in each host's "
 "`.env`, including `AGENT_TIMEOUT_S`, `AGENT_CHAT_IDLE_TIMEOUT_S`, "
@@ -1926,6 +1989,8 @@ msgid "the value set for every server;"
 msgstr "给所有服务器设置的值；"
 
 #: ../../ENVIRONMENT.md:385
+
+#: ../../ENVIRONMENT.md:372
 msgid ""
 "The control plane sends complete effective values, including defaults, on"
 " each heartbeat. Host environment values apply only before the first "
@@ -2113,6 +2178,8 @@ msgid "Optional compute-resource management"
 msgstr "可选：计算资源管理"
 
 #: ../../ENVIRONMENT.md:448
+
+#: ../../ENVIRONMENT.md:435
 msgid ""
 "These values belong only to the stable main control plane, not its MCP-"
 "only listener, any Host, or any sandbox. See [the compute "
@@ -2256,6 +2323,8 @@ msgid "Repository environments"
 msgstr "仓库环境"
 
 #: ../../ENVIRONMENT.md:468
+
+#: ../../ENVIRONMENT.md:455
 msgid ""
 "Reusable repository environments are available by default. There is no "
 "feature switch or initial environment-variable import. A legacy "
@@ -2289,6 +2358,8 @@ msgid "The stack's own identity"
 msgstr "这套主机服务自己的身份"
 
 #: ../../ENVIRONMENT.md:476
+
+#: ../../ENVIRONMENT.md:463
 msgid ""
 "Read by `deploy/host/deploy.sh` and `deploy/host/sandbox_host.sh` rather "
 "than by compose, because they name the stack rather than configure it."
@@ -3315,6 +3386,8 @@ msgid "Physical servers and execution environments"
 msgstr "物理服务器和执行环境"
 
 #: ../../ENVIRONMENT.md:572
+
+#: ../../ENVIRONMENT.md:559
 msgid ""
 "`AGENT_RUNNER_HOST` identifies one enrolled execution environment. When "
 "two stacks on the same physical server talk to one control plane, they "
@@ -3718,6 +3791,8 @@ msgid "Kata runtime qualification generation"
 msgstr "Kata 运行时资格验证的代次"
 
 #: ../../ENVIRONMENT.md:637
+
+#: ../../ENVIRONMENT.md:624
 #, python-brace-format
 msgid ""
 "The supported host deployment mounts `/var/lib/freeinference/kata-"
@@ -3761,6 +3836,8 @@ msgid "Complete local stack database recovery"
 msgstr "完整本地环境的数据库恢复"
 
 #: ../../ENVIRONMENT.md:657
+
+#: ../../ENVIRONMENT.md:644
 msgid ""
 "`deploy/local/dev.sh` stores the local Postgres password and matching "
 "`AGENT_DATABASE_URL` in the gitignored `deploy/local/.env.local`. Back up"
@@ -3794,6 +3871,8 @@ msgid "Claude inference retry policy"
 msgstr "Claude 推理请求的重试策略"
 
 #: ../../ENVIRONMENT.md:674
+
+#: ../../ENVIRONMENT.md:661
 msgid ""
 "The runtime adapter sets `CLAUDE_CODE_MAX_RETRIES=15` and "
 "`CLAUDE_CODE_RETRY_WATCHDOG=0` for each resident Claude Code process. "
@@ -3818,6 +3897,8 @@ msgid "Agent CLI version pins (image build)"
 msgstr "Agent CLI 的版本固定（构建镜像时）"
 
 #: ../../ENVIRONMENT.md:687
+
+#: ../../ENVIRONMENT.md:674
 msgid ""
 "The five default versions live in both `deploy/sandbox/Dockerfile.agent-"
 "sandbox` and `apps/backend/cloud_agent_shared/shared_protocol.py`. They "
@@ -3943,6 +4024,8 @@ msgid "Interpret a passing conformance run within these limits:"
 msgstr "一致性测试通过时，要在下面这些前提下理解它的意义："
 
 #: ../../ENVIRONMENT.md:750
+
+#: ../../ENVIRONMENT.md:737
 msgid ""
 "**`claude-code` only.** This is the one runtime with a stream-conformance"
 " suite; the other four have contract fixtures and their adapters' unit "
@@ -4010,6 +4093,8 @@ msgid "Web (`apps/frontend/`)"
 msgstr "Web（`apps/frontend/`）"
 
 #: ../../ENVIRONMENT.md:770
+
+#: ../../ENVIRONMENT.md:757
 msgid ""
 "Frontend configuration is public. Build-time routing settings enter the "
 "downloaded bundle and require a rebuild. Appearance settings are saved "
@@ -4025,6 +4110,8 @@ msgid "Build-time: the image variant"
 msgstr "构建时决定：镜像变体"
 
 #: ../../ENVIRONMENT.md:778
+
+#: ../../ENVIRONMENT.md:765
 msgid ""
 "A `NEXT_PUBLIC_*` variable is substituted into the bundle during `next "
 "build`. Each one must therefore be an `ARG` in `deploy/control-"
@@ -4136,6 +4223,8 @@ msgid "Runtime: the deployment's identity"
 msgstr "运行时决定：部署的身份信息"
 
 #: ../../ENVIRONMENT.md:802
+
+#: ../../ENVIRONMENT.md:789
 msgid ""
 "The main control plane imports the first eight appearance variables below"
 " when it initializes the settings document. Set them in its deployment "
@@ -4288,6 +4377,8 @@ msgid "Set on the HybridInference side — not here"
 msgstr "在 HybridInference 那一侧设置，不在这里"
 
 #: ../../ENVIRONMENT.md:834
+
+#: ../../ENVIRONMENT.md:821
 msgid ""
 "These are provisioned in the gateway's environment. Listed so the "
 "contract has one place to be read from end to end."
@@ -4353,6 +4444,8 @@ msgid "Recorded here as *what has to be decided*, not as anyone's actual answer.
 msgstr "这里记录的是*需要做出哪些决定*，而不是谁的实际选择。"
 
 #: ../../ENVIRONMENT.md:849
+
+#: ../../ENVIRONMENT.md:836
 msgid ""
 "**Domains**: one host for the web app and the control-plane API, the API "
 "under `/api` — e.g. `agents.example.org` and a staging sibling. The exact"
@@ -4410,6 +4503,8 @@ msgid "If it is a secret, say where it is stored — never the value itself."
 msgstr "如果是 secret，写明它存在哪里，但绝不要写出它的值。"
 
 #: ../../ENVIRONMENT.md:871
+
+#: ../../ENVIRONMENT.md:858
 msgid ""
 "The PR checklist enforces this; a new variable without a row is a review "
 "stop."

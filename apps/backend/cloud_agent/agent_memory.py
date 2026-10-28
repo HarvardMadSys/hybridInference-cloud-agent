@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
 from datetime import datetime  # noqa: TC003 - Pydantic resolves the view schema.
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
+from cloud_agent.logging_utils import get_logger
 from cloud_agent.user_text import CREDENTIAL, normalize_text
+
+if TYPE_CHECKING:
+    from cloud_agent.ports import AgentMemoryRepository
+
+#: Moved from the worker routes with the claim helper below; the deployment's
+#: log selection is on ``cloud_agent.api.routes``.
+_claim_logger = get_logger("cloud_agent.api.routes")
+# Memory must leave ample time inside the host's claim deadline.
+_MEMORY_TIMEOUT_SECONDS = 2.0
 
 #: Characters in one memory.
 MEMORY_CONTENT_LIMIT = 240
@@ -156,6 +167,25 @@ def fit_task_memories(memories: dict[str, Any]) -> dict[str, Any]:
                 break
             kept = candidate
     return {"repo": memories.get("repo"), **kept}
+
+
+async def claim_agent_memories(
+    repository: AgentMemoryRepository, user_id: str, repo: str | None
+) -> dict[str, Any]:
+    """Read the memories that fit the task's prompt and mark only those used.
+
+    Unavailable memory leaves the lists empty and never blocks the claim.
+    """
+    try:
+        async with asyncio.timeout(_MEMORY_TIMEOUT_SECONDS):
+            kept = fit_task_memories(await repository.task_memories(user_id, repo))
+            await repository.mark_memories_used(
+                user_id, [memory["id"] for scope in ("project", "user") for memory in kept[scope]]
+            )
+            return kept
+    except Exception:
+        _claim_logger.warning("agent_claim_durable_memory_unavailable")
+        return {"repo": repo, "project": [], "user": []}
 
 
 def prompt_with_agent_memories(prompt: str, memories: dict[str, Any] | None) -> str:

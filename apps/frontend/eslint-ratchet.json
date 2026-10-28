@@ -270,7 +270,7 @@
     {
       "files": ["src/components/features/agents/LedgerUsage.tsx"],
       "rules": {
-        "complexity": ["error", 47]
+        "complexity": ["error", 46]
       }
     },
     {
@@ -357,7 +357,7 @@
     {
       "files": ["src/components/features/agents/JobDetail.tsx"],
       "rules": {
-        "complexity": ["error", 98]
+        "complexity": ["error", 96]
       }
     },
     {
@@ -449,7 +449,7 @@
         "max-lines": [
           "error",
           {
-            "max": 942
+            "max": 939
           }
         ]
       }
@@ -460,7 +460,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1087
+            "max": 1080
           }
         ]
       }

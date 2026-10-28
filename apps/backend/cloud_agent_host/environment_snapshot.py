@@ -9,6 +9,8 @@ from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.secret_redaction import secret_patterns
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from cloud_agent_host.chat_sandbox import RetainedChatBackend
     from cloud_agent_shared.environment import BoundEnvironment
 
@@ -35,18 +37,23 @@ for raw in paths:
 def check_snapshot_secrets(
     backend: RetainedChatBackend,
     base_sha: str,
-    environment: BoundEnvironment,
+    environment: BoundEnvironment | None,
     *,
     workdir: str = "/workspace",
+    known_secrets: Mapping[str, str] | None = None,
 ) -> None:
-    """Reject new known credential bytes without sending file contents outside the sandbox."""
+    """Reject new known credential bytes without sending file contents outside the sandbox.
+
+    The environment's Secrets, and ``known_secrets``: the group owner's model
+    connection keys, current and past.
+    """
+    values = [
+        *(environment.secrets().values() if environment is not None else ()),
+        *(known_secrets or {}).values(),
+    ]
     patterns = {
         f"AGENT_SECRET_PATTERN_{i}": base64.b64encode(value.encode()).decode()
-        for i, value in enumerate(
-            pattern
-            for value in environment.secrets().values()
-            for pattern in secret_patterns(value)
-        )
+        for i, value in enumerate(pattern for value in values for pattern in secret_patterns(value))
     }
     if not patterns:
         return

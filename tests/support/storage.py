@@ -46,6 +46,18 @@ class AllCapabilities:
         """Legacy fixtures have no chat that ever selected an SSH server."""
         return None
 
+    async def list_model_connections(self, *, user_id: str) -> list[dict[str, Any]]:
+        """Legacy fixtures' owners have added no model connection of their own."""
+        return []
+
+    async def get_model_connection(self, *, user_id: str, connection_id: str):
+        """No fixture owner has a model connection, so a named one reads as missing."""
+        return None
+
+    async def scan_key_ciphertexts(self, *, sandbox_id: str, limit: int) -> list[str]:
+        """Legacy fixtures' sandbox groups were never handed a model connection key."""
+        return []
+
     async def owns_job(self, *, job_id: str, user_id: str) -> bool:
         """Ownership as a fake's full job read answers it, as the routes once asked it."""
         job = await self.get_job(job_id)  # type: ignore[attr-defined]
@@ -113,6 +125,20 @@ class OneFake(AllCapabilities):
         if name in CAPABILITIES:
             return self
         raise AttributeError(name)
+
+
+class NoAccounts:
+    """Opt-in for fakes whose owners have connected neither GitLab nor GitHub."""
+
+    async def get_gitlab_connection(self, *, user_id: str) -> dict[str, Any] | None:
+        """No GitLab account connected."""
+        del user_id
+        return None
+
+    async def get_github_account(self, *, user_id: str) -> dict[str, Any] | None:
+        """No GitHub account connected either."""
+        del user_id
+        return None
 
 
 class EmptySkillLibrary:

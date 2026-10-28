@@ -4192,6 +4192,18 @@
             "description": "The model a new task should start on, first available of: this owner's pin in My Settings, the model their newest turn used, the deployment default. Always one of `models`, so a retired model is never pre-selected. Null means none of the three resolves, or the catalog was unreadable — the composer then leaves its model control empty and asks, rather than choosing one for the owner.",
             "title": "Default Model"
           },
+          "default_model_connection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The source of `default_model`: the owner connection it last ran on, or null for the Gateway. When set, `default_model` is one of that connection's models, not necessarily one of `models`.",
+            "title": "Default Model Connection Id"
+          },
           "environment_limits": {
             "additionalProperties": true,
             "title": "Environment Limits",
@@ -4245,6 +4257,20 @@
             "default": false,
             "description": "True when this local account has no model connection, so no model can run (AGENT_AUTH_MODE=local without personal model connections).",
             "title": "Model Connection Required",
+            "type": "boolean"
+          },
+          "model_connections": {
+            "description": "This owner's enabled model connections. A model chosen from one is submitted with its `model_connection_id`; the same id may also be a Gateway model, which is a different choice.",
+            "items": {
+              "$ref": "#/components/schemas/ModelConnectionOption"
+            },
+            "title": "Model Connections",
+            "type": "array"
+          },
+          "model_connections_enabled": {
+            "default": false,
+            "description": "Whether this deployment lets owners add and run on their own connections.",
+            "title": "Model Connections Enabled",
             "type": "boolean"
           },
           "model_reasoning_efforts": {
@@ -5141,10 +5167,23 @@
             "title": "Metadata"
           },
           "model": {
-            "description": "Gateway model id the runtime should use.",
+            "description": "Model id the runtime should use: a Gateway model, or one listed on `model_connection_id` when that is set.",
             "maxLength": 255,
             "title": "Model",
             "type": "string"
+          },
+          "model_connection_id": {
+            "anyOf": [
+              {
+                "pattern": "^mconn_[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The owner's own model connection the model runs on. Null is the Gateway. Together with `model` this names the source unambiguously: the same id may exist on the Gateway and on several connections.",
+            "title": "Model Connection Id"
           },
           "plugins": {
             "anyOf": [
@@ -5680,6 +5719,17 @@
               }
             ],
             "title": "Model Calls"
+          },
+          "model_connection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Connection Id"
           },
           "native_fork_available": {
             "default": false,
@@ -6464,6 +6514,39 @@
         "title": "AgentOperationProfilingFragment",
         "type": "object"
       },
+      "AgentPathView": {
+        "description": "How one agent reaches a model: directly, or through the member's helper.",
+        "properties": {
+          "client_protocol": {
+            "title": "Client Protocol",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "direct",
+              "translated"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "runtime": {
+            "title": "Runtime",
+            "type": "string"
+          },
+          "upstream_protocol": {
+            "title": "Upstream Protocol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "runtime",
+          "mode",
+          "client_protocol",
+          "upstream_protocol"
+        ],
+        "title": "AgentPathView",
+        "type": "object"
+      },
       "AgentPendingMessageAttachment": {
         "description": "One upload a waiting message holds, without its bytes.",
         "properties": {
@@ -6553,6 +6636,17 @@
               }
             ],
             "title": "Model"
+          },
+          "model_connection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Connection Id"
           },
           "position": {
             "title": "Position",
@@ -6673,6 +6767,18 @@
               }
             ],
             "title": "Model"
+          },
+          "model_connection_id": {
+            "anyOf": [
+              {
+                "pattern": "^mconn_[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Connection Id"
           },
           "prompt": {
             "anyOf": [
@@ -8067,6 +8173,19 @@
             ],
             "description": "Optional model override for this turn.",
             "title": "Model"
+          },
+          "model_connection_id": {
+            "anyOf": [
+              {
+                "pattern": "^mconn_[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The source of `model`: the owner's connection, or null for the Gateway. Only with `model`; an omitted model inherits the previous turn's model and its source together.",
+            "title": "Model Connection Id"
           },
           "prompt": {
             "maxLength": 100000,
@@ -10343,6 +10462,11 @@
             "title": "Estimated Calls",
             "type": "integer"
           },
+          "external_provider": {
+            "default": false,
+            "title": "External Provider",
+            "type": "boolean"
+          },
           "incomplete": {
             "default": false,
             "title": "Incomplete",
@@ -11098,6 +11222,23 @@
           "revision"
         ],
         "title": "DefaultInput",
+        "type": "object"
+      },
+      "DiscoveredModels": {
+        "description": "The ids a provider's ``GET /models`` listed; a convenience, not a check.",
+        "properties": {
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          }
+        },
+        "required": [
+          "models"
+        ],
+        "title": "DiscoveredModels",
         "type": "object"
       },
       "EmailPasswordRequest": {
@@ -12842,6 +12983,28 @@
             ],
             "title": "Model"
           },
+          "model_connection_plan": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Connection Plan"
+          },
+          "model_connection_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Connection Revision"
+          },
           "thread_id": {
             "title": "Thread Id",
             "type": "string"
@@ -13723,6 +13886,11 @@
               }
             ]
           },
+          "external_provider": {
+            "default": false,
+            "title": "External Provider",
+            "type": "boolean"
+          },
           "ledger": {
             "$ref": "#/components/schemas/JobLedgerSummary"
           },
@@ -14244,6 +14412,338 @@
         "title": "MessageRequestDetail",
         "type": "object"
       },
+      "ModelConnectionAccess": {
+        "additionalProperties": false,
+        "description": "One connection, as the claim of a turn running on it hands it to a host.\n\n``revision`` is the connection's credential revision. It is part of the\nmember process's fixed launch, so a turn after the key, Base URL or\nprotocols changed starts a new process rather than borrowing one that holds\nthe old key. ``api_key`` is the owner's own secret; it is masked in every\ndurable output of the turn and written only into the member's private\nenvironment and activation tmpfs.",
+        "properties": {
+          "api_key": {
+            "title": "Api Key",
+            "type": "string"
+          },
+          "base_url": {
+            "maxLength": 512,
+            "minLength": 8,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "client_protocol": {
+            "default": "",
+            "title": "Client Protocol",
+            "type": "string"
+          },
+          "connection_id": {
+            "maxLength": 64,
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "local_token": {
+            "default": "",
+            "title": "Local Token",
+            "type": "string"
+          },
+          "protocol": {
+            "title": "Protocol",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "connection_id",
+          "revision",
+          "base_url",
+          "protocol",
+          "api_key"
+        ],
+        "title": "ModelConnectionAccess",
+        "type": "object"
+      },
+      "ModelConnectionCreate": {
+        "additionalProperties": false,
+        "description": "A new connection. ``protocols`` is the advanced manual declaration; omitted is automatic.",
+        "properties": {
+          "api_key": {
+            "maxLength": 4160,
+            "title": "Api Key",
+            "type": "string"
+          },
+          "base_url": {
+            "maxLength": 1024,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 256,
+            "title": "Models",
+            "type": "array"
+          },
+          "name": {
+            "maxLength": 200,
+            "title": "Name",
+            "type": "string"
+          },
+          "protocols": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 3,
+            "title": "Protocols",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "base_url",
+          "api_key",
+          "models"
+        ],
+        "title": "ModelConnectionCreate",
+        "type": "object"
+      },
+      "ModelConnectionList": {
+        "description": "The owner's connections, and whether this deployment can store keys at all.",
+        "properties": {
+          "checks_per_hour": {
+            "default": 20,
+            "title": "Checks Per Hour",
+            "type": "integer"
+          },
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "connections": {
+            "items": {
+              "$ref": "#/components/schemas/ModelConnectionView"
+            },
+            "title": "Connections",
+            "type": "array"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "configured",
+          "connections"
+        ],
+        "title": "ModelConnectionList",
+        "type": "object"
+      },
+      "ModelConnectionOption": {
+        "description": "One of the owner's enabled model connections, as the composer offers it.\n\nEverything needed to offer its models beside the Gateway's, and which\nagents can run each one now; nothing about its key or its APIs.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "model_runtimes": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": "Model Runtimes",
+            "type": "object"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "models"
+        ],
+        "title": "ModelConnectionOption",
+        "type": "object"
+      },
+      "ModelConnectionUpdate": {
+        "additionalProperties": false,
+        "description": "Change some fields; an omitted field keeps its value. ``api_key`` rotates the key.\n\n``protocols`` set to ``[]`` returns the connection to automatic detection.",
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "maxLength": 4160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "models": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 256,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Models"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "protocols": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 3,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocols"
+          }
+        },
+        "title": "ModelConnectionUpdate",
+        "type": "object"
+      },
+      "ModelConnectionView": {
+        "description": "A connection as its owner sees it: everything but the key.",
+        "properties": {
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "has_api_key": {
+            "title": "Has Api Key",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "manual_protocols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Manual Protocols",
+            "type": "array"
+          },
+          "model_status": {
+            "items": {
+              "$ref": "#/components/schemas/ModelStatusView"
+            },
+            "title": "Model Status",
+            "type": "array"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "protocol_mode": {
+            "enum": [
+              "auto",
+              "manual"
+            ],
+            "title": "Protocol Mode",
+            "type": "string"
+          },
+          "runtimes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Runtimes",
+            "type": "array"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "base_url",
+          "protocol_mode",
+          "models",
+          "enabled",
+          "has_api_key",
+          "runtimes",
+          "model_status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ModelConnectionView",
+        "type": "object"
+      },
       "ModelPreferenceResponse": {
         "description": "The preference, resolved, beside the catalog it was resolved against.",
         "properties": {
@@ -14291,6 +14791,17 @@
             ],
             "title": "Last Model"
           },
+          "last_model_connection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Model Connection Id"
+          },
           "models": {
             "description": "The models this owner may pin, in the gateway's order. Empty means the catalog could not be read, not that a pin has been retired.",
             "items": {
@@ -14301,6 +14812,178 @@
           }
         },
         "title": "ModelPreferenceResponse",
+        "type": "object"
+      },
+      "ModelStatusView": {
+        "description": "One listed model as its owner sees it.\n\n``status`` is ``ready``, ``declared``, ``unverified``, ``failed`` or\n``unsupported``; ``runtimes`` are the agents a task may run it with now,\nexactly what the execution gates accept. ``paths`` and ``protocols`` are\ndiagnostics.",
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "checked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checked At"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "paths": {
+            "items": {
+              "$ref": "#/components/schemas/AgentPathView"
+            },
+            "title": "Paths",
+            "type": "array"
+          },
+          "protocols": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ProtocolResultView"
+            },
+            "title": "Protocols",
+            "type": "object"
+          },
+          "runtimes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Runtimes",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "declared",
+              "unverified",
+              "failed",
+              "unsupported"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "status",
+          "runtimes"
+        ],
+        "title": "ModelStatusView",
+        "type": "object"
+      },
+      "ModelVerificationView": {
+        "description": "A finished verification of one model.",
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "checked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checked At"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "paths": {
+            "items": {
+              "$ref": "#/components/schemas/AgentPathView"
+            },
+            "title": "Paths",
+            "type": "array"
+          },
+          "protocols": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ProtocolResultView"
+            },
+            "title": "Protocols",
+            "type": "object"
+          },
+          "recorded": {
+            "default": true,
+            "title": "Recorded",
+            "type": "boolean"
+          },
+          "runtimes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Runtimes",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "declared",
+              "unverified",
+              "failed",
+              "unsupported"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "status",
+          "runtimes"
+        ],
+        "title": "ModelVerificationView",
+        "type": "object"
+      },
+      "ModelVerifyRequest": {
+        "additionalProperties": false,
+        "description": "Which of the connection's models to verify.",
+        "properties": {
+          "model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "ModelVerifyRequest",
         "type": "object"
       },
       "NodeRegistrationRequest": {
@@ -15282,6 +15965,41 @@
           "model"
         ],
         "title": "PromptRewriteRequest",
+        "type": "object"
+      },
+      "ProtocolResultView": {
+        "description": "What one native API's check found for a model: a diagnostic.",
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "http_status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Status"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "category",
+          "message"
+        ],
+        "title": "ProtocolResultView",
         "type": "object"
       },
       "RebuildInput": {
@@ -20392,6 +21110,16 @@
           "model": {
             "title": "Model",
             "type": "string"
+          },
+          "model_connection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelConnectionAccess"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "parent_job_id": {
             "anyOf": [
@@ -35605,6 +36333,361 @@
         "summary": "Restore Memory",
         "tags": [
           "agent-memory"
+        ]
+      }
+    },
+    "/v1/agent/model-connections": {
+      "get": {
+        "description": "The owner's live connections.",
+        "operationId": "list_connections_v1_agent_model_connections_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Connections",
+        "tags": [
+          "model-connections"
+        ]
+      },
+      "post": {
+        "description": "Add a connection; its key is encrypted before anything stores it.",
+        "operationId": "create_connection_v1_agent_model_connections_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelConnectionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Connection",
+        "tags": [
+          "model-connections"
+        ]
+      }
+    },
+    "/v1/agent/model-connections/{connection_id}": {
+      "delete": {
+        "description": "Delete a connection: its key is erased and its running processes are closed.\n\nTurns that name it are refused as deleted from now on, never moved elsewhere.",
+        "operationId": "delete_connection_v1_agent_model_connections__connection_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Connection",
+        "tags": [
+          "model-connections"
+        ]
+      },
+      "patch": {
+        "description": "Edit, rotate the key of, enable or disable a connection.\n\nA field sent with the value it already has is not a change: a rename that\ncarries the same Base URL and models keeps the credential, every running\nprocess and every model's verification (the repository compares each one).",
+        "operationId": "update_connection_v1_agent_model_connections__connection_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelConnectionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Connection",
+        "tags": [
+          "model-connections"
+        ]
+      }
+    },
+    "/v1/agent/model-connections/{connection_id}/discover-models": {
+      "post": {
+        "description": "List the ids the provider's model list offers, for the owner to choose from.\n\nAutomatically, ``GET /models`` under the Base URL and, only if that listing\nis missing or refused, ``GET /v1/models`` with Messages authentication: at\nmost two requests and one hourly check. A manual declaration asks only the\nlisting that fits it.",
+        "operationId": "discover_v1_agent_model_connections__connection_id__discover_models_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscoveredModels"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Discover",
+        "tags": [
+          "model-connections"
+        ]
+      }
+    },
+    "/v1/agent/model-connections/{connection_id}/verify": {
+      "post": {
+        "description": "Find which APIs one model streams a tool round trip on, and keep the result.\n\nSpends the owner's own quota upstream: at most three checks of two\nrequests each, and one of the owner's hourly checks. Answers the model's\nstate as it now is; an unreachable or refusing provider is a result, not\nan error. The result is kept only if the connection's key and Base URL did\nnot change and the model is still listed (``recorded``); other models'\nresults are never touched.",
+        "operationId": "verify_v1_agent_model_connections__connection_id__verify_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelVerificationView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Verify",
+        "tags": [
+          "model-connections"
         ]
       }
     },

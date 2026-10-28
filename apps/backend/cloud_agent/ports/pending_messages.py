@@ -37,6 +37,7 @@ class PendingMessageRepository(Protocol):
         reset_reasoning_effort: bool = False,
         skills: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        model_connection_id: str | None = None,
     ) -> dict[str, Any]:
         """Put one message at the end of the owner's thread's queue.
 

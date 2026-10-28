@@ -59,7 +59,6 @@ from cloud_agent_host.guest_observer import (
 )
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
 from cloud_agent_host.operation_call import SandboxManagerCall, closed, open_call
-from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTurn
 from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.retained_workspace import (
     RetainedWorkspaceError,
@@ -122,7 +121,6 @@ from cloud_agent_shared.host_settings import (
     resolve,
 )
 from cloud_agent_shared.operation_profiling import PROFILING_CONTEXT_HEADER
-from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicyError
 from cloud_agent_shared.sandbox_manager_compat import manager_env
 from cloud_agent_shared.sandbox_manager_wire import (
@@ -148,6 +146,7 @@ if TYPE_CHECKING:
 
     from starlette.types import Receive, Scope, Send
 
+    from cloud_agent_host.resident_transport import ResidentTurn
     from cloud_agent_host.sandbox_archives import SandboxArchiveService
 
 _DEFAULT_SETTINGS = default_values(SANDBOX_MANAGER_SETTING_KEYS)
@@ -306,6 +305,7 @@ from cloud_agent_host.action_receipts import ActionReceipts
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.environment_process import tool_environment
 from cloud_agent_host.environment_snapshot import check_snapshot_secrets
+from cloud_agent_host.resident_launch_config import SharedResidentLaunchConfig, resident_launch
 from cloud_agent_host.ssh_access import apply_ssh_access
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
@@ -544,33 +544,6 @@ class EnvironmentSnapshotDeleteRequest(BaseModel):
     snapshots: list[EnvironmentSnapshotDeletion] = Field(..., max_length=100)
 
 
-class SharedResidentLaunchConfig(BaseModel):
-    """Process-fixed configuration and renewable residency credential."""
-
-    model_config = ConfigDict(extra="forbid")
-    environment: BoundEnvironment | None = Field(None, repr=False)
-    thread_id: str | None = Field(None, max_length=128)
-
-    runtime_id: str = Field(..., min_length=1, max_length=128)
-    runtime_version: str | None = Field(None, max_length=128)
-    native_session_id: str | None = Field(None, max_length=512)
-    model: str = Field(..., min_length=1, max_length=256)
-    reasoning_effort: str | None = Field(None, max_length=64)
-    # The sandbox manager replaces this with its host-local relay address when one is
-    # configured.  The fallback keeps injected/unit-test sandbox managers usable.
-    gateway_base_url: str = Field("", max_length=2048)
-    credential: str | None = Field(None, max_length=16384)
-    mcp_server_ids: list[str] = Field(default_factory=list, max_length=64)
-    plugins: list[SandboxPlugin] = Field(default_factory=list, max_length=MAX_SANDBOX_PLUGINS)
-    # Replaced, like the gateway's, by this host's own MCP relay address.
-    mcp_base_url: str = Field("", max_length=2048)
-    mcp_credential: str = Field("", max_length=16384)
-    github_token: str | None = Field(None, max_length=16384, repr=False)
-    github_repo: str = Field("", max_length=512)
-    slot_id: int = Field(..., ge=0, le=127)
-    residency_generation: int = Field(0, ge=0)
-
-
 class SharedResidentLaunchRequest(SharedLeaseRequest):
     """Lease fence plus resident launch configuration."""
 
@@ -611,6 +584,9 @@ class SharedSnapshotCaptureRequest(SharedSandboxIdentityRequest):
     """Exact ordered workspace epoch requested by the coordinator."""
 
     environment: BoundEnvironment | None = Field(None, repr=False)
+    #: Further values the snapshot must not add: the group owner's model
+    #: connection keys, current and past. Never shown, never echoed.
+    known_secrets: dict[str, str] = Field(default_factory=dict, repr=False, max_length=200)
 
     snapshot_id: int = Field(..., ge=1)
     workspace_epoch: int = Field(..., ge=1)
@@ -2140,40 +2116,6 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     def shared_manifest(members: list[SharedMember]) -> list[SharedMemberManifest]:
         return [SharedMemberManifest(**member.model_dump()) for member in members]
 
-    def resident_launch(
-        thread_id: str,
-        body: SharedResidentLaunchConfig,
-    ) -> ResidentLaunch:
-        gateway_base_url = (os.environ.get("AGENT_GATEWAY_URL") or body.gateway_base_url).strip()
-        if not gateway_base_url:
-            raise SandboxError("resident launch has no sandbox-reachable gateway URL")
-        return ResidentLaunch(
-            thread_id=thread_id,
-            runtime_id=body.runtime_id,
-            runtime_version=body.runtime_version,
-            native_session_id=body.native_session_id,
-            model=body.model,
-            reasoning_effort=body.reasoning_effort,
-            gateway_base_url=gateway_base_url,
-            credential=body.credential,
-            plugins=tuple(plugin.model_dump(exclude_none=True) for plugin in body.plugins),
-            mcp_server_ids=tuple(body.mcp_server_ids),
-            # Like the gateway's, the relay is this host's own, so the address
-            # a CLI is told is the one the host rules admit for its group. Only
-            # a launch with tools has one to name.
-            mcp_base_url=(
-                (os.environ.get("AGENT_SANDBOX_MCP_URL") or body.mcp_base_url).strip()
-                if body.mcp_server_ids
-                else ""
-            ),
-            mcp_credential=body.mcp_credential,
-            github_token=body.github_token,
-            github_repo=body.github_repo,
-            environment=body.environment,
-            slot_id=body.slot_id,
-            residency_generation=body.residency_generation,
-        )
-
     @app.post("/shared-sandboxes/{thread_id}/acquire")
     async def acquire_shared_chat_sandbox(
         thread_id: str,
@@ -2911,8 +2853,10 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             * 1024,
             exact_patch=True,
         )
-        if body.environment is not None:
-            check_snapshot_secrets(backend, body.base_sha, body.environment)
+        if body.environment is not None or body.known_secrets:
+            check_snapshot_secrets(
+                backend, body.base_sha, body.environment, known_secrets=body.known_secrets
+            )
         return result
 
     def capture_environment_snapshot(
@@ -2926,7 +2870,9 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             # and must not rewrite them.
             raise
         except Exception as exc:
-            redactor = SecretRedactor(body.environment.secrets() if body.environment else {})
+            redactor = SecretRedactor(
+                {**(body.environment.secrets() if body.environment else {}), **body.known_secrets}
+            )
             if isinstance(exc, HTTPException):
                 # The inspection's own answer, redacted. A refused patch (502)
                 # is final for the snapshot coordinator, which retries a 503.

@@ -81,7 +81,8 @@ class PostgresResidencyRepository:
                 return None
             earns = await conn.fetchrow(
                 """
-                SELECT j.id AS job_id, j.user_id, j.model
+                SELECT j.id AS job_id, j.user_id, j.model, j.runtime, j.reasoning_effort,
+                       j.model_connection_id
                 FROM agent_jobs j
                 WHERE j.id = $1 AND j.thread_id = $2
                   AND j.current_attempt_id = $3
@@ -169,6 +170,11 @@ class PostgresResidencyRepository:
         result["establishing_attempt_id"] = attempt["id"]
         result["user_id"] = earns["user_id"]
         result["model"] = earns["model"]
+        # What the establishing turn runs on, so the caller hands this
+        # residency the owner connection's key instead of minting a grant.
+        result["runtime"] = earns["runtime"]
+        result["reasoning_effort"] = earns["reasoning_effort"]
+        result["model_connection_id"] = earns["model_connection_id"]
         return result
 
     async def heartbeat_residency(

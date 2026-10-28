@@ -99,6 +99,7 @@ class PostgresConversationCommands:
         task_prompt: str,
         runtime: str,
         model: str,
+        model_connection_id: str | None = None,
         execution_profile: str | None = None,
         reasoning_effort: str | None = None,
         base_sha: str | None = None,
@@ -217,9 +218,9 @@ class PostgresConversationCommands:
                         (id, thread_id, turn_no, user_id, base_sha, task_prompt,
                          runtime, model, reasoning_effort, metadata,
                          client_request_id, client_request_fingerprint, skills,
-                         attachments, input_seq_at_create)
+                         attachments, input_seq_at_create, model_connection_id)
                     VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12::jsonb,
-                            $13::jsonb, $14)
+                            $13::jsonb, $14, $15)
                     """,
                     job_id,
                     thread_id,
@@ -242,6 +243,7 @@ class PostgresConversationCommands:
                     # reported would be refused as "the owner has spoken since",
                     # and no goal on a fresh conversation could ever complete.
                     user_input_seq,
+                    model_connection_id,
                 )
                 await claim_attachments(
                     conn,
@@ -786,9 +788,13 @@ class PostgresConversationCommands:
                  task_prompt, runtime, model, reasoning_effort, state, metadata,
                  client_request_id, client_request_fingerprint, skills,
                  turn_source, goal_round, goal_round_kind, goal_revision, goal_id,
-                 input_seq_at_create)
+                 model_connection_id, input_seq_at_create)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
                     $13, $14, $15::jsonb, 'goal', $16, $17, $18, $19,
+                    -- A round runs where the turn before it ran: the same
+                    -- model from the same source, never the Gateway's
+                    -- namesake. Its claim re-checks the connection.
+                    $20,
                     -- The input counter as this round was created, so that a
                     -- completion it reports can be checked against whether the
                     -- owner has spoken since. Zero here would make every round
@@ -815,6 +821,7 @@ class PostgresConversationCommands:
             kind,
             revision,
             goal_id,
+            parent["model_connection_id"],
         )
         await conn.execute(
             """
@@ -845,6 +852,7 @@ async def insert_follow_up(
     user_id: str,
     prompt: str,
     model: str | None = None,
+    model_connection_id: str | None = None,
     reasoning_effort: str | None = None,
     reset_reasoning_effort: bool = False,
     skills: list[dict[str, Any]] | None = None,
@@ -875,6 +883,11 @@ async def insert_follow_up(
     conversation is already queued or running, answering
     ``{"error": "yielded"}``. It is asked under this transaction's thread lock,
     which is the only place the answer cannot go stale.
+
+    ``model`` is named together with its source: with ``model`` set,
+    ``model_connection_id`` is the connection it runs on, ``None`` being the
+    Gateway. Omitting ``model`` inherits the parent's model *and* its source,
+    so a turn never moves between sources without being told to.
 
     ``reasoning_effort`` overrides the inherited depth; omitting it keeps the
     parent's, as an omitted model does. ``reset_reasoning_effort`` clears it
@@ -969,6 +982,14 @@ async def insert_follow_up(
         # source from which the new runtime can fabricate continuity.
         return {"error": "sandbox_context_lost"}
     turn_no = parent["turn_no"] + 1
+    connection_id = model_connection_id if model else parent["model_connection_id"]
+    # An owner connection takes no effort setting, so a switch onto one never
+    # carries the Gateway turn's depth along with it.
+    effort = (
+        None
+        if reset_reasoning_effort or connection_id
+        else (reasoning_effort or parent["reasoning_effort"])
+    )
     previous_skills = load_json(parent["skills"]) if parent["skills"] is not None else None
     selected_skills = previous_skills if skills is None else skills
     if selected_skills == [] and previous_skills is None:
@@ -983,9 +1004,9 @@ async def insert_follow_up(
             (id, thread_id, parent_job_id, turn_no, user_id, base_sha,
              task_prompt, runtime, model, reasoning_effort, state, metadata,
              client_request_id, client_request_fingerprint, skills, attachments,
-             turn_source, goal_id, input_seq_at_create)
+             turn_source, goal_id, input_seq_at_create, model_connection_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14,
-                $15::jsonb, $16::jsonb, 'human', $17, $18)
+                $15::jsonb, $16::jsonb, 'human', $17, $18, $19)
         """,
         job_id,
         thread_id,
@@ -996,7 +1017,7 @@ async def insert_follow_up(
         prompt,
         parent["runtime"],
         model or parent["model"],
-        None if reset_reasoning_effort else (reasoning_effort or parent["reasoning_effort"]),
+        effort,
         QUEUED,
         json.dumps(load_json(parent["metadata"])) if parent["metadata"] is not None else None,
         client_request_id,
@@ -1012,6 +1033,7 @@ async def insert_follow_up(
         # thread's counter has moved. An automatic round carries zero
         # and never advances it.
         0,
+        connection_id,
     )
     await claim_attachments(
         conn,

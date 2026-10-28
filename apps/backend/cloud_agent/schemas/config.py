@@ -18,6 +18,23 @@ from cloud_agent.source_control_runtime import (
 from cloud_agent_shared.environment import environment_limits
 
 
+class ModelConnectionOption(BaseModel):
+    """One of the owner's enabled model connections, as the composer offers it.
+
+    Everything needed to offer its models beside the Gateway's, and which
+    agents can run each one now; nothing about its key or its APIs.
+    """
+
+    id: str
+    name: str
+    #: Every listed model, in the owner's order.
+    models: list[str]
+    #: The listed models a task can run now, each with the agents that can run
+    #: it: exactly what the execution gates accept. A model missing here is not
+    #: verified, or no agent can use it.
+    model_runtimes: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class AgentConfigResponse(BaseModel):
     """What this deployment will actually accept, for the task composer.
 
@@ -83,6 +100,26 @@ class AgentConfigResponse(BaseModel):
             "never pre-selected. Null means none of the three resolves, or the "
             "catalog was unreadable — the composer then leaves its model "
             "control empty and asks, rather than choosing one for the owner."
+        ),
+    )
+    model_connections: list[ModelConnectionOption] = Field(
+        default_factory=list,
+        description=(
+            "This owner's enabled model connections. A model chosen from one is "
+            "submitted with its `model_connection_id`; the same id may also be a "
+            "Gateway model, which is a different choice."
+        ),
+    )
+    model_connections_enabled: bool = Field(
+        default=False,
+        description="Whether this deployment lets owners add and run on their own connections.",
+    )
+    default_model_connection_id: str | None = Field(
+        default=None,
+        description=(
+            "The source of `default_model`: the owner connection it last ran on, "
+            "or null for the Gateway. When set, `default_model` is one of that "
+            "connection's models, not necessarily one of `models`."
         ),
     )
     mcp_runtimes: list[str] = Field(

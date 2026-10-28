@@ -32,8 +32,10 @@ export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
     },
     {
       label: 'Cost (USD)',
-      gateway:
-        cost.exact && unknownRows?.spent_usd
+      // The owner's own provider bills such a turn; the Gateway never saw it.
+      gateway: usage.external_provider
+        ? "Billed by the owner's provider"
+        : cost.exact && unknownRows?.spent_usd
           ? `${cost.display} (${number(unknownRows.spent_usd)} unknown)`
           : cost.display,
       title: cost.exact ?? undefined,
@@ -49,6 +51,12 @@ export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
         Token usage
       </h2>
       <div className={`${CARD} mt-4 overflow-hidden`}>
+        {usage.external_provider ? (
+          <p className="border-b border-gray-100 px-5 py-4 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
+            This turn ran on its owner&rsquo;s own model connection. That provider bills it, and the
+            Gateway ledger records none of it.
+          </p>
+        ) : null}
         {(ledger.missing_attempts > 0 || ledger.estimated_calls > 0) && (
           <div className="flex flex-wrap gap-x-5 gap-y-2 border-b border-gray-100 px-5 py-4 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
             {ledger.missing_attempts > 0 && (

@@ -24,7 +24,9 @@ layer is unavailable, nothing is pre-selected at all.
 
 ``last_model`` is **derived, never written**: it is read from the owner's
 newest turn, so the single source of truth stays the job row that was really
-created. A separate "last chosen" column would need a write on every creation
+created. It carries that turn's source: a model last run on the owner's own
+connection is offered again on that connection, never as the Gateway model of
+the same name, and the pin and the deployment default are Gateway models. A separate "last chosen" column would need a write on every creation
 path and would disagree with the jobs table the moment one of them missed.
 """
 
@@ -45,6 +47,8 @@ class ModelPreferenceView(BaseModel):
     #: it, so the settings card can say *why* it is not being applied.
     default_model: str | None = None
     last_model: str | None = None
+    #: The owner connection ``last_model`` ran on; null is the Gateway.
+    last_model_connection_id: str | None = None
     #: The model a new task would actually start on, narrowed to the catalog.
     #: Null only when no layer resolves to something this owner can call.
     effective_model: str | None = None
@@ -54,7 +58,12 @@ class ModelPreferenceView(BaseModel):
     deployment_default: str | None = None
 
     @classmethod
-    def of(cls, default_model: str | None, last_model: str | None) -> ModelPreferenceView:
+    def of(
+        cls,
+        default_model: str | None,
+        last_model: str | None,
+        last_model_connection_id: str | None = None,
+    ) -> ModelPreferenceView:
         """Describe both stored facts, before any catalog is consulted.
 
         ``effective_model`` here is the unresolved preference — the pin, else
@@ -65,6 +74,7 @@ class ModelPreferenceView(BaseModel):
         return cls(
             default_model=default_model,
             last_model=last_model,
+            last_model_connection_id=last_model_connection_id,
             effective_model=default_model or last_model,
         )
 
@@ -105,9 +115,46 @@ def resolve_model(
     Choosing one from the catalog order would run the owner's task on a model
     they never picked, which is the same mistake as choosing their repository.
     """
+    if preference.last_model_connection_id is not None:
+        # The owner last ran on their own connection. Only their explicit pin
+        # outranks that; neither the Gateway model of the same name nor the
+        # deployment default stands in for it -- when that connection cannot
+        # serve a new task, the control stays empty until the owner chooses
+        # (``resolve_connection_default``).
+        pinned = preference.default_model
+        return pinned if pinned and pinned in models else None
     for candidate in (preference.default_model, preference.last_model, deployment_default):
         if candidate and candidate in models:
             return candidate
+    return None
+
+
+def resolve_connection_default(
+    models: list[str],
+    preference: ModelPreferenceView,
+    connections: list[dict[str, object]],
+) -> tuple[str, str] | None:
+    """``(model, connection_id)`` when a new task should start on the owner's connection.
+
+    Only from history, only when no Gateway pin outranks it, and only while
+    that connection is still enabled and still lists the model. ``models`` is
+    the Gateway catalog, consulted only for the pin: an unreadable catalog does
+    not stop an owner's own connection from being offered.
+    """
+    if preference.default_model and preference.default_model in models:
+        return None
+    connection_id = preference.last_model_connection_id
+    if not connection_id or not preference.last_model:
+        return None
+    for connection in connections:
+        listed = connection.get("models")
+        if (
+            connection.get("id") == connection_id
+            and connection.get("enabled")
+            and isinstance(listed, list)
+            and preference.last_model in listed
+        ):
+            return preference.last_model, connection_id
     return None
 
 

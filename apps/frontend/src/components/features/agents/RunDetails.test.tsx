@@ -426,6 +426,33 @@ describe('RunDetails', () => {
     expect(screen.getAllByText('Not recorded').length).toBeGreaterThan(0);
   });
 
+  it('says a turn on an owner connection is billed by that provider, and stops polling', async () => {
+    vi.useFakeTimers();
+    // No grant, so no Gateway attempt rows: the ledger only ever says pending.
+    vi.mocked(getAgentJobUsage).mockResolvedValue({
+      ...usage({ status: 'pending', totals: null, attempts: [] }),
+      external_provider: true,
+    });
+    renderPanel(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="usage"
+        job={HISTORY_JOB}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(screen.getByText(/your provider bills it/)).toBeInTheDocument();
+    expect(screen.queryByText('Ledger')).toBeNull();
+    expect(screen.queryByText(/\$/)).toBeNull();
+    // A pending Gateway ledger would be read again; this one never fills in.
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
   it('shows usage the change stream sent without reading it again', async () => {
     vi.useFakeTimers();
     vi.mocked(getAgentJobUsage).mockResolvedValue(usage());

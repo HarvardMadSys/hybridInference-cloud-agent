@@ -38,6 +38,7 @@ Start with the task you need:
 | Investigate a task | [Recorded events and audit](#reading-a-tasks-recorded-events) |
 | Choose the tests for a runtime or MCP change | [Runtime verification](#runtime-verification) |
 | Let owners reach their own servers | [SSH servers](#ssh-servers) |
+| Let owners run tasks on their own inference endpoint | [Owner model connections](#owner-model-connections) |
 | Operate environments and team environments | [Reusable cloud environments](#reusable-cloud-environments) |
 
 [ENVIRONMENT.md](../../ENVIRONMENT.md) documents configuration, and the
@@ -1499,7 +1500,7 @@ with no leader and no sharding.
 | `AGENT_RUNTIME_REGISTRY_URL` | public npm | Registry a host downloads updated agents from. Set the same value on the control plane, which reads the latest release from it. pi updates come from `@earendil-works/pi-coding-agent`; a private mirror must carry that package as well as the image's `@mariozechner` one |
 | `AGENT_EGRESS_CHAT_NETWORK_POOL` | required | This deployment's RFC1918 IPv4 pool, one daemon-arbitrated `/29` per active group bridge. No default: it must be disjoint from every other deployment's pool on the machine — of two that overlap, the host rules refuse the one installed later — and from the host's Docker, VPN and private-service routes. A group's bridge is removed on stop and rebuilt on wake |
 | `AGENT_EGRESS_DNS_SERVER` | required | The one IPv4 resolver sandboxes may use, on TCP and UDP 53. It is the only exception to the protected ranges, so a site resolver on a private address or on this host works. Not loopback, and not inside the pool; see _Choosing the resolver_ below |
-| `AGENT_EGRESS_PROTECTED_CIDRS` | — | Comma-separated IPv4 blocks to refuse on top of the built-in host, private, link-local/metadata, CGNAT, multicast and reserved ranges — an institution's services on public addresses, for example. It can only add protection. Set the same value on the control plane, where an owner's SSH server check refuses these blocks too |
+| `AGENT_EGRESS_PROTECTED_CIDRS` | — | Comma-separated IPv4 blocks to refuse on top of the built-in host, private, link-local/metadata, CGNAT, multicast and reserved ranges — an institution's services on public addresses, for example. It can only add protection. Set the same value on the control plane, where an owner's SSH server and model connection checks refuse these blocks too |
 | `AGENT_RELAY_NETWORK` | derived | Where lifecycle finds the two relays; the host stack derives `<COMPOSE_PROJECT>-agent-relays`. It must exist and be `internal`, or preflight refuses, and no sandbox group ever joins it. Set it only to name an existing network |
 | `AGENT_EGRESS_SETUP_TIER`, `_AGENT_TIER` | removed | Retired with the network tiers and the Squid proxy, together with `AGENT_EGRESS_ALLOWLIST`, `AGENT_EGRESS_NETWORK_*`, `AGENT_EGRESS_PROXY_*`, `AGENT_EGRESS_STOP_GRACE`, `AGENT_SANDBOX_NETWORK` and `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`. Nothing reads them, so setting one changes nothing; delete them from `.env` |
 | `AGENT_RUNNER_HOST` | host name | Enrolled execution environment, shared by every turn it runs — the unit the admin placement switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. After enrolment the persisted credential is authoritative, so editing this renames nothing. Unset keeps the environment out of the pool and changes nothing else. Distinct from `AGENT_PHYSICAL_HOST`, which is the display-only inventory name grouping environments that share one server |
@@ -4163,6 +4164,163 @@ and the owner SSH servers entry in [AGENTS.md](../../AGENTS.md) §7.
   control plane's memory.
 - **Owner firewalls.** A server that limits who may connect must allow both
   the control plane (for checks) and every host its chats may run on.
+
+## Owner model connections
+
+An owner adds their own inference endpoint under **Settings → My settings →
+Personal model connections** (`/settings/my-settings`): a name, a Base URL,
+an API key and the model ids to use. The owner then verifies each model
+(**Save and verify**, or **Verify** on a model); Cloud Agent works out which
+APIs that model serves, and the model appears in the composer beside the
+Gateway's for the agents that can use it. Such a turn runs on the owner's key and bill and
+needs no Gateway grant, catalog or quota; login and Agent admission still go
+through the Gateway. Design, protocol matrix and accepted risks:
+[model connection design](../agents/specs/2026-10-27-user-model-connections.zh-CN.md),
+and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
+
+- **Turning it on.** `AGENT_MODEL_CONNECTIONS_ENABLED` is off by default. Turn
+  it on only after every host **and every control-plane replica** runs this
+  release: an older control plane does not read the source columns, so it
+  would claim, resume or queue a turn on a connection as a Gateway turn, and
+  no host capability can stop that. The setting gates admission only. Turning
+  it off stops new connections, re-enabling one and new turns or messages on
+  one; turns already admitted still run on their connection or fail, never on
+  the Gateway. It is not a way to stop running work.
+- **Rolling back.** Once any owner has saved a connection, do not run an
+  older control plane, with or without the setting: conversations that ran on
+  a connection keep their source and would continue on the Gateway under older
+  code. Downgrading `0106` refuses while any connection, any turn or waiting
+  message that names one, or any member resident on one exists — finished
+  conversations included. Removing them is a data decision to make first.
+- **Migration and key.** `0106_user_model_connections` adds the tables and the
+  source columns. Keys are encrypted with `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`
+  under their own `hybridinference/model-connection-key/v1` domain; without
+  that key the page says so and nothing can be saved. No owner route returns a
+  key, and a refused request names the field without echoing it. The host's
+  authorized claim and residency responses do carry it: that is how the
+  member's CLI gets it.
+- **Verification and protocols.** Owners are not asked which APIs their
+  provider offers. Verifying a model streams a tool call and its result on
+  each of OpenAI Chat Completions, OpenAI Responses and Anthropic Messages,
+  side by side, and stores, per model, each API's native outcome:
+  `supported`, `unsupported` (the provider answered and could not) or
+  `failed` (it could not be determined: unreachable, key refused, rate
+  limited, 5xx, timeout). A failure is never read as the API existing or as
+  it missing. OpenCode, Kilo and pi need Chat Completions; Codex needs
+  Responses; Claude Code needs Anthropic Messages. An agent's own API is used
+  whenever it is supported for that model; otherwise Codex and Claude Code run
+  on a model whose Chat Completions is supported, through the member's
+  translator (below); no other pair is translated. Translated availability is
+  derived from the stored facts, never stored. A model never verified,
+  verified against an older key or Base URL, or with no usable path runs on
+  nothing, and the composer does not offer it. Reasoning effort is Auto only.
+  A pairing a model cannot serve is refused when the task or message is
+  submitted, and again at every claim and residency; nothing falls back to
+  the Gateway, another model or another API, and there is no trial and error
+  at inference time.
+- **Manual declaration (advanced).** Under **Advanced**, an owner may instead
+  declare the APIs the endpoint offers. Every listed model then runs on the
+  declared APIs without verification, as before automatic detection; the
+  option is for a model that does real work but fails the probe. It is off by
+  default, and returning to automatic restores the per-model results, which a
+  declaration does not erase.
+- **Where requests go.** The OpenAI CLIs append `/chat/completions` or
+  `/responses` to the Base URL exactly as written. Claude Code's SDK appends
+  `/v1/messages` to `ANTHROPIC_BASE_URL`, so one trailing `/v1` of the Base URL
+  is dropped first and any other path is kept: `https://host`,
+  `https://host/v1` and `https://host/anthropic/v1` all reach
+  `…/v1/messages`. The CLI authenticates with `x-api-key` and
+  `anthropic-version: 2023-06-01`; verification posts to the same URL with the
+  same headers. **Discover model IDs** first reads the OpenAI-style
+  `GET /models` and, only if that listing is missing or refused, the
+  Anthropic-style `…/v1/models` with `x-api-key` (at most two requests; a
+  manual declaration picks the one that fits it). The CLI may also call `count_tokens`, `/v1/models` and
+  `HEAD /api/hello` on the same host; a provider that lacks them still works.
+- **Host rollout.** Runners advertise `model-connections-v1`, and
+  `model-protocol-translation-v1` when they can run a translated member. A
+  claim for a turn on a connection, or for a translated one, is released,
+  without spending an attempt, to a runner that does not attest what it
+  needs, so roll hosts out first. A disabled, deleted or no
+  longer suitable connection fails the turn at its claim with that reason.
+- **What a turn does.** The claim carries the connection's exact Base URL,
+  protocol, credential revision and key; the runner masks the key. The
+  residency binds the member to that revision and hands it the key instead of
+  minting a grant. The member's CLI is configured with that URL (for Claude
+  Code, `ANTHROPIC_BASE_URL` as above) and the key in its environment and
+  activation tmpfs, never in argv; an OpenAI CLI is never given a Messages
+  connection's key, nor Claude Code an OpenAI one. A later turn
+  after the key, Base URL, declaration or the model's verified path changed
+  starts a new process, because the plan and token are part of the process's
+  reuse identity. A claim and its residency must agree on both the credential
+  revision and the plan (`client>upstream`); a verification that moves the
+  model between a native and a translated path while a turn starts fails that
+  start rather than mixing the two.
+- **Scan history.** When a key is bound to a residency, an encrypted scanning
+  copy is recorded under a separate domain against that sandbox group and
+  connection revision. Trusted snapshot and publication scans of the group
+  look for every key it used, including rotated and deleted ones and those of
+  same-owner Fork members, and nothing from other groups. The copy stays with
+  the sandbox group record after the connection is deleted; it is still a
+  real provider key, and deleting the connection here does not revoke it at
+  the provider. A group whose history exceeds the scan bound fails the scan
+  closed rather than skipping keys.
+- **Translated turns.** For Codex or Claude Code on a model whose only usable
+  API is Chat Completions, the host installs `/usr/local/libexec/model-protocol-translator.pyz`
+  (built from `cloud_agent_host/protocol_translator.py` and
+  `cloud_agent_shared/protocol_compat`, digest-checked, root-owned) into the
+  container before the member starts, so a retained container runs
+  this host's code. The member's command becomes
+  `python3 -I model-protocol-translator.pyz <CLI argv>`: it binds `127.0.0.1`
+  on a free port, forks the translator as the same member UID, and execs the
+  CLI, which keeps the PID the host recorded. The translator dies with the
+  CLI (parent-death signal and a parent check), and member reaping and
+  container stop remove it as they remove the CLI. It forwards only to the
+  connection's `/chat/completions` over HTTPS, answers only the member's own
+  token (issued with the claim and keyed by the platform, not by the provider
+  key, so a sibling on the same key cannot compute it), refuses requests it cannot carry (hosted tools such as web search,
+  files, stateful `previous_response_id`) and turns a provider stream that did
+  not finish into a failure, never a success. A tool's image result (Claude
+  Code reading a screenshot, Codex's `view_image`) is sent as image parts in a
+  user message after that run of tool results, since a Chat tool message holds
+  text only; a provider without vision refuses it with its own error rather
+  than the image being dropped. Codex starts with web search
+  disabled and Claude Code without its WebSearch tool on this path; their
+  other tools, Codex sub-agents and MCP tools included, work. Prior
+  reasoning or thinking is not sent to a Chat Completions provider. The
+  `AGENT_COMPAT_*` variables are the launcher's and never reach the CLI.
+- **Changes take effect at once.** Rotating the key, changing the Base URL or
+  the manual declaration, disabling or deleting a connection releases every residency
+  started on the old state and closes its process, the same path a chat
+  deletion takes; a turn running on it stops. A new key or Base URL also
+  clears every model's verification. A field saved with its stored value
+  (including a re-entered identical key) is not a change: renaming a
+  connection or editing its model list closes nothing and keeps the other
+  models' results, and a newly listed model starts unverified. A host the control plane cannot
+  reach closes it when its next residency heartbeat is refused.
+- **Verification dials out from the control plane.** It runs only when the
+  owner asks, one model per request: three native checks side by side, each a
+  streaming request offering one tool and a second carrying its result back
+  in that API's own format (for Messages, `tool_use` and `tool_result` blocks,
+  signed thinking carried back, and a stream that must end with
+  `message_delta` and `message_stop`). That is at most six provider requests,
+  each check under the check timeout, and one of the owner's 20 hourly checks
+  and model-list reads, reserved atomically across replicas. The UI verifies
+  at most three models per click, one at a time, and says how many remain;
+  saving, editing or opening the page never calls a provider. It dials only
+  public IPv4 HTTPS on port 443: every resolved address must pass the MCP
+  connection policy and the sandbox's protected ranges (including
+  `AGENT_EGRESS_PROTECTED_CIDRS`), the connection is pinned to the checked
+  addresses, redirects are not followed, no proxy is used and no upstream body
+  is echoed. A result is merged under its model alone, and only if the
+  connection is still enabled with the key, Base URL and model it tested;
+  otherwise it is answered with `recorded: false` and not kept, so a stale
+  probe never overwrites a newer key or re-enables anything.
+- **Usage.** The owner's provider bills these turns and the Gateway ledger
+  records none of them. A turn's usage shows runtime token counts and says the
+  cost is the provider's; conversation totals mark themselves incomplete, and
+  an admin's run detail says the owner's provider bills it. The owner and admin
+  usage aggregates still count such a turn as a run whose Gateway usage is
+  `unavailable` — never as zero cost, but without naming the provider either.
 
 ## Reusable cloud environments
 

@@ -171,8 +171,10 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const [branch, setBranch] = useState(draft?.branch ?? '');
   const [branchOptionsRepo, setBranchOptionsRepo] = useState<string | null>(null);
   const [runtime, setRuntime] = useState(draft?.runtime ?? '');
-  const { models, model, chosenModel, chooseModel, adoptModels, missingModel, modelControl } =
-    useComposerModel(draft?.chosenModel);
+  const composerModel = useComposerModel(draft, runtime);
+  const { draftFields, requestFields, adoptModels, missingModel, picker, modelControl } =
+    composerModel;
+  const { model, connectionId } = composerModel.choice;
   const [effort, setEffort] = useState(draft?.effort ?? '');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -184,19 +186,18 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const saveDraft = draftStore.setValue;
   const savedBranch =
     branchOptionsRepo === repo ? branch : draft?.repo === repo ? draft.branch : '';
-  useEffect(() => {
-    saveDraft(
-      JSON.stringify({
-        task,
-        repo,
-        runtime,
-        chosenModel,
-        effort,
-        branch: savedBranch,
-        plugins,
-      }),
-    );
-  }, [saveDraft, task, repo, runtime, chosenModel, effort, savedBranch, plugins]);
+  const draftFor = (where: string) =>
+    JSON.stringify({
+      task,
+      repo: where,
+      runtime,
+      ...draftFields,
+      effort,
+      branch: savedBranch,
+      plugins,
+    });
+  const draftValue = draftFor(repo);
+  useEffect(() => saveDraft(draftValue), [saveDraft, draftValue]);
   const goalCommand = useGoalCommand({
     value: task,
     setValue: setTask,
@@ -344,7 +345,10 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
 
   // The offered efforts follow the (runtime, model) pair, so switching either
   // can empty the set or drop the current choice out of it.
-  const efforts = useMemo(() => offeredEfforts(config, runtime, model), [config, runtime, model]);
+  const efforts = useMemo(
+    () => offeredEfforts(config, runtime, model, connectionId),
+    [config, runtime, model, connectionId],
+  );
   useEffect(() => {
     // Only once the config has arrived: before that the offered set is empty
     // because nothing is *known*, not because nothing is offered.
@@ -444,33 +448,16 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   async function goToGitHub(kind: 'connect' | 'manage') {
     setLeaving(kind);
     setError(null);
-    if (temporary) {
-      // Either trip is for a repository: come back to the picker, not to the
-      // temporary workspace the owner is leaving to get one.
-      saveDraft(
-        JSON.stringify({
-          task,
-          repo: '',
-          runtime,
-          chosenModel,
-          effort,
-          branch: savedBranch,
-          plugins,
-        }),
-      );
-    }
+    // Either trip is for a repository: come back to the picker, not to the
+    // temporary workspace the owner is leaving to get one.
+    if (temporary) saveDraft(draftFor(''));
     rememberReturn(
       // Not back to the temporary workspaces' folder: its link asks for a
       // temporary workspace again, ahead of the draft that asks where to run.
       initialRepo && initialRepo !== TEMPORARY_WORKSPACE
         ? `/?repo=${encodeURIComponent(initialRepo)}`
         : '/',
-      {
-        task,
-        repo: temporary ? '' : repo,
-        runtime,
-        chosenModel,
-      },
+      { task, repo: temporary ? '' : repo, runtime, ...draftFields },
       userId,
     );
     try {
@@ -580,7 +567,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
       // is already working toward it rather than learning about it later.
       ...(goal ? { goal } : {}),
       runtime,
-      model,
+      // The model with its source, when that is the owner's own connection.
+      ...requestFields,
       // Sent as a ref; the platform pins it to a commit at creation, because
       // a branch moves and the publisher applies onto a fixed one.
       ...(branch ? { base_ref: branch } : {}),
@@ -792,7 +780,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
 
         <PromptRewrite
           value={task}
-          model={model}
+          {...composerModel.rewrite}
           disabled={submitting || goalCommand.busy || /^\s*\//.test(task)}
           onActiveChange={setRewriting}
           onApply={(prompt) => {
@@ -874,9 +862,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
             />
             <Picker
               label={t('composer.model')}
-              value={model}
-              options={models}
-              onChange={chooseModel}
+              {...picker}
               // Empty until something resolves for this owner. The model is
               // never filled in for them: see applyConfig.
               placeholder={t('composer.chooseModelPlaceholder')}
@@ -1037,6 +1023,13 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         </p>
       ) : null}
 
+      <p
+        hidden={!composerModel.unavailableHint}
+        className="mt-3 text-center text-[13px] text-status-error"
+        role="status"
+      >
+        {composerModel.unavailableHint}
+      </p>
       {unavailableRepo && !disconnected ? (
         <p className="mt-3 text-center text-[13px] text-gray-500 dark:text-gray-400" role="status">
           {t('composer.repositoryUnavailable', { repo: unavailableRepo })}

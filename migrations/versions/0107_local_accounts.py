@@ -7,14 +7,14 @@ startup keeps one database from serving both identity sources.
 None of the columns is named ``user_id``: the namespace guard discovers owner
 data by that column name, and an account record is not owner data.
 
-The numbering follows the current head. The parallel personal-model-connection
-branch also adds a revision after 0105; whichever merges second renumbers.
+It follows ``0106_user_model_connections``: the two features were developed
+in parallel and this one was renumbered when they were integrated.
 """
 
 from alembic import op
 
-revision = "0106_local_accounts"
-down_revision = "0105_job_event_usage_summary"
+revision = "0107_local_accounts"
+down_revision = "0106_user_model_connections"
 branch_labels = None
 depends_on = None
 

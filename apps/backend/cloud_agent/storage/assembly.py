@@ -43,6 +43,7 @@ from cloud_agent.storage.repositories import (
     PostgresLocalAccountRepository,
     PostgresMcpCatalogRepository,
     PostgresMcpConnectionRepository,
+    PostgresModelConnectionRepository,
     PostgresModelPreferenceRepository,
     PostgresNotificationMaintenanceRepository,
     PostgresOperationMeasurementRepository,
@@ -92,6 +93,7 @@ if TYPE_CHECKING:
         LocalAccountRepository,
         McpCatalogRepository,
         McpConnectionRepository,
+        ModelConnectionRepository,
         ModelPreferenceRepository,
         NotificationMaintenanceRepository,
         OperationMeasurements,
@@ -171,6 +173,7 @@ class Storage:
         self.snapshot: SnapshotRepository = PostgresSnapshotRepository(pool)
         self.source_control: SourceControlRepository = PostgresSourceControlRepository(pool)
         self.ssh_servers: SshServerRepository = PostgresSshServerRepository(pool)
+        self.model_connections: ModelConnectionRepository = PostgresModelConnectionRepository(pool)
         self.work_insights: WorkInsightsRepository = PostgresWorkInsightsRepository(pool)
         self.agent_memory: AgentMemoryRepository = PostgresAgentMemoryRepository(pool)
         self.user_profile: UserProfileRepository = PostgresUserProfileRepository(pool)

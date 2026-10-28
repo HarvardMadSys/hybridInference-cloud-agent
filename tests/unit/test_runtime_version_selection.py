@@ -33,6 +33,7 @@ from cloud_agent_host.sandbox import (
 )
 from cloud_agent_shared.environment import BoundEnvironment
 from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef, snapshot_object_key
+from cloud_agent_shared.model_connections import ModelConnectionAccess
 from cloud_agent_shared.ssh_access import SshAccess
 
 _MENU = {"claude-code": ["2.1.220", "2.1.235"]}
@@ -315,6 +316,13 @@ def _full_claim() -> WorkerClaimResponse:
         environment=BoundEnvironment(binding_id="b").model_dump(mode="json"),
         environment_snapshot=snapshot.model_dump(mode="json"),
         ssh_access=SshAccess(revision=1),
+        model_connection=ModelConnectionAccess(
+            connection_id="mconn_" + "b" * 32,
+            revision=2,
+            base_url="https://models.example/v1",
+            protocol="responses",
+            api_key="sk-owner",
+        ),
         parent_job_id="ajob_0",
         turn_no=2,
         base_sha="c" * 40,

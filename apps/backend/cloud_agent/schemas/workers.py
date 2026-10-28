@@ -19,6 +19,9 @@ from cloud_agent.schemas._host_reports import (
     _HostReportVersion,
     _HostVersionMenu,
 )
+from cloud_agent_shared.model_connections import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
+    ModelConnectionAccess,
+)
 from cloud_agent_shared.plugins import (
     SandboxPlugin,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
@@ -246,6 +249,10 @@ class WorkerClaimResponse(BaseModel):
     #: The sandbox group's whole SSH state, keys included; absent for a group
     #: whose chats never selected an SSH server.
     ssh_access: SshAccess | None = Field(None, repr=False)
+    #: The owner's own model connection this turn runs on, key included;
+    #: absent for a Gateway turn. Only a host advertising
+    #: ``MODEL_CONNECTION_CAPABILITY`` is ever handed one.
+    model_connection: ModelConnectionAccess | None = Field(None, repr=False)
 
     #: How many uploads this whole conversation holds, not just this turn.
     #: A host with zero here skips the upload fetch entirely, which is every

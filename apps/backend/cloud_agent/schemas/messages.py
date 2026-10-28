@@ -7,7 +7,11 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cloud_agent.schemas._prompts import _visible_prompt
-from cloud_agent.schemas.jobs import RESET_REASONING_EFFORT, AgentJobResponse
+from cloud_agent.schemas.jobs import (
+    MODEL_CONNECTION_ID_PATTERN,
+    RESET_REASONING_EFFORT,
+    AgentJobResponse,
+)
 
 
 class AgentThreadMessageResponse(BaseModel):
@@ -61,6 +65,15 @@ class AgentThreadMessageCreate(BaseModel):
         ),
     )
     model: str | None = Field(None, description="Optional model override for this turn.")
+    model_connection_id: str | None = Field(
+        None,
+        pattern=MODEL_CONNECTION_ID_PATTERN,
+        description=(
+            "The source of `model`: the owner's connection, or null for the Gateway. "
+            "Only with `model`; an omitted model inherits the previous turn's model "
+            "and its source together."
+        ),
+    )
     reasoning_effort: str | None = Field(
         None,
         max_length=32,
@@ -87,6 +100,8 @@ class AgentThreadMessageCreate(BaseModel):
     @model_validator(mode="after")
     def validate_idle_guard(self) -> AgentThreadMessageCreate:
         """Bind an idle-only action to the newest turn its caller actually read."""
+        if self.model_connection_id is not None and not self.model:
+            raise ValueError("model_connection_id needs model")
         if self.require_idle and (
             not self.expected_latest_job_id or not self.expected_latest_job_id.strip()
         ):
@@ -118,8 +133,24 @@ class AgentPendingMessageUpdate(BaseModel):
         None, max_length=50
     )
     model: str | None = None
+    #: The source of ``model``, sent with it; null is the Gateway.
+    model_connection_id: str | None = Field(None, pattern=MODEL_CONNECTION_ID_PATTERN)
     reasoning_effort: str | None = Field(None, max_length=32)
     state: Literal["held", "queued"] | None = None
+
+    @model_validator(mode="after")
+    def validate_source(self) -> AgentPendingMessageUpdate:
+        """A source is only ever changed together with the model it serves.
+
+        A connection with no model, or an empty one, is refused rather than
+        read as "inherit": that would quietly drop the owner's source.
+        """
+        if "model_connection_id" in self.model_fields_set and (
+            "model" not in self.model_fields_set
+            or (self.model_connection_id is not None and not self.model)
+        ):
+            raise ValueError("model_connection_id needs model")
+        return self
 
     @field_validator("prompt")
     @classmethod
@@ -162,6 +193,7 @@ class AgentPendingMessageResponse(BaseModel):
     attachment_ids: list[int] | None = None
     attachments: list[AgentPendingMessageAttachment] = Field(default_factory=list)
     model: str | None = None
+    model_connection_id: str | None = None
     reasoning_effort: str | None = None
     #: Why the platform held this message instead of sending it, if it did.
     last_error: str | None = None

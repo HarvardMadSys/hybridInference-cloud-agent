@@ -12,6 +12,7 @@ from typing import Any
 
 from cloud_agent_shared.environment import BoundEnvironment
 from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
+from cloud_agent_shared.model_connections import ModelConnectionAccess
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, validate_sandbox_plugins
 from cloud_agent_shared.ssh_access import SshAccess
 
@@ -78,6 +79,9 @@ class ClaimedJob:
     # The group's whole SSH state, present only for a group whose chats have
     # ever selected an SSH server. It carries private keys.
     ssh_access: SshAccess | None = field(default=None, repr=False)
+    # The owner's own model connection this turn runs on, key included; None
+    # for a Gateway turn. Its key is the member's credential, not a grant.
+    model_connection: ModelConnectionAccess | None = field(default=None, repr=False)
     # Explicit CLI plugins installed in this chat's private member state.
     plugins: list[dict[str, str]] = field(default_factory=list)
     # Read-only, single-repo, short-lived: what the runner clones with. Never
@@ -136,6 +140,9 @@ class ClaimedJob:
             ssh_access=SshAccess.model_validate(body["ssh_access"])
             if body.get("ssh_access")
             else None,
+            model_connection=ModelConnectionAccess.model_validate(body["model_connection"])
+            if body.get("model_connection")
+            else None,
             plugins=plugins,
             runtime=body["runtime"],
             model=body["model"],
@@ -157,3 +164,42 @@ class ClaimedJob:
             thread_attachment_count=int(body.get("thread_attachment_count") or 0),
             turn_attachment_count=int(body.get("turn_attachment_count") or 0),
         )
+
+
+def claim_secret_values(job: ClaimedJob) -> dict[str, str]:
+    """Every value the claim put in the sandbox that output must never show."""
+    values = job.environment.secrets() if job.environment else {}
+    if job.ssh_access is not None:
+        values = {**values, **job.ssh_access.secrets()}
+    if job.model_connection is not None:
+        # With the token this member's CLI holds on a translated plan.
+        values = {**values, **job.model_connection.secrets()}
+    return values
+
+
+def model_connection_launch(job: ClaimedJob) -> dict[str, str]:
+    """The process-fixed launch fields of a turn on an owner connection; none otherwise.
+
+    Part of the launch a live process is compared against, so a turn after the
+    key or endpoint changed starts a new process instead of borrowing one that
+    holds the old key, and a Gateway turn never borrows one that holds a key.
+    """
+    return job.model_connection.launch_fields() if job.model_connection is not None else {}
+
+
+def require_residency_connection(job: ClaimedJob, residency: dict[str, Any]) -> None:
+    """Refuse a residency whose connection key or plan is not what this turn's claim named.
+
+    The control plane hands a residency on an owner connection that
+    connection's key at its current revision, resolved to the plan the model's
+    current verification gives. A different revision means the owner changed
+    the connection while this turn was starting; a different plan means a
+    verification moved the model between a native and a translated path. The
+    turn must not run on either without its claim saying so: the launch, the
+    member's token and the host's capability were all settled for the claim's.
+    """
+    access = job.model_connection
+    expected = (access.revision, access.plan.identity) if access is not None else (None, None)
+    held = (residency.get("model_connection_revision"), residency.get("model_connection_plan"))
+    if held != expected:
+        raise ValueError("the model connection changed while this turn was starting")

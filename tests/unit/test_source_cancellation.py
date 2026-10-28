@@ -44,13 +44,18 @@ def test_archive_cancellation_stops_before_the_next_entry_or_chunk(tmp_path, mon
         monkeypatch.setattr(source_archive, "_entries", entries)
     elif stage == "metadata":
         lstat = pathlib.Path.lstat
+        entries = {root / ".git", root / "payload"}
 
+        # Cancelled at whichever entry is statted first: `os.scandir` order is
+        # the filesystem's, and assuming `.git` came first failed on ext4
+        # (reproduced on the unmodified base, 3f60b6a). Nothing may be statted
+        # after that, whichever order the walk takes.
         def metadata(path, *args, **kwargs):
             result = lstat(path, *args, **kwargs)
-            if path == root / ".git":
+            if path in entries:
+                if stop.is_set():
+                    consumed.append("statted after cancellation")
                 stop.set()
-            elif path == root / "payload":
-                consumed.append("statted after cancellation")
             return result
 
         monkeypatch.setattr(pathlib.Path, "lstat", metadata)

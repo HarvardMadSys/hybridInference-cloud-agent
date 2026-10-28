@@ -88,6 +88,8 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "environment_binding_id": row.get("environment_binding_id"),
         "runtime": row["runtime"],
         "model": row["model"],
+        # NULL is the Gateway; otherwise the owner connection this turn runs on.
+        "model_connection_id": row.get("model_connection_id"),
         "execution_profile": row["execution_profile"],
         "reasoning_effort": row["reasoning_effort"],
         "state": row["state"],

@@ -154,6 +154,9 @@ async def get_admin_run(
         runtime_inputs=runtime_inputs,
         runtime=run["runtime"],
         terminal=run["state"] in TERMINAL_STATES,
+        # Which connection stays the owner's; the reader learns only that the
+        # turn's provider, not the Gateway, bills it.
+        external_provider=bool(run.get("model_connection_id")),
     )
     return AdminRunDetail(
         run=AdminRun.model_validate(run),

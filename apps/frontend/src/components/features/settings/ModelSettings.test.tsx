@@ -238,3 +238,36 @@ describe('default model settings', () => {
     expect(getModelPreference).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('a model last used on the owner’s own connection', () => {
+  it('says new tasks offer it again, not that a platform default applies', async () => {
+    vi.mocked(getModelPreference).mockResolvedValue(
+      preference({
+        last_model: 'qwen-next',
+        last_model_connection_id: 'mconn_0123456789abcdef0123456789abcdef',
+        effective_model: null,
+      }),
+    );
+    renderSettings();
+    expect(
+      await screen.findByText(/Your last task ran on qwen-next through your own connection/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('New tasks start on qwen-next.')).toBeNull();
+    // The pin is a platform model and stays empty until one is chosen.
+    await modelField('');
+  });
+
+  it('lets a pin take precedence, and then describes the pin', async () => {
+    vi.mocked(getModelPreference).mockResolvedValue(
+      preference({
+        default_model: 'glm-5.1',
+        last_model: 'qwen-next',
+        last_model_connection_id: 'mconn_0123456789abcdef0123456789abcdef',
+        effective_model: 'glm-5.1',
+      }),
+    );
+    renderSettings();
+    expect(await screen.findByText('New tasks start on glm-5.1.')).toBeInTheDocument();
+    expect(screen.queryByText(/through your own connection/)).toBeNull();
+  });
+});
