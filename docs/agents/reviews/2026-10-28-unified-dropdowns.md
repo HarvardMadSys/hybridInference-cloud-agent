@@ -68,9 +68,9 @@ panel style was left to the existing dialog conventions:
   dialogs, `ApplicationSettingGroup` review dialog.
 - `AddWorkspace` remains a rich searchable popup, now on the shared surface.
 
-## Verification
+## Implementation verification
 
-Run on Node 22 in the frontend directory unless noted.
+Run by DSH on Node 22 in the frontend directory unless noted.
 
 - `npm run lint` — pass.
 - `npx prettier --check "src/**/*.{ts,tsx}" "e2e/**/*.ts"` — pass.
@@ -80,9 +80,9 @@ Run on Node 22 in the frontend directory unless noted.
   model/agent pickers, repository menu, account menu, sidebar view menu, task
   actions menu and admin form `Select` in desktop light and mobile dark; plus
   real-browser first-row/End focus for action menus, a 50-repository mobile
-  panel whose list scrolls while the footer stays visible, and a fixed picker
+  panel whose list scrolls while the footer stays visible, and an action menu
   opened under a real containing block (`will-change: transform` on the menu's
-  own header), a wheel-scroll frame trace whose every frame keeps the 6px gap,
+  own header), a programmatic-scroll frame trace whose every frame keeps the 6px gap,
   a hover-then-arrow case where only the active option is tinted, pointer hover
   on an actual Account navigation link plus a repository footer anchor (not
   only class names), the shared action-row inset and trigger-arrow opening, and
@@ -117,3 +117,41 @@ task creation.
   (Advanced setting groups, file/text expanders); they are not menus.
 - The legacy `.ui-popover` fade was removed (the class is no longer used), so
   menus render in their final state and review snapshots are deterministic.
+
+## Independent acceptance
+
+Implementation reviewed and tested: `aeca3559b665c2c186ff756f75d7db54d6d50848`.
+The subsequent acceptance-record commit changes only this document.
+
+- Codex ran `make ci-frontend` in an isolated Linux development checkout with
+  Node 22: every gate passed, including 275 test files / 4,437 unit tests and
+  27 browser tests. The final desktop-light and mobile-dark screenshots were
+  inspected from that run.
+- Three additional Codex Chromium probes passed: initial action-menu focus
+  and End navigation, account navigation-link hover, and internal scrolling
+  plus footer containment with 50 repositories. All three failed on the first
+  implementation; the intermediate fix still failed the link-hover probe.
+- `make check` passed on the merged development baseline: 12,413 tests passed,
+  7 existing root/setpriv-dependent tests skipped. Backend sources, backend
+  tests, migrations and dependency files are unchanged by this UI work. The
+  Linux Python runtime needed a process-local `OPENSSL_CONF=/dev/null` to avoid
+  its host OpenSSL configuration mismatch; certificate verification remained
+  enabled.
+- Claude Code (Opus 5.5, high effort) independently reviewed the full change
+  and its repair deltas on a separate Linux checkout. Its final review of
+  `aeca3559` confirmed all earlier code findings resolved, with no blocking
+  findings. Targeted browser probes also verified the converted SSH and
+  integrations menus, confirmation flows, short-viewport scrolling, shared
+  padding, selected/disabled states, and the footer accent.
+- Claude temporarily restored the old placement/row implementations: the new
+  scroll and double-highlight regressions failed there and passed on the
+  final code. A temporary stale-error test likewise failed with the previous
+  task-actions implementation and passed after the keyboard-open fix.
+- Independent per-frame wheel-scroll sampling kept the 6px gap in all 44
+  frames. The first visible frame under a real containing block was already
+  positioned correctly. The committed containing-block test checks settled
+  positioning; it does not itself guard the first-frame flash, a non-blocking
+  test-coverage suggestion from review.
+
+All browser acceptance used local mocked API fixtures. No production
+acceptance, merge or deployment is claimed.
