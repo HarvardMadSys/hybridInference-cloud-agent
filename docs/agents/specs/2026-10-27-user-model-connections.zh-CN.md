@@ -63,8 +63,9 @@ Base URL 原样使用，不像 Gateway 中继地址那样补 `/v1`：有的服�
 `/v1beta/openai`。CLI 自己在后面拼 `/chat/completions` 或 `/responses`。
 
 Anthropic Messages 的约定不同：Claude Code 的 SDK 会在 `ANTHROPIC_BASE_URL` 后面拼
-`/v1/messages`（实测本地 CLI 2.1.311 请求 `/v1/messages?beta=true`，带 `x-api-key` 和
-`anthropic-version: 2023-06-01`；固定版本为 2.1.220，未单独实测）。所以对这一协议只去掉 Base URL
+`/v1/messages`（本地 CLI 2.1.311 与项目固定版本 2.1.220 均已通过模拟服务核对：请求
+`/v1/messages?beta=true`，带 `x-api-key` 和 `anthropic-version: 2023-06-01`；该验证不代表
+真实模型推理或 Kata 端到端验收）。所以对这一协议只去掉 Base URL
 结尾的**一个** `/v1`，其他路径原样保留（`anthropic_base_url`）：`https://host`、`https://host/v1`、
 `https://host/anthropic`、`https://host/anthropic/v1` 都到 `…/v1/messages`；`/v1beta` 或中间的
 `/v1` 不动。这样一个以 `/v1` 结尾的 Base URL 可以同时服务三种协议。测试用同一个函数算 URL，
