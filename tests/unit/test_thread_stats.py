@@ -447,7 +447,7 @@ def test_runtime_without_usage_reports_none_not_zero() -> None:
     assert stats.tokens_source == "unavailable"
 
 
-def test_ttft_measures_from_attempt_start_to_first_output() -> None:
+def test_first_output_measures_from_attempt_start_to_first_output() -> None:
     stats = summarize_thread(
         job_ids=["job-1"],
         attempts=[_attempt(offset=0)],
@@ -460,23 +460,23 @@ def test_ttft_measures_from_attempt_start_to_first_output() -> None:
         ],
     )
 
-    assert stats.ttft_seconds == 3.0
+    assert stats.first_output_seconds == 3.0
 
 
-def test_ttft_uses_the_first_attempt_of_a_retried_turn() -> None:
+def test_first_output_uses_the_first_attempt_of_a_retried_turn() -> None:
     stats = summarize_thread(
         job_ids=["job-1"],
         attempts=[_attempt(offset=10), _attempt(offset=0)],
         events=[_event(seq=1, event_type="message", payload={"text": "hi"}, offset=12)],
     )
 
-    assert stats.ttft_seconds == 12.0
+    assert stats.first_output_seconds == 12.0
 
 
-def test_ttft_across_a_thread_is_the_mean_of_its_turns() -> None:
-    """A multi-turn thread reports the average first-token time, not one turn's.
+def test_first_output_across_a_thread_is_the_mean_of_its_turns() -> None:
+    """A multi-turn thread reports the average first-output time, not one turn's.
 
-    Every other ttft case here has exactly one sample, which makes the mean
+    Every other first-output case here has exactly one sample, which makes the mean
     indistinguishable from the max, the min, or the sum — mutation testing
     found that replacing the mean with `max()` left the suite green. A thread
     is the unit this stat is displayed for, so the aggregation across turns is
@@ -498,10 +498,10 @@ def test_ttft_across_a_thread_is_the_mean_of_its_turns() -> None:
     )
 
     # Samples are 2s, 4s and 12s: mean 6, max 12, min 2, sum 18.
-    assert stats.ttft_seconds == 6.0
+    assert stats.first_output_seconds == 6.0
 
 
-def test_ttft_ignores_a_turn_that_never_produced_output() -> None:
+def test_first_output_ignores_a_turn_that_never_produced_output() -> None:
     """A turn with no output contributes no sample, rather than a zero.
 
     The same rule the rest of this module follows: a measure we do not have
@@ -526,17 +526,17 @@ def test_ttft_ignores_a_turn_that_never_produced_output() -> None:
         ],
     )
 
-    assert stats.ttft_seconds == 4.0
+    assert stats.first_output_seconds == 4.0
 
 
-def test_ttft_is_absent_without_an_attempt_row() -> None:
+def test_first_output_is_absent_without_an_attempt_row() -> None:
     stats = summarize_thread(
         job_ids=["job-1"],
         attempts=[],
         events=[_event(seq=1, event_type="message", payload={"text": "hi"}, offset=2)],
     )
 
-    assert stats.ttft_seconds is None
+    assert stats.first_output_seconds is None
 
 
 def test_multiple_turns_aggregate_across_the_thread() -> None:
@@ -652,7 +652,7 @@ def test_empty_thread_is_all_zero_and_never_raises() -> None:
     assert stats.tool_calls == 0
     assert stats.wall_seconds == 0.0
     assert stats.model_seconds == 0.0
-    assert stats.ttft_seconds is None
+    assert stats.first_output_seconds is None
     assert stats.tokens_source == "unavailable"
 
 

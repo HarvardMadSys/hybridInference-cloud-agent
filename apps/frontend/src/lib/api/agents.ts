@@ -146,9 +146,15 @@ export type {
   AgentAttemptUsageApi,
   AgentJobUsageApi,
   AgentMessageRequestApi,
+  ModelTtftApi,
 } from './agents/usage';
 
-export { getAgentMessageRequest, getAgentJobUsage, refreshAgentJobUsage } from './agents/usage';
+export {
+  getAgentMessageRequest,
+  getAgentJobUsage,
+  getAgentThreadModelTtft,
+  refreshAgentJobUsage,
+} from './agents/usage';
 
 export type {
   AgentJobFileStatus,

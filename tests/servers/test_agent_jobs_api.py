@@ -2744,7 +2744,7 @@ async def test_thread_stats_answer_a_thread_that_never_ran(client: AsyncClient):
     assert body["turns"] == 1
     assert body["tool_calls"] == 0
     assert body["wall_seconds"] == 0.0
-    assert body["ttft_seconds"] is None
+    assert body["first_output_seconds"] is None
 
 
 async def test_archived_threads_leave_the_active_project_tree(client: AsyncClient):
