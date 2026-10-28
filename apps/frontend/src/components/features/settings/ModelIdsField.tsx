@@ -2,6 +2,7 @@
 
 import { useId, useState, type KeyboardEvent } from 'react';
 import { useT } from '@/components/providers';
+import { connectionReason, connectionAgentNames } from './modelConnectionDisplay';
 import type { ModelStatus } from '@/lib/api/modelConnections';
 import { isModelId, withModel } from './modelConnectionChanges';
 
@@ -48,8 +49,8 @@ function ModelChip({
             }`}
           >
             {refused
-              ? t('connections.modelRefused', { reason: result.message || t('connections.error') })
-              : t('connections.agents', { agents: result.runtimes.join(', ') })}
+              ? t('connections.modelRefused', { reason: connectionReason(result.category, t) })
+              : t('connections.agents', { agents: connectionAgentNames(result.runtimes) })}
           </span>
         ) : null}
       </span>
@@ -109,7 +110,7 @@ export function ModelIdsField({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
-    if (event.key === 'Enter') {
+    if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
       // Enter keeps the ID; the form is saved with its own button.
       event.preventDefault();
       add();

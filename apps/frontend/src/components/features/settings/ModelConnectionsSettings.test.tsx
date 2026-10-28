@@ -19,6 +19,7 @@ vi.mock('@/lib/api/modelConnections', async (importOriginal) => ({
 }));
 
 const EVERY = ['claude-code', 'codex', 'kilo', 'opencode', 'pi'];
+const AGENT_NAMES = 'Claude Code, Codex, Kilo Code, OpenCode, pi';
 
 /** Chat Completions verified for `model`; Codex and Claude Code translated. */
 function ready(model: string, runtimes = EVERY): api.ModelStatus {
@@ -60,11 +61,11 @@ function ready(model: string, runtimes = EVERY): api.ModelStatus {
   };
 }
 
-function refused(model: string, message = 'The model did not call the tool.'): api.ModelStatus {
+function refused(model: string, message = 'The model did not call the tool.', category = 'no_tool_call'): api.ModelStatus {
   return {
     ...ready(model),
     status: 'unsupported',
-    category: 'tool_call_missing',
+    category,
     message,
     runtimes: [],
     paths: [],
@@ -169,7 +170,7 @@ describe('adding a connection', () => {
       }),
     );
     const card = await screen.findByRole('article', { name: 'Second provider' });
-    expect(within(card).getAllByText(`Works with ${EVERY.join(', ')}`)).toHaveLength(2);
+    expect(within(card).getAllByText(`Works with ${AGENT_NAMES}`)).toHaveLength(2);
     expect(screen.queryByLabelText('API key')).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue('private-provider-key')).not.toBeInTheDocument();
   });
@@ -188,8 +189,8 @@ describe('adding a connection', () => {
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://api.example.com/custom/v1');
     expect(screen.getByLabelText('API key')).toHaveValue('private-provider-key');
     const chips = screen.getByRole('list', { name: 'Models to save' });
-    expect(chips).toHaveTextContent('Not usable: The model did not call the tool.');
-    expect(chips).toHaveTextContent(`Works with ${EVERY.join(', ')}`);
+    expect(chips).toHaveTextContent('Not usable: The model did not call the offered tool exactly once.');
+    expect(chips).toHaveTextContent(`Works with ${AGENT_NAMES}`);
     expect(screen.queryByRole('article', { name: 'Second provider' })).not.toBeInTheDocument();
 
     // Removing the refused model clears the stale results; retrying saves the rest.
@@ -299,7 +300,7 @@ describe('editing a connection', () => {
 
   it('verifies a new key before saving it, and a refusal keeps the old card as it was', async () => {
     vi.mocked(api.updateModelConnection).mockRejectedValue(
-      refusal(refused('shared-model', 'The provider refused the key.'), ready('another-model')),
+      refusal(refused('shared-model', 'The provider refused the key.', 'auth'), ready('another-model')),
     );
     renderSettings();
     const card = await screen.findByRole('article', { name: connection.name });
@@ -316,10 +317,10 @@ describe('editing a connection', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/Not saved/);
     expect(screen.getByLabelText('API key')).toHaveValue('replacement-key');
     expect(screen.getByRole('list', { name: 'Models to save' })).toHaveTextContent(
-      'Not usable: The provider refused the key.',
+      'Not usable: The provider refused the API key (401/403).',
     );
     // The saved connection is untouched until a save succeeds.
-    expect(within(card).getAllByText(`Works with ${EVERY.join(', ')}`)).toHaveLength(2);
+    expect(within(card).getAllByText(`Works with ${AGENT_NAMES}`)).toHaveLength(2);
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByLabelText('API key')).not.toBeInTheDocument();
@@ -343,7 +344,7 @@ describe('editing a connection', () => {
       }),
     );
     const card = await screen.findByRole('article', { name: connection.name });
-    expect(within(card).getByText('Works with codex')).toBeVisible();
+    expect(within(card).getByText('Works with Codex')).toBeVisible();
   });
 });
 
@@ -431,6 +432,37 @@ describe('a saved connection', () => {
     const form = region().querySelector('form')!;
     expect(form).not.toHaveTextContent(/Chat Completions|Responses|Anthropic Messages/);
     const card = screen.getByRole('article', { name: connection.name });
-    expect(within(card).getAllByText(`可用于 ${EVERY.join(', ')}`)).toHaveLength(2);
+    expect(within(card).getAllByText(`可用于 ${AGENT_NAMES}`)).toHaveLength(2);
   });
+});
+
+it('reports malformed URL and model IDs beside the fields without calling the provider', async () => {
+  renderSettings();
+  fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
+  fillNew(['model with spaces']);
+  fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'http://provider.example/v1' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Verify and save' }));
+  expect(screen.getByLabelText('Base URL')).toHaveAttribute('aria-invalid', 'true');
+  expect(screen.getByLabelText('Model IDs')).toHaveAttribute('aria-invalid', 'true');
+  expect(screen.getByText(/Enter an HTTPS Base URL/)).toBeVisible();
+  expect(screen.getByText(/Use the exact model ID/)).toBeVisible();
+  expect(api.createModelConnection).not.toHaveBeenCalled();
+  expect(screen.getByLabelText('API key')).toHaveValue('private-provider-key');
+});
+
+it('shows a Chinese reason and readable agent names after a mixed verification refusal', async () => {
+  vi.mocked(api.createModelConnection).mockRejectedValue(refusal(ready('good-model'), refused('bad-model')));
+  renderSettings('zh-CN');
+  fireEvent.click(await screen.findByRole('button', { name: '添加连接' }));
+  fireEvent.change(screen.getByLabelText('连接名称'), { target: { value: '我的服务' } });
+  fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://provider.example/v1' } });
+  fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'fixture-key' } });
+  const input = screen.getByLabelText('模型 ID');
+  fireEvent.change(input, { target: { value: 'good-model' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  fireEvent.change(input, { target: { value: 'bad-model' } });
+  fireEvent.click(screen.getByRole('button', { name: '验证并保存' }));
+  expect(await screen.findByText('无法使用：模型未按要求调用工具。')).toBeVisible();
+  expect(screen.getByRole('list', { name: '要保存的模型' })).toHaveTextContent('Claude Code, Codex, Kilo Code, OpenCode, pi');
+  expect(screen.queryByText('The model did not call the tool.')).not.toBeInTheDocument();
 });

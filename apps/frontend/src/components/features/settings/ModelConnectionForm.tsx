@@ -186,6 +186,7 @@ export function ModelConnectionForm({
     event.preventDefault();
     if (busy) return;
     const found = fieldProblems(fields);
+    if (!connection && !fields.key) found.api_key = true;
     const invalid = Object.keys(found).length > 0;
     setProblems(found);
     setResults({});

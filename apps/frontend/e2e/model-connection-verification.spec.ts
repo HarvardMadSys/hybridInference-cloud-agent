@@ -384,8 +384,8 @@ test.describe('verification without a protocol menu', () => {
       await form.getByRole('button', { name: 'Verify and save', exact: true }).click();
       await expect.poll(() => posted.length).toBe(1);
       await expect(form.getByRole('button', { name: 'Verifying…', exact: true })).toBeDisabled();
-      // Cancel stays usable while a slow provider is verified.
-      await expect(form.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled();
+      // A pending save can still commit on the server, so Cancel is disabled.
+      await expect(form.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled();
       expect(posted).toEqual([
         {
           name: 'Fixture provider',

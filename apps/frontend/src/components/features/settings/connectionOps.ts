@@ -33,8 +33,10 @@ interface State {
 
 export class ConnectionOps {
   private readonly states = new Map<string, State>();
+  version = 0;
 
   begin(id: string): OperationTicket {
+    this.version += 1;
     const state = this.states.get(id) ?? { epoch: 0, running: 0, overlapped: false };
     if (state.running > 0) state.overlapped = true;
     state.epoch += 1;
@@ -44,6 +46,7 @@ export class ConnectionOps {
   }
 
   settle(ticket: OperationTicket): Settlement {
+    this.version += 1;
     const state = this.states.get(ticket.id);
     if (!state) return 'refresh';
     state.running -= 1;

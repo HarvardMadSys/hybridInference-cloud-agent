@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useT } from '@/components/providers';
+import { connectionReason } from './modelConnectionDisplay';
 import {
   discoverConnectionModels,
   refusedModels,
@@ -56,7 +57,7 @@ export function ModelConnectionTools({
           .map((status) =>
             t('connections.modelRefusedNamed', {
               model: status.model,
-              reason: status.message || t('connections.error'),
+              reason: connectionReason(status.category, t),
             }),
           ),
       );
@@ -88,12 +89,13 @@ export function ModelConnectionTools({
       ) : null}
       {discovered?.length ? (
         <div className="mt-3 space-y-3">
+          <p className="text-xs text-muted">{t('connections.modelLimit', { max: maxModels })}</p>
           <div className="max-h-60 space-y-2 overflow-y-auto">
             {discovered.map((value) => (
               <label key={value} className="flex min-h-9 items-center gap-2 break-all text-sm">
                 <input
                   type="checkbox"
-                  disabled={busy || connection.models.includes(value)}
+                  disabled={busy || connection.models.includes(value) || (!selected.includes(value) && connection.models.length + selected.length >= maxModels)}
                   checked={connection.models.includes(value) || selected.includes(value)}
                   onChange={(event) =>
                     setSelected((current) =>

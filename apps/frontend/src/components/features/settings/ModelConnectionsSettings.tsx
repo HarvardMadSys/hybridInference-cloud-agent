@@ -38,10 +38,17 @@ export function ModelConnectionsSettings() {
 
   useEffect(() => {
     let active = true;
+    const version = ops.current.version;
     setFailed(false);
     void listModelConnections()
       .then((value) => {
-        if (active) setData(value);
+        if (!active) return;
+        if (version !== ops.current.version) {
+          setReload((current) => current + 1);
+          return;
+        }
+        // A later mutation can be queued in the same React batch.
+        setData((current) => version === ops.current.version ? value : current);
       })
       .catch(() => {
         if (active) setFailed(true);

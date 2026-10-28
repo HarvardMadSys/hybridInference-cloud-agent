@@ -4232,13 +4232,18 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   refused edit leaves the previous endpoint, key, results and running
   processes untouched. A model that fails is never dropped to save the
   others. An edit commits only while the row still has the credential
-  revision, config revision and model list its verification read; a
+  revision, config revision, model list and stored facts its verification read; a
   rotation, disable, delete or model edit made meanwhile wins, and the late
   save answers `409 model_connection_changed`. A rename, removing models,
   enabling or disabling makes no provider call. The request carries the
   normalized endpoint, key and models it commits, so nothing a client sends
   can stand in for a verification. At most eight models per connection keep
   one save to at most 48 provider requests and two waves of four models.
+  Verification has a 240-second overall deadline; exceeding it answers
+  `504 model_connection_verification_timeout` without writing anything. The
+  deployment edge permits this duration; any additional proxy must permit it
+  too. Cancelling the form is disabled while saving because the server may
+  still commit the request.
 - **Where requests go.** The OpenAI CLIs append `/chat/completions` or
   `/responses` to the Base URL exactly as written. Claude Code's SDK appends
   `/v1/messages` to `ANTHROPIC_BASE_URL`, so one trailing `/v1` of the Base URL

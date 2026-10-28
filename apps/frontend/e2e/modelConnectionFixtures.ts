@@ -78,7 +78,7 @@ type Status = ReturnType<typeof unverified>;
 
 /** A model whose verification found no API an agent can use. */
 export function refusedStatus(model: string, message: string) {
-  return { ...unverified(model), status: 'unsupported', category: 'tool_call_missing', message };
+  return { ...unverified(model), status: 'unsupported', category: 'no_tool_call', message };
 }
 
 /** The 422 a save answers when a model could not be verified: nothing was stored. */

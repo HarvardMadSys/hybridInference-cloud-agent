@@ -339,7 +339,8 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   storing the native outcomes (supported, unsupported or failed) per model;
   otherwise nothing is written, not even a new key, and each model's result is
   answered. An edit commits only while the row still has the revisions and
-  model list its verification read. A model without current facts runs on
+  model list and stored facts its verification read. Verification has a
+  240-second overall deadline; a timeout writes nothing. A model without current facts runs on
   nothing. A runtime runs on its own API when verified for
   that model (Chat Completions: OpenCode, Kilo, pi; Responses: Codex;
   Anthropic Messages: Claude Code). Otherwise only Codex and Claude Code may

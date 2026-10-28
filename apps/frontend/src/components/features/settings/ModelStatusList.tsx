@@ -1,6 +1,7 @@
 'use client';
 
 import { useT } from '@/components/providers';
+import { connectionReason, connectionAgentNames, connectionAgentName } from './modelConnectionDisplay';
 import {
   protocolName,
   type AgentPath,
@@ -19,12 +20,12 @@ function resultKey(status: string | undefined) {
 function pathText(path: AgentPath, t: Translate): string {
   if (path.mode === 'direct') {
     return t('connections.pathDirect', {
-      runtime: path.runtime,
+      runtime: connectionAgentName(path.runtime),
       protocol: protocolName(path.upstream_protocol),
     });
   }
   return t('connections.pathTranslated', {
-    runtime: path.runtime,
+    runtime: connectionAgentName(path.runtime),
     client: protocolName(path.client_protocol),
     upstream: protocolName(path.upstream_protocol),
   });
@@ -39,7 +40,7 @@ function Diagnostics({ status }: { status: ModelStatus }) {
         <li key={protocol}>
           {t(resultKey(result?.status), {
             protocol: protocolName(protocol as ModelProtocol),
-            message: result?.message ?? '',
+            message: connectionReason(result?.category, t),
           })}
         </li>
       ))}
@@ -67,7 +68,7 @@ export function ModelStatusList({ statuses }: { statuses: ModelStatus[] }) {
               className={`text-xs ${status.runtimes.length ? 'text-muted' : 'text-status-warning'}`}
             >
               {status.runtimes.length
-                ? t('connections.agents', { agents: status.runtimes.join(', ') })
+                ? t('connections.agents', { agents: connectionAgentNames(status.runtimes) })
                 : t('connections.notUsable')}
             </p>
           </li>

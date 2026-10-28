@@ -19,19 +19,23 @@ export function isModelId(text: string): boolean {
 export type ConnectionField = 'name' | 'base_url' | 'api_key' | 'models';
 
 /** What is wrong with each field before anything is sent; empty when nothing is. */
+function validBaseUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !/[^\x21-\x7e]/.test(value) &&
+      !url.username && !url.password && !url.search && !url.hash &&
+      (!url.port || url.port === '443');
+  } catch {
+    return false;
+  }
+}
+
 export function fieldProblems(fields: ConnectionFields): Partial<Record<ConnectionField, true>> {
   const problems: Partial<Record<ConnectionField, true>> = {};
-  let url: URL | null = null;
-  try {
-    url = new URL(fields.base_url);
-  } catch {
-    url = null;
-  }
-  if (fields.base_url && (url?.protocol !== 'https:' || /\s/.test(fields.base_url))) {
-    problems.base_url = true;
-  }
-  if (/\s/.test(fields.key)) problems.api_key = true;
-  if (fields.models.some((model) => !isModelId(model))) problems.models = true;
+  if (!fields.name || fields.name.length > 64) problems.name = true;
+  if (!validBaseUrl(fields.base_url)) problems.base_url = true;
+  if (/[^\x21-\x7e]/.test(fields.key)) problems.api_key = true;
+  if (!fields.models.length || fields.models.some((model) => !isModelId(model))) problems.models = true;
   return problems;
 }
 
