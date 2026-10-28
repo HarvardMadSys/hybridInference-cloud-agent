@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
+import { useSignedInAuthMode } from '@/components/providers/AuthProvider';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import type { TranslationKey } from '@/lib/i18n/translate';
 import {
@@ -358,9 +359,26 @@ function ContainerRow({ container, nowMs }: { container: OwnerContainer; nowMs: 
   );
 }
 
+function GatewayUsageLink() {
+  const authMode = useSignedInAuthMode();
+  const { branding } = useSiteConfig();
+  const { t } = useLocale();
+  if (authMode === 'local' || !branding.gatewayUrl) return null;
+  return (
+    <>
+      {' '}
+      <a
+        href={`${branding.gatewayUrl}/dashboard`}
+        className="ui-focus-ring rounded font-medium text-accent hover:underline"
+      >
+        {t('settings.usage.dashboardLink')}
+      </a>
+    </>
+  );
+}
+
 function History() {
   const { t, locale } = useLocale();
-  const { branding } = useSiteConfig();
   const [period, setPeriod] = useState<UsagePeriod>(7);
   const [tokens, setTokens] = useState<OwnerTokenUsage | null>(null);
   const [resources, setResources] = useState<OwnerResourceHistory | null>(null);
@@ -493,17 +511,7 @@ function History() {
         {dayStart
           ? t('settings.usage.utcNoteLocal', { time: dayStart })
           : t('settings.usage.utcNote')}
-        {branding.gatewayUrl ? (
-          <>
-            {' '}
-            <a
-              href={`${branding.gatewayUrl}/dashboard`}
-              className="ui-focus-ring rounded font-medium text-accent hover:underline"
-            >
-              {t('settings.usage.dashboardLink')}
-            </a>
-          </>
-        ) : null}
+        <GatewayUsageLink />
       </p>
     </Card>
   );

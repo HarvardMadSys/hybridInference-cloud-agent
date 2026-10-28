@@ -16,6 +16,7 @@ import { AccountMenu } from './AccountMenu';
 
 const router = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn() }));
 const logout = vi.hoisted(() => vi.fn());
+const auth = vi.hoisted(() => ({ mode: undefined as 'local' | 'gateway' | undefined }));
 let pathname = '/';
 
 vi.mock('next/navigation', () => ({
@@ -30,7 +31,7 @@ vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn() }));
 vi.mock('@/components/providers', async () => {
   const { translate } = await import('@/lib/i18n/translate');
   return {
-    useAuth: () => ({ state: { user: { id: 'ada' } }, logout }),
+    useAuth: () => ({ state: { user: { id: 'ada', auth_mode: auth.mode } }, logout }),
     useT: () => (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) =>
       translate('en', key, vars),
   };
@@ -50,6 +51,7 @@ beforeEach(() => {
   document.documentElement.classList.remove(DARK_CLASS);
   document.documentElement.lang = 'en';
   pathname = '/';
+  auth.mode = undefined;
   router.replace.mockReset();
   logout.mockReset();
   vi.mocked(toast.error).mockReset();
@@ -170,6 +172,24 @@ describe('account menu', () => {
     expect(settings).toHaveAttribute('href', '/settings/my-settings');
     expect(settings).toHaveAttribute('aria-current', 'page');
     expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Dashboard' }));
+  });
+
+  it('keeps local account settings and logout without a configured Gateway dashboard link', async () => {
+    auth.mode = 'local';
+    renderMenu({ gatewayUrl: 'https://gateway.example' });
+    const menu = await openMenu();
+    expect(within(menu).queryByRole('menuitem', { name: 'Dashboard' })).not.toBeInTheDocument();
+    expect(menu.querySelector('a[href^="https://gateway.example"]')).toBeNull();
+    expect(within(menu).getByRole('menuitem', { name: 'My Settings' })).toHaveAttribute(
+      'href',
+      '/settings/my-settings',
+    );
+    expect(within(menu).getByRole('menuitem', { name: 'Switch account' })).toHaveAttribute(
+      'href',
+      '/login?return_to=%2F',
+    );
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Log out' }));
+    await waitFor(() => expect(logout).toHaveBeenCalledTimes(1));
   });
 
   it('switches account through the gateway’s chooser, back to this page', async () => {

@@ -339,7 +339,7 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
                   {profile.email}
                 </div>
               ) : null}
-              {branding.gatewayUrl ? (
+              {state.user?.auth_mode !== 'local' && branding.gatewayUrl ? (
                 <a
                   role="menuitem"
                   href={`${branding.gatewayUrl}/dashboard`}

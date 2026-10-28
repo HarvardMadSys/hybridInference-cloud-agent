@@ -42,6 +42,18 @@ const NAV_ITEM_CURRENT =
 // App-mode shell (same fixed-overlay pattern as the playground): slim header +
 // repo/task sidebar + main pane. Deep links keep working — /agents/* are real
 // routes; only the marketing chrome is replaced.
+function DocsAssistantLink() {
+  const { state } = useAuth();
+  const { branding, features } = useSiteConfig();
+  const t = useT();
+  if (state.user?.auth_mode === 'local' || !features.rag || !branding.gatewayUrl) return null;
+  return (
+    <a href={`${branding.gatewayUrl}/chat`} className={NAV_ITEM}>
+      {t('nav.docsAssistant')}
+    </a>
+  );
+}
+
 function AgentsHeader({
   sidebarToggle,
   accountMenu,
@@ -52,7 +64,7 @@ function AgentsHeader({
 }) {
   const pathname = usePathname() ?? '/';
   const { state } = useAuth();
-  const { branding, features } = useSiteConfig();
+  const { branding } = useSiteConfig();
   const t = useT();
 
   // Which nav item is lit has to follow the route. The highlight used to be
@@ -129,15 +141,9 @@ function AgentsHeader({
             {t('nav.status')}
           </a>
         )}
-        {/* Docs Assistant and Dashboard are the gateway's pages, not ours. In
-            the monorepo they were same-origin routes; here they are absolute
-            links to the gateway, and they disappear on a deployment that has
-            not been told where the gateway is. */}
-        {features.rag && branding.gatewayUrl && (
-          <a href={`${branding.gatewayUrl}/chat`} className={NAV_ITEM}>
-            {t('nav.docsAssistant')}
-          </a>
-        )}
+        {/* The Docs Assistant uses Gateway identity. A local Agent account
+            does not gain access through a configured Gateway address. */}
+        <DocsAssistantLink />
         <Link
           href="/"
           className={onTasks ? NAV_ITEM_CURRENT : NAV_ITEM}

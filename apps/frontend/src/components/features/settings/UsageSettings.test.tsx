@@ -3,6 +3,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as authState from '@/components/providers/AuthProvider';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
 import { NEUTRAL_SITE_CONFIG } from '@/config/site';
@@ -295,6 +296,17 @@ describe('UsageSettings', () => {
       'href',
       'https://gateway.example/dashboard',
     );
+  });
+
+  it('does not link an independent account to Gateway quota or account usage', async () => {
+    vi.spyOn(authState, 'useSignedInAuthMode').mockReturnValue('local');
+    section();
+    await screen.findByRole('table', { name: 'By model' });
+    expect(
+      screen.queryByRole('link', { name: 'Daily limit and account usage' }),
+    ).not.toBeInTheDocument();
+    expect(document.querySelector('a[href^="https://gateway.example"]')).toBeNull();
+    expect(await tile('Tokens')).toBe('150K');
   });
 
   it('reads both histories again for another period', async () => {
