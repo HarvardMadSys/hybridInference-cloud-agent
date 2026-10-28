@@ -15,7 +15,7 @@ vi.mock('@/lib/api/modelConnections', async (importOriginal) => ({
   createModelConnection: vi.fn(),
   updateModelConnection: vi.fn(),
   deleteModelConnection: vi.fn(),
-  discoverConnectionModels: vi.fn(),
+  discoverModels: vi.fn(),
 }));
 
 const EVERY = ['claude-code', 'codex', 'kilo', 'opencode', 'pi'];
@@ -151,13 +151,16 @@ describe('adding a connection', () => {
     expect(form.querySelector('textarea, select, datalist')).toBeNull();
     expect(form).not.toHaveTextContent(/Chat Completions|Responses|Anthropic Messages|Advanced/);
     expect(screen.getByLabelText('API key')).toHaveAttribute('type', 'password');
-    // The actions, in order: the primary one first, then Cancel.
+    // The actions, in order: the model line's own two (listing is optional and
+    // waits for a URL and key), then the one primary action, then Cancel.
     expect(
       within(form)
         .getAllByRole('button')
         .filter((button) => button.getAttribute('type') !== null)
         .map((button) => button.textContent),
-    ).toEqual(['Add', 'Verify and save', 'Cancel']);
+    ).toEqual(['Add', 'Load models from provider', 'Verify and save', 'Cancel']);
+    expect(form.querySelectorAll('.ui-button-primary')).toHaveLength(1);
+    expect(within(form).getByRole('button', { name: 'Load models from provider' })).toBeDisabled();
     expect(within(form).getByText(/may bill/)).toBeVisible();
 
     fillNew(['shared-model', 'shared-model', 'another-model']);
@@ -358,20 +361,17 @@ describe('editing a connection', () => {
 });
 
 describe('a saved connection', () => {
-  it('shows each model and its agents, with protocols only in collapsed details', async () => {
+  it('shows each model and its agents, with no protocols, diagnostics or tools', async () => {
     renderSettings();
     const card = await screen.findByRole('article', { name: connection.name });
+    expect(within(card).getAllByText(`Works with ${AGENT_NAMES}`)).toHaveLength(2);
     expect(within(card).queryByRole('button', { name: /^Verify/ })).not.toBeInTheDocument();
-    const details = within(card).getByText('Technical details', { selector: 'summary' });
-    for (const path of within(card).getAllByText('OpenCode: Chat Completions')) {
-      expect(path).not.toBeVisible();
-    }
-    fireEvent.click(details);
-    expect(within(card).getAllByText('OpenCode: Chat Completions')[0]).toBeVisible();
-    expect(
-      within(card).getAllByText('Codex: Responses, translated to Chat Completions')[0],
-    ).toBeVisible();
-    expect(within(card).getAllByText('Chat Completions: works')[0]).toBeVisible();
+    expect(within(card).queryByText('Technical details')).not.toBeInTheDocument();
+    expect(card.querySelector('details, summary')).toBeNull();
+    expect(card).not.toHaveTextContent(/Chat Completions|Responses|Anthropic Messages|translated/);
+    // Listing model IDs lives in the add and edit forms, not on the card.
+    expect(within(card).queryByRole('button', { name: /models from provider|Discover/ })).toBeNull();
+    expect(api.discoverModels).not.toHaveBeenCalled();
   });
 
   it('requires confirmation for disable and delete and does not claim provider revocation', async () => {
@@ -397,25 +397,37 @@ describe('a saved connection', () => {
     expect(await screen.findByText('No personal connections yet.')).toBeVisible();
   });
 
-  it('adds discovered IDs through a verified save and reports a refused one', async () => {
-    vi.mocked(api.discoverConnectionModels).mockResolvedValue(['shared-model', 'third-model']);
+  it('adds a suggested ID through a verified save and reports a refused one', async () => {
+    vi.mocked(api.discoverModels).mockResolvedValue(['shared-model', 'third-model']);
     vi.mocked(api.updateModelConnection).mockRejectedValue(
       refusal(refused('third-model', 'The provider has no such model.', 'endpoint_missing')),
     );
     renderSettings();
-    await screen.findByRole('article', { name: connection.name });
-    fireEvent.click(screen.getByText('Discover model IDs', { selector: 'summary' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Discover model IDs' }));
-    fireEvent.click(await screen.findByRole('checkbox', { name: 'third-model' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Verify and add selected' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Load models from provider' }));
+    // The saved key, at the Base URL it was saved with: the form holds no key.
+    expect(api.discoverModels).toHaveBeenCalledWith(
+      { base_url: connection.base_url, connection_id: connection.id },
+      expect.any(AbortSignal),
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Add third-model' }));
+    expect(screen.queryByRole('button', { name: 'Add shared-model' })).not.toBeInTheDocument();
+    expect(api.updateModelConnection).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Verify and save' }));
     await waitFor(() =>
       expect(api.updateModelConnection).toHaveBeenCalledWith(connection.id, {
         models: [...connection.models, 'third-model'],
       }),
     );
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'third-model: The provider has no such endpoint or model (404). Check the Base URL, the model id, and that the provider offers this protocol.',
-    );
+    expect(
+      await screen.findByText(
+        'Not usable: The provider has no such endpoint or model (404). Check the Base URL, the model id, and that the provider offers this protocol.',
+      ),
+    ).toBeVisible();
+    // Nothing was saved, and the form still holds the picked ID to fix or remove.
+    const card = screen.getByRole('article', { name: connection.name });
+    expect(within(card).queryByText('third-model')).not.toBeInTheDocument();
+    expect(screen.getByRole('list', { name: 'Models to save' })).toHaveTextContent('third-model');
   });
 
   it('allows cleanup while the deployment gate is off but prevents new use', async () => {

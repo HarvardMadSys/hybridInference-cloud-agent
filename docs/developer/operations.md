@@ -4251,12 +4251,23 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   `https://host/v1` and `https://host/anthropic/v1` all reach
   `…/v1/messages`. The CLI authenticates with `x-api-key` and
   `anthropic-version: 2023-06-01`; verification posts to the same URL with the
-  same headers. **Discover model IDs** first reads the OpenAI-style
-  `GET /models` and, only if that listing is missing or refused, the
-  Anthropic-style `…/v1/models` with `x-api-key` (at most two requests).
-  Picked IDs are added by an edit, so they are verified before they are
-  saved. The CLI may also call `count_tokens`, `/v1/models` and
+  same headers. The CLI may also call `count_tokens`, `/v1/models` and
   `HEAD /api/hello` on the same host; a provider that lacks them still works.
+- **Model ID suggestions.** The add and edit forms can load the provider's
+  model list on request to pick IDs from: `POST
+  /v1/agent/model-connections/discover-models` with the form's `base_url`
+  and either the `api_key` just entered or, for an edit, the `connection_id`
+  whose saved key to use. The saved key is used only while `base_url` is
+  still the one saved with it (otherwise `422 model_connection_key_required`),
+  and an entered key is never replaced by it. The route needs the owner and
+  the deployment gate, reserves one of the owner's hourly checks before any
+  call, and dials under the same address rules as verification. It first
+  reads the OpenAI-style `GET /models` and, only if that listing is missing
+  or refused, the Anthropic-style `…/v1/models` with `x-api-key` (at most two
+  requests). Failures answer only a category. It writes nothing, and a listed
+  ID means nothing until the form's save verifies it; listing is optional,
+  and any ID can be typed. The older `POST …/{connection_id}/discover-models`
+  remains for one release.
 - **Host rollout.** Runners advertise `model-connections-v1`, and
   `model-protocol-translation-v1` when they can run a translated member. A
   claim for a turn on a connection, or for a translated one, is released,

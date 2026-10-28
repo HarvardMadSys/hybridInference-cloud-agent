@@ -17,7 +17,7 @@ vi.mock('@/lib/api/modelConnections', async (importOriginal) => ({
   createModelConnection: vi.fn(),
   updateModelConnection: vi.fn(),
   deleteModelConnection: vi.fn(),
-  discoverConnectionModels: vi.fn(),
+  discoverModels: vi.fn(),
 }));
 
 const ready = (model: string): api.ModelStatus => ({

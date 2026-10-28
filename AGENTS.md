@@ -358,6 +358,9 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   every gate accepts, the same per-model paths. A claim and its residency must
   agree on both the credential revision and the plan. See the
   [protocol compatibility design](docs/agents/specs/2026-10-28-model-protocol-compatibility.zh-CN.md).
+  Listing a provider's model ids to fill in the form writes nothing and
+  proves nothing; it uses the key just entered, or a saved key only at the
+  exact Base URL it was saved with, and spends one hourly check.
   A verified new key or Base URL replaces every model's facts; that,
   disabling or deleting closes every process still running on the old state,
   while a rename, removing models or enabling makes no provider call and

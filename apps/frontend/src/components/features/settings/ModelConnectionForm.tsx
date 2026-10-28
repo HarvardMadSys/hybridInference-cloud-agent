@@ -14,9 +14,11 @@ import {
 import { APIError } from '@/lib/utils/errors';
 import { ModelIdsField } from './ModelIdsField';
 import type { Operate } from './connectionOps';
+import { useModelSuggestions } from './useModelSuggestions';
 import {
   connectionChanges,
   fieldProblems,
+  modelListSource,
   needsVerification,
   newConnection,
   withModel,
@@ -124,6 +126,11 @@ function Field({
  * keeps every input, with each model's result on its chip, to fix and retry.
  * A rename or removing models saves without calling the provider. While a
  * save runs it cannot be cancelled: the server may still commit it.
+ *
+ * Model IDs can be picked from the provider's own list, loaded on request
+ * with the Base URL and key in the form (an edit at its saved Base URL may
+ * leave the key blank). Loading saves nothing and proves nothing; a save
+ * aborts a load still in flight.
  */
 export function ModelConnectionForm({
   connection,
@@ -165,6 +172,10 @@ export function ModelConnectionForm({
     key: key.trim(),
   };
   const verify = needsVerification(connection, fields);
+  const source = modelListSource(connection, fields);
+  const { suggestions, load, stop } = useModelSuggestions(
+    'request' in source ? source.request : null,
+  );
   const problem = (field: ConnectionField) => (problems[field] ? t(PROBLEM_KEYS[field]) : '');
 
   /** Any edit after a refusal: its results described the form as it was. */
@@ -187,6 +198,7 @@ export function ModelConnectionForm({
     setResults({});
     setError(invalid ? t('connections.invalid') : '');
     if (invalid) return;
+    stop();
     setBusy(true);
     try {
       const saved = await submit(connection, fields, operate);
@@ -273,6 +285,11 @@ export function ModelConnectionForm({
           results={results}
           invalid={Boolean(problems.models)}
           disabled={busy}
+          suggest={{
+            suggestions,
+            missing: 'missing' in source ? source.missing : null,
+            onLoad: () => void load(),
+          }}
           onModels={edited(setModels)}
           onDraft={edited(setDraft)}
         />

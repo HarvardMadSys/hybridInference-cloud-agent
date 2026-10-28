@@ -772,6 +772,273 @@ async def test_with_the_gate_off_nothing_new_can_be_made_usable(provider, monkey
     assert provider.calls == []
 
 
+# -- listing model ids for the form -------------------------------------------------
+
+DISCOVER = f"{PATH}/discover-models"
+_NEW_KEY = "sk-entered-in-form-QRSTUVWXYZ012345"
+
+
+class _Listing:
+    """Stands in for ``discover_models``: records each call, answers or raises."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+        self.answer: list[str] = ["gpt-4.1", "gpt-5"]
+        self.error: BaseException | None = None
+
+    async def __call__(self, *, base_url: str, api_key: str) -> list[str]:
+        self.calls.append({"base_url": base_url, "api_key": api_key})
+        if self.error is not None:
+            raise self.error
+        return list(self.answer)
+
+
+@pytest.fixture
+def listing(monkeypatch) -> _Listing:
+    fake = _Listing()
+    monkeypatch.setattr(api, "discover_models", fake)
+    return fake
+
+
+async def _discover(store: _Store, body: dict[str, Any], owner: str = "owner-1"):
+    async with await _client(_settings_app(store, owner)) as client:
+        return await client.post(DISCOVER, json=body)
+
+
+async def test_a_new_connection_lists_models_with_the_entered_key_and_saves_nothing(
+    listing, provider, caplog
+):
+    store = _Store()
+    caplog.set_level("DEBUG")
+    response = await _discover(
+        store, {"base_url": "https://models.example/v1/", "api_key": f"  {_NEW_KEY} "}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"models": ["gpt-4.1", "gpt-5"]}
+    assert response.headers["Cache-Control"] == "no-store"
+    # The exact normalized URL and key the form holds, nothing stored, one check spent.
+    assert listing.calls == [{"base_url": "https://models.example/v1", "api_key": _NEW_KEY}]
+    assert store.model_connections.rows == {}
+    assert store.model_connections.checks == ["owner-1"]
+    # A listing is not a verification: no model was checked.
+    assert provider.calls == []
+    assert _NEW_KEY not in response.text and _NEW_KEY not in caplog.text
+
+
+async def test_a_listing_never_changes_a_saved_connection(listing):
+    store = _Store()
+    view = await _create(store)
+    before = copy.deepcopy(store.model_connections.rows[view["id"]])
+    response = await _discover(store, {"base_url": "https://other.example/v1", "api_key": _NEW_KEY})
+
+    assert response.status_code == 200
+    assert store.model_connections.rows[view["id"]] == before
+    assert store.model_connections.release_calls == []
+
+
+async def test_an_unchanged_url_lists_with_the_saved_key_at_the_saved_url(listing):
+    store = _Store()
+    view = await _create(store)
+    store.model_connections.checks.clear()
+    # The form may still show the address as it was typed, trailing slash and all.
+    response = await _discover(
+        store, {"base_url": "https://models.example/v1/", "connection_id": view["id"]}
+    )
+
+    assert response.status_code == 200, response.text
+    assert listing.calls == [{"base_url": "https://models.example/v1", "api_key": _KEY}]
+    assert store.model_connections.checks == ["owner-1"]
+    assert _KEY not in response.text
+
+
+async def test_a_changed_url_never_receives_the_saved_key(listing):
+    store = _Store()
+    view = await _create(store)
+    store.model_connections.checks.clear()
+    response = await _discover(
+        store, {"base_url": "https://elsewhere.example/v1", "connection_id": view["id"]}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"]["type"] == "model_connection_key_required"
+    assert listing.calls == [], "the saved key must not be sent to an edited Base URL"
+    assert store.model_connections.checks == [], "a refusal spends no check"
+    assert _KEY not in response.text
+
+
+async def test_an_entered_key_is_used_as_is_and_never_replaced_by_the_saved_one(listing):
+    store = _Store()
+    view = await _create(store)
+    changed = await _discover(
+        store, {"base_url": "https://elsewhere.example/v1", "api_key": _NEW_KEY}
+    )
+    same = await _discover(store, {"base_url": "https://models.example/v1", "api_key": _NEW_KEY})
+    both = await _discover(
+        store,
+        {"base_url": "https://models.example/v1", "api_key": _NEW_KEY, "connection_id": view["id"]},
+    )
+    neither = await _discover(store, {"base_url": "https://models.example/v1"})
+
+    assert [changed.status_code, same.status_code] == [200, 200]
+    assert listing.calls == [
+        {"base_url": "https://elsewhere.example/v1", "api_key": _NEW_KEY},
+        {"base_url": "https://models.example/v1", "api_key": _NEW_KEY},
+    ]
+    # Sending a key and a connection is ambiguous, so it is refused, not resolved.
+    assert [both.status_code, neither.status_code] == [422, 422]
+    assert both.json()["error"]["type"] == "invalid_model_connection"
+    assert _NEW_KEY not in both.text
+    assert all(call["api_key"] != _KEY for call in listing.calls)
+
+
+async def test_a_listing_reads_the_connection_as_it_is_when_asked(listing, provider):
+    store = _Store()
+    view = await _create(store)
+    rotated = await _patch(store, view["id"], {"api_key": "sk-rotated-key-0000"})
+    assert rotated.status_code == 200
+    disabled = await _patch(store, view["id"], {"enabled": False})
+    assert disabled.status_code == 200
+
+    # The current key of a disabled connection, as verifying an edit of it would use.
+    listed = await _discover(
+        store, {"base_url": "https://models.example/v1", "connection_id": view["id"]}
+    )
+    assert listed.status_code == 200
+    assert listing.calls == [
+        {"base_url": "https://models.example/v1", "api_key": "sk-rotated-key-0000"}
+    ]
+
+    async with await _client(_settings_app(store)) as client:
+        assert (await client.delete(f"{PATH}/{view['id']}")).status_code == 204
+    gone = await _discover(
+        store, {"base_url": "https://models.example/v1", "connection_id": view["id"]}
+    )
+    assert gone.status_code == 404
+    assert len(listing.calls) == 1
+
+
+async def test_another_owner_cannot_list_with_a_connections_saved_key(listing):
+    store = _Store()
+    mine = await _create(store)
+    store.model_connections.checks.clear()
+    for connection_id in (mine["id"], "not-a-connection-id"):
+        response = await _discover(
+            store,
+            {"base_url": "https://models.example/v1", "connection_id": connection_id},
+            owner="owner-2",
+        )
+        assert response.status_code == 404
+        assert response.json()["detail"]["error"]["type"] == "model_connection_not_found"
+    assert listing.calls == []
+    assert store.model_connections.checks == []
+
+
+async def test_a_listing_past_the_hourly_limit_calls_no_provider(listing):
+    store = _Store()
+    store.model_connections.checks = ["owner-1"] * check.CHECKS_PER_HOUR
+    response = await _discover(store, {"base_url": "https://models.example/v1", "api_key": _KEY})
+
+    assert response.status_code == 429
+    assert response.json()["detail"]["error"]["type"] == "model_connection_check_limit"
+    assert listing.calls == []
+    # Another owner's budget is their own.
+    other = await _discover(
+        store, {"base_url": "https://models.example/v1", "api_key": _KEY}, owner="owner-2"
+    )
+    assert other.status_code == 200
+
+
+async def test_with_the_gate_off_nothing_is_listed(listing, monkeypatch):
+    store = _Store()
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "")
+    response = await _discover(store, {"base_url": "https://models.example/v1", "api_key": _KEY})
+
+    assert response.status_code == 403
+    assert listing.calls == [] and store.model_connections.checks == []
+
+
+async def test_a_listing_needs_the_owner():
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[get_storage] = lambda: _Store()
+    async with await _client(app) as client:
+        response = await client.post(
+            DISCOVER, json={"base_url": "https://models.example/v1", "api_key": _KEY}
+        )
+    assert response.status_code in (401, 403)
+    assert _KEY not in response.text
+
+
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (check.CheckStop("auth", http_status=401), "model_connection_auth"),
+        (check.CheckStop("endpoint_missing", http_status=404), "model_connection_endpoint_missing"),
+        (check.CheckStop("too_large", http_status=200), "model_connection_too_large"),
+        (TimeoutError(), "model_connection_unreachable"),
+    ],
+)
+async def test_a_failed_listing_answers_only_its_category(listing, caplog, error, kind):
+    store = _Store()
+    caplog.set_level("DEBUG")
+    listing.error = error
+    response = await _discover(
+        store, {"base_url": "https://models.example/v1", "api_key": _NEW_KEY}
+    )
+
+    assert response.status_code == 422
+    body = response.json()["detail"]["error"]
+    assert body["type"] == kind
+    assert body["message"] in check.CHECK_MESSAGES.values()
+    assert _NEW_KEY not in response.text and _NEW_KEY not in caplog.text
+    assert store.model_connections.rows == {}
+
+
+async def test_a_rejected_listing_request_never_echoes_the_key(listing):
+    store = _Store()
+    bad_url = await _discover(store, {"base_url": "http://models.example/v1", "api_key": _NEW_KEY})
+    bad_key = await _discover(
+        store, {"base_url": "https://models.example/v1", "api_key": f"{_NEW_KEY} junk"}
+    )
+
+    assert bad_url.status_code == 422
+    assert bad_url.json()["error"]["fields"][0]["field"] == "base_url"
+    assert bad_key.status_code == 422
+    assert _NEW_KEY not in bad_url.text and _NEW_KEY not in bad_key.text
+    assert listing.calls == [] and store.model_connections.checks == []
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://10.0.0.8/v1",
+        "https://169.254.169.254/v1",
+        "https://127.0.0.1/v1",
+        "https://100.64.0.1/v1",
+    ],
+)
+async def test_a_listing_dials_only_a_public_ipv4_address(base_url):
+    # The real listing: the address guard refuses before any connection is made.
+    store = _Store()
+    response = await _discover(store, {"base_url": base_url, "api_key": _NEW_KEY})
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"]["type"] == "model_connection_blocked_address"
+    assert _NEW_KEY not in response.text
+    assert store.model_connections.rows == {}
+
+
+async def test_the_saved_connection_route_still_lists_with_its_own_key(listing):
+    # COMPAT(remove-after=2026-12-15): the route the earlier settings page calls.
+    store = _Store()
+    view = await _create(store)
+    async with await _client(_settings_app(store)) as client:
+        response = await client.post(f"{PATH}/{view['id']}/discover-models")
+    assert response.status_code == 200
+    assert listing.calls == [{"base_url": "https://models.example/v1", "api_key": _KEY}]
+
+
 # -- turns ---------------------------------------------------------------------------
 
 

@@ -11,8 +11,9 @@ import {
 // Verify before saving, in the real Next app. The owner gives a name, a Base
 // URL, a key and model IDs; "Verify and save" asks the server, which verifies
 // every model first and stores nothing unless each has an agent that can use
-// it. A refusal keeps every input. No protocol is asked for or named on the
-// normal path; the technical details stay one click away.
+// it. A refusal keeps every input. Model IDs can be picked from the
+// provider's own list, which saves nothing. No protocol is asked for or named,
+// in the form or on the card.
 
 const connectionId = `mconn_${'e'.repeat(32)}`;
 const name = 'Mixed provider';
@@ -33,7 +34,8 @@ const TEXT = {
     reason: 'The model did not call the offered tool exactly once.',
     authReason: 'The provider refused the API key (401/403).',
     works: 'Works with',
-    details: 'Technical details',
+    load: 'Load models from provider',
+    pick: (model: string) => `Add ${model}`,
     model: 'Model',
     run: 'Run',
     region: 'Personal model connections',
@@ -52,7 +54,8 @@ const TEXT = {
     reason: '模型未按要求调用工具。',
     authReason: '服务商拒绝了 API key（401/403），请检查密钥。',
     works: '可用于',
-    details: '技术详情',
+    load: '从服务商获取模型',
+    pick: (model: string) => `添加 ${model}`,
     model: '模型',
     run: '运行',
     region: '个人模型连接',
@@ -100,6 +103,11 @@ for (const locale of ['en', 'zh-CN'] as const) {
       let saved: ReturnType<typeof connectionView> | null = null;
       const created: Record<string, unknown>[] = [];
       const patched: Record<string, unknown>[] = [];
+      const listings: Record<string, unknown>[] = [];
+      await page.route('**/api/v1/agent/model-connections/discover-models', async (route) => {
+        listings.push(route.request().postDataJSON());
+        return route.fulfill({ json: { models: ['chat-model', 'claude-model', 'other-model'] } });
+      });
       await page.route('**/api/v1/agent/model-connections', async (route) => {
         if (route.request().method() === 'GET') {
           return route.fulfill({
@@ -166,8 +174,14 @@ for (const locale of ['en', 'zh-CN'] as const) {
       await page.getByLabel(text.name, { exact: true }).fill(name);
       await page.getByLabel('Base URL', { exact: true }).fill(baseUrl);
       await page.getByLabel('API key', { exact: true }).fill('fixture-key-not-a-credential');
+      // Picking from the provider's list only fills the form.
+      await form.getByRole('button', { name: text.load, exact: true }).click();
+      await form.getByRole('button', { name: text.pick('chat-model'), exact: true }).click();
+      expect(listings).toEqual([{ base_url: baseUrl, api_key: 'fixture-key-not-a-credential' }]);
+      expect(created).toEqual([]);
+      await expect(form).not.toContainText(PROTOCOL_NAMES);
       const modelInput = page.getByLabel(text.models, { exact: true });
-      for (const model of ['chat-model', 'claude-model', 'bad-model']) {
+      for (const model of ['claude-model', 'bad-model']) {
         await modelInput.fill(model);
         await modelInput.press('Enter');
       }
@@ -206,12 +220,10 @@ for (const locale of ['en', 'zh-CN'] as const) {
       ]);
       await expect(card).toContainText(`${text.works} Claude Code, Codex, Kilo Code, OpenCode, pi`);
       await expect(card).toContainText(`${text.works} Claude Code`);
-      const details = card.locator('details').filter({ hasText: text.details });
-      await expect(details.locator('ul').first()).toBeHidden();
+      // No diagnostics on the card: no expander, no API names.
+      await expect(card.locator('details, summary')).toHaveCount(0);
+      await expect(card).not.toContainText(PROTOCOL_NAMES);
       await region.screenshot({ path: testInfo.outputPath('connection-saved.png') });
-      await details.locator('summary').click();
-      await expect(details).toContainText(/Codex[:：] ?Responses/);
-      await details.locator('summary').click();
 
       // A new key is verified first; its refusal leaves the saved card as it was.
       await card.getByRole('button', { name: text.edit, exact: true }).click();

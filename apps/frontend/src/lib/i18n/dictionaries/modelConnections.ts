@@ -87,18 +87,34 @@ export const modelConnectionsEn = {
   'connections.confirm': 'Confirm',
   'connections.agents': 'Works with {agents}',
   'connections.notUsable': 'No agent can use this model. Edit the connection to fix it.',
-  'connections.details': 'Technical details',
-  'connections.pathDirect': '{runtime}: {protocol}',
-  'connections.pathTranslated': '{runtime}: {client}, translated to {upstream}',
-  'connections.result.supported': '{protocol}: works',
-  'connections.result.unsupported': '{protocol}: not available. {message}',
-  'connections.result.failed': '{protocol}: could not be checked. {message}',
-  'connections.discover': 'Discover model IDs',
-  'connections.discoverHint':
-    'Lists the IDs your provider reports. Selected IDs are verified before they are added.',
-  'connections.discoverEmpty':
-    'The provider did not list any model IDs. You can still enter them manually.',
-  'connections.addModels': 'Verify and add selected',
+  'connections.suggest.load': 'Load models from provider',
+  'connections.suggest.loadingShort': 'Loading…',
+  'connections.suggest.hint':
+    'Optional. Uses one of your hourly checks. Nothing is saved; picked models are verified when you save.',
+  'connections.suggest.needsDetails':
+    'Enter the Base URL and API key to load your provider’s models.',
+  'connections.suggest.needsKey': 'Enter the API key to load models from the changed Base URL.',
+  'connections.suggest.loading': 'Loading your provider’s models…',
+  'connections.suggest.listed': 'Your provider lists {total}. Pick one to add, or type any ID.',
+  'connections.suggest.narrow': 'Showing {shown} of {total}. Type above to narrow the list.',
+  'connections.suggest.noMatch': 'No listed model matches. Press Enter to add what you typed.',
+  'connections.suggest.empty': 'Your provider listed no models. Type the model ID instead.',
+  'connections.suggest.list': 'Models your provider lists',
+  'connections.suggest.pick': 'Add {model}',
+  'connections.suggest.problem.unsupported':
+    'Your provider doesn’t offer a model list. Type the model ID instead.',
+  'connections.suggest.problem.auth':
+    'Your provider refused this API key, so no list was loaded. Check the key, or type the model ID.',
+  'connections.suggest.problem.unreachable':
+    'Couldn’t reach your provider at this Base URL. Check it, or type the model ID.',
+  'connections.suggest.problem.rateLimited':
+    'Your provider is rate limiting this key. Try again later, or type the model ID.',
+  'connections.suggest.problem.limited':
+    'Too many checks in the last hour. Try again later, or type the model ID.',
+  'connections.suggest.problem.keyRequired':
+    'Enter the API key to load models from the changed Base URL.',
+  'connections.suggest.problem.failed':
+    'Couldn’t load the model list. You can still type the model ID.',
 } as const;
 
 export const modelConnectionsZhCN: Record<keyof typeof modelConnectionsEn, string> = {
@@ -177,14 +193,27 @@ export const modelConnectionsZhCN: Record<keyof typeof modelConnectionsEn, strin
   'connections.confirm': '确认',
   'connections.agents': '可用于 {agents}',
   'connections.notUsable': '没有 Agent 能使用此模型，请编辑连接修正。',
-  'connections.details': '技术详情',
-  'connections.pathDirect': '{runtime}：{protocol}',
-  'connections.pathTranslated': '{runtime}：{client}，转换为 {upstream}',
-  'connections.result.supported': '{protocol}：可用',
-  'connections.result.unsupported': '{protocol}：不可用。{message}',
-  'connections.result.failed': '{protocol}：无法检查。{message}',
-  'connections.discover': '发现模型 ID',
-  'connections.discoverHint': '列出服务商报告的模型 ID。选中的 ID 会先验证再添加。',
-  'connections.discoverEmpty': '服务商未返回模型 ID，仍可手动填写。',
-  'connections.addModels': '验证并添加所选',
+  'connections.suggest.load': '从服务商获取模型',
+  'connections.suggest.loadingShort': '获取中…',
+  'connections.suggest.hint':
+    '可选，计入每小时检查次数。不会保存任何内容，选中的模型会在保存时验证。',
+  'connections.suggest.needsDetails': '填写 Base URL 和 API key 后即可获取服务商的模型。',
+  'connections.suggest.needsKey': 'Base URL 已修改，请填写 API key 后再获取模型。',
+  'connections.suggest.loading': '正在获取服务商的模型…',
+  'connections.suggest.listed': '服务商提供 {total} 个模型。点击即可添加，也可以手动输入任意 ID。',
+  'connections.suggest.narrow': '显示 {total} 个中的 {shown} 个，可在上方输入以筛选。',
+  'connections.suggest.noMatch': '没有匹配的模型。按回车即可添加所输入的 ID。',
+  'connections.suggest.empty': '服务商未列出任何模型，请手动输入模型 ID。',
+  'connections.suggest.list': '服务商提供的模型',
+  'connections.suggest.pick': '添加 {model}',
+  'connections.suggest.problem.unsupported': '服务商未提供模型列表，请手动输入模型 ID。',
+  'connections.suggest.problem.auth':
+    '服务商拒绝了此 API key，未能获取列表。请检查密钥，或手动输入模型 ID。',
+  'connections.suggest.problem.unreachable':
+    '无法通过此 Base URL 连接服务商。请检查地址，或手动输入模型 ID。',
+  'connections.suggest.problem.rateLimited': '此密钥被服务商限流，请稍后重试，或手动输入模型 ID。',
+  'connections.suggest.problem.limited':
+    '过去一小时内检查次数过多，请稍后重试，或手动输入模型 ID。',
+  'connections.suggest.problem.keyRequired': 'Base URL 已修改，请填写 API key 后再获取模型。',
+  'connections.suggest.problem.failed': '未能获取模型列表，仍可手动输入模型 ID。',
 };

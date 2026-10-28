@@ -11082,6 +11082,46 @@
         "title": "DefaultInput",
         "type": "object"
       },
+      "DiscoverModelsRequest": {
+        "additionalProperties": false,
+        "description": "Where to list model ids, with which key: the form's, before anything is saved.\n\nExactly one of ``api_key`` (the key the owner just entered) and\n``connection_id`` (the owner's saved connection, whose stored key is used\nonly while ``base_url`` is still that connection's Base URL). A key that\nwas entered is never replaced by a stored one.",
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "maxLength": 4160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "base_url": {
+            "maxLength": 1024,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "connection_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Id"
+          }
+        },
+        "required": [
+          "base_url"
+        ],
+        "title": "DiscoverModelsRequest",
+        "type": "object"
+      },
       "DiscoveredModels": {
         "description": "The ids a provider's ``GET /models`` listed; a convenience, not a check.",
         "properties": {
@@ -36030,6 +36070,66 @@
         ]
       }
     },
+    "/v1/agent/model-connections/discover-models": {
+      "post": {
+        "description": "List the provider's model ids for the add or edit form, saving nothing.\n\nWith ``api_key``, the listing uses exactly that key at ``base_url``. With\n``connection_id``, it uses the owner's saved key, and only when\n``base_url`` is the one saved with it (422 ``model_connection_key_required``\notherwise). Same bounds as verification: public IPv4 HTTPS, pinned, no\nredirects, a bounded read, at most two requests and one hourly check. The\nlisting implies nothing about whether a model works; a picked id is\nverified when the form is saved.",
+        "operationId": "discover_for_form_v1_agent_model_connections_discover_models_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiscoverModelsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscoveredModels"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Discover For Form",
+        "tags": [
+          "model-connections"
+        ]
+      }
+    },
     "/v1/agent/model-connections/{connection_id}": {
       "delete": {
         "description": "Delete a connection: its key is erased and its running processes are closed.\n\nTurns that name it are refused as deleted from now on, never moved elsewhere.",
@@ -36157,7 +36257,7 @@
     },
     "/v1/agent/model-connections/{connection_id}/discover-models": {
       "post": {
-        "description": "List the ids the provider's model list offers, for the owner to choose from.\n\n``GET /models`` under the Base URL and, only if that listing is missing or\nrefused, ``GET /v1/models`` with Messages authentication: at most two\nrequests and one hourly check. Picked ids are added by an edit, which\nverifies them before saving.",
+        "description": "List the ids the provider's model list offers for a saved connection.\n\n``GET /models`` under the Base URL and, only if that listing is missing or\nrefused, ``GET /v1/models`` with Messages authentication: at most two\nrequests and one hourly check. Picked ids are added by an edit, which\nverifies them before saving.",
         "operationId": "discover_v1_agent_model_connections__connection_id__discover_models_post",
         "parameters": [
           {

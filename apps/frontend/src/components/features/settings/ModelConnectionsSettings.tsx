@@ -135,7 +135,6 @@ export function ModelConnectionsSettings() {
             key={`${connection.id}:${connection.updated_at}`}
             connection={connection}
             available={available && !editing}
-            maxModels={maxModels}
             operate={operate}
             onEdit={() => setEditing(connection)}
             onChange={(changed) => saved(changed)}

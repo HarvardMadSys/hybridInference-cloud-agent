@@ -8,7 +8,6 @@ import {
   type ModelConnection,
 } from '@/lib/api/modelConnections';
 
-import { ModelConnectionTools } from './ModelConnectionTools';
 import { ModelStatusList } from './ModelStatusList';
 import type { Operate } from './connectionOps';
 
@@ -17,7 +16,6 @@ const buttonClass = 'ui-button ui-button-secondary min-h-11';
 export function ModelConnectionCard({
   connection,
   available,
-  maxModels,
   operate,
   onEdit,
   onChange,
@@ -25,7 +23,6 @@ export function ModelConnectionCard({
 }: {
   connection: ModelConnection;
   available: boolean;
-  maxModels: number;
   operate: Operate;
   onEdit: () => void;
   onChange: (connection: ModelConnection) => void;
@@ -140,15 +137,6 @@ export function ModelConnectionCard({
           </div>
         </div>
       ) : null}
-      <ModelConnectionTools
-        connection={connection}
-        available={available}
-        maxModels={maxModels}
-        operate={operate}
-        busy={busy}
-        run={run}
-        onChange={onChange}
-      />
       {error ? (
         <p role="alert" className="mt-3 text-sm text-status-error">
           {t('connections.error')}

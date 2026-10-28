@@ -1,4 +1,8 @@
-import type { ModelConnection, ModelConnectionInput } from '@/lib/api/modelConnections';
+import type {
+  ModelConnection,
+  ModelConnectionInput,
+  ModelListRequest,
+} from '@/lib/api/modelConnections';
 
 /** What the form holds. */
 export interface ConnectionFields {
@@ -34,6 +38,11 @@ function validBaseUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Whether a key could be sent as typed: printable, without spaces. */
+function validKey(value: string): boolean {
+  return Boolean(value) && !/[^\x21-\x7e]/.test(value);
 }
 
 export function fieldProblems(fields: ConnectionFields): Partial<Record<ConnectionField, true>> {
@@ -104,4 +113,27 @@ export function newConnection(fields: ConnectionFields): ModelConnectionInput {
     api_key: fields.key,
     models: fields.models,
   };
+}
+
+/**
+ * What the form can list model IDs with right now, or what it still needs:
+ * `details` (a valid Base URL and key) or, for an edit at a changed Base URL,
+ * `newKey` -- the saved key is only ever used at the URL it was saved with.
+ * A typed key is always the one used, never swapped for the saved key.
+ */
+export type ModelListSource = { request: ModelListRequest } | { missing: 'details' | 'newKey' };
+
+export function modelListSource(
+  connection: ModelConnection | undefined,
+  fields: ConnectionFields,
+): ModelListSource {
+  if (!validBaseUrl(fields.base_url)) return { missing: 'details' };
+  if (fields.key) {
+    return validKey(fields.key)
+      ? { request: { base_url: fields.base_url, api_key: fields.key } }
+      : { missing: 'details' };
+  }
+  if (!connection) return { missing: 'details' };
+  if (!sameBaseUrl(fields.base_url, connection.base_url)) return { missing: 'newKey' };
+  return { request: { base_url: fields.base_url, connection_id: connection.id } };
 }

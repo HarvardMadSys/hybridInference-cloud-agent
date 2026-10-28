@@ -5,6 +5,8 @@ import { useT } from '@/components/providers';
 import { connectionReason, connectionAgentNames } from './modelConnectionDisplay';
 import type { ModelStatus } from '@/lib/api/modelConnections';
 import { isModelId, withModel } from './modelConnectionChanges';
+import { ModelSuggestions } from './ModelSuggestions';
+import type { Suggestions } from './useModelSuggestions';
 
 const inputClass = 'ui-input block min-h-11 w-full min-w-0 rounded-lg font-mono text-sm';
 
@@ -68,9 +70,19 @@ function ModelChip({
   );
 }
 
+/** Model ID suggestions from the provider's list, and how to ask for them. */
+export interface ModelSuggest {
+  suggestions: Suggestions | null;
+  /** What the form still needs before it can ask; `null` when it can. */
+  missing: 'details' | 'newKey' | null;
+  onLoad: () => void;
+}
+
 /**
  * Model IDs: one line to type an ID, Enter or **Add** to keep it as a chip.
  * An ID still in the line when the form is saved counts too (`pending`).
+ * Below it, the provider's own list can be loaded to pick IDs from; typing
+ * in the line narrows it, and any ID can still be typed by hand.
  */
 export function ModelIdsField({
   models,
@@ -79,6 +91,7 @@ export function ModelIdsField({
   results,
   invalid,
   disabled,
+  suggest,
   onModels,
   onDraft,
 }: {
@@ -90,6 +103,7 @@ export function ModelIdsField({
   /** A model ID the form or the server found malformed. */
   invalid: boolean;
   disabled: boolean;
+  suggest: ModelSuggest;
   onModels: (models: string[]) => void;
   onDraft: (draft: string) => void;
 }) {
@@ -170,6 +184,20 @@ export function ModelIdsField({
       <p id={`${id}-hint`} className="mt-1 text-xs leading-5 text-muted">
         {t('connections.modelsHint', { max })}
       </p>
+      <ModelSuggestions
+        {...suggest}
+        models={models}
+        draft={draft}
+        max={max}
+        disabled={disabled}
+        onPick={(model) => {
+          if (full) return;
+          setMalformed(false);
+          onModels(withModel(models, model));
+          // The line was narrowing the list; picking is what it was typed for.
+          onDraft('');
+        }}
+      />
     </div>
   );
 }

@@ -4,17 +4,6 @@ import { fetchWithAuth, jsonOrThrow } from './client';
 
 export type ModelProtocol = 'chat_completions' | 'responses' | 'anthropic_messages';
 
-const PROTOCOL_NAMES: Record<ModelProtocol, string> = {
-  chat_completions: 'Chat Completions',
-  responses: 'Responses',
-  anthropic_messages: 'Anthropic Messages',
-};
-
-/** A protocol's proper name, the same in every language. Technical details only. */
-export function protocolName(protocol: ModelProtocol): string {
-  return PROTOCOL_NAMES[protocol] ?? protocol;
-}
-
 /**
  * One model's state. `ready`: verified, with the agents in `runtimes`;
  * `failed`: the check could not determine anything (unreachable, key refused,
@@ -24,7 +13,7 @@ export function protocolName(protocol: ModelProtocol): string {
  */
 export type ModelStatusKind = 'ready' | 'unverified' | 'failed' | 'unsupported';
 
-/** What one native API's check found for a model. Technical details only. */
+/** What one native API's check found for a model. Never shown on the settings page. */
 export interface ProtocolResult {
   status: string;
   category: string;
@@ -32,7 +21,7 @@ export interface ProtocolResult {
   http_status: number | null;
 }
 
-/** How one agent reaches a model. Technical details only. */
+/** How one agent reaches a model. Never shown on the settings page. */
 export interface AgentPath {
   runtime: string;
   mode: 'direct' | 'translated';
@@ -173,9 +162,27 @@ export async function deleteModelConnection(id: string): Promise<void> {
   if (!response.ok) await jsonOrThrow(response);
 }
 
-export async function discoverConnectionModels(id: string): Promise<string[]> {
-  const response = await fetchWithAuth(config.apiBase, path(id, '/discover-models'), {
-    method: 'POST',
+/**
+ * Where to list model IDs for the form: the Base URL it shows, with the key
+ * just entered or, for an edit whose Base URL is unchanged, the saved
+ * connection's key (the server refuses a saved key for any other URL).
+ */
+export type ModelListRequest =
+  | { base_url: string; api_key: string }
+  | { base_url: string; connection_id: string };
+
+/**
+ * The model IDs the provider lists, as suggestions only: nothing is saved,
+ * one hourly check is spent, and a picked ID is verified when the form is.
+ */
+export async function discoverModels(
+  request: ModelListRequest,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const response = await fetchWithAuth(config.apiBase, `${ROOT}/discover-models`, {
+    ...json('POST', request),
+    cache: 'no-store',
+    signal,
   });
   return (await jsonOrThrow<{ models: string[] }>(response)).models;
 }

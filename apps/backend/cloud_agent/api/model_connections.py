@@ -19,6 +19,11 @@ Base URL replaces every model's verification; that, disabling or deleting a
 connection closes every member process still running on its old state. A field
 sent with its stored value changes nothing, and a rename, removing models,
 enabling or disabling makes no provider call.
+
+Listing a provider's model ids (``discover-models``) is a convenience for
+filling in the form, before or after a connection exists. It writes nothing,
+spends one hourly check, and says nothing about whether a listed model works:
+an id the owner picks is verified like any other when the form is saved.
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._sensitive_routes import SensitiveRoute
@@ -261,6 +266,26 @@ class DiscoveredModels(BaseModel):
     """The ids a provider's ``GET /models`` listed; a convenience, not a check."""
 
     models: list[str]
+
+
+class DiscoverModelsRequest(_Fields):
+    """Where to list model ids, with which key: the form's, before anything is saved.
+
+    Exactly one of ``api_key`` (the key the owner just entered) and
+    ``connection_id`` (the owner's saved connection, whose stored key is used
+    only while ``base_url`` is still that connection's Base URL). A key that
+    was entered is never replaced by a stored one.
+    """
+
+    base_url: str = Field(..., max_length=1024)
+    api_key: str | None = Field(None, max_length=MAX_API_KEY_CHARS + 64, repr=False)
+    connection_id: str | None = Field(None, max_length=200)
+
+    @model_validator(mode="after")
+    def _one_key(self) -> DiscoverModelsRequest:
+        if (self.api_key is None) == (self.connection_id is None):
+            raise ValueError("Send either an API key or the saved connection, not both.")
+        return self
 
 
 def _view(row: dict[str, Any]) -> ModelConnectionView:
@@ -566,13 +591,84 @@ def _key(row: dict[str, Any]) -> str:
         raise _refused(503, "model_connections_unconfigured", "The key cannot be read.") from None
 
 
+async def _listing(store: _Storage, user_id: str, *, base_url: str, api_key: str) -> list[str]:
+    """The provider's model ids at ``base_url`` with ``api_key``; nothing is written.
+
+    One of the owner's hourly checks is reserved, atomically across replicas,
+    before the provider is called. Only a failure's category is answered,
+    never what the provider sent.
+    """
+    reserved = await store.model_connections.reserve_model_connection_checks(
+        user_id=user_id, count=1, limit=CHECKS_PER_HOUR, seconds=3600
+    )
+    if not reserved:
+        raise _refused(
+            429,
+            "model_connection_check_limit",
+            "Too many checks in the last hour. Try again later.",
+        )
+    try:
+        return await discover_models(base_url=base_url, api_key=api_key)
+    except CheckStop as stop:
+        raise _refused(
+            422, f"model_connection_{stop.category}", CHECK_MESSAGES[stop.category]
+        ) from None
+    except TimeoutError:
+        raise _refused(422, "model_connection_unreachable", CHECK_MESSAGES["unreachable"]) from None
+
+
+async def _saved_key_for(store: _Storage, user_id: str, connection_id: str, base_url: str) -> str:
+    """The owner's stored key, only for the exact Base URL it is saved with."""
+    row = await _live(store, user_id, connection_id)
+    if base_url != row["base_url"]:
+        # An edited Base URL is a different endpoint: the saved key never goes there.
+        raise _refused(
+            422,
+            "model_connection_key_required",
+            "Enter the API key to list models at a changed Base URL.",
+        )
+    return _key(row)
+
+
+@router.post("/discover-models", response_model=DiscoveredModels)
+async def discover_for_form(
+    body: DiscoverModelsRequest,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _Storage | None = Depends(get_storage),
+) -> DiscoveredModels:
+    """List the provider's model ids for the add or edit form, saving nothing.
+
+    With ``api_key``, the listing uses exactly that key at ``base_url``. With
+    ``connection_id``, it uses the owner's saved key, and only when
+    ``base_url`` is the one saved with it (422 ``model_connection_key_required``
+    otherwise). Same bounds as verification: public IPv4 HTTPS, pinned, no
+    redirects, a bounded read, at most two requests and one hourly check. The
+    listing implies nothing about whether a model works; a picked id is
+    verified when the form is saved.
+    """
+    _require_enabled()
+    store = require_store(store)
+    user_id = user["user_id"]
+    api_key = (
+        body.api_key
+        if body.api_key is not None
+        else await _saved_key_for(store, user_id, str(body.connection_id), body.base_url)
+    )
+    return DiscoveredModels(
+        models=await _listing(store, user_id, base_url=body.base_url, api_key=api_key)
+    )
+
+
+# COMPAT(remove-after=2026-12-15): the settings page before PR #1029 lists models
+# only for a saved connection through this route; remove once no deployed
+# frontend predates the form's own listing above.
 @router.post("/{connection_id}/discover-models", response_model=DiscoveredModels)
 async def discover(
     connection_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _Storage | None = Depends(get_storage),
 ) -> DiscoveredModels:
-    """List the ids the provider's model list offers, for the owner to choose from.
+    """List the ids the provider's model list offers for a saved connection.
 
     ``GET /models`` under the Base URL and, only if that listing is missing or
     refused, ``GET /v1/models`` with Messages authentication: at most two
@@ -582,21 +678,6 @@ async def discover(
     _require_enabled()
     store = require_store(store)
     row = await _live(store, user["user_id"], connection_id)
-    reserved = await store.model_connections.reserve_model_connection_checks(
-        user_id=user["user_id"], count=1, limit=CHECKS_PER_HOUR, seconds=3600
+    return DiscoveredModels(
+        models=await _listing(store, user["user_id"], base_url=row["base_url"], api_key=_key(row))
     )
-    if not reserved:
-        raise _refused(
-            429,
-            "model_connection_check_limit",
-            "Too many checks in the last hour. Try again later.",
-        )
-    try:
-        models = await discover_models(base_url=row["base_url"], api_key=_key(row))
-    except CheckStop as stop:
-        raise _refused(
-            422, f"model_connection_{stop.category}", CHECK_MESSAGES[stop.category]
-        ) from None
-    except TimeoutError:
-        raise _refused(422, "model_connection_unreachable", CHECK_MESSAGES["unreachable"]) from None
-    return DiscoveredModels(models=models)
