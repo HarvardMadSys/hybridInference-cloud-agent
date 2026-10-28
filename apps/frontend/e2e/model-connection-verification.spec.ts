@@ -293,3 +293,121 @@ for (const locale of ['en', 'zh-CN'] as const) {
     });
   }
 }
+
+// Moved from dropdowns.spec.ts with the dropdown scope split, and adapted to
+// verify-before-save. These cases run with an admin session and empty admin
+// settings, the setup they were written against.
+test.describe('verification without a protocol menu', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route('**/api/v1/session/me', (route) =>
+      route.fulfill({
+        json: {
+          id: 'browser-owner',
+          agent_access: { allowed: true, permissions: ['agent.use', 'agent.admin'] },
+        },
+      }),
+    );
+    await page.route('**/api/admin/agent/settings', (route) =>
+      route.fulfill({
+        json: {
+          revision: 1,
+          definitions: [],
+          values: {},
+          secret_configured: {},
+          bootstrap: [],
+          setup: { required: false, groups: [], bootstrap_missing: [] },
+        },
+      }),
+    );
+  });
+
+  for (const variant of [
+    { name: 'desktop light', width: 1440, height: 900, theme: 'light' },
+    { name: 'mobile dark', width: 390, height: 844, theme: 'dark' },
+  ]) {
+    test(`verify and save needs no protocol menu and fits the viewport (${variant.name})`, async ({
+      page,
+    }, testInfo) => {
+      await page.setViewportSize({ width: variant.width, height: variant.height });
+      await page.addInitScript((theme) => {
+        localStorage.setItem('agents.locale', 'en');
+        localStorage.setItem('agents.theme', theme);
+      }, variant.theme);
+      await page.route('**/api/v1/agent/model-preference', (route) =>
+        route.fulfill({
+          json: {
+            default_model: null,
+            last_model: null,
+            effective_model: null,
+            deployment_default: null,
+            models: ['fixture-model'],
+          },
+        }),
+      );
+      const posted: unknown[] = [];
+      let release!: () => void;
+      const allowed = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let saved: ReturnType<typeof connectionView> | null = null;
+      await page.route('**/api/v1/agent/model-connections', async (route) => {
+        if (route.request().method() === 'GET') {
+          return route.fulfill({
+            json: { enabled: true, configured: true, connections: saved ? [saved] : [] },
+          });
+        }
+        posted.push(route.request().postDataJSON());
+        // The server verifies before it answers; the form waits for it.
+        await allowed;
+        saved = connectionView({
+          id: connectionId,
+          name: 'Fixture provider',
+          base_url: 'https://provider.example/v1',
+          model_status: [chatOnly('fixture-small'), chatOnly('fixture-large')],
+        });
+        return route.fulfill({ status: 201, json: saved });
+      });
+      await page.goto('/settings/my-settings');
+      await page.getByRole('button', { name: 'Add connection', exact: true }).click();
+      const form = page.getByRole('region', { name: 'Personal model connections' }).locator('form');
+      await expect(form.getByRole('combobox')).toHaveCount(0);
+      await expect(page.locator('select:visible')).toHaveCount(0);
+      await expect(page.locator('datalist')).toHaveCount(0);
+      await page.getByLabel('Connection name', { exact: true }).fill('Fixture provider');
+      await page.getByLabel('Base URL', { exact: true }).fill('https://provider.example/v1');
+      await page.getByLabel('API key', { exact: true }).fill('fixture-key-not-a-credential');
+      const models = page.getByLabel('Model IDs', { exact: true });
+      await models.fill('fixture-small');
+      await models.press('Enter');
+      await models.fill('fixture-large');
+      expect(posted).toEqual([]);
+      await form.getByRole('button', { name: 'Verify and save', exact: true }).click();
+      await expect.poll(() => posted.length).toBe(1);
+      await expect(form.getByRole('button', { name: 'Verifying…', exact: true })).toBeDisabled();
+      // Cancel stays usable while a slow provider is verified.
+      await expect(form.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled();
+      expect(posted).toEqual([
+        {
+          name: 'Fixture provider',
+          base_url: 'https://provider.example/v1',
+          api_key: 'fixture-key-not-a-credential',
+          models: ['fixture-small', 'fixture-large'],
+        },
+      ]);
+      await form.screenshot({
+        path: testInfo.outputPath('verify-and-save-pending.png'),
+        animations: 'disabled',
+      });
+      release();
+      const card = page.getByRole('article', { name: 'Fixture provider' });
+      await expect(card.getByText(/^Works with/)).toHaveCount(2);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        variant.width,
+      );
+      await card.screenshot({
+        path: testInfo.outputPath('verified-connection.png'),
+        animations: 'disabled',
+      });
+    });
+  }
+});
