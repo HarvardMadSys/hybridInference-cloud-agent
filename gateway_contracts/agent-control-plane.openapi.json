@@ -8638,6 +8638,17 @@
             "title": "Failed Tool Calls",
             "type": "integer"
           },
+          "first_output_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Output Seconds"
+          },
           "input_tokens": {
             "anyOf": [
               {
@@ -8694,17 +8705,6 @@
           "tool_seconds": {
             "title": "Tool Seconds",
             "type": "number"
-          },
-          "ttft_seconds": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Ttft Seconds"
           },
           "turns": {
             "title": "Turns",
@@ -14671,6 +14671,83 @@
         "title": "ModelStatusView",
         "type": "object"
       },
+      "ModelTtftSummary": {
+        "description": "Mean gateway time to first token over the requests that measured one.\n\n``mean_ttft_ms`` weighs every sampled request equally. ``complete`` is true\nonly when every started execution in scope was attributed, read, and fit in\none page; otherwise ``reason`` names the first gap, and the mean describes\nthe ``samples`` it was computed from and nothing more.",
+        "properties": {
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "mean_ttft_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mean Ttft Ms"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "requests_read": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Requests Read",
+            "type": "integer"
+          },
+          "samples": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Samples",
+            "type": "integer"
+          },
+          "source": {
+            "const": "gateway_request_log",
+            "default": "gateway_request_log",
+            "title": "Source",
+            "type": "string"
+          },
+          "sources_read": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Sources Read",
+            "type": "integer"
+          },
+          "sources_total": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Sources Total",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "not_recorded",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "complete"
+        ],
+        "title": "ModelTtftSummary",
+        "type": "object"
+      },
       "NodeRegistrationRequest": {
         "additionalProperties": false,
         "description": "A node's SSH host public keys and the token it was created with.",
@@ -17281,6 +17358,18 @@
       "SessionStatistics": {
         "description": "Run performance estimates, with unavailable measurements left absent.",
         "properties": {
+          "first_output_seconds": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Output Seconds"
+          },
           "model_seconds": {
             "anyOf": [
               {
@@ -17322,18 +17411,6 @@
               }
             ],
             "title": "Tool Seconds"
-          },
-          "ttft_seconds": {
-            "anyOf": [
-              {
-                "minimum": 0.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Ttft Seconds"
           }
         },
         "title": "SessionStatistics",
@@ -26908,6 +26985,63 @@
         "summary": "List Admin Llm Requests"
       }
     },
+    "/admin/agent/runs/{job_id}/model-ttft": {
+      "get": {
+        "description": "Mean gateway time to first token over this run's executions.\n\nThe same stored references and the same rules as the request pages; the\nrun's session statistics keep event-derived first output separately.",
+        "operationId": "get_admin_run_model_ttft_admin_agent_runs__job_id__model_ttft_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelTtftSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Admin Run Model Ttft"
+      }
+    },
     "/admin/agent/runtime-upgrades": {
       "get": {
         "description": "Each agent's version for new chats, npm's latest, and any update's progress.",
@@ -33671,6 +33805,65 @@
           }
         },
         "summary": "Get Agent Thread Message"
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/model-ttft": {
+      "get": {
+        "description": "Mean gateway time to first token over the thread's newest executions.\n\nThe gateway's per-request ``ttft_ms`` is the only input; sandbox startup\nand event arrival times never are. Grant, window and attribution key come\nfrom the owner's own stored references, never from the caller.",
+        "operationId": "get_thread_model_ttft_v1_agent_jobs__job_id__thread_model_ttft_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelTtftSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Thread Model Ttft",
+        "tags": [
+          "agent"
+        ]
       }
     },
     "/v1/agent/jobs/{job_id}/thread/stats": {
