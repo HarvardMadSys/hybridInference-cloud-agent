@@ -49,11 +49,15 @@ export function ModelConnectionsSettings() {
     setEditing(null);
   }
 
-  function verified(id: string, verification: ModelVerification) {
+  function verified(id: string, verification: ModelVerification, startedOn: string) {
     setData((current) => {
       if (!current) return current;
+      // Only into the version it was started on; after an edit, the server's
+      // record (re-read on the next load) is the truth.
       const connections = current.connections.map((item) =>
-        item.id === id ? withVerification(item, verification) : item,
+        item.id === id && item.updated_at === startedOn
+          ? withVerification(item, verification)
+          : item,
       );
       return { ...current, connections };
     });
@@ -118,7 +122,9 @@ export function ModelConnectionsSettings() {
             onAutoVerifyStarted={() => setVerifyRequest(null)}
             onEdit={() => setEditing(connection)}
             onChange={(changed) => saved(changed)}
-            onVerified={(verification) => verified(connection.id, verification)}
+            onVerified={(verification, startedOn) =>
+              verified(connection.id, verification, startedOn)
+            }
             onDelete={() => {
               setData((current) => {
                 if (!current) return current;

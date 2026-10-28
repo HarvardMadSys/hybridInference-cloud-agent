@@ -33,7 +33,7 @@ export function ModelConnectionCard({
   onAutoVerifyStarted?: () => void;
   onEdit: () => void;
   onChange: (connection: ModelConnection) => void;
-  onVerified: (verification: ModelVerification) => void;
+  onVerified: (verification: ModelVerification, startedOn: string) => void;
   onDelete: () => void;
 }) {
   const t = useT();

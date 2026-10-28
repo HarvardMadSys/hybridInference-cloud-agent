@@ -126,3 +126,35 @@ it('leaving the settings page stops the remaining verification batch requests', 
   await settle();
   expect(api.verifyModelConnection).toHaveBeenCalledTimes(1);
 });
+
+it('a recorded result queued with a newer edit cannot mark the changed endpoint ready', async () => {
+  let finishVerification!: (value: api.ModelVerification) => void;
+  let finishEdit!: (value: api.ModelConnection) => void;
+  const verification = new Promise<api.ModelVerification>((done) => {
+    finishVerification = done;
+  });
+  const edit = new Promise<api.ModelConnection>((done) => {
+    finishEdit = done;
+  });
+  vi.mocked(api.verifyModelConnection).mockReturnValue(verification);
+  vi.mocked(api.updateModelConnection).mockReturnValue(edit);
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Verify m1' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+  fireEvent.change(screen.getByLabelText('Base URL'), {
+    target: { value: 'https://new.example/v1' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await act(async () => {
+    finishEdit({
+      ...connection,
+      base_url: 'https://new.example/v1',
+      updated_at: '2026-10-28T01:00:00Z',
+    });
+    await edit;
+    finishVerification({ ...pending('m1'), status: 'ready', runtimes: ['codex'], recorded: true });
+    await verification;
+  });
+  expect(screen.getByText('https://new.example/v1', { exact: true })).toBeVisible();
+  expect(screen.queryByText('Ready', { exact: true })).not.toBeInTheDocument();
+});

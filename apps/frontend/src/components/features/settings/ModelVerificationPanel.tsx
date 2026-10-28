@@ -134,16 +134,18 @@ export function ModelVerificationPanel({
   autoVerify: boolean;
   onAutoVerifyStarted: () => void;
   /**
-   * A kept result, merged by the page into whatever it holds for this
-   * connection now: an edit saved meanwhile is never overwritten.
+   * A kept result, with the connection version it was started on. The page
+   * merges it only into that version: an edit saved meanwhile is never
+   * overwritten, nor marked by a result about its previous endpoint.
    */
-  onVerified: (verification: ModelVerification) => void;
+  onVerified: (verification: ModelVerification, startedOn: string) => void;
 }) {
   const t = useT();
   const [verifying, setVerifying] = useState<string | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
   const [error, setError] = useState(false);
   const id = connection.id;
+  const version = connection.updated_at;
   // The models still waiting, as the page holds them: a batch counts what remains.
   const remaining = useRef(unverifiedModels(connection));
   remaining.current = unverifiedModels(connection);
@@ -170,7 +172,7 @@ export function ModelVerificationPanel({
           if (!mounted.current) return;
           if (result.recorded) {
             done.add(model);
-            onVerified(result);
+            onVerified(result, version);
           } else {
             setNotes((current) => [...current, t('connections.verifyStale', { model })]);
           }
@@ -184,7 +186,7 @@ export function ModelVerificationPanel({
       if (left)
         setNotes((current) => [...current, t('connections.verifyRemaining', { count: left })]);
     },
-    [id, onVerified, t],
+    [id, version, onVerified, t],
   );
 
   const pending = unverifiedModels(connection);
