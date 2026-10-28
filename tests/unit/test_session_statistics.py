@@ -40,7 +40,7 @@ def test_retries_sum_active_windows_and_average_each_attempts_first_output():
     stats = _stats(list(reversed(events)), attempts)
     assert stats.model_seconds == 20  # excludes the 90-second gap between attempts
     assert stats.tool_seconds == 0
-    assert stats.ttft_seconds == 3  # mean of 2 and 4, never first-attempt-to-last-output
+    assert stats.first_output_seconds == 3  # mean of 2 and 4, never first-attempt-to-last-output
     assert stats.output_tokens_per_second == 6  # 120 tokens / 20 measured seconds
     assert stats.timing_source == "message_events"
 
@@ -131,7 +131,7 @@ def test_absent_or_invalid_measurements_remain_null(events):
     stats = _stats(events)
     assert stats.model_seconds is None
     assert stats.tool_seconds is None
-    assert stats.ttft_seconds is None
+    assert stats.first_output_seconds is None
     assert stats.output_tokens_per_second is None
 
 
@@ -189,14 +189,14 @@ def test_false_zero_output_does_not_become_zero_tps():
     assert stats.output_tokens_per_second is None
 
 
-def test_unobserved_execution_withholds_total_time_but_not_available_ttft_samples():
+def test_unobserved_execution_withholds_total_time_but_not_available_first_output_samples():
     stats = _stats(
         _execution(),
         [{**_attempt(), "attempt_id": 1}, {**_attempt(offset=100), "attempt_id": 2}],
     )
     assert stats.model_seconds is None
     assert stats.tool_seconds is None
-    assert stats.ttft_seconds == 2
+    assert stats.first_output_seconds == 2
     assert stats.output_tokens_per_second == 4
 
 
