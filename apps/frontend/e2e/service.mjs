@@ -344,6 +344,7 @@ export function createFixture() {
         actions: [],
       });
     else if (/\/thread\/stats$/.test(api)) json(res, { detail: 'No stats' }, 404);
+    else if (/\/thread\/model-ttft$/.test(api)) json(res, { detail: 'No thread' }, 404);
     else if (/\/terminals$/.test(api)) {
       if (req.method === 'POST')
         state.terminals.push({

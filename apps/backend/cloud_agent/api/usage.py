@@ -18,6 +18,7 @@ from cloud_agent.ledger import (
     summarize_conversation,
     summarize_job_usage,
 )
+from cloud_agent.model_ttft import ModelTtftSummary, read_model_ttft
 
 if TYPE_CHECKING:
     from cloud_agent.grants import GrantClient
@@ -121,6 +122,38 @@ async def get_message_request(
     if not matches:
         return MessageRequestDetail(status="not_recorded")
     return MessageRequestDetail(status="available", request=next(iter(matches.values())))
+
+
+#: Started executions of a thread one model TTFT read covers, newest first. Each
+#: costs one bounded gateway page; an older thread reports a partial sample.
+THREAD_TTFT_SOURCES = 8
+
+
+@router.get("/jobs/{job_id}/thread/model-ttft", response_model=ModelTtftSummary)
+async def get_thread_model_ttft(
+    response: Response,
+    job_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _UsageStorage | None = Depends(get_storage),
+    grants: GrantClient = Depends(get_grant_client),
+) -> ModelTtftSummary:
+    """Mean gateway time to first token over the thread's newest executions.
+
+    The gateway's per-request ``ttft_ms`` is the only input; sandbox startup
+    and event arrival times never are. Grant, window and attribution key come
+    from the owner's own stored references, never from the caller.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    read = await _require_store(store).ledger.thread_request_sources(
+        job_id=job_id, user_id=user["user_id"], limit=THREAD_TTFT_SOURCES
+    )
+    if read is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"type": "not_found", "message": f"No thread for {job_id}"}},
+        )
+    sources, more = read
+    return await read_model_ttft(sources, more_sources=more, grants=grants, scope=job_id)
 
 
 async def job_usage_response(

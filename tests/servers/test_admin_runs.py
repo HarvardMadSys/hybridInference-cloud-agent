@@ -207,7 +207,7 @@ async def test_empty_terminal_turn_has_no_promised_future_usage(setup):
     assert response.json()["session_statistics"] == {
         "model_seconds": None,
         "tool_seconds": None,
-        "ttft_seconds": None,
+        "first_output_seconds": None,
         "output_tokens_per_second": None,
         "timing_source": "message_events",
     }
@@ -244,7 +244,7 @@ async def test_session_statistics_reuses_safe_usage_inputs_without_additional_re
     assert response.json()["session_statistics"] == {
         "model_seconds": 4,
         "tool_seconds": 6,
-        "ttft_seconds": 2,
+        "first_output_seconds": 2,
         "output_tokens_per_second": 20,
         "timing_source": "message_events",
     }
@@ -456,7 +456,7 @@ def test_admin_observation_routes_are_registered_only_on_the_control_plane():
     control = create_app().openapi()["paths"]
     relay = create_mcp_app().openapi()["paths"]
     paths = {path for path in control if path.startswith(PREFIX)}
-    assert len(paths) == 5
+    assert len(paths) == 6
     assert not paths.intersection(relay)
 
 
