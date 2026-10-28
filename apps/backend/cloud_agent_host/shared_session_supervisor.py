@@ -34,6 +34,7 @@ from cloud_agent_host.chat_sandbox import (
     SandboxRestoreFailed,
 )
 from cloud_agent_host.drivers import DialectRuntime, InputOutcome, PendingInput
+from cloud_agent_host.environment_preparation import runs_no_script
 from cloud_agent_host.guarded_workloads import (
     GuardedWorkload,
     exact_stop_unguarded,
@@ -3461,12 +3462,15 @@ class SharedChatSessionSupervisor:
         monitor_thread.start()
         manifest = None
         try:
-            manifest = self._manager.freeze_shared_writers(
-                group.spec,
-                slot_ids=slots,
-                token=secrets.token_hex(16),
-                expected_container_id=expected,
-            )
+            # Writers are frozen only around a script: preparing a boot that
+            # runs none only makes the tool home and records the start.
+            if not runs_no_script(receipt, environment, expected):
+                manifest = self._manager.freeze_shared_writers(
+                    group.spec,
+                    slot_ids=slots,
+                    token=secrets.token_hex(16),
+                    expected_container_id=expected,
+                )
             result = preparer.prepare(backend, environment, cancel=cancelled)
             self._require_current_inspection(group)
             if cancelled.is_set():

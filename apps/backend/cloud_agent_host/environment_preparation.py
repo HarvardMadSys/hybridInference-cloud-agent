@@ -47,6 +47,26 @@ def step_state(result: SetupResult, cancel: threading.Event | None) -> str:
     return "failed"
 
 
+def runs_no_script(
+    receipt: dict[str, Any], environment: BoundEnvironment, container_id: str
+) -> bool:
+    """Whether preparing exactly this container runs none of the environment's scripts.
+
+    ``receipt`` is this container's (:meth:`EnvironmentPreparation.status`).
+    Its installation is done and no update is pending, so neither runs, and
+    the start script is empty or skipped for this turn: preparation then only
+    makes the shared tool home and records the start. Both receipt facts stay
+    true for the container's life once true: installation is never undone,
+    and an update becomes pending only while installation is not yet done.
+    """
+    return (
+        receipt.get("container_id") == container_id
+        and receipt.get("setup_done") is True
+        and not receipt.get("update_pending")
+        and (environment.skip_start or not environment.start_script.strip())
+    )
+
+
 def run_step(
     backend: RetainedChatBackend,
     environment: BoundEnvironment,
