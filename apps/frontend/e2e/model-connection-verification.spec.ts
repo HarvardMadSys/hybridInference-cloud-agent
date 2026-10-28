@@ -30,6 +30,7 @@ const TEXT = {
     edit: 'Edit',
     remove: (model: string) => `Remove ${model}`,
     refused: /Not saved/,
+    reason: 'The model did not call the offered tool exactly once.',
     works: 'Works with',
     details: 'Technical details',
     model: 'Model',
@@ -47,6 +48,7 @@ const TEXT = {
     edit: '编辑',
     remove: (model: string) => `移除 ${model}`,
     refused: /未保存/,
+    reason: '模型未按要求调用工具。',
     works: '可用于',
     details: '技术详情',
     model: '模型',
@@ -176,7 +178,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
       await expect(page.getByLabel('API key', { exact: true })).toHaveValue(
         'fixture-key-not-a-credential',
       );
-      await expect(form).toContainText('The model did not call the tool.');
+      await expect(form).toContainText(text.reason);
       await form.screenshot({ path: testInfo.outputPath('connection-refused.png') });
 
       await form.getByRole('button', { name: text.remove('bad-model'), exact: true }).click();
@@ -197,13 +199,13 @@ for (const locale of ['en', 'zh-CN'] as const) {
           models: ['chat-model', 'claude-model'],
         },
       ]);
-      await expect(card).toContainText(`${text.works} claude-code, codex, kilo, opencode, pi`);
-      await expect(card).toContainText(`${text.works} claude-code`);
+      await expect(card).toContainText(`${text.works} Claude Code, Codex, Kilo Code, OpenCode, pi`);
+      await expect(card).toContainText(`${text.works} Claude Code`);
       const details = card.locator('details').filter({ hasText: text.details });
       await expect(details.locator('ul').first()).toBeHidden();
       await region.screenshot({ path: testInfo.outputPath('connection-saved.png') });
       await details.locator('summary').click();
-      await expect(details).toContainText(/codex[:：] ?Responses/);
+      await expect(details).toContainText(/Codex[:：] ?Responses/);
       await details.locator('summary').click();
 
       // A new key is verified first; its refusal leaves the saved card as it was.
@@ -213,7 +215,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
       await expect(form.getByRole('alert')).toContainText(text.refused);
       await expect(form).toContainText('The provider refused the key.');
       await form.getByRole('button', { name: text.cancel, exact: true }).click();
-      await expect(card).toContainText(`${text.works} claude-code, codex, kilo, opencode, pi`);
+      await expect(card).toContainText(`${text.works} Claude Code, Codex, Kilo Code, OpenCode, pi`);
 
       // A rename alone saves without verifying.
       await card.getByRole('button', { name: text.edit, exact: true }).click();
