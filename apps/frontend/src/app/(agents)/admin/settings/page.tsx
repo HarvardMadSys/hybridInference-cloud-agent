@@ -314,9 +314,6 @@ function SettingsView() {
     const focusTarget = () => {
       const target = document.getElementById(searchTarget);
       if (!target || !root.contains(target) || target.closest('[hidden]')) return false;
-      for (let ancestor = target.parentElement; ancestor; ancestor = ancestor.parentElement) {
-        if (ancestor instanceof HTMLDetailsElement) ancestor.open = true;
-      }
       let control = target.matches('input, select, textarea, button, [tabindex]')
         ? target
         : target.querySelector<HTMLElement>('input, select, textarea, button');

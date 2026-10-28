@@ -112,3 +112,31 @@ for (const width of [1440, 390]) {
     await expect(page.locator('#application-setting-pgadmin_url')).toBeFocused();
   });
 }
+
+for (const width of [1440, 390]) {
+  test(`a previously advanced field is visible and keeps its draft across tabs at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/admin/settings?tab=application-Operations');
+    const panel = page.getByRole('tabpanel', { name: 'Operations', exact: true });
+    await expect(panel).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Database tools' })).toBeVisible();
+    const readOnly = page.locator('#application-setting-pgadmin_url');
+    await expect(readOnly).toBeVisible();
+    // The field is a plain always-visible row, not a collapsed disclosure.
+    expect(await readOnly.locator('xpath=ancestor::details').count()).toBe(0);
+    expect(await panel.getByText('Advanced', { exact: true }).count()).toBe(0);
+
+    await page.getByRole('button', { name: 'Edit Database tools settings', exact: true }).click();
+    const field = page.getByRole('textbox', { name: 'pgAdmin URL', exact: true });
+    await field.fill('https://pgadmin.example.test');
+
+    await page.getByRole('tab', { name: 'Deployment', exact: true }).click();
+    await expect(page.getByRole('tabpanel', { name: 'Deployment', exact: true })).toBeVisible();
+    await page.getByRole('tab', { name: 'Operations', exact: true }).click();
+    await expect(panel).toBeVisible();
+    await expect(field).toHaveValue('https://pgadmin.example.test');
+    await expect(readOnly).toBeVisible();
+  });
+}
