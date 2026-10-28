@@ -441,7 +441,7 @@ Base URL 未改可以留空 key，用已保存的 key；改了 Base URL 则提�
 总时长、最多两次请求。失败只返回类别（`model_connection_<category>`）和固定说明，不回显服务商内容；
 key 只在 JSON 请求体里，从不进入查询串、日志或响应，校验失败只说明字段。获取不写入任何连接、key
 或模型，也不说明列出的模型能用：保存时照常验证选中的模型，失败不改动已保存的配置，表单输入保留。
-旧的 `POST /{connection_id}/discover-models` 为滚动发布保留（`COMPAT`），新页面不再调用。
+原先在本 PR 中试用的 `POST /{connection_id}/discover-models` 尚未发布，已删除。
 
 **前端竞态。** 只在用户点击时请求。请求带 `AbortSignal`；Base URL 或 key 改变、发起新请求、开始保存、
 取消或离开表单都会中止在途请求，迟到的结果（成功或失败）按请求序号和请求内容双重比对后丢弃，只有

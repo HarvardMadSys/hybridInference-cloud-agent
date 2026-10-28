@@ -4266,8 +4266,7 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   or refused, the Anthropic-style `…/v1/models` with `x-api-key` (at most two
   requests). Failures answer only a category. It writes nothing, and a listed
   ID means nothing until the form's save verifies it; listing is optional,
-  and any ID can be typed. The older `POST …/{connection_id}/discover-models`
-  remains for one release.
+  and any ID can be typed.
 - **Host rollout.** Runners advertise `model-connections-v1`, and
   `model-protocol-translation-v1` when they can run a translated member. A
   claim for a turn on a connection, or for a translated one, is released,

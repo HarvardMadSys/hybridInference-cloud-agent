@@ -657,27 +657,3 @@ async def discover_for_form(
     return DiscoveredModels(
         models=await _listing(store, user_id, base_url=body.base_url, api_key=api_key)
     )
-
-
-# COMPAT(remove-after=2026-12-15): the settings page before PR #1029 lists models
-# only for a saved connection through this route; remove once no deployed
-# frontend predates the form's own listing above.
-@router.post("/{connection_id}/discover-models", response_model=DiscoveredModels)
-async def discover(
-    connection_id: str,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _Storage | None = Depends(get_storage),
-) -> DiscoveredModels:
-    """List the ids the provider's model list offers for a saved connection.
-
-    ``GET /models`` under the Base URL and, only if that listing is missing or
-    refused, ``GET /v1/models`` with Messages authentication: at most two
-    requests and one hourly check. Picked ids are added by an edit, which
-    verifies them before saving.
-    """
-    _require_enabled()
-    store = require_store(store)
-    row = await _live(store, user["user_id"], connection_id)
-    return DiscoveredModels(
-        models=await _listing(store, user["user_id"], base_url=row["base_url"], api_key=_key(row))
-    )

@@ -489,7 +489,10 @@ async def test_another_owner_can_neither_see_nor_change_a_connection(provider):
         changed = await client.patch(f"{PATH}/{mine['id']}", json={"enabled": False})
         rotated = await client.patch(f"{PATH}/{mine['id']}", json={"api_key": "sk-other-0000"})
         deleted = await client.delete(f"{PATH}/{mine['id']}")
-        listed_models = await client.post(f"{PATH}/{mine['id']}/discover-models")
+        listed_models = await client.post(
+            f"{PATH}/discover-models",
+            json={"base_url": _CREATE["base_url"], "connection_id": mine["id"]},
+        )
 
     assert listed.json()["connections"] == []
     assert [changed.status_code, rotated.status_code, deleted.status_code] == [404, 404, 404]
@@ -1027,16 +1030,6 @@ async def test_a_listing_dials_only_a_public_ipv4_address(base_url):
     assert response.json()["detail"]["error"]["type"] == "model_connection_blocked_address"
     assert _NEW_KEY not in response.text
     assert store.model_connections.rows == {}
-
-
-async def test_the_saved_connection_route_still_lists_with_its_own_key(listing):
-    # COMPAT(remove-after=2026-12-15): the route the earlier settings page calls.
-    store = _Store()
-    view = await _create(store)
-    async with await _client(_settings_app(store)) as client:
-        response = await client.post(f"{PATH}/{view['id']}/discover-models")
-    assert response.status_code == 200
-    assert listing.calls == [{"base_url": "https://models.example/v1", "api_key": _KEY}]
 
 
 # -- turns ---------------------------------------------------------------------------
