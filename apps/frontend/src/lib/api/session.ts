@@ -10,6 +10,7 @@
 
 import { agentApiBase } from '@/config/env';
 import { jsonOrThrow, safeFetch } from './client';
+import type { WaitlistEntry } from './accounts';
 import { APIError } from '@/lib/utils/errors';
 
 export type AgentPermission = 'agent.use' | 'agent.admin';
@@ -21,6 +22,9 @@ export interface AgentAccessApi {
 
 export interface SessionUserApi {
   id: string;
+  auth_mode?: 'gateway' | 'local';
+  email?: string;
+  waitlist?: WaitlistEntry;
   agent_access?: AgentAccessApi;
 }
 

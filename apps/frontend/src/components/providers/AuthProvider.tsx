@@ -2,11 +2,9 @@
 
 // Session state for the app.
 //
-// Recreated rather than moved: the source provider drove the gateway's own
-// email/password login and its token refresh. This service has neither. Sign-in
-// happens at the gateway and lands as an HttpOnly cookie, so the only question
-// this provider can answer is "does the cookie still work", which it asks by
-// calling `/v1/session/me`.
+// Both local and Gateway sign-in establish an HttpOnly cookie. Identity and
+// current admission are read through /v1/session/me; no password or token is
+// retained by this provider.
 //
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { clearSideChatDrafts } from '@/components/features/agents/sideChatStorage';
@@ -19,11 +17,20 @@ import {
   getSessionUser,
   type AgentAccessApi,
   type AgentPermission,
+  type SessionUserApi,
 } from '@/lib/api/session';
 
-interface User {
-  id: string;
-  agent_access?: AgentAccessApi;
+type User = SessionUserApi;
+
+/** Admit only the documented identity fields, never legacy Gateway role claims. */
+function sessionIdentity(me: SessionUserApi): User {
+  const user: User = { id: me.id, agent_access: me.agent_access };
+  if (me.auth_mode === 'local') {
+    user.auth_mode = 'local';
+    user.email = me.email;
+    user.waitlist = me.waitlist;
+  } else if (me.auth_mode === 'gateway') user.auth_mode = 'gateway';
+  return user;
 }
 
 interface AuthState {
@@ -111,10 +118,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setState({
         isAuthenticated: true,
         loading: false,
-        user: {
-          id: me.id,
-          agent_access: me.agent_access,
-        },
+        user: sessionIdentity(me),
       });
     } catch (error) {
       if (epoch !== sessionEpoch.current) return;
@@ -142,11 +146,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Whether the cookie still names the account this tab shows, asked without
   // the loading state a full refresh shows, and acted on only when it does not.
   const lastCheck = useRef(0);
+  const checkEpoch = useRef(0);
   const checkSession = useCallback(async () => {
     lastCheck.current = Date.now();
+    const epoch = sessionEpoch.current;
+    const check = ++checkEpoch.current;
     try {
       const me = await getSessionUser();
+      if (epoch !== sessionEpoch.current || check !== checkEpoch.current || reading.current) return;
       if ((me?.id ?? undefined) !== accountId.current) await refreshUser();
+      else if (me?.auth_mode === 'local') {
+        // Local admission can change while identity stays the same. Apply the
+        // fresh answer without unmounting the page or losing an edited draft.
+        setState((previous) => ({ ...previous, user: sessionIdentity(me) }));
+      }
     } catch {
       // An outage is not a different account; the next request will say so.
     }
@@ -214,6 +227,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+/** Auth mode for optional navigation, including consumers outside the provider. */
+export function useSignedInAuthMode(): SessionUserApi['auth_mode'] {
+  return useContext(AuthContext)?.state.user?.auth_mode;
 }
 
 /** The signed-in account, for scoping what a component keeps; none outside the provider. */

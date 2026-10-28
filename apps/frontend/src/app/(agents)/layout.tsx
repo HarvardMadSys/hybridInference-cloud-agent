@@ -1,6 +1,8 @@
 'use client';
 
 import Link from 'next/link';
+import { WaitlistPanel } from '@/components/features/auth/WaitlistPanel';
+
 import { usePathname, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { GatewayAccountBanner } from '@/components/features/auth/GatewayAccountBanner';
@@ -239,8 +241,9 @@ function AgentsShell({
   const { branding } = useSiteConfig();
   const t = useT();
 
-  // The Gateway decides admission; account role is only profile metadata.
+  // Current admission decides access independently of the login provider.
   if (!hasAgentPermission(state.user?.agent_access, 'agent.use')) {
+    if (state.user?.auth_mode === 'local') return <WaitlistPanel key={state.user.id} />;
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3">
         <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">

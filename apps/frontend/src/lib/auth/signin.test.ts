@@ -130,3 +130,15 @@ describe('safeReturnTo', () => {
     expect(safeReturnTo('')).toBe('/');
   });
 });
+
+describe('local account navigation', () => {
+  it('rejects backslashes and control characters before direct navigation', async () => {
+    const { safeReturnTo } = await loadSignin('');
+    for (const value of ['/\\evil.test', '/\n/evil.test', '/\t/evil.test'])
+      expect(safeReturnTo(value)).toBe('/');
+  });
+  it('local accounts never switch through the Gateway', async () => {
+    const { accountSignInUrl } = await loadSignin('/agents');
+    expect(accountSignInUrl('local', '/agents/job')).toBe('/agents/login?return_to=%2Fjob');
+  });
+});

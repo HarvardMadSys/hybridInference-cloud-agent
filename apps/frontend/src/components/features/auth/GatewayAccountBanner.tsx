@@ -66,7 +66,8 @@ export function GatewayAccountBanner() {
     }
   }, [userId, consoleAccount]);
 
-  if (!userId || !consoleAccount || consoleAccount === userId) return null;
+  if (state.user?.auth_mode === 'local' || !userId || !consoleAccount || consoleAccount === userId)
+    return null;
 
   const dismiss = () => {
     store(null);

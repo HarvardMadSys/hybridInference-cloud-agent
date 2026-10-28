@@ -9,6 +9,9 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 let search = '';
+vi.mock('@/lib/api/accounts', () => ({
+  getAuthConfig: vi.fn(async () => ({ mode: 'gateway', signup_enabled: false })),
+}));
 
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(search),
@@ -23,7 +26,7 @@ vi.mock('@/config/env', async (importOriginal) => ({
 
 import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
 import type { RuntimeSiteConfig } from '@/config/site';
-import LoginPage from './page';
+import LoginPage from '@/components/features/auth/LoginPageClient';
 
 // The deployment identity now arrives as a provider prop rather than from
 // build-time environment, so the test supplies it the same way the root layout

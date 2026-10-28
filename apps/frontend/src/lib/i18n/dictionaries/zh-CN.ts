@@ -1,3 +1,4 @@
+import { accountsZh } from './accounts';
 import { modelSelectionZhCN } from './modelSelection';
 
 import type { TranslationKey } from './en';
@@ -14,6 +15,7 @@ import type { TranslationKey } from './en';
  * easier to read.
  */
 export const zhCN: Record<TranslationKey, string> = {
+  ...accountsZh,
   'environment.title': '环境',
   'environment.configure': '配置环境',
   'environment.sectionTitle': '环境',
@@ -1297,7 +1299,4 @@ export const zhCN: Record<TranslationKey, string> = {
   'ssh.rotateHint':
     '先安装新密钥再测试。新密钥登录成功前旧密钥继续有效；成功后请删除旧的那行公钥。',
   'ssh.testNewKey': '测试新密钥',
-  'common.loading': '加载中…',
-  'common.retry': '重试',
-  'common.refreshFailed': '刷新失败，正在显示上次成功读取的内容。',
 };

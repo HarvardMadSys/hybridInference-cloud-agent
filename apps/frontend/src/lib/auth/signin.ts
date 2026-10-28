@@ -28,7 +28,13 @@ import { agentApiBase, basePath } from '@/config/env';
  * matters is the one an attacker cannot skip.
  */
 export function safeReturnTo(candidate: string | undefined): string {
-  if (!candidate || !candidate.startsWith('/') || candidate.startsWith('//')) return '/';
+  if (
+    !candidate ||
+    !candidate.startsWith('/') ||
+    candidate.startsWith('//') ||
+    /[\\\u0000-\u001f\u007f]/.test(candidate)
+  )
+    return '/';
   if (!basePath) return candidate;
   if (candidate === basePath) return '/';
   if (candidate.startsWith(`${basePath}/`)) return candidate.slice(basePath.length);
@@ -67,4 +73,14 @@ export function signInUrl(returnTo: string, options: SignInOptions = {}): string
  */
 export function switchAccountUrl(returnTo: string, loginHint?: string): string {
   return signInUrl(returnTo, { prompt: 'select_account', loginHint });
+}
+
+/** Local accounts switch through their own login page; Gateway accounts keep the chooser. */
+export function accountSignInUrl(
+  mode: 'local' | 'gateway' | undefined,
+  pathname: string | null,
+): string {
+  if (mode === 'local')
+    return `${basePath}/login?${new URLSearchParams({ return_to: safeReturnTo(pathname ?? '/') })}`;
+  return switchAccountUrl(pathname ?? '/');
 }

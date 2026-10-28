@@ -383,3 +383,39 @@ describe('AuthProvider and the browser’s other Agents tabs', () => {
     tab.close();
   });
 });
+
+it('same-account local approval and revocation update on focus without a loading remount', async () => {
+  getMe.mockResolvedValue({
+    id: 'local',
+    auth_mode: 'local',
+    email: 'local@example.test',
+    agent_access: { allowed: false, permissions: [] },
+  });
+  render(
+    <AuthProvider>
+      <Consumer />
+    </AuthProvider>,
+  );
+  await waitFor(() => expect(current().loading).toBe(false));
+  getMe.mockResolvedValue({
+    id: 'local',
+    auth_mode: 'local',
+    email: 'local@example.test',
+    agent_access: { allowed: true, permissions: ['agent.use'] },
+  });
+  act(() => window.dispatchEvent(new Event('focus')));
+  await waitFor(() => expect(current().user.agent_access.allowed).toBe(true));
+  expect(current().loading).toBe(false);
+  getMe.mockResolvedValue({
+    id: 'local',
+    auth_mode: 'local',
+    email: 'local@example.test',
+    agent_access: { allowed: false, permissions: [] },
+  });
+  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000);
+  act(() => window.dispatchEvent(new Event('focus')));
+  await waitFor(() => expect(current().user.agent_access.allowed).toBe(false));
+  expect(current().isAuthenticated).toBe(true);
+  expect(current().loading).toBe(false);
+  vi.restoreAllMocks();
+});

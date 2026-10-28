@@ -30,7 +30,7 @@ import {
   SunIcon,
 } from '@/components/features/settings/icons';
 import { isSettingsPath, SETTINGS_PATHS } from '@/components/features/settings/navigation';
-import { switchAccountUrl } from '@/lib/auth/signin';
+import { accountSignInUrl } from '@/lib/auth/signin';
 import { LOCALES, LOCALE_LABELS } from '@/lib/i18n/locales';
 import { THEME_PREFERENCES, type ThemePreference } from '@/lib/theme';
 
@@ -379,7 +379,7 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
               <div role="separator" className={SEPARATOR} />
               <a
                 role="menuitem"
-                href={switchAccountUrl(pathname ?? '/')}
+                href={accountSignInUrl(state.user?.auth_mode, pathname)}
                 className={ITEM}
                 onClick={() => close(false)}
                 {...plain}

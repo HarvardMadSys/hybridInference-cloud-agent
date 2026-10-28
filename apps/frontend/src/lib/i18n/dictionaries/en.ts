@@ -1,3 +1,4 @@
+import { accountsEn } from './accounts';
 import { modelSelectionEn } from './modelSelection';
 
 /**
@@ -12,6 +13,7 @@ import { modelSelectionEn } from './modelSelection';
  * Placeholders are `{name}` and are substituted by `translate()`.
  */
 export const en = {
+  ...accountsEn,
   'environment.title': 'Environment',
   'environment.configure': 'Configure Environment',
   'environment.sectionTitle': 'Environments',
@@ -1393,9 +1395,6 @@ export const en = {
   'ssh.rotateHint':
     'Install the new key, then test it. The old key keeps working until the new one logs in; remove the old line afterwards.',
   'ssh.testNewKey': 'Test the new key',
-  'common.loading': 'Loading…',
-  'common.retry': 'Retry',
-  'common.refreshFailed': 'Refresh failed — showing the last successful read.',
 } as const;
 
 export type TranslationKey = keyof typeof en;

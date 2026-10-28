@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useRef } from 'react';
+import { useSignedInAuthMode } from '@/components/providers/AuthProvider';
 import { AdminSetupNotice } from './AdminSetupNotice';
 
 const SECTIONS = [
@@ -9,6 +10,7 @@ const SECTIONS = [
   { key: 'sandboxes', label: 'Sandboxes', href: '/admin/sandboxes' },
   { key: 'activity', label: 'Activity', href: '/admin/activity' },
   { key: 'usage', label: 'Usage', href: '/admin/usage' },
+  { key: 'accounts', label: 'Accounts', href: '/admin/accounts' },
   { key: 'teams', label: 'Teams', href: '/admin/teams' },
   { key: 'measurements', label: 'Measurements', href: '/admin/measurements' },
   { key: 'settings', label: 'Settings', href: '/admin/settings' },
@@ -25,12 +27,14 @@ export function AdminNavigation({
     | 'runs'
     | 'activity'
     | 'usage'
+    | 'accounts'
     | 'teams'
     | 'measurements'
     | 'settings'
     | 'database'
     | 'audit';
 }) {
+  const authMode = useSignedInAuthMode();
   const section = current === 'runs' ? 'activity' : current;
   const selected = useRef<HTMLAnchorElement>(null);
   const navigation = useRef<HTMLElement>(null);
@@ -72,7 +76,7 @@ export function AdminNavigation({
         aria-label="Admin sections"
         className="mt-3 flex gap-1 overflow-x-auto overflow-y-hidden border-b border-border"
       >
-        {SECTIONS.map((item) => {
+        {SECTIONS.filter((item) => item.key !== 'accounts' || authMode === 'local').map((item) => {
           const active = section === item.key;
           return (
             <Link
