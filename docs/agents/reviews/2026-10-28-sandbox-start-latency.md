@@ -174,6 +174,102 @@ status answers the first question; preflight now runs it once (CLI time
 44 → 21 ms). `check_network()`, which the host service and a Kata child
 holding its host's verdict call, still asks Docker itself every time.
 
+### Settled root markers are checked once per container
+
+Before a member's CLI started, the host asked the container, as root and
+under its install lock, whether a downloaded runtime version is copied in,
+whether Kilo's build carries the isolation patch, and whether each MCP adapter
+matches the one this host ships. Each answer is a root-owned file in a
+root-owned directory that no member can write and only a platform exec as root
+writes, so `ProvenContainers` now remembers it per exact container id, as it
+does the reaper's (`chat_sandbox_exec.install_once`): checked before the
+install lock, noted only after a probe or install that succeeded. An adapter
+is keyed by its content digest too, and replacing one forgets what was found
+there. The Codex MCP policy is still asked every launch: its content follows
+the relay each launch names. A resumed Claude launch on a downloaded version
+went from 5 execs to 4, 615 → 532 ms.
+
+### A member is prepared in one exec
+
+`cloud_agent_host/member_preparation.py`. Before a member's CLI spawned, its
+own UID reaped its slot, removed stale pidfiles and the last launch's
+credentials, prepared its provider home and, for Claude, merged the tool
+hooks: two to four `docker exec`s, one per step. They now run in one exec of a
+runner the host sends (`python3 -I`), each step still a process of its own,
+with its argv, input, timeout and error, in the same order, and a failure
+stops the rest. The reaper kills every process of its UID outside its
+baseline, so the runner adds its own pid and start time and the reap spares
+exactly it. The owner's inference credential is not queued: it is written by
+its own exec after the reap, because a process an earlier launch left as this
+UID could read the runner's input until the reap kills it; nothing else in the
+queue is secret. Medians of 20 resumed launches on runc:
+
+| Runtime | Execs, without / with owner Secrets | ms, without / with |
+|---|---|---|
+| Claude | 4 → 1 / 5 → 2 | 426 → 223 / 517 → 310 |
+| Codex | 3 → 1 / 4 → 2 | 314 → 192 / 399 → 269 |
+| OpenCode | 3 → 1 / 4 → 2 | 314 → 191 / 389 → 269 |
+| Kilo | 3 → 1 / 4 → 2 | 303 → 193 / 393 → 276 |
+| pi | 2 → 1 / 3 → 2 | 218 → 176 / 305 → 255 |
+
+### The census runs beside the tool-mark fence on runc
+
+`cloud_agent_host/turn_arming.py`. Before each prompt the supervisor took the
+member-process census and then the observer or tool-mark fence, each a
+`docker exec`, on every turn. Under runc, Claude Code's tool-mark fence reads
+where the hook-mark file ends as the sandbox user, while the census lists the
+member's processes as the member, and neither can see the other; the census
+now runs on a worker thread beside the fence, joined however the fence ends,
+before admission is rechecked and the prompt is written. A census failure is
+still the error the turn reports, through the same cleanup. Under Kata the
+census stays strictly before the guest observer's fence: it runs as the
+member's UID, and a census exec that reached the guest after the fence was
+read would be journaled inside the turn's slice and billed to the member. On
+runc, 215 → 129 ms per Claude Code turn.
+
+### A booted Kata guest's observer starts before its first prompt
+
+`cloud_agent_host/guest_observer_warmup.py`. The first prompt after every boot
+found the guest observer missing and started it inside its own fence: a
+cleanup exec, the detached start, the eBPF load and the polls until the
+helper was ready. When acquire has created or started the guest and proved
+it, a daemon thread now takes that container's observer lock and calls the
+same `ensure()` the fence would, so the first prompt finds the helper running
+or waits on that lock. It acts only while the exact container it was asked
+for is still the proven one, never while a cursor is open on that guest, and
+a failure is only logged, leaving the prompt's own start as before.
+Estimated at 0.8–3 s off the first prompt after `new_group` or
+`resume_stopped`; not measured, for want of a Kata host.
+
+### No writer freeze for an environment boot with no script to run
+
+`cloud_agent_host/environment_preparation.py`. An environment boot froze and
+thawed every writer UID, 11 execs and about 950 ms on runc with two members,
+even when no script would run. Writers are now frozen only when one will: the
+container's receipt must show setup done and no update pending, and the start
+script must be empty or skipped. Both receipt facts only ever become true for
+a container, so a receipt read before admission cannot understate the work.
+The preparation barrier, the lease and lifecycle fencing and the
+exact-container check are unchanged, and the fixed tool-home script still
+runs.
+
+## Found, not changed
+
+**An environment preparation can trust a stale receipt.**
+`EnvironmentPreparation.status` caches the container's inspection for 15 s,
+stopped or not, and `prepare_environment` returns a receipt whose `ready` was
+computed against that cache. A status read of a stopped environment, such as
+the control plane's environment view, less than 15 s before something starts
+it (a turn's acquire, a terminal, an action, a retry) makes the boot just
+started look prepared: the receipt names the previous boot, and the start
+script does not run in the new one. Reproduced against this branch's
+`prepare_environment` with the real `EnvironmentPreparation`; the same test
+without the earlier status read runs the preparation. The fix is to compare
+the receipt's boot with the inspection `prepare_environment` takes after the
+start. A follow-up could then answer a prepared boot without the full path;
+that was prototyped here, about 15 ms per follow-up on runc and one guest
+network sync under Kata, and left out until the check exists.
+
 ## Recommended next, not changed here
 
 Ranked by time saved × how often the path runs. Each needs a design decision,
@@ -188,33 +284,27 @@ a security review or a Kata host this review did not have.
    this deliberately, for no helper containers on an empty host. Renewing
    from the idle sweep costs two helpers per 45 s per idle host. On the
    runner side, the renewal could instead overlap the child's import.
-2. **Dispatch arming.** Before each prompt the supervisor runs the process
-   census and the observer or tool-mark fence one after another. The census
-   could run beside them and join before admission. Under Kata the opening
-   and bracketed snapshots could be one exec. Estimated 0.3–0.9 s per Kata
-   turn.
-3. **Member preparation before a CLI spawn:** reap, stale-file removal, state
-   preparation, hook merge and `BASH_ENV` are 5–7 execs as the member's UID.
-   They could be one reviewed script with its input on stdin. Saves 0.3–1.5 s
-   per spawn.
-4. **Kata guest observer at first prompt after each boot.** It could start
-   in the background once acquire has proved a started guest. Estimated
-   0.8–3 s per boot.
-5. **Environment boots** freeze and thaw every writer UID (9 execs and 11
-   inspects) even when there is no start script. Each script phase also spends
-   three separate execs on preparation, and completion is polled every second.
-   Saves 1–3 s per environment boot.
-6. **The clone's size watcher** walks the whole checkout again and again while
+2. **One exec for a Kata turn's opening observer reads.** The opening read
+   and the fence after it are two guest execs. One root script can take both
+   (prototyped here), but it pays the helper's two-poll wait inside the exec,
+   which the second exec's start used to hide: the clock bridge around the
+   reading widened by about 10 ms with a stand-in helper on runc, an
+   estimated 25–50 ms under Kata, and attribution windows with it. Its
+   fallback must also still restart a helper whose opening read the host
+   refuses. Estimated at one kata-agent exec less 50–100 ms per Kata turn.
+3. **Environment boots with a script** spend three separate execs on
+   preparation in each script phase, and completion is polled every second.
+4. **The clone's size watcher** walks the whole checkout again and again while
    Git writes it, backing off to at most a fifth of the time. A 30,000-file
    local clone took 7.7–9.7 s; how much of that the walks cost was not
    measured.
-7. **Initial archives** (when archives are enabled) gzip at level 6 on one
+5. **Initial archives** (when archives are enabled) gzip at level 6 on one
    thread before a new chat's first prompt: 18 s for a 402 MB workspace. Level
    1 halves it, and parallel deflate keeping one gzip member does better. The
    previous release's marker rebuild must keep working. One capture slot per
    host also queues urgent work behind background archives, for up to 12
    minutes.
-8. **Kata boot configuration.** Apart from the kernel and guest seccomp,
+6. **Kata boot configuration.** Apart from the kernel and guest seccomp,
    everything is upstream default. Candidates:
    - `static_sandbox_resource_mgmt = true`, which removes CPU and memory
      hotplug;
@@ -223,37 +313,35 @@ a security review or a Kata host this review did not have.
 
    Each needs Kata qualification. VM templating shares kernel memory and
    RNG/KASLR state across tenants and should stay off.
-9. **Archive start fences** re-inspect the container `start()` just
+7. **Archive start fences** re-inspect the container `start()` just
    verified: seven of their ten inspects, about 0.35 s per cold start on runc.
    Most of that cost goes away with the Engine API reads in this revision.
-10. **`HostNetworkGuard._lock` serializes relay updates across unrelated
-    bridges.** A third concurrent `new_group` waited 0.8 s. A per-bridge lock
-    for relay and SSH updates, with installs still exclusive, would remove the
-    wait.
-11. **A long-lived host-rule helper** (150–176 ms per exec against 409 ms per
-    run) needs a security review: it is a standing `NET_ADMIN` container in the
-    host's network namespace.
-12. **Kata guest network sync on every running-group acquire.** It could be
+8. **`HostNetworkGuard._lock` serializes relay updates across unrelated
+   bridges.** A third concurrent `new_group` waited 0.8 s. A per-bridge lock
+   for relay and SSH updates, with installs still exclusive, would remove the
+   wait.
+9. **A long-lived host-rule helper** (150–176 ms per exec against 409 ms per
+   run) needs a security review: it is a standing `NET_ADMIN` container in the
+   host's network namespace.
+10. **Kata guest network sync on every running-group acquire.** It could be
     skipped when the container, its start time, the bridge and the relay
     addresses are unchanged. Needs a security review, because Docker may
     rewrite the guest's hosts file.
-13. **Control-plane round trips before dispatch.** Suspend flushes an event it
+11. **Control-plane round trips before dispatch.** Suspend flushes an event it
     just queued, and suspend and resume each re-register the group with the
     sandbox manager. `report_continuity` is synchronous. The claim route also
     awaits the gateway grant and the GitHub token mints one after another.
     Together that is 50–400 ms across the tunnels.
-14. **Restore throughput.** One `get_object` stream goes to a temporary file,
+12. **Restore throughput.** One `get_object` stream goes to a temporary file,
     then a second rewrite, then `docker image load`. Parallel ranged GETs
     pinned to the object version would drop a copy and survive a broken
     stream. Estimated 1 GiB in 8–15 s instead of 20–40 s.
-15. **Sandbox image size (pulls only).**
+13. **Sandbox image size (pulls only).**
     - The Kilo build is copied in and deleted in a later layer, so it is
       stored twice (≈170 MB).
     - The Claude SDK's venv carries an unused 214 MB CLI.
-16. **Smaller items:**
+14. **Smaller items:**
     - Codex's npm shim adds a Node process and 44 ms per member start.
-    - A downloaded runtime version's root marker is probed on every launch;
-      the reaper cache above would serve it.
     - At capacity, the claim loop polls for a free slot every second.
 
 ## Checked, already fine
@@ -271,5 +359,5 @@ a security review or a Kata host this review did not have.
   - It answers DNS from a local responder.
   - It runs the helper from `python:3.12-slim` with the host's `nft`.
   - It uses `python:3.12-slim` as the sandbox image.
-- **Not covered:** turn-level CLI start and model time are outside it.
-- **Kata:** no Kata host was available, so VM boot, kata-agent exec and virtio-fs costs are estimates throughout. The engine reads and the two removed probes save the same Docker and exec round trips there, and under Kata each exec costs more.
+- **Not covered:** turn-level CLI start and model time are outside it. The spare child, the archive builder, member preparation and the census were measured on benches of their own, described with each.
+- **Kata:** no Kata host was available, so VM boot, kata-agent exec and virtio-fs costs are estimates throughout. The observer warm-up acts only under Kata and was tested with fakes, not measured. Every removed Docker call and exec saves the same round trip there, and under Kata each exec costs more.
