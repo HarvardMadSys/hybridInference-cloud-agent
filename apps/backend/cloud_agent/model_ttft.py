@@ -18,10 +18,10 @@ the whole.
 
 A request is a sample only when the gateway measured a first token for it and
 the request succeeded: ``status_code`` below 400 (the filter the gateway's own
-latency rollups use) and a positive ``ttft_ms``. Non-streamed requests, failed
-ones, rows from a gateway that does not record the field, and a zero all count
-as unmeasured. With no sample the mean is ``None``; it is never replaced by an
-event-derived value.
+latency rollups use) and a non-null ``ttft_ms``. Zero is a measured value at
+millisecond resolution; only null means the gateway did not record a timing.
+Non-streamed requests and failed ones are not samples. With no sample the mean
+is ``None``; it is never replaced by an event-derived value.
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ class ModelTtftSummary(BaseModel):
 
     source: Literal["gateway_request_log"] = "gateway_request_log"
     status: Literal["available", "not_recorded", "unavailable"]
-    mean_ttft_ms: float | None = Field(None, gt=0)
+    mean_ttft_ms: float | None = Field(None, ge=0)
     #: Requests whose TTFT entered the mean.
     samples: int = Field(0, ge=0)
     #: Requests the gateway returned, sampled or not.
@@ -92,7 +92,7 @@ def measured_ttft_ms(request: GrantUsageRequest) -> int | None:
     """The request's first-token time when it is a model TTFT sample, else ``None``."""
     status = request.status_code
     ttft = request.ttft_ms
-    if status is None or status >= 400 or ttft is None or ttft <= 0:
+    if status is None or status >= 400 or ttft is None:
         return None
     return ttft
 

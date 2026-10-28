@@ -159,13 +159,16 @@ export function ThreadStatsBar({ job }: { job: AgentJob }) {
   // Model TTFT is a gateway read, several per call, so it follows state
   // transitions only and never the two-second totals poll.
   useEffect(() => {
+    // A reading from the previous state cannot describe the new state's
+    // request set, especially when the final refresh fails.
+    setTtftSnapshot(null);
     const controller = new AbortController();
     const load = async () => {
       try {
         const ttft = await getAgentThreadModelTtft(job.id, controller.signal);
         if (!controller.signal.aborted) setTtftSnapshot({ jobId: job.id, ttft });
       } catch {
-        // Keep the last reading; a missing TTFT is simply not shown.
+        // A missing reading is not shown; never retain an earlier state's mean.
       }
     };
     void load();

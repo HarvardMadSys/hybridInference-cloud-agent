@@ -136,7 +136,6 @@ async def test_unmeasured_and_failed_requests_never_become_samples() -> None:
             [
                 row("req_ok", offset_s=1, ttft_ms=900),
                 row("req_unstreamed", offset_s=2, ttft_ms=None),
-                row("req_zero", offset_s=3, ttft_ms=0),
                 row("req_429", offset_s=4, ttft_ms=50, status_code=429),
                 row("req_500", offset_s=5, ttft_ms=70, status_code=500),
                 row("req_no_status", offset_s=6, ttft_ms=60, status_code=None),
@@ -149,8 +148,24 @@ async def test_unmeasured_and_failed_requests_never_become_samples() -> None:
 
     assert summary.mean_ttft_ms == 1_000
     assert summary.samples == 2
-    assert summary.requests_read == 7
+    assert summary.requests_read == 6
     assert summary.complete is True
+
+
+async def test_measured_zero_is_preserved_and_participates_in_the_mean() -> None:
+    zero_page = page([row("req_zero", ttft_ms=0)])
+    zero = summarize_request_pages([zero_page], sources_total=1, gap=None)
+    assert zero.status == "available"
+    assert zero.mean_ttft_ms == 0
+    assert zero.samples == 1
+
+    summary = summarize_request_pages(
+        [zero_page, page([row("req_other", ttft_ms=1_000)])],
+        sources_total=2,
+        gap=None,
+    )
+    assert summary.mean_ttft_ms == 500
+    assert summary.samples == 2
 
 
 async def test_an_old_gateway_that_records_no_ttft_manufactures_none() -> None:

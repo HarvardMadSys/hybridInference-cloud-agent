@@ -11,7 +11,7 @@ import { formatDuration } from './TurnFooter';
 
 /** Why a summary covers only part of its scope, in the words a reader needs. */
 const GAPS: Record<string, string> = {
-  sources_truncated: 'only the most recent runs were read',
+  sources_truncated: 'only some runs were read',
   request_page_truncated: 'a run made more requests than one read covers',
   gateway_unavailable: 'the gateway could not be read for every run',
   request_details_unsupported: 'the gateway does not report per-request detail for every run',
@@ -35,7 +35,7 @@ export function modelTtftDisplay(
 ): ModelTtftDisplay | null {
   if (!summary || summary.status !== 'available' || summary.samples <= 0) return null;
   const mean = summary.mean_ttft_ms;
-  if (typeof mean !== 'number' || !Number.isFinite(mean) || mean <= 0) return null;
+  if (typeof mean !== 'number' || !Number.isFinite(mean) || mean < 0) return null;
   const value = formatDuration(mean);
   if (!value) return null;
   const requests = `${summary.samples} successful streamed request${summary.samples === 1 ? '' : 's'}`;

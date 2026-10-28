@@ -19,9 +19,10 @@ receiving a model request to the first streamed chunk it relays back. The
 gateway records it only for streamed requests and leaves it null otherwise.
 
 - A request is a sample when `status_code` is present and below 400 (the
-  filter the gateway's own latency rollups use) and `ttft_ms` is positive.
-  Non-streamed, failed and status-less requests, rows without the field, and
-  zero are unmeasured.
+  status filter the gateway's own latency rollups use) and `ttft_ms` is non-null.
+  Zero is a measured value at millisecond resolution, not a missing value.
+  Non-streamed, failed and status-less requests and rows without the field
+  are unmeasured.
 - The summary is the request-weighted arithmetic mean of the samples. Every
   sampled request weighs one; a request id read twice counts once.
 - With no sample the mean is `null`. No event-derived interval is ever

@@ -106,7 +106,14 @@ describe('statSegments', () => {
 
     expect(speed?.text).toBe('TTFT 10.4s (partial) · 135 tok/s');
     expect(speed?.title).toMatch(/over 1 successful streamed request\./);
-    expect(speed?.title).toMatch(/Partial: only the most recent runs were read\./);
+    expect(speed?.title).toMatch(/Partial: only some runs were read\./);
+  });
+
+  it('shows a measured zero instead of treating it as missing', () => {
+    const speed = statSegments(makeStats(), makeTtft({ mean_ttft_ms: 0 })).find(
+      (segment) => segment.key === 'speed',
+    );
+    expect(speed?.text).toBe('TTFT 0ms · 135 tok/s');
   });
 
   it('renders a dash for tokens a runtime does not report, never a zero', () => {
@@ -230,6 +237,21 @@ describe('ThreadStatsBar live totals', () => {
     render(<ThreadStatsBar job={{ ...running, state: 'queued' }} />);
     await tick(4_000);
     expect(getAgentThreadStats).toHaveBeenCalledTimes(3);
+  });
+
+  it('drops an earlier state’s TTFT when the completed turn cannot be measured', async () => {
+    vi.mocked(getAgentThreadStats).mockResolvedValue(makeStats());
+    vi.mocked(getAgentThreadModelTtft)
+      .mockResolvedValueOnce(makeTtft())
+      .mockRejectedValueOnce(new Error('gateway unavailable'));
+    const { rerender } = render(<ThreadStatsBar job={running} />);
+    await tick();
+    expect(screen.getByText('TTFT 10.4s · 135 tok/s')).toBeInTheDocument();
+
+    rerender(<ThreadStatsBar job={{ ...running, state: 'done' }} />);
+    await tick();
+    expect(screen.queryByText(/TTFT/)).not.toBeInTheDocument();
+    expect(screen.getByText('135 tok/s')).toBeInTheDocument();
   });
 
   it('refreshes a historical turn while another turn in its conversation is active', async () => {
