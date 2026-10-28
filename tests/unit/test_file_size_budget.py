@@ -24,7 +24,7 @@ TEST_LIMIT = 2000
 BASELINE = {
     "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5220,
     "apps/backend/cloud_agent_host/runner.py": 4693,
-    "apps/backend/cloud_agent_host/chat_sandbox.py": 4045,
+    "apps/backend/cloud_agent_host/chat_sandbox.py": 4044,
     "apps/backend/cloud_agent/storage/repositories/compute_resources.py": 3815,
     "apps/backend/cloud_agent_host/sandbox_manager.py": 3545,
     "apps/backend/cloud_agent/storage/repositories/sandbox.py": 3403,
@@ -39,7 +39,7 @@ BASELINE = {
     "apps/backend/cloud_agent/api/mcp_relay.py": 1798,
     "apps/backend/cloud_agent/storage/repositories/snapshot.py": 1673,
     "apps/backend/cloud_agent_host/host_capacity.py": 1636,
-    "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1571,
+    "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1569,
 }
 
 #: Exact line counts of test modules over their calibrated limit after #894's
@@ -57,7 +57,7 @@ TEST_BASELINE = {
     "tests/unit/test_agent_publish_worker.py": 2080,
     "tests/unit/test_agent_runner.py": 2544,
     "tests/unit/test_agent_sandbox_manager.py": 3936,
-    "tests/unit/test_chat_sandbox.py": 3145,
+    "tests/unit/test_chat_sandbox.py": 3138,
     "tests/unit/test_compute_providers.py": 2002,
     "tests/unit/test_compute_reconcile.py": 2291,
     "tests/unit/test_deploy_config.py": 2071,

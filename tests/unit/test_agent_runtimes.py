@@ -1033,6 +1033,8 @@ def test_pi_native_session_is_persisted_and_resumed_explicitly():
     assert argv[argv.index("--session-dir") + 1] == "/agent-state"
     assert argv[argv.index("--session") + 1] == "pi-session-123"
     assert env["PI_CODING_AGENT_DIR"] == "/run/agent-activation/pi"
+    assert env["JITI_FS_CACHE"] == "false"
+    assert env["NODE_DISABLE_COMPILE_CACHE"] == "1"
 
 
 class _Unmediated(AgentRuntime):
