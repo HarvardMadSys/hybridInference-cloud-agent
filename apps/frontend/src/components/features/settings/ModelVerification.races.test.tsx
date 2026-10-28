@@ -85,7 +85,9 @@ it('cannot cancel a pending create that can still commit on the server', async (
   mount();
   fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
   fireEvent.change(screen.getByLabelText('Connection name'), { target: { value: 'Late' } });
-  fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://late.example/v1' } });
+  fireEvent.change(screen.getByLabelText('Base URL'), {
+    target: { value: 'https://late.example/v1' },
+  });
   fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'fixture-key' } });
   fireEvent.change(screen.getByLabelText('Model IDs'), { target: { value: 'm1' } });
   fireEvent.click(screen.getByRole('button', { name: 'Verify and save' }));
@@ -164,19 +166,31 @@ it('leaving the page while verifying applies nothing and sends nothing more', as
 it('a refused edit keeps the old card, and any change clears the stale per-model results', async () => {
   vi.mocked(api.updateModelConnection).mockRejectedValue(
     new APIError(api.VERIFICATION_FAILED, 'no', 422, {
-      models: [{ ...ready('m1'), status: 'failed', category: 'auth', runtimes: [], message: 'Key refused.' }],
+      models: [
+        {
+          ...ready('m1'),
+          status: 'failed',
+          category: 'auth',
+          runtimes: [],
+          message: 'Key refused.',
+        },
+      ],
     }),
   );
   mount();
   await screen.findByRole('article', { name: 'My provider' });
   editBaseUrl('https://new.example/v1');
-  expect(await screen.findByText('Not usable: The provider refused the API key (401/403).')).toBeVisible();
+  expect(
+    await screen.findByText('Not usable: The provider refused the API key (401/403).'),
+  ).toBeVisible();
   expect(screen.getByText('https://old.example/v1', { exact: true })).toBeVisible();
   // The results described the endpoint as it was typed; an edit makes them stale.
   fireEvent.change(screen.getByLabelText('Base URL'), {
     target: { value: 'https://fixed.example/v1' },
   });
-  expect(screen.queryByText('Not usable: The provider refused the API key (401/403).')).not.toBeInTheDocument();
+  expect(
+    screen.queryByText('Not usable: The provider refused the API key (401/403).'),
+  ).not.toBeInTheDocument();
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   expect(screen.getByLabelText('Base URL')).toHaveValue('https://fixed.example/v1');
 });
@@ -199,25 +213,42 @@ it('a verifying save cannot be submitted twice', async () => {
 });
 
 it.each(['edit-first', 'disable-first', 'same-batch'])(
-  'overlapping edit and disable re-read the committed state (%s)', async (order) => {
+  'overlapping edit and disable re-read the committed state (%s)',
+  async (order) => {
     const edit = deferred<api.ModelConnection>();
     const disable = deferred<api.ModelConnection>();
     const edited = { ...connection, base_url: 'https://new.example/v1', updated_at: 'edited' };
     const disabled = { ...edited, enabled: false, updated_at: 'disabled' };
-    vi.mocked(api.updateModelConnection).mockImplementation((_id, changes) => changes.enabled === false ? disable.promise : edit.promise);
+    vi.mocked(api.updateModelConnection).mockImplementation((_id, changes) =>
+      changes.enabled === false ? disable.promise : edit.promise,
+    );
     mount();
     await screen.findByRole('article', { name: 'My provider' });
     editBaseUrl(edited.base_url);
     fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-    vi.mocked(api.listModelConnections).mockResolvedValue({ configured: true, enabled: true, connections: [disabled] });
+    vi.mocked(api.listModelConnections).mockResolvedValue({
+      configured: true,
+      enabled: true,
+      connections: [disabled],
+    });
     if (order === 'same-batch') {
-      await act(async () => { edit.resolve(edited); disable.resolve(disabled); await Promise.all([edit.promise, disable.promise]); });
+      await act(async () => {
+        edit.resolve(edited);
+        disable.resolve(disabled);
+        await Promise.all([edit.promise, disable.promise]);
+      });
     } else {
       const first = order === 'edit-first' ? edit : disable;
       const last = order === 'edit-first' ? disable : edit;
-      await act(async () => { first.resolve(order === 'edit-first' ? edited : disabled); await first.promise; });
-      await act(async () => { last.resolve(order === 'edit-first' ? disabled : edited); await last.promise; });
+      await act(async () => {
+        first.resolve(order === 'edit-first' ? edited : disabled);
+        await first.promise;
+      });
+      await act(async () => {
+        last.resolve(order === 'edit-first' ? disabled : edited);
+        await last.promise;
+      });
     }
     await waitFor(() => expect(api.listModelConnections).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole('button', { name: 'Enable' })).toBeVisible();
@@ -230,20 +261,33 @@ it('a delayed list refresh cannot restore a connection deleted by a later action
   const edit = deferred<api.ModelConnection>();
   const disable = deferred<api.ModelConnection>();
   const refresh = deferred<api.ModelConnectionList>();
-  vi.mocked(api.updateModelConnection).mockImplementation((_id, changes) => changes.enabled === false ? disable.promise : edit.promise);
+  vi.mocked(api.updateModelConnection).mockImplementation((_id, changes) =>
+    changes.enabled === false ? disable.promise : edit.promise,
+  );
   vi.mocked(api.deleteModelConnection).mockResolvedValue();
   mount();
   await screen.findByRole('article', { name: 'My provider' });
   editBaseUrl('https://new.example/v1');
   fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
   fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-  vi.mocked(api.listModelConnections).mockReturnValueOnce(refresh.promise).mockResolvedValue({ configured: true, enabled: true, connections: [] });
-  await act(async () => { edit.resolve(connection); disable.resolve({ ...connection, enabled: false }); await Promise.all([edit.promise, disable.promise]); });
+  vi.mocked(api.listModelConnections)
+    .mockReturnValueOnce(refresh.promise)
+    .mockResolvedValue({ configured: true, enabled: true, connections: [] });
+  await act(async () => {
+    edit.resolve(connection);
+    disable.resolve({ ...connection, enabled: false });
+    await Promise.all([edit.promise, disable.promise]);
+  });
   await waitFor(() => expect(api.listModelConnections).toHaveBeenCalledTimes(2));
   fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
   fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-  await waitFor(() => expect(screen.queryByRole('article', { name: 'My provider' })).not.toBeInTheDocument());
-  await act(async () => { refresh.resolve({ configured: true, enabled: true, connections: [connection] }); await refresh.promise; });
+  await waitFor(() =>
+    expect(screen.queryByRole('article', { name: 'My provider' })).not.toBeInTheDocument(),
+  );
+  await act(async () => {
+    refresh.resolve({ configured: true, enabled: true, connections: [connection] });
+    await refresh.promise;
+  });
   await waitFor(() => expect(api.listModelConnections).toHaveBeenCalledTimes(3));
   expect(screen.queryByRole('article', { name: 'My provider' })).not.toBeInTheDocument();
 });

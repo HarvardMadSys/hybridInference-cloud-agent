@@ -1,31 +1,42 @@
 export const modelConnectionsEn = {
-  "connections.invalid": "Check the highlighted fields, then try again.",
-  "connections.invalid.name": "Enter a connection name of up to 64 characters.",
-  "connections.invalid.url": "Enter an HTTPS Base URL without a username, password, query or fragment.",
-  "connections.invalid.key": "Use a printable API key without spaces.",
-  "connections.invalid.model": "Use the exact model ID, without spaces (up to 200 characters).",
-  "connections.timedOut": "Verification took too long. Nothing was saved; try again later.",
-  "connections.modelLimit": "Up to {max} models per connection.",
-  "connections.reason.supported": "Streaming and a tool call round trip both worked.",
-  "connections.reason.blocked_address": "That address cannot be used: it resolves to a private, reserved or protected address, or has no public IPv4 address a sandbox can reach.",
-  "connections.reason.unreachable": "The provider could not be reached, or did not answer in time.",
-  "connections.reason.tls": "The provider's TLS certificate could not be verified.",
-  "connections.reason.redirected": "The provider redirected the request. Enter the final Base URL instead.",
-  "connections.reason.auth": "The provider refused the API key (401/403).",
-  "connections.reason.rate_limited": "The provider is rate limiting this key (429). Try again later.",
-  "connections.reason.upstream_error": "The provider failed to answer (5xx). Try again later.",
-  "connections.reason.too_large": "The provider's answer was larger than a check reads.",
-  "connections.reason.endpoint_missing": "The provider has no such endpoint or model (404). Check the Base URL, the model id, and that the provider offers this protocol.",
-  "connections.reason.request_rejected": "The provider rejected a streaming request with a tool (400/422). The model or provider may not support tool calls in this protocol.",
-  "connections.reason.not_streaming": "The provider did not answer with a stream in this protocol.",
-  "connections.reason.no_tool_call": "The model did not call the offered tool exactly once.",
-  "connections.reason.missing_call_id": "The model's tool call carried no call id to answer it with.",
-  "connections.reason.wrong_tool_arguments": "The model called the tool, but not with the value it was asked for.",
-  "connections.reason.no_final_answer": "The model's answer after the tool result did not repeat that result.",
-  "connections.reason.stream_error": "The provider reported an error, or cut the answer short, inside the stream.",
-  "connections.reason.incomplete_stream": "The provider's stream ended before the answer finished.",
-  "connections.reason.unexpected_status": "The provider answered with an unexpected HTTP status.",
-  "connections.reason.invalid_response": "The provider's answer could not be read in the expected format.",
+  'connections.invalid': 'Check the highlighted fields, then try again.',
+  'connections.invalid.name': 'Enter a connection name of up to 64 characters.',
+  'connections.invalid.url':
+    'Enter an HTTPS Base URL without a username, password, query or fragment.',
+  'connections.invalid.key': 'Use a printable API key without spaces.',
+  'connections.invalid.model': 'Use the exact model ID, without spaces (up to 200 characters).',
+  'connections.timedOut': 'Verification took too long. Nothing was saved; try again later.',
+  'connections.modelLimit': 'Up to {max} models per connection.',
+  'connections.reason.supported': 'Streaming and a tool call round trip both worked.',
+  'connections.reason.blocked_address':
+    'That address cannot be used: it resolves to a private, reserved or protected address, or has no public IPv4 address a sandbox can reach.',
+  'connections.reason.unreachable': 'The provider could not be reached, or did not answer in time.',
+  'connections.reason.tls': "The provider's TLS certificate could not be verified.",
+  'connections.reason.redirected':
+    'The provider redirected the request. Enter the final Base URL instead.',
+  'connections.reason.auth': 'The provider refused the API key (401/403).',
+  'connections.reason.rate_limited':
+    'The provider is rate limiting this key (429). Try again later.',
+  'connections.reason.upstream_error': 'The provider failed to answer (5xx). Try again later.',
+  'connections.reason.too_large': "The provider's answer was larger than a check reads.",
+  'connections.reason.endpoint_missing':
+    'The provider has no such endpoint or model (404). Check the Base URL, the model id, and that the provider offers this protocol.',
+  'connections.reason.request_rejected':
+    'The provider rejected a streaming request with a tool (400/422). The model or provider may not support tool calls in this protocol.',
+  'connections.reason.not_streaming': 'The provider did not answer with a stream in this protocol.',
+  'connections.reason.no_tool_call': 'The model did not call the offered tool exactly once.',
+  'connections.reason.missing_call_id':
+    "The model's tool call carried no call id to answer it with.",
+  'connections.reason.wrong_tool_arguments':
+    'The model called the tool, but not with the value it was asked for.',
+  'connections.reason.no_final_answer':
+    "The model's answer after the tool result did not repeat that result.",
+  'connections.reason.stream_error':
+    'The provider reported an error, or cut the answer short, inside the stream.',
+  'connections.reason.incomplete_stream': "The provider's stream ended before the answer finished.",
+  'connections.reason.unexpected_status': 'The provider answered with an unexpected HTTP status.',
+  'connections.reason.invalid_response':
+    "The provider's answer could not be read in the expected format.",
   'connections.title': 'Personal model connections',
   'connections.description':
     'Run your tasks on your own provider’s API key. Connections are private to you, and your provider bills that key separately from platform inference.',
@@ -91,6 +102,35 @@ export const modelConnectionsEn = {
 } as const;
 
 export const modelConnectionsZhCN: Record<keyof typeof modelConnectionsEn, string> = {
+  'connections.invalid': '请检查标出的字段后重试。',
+  'connections.invalid.name': '请输入连接名称，最多 64 个字符。',
+  'connections.invalid.url': '请输入 HTTPS Base URL，不含用户名、密码、查询参数或片段。',
+  'connections.invalid.key': '请输入不含空格的可打印 API key。',
+  'connections.invalid.model': '请输入完整的模型 ID，不含空格，最多 200 个字符。',
+  'connections.timedOut': '验证超时，未保存任何内容，请稍后重试。',
+  'connections.modelLimit': '每个连接最多添加 {max} 个模型。',
+  'connections.reason.supported': '流式回复及工具调用往返验证成功。',
+  'connections.reason.blocked_address':
+    '地址指向私有、保留或受保护的网络，或没有可用的公网 IPv4 地址。',
+  'connections.reason.unreachable': '无法连接服务商，或服务商未及时响应。',
+  'connections.reason.tls': '无法验证服务商的 TLS 证书。',
+  'connections.reason.redirected': '服务商返回了重定向，请填写最终的 Base URL。',
+  'connections.reason.auth': '服务商拒绝了 API key（401/403），请检查密钥。',
+  'connections.reason.rate_limited': '此密钥被服务商限流（429），请稍后重试。',
+  'connections.reason.upstream_error': '服务商返回错误（5xx），请稍后重试。',
+  'connections.reason.too_large': '服务商返回的数据超过验证的大小限制。',
+  'connections.reason.endpoint_missing': '未找到接口或模型（404），请检查地址和模型 ID。',
+  'connections.reason.request_rejected':
+    '服务商拒绝了流式工具调用请求（400/422），此模型可能不支持工具调用。',
+  'connections.reason.not_streaming': '服务商未返回流式回复。',
+  'connections.reason.no_tool_call': '模型未按要求调用工具。',
+  'connections.reason.missing_call_id': '工具调用缺少调用 ID。',
+  'connections.reason.wrong_tool_arguments': '模型未按要求传入工具参数。',
+  'connections.reason.no_final_answer': '模型未正确处理工具返回的结果。',
+  'connections.reason.stream_error': '服务商在流式回复中报错或提前中断。',
+  'connections.reason.incomplete_stream': '回复尚未完成，流式连接已结束。',
+  'connections.reason.unexpected_status': '服务商返回了非预期的 HTTP 状态。',
+  'connections.reason.invalid_response': '无法解析服务商返回的数据。',
   'connections.title': '个人模型连接',
   'connections.description':
     '用自己服务商的 API key 运行任务。连接只有你自己能用，费用由服务商按这个 key 单独计费，与平台推理额度无关。',

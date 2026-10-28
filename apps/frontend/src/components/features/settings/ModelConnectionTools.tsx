@@ -95,7 +95,12 @@ export function ModelConnectionTools({
               <label key={value} className="flex min-h-9 items-center gap-2 break-all text-sm">
                 <input
                   type="checkbox"
-                  disabled={busy || connection.models.includes(value) || (!selected.includes(value) && connection.models.length + selected.length >= maxModels)}
+                  disabled={
+                    busy ||
+                    connection.models.includes(value) ||
+                    (!selected.includes(value) &&
+                      connection.models.length + selected.length >= maxModels)
+                  }
                   checked={connection.models.includes(value) || selected.includes(value)}
                   onChange={(event) =>
                     setSelected((current) =>

@@ -93,8 +93,7 @@ export function ModelConnectionCard({
             disabled={busy || (!available && !connection.enabled)}
             onClick={() => {
               if (connection.enabled) setConfirm('disable');
-              else
-                void run(() => change({ enabled: true }));
+              else void run(() => change({ enabled: true }));
             }}
           >
             {t(connection.enabled ? 'connections.disable' : 'connections.enable')}

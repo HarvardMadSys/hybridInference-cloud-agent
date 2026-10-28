@@ -61,7 +61,11 @@ function ready(model: string, runtimes = EVERY): api.ModelStatus {
   };
 }
 
-function refused(model: string, message = 'The model did not call the tool.', category = 'no_tool_call'): api.ModelStatus {
+function refused(
+  model: string,
+  message = 'The model did not call the tool.',
+  category = 'no_tool_call',
+): api.ModelStatus {
   return {
     ...ready(model),
     status: 'unsupported',
@@ -189,7 +193,9 @@ describe('adding a connection', () => {
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://api.example.com/custom/v1');
     expect(screen.getByLabelText('API key')).toHaveValue('private-provider-key');
     const chips = screen.getByRole('list', { name: 'Models to save' });
-    expect(chips).toHaveTextContent('Not usable: The model did not call the offered tool exactly once.');
+    expect(chips).toHaveTextContent(
+      'Not usable: The model did not call the offered tool exactly once.',
+    );
     expect(chips).toHaveTextContent(`Works with ${AGENT_NAMES}`);
     expect(screen.queryByRole('article', { name: 'Second provider' })).not.toBeInTheDocument();
 
@@ -300,7 +306,10 @@ describe('editing a connection', () => {
 
   it('verifies a new key before saving it, and a refusal keeps the old card as it was', async () => {
     vi.mocked(api.updateModelConnection).mockRejectedValue(
-      refusal(refused('shared-model', 'The provider refused the key.', 'auth'), ready('another-model')),
+      refusal(
+        refused('shared-model', 'The provider refused the key.', 'auth'),
+        ready('another-model'),
+      ),
     );
     renderSettings();
     const card = await screen.findByRole('article', { name: connection.name });
@@ -354,13 +363,13 @@ describe('a saved connection', () => {
     const card = await screen.findByRole('article', { name: connection.name });
     expect(within(card).queryByRole('button', { name: /^Verify/ })).not.toBeInTheDocument();
     const details = within(card).getByText('Technical details', { selector: 'summary' });
-    for (const path of within(card).getAllByText('opencode: Chat Completions')) {
+    for (const path of within(card).getAllByText('OpenCode: Chat Completions')) {
       expect(path).not.toBeVisible();
     }
     fireEvent.click(details);
-    expect(within(card).getAllByText('opencode: Chat Completions')[0]).toBeVisible();
+    expect(within(card).getAllByText('OpenCode: Chat Completions')[0]).toBeVisible();
     expect(
-      within(card).getAllByText('codex: Responses, translated to Chat Completions')[0],
+      within(card).getAllByText('Codex: Responses, translated to Chat Completions')[0],
     ).toBeVisible();
     expect(within(card).getAllByText('Chat Completions: works')[0]).toBeVisible();
   });
@@ -391,7 +400,7 @@ describe('a saved connection', () => {
   it('adds discovered IDs through a verified save and reports a refused one', async () => {
     vi.mocked(api.discoverConnectionModels).mockResolvedValue(['shared-model', 'third-model']);
     vi.mocked(api.updateModelConnection).mockRejectedValue(
-      refusal(refused('third-model', 'The provider has no such model.')),
+      refusal(refused('third-model', 'The provider has no such model.', 'endpoint_missing')),
     );
     renderSettings();
     await screen.findByRole('article', { name: connection.name });
@@ -405,7 +414,7 @@ describe('a saved connection', () => {
       }),
     );
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'third-model: The provider has no such model.',
+      'third-model: The provider has no such endpoint or model (404). Check the Base URL, the model id, and that the provider offers this protocol.',
     );
   });
 
@@ -440,7 +449,9 @@ it('reports malformed URL and model IDs beside the fields without calling the pr
   renderSettings();
   fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
   fillNew(['model with spaces']);
-  fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'http://provider.example/v1' } });
+  fireEvent.change(screen.getByLabelText('Base URL'), {
+    target: { value: 'http://provider.example/v1' },
+  });
   fireEvent.click(screen.getByRole('button', { name: 'Verify and save' }));
   expect(screen.getByLabelText('Base URL')).toHaveAttribute('aria-invalid', 'true');
   expect(screen.getByLabelText('Model IDs')).toHaveAttribute('aria-invalid', 'true');
@@ -451,11 +462,15 @@ it('reports malformed URL and model IDs beside the fields without calling the pr
 });
 
 it('shows a Chinese reason and readable agent names after a mixed verification refusal', async () => {
-  vi.mocked(api.createModelConnection).mockRejectedValue(refusal(ready('good-model'), refused('bad-model')));
+  vi.mocked(api.createModelConnection).mockRejectedValue(
+    refusal(ready('good-model'), refused('bad-model')),
+  );
   renderSettings('zh-CN');
   fireEvent.click(await screen.findByRole('button', { name: '添加连接' }));
   fireEvent.change(screen.getByLabelText('连接名称'), { target: { value: '我的服务' } });
-  fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://provider.example/v1' } });
+  fireEvent.change(screen.getByLabelText('Base URL'), {
+    target: { value: 'https://provider.example/v1' },
+  });
   fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'fixture-key' } });
   const input = screen.getByLabelText('模型 ID');
   fireEvent.change(input, { target: { value: 'good-model' } });
@@ -463,6 +478,8 @@ it('shows a Chinese reason and readable agent names after a mixed verification r
   fireEvent.change(input, { target: { value: 'bad-model' } });
   fireEvent.click(screen.getByRole('button', { name: '验证并保存' }));
   expect(await screen.findByText('无法使用：模型未按要求调用工具。')).toBeVisible();
-  expect(screen.getByRole('list', { name: '要保存的模型' })).toHaveTextContent('Claude Code, Codex, Kilo Code, OpenCode, pi');
+  expect(screen.getByRole('list', { name: '要保存的模型' })).toHaveTextContent(
+    'Claude Code, Codex, Kilo Code, OpenCode, pi',
+  );
   expect(screen.queryByText('The model did not call the tool.')).not.toBeInTheDocument();
 });

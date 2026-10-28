@@ -48,7 +48,7 @@ export function ModelConnectionsSettings() {
           return;
         }
         // A later mutation can be queued in the same React batch.
-        setData((current) => version === ops.current.version ? value : current);
+        setData((current) => (version === ops.current.version ? value : current));
       })
       .catch(() => {
         if (active) setFailed(true);
@@ -123,7 +123,6 @@ export function ModelConnectionsSettings() {
             if (connection) saved(connection, { created: editing === 'new' });
             setEditing(null);
           }}
-          onSettledAfterLeaving={() => setReload((value) => value + 1)}
           onCancel={() => setEditing(null)}
         />
       ) : null}

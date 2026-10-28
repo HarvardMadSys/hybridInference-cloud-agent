@@ -1,7 +1,11 @@
 'use client';
 
 import { useT } from '@/components/providers';
-import { connectionReason, connectionAgentNames, connectionAgentName } from './modelConnectionDisplay';
+import {
+  connectionReason,
+  connectionAgentNames,
+  connectionAgentName,
+} from './modelConnectionDisplay';
 import {
   protocolName,
   type AgentPath,

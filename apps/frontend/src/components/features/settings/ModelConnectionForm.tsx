@@ -128,7 +128,6 @@ export function ModelConnectionForm({
   maxModels = MAX_MODELS,
   operate,
   onSaved,
-  onSettledAfterLeaving,
   onCancel,
 }: {
   connection?: ModelConnection;
@@ -136,12 +135,6 @@ export function ModelConnectionForm({
   operate: Operate;
   /** `null`: saved, but another change overtook its answer; the page re-reads. */
   onSaved: (connection: ModelConnection | null) => void;
-  /**
-   * A save still running when the form went away (the page was left, or the
-   * connection deleted) finished anyway: the server may now hold it, so the
-   * page re-reads its list rather than trusting or dropping this late answer.
-   */
-  onSettledAfterLeaving?: () => void;
   onCancel: () => void;
 }) {
   const t = useT();
@@ -195,10 +188,7 @@ export function ModelConnectionForm({
     setBusy(true);
     try {
       const saved = await submit(connection, fields, operate);
-      if (!mounted.current) {
-        onSettledAfterLeaving?.();
-        return;
-      }
+      if (!mounted.current) return;
       setKey('');
       onSaved(saved ?? null);
     } catch (cause) {
