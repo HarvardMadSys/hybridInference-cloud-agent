@@ -218,6 +218,71 @@ async def test_a_mixed_connection_lists_models_with_the_openai_request():
     assert "x-api-key" not in seen[0].headers
 
 
+async def test_an_automatic_chat_only_connection_lists_models_in_one_openai_request():
+    seen: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _models(request)
+
+    models = await discover_models(
+        base_url="https://api.example.com/v1",
+        api_key=_KEY,
+        protocols=[],
+        resolve=_public,
+        transport=httpx.MockTransport(respond),
+    )
+    assert models == ["claude-sonnet-4-5"]
+    assert len(seen) == 1
+    assert seen[0].headers["authorization"] == f"Bearer {_KEY}"
+    assert "x-api-key" not in seen[0].headers
+
+
+@pytest.mark.parametrize("refusal", [401, 404])
+async def test_an_automatic_messages_only_connection_lists_models_on_its_second_request(refusal):
+    """No manual declaration is needed for a provider that answers only the Anthropic way."""
+    seen: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if "x-api-key" not in request.headers:
+            return httpx.Response(refusal, text=f"no such thing {_KEY}")
+        return _models(request)
+
+    models = await discover_models(
+        base_url="https://gateway.example/anthropic/v1",
+        api_key=_KEY,
+        protocols=[],
+        resolve=_public,
+        transport=httpx.MockTransport(respond),
+    )
+    assert models == ["claude-sonnet-4-5"]
+    assert len(seen) == 2
+    assert seen[0].headers["authorization"] == f"Bearer {_KEY}"
+    assert str(seen[1].url) == "https://gateway.example/anthropic/v1/models"
+    assert seen[1].headers["x-api-key"] == _KEY
+    assert "authorization" not in seen[1].headers
+
+
+async def test_automatic_discovery_stops_at_a_failure_another_listing_cannot_fix():
+    seen: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(503, text=f"down {_KEY}")
+
+    with pytest.raises(CheckStop) as stop:
+        await discover_models(
+            base_url="https://api.example.com/v1",
+            api_key=_KEY,
+            protocols=[],
+            resolve=_public,
+            transport=httpx.MockTransport(respond),
+        )
+    assert len(seen) == 1
+    assert stop.value.category == "upstream_error" and _KEY not in str(stop.value)
+
+
 async def test_a_messages_model_list_refusal_is_a_category_not_a_body():
     def respond(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, text=f"bad key {_KEY}")

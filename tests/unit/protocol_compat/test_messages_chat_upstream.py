@@ -826,8 +826,13 @@ def test_request_tool_result_and_text_ordering():
     assert messages[1]["content"] == "<system-reminder>be brief</system-reminder>"
 
 
-def test_request_tool_result_image_block_becomes_placeholder():
-    """C10: image blocks in a tool_result don't vanish into an empty string."""
+def test_request_tool_result_image_block_is_kept_not_replaced():
+    """C10, Cloud Agent: an image in a tool_result is carried, never a placeholder.
+
+    The upstream kernel replaced it with ``[image]``; the image is kept as a
+    part, which ``tool_images`` moves out of the tool message (see
+    ``test_compat_gate``).
+    """
     body = {
         "model": "m",
         "max_tokens": 10,
@@ -848,7 +853,11 @@ def test_request_tool_result_image_block_becomes_placeholder():
     }
     messages, _ = anthropic_request_to_openai(body)
     assert messages[0]["role"] == "tool"
-    assert messages[0]["content"] == "[image]"
+    assert messages[0]["content"] == [
+        {"type": "text", "text": ""},
+        {"type": "image_url", "image_url": {"url": "data:application/octet-stream;base64,x"}},
+    ]
+    assert "[image]" not in str(messages)
 
 
 def test_request_tool_result_is_error_prefixed():

@@ -21,8 +21,8 @@ const config = {
   runtimes: ['claude-code', 'codex', 'opencode'],
   models: ['gpt-5', '[odd]'],
   model_connections: [
-    { id: A, name: 'Alpha', models: ['gpt-5'], runtimes: ['codex', 'opencode'] },
-    { id: B, name: 'Beta', models: ['gpt-5'], runtimes: ['opencode'] },
+    { id: A, name: 'Alpha', models: ['gpt-5'], model_runtimes: { 'gpt-5': ['codex', 'opencode'] } },
+    { id: B, name: 'Beta', models: ['gpt-5'], model_runtimes: { 'gpt-5': ['opencode'] } },
   ],
   github_connected: true,
   github_install_url: null,
@@ -99,35 +99,36 @@ describe('modelOverride', () => {
   });
 });
 
-describe('translated sources', () => {
-  const chatOnly = {
+describe('per-model availability', () => {
+  const mixed = {
     ...config,
     models: [],
     model_connections: [
       {
         id: A,
-        name: 'Chat only',
-        models: ['m'],
-        runtimes: ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
-        translated_runtimes: ['claude-code', 'codex'],
+        name: 'Mixed',
+        models: ['verified', 'fresh'],
+        // `fresh` was added after verification: it is listed, but not usable yet.
+        model_runtimes: { verified: ['claude-code', 'codex', 'kilo', 'opencode', 'pi'] },
       },
     ],
   } as AgentConfigApi;
 
-  it('says when an agent reaches a connection through the compatibility helper', () => {
-    const choice = { model: 'm', connectionId: A };
-    expect(choiceLabel(chatOnly, choice, t, { runtime: 'codex' })).toBe(
-      'm · Chat only · via Chat Completions',
-    );
-    expect(choiceLabel(chatOnly, choice, t, { runtime: 'opencode' })).toBe('m · Chat only');
-    expect(choiceLabel(chatOnly, choice, t, { runtime: 'codex', unavailable: true })).toBe(
-      'm · Chat only · via Chat Completions (unavailable)',
-    );
+  it('offers only the models verified for the agent, never the whole connection', () => {
+    for (const runtime of ['codex', 'claude-code', 'pi']) {
+      expect(offeredChoices(mixed, runtime)).toEqual([{ model: 'verified', connectionId: A }]);
+    }
+    expect(offeredChoices(mixed, 'goose')).toEqual([]);
   });
 
-  it('offers a chat-only connection to Codex and Claude Code as well', () => {
-    for (const runtime of ['codex', 'claude-code', 'pi']) {
-      expect(offeredChoices(chatOnly, runtime)).toEqual([{ model: 'm', connectionId: A }]);
-    }
+  it('never names the API an agent reaches a model on', () => {
+    const choice = { model: 'verified', connectionId: A };
+    expect(choiceLabel(mixed, choice, t, { runtime: 'codex' })).toBe('verified · Mixed');
+    expect(
+      choiceLabel(mixed, { model: 'fresh', connectionId: A }, t, {
+        runtime: 'codex',
+        unavailable: true,
+      }),
+    ).toBe('fresh · Mixed (unavailable)');
   });
 });

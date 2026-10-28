@@ -7,52 +7,93 @@ import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import * as api from '@/lib/api/modelConnections';
 import { ModelConnectionsSettings } from './ModelConnectionsSettings';
 
-// The calls are mocked; the protocol vocabulary is the real one.
+// The calls are mocked; the protocol vocabulary and status helpers are the real ones.
 vi.mock('@/lib/api/modelConnections', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/modelConnections')>()),
   listModelConnections: vi.fn(),
   createModelConnection: vi.fn(),
   updateModelConnection: vi.fn(),
   deleteModelConnection: vi.fn(),
-  checkModelConnection: vi.fn(),
+  verifyModelConnection: vi.fn(),
   discoverConnectionModels: vi.fn(),
 }));
+
+function unverified(model: string): api.ModelStatus {
+  return {
+    model,
+    status: 'unverified',
+    category: null,
+    message: '',
+    runtimes: [],
+    paths: [],
+    protocols: {},
+    checked_at: null,
+  };
+}
+
+/** Chat Completions verified for `model`; Codex and Claude Code through translation. */
+function chatReady(model: string): api.ModelStatus {
+  return {
+    model,
+    status: 'ready',
+    category: null,
+    message: '',
+    runtimes: ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
+    paths: [
+      {
+        runtime: 'claude-code',
+        mode: 'translated',
+        client_protocol: 'anthropic_messages',
+        upstream_protocol: 'chat_completions',
+      },
+      {
+        runtime: 'codex',
+        mode: 'translated',
+        client_protocol: 'responses',
+        upstream_protocol: 'chat_completions',
+      },
+      {
+        runtime: 'opencode',
+        mode: 'direct',
+        client_protocol: 'chat_completions',
+        upstream_protocol: 'chat_completions',
+      },
+    ],
+    protocols: {
+      chat_completions: {
+        status: 'supported',
+        category: 'supported',
+        message: '',
+        http_status: null,
+      },
+      responses: {
+        status: 'unsupported',
+        category: 'endpoint_missing',
+        message: 'The provider has no such endpoint.',
+        http_status: 404,
+      },
+    },
+    checked_at: '2026-10-28T00:00:00Z',
+  };
+}
 
 const connection: api.ModelConnection = {
   id: 'mconn_01234567890123456789012345678901',
   name: 'My provider',
   base_url: 'https://api.example.com/custom/v1',
-  protocols: ['chat_completions', 'responses'],
+  protocol_mode: 'auto',
+  manual_protocols: [],
   models: ['shared-model', 'another-model'],
   enabled: true,
   has_api_key: true,
-  runtimes: ['opencode', 'kilo', 'pi', 'codex'],
-  last_check: null,
+  runtimes: [],
+  model_status: [unverified('shared-model'), unverified('another-model')],
   created_at: '2026-10-27T00:00:00Z',
   updated_at: '2026-10-27T00:00:00Z',
 };
 
-/** The labels a themed select's menu offers; the menu closes again with Escape. */
-function menuLabels(combobox: HTMLElement): (string | null)[] {
-  fireEvent.click(combobox);
-  const label = (combobox as HTMLButtonElement).labels?.[0]?.textContent ?? '';
-  const menu = screen.getByRole('listbox', { name: label });
-  const labels = within(menu)
-    .getAllByRole('option')
-    .map((option) => option.textContent);
-  fireEvent.keyDown(menu, { key: 'Escape' });
-  expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
-  return labels;
-}
-
-/** Choose an option from a themed select's menu with the pointer. */
-function choose(combobox: HTMLElement, label: string) {
-  fireEvent.click(combobox);
-  fireEvent.click(screen.getByRole('option', { name: label }));
-  expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
-}
-
-function renderSettings() {
+function renderSettings(locale: 'en' | 'zh-CN' = 'en') {
+  localStorage.setItem(LOCALE_STORAGE_KEY, locale);
   return render(
     <LocaleProvider>
       <ModelConnectionsSettings />
@@ -60,20 +101,31 @@ function renderSettings() {
   );
 }
 
+function fillNew(models: string) {
+  fireEvent.change(screen.getByLabelText('Connection name'), {
+    target: { value: 'Second provider' },
+  });
+  fireEvent.change(screen.getByLabelText('Base URL'), {
+    target: { value: 'https://api.example.com/custom/v1' },
+  });
+  fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'private-provider-key' } });
+  fireEvent.change(screen.getByLabelText('Model IDs'), { target: { value: models } });
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
   localStorage.clear();
-  localStorage.setItem(LOCALE_STORAGE_KEY, 'en');
   vi.mocked(api.listModelConnections).mockResolvedValue({
     configured: true,
     enabled: true,
+    checks_per_hour: 20,
     connections: [connection],
   });
 });
 afterEach(cleanup);
 
-describe('personal model connections', () => {
-  it('saves a manually configured connection without discovery or billable tests', async () => {
+describe('adding a connection', () => {
+  it('asks only for a name, Base URL, key and models, and saving calls no provider', async () => {
     vi.mocked(api.createModelConnection).mockResolvedValue({
       ...connection,
       id: 'new',
@@ -81,35 +133,106 @@ describe('personal model connections', () => {
     });
     renderSettings();
     fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
-    fireEvent.change(screen.getByLabelText('Connection name'), {
-      target: { value: 'Second provider' },
-    });
-    fireEvent.change(screen.getByLabelText('Base URL'), {
-      target: { value: 'https://api.example.com/custom/v1' },
-    });
-    const key = screen.getByLabelText('API key');
-    expect(key).toHaveAttribute('type', 'password');
-    fireEvent.change(key, { target: { value: 'private-provider-key' } });
-    fireEvent.change(screen.getByLabelText('Model IDs'), {
-      target: { value: 'shared-model\nshared-model\nanother-model' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Save connection' }));
+    // No protocol is asked for on the ordinary path: the override is collapsed.
+    for (const name of ['Chat Completions', 'Responses', 'Anthropic Messages']) {
+      expect(screen.queryByRole('checkbox', { name })).not.toBeInTheDocument();
+    }
+    expect(screen.getByText('Advanced', { selector: 'summary' })).toBeVisible();
+    expect(screen.queryByText(/OpenCode, Kilo, pi/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('API key')).toHaveAttribute('type', 'password');
+    fillNew('shared-model\nshared-model\nanother-model');
+    expect(screen.getAllByText(/Your provider may bill them/)[0]).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() =>
       expect(api.createModelConnection).toHaveBeenCalledWith({
         name: 'Second provider',
         base_url: connection.base_url,
         api_key: 'private-provider-key',
-        protocols: ['chat_completions'],
         models: connection.models,
       }),
     );
-    expect(await screen.findByRole('article', { name: 'Second provider' })).toBeVisible();
+    const card = await screen.findByRole('article', { name: 'Second provider' });
+    expect(within(card).getAllByText('Not verified')).toHaveLength(2);
     expect(screen.queryByDisplayValue('private-provider-key')).not.toBeInTheDocument();
-    expect(api.checkModelConnection).not.toHaveBeenCalled();
+    expect(api.verifyModelConnection).not.toHaveBeenCalled();
     expect(api.discoverConnectionModels).not.toHaveBeenCalled();
   });
 
-  it('never reads back a saved key and omits a blank key on edit', async () => {
+  it('"Save and verify" verifies at most three models, one at a time, and says how many remain', async () => {
+    const models = ['m1', 'm2', 'm3', 'm4'];
+    vi.mocked(api.createModelConnection).mockResolvedValue({
+      ...connection,
+      id: 'new',
+      name: 'Second provider',
+      models,
+      model_status: models.map(unverified),
+    });
+    let inFlight = 0;
+    vi.mocked(api.verifyModelConnection).mockImplementation(async (_id, model) => {
+      inFlight += 1;
+      expect(inFlight).toBe(1);
+      await Promise.resolve();
+      inFlight -= 1;
+      return { ...chatReady(model), recorded: true };
+    });
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
+    fillNew(models.join('\n'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save and verify' }));
+    const card = await screen.findByRole('article', { name: 'Second provider' });
+    await waitFor(() => expect(within(card).getAllByText('Ready')).toHaveLength(3));
+    expect(vi.mocked(api.verifyModelConnection).mock.calls).toEqual([
+      ['new', 'm1'],
+      ['new', 'm2'],
+      ['new', 'm3'],
+    ]);
+    expect(within(card).getByText('Models not verified yet: 1.')).toBeVisible();
+    expect(within(card).getByText('3 of 4 models ready')).toBeVisible();
+    // The agents are named; how each reaches the model is not on the normal path.
+    expect(
+      within(card).getAllByText('Works with claude-code, codex, kilo, opencode, pi')[0],
+    ).toBeVisible();
+    expect(within(card).queryByText(/via Chat Completions/)).not.toBeInTheDocument();
+    for (const path of within(card).getAllByText(
+      /codex: Responses, translated to Chat Completions/,
+    )) {
+      expect(path).not.toBeVisible();
+    }
+  });
+
+  it('declares APIs only through the advanced override, and never an empty declaration', async () => {
+    vi.mocked(api.createModelConnection).mockResolvedValue({
+      ...connection,
+      id: 'new',
+      name: 'Second provider',
+      protocol_mode: 'manual',
+      manual_protocols: ['anthropic_messages'],
+    });
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
+    fillNew('claude-sonnet-4-5');
+    fireEvent.click(screen.getByText('Advanced', { selector: 'summary' }));
+    expect(
+      screen.getByRole('radio', { name: 'Detect automatically when verifying (recommended)' }),
+    ).toBeChecked();
+    fireEvent.click(screen.getByRole('radio', { name: 'Declare the APIs this endpoint offers' }));
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Anthropic Messages' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(api.createModelConnection).toHaveBeenCalledWith({
+        name: 'Second provider',
+        base_url: connection.base_url,
+        api_key: 'private-provider-key',
+        models: ['claude-sonnet-4-5'],
+        protocols: ['anthropic_messages'],
+      }),
+    );
+  });
+});
+
+describe('editing a connection', () => {
+  it('sends only the name on a rename, so the key and verification stay', async () => {
     vi.mocked(api.updateModelConnection).mockResolvedValue({
       ...connection,
       name: 'Renamed',
@@ -120,16 +243,59 @@ describe('personal model connections', () => {
     expect(screen.getByLabelText('API key')).toHaveValue('');
     expect(screen.getByLabelText('API key')).not.toBeRequired();
     fireEvent.change(screen.getByLabelText('Connection name'), { target: { value: 'Renamed' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save connection' }));
+    // The same address typed with a trailing slash is not a change either.
+    fireEvent.change(screen.getByLabelText('Base URL'), {
+      target: { value: `${connection.base_url}/` },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() =>
-      expect(api.updateModelConnection).toHaveBeenCalledWith(connection.id, {
-        name: 'Renamed',
-        base_url: connection.base_url,
-        protocols: connection.protocols,
-        models: connection.models,
-      }),
+      expect(api.updateModelConnection).toHaveBeenCalledWith(connection.id, { name: 'Renamed' }),
     );
     expect(await screen.findByRole('article', { name: 'Renamed' })).toBeVisible();
+  });
+
+  it('saves nothing when nothing changed', async () => {
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByLabelText('API key')).not.toBeInTheDocument());
+    expect(api.updateModelConnection).not.toHaveBeenCalled();
+  });
+
+  it('sends an added model alone, and the new model stays unverified', async () => {
+    vi.mocked(api.listModelConnections).mockResolvedValue({
+      configured: true,
+      enabled: true,
+      connections: [
+        { ...connection, model_status: [chatReady('shared-model'), chatReady('another-model')] },
+      ],
+    });
+    vi.mocked(api.updateModelConnection).mockResolvedValue({
+      ...connection,
+      models: [...connection.models, 'third-model'],
+      model_status: [
+        chatReady('shared-model'),
+        chatReady('another-model'),
+        unverified('third-model'),
+      ],
+      updated_at: 'later',
+    });
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('Model IDs'), {
+      target: { value: 'shared-model\nanother-model\nthird-model' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(api.updateModelConnection).toHaveBeenCalledWith(connection.id, {
+        models: ['shared-model', 'another-model', 'third-model'],
+      }),
+    );
+    const card = await screen.findByRole('article', { name: connection.name });
+    expect(within(card).getAllByText('Ready')).toHaveLength(2);
+    expect(within(card).getByText('Not verified')).toBeVisible();
+    expect(within(card).getByText('Verify this model before tasks can use it.')).toBeVisible();
+    expect(api.verifyModelConnection).not.toHaveBeenCalled();
   });
 
   it('sends an explicitly entered replacement key and clears the form on success', async () => {
@@ -137,16 +303,155 @@ describe('personal model connections', () => {
     renderSettings();
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'replacement-key' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save connection' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() =>
-      expect(api.updateModelConnection).toHaveBeenCalledWith(
-        connection.id,
-        expect.objectContaining({ api_key: 'replacement-key' }),
-      ),
+      expect(api.updateModelConnection).toHaveBeenCalledWith(connection.id, {
+        api_key: 'replacement-key',
+      }),
     );
     await waitFor(() => expect(screen.queryByLabelText('API key')).not.toBeInTheDocument());
   });
 
+  it('keeps the form for correction but never renders the raw failure or key', async () => {
+    vi.mocked(api.updateModelConnection).mockRejectedValue(
+      new Error('upstream echoed replacement-key'),
+    );
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'replacement-key' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The request failed.');
+    expect(screen.queryByText(/upstream echoed/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('API key')).toHaveAttribute('type', 'password');
+  });
+});
+
+describe('verifying models', () => {
+  it('verifies only the chosen model and shows mixed native and translated agents', async () => {
+    vi.mocked(api.verifyModelConnection).mockResolvedValue({
+      ...chatReady('another-model'),
+      recorded: true,
+    });
+    renderSettings();
+    const card = await screen.findByRole('article', { name: connection.name });
+    // Opening the page spends no quota.
+    expect(api.verifyModelConnection).not.toHaveBeenCalled();
+    fireEvent.click(within(card).getByRole('button', { name: 'Verify another-model' }));
+    await waitFor(() =>
+      expect(api.verifyModelConnection).toHaveBeenCalledWith(connection.id, 'another-model'),
+    );
+    await within(card).findByText('Ready');
+    expect(within(card).getByText('1 of 2 models ready')).toBeVisible();
+    expect(within(card).getAllByText('Not verified')).toHaveLength(1);
+    expect(api.verifyModelConnection).toHaveBeenCalledTimes(1);
+    fireEvent.click(within(card).getByText('API details', { selector: 'summary' }));
+    expect(within(card).getByText('Chat Completions: works')).toBeVisible();
+    expect(within(card).getByText(/Responses: not available\./)).toBeVisible();
+    expect(within(card).getByText('opencode: Chat Completions')).toBeVisible();
+    expect(
+      within(card).getByText('claude-code: Anthropic Messages, translated to Chat Completions'),
+    ).toBeVisible();
+  });
+
+  it('keeps nothing from a verification the connection outran, and says so', async () => {
+    vi.mocked(api.verifyModelConnection).mockResolvedValue({
+      ...chatReady('shared-model'),
+      recorded: false,
+    });
+    renderSettings();
+    const card = await screen.findByRole('article', { name: connection.name });
+    fireEvent.click(within(card).getByRole('button', { name: 'Verify shared-model' }));
+    expect(await within(card).findByText(/changed while it was being verified/)).toBeVisible();
+    expect(within(card).getAllByText('Not verified')).toHaveLength(2);
+    expect(within(card).queryByText('Ready')).not.toBeInTheDocument();
+  });
+
+  it('tells a failed verification apart from a model no agent can use', async () => {
+    vi.mocked(api.listModelConnections).mockResolvedValue({
+      configured: true,
+      enabled: true,
+      connections: [
+        {
+          ...connection,
+          model_status: [
+            {
+              ...unverified('shared-model'),
+              status: 'failed',
+              category: 'rate_limited',
+              message: 'The provider rate limited the check. Try again later.',
+              protocols: {
+                chat_completions: {
+                  status: 'failed',
+                  category: 'rate_limited',
+                  message: 'The provider rate limited the check. Try again later.',
+                  http_status: 429,
+                },
+              },
+            },
+            {
+              ...unverified('another-model'),
+              status: 'unsupported',
+              category: 'tool_call_missing',
+              message: 'The model did not call the tool.',
+            },
+          ],
+        },
+      ],
+    });
+    renderSettings();
+    const card = await screen.findByRole('article', { name: connection.name });
+    expect(within(card).getByText('Couldn’t verify')).toBeVisible();
+    expect(within(card).getAllByText(/rate limited the check/)[0]).toBeVisible();
+    expect(within(card).getByText('Not usable for agents')).toBeVisible();
+    expect(within(card).getByText('The model did not call the tool.')).toBeVisible();
+    expect(within(card).getAllByRole('button', { name: /^Verify / })).toHaveLength(2);
+    expect(within(card).getAllByText('Verify again')).toHaveLength(2);
+  });
+
+  it('cannot verify a disabled connection', async () => {
+    vi.mocked(api.listModelConnections).mockResolvedValue({
+      configured: true,
+      enabled: true,
+      connections: [{ ...connection, enabled: false }],
+    });
+    renderSettings();
+    const card = await screen.findByRole('article', { name: connection.name });
+    for (const button of within(card).getAllByRole('button', { name: /^Verify / })) {
+      expect(button).toBeDisabled();
+    }
+  });
+
+  it('marks a manual declaration as declared rather than verified', async () => {
+    vi.mocked(api.listModelConnections).mockResolvedValue({
+      configured: true,
+      enabled: true,
+      connections: [
+        {
+          ...connection,
+          protocol_mode: 'manual',
+          manual_protocols: ['chat_completions'],
+          runtimes: ['opencode'],
+          model_status: connection.models.map((model) => ({
+            ...unverified(model),
+            status: 'declared' as const,
+            runtimes: ['opencode'],
+          })),
+        },
+      ],
+    });
+    renderSettings();
+    const card = await screen.findByRole('article', { name: connection.name });
+    expect(within(card).getByText('APIs declared manually')).toBeVisible();
+    expect(within(card).getAllByText('Declared')).toHaveLength(2);
+    fireEvent.click(within(card).getByRole('button', { name: 'Edit' }));
+    expect(
+      screen.getByRole('radio', { name: 'Declare the APIs this endpoint offers' }),
+    ).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Chat Completions' })).toBeChecked();
+  });
+});
+
+describe('connection lifecycle', () => {
   it('requires confirmation for disable and delete and does not claim provider revocation', async () => {
     vi.mocked(api.updateModelConnection).mockResolvedValue({
       ...connection,
@@ -170,52 +475,7 @@ describe('personal model connections', () => {
     expect(await screen.findByText('No personal connections yet.')).toBeVisible();
   });
 
-  it('tests only the selected model and protocol and labels stale results', async () => {
-    vi.mocked(api.checkModelConnection).mockResolvedValue({
-      status: 'supported',
-      category: 'supported',
-      message: 'The test completed.',
-      protocol: 'responses',
-      model: 'another-model',
-      streaming: true,
-      tool_call: true,
-      final_answer: true,
-      http_status: 200,
-      checked_at: 'now',
-      recorded: false,
-    });
-    renderSettings();
-    const card = await screen.findByRole('article', { name: connection.name });
-    fireEvent.click(within(card).getByText('Test model', { selector: 'summary' }));
-    const model = screen.getByRole('combobox', { name: 'Model to test' });
-    const protocol = screen.getByRole('combobox', { name: 'API to test' });
-    expect(model).toHaveTextContent('shared-model');
-    expect(protocol).toHaveTextContent('Chat Completions');
-    choose(model, 'another-model');
-    expect(model).toHaveTextContent('another-model');
-    // The keyboard reaches the same menu: open on the chosen option, step, choose.
-    fireEvent.keyDown(protocol, { key: 'ArrowDown' });
-    const menu = screen.getByRole('listbox', { name: 'API to test' });
-    expect(within(menu).getByRole('option', { selected: true })).toHaveTextContent(
-      'Chat Completions',
-    );
-    fireEvent.keyDown(menu, { key: 'ArrowDown' });
-    fireEvent.keyDown(menu, { key: 'Enter' });
-    expect(protocol).toHaveTextContent('Responses');
-    expect(protocol).toHaveFocus();
-    fireEvent.click(screen.getByRole('button', { name: 'Test model' }));
-    await waitFor(() =>
-      expect(api.checkModelConnection).toHaveBeenCalledWith(
-        connection.id,
-        'another-model',
-        'responses',
-      ),
-    );
-    expect(await screen.findByText(/connection changed during this test/)).toBeVisible();
-    expect(screen.getByText(/another-model · Responses\. Other models/)).toBeVisible();
-  });
-
-  it('adds only explicitly selected discovered IDs and does not run a test', async () => {
+  it('adds only explicitly selected discovered IDs and does not verify them', async () => {
     vi.mocked(api.discoverConnectionModels).mockResolvedValue([
       'shared-model',
       'third-model',
@@ -224,6 +484,7 @@ describe('personal model connections', () => {
     vi.mocked(api.updateModelConnection).mockResolvedValue({
       ...connection,
       models: [...connection.models, 'third-model'],
+      model_status: [...connection.model_status, unverified('third-model')],
       updated_at: 'later',
     });
     renderSettings();
@@ -237,20 +498,7 @@ describe('personal model connections', () => {
         models: [...connection.models, 'third-model'],
       }),
     );
-    expect(api.checkModelConnection).not.toHaveBeenCalled();
-  });
-
-  it('keeps the form for correction but never renders the raw failure or key', async () => {
-    vi.mocked(api.updateModelConnection).mockRejectedValue(
-      new Error('upstream echoed replacement-key'),
-    );
-    renderSettings();
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'replacement-key' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save connection' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('The request failed.');
-    expect(screen.queryByText(/upstream echoed/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText('API key')).toHaveAttribute('type', 'password');
+    expect(api.verifyModelConnection).not.toHaveBeenCalled();
   });
 
   it('allows cleanup while the deployment gate is off but prevents new use', async () => {
@@ -266,165 +514,15 @@ describe('personal model connections', () => {
     expect(screen.getByRole('button', { name: 'Enable' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
   });
-});
 
-describe('an Anthropic Messages connection', () => {
-  const messages: api.ModelConnection = {
-    ...connection,
-    id: 'mconn_abcdefabcdefabcdefabcdefabcdefab',
-    name: 'Claude provider',
-    base_url: 'https://gateway.example/anthropic/v1',
-    protocols: ['anthropic_messages'],
-    models: ['claude-sonnet-4-5'],
-    runtimes: ['claude-code'],
-  };
-
-  it('offers Anthropic Messages for Claude Code and saves it on its own', async () => {
-    vi.mocked(api.createModelConnection).mockResolvedValue(messages);
-    renderSettings();
-    fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
-    const anthropic = screen.getByRole('checkbox', { name: 'Anthropic Messages · Claude Code' });
-    expect(anthropic).not.toBeChecked();
-    expect(screen.getByText(/Claude Code adds \/v1\/messages/)).toBeVisible();
-    expect(screen.queryByText(/cannot use these connections/)).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Connection name'), {
-      target: { value: 'Claude provider' },
-    });
-    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: messages.base_url } });
-    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-ant-private' } });
-    fireEvent.change(screen.getByLabelText('Model IDs'), {
-      target: { value: 'claude-sonnet-4-5' },
-    });
-    fireEvent.click(anthropic);
-    fireEvent.click(
-      screen.getByRole('checkbox', { name: 'Chat Completions · OpenCode, Kilo, pi' }),
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Save connection' }));
-    await waitFor(() =>
-      expect(api.createModelConnection).toHaveBeenCalledWith({
-        name: 'Claude provider',
-        base_url: messages.base_url,
-        api_key: 'sk-ant-private',
-        protocols: ['anthropic_messages'],
-        models: ['claude-sonnet-4-5'],
-      }),
-    );
-  });
-
-  it('tests the selected model over Anthropic Messages and discovers its IDs', async () => {
-    vi.mocked(api.listModelConnections).mockResolvedValue({
-      configured: true,
-      enabled: true,
-      connections: [messages],
-    });
-    vi.mocked(api.checkModelConnection).mockResolvedValue({
-      status: 'supported',
-      category: 'supported',
-      message: 'Streaming and a tool call round trip both worked.',
-      protocol: 'anthropic_messages',
-      model: 'claude-sonnet-4-5',
-      streaming: true,
-      tool_call: true,
-      final_answer: true,
-      http_status: 200,
-      checked_at: 'now',
-      recorded: true,
-    });
-    vi.mocked(api.discoverConnectionModels).mockResolvedValue(['claude-opus-4-1']);
-    renderSettings();
-    const card = await screen.findByRole('article', { name: 'Claude provider' });
-    fireEvent.click(within(card).getByText('Test model', { selector: 'summary' }));
-    const protocol = screen.getByRole('combobox', { name: 'API to test' });
-    expect(menuLabels(protocol)).toEqual(['Anthropic Messages']);
-    fireEvent.click(screen.getByRole('button', { name: 'Test model' }));
-    await waitFor(() =>
-      expect(api.checkModelConnection).toHaveBeenCalledWith(
-        messages.id,
-        'claude-sonnet-4-5',
-        'anthropic_messages',
-      ),
-    );
-    expect(await screen.findByText(/claude-sonnet-4-5 · Anthropic Messages\./)).toBeVisible();
-    fireEvent.click(screen.getByText('Discover model IDs', { selector: 'summary' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Discover model IDs' }));
-    expect(await screen.findByRole('checkbox', { name: 'claude-opus-4-1' })).toBeVisible();
-    expect(api.discoverConnectionModels).toHaveBeenCalledWith(messages.id);
-  });
-});
-
-describe('a Chat Completions connection used through translation', () => {
-  const chat: api.ModelConnection = {
-    ...connection,
-    id: 'mconn_c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0',
-    name: 'Chat provider',
-    protocols: ['chat_completions'],
-    models: ['chat-model'],
-    runtimes: ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
-    translated_runtimes: ['claude-code', 'codex'],
-  };
-
-  it('names the translated agents and tests the translated path on request', async () => {
-    vi.mocked(api.listModelConnections).mockResolvedValue({
-      configured: true,
-      enabled: true,
-      connections: [chat],
-    });
-    vi.mocked(api.checkModelConnection).mockResolvedValue({
-      status: 'supported',
-      category: 'supported',
-      message: 'Streaming and a tool call round trip both worked.',
-      protocol: 'responses',
-      upstream_protocol: 'chat_completions',
-      mode: 'translated',
-      model: 'chat-model',
-      streaming: true,
-      tool_call: true,
-      final_answer: true,
-      http_status: 200,
-      checked_at: 'now',
-      recorded: true,
-    });
-    renderSettings();
-    const card = await screen.findByRole('article', { name: 'Chat provider' });
-    expect(card).toHaveTextContent('codex (via Chat Completions)');
-    expect(card).toHaveTextContent('claude-code (via Chat Completions)');
-    expect(card).not.toHaveTextContent('pi (via');
-    // Nothing is tested until asked: opening the page spends no quota.
-    expect(api.checkModelConnection).not.toHaveBeenCalled();
-    fireEvent.click(within(card).getByText('Test model', { selector: 'summary' }));
-    const protocol = within(card).getByRole('combobox', { name: 'API to test' });
-    expect(menuLabels(protocol)).toEqual([
-      'Chat Completions',
-      'Responses via Chat Completions',
-      'Anthropic Messages via Chat Completions',
-    ]);
-    choose(protocol, 'Responses via Chat Completions');
-    // The menu shows the translated label but submits the exact protocol value.
-    expect(protocol).toHaveTextContent('Responses via Chat Completions');
-    fireEvent.click(within(card).getByRole('button', { name: 'Test model' }));
-    // Both menus are disabled while the test runs.
-    expect(protocol).toBeDisabled();
-    expect(within(card).getByRole('combobox', { name: 'Model to test' })).toBeDisabled();
-    await waitFor(() =>
-      expect(api.checkModelConnection).toHaveBeenCalledWith(chat.id, 'chat-model', 'responses'),
-    );
-    expect(
-      await within(card).findByText(/chat-model · Responses via Chat Completions\./),
-    ).toBeVisible();
-  });
-
-  it('offers no translated test where the connection speaks the agent API itself', async () => {
-    vi.mocked(api.listModelConnections).mockResolvedValue({
-      configured: true,
-      enabled: true,
-      connections: [
-        { ...chat, protocols: ['chat_completions', 'responses', 'anthropic_messages'] },
-      ],
-    });
-    renderSettings();
-    const card = await screen.findByRole('article', { name: 'Chat provider' });
-    fireEvent.click(within(card).getByText('Test model', { selector: 'summary' }));
-    const protocol = within(card).getByRole('combobox', { name: 'API to test' });
-    expect(menuLabels(protocol)).toEqual(['Chat Completions', 'Responses', 'Anthropic Messages']);
+  it('reads in Chinese without naming any API on the normal path', async () => {
+    renderSettings('zh-CN');
+    fireEvent.click(await screen.findByRole('button', { name: '添加连接' }));
+    expect(screen.getByLabelText('模型 ID')).toBeVisible();
+    expect(screen.getByRole('button', { name: '保存并验证' })).toBeVisible();
+    expect(screen.queryByRole('checkbox', { name: 'Chat Completions' })).not.toBeInTheDocument();
+    const card = screen.getByRole('article', { name: connection.name });
+    expect(within(card).getAllByText('未验证')).toHaveLength(2);
+    expect(within(card).getByText('2 个模型中有 0 个可用')).toBeVisible();
   });
 });

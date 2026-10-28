@@ -7,7 +7,8 @@ every request passes this gate first. It refuses -- with a client-shaped 400
 naming what is unsupported -- anything a Chat Completions upstream cannot
 carry, and admits only the stateless subset: the whole conversation replayed
 on every request, function tools (namespaced ones flattened and restored by
-``namespaces``), text and images.
+``namespaces``), text and images -- a tool's images included, carried after
+its tool message (``tool_images``) since a tool message holds text only.
 
 Three kinds of field are knowingly not forwarded, and documented as such:
 
@@ -37,6 +38,7 @@ from .responses_chat import (
     responses_input_to_messages,
     responses_request_to_chat_params,
 )
+from .tool_images import move_tool_images
 
 _RESPONSES_STATEFUL = ("previous_response_id", "conversation", "prompt")
 _RESPONSES_ITEMS = frozenset(
@@ -180,7 +182,7 @@ def responses_chat_request(body: dict[str, Any], model: str) -> Prepared:
     params.pop("reasoning_effort", None)
     if isinstance(body.get("parallel_tool_calls"), bool) and params.get("tools"):
         params["parallel_tool_calls"] = body["parallel_tool_calls"]
-    chat = _chat_body(model, merge_leading_system_messages(messages), params)
+    chat = _chat_body(model, move_tool_images(merge_leading_system_messages(messages)), params)
     return Prepared(chat=chat, names=names if names else None)
 
 
@@ -205,6 +207,8 @@ def _check_tool_result(block: dict[str, Any]) -> None:
             f"Tool result block {_type_name(inner)!r} cannot be sent to a Chat Completions "
             "upstream.",
         )
+        if inner.get("type") == "image":
+            _check_image(inner)
 
 
 def _check_message_blocks(content: Any) -> None:
@@ -279,7 +283,7 @@ def messages_chat_request(body: dict[str, Any], model: str) -> Prepared:
     choice = body.get("tool_choice")
     if isinstance(choice, dict) and choice.get("type") == "none":
         params["tool_choice"] = "none"
-    return Prepared(chat=_chat_body(model, messages, params))
+    return Prepared(chat=_chat_body(model, move_tool_images(messages), params))
 
 
 # -- shared -------------------------------------------------------------------

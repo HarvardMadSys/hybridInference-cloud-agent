@@ -115,6 +115,16 @@ class ProtocolPlan:
         """``direct`` or ``translated``."""
         return TRANSLATED if self.translated else DIRECT
 
+    @property
+    def identity(self) -> str:
+        """``<client>><upstream>``: what a claim and its residency must agree on.
+
+        A model's verification can change its plan without changing the
+        connection's credential revision, so a residency is matched to its
+        claim on both.
+        """
+        return f"{self.client_protocol}>{self.upstream_protocol}"
+
 
 def protocol_plan(runtime: str, protocols: list[str] | tuple[str, ...]) -> ProtocolPlan | None:
     """The one plan for ``runtime`` on a connection offering ``protocols``, or ``None``.

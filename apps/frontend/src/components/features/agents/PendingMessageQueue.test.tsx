@@ -85,8 +85,10 @@ function stored(row: PendingMessageApi): PendingMessageApi {
 function Harness({
   onSent,
   onQueue,
+  liveTurn,
 }: {
   onSent?: (jobId: string) => void;
+  liveTurn?: { model: string; modelConnectionId?: string | null };
   /** Hands the test the live queue, to read the server when it chooses. */
   onQueue?: (queue: ReturnType<typeof usePendingMessages>) => void;
 }) {
@@ -96,7 +98,7 @@ function Harness({
     onSent: onSent ? (jobId) => onSent(jobId) : undefined,
   });
   onQueue?.(queue);
-  return <PendingMessageQueue queue={queue} />;
+  return <PendingMessageQueue queue={queue} liveTurn={liveTurn} />;
 }
 
 /** An edit the way the server takes it: at the row's revision, or refused. */
@@ -463,6 +465,67 @@ describe('PendingMessageQueue', () => {
       'title',
       'A message with files goes as a turn of its own; it cannot join the running one.',
     );
+  });
+
+  it("adds only a message that inherits, or matches, the live turn's model and source", async () => {
+    const A = 'mconn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const B = 'mconn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const cases: {
+      live: { model: string; modelConnectionId?: string | null };
+      chosen: Partial<PendingMessageApi>;
+      allowed: boolean;
+    }[] = [
+      // No model: it inherits the running turn, whatever its source.
+      { live: { model: 'mine', modelConnectionId: A }, chosen: {}, allowed: true },
+      {
+        live: { model: 'mine', modelConnectionId: A },
+        chosen: { model: 'mine', model_connection_id: A },
+        allowed: true,
+      },
+      { live: { model: 'gpt-5' }, chosen: { model: 'gpt-5' }, allowed: true },
+      // Gateway <-> personal, and two connections with the same model ID.
+      {
+        live: { model: 'mine' },
+        chosen: { model: 'mine', model_connection_id: A },
+        allowed: false,
+      },
+      { live: { model: 'mine', modelConnectionId: A }, chosen: { model: 'mine' }, allowed: false },
+      {
+        live: { model: 'mine', modelConnectionId: A },
+        chosen: { model: 'mine', model_connection_id: B },
+        allowed: false,
+      },
+    ];
+    for (const { live, chosen, allowed } of cases) {
+      queueWith([message(chosen)], { mid_turn_input_supported: true });
+      const view = render(<Harness liveTurn={live} />);
+      const card = (await screen.findAllByRole('listitem'))[0];
+      const send = within(card).getByRole('button', { name: 'Add to the turn in progress' });
+      if (allowed) {
+        expect(send).toBeEnabled();
+      } else {
+        expect(send).toBeDisabled();
+        expect(send).toHaveAttribute(
+          'title',
+          'This message uses a different model or source than the running turn, so it runs as its own next turn.',
+        );
+      }
+      view.unmount();
+    }
+  });
+
+  it('keeps a message in line when the server refuses it for another model or source', async () => {
+    queueWith([message()], { mid_turn_input_supported: true });
+    vi.mocked(sendPendingMessageNow).mockRejectedValue(
+      new APIError('send_now_model_mismatch', 'different model', 409),
+    );
+    render(<Harness />);
+    const card = (await screen.findAllByRole('listitem'))[0];
+    fireEvent.click(within(card).getByRole('button', { name: 'Add to the turn in progress' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'This message uses a different model or source than the running turn',
+    );
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
   });
 
   it("says in the owner's words why a message could not be offered to the turn", async () => {

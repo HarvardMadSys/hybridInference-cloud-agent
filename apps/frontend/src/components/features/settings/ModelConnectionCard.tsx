@@ -6,23 +6,34 @@ import {
   deleteModelConnection,
   updateModelConnection,
   type ModelConnection,
+  type ModelVerification,
 } from '@/lib/api/modelConnections';
 
 import { ModelConnectionTools } from './ModelConnectionTools';
+import { ModelVerificationPanel } from './ModelVerificationPanel';
 
 const buttonClass = 'ui-button ui-button-secondary min-h-11';
 
 export function ModelConnectionCard({
   connection,
   available,
+  autoVerify = false,
+  checksPerHour,
+  onAutoVerifyStarted = () => {},
   onEdit,
   onChange,
+  onVerified,
   onDelete,
 }: {
   connection: ModelConnection;
   available: boolean;
+  /** "Save and verify" was pressed: verify the unverified models now. */
+  autoVerify?: boolean;
+  checksPerHour?: number;
+  onAutoVerifyStarted?: () => void;
   onEdit: () => void;
   onChange: (connection: ModelConnection) => void;
+  onVerified: (verification: ModelVerification, startedOn: string) => void;
   onDelete: () => void;
 }) {
   const t = useT();
@@ -60,14 +71,10 @@ export function ModelConnectionCard({
           <h3 className="break-words text-sm font-semibold">{connection.name}</h3>
           <p className="mt-1 break-all text-xs text-muted">{connection.base_url}</p>
           <p className="mt-1 text-xs text-muted">
-            {t(connection.enabled ? 'connections.enabled' : 'connections.disabled')} ·{' '}
-            {connection.runtimes
-              .map((runtime) =>
-                connection.translated_runtimes?.includes(runtime)
-                  ? t('connections.runtimeTranslated', { runtime })
-                  : runtime,
-              )
-              .join(', ')}
+            {t(connection.enabled ? 'connections.enabled' : 'connections.disabled')}
+            {connection.runtimes.length
+              ? ` · ${t('connections.agents', { agents: connection.runtimes.join(', ') })}`
+              : ''}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -103,7 +110,14 @@ export function ModelConnectionCard({
           </button>
         </div>
       </div>
-      <p className="mt-3 break-words text-xs text-muted">{connection.models.join(', ')}</p>
+      <ModelVerificationPanel
+        connection={connection}
+        available={available}
+        autoVerify={autoVerify}
+        checksPerHour={checksPerHour}
+        onAutoVerifyStarted={onAutoVerifyStarted}
+        onVerified={onVerified}
+      />
       {confirm ? (
         <div
           role="group"

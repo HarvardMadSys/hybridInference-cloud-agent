@@ -339,17 +339,23 @@ def _bucket_block(
         )
 
     elif btype == "tool_result":
-        result_text = _flatten_tool_result_content(block.get("content"))
+        content = block.get("content")
+        result_text = _flatten_tool_result_content(content)
         if block.get("is_error"):
             # OpenAI tool messages have no error flag; prepend a marker so
             # the model can distinguish a failed tool call from a successful
             # one instead of treating raw stderr as a valid result.
             result_text = f"[tool error]\n{result_text}" if result_text else "[tool error]"
+        images = _tool_result_images(content)
         tool_results.append(
             {
                 "role": "tool",
                 "tool_call_id": block.get("tool_use_id", ""),
-                "content": result_text,
+                # Cloud Agent: images ride as parts, which ``tool_images``
+                # moves to the user message after this turn's tool messages.
+                "content": [{"type": "text", "text": result_text}, *images]
+                if images
+                else result_text,
             }
         )
 
@@ -367,15 +373,30 @@ def _image_block_to_url(source: dict[str, Any]) -> str | None:
     return None
 
 
+def _tool_result_images(content: Any) -> list[dict[str, Any]]:
+    """The tool result's image blocks as chat image parts, in order.
+
+    Cloud Agent: new. The upstream kernel replaced them with ``[image]``; the
+    images are kept and carried by ``tool_images.move_tool_images``.
+    """
+    if not isinstance(content, list):
+        return []
+    parts: list[dict[str, Any]] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "image":
+            url = _image_block_to_url(block.get("source") or {})
+            if url is not None:
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+    return parts
+
+
 def _flatten_tool_result_content(content: Any) -> str:
-    """Flatten Anthropic tool_result content to a string.
+    """Flatten Anthropic tool_result content's text to a string.
 
     Anthropic tool_result content can be a string or list of blocks; OpenAI tool
-    messages take a string. Text blocks are joined with newlines. Image (and
-    other non-text) blocks can't ride along in a string tool message, so each is
-    replaced with a ``[image]`` placeholder: this keeps the result non-empty so
-    the model doesn't read an image-only tool result as "the tool returned
-    nothing" and answer wrongly or loop retrying.
+    messages take a string. Text blocks are joined with newlines. Image blocks
+    are not text: Cloud Agent carries them separately (``_tool_result_images``)
+    instead of the upstream kernel's ``[image]`` placeholder.
     """
     if isinstance(content, str):
         return content
@@ -389,8 +410,6 @@ def _flatten_tool_result_content(content: Any) -> str:
                 text_val = block.get("text")
                 if isinstance(text_val, str):
                     parts.append(text_val)
-            elif btype == "image":
-                parts.append("[image]")
         return "\n".join(p for p in parts if p)
     return ""
 

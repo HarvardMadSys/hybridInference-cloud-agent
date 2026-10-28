@@ -1,22 +1,27 @@
 """Owner routes for their own model connections.
 
 A connection is the owner's own inference endpoint: a name, a Base URL, an
-API key, the protocols it offers (OpenAI Chat Completions or Responses,
-Anthropic Messages) and the model ids it serves. The key
-is write-only: it is encrypted before it is stored, no owner route answers it,
-and a validation failure answers which field was wrong without echoing what was
-sent. Every response is ``no-store``.
+API key and the model ids it serves. Which APIs each model is reached on is
+found by verifying it -- the owner's explicit action, never a side effect of
+saving or reading -- or, as an advanced override, declared by the owner. The
+key is write-only: it is encrypted before it is stored, no owner route answers
+it, and a validation failure answers which field was wrong without echoing
+what was sent. Every response is ``no-store``.
 
-A check calls the owner's provider with their key, so it runs only when they
-ask, and each one reserves one of the owner's hourly checks atomically across
-replicas. Only the count is bounded: an owner's checks are not serialized and
-may overlap. Changing the key, Base URL or protocols, disabling or deleting a
-connection closes every member process still running on its old state.
+A verification calls the owner's provider with their key: one model at a time,
+at most three native checks of two requests each, and each one reserves one of
+the owner's hourly checks atomically across replicas. Only the count is
+bounded: an owner's verifications are not serialized and may overlap, and each
+model's result is merged on its own. Changing the key or Base URL clears every
+model's verification; changing either, the declared APIs, or disabling or
+deleting a connection closes every member process still running on its old
+state. A field sent with its stored value changes nothing.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+import hmac
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.exceptions import RequestValidationError
@@ -30,9 +35,10 @@ from cloud_agent.application.model_connection_check import (
     CHECK_MESSAGES,
     CHECKS_PER_HOUR,
     CheckStop,
-    check_connection,
     discover_models,
+    verify_model,
 )
+from cloud_agent.application.model_connection_status import connection_statuses, model_status
 from cloud_agent.application.model_connections import (
     invalidate_connection,
     model_connection_cipher,
@@ -48,12 +54,11 @@ from cloud_agent.domain.model_connections import (
     clean_name,
     clean_protocols,
     is_connection_id,
+    is_manual,
 )
 from cloud_agent_shared.model_connections import (
-    COMPAT_UPSTREAMS,
     MAX_API_KEY_CHARS,
     PROTOCOLS,
-    runtime_plans,
     valid_api_key,
 )
 
@@ -145,17 +150,20 @@ class _Fields(BaseModel):
 
 
 class ModelConnectionCreate(_Fields):
-    """A new connection; every field is required."""
+    """A new connection. ``protocols`` is the advanced manual declaration; omitted is automatic."""
 
     name: str = Field(..., max_length=200)
     base_url: str = Field(..., max_length=1024)
     api_key: str = Field(..., max_length=MAX_API_KEY_CHARS + 64, repr=False)
-    protocols: list[str] = Field(..., max_length=len(PROTOCOLS))
     models: list[str] = Field(..., max_length=256)
+    protocols: list[str] = Field(default_factory=list, max_length=len(PROTOCOLS))
 
 
 class ModelConnectionUpdate(_Fields):
-    """Change some fields; an omitted field keeps its value. ``api_key`` rotates the key."""
+    """Change some fields; an omitted field keeps its value. ``api_key`` rotates the key.
+
+    ``protocols`` set to ``[]`` returns the connection to automatic detection.
+    """
 
     name: str | None = Field(None, max_length=200)
     base_url: str | None = Field(None, max_length=1024)
@@ -165,12 +173,57 @@ class ModelConnectionUpdate(_Fields):
     enabled: bool | None = None
 
 
-class ModelConnectionCheckRequest(BaseModel):
-    """Which model and protocol to check."""
+class ModelVerifyRequest(BaseModel):
+    """Which of the connection's models to verify."""
 
     model_config = ConfigDict(extra="forbid")
     model: str = Field(..., min_length=1, max_length=200)
-    protocol: str = Field(..., max_length=32)
+
+
+class ProtocolResultView(BaseModel):
+    """What one native API's check found for a model: a diagnostic."""
+
+    status: str
+    category: str
+    message: str
+    http_status: int | None = None
+
+
+class AgentPathView(BaseModel):
+    """How one agent reaches a model: directly, or through the member's helper."""
+
+    runtime: str
+    mode: Literal["direct", "translated"]
+    client_protocol: str
+    upstream_protocol: str
+
+
+class ModelStatusView(BaseModel):
+    """One listed model as its owner sees it.
+
+    ``status`` is ``ready``, ``declared``, ``unverified``, ``failed`` or
+    ``unsupported``; ``runtimes`` are the agents a task may run it with now,
+    exactly what the execution gates accept. ``paths`` and ``protocols`` are
+    diagnostics.
+    """
+
+    model: str
+    status: Literal["ready", "declared", "unverified", "failed", "unsupported"]
+    category: str | None = None
+    message: str = ""
+    runtimes: list[str]
+    paths: list[AgentPathView] = Field(default_factory=list)
+    protocols: dict[str, ProtocolResultView] = Field(default_factory=dict)
+    checked_at: str | None = None
+
+
+class ModelVerificationView(ModelStatusView):
+    """A finished verification of one model."""
+
+    #: False when the connection changed while it ran -- a new key or Base URL,
+    #: the model removed, or the connection deleted: the result described a
+    #: configuration that no longer exists and was not kept.
+    recorded: bool = True
 
 
 class ModelConnectionView(BaseModel):
@@ -179,17 +232,17 @@ class ModelConnectionView(BaseModel):
     id: str
     name: str
     base_url: str
-    protocols: list[str]
+    #: ``auto``: each model's APIs come from its verification. ``manual``:
+    #: every listed model runs on ``manual_protocols`` without verification.
+    protocol_mode: Literal["auto", "manual"]
+    manual_protocols: list[str] = Field(default_factory=list)
     models: list[str]
     enabled: bool
     #: Always true for a live connection; the key itself is never answered.
     has_api_key: bool
-    #: The agents that can run on this connection, from the protocols it offers.
+    #: Every agent at least one listed model can run with now.
     runtimes: list[str]
-    #: Those of ``runtimes`` that run through the compatibility helper; the
-    #: connection's own ``protocols`` stay what its upstream offers.
-    translated_runtimes: list[str] = Field(default_factory=list)
-    last_check: dict[str, Any] | None = None
+    model_status: list[ModelStatusView]
     created_at: str
     updated_at: str
 
@@ -201,30 +254,9 @@ class ModelConnectionList(BaseModel):
     #: Whether the deployment has turned connections on. Off, existing ones
     #: are listed and can be disabled or deleted, but not added or re-enabled.
     enabled: bool = True
+    #: How many models one owner may verify (or discover) per hour.
+    checks_per_hour: int = CHECKS_PER_HOUR
     connections: list[ModelConnectionView]
-
-
-class ModelConnectionCheckView(BaseModel):
-    """One check's result, as stored on the connection."""
-
-    status: str
-    category: str
-    message: str
-    #: The client protocol tested: what the agent's CLI speaks.
-    protocol: str
-    #: What the request went out as; differs on a translated check.
-    upstream_protocol: str = ""
-    #: ``direct`` or ``translated``.
-    mode: str = "direct"
-    model: str
-    streaming: bool
-    tool_call: bool
-    final_answer: bool
-    http_status: int | None = None
-    checked_at: str
-    #: False when the connection changed while the check ran: the result then
-    #: describes a configuration that no longer exists and was not kept.
-    recorded: bool = True
 
 
 class DiscoveredModels(BaseModel):
@@ -234,19 +266,18 @@ class DiscoveredModels(BaseModel):
 
 
 def _view(row: dict[str, Any]) -> ModelConnectionView:
-    protocols = list(row["protocols"])
-    plans = runtime_plans(protocols)
+    statuses = connection_statuses(row)
     return ModelConnectionView(
         id=row["id"],
         name=row["name"],
         base_url=row["base_url"],
-        protocols=protocols,
+        protocol_mode="manual" if is_manual(row) else "auto",
+        manual_protocols=list(row.get("protocols") or []),
         models=list(row["models"]),
         enabled=bool(row["enabled"]),
         has_api_key=row.get("api_key_ciphertext") is not None,
-        runtimes=sorted(plans),
-        translated_runtimes=sorted(r for r, plan in plans.items() if plan.translated),
-        last_check=row.get("last_check"),
+        runtimes=sorted({runtime for status in statuses for runtime in status["runtimes"]}),
+        model_status=[ModelStatusView(**status) for status in statuses],
         created_at=row["created_at"].isoformat(),
         updated_at=row["updated_at"].isoformat(),
     )
@@ -347,30 +378,55 @@ async def update_connection(
     store: _Storage | None = Depends(get_storage),
     grants: Any = Depends(get_grant_client),
 ) -> ModelConnectionView:
-    """Edit, rotate the key of, enable or disable a connection."""
+    """Edit, rotate the key of, enable or disable a connection.
+
+    A field sent with the value it already has is not a change: a rename that
+    carries the same Base URL and models keeps the credential, every running
+    process and every model's verification (the repository compares each one).
+    """
     store = require_store(store)
-    await _live(store, user["user_id"], connection_id)
-    if body.enabled or body.api_key is not None or body.base_url or body.protocols:
-        # Turning the feature off stops anything that would make a connection
-        # usable again; disabling, deleting and renaming still work.
-        _require_enabled()
+    row = await _live(store, user["user_id"], connection_id)
     changes: dict[str, Any] = {
         field: value
         for field, value in body.model_dump(exclude_unset=True).items()
         if value is not None and field != "api_key"
     }
-    if body.api_key is not None:
+    if body.api_key is not None and not _same_key(row, body.api_key):
         changes["api_key_ciphertext"] = _cipher().encrypt(body.api_key)
+    if _reenables(row, changes):
+        # Turning the feature off stops anything that would make a connection
+        # usable again; disabling, deleting, renaming and editing models still work.
+        _require_enabled()
     try:
-        row = await store.model_connections.update_model_connection(
+        updated = await store.model_connections.update_model_connection(
             user_id=user["user_id"], connection_id=connection_id, changes=changes
         )
     except ModelConnectionConflict:
         raise _taken(str(changes.get("name"))) from None
-    if row is None:
+    if updated is None:
         raise _refused(404, "model_connection_not_found", "Model connection not found.")
     await invalidate_connection(store, grants, user_id=user["user_id"], connection_id=connection_id)
-    return _view(row)
+    return _view(updated)
+
+
+def _same_key(row: dict[str, Any], key: str) -> bool:
+    """Whether ``key`` is the stored one, so re-entering it rotates nothing."""
+    try:
+        stored = _cipher().decrypt(str(row["api_key_ciphertext"]))
+    except (CredentialCipherError, HTTPException):
+        return False
+    return hmac.compare_digest(stored.encode(), key.encode())
+
+
+def _reenables(row: dict[str, Any], changes: dict[str, Any]) -> bool:
+    """Whether ``changes`` would put the connection on a new endpoint, key or declaration, or on."""
+    if changes.get("enabled") is True and not row.get("enabled"):
+        return True
+    if "api_key_ciphertext" in changes:
+        return True
+    return any(
+        field in changes and changes[field] != row.get(field) for field in ("base_url", "protocols")
+    )
 
 
 @router.delete("/{connection_id}", status_code=204)
@@ -419,19 +475,6 @@ async def _reserve(store: _Storage, user_id: str, connection_id: str) -> dict[st
     return connection
 
 
-def _check_upstream(client: str, protocols: list[str]) -> str | None:
-    """What a check of ``client`` goes out as on ``protocols``: native first, else translated.
-
-    The same rule as ``protocol_plan``: a protocol the connection declares is
-    tested directly, never through the helper; Responses or Anthropic Messages
-    on a Chat Completions connection is tested through it.
-    """
-    if client in protocols:
-        return client
-    upstream = COMPAT_UPSTREAMS.get(client)
-    return upstream if upstream is not None and upstream in protocols else None
-
-
 def _key(row: dict[str, Any]) -> str:
     try:
         return _cipher().decrypt(row["api_key_ciphertext"])
@@ -439,47 +482,54 @@ def _key(row: dict[str, Any]) -> str:
         raise _refused(503, "model_connections_unconfigured", "The key cannot be read.") from None
 
 
-@router.post("/{connection_id}/check", response_model=ModelConnectionCheckView)
-async def check(
+@router.post("/{connection_id}/verify", response_model=ModelVerificationView)
+async def verify(
     connection_id: str,
-    body: ModelConnectionCheckRequest,
+    body: ModelVerifyRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _Storage | None = Depends(get_storage),
-) -> ModelConnectionCheckView:
-    """Stream a tool call and its result through the connection, for one model and protocol.
+) -> ModelVerificationView:
+    """Find which APIs one model streams a tool round trip on, and keep the result.
 
-    Spends the owner's own quota upstream. Answers what the check found; an
-    unreachable or refusing provider is a result, not an error. The result is
-    kept on the connection only if nothing it depends on -- key, Base URL,
-    protocols, models -- changed while it ran (``recorded``).
+    Spends the owner's own quota upstream: at most three checks of two
+    requests each, and one of the owner's hourly checks. Answers the model's
+    state as it now is; an unreachable or refusing provider is a result, not
+    an error. The result is kept only if the connection's key and Base URL did
+    not change and the model is still listed (``recorded``); other models'
+    results are never touched.
     """
     _require_enabled()
     store = require_store(store)
     row = await _live(store, user["user_id"], connection_id)
-    if _check_upstream(body.protocol, row["protocols"]) is None:
-        raise _refused(400, "invalid_request", "This connection does not offer that protocol.")
     if body.model not in row["models"]:
         raise _refused(400, "invalid_request", "That model is not listed on this connection.")
-    # What is checked is the row the reservation read, and what it is
+    if not row["enabled"]:
+        raise _refused(
+            409, "model_connection_disabled", "Enable the connection before verifying it."
+        )
+    # What is verified is the row the reservation read, and what it is
     # recorded against is that row's revision -- never whatever is there later.
     checked = await _reserve(store, user["user_id"], connection_id)
-    upstream = _check_upstream(body.protocol, checked["protocols"])
-    if upstream is None or body.model not in checked["models"]:
+    if body.model not in checked["models"] or not checked["enabled"]:
         raise _refused(409, "model_connection_changed", "The connection changed. Try again.")
-    result = await check_connection(
-        base_url=checked["base_url"],
-        api_key=_key(checked),
-        protocol=body.protocol,
-        model=body.model,
-        upstream_protocol=upstream,
+    result = await verify_model(
+        base_url=checked["base_url"], api_key=_key(checked), model=body.model
     )
-    recorded = await store.model_connections.record_model_connection_check(
+    revision = int(checked["config_revision"])
+    recorded = await store.model_connections.record_model_verification(
         user_id=user["user_id"],
         connection_id=connection_id,
-        config_revision=int(checked["config_revision"]),
-        result=result.as_dict(),
+        config_revision=revision,
+        credential_revision=int(checked["credential_revision"]),
+        model=body.model,
+        result=result,
     )
-    return ModelConnectionCheckView(**result.as_dict(), recorded=recorded)
+    # Shown as it was found, even when the connection moved on meanwhile.
+    shown = {
+        **checked,
+        "model_checks": {body.model: {**result, "revision": revision}},
+    }
+    return ModelVerificationView(**model_status(shown, body.model), recorded=recorded)
 
 
 @router.post("/{connection_id}/discover-models", response_model=DiscoveredModels)
@@ -490,8 +540,10 @@ async def discover(
 ) -> DiscoveredModels:
     """List the ids the provider's model list offers, for the owner to choose from.
 
-    ``GET /models`` under the Base URL, or ``GET /v1/models`` with Messages
-    authentication for a connection that offers only Anthropic Messages.
+    Automatically, ``GET /models`` under the Base URL and, only if that listing
+    is missing or refused, ``GET /v1/models`` with Messages authentication: at
+    most two requests and one hourly check. A manual declaration asks only the
+    listing that fits it.
     """
     _require_enabled()
     store = require_store(store)

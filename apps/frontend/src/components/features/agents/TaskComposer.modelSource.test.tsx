@@ -61,7 +61,12 @@ function config(overrides: Partial<AgentConfigApi> = {}): AgentConfigApi {
     default_model: 'shared',
     model_connections_enabled: true,
     model_connections: [
-      { id: CONNECTION, name: 'My provider', models: ['shared', 'mine'], runtimes: ['codex'] },
+      {
+        id: CONNECTION,
+        name: 'My provider',
+        models: ['shared', 'mine'],
+        model_runtimes: { shared: ['codex'], mine: ['codex'] },
+      },
     ],
     github_connected: true,
     github_install_url: null,
@@ -289,8 +294,18 @@ describe('TaskComposer model sources', () => {
     vi.mocked(getAgentConfig).mockResolvedValue(
       config({
         model_connections: [
-          { id: CONNECTION, name: 'My provider', models: ['shared', 'mine'], runtimes: ['codex'] },
-          { id: messages, name: 'Claude gateway', models: ['shared'], runtimes: ['claude-code'] },
+          {
+            id: CONNECTION,
+            name: 'My provider',
+            models: ['shared', 'mine'],
+            model_runtimes: { shared: ['codex'], mine: ['codex'] },
+          },
+          {
+            id: messages,
+            name: 'Claude gateway',
+            models: ['shared'],
+            model_runtimes: { shared: ['claude-code'] },
+          },
         ],
       }),
     );
@@ -321,7 +336,12 @@ describe('TaskComposer model sources', () => {
     vi.mocked(getAgentConfig).mockResolvedValue(
       config({
         model_connections: [
-          { id: messages, name: 'Claude gateway', models: ['shared'], runtimes: ['claude-code'] },
+          {
+            id: messages,
+            name: 'Claude gateway',
+            models: ['shared'],
+            model_runtimes: { shared: ['claude-code'] },
+          },
         ],
       }),
     );
@@ -335,7 +355,7 @@ describe('TaskComposer model sources', () => {
     expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
   });
 
-  it('runs Codex and Claude Code on a Chat-only connection, saying it is translated', async () => {
+  it('runs Codex on a model verified only for Chat, without saying how it is reached', async () => {
     const chat = 'mconn_0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f';
     vi.mocked(getAgentConfig).mockResolvedValue(
       config({
@@ -343,9 +363,8 @@ describe('TaskComposer model sources', () => {
           {
             id: chat,
             name: 'Chat provider',
-            models: ['chat-model'],
-            runtimes: ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
-            translated_runtimes: ['claude-code', 'codex'],
+            models: ['chat-model', 'new-model'],
+            model_runtimes: { 'chat-model': ['claude-code', 'codex', 'kilo', 'opencode', 'pi'] },
           },
         ],
       }),
@@ -353,7 +372,13 @@ describe('TaskComposer model sources', () => {
     render(<TaskComposer />);
     await chooseRepository();
     choose('Agent', 'codex');
-    choose('Model', 'chat-model · Chat provider · via Chat Completions');
+    fireEvent.click(screen.getByLabelText('Model'));
+    const options = screen.getAllByRole('option').map((option) => option.textContent);
+    // The unverified model is not offered; no label names an API.
+    expect(options).toContain('chat-model · Chat provider');
+    expect(options.some((option) => option?.includes('new-model'))).toBe(false);
+    expect(options.some((option) => option?.includes('Chat Completions'))).toBe(false);
+    fireEvent.click(screen.getByRole('option', { name: 'chat-model · Chat provider' }));
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Run Codex on Chat' } });
     await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
@@ -366,17 +391,19 @@ describe('TaskComposer model sources', () => {
     expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('reasoning_effort');
   });
 
-  it('labels a connection native for an agent whose own API it offers', async () => {
+  it('offers each model only to the agents its own verification allows', async () => {
     const both = 'mconn_1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e';
     vi.mocked(getAgentConfig).mockResolvedValue(
       config({
         model_connections: [
           {
             id: both,
-            name: 'Both APIs',
-            models: ['mine'],
-            runtimes: ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
-            translated_runtimes: ['claude-code'],
+            name: 'Mixed',
+            models: ['messages-only', 'chat-model'],
+            model_runtimes: {
+              'messages-only': ['claude-code'],
+              'chat-model': ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
+            },
           },
         ],
       }),
@@ -385,12 +412,12 @@ describe('TaskComposer model sources', () => {
     await chooseRepository();
     choose('Agent', 'codex');
     fireEvent.click(screen.getByLabelText('Model'));
-    expect(screen.getByRole('option', { name: 'mine · Both APIs' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'chat-model · Mixed' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'messages-only · Mixed' })).not.toBeInTheDocument();
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     choose('Agent', 'claude-code');
     fireEvent.click(screen.getByLabelText('Model'));
-    expect(
-      screen.getByRole('option', { name: 'mine · Both APIs · via Chat Completions' }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'messages-only · Mixed' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'chat-model · Mixed' })).toBeInTheDocument();
   });
 });

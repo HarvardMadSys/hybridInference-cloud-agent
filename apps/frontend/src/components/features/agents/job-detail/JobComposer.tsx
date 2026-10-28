@@ -21,6 +21,7 @@ import { AttachmentStrip } from '../attachments/AttachmentStrip';
 import type { useAttachments } from '../attachments/useAttachments';
 import { isSteerChord } from '../composerKeys';
 import { hasLostContext } from '../conversationJob';
+import { modelOverride } from '../modelSource';
 import { GoalBar } from '../goal/GoalBar';
 import { hasLiveWork } from '../goal/liveWork';
 import { useGoalCommand, type GoalCommandControls } from '../goal/useGoalCommand';
@@ -35,6 +36,21 @@ import type { useJobComposerSettings } from './useJobComposerSettings';
 import type { useJobRunActions } from './useJobRunActions';
 
 /** What the next message runs with, before the model: the thread's harness. */
+/**
+ * How a draft can join the running turn: steered in, or, when it chose another
+ * model or source, queued as the next turn (never answered on the live one).
+ */
+function steerNote(
+  canSendNow: boolean,
+  otherModel: boolean,
+  apple: boolean,
+  t: ReturnType<typeof useT>,
+): string {
+  if (!canSendNow) return '';
+  if (otherModel) return ` · ${t('modelSource.steerQueued')}`;
+  return ` · ${t('queue.steerHint', { keys: chordLabel('↵', apple) })}`;
+}
+
 function runtimeNote(job: AgentJob, contextLost: boolean): string {
   if (contextLost) return `Start a new chat · ${job.runtime}`;
   if (job.state === 'cancelled') return `Restores any saved changes · ${job.runtime}`;
@@ -122,6 +138,8 @@ export function JobComposer({
   const contextLost = hasLostContext(job);
   const {
     config,
+    inherited,
+    choice,
     inheritedLabel,
     inheritedUnavailable,
     rewrite,
@@ -131,6 +149,11 @@ export function JobComposer({
     efforts,
   } = settings;
   const { restoring, unarchive } = runActions;
+  // Steering puts the draft into the running turn, which answers on its own
+  // model and source. A draft that chose another goes as the next turn
+  // instead, so it is never billed where its owner did not choose.
+  const otherModel = Boolean(modelOverride(inherited, choice).model);
+  const canSteer = queue.canSendNow && !otherModel;
   const followUp = useComposerDraftValue(draft);
   const { setValue: setFollowUp } = draft;
   const goalCommand = useGoalCommand({
@@ -176,7 +199,11 @@ export function JobComposer({
         {/* Its own card above the composer rather than inside it: the
                     queue is what the conversation will send next, not part of
                     the message being written. */}
-        <PendingMessageQueue queue={queue} disabled={isArchived || contextLost} />
+        <PendingMessageQueue
+          queue={queue}
+          disabled={isArchived || contextLost}
+          liveTurn={inherited}
+        />
         <div
           className={
             isArchived
@@ -288,7 +315,7 @@ export function JobComposer({
                 onKeyDown={(event) => {
                   goalCommand.onKeyDown(event);
                   if (event.defaultPrevented) return;
-                  if (queue.canSendNow && isSteerChord(event)) {
+                  if (canSteer && isSteerChord(event)) {
                     event.preventDefault();
                     void steerNow(goalCommand.submit);
                   }
@@ -371,7 +398,7 @@ export function JobComposer({
                   steerLabel={t('composer.steer')}
                   steerTitle={t('composer.steerHint', { keys: chordLabel('Enter', apple) })}
                   onSteer={
-                    queue.canSendNow && attachments.entries.length === 0
+                    canSteer && attachments.entries.length === 0
                       ? () => void steerNow(goalCommand.submit)
                       : undefined
                   }
@@ -394,9 +421,7 @@ export function JobComposer({
                 {runtimeNote(job, contextLost)}
                 {modelPicker ? '' : ` · ${inheritedLabel}`}
                 {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
-                {queue.canSendNow
-                  ? ` · ${t('queue.steerHint', { keys: chordLabel('↵', apple) })}`
-                  : ''}
+                {steerNote(queue.canSendNow, otherModel, apple, t)}
               </p>
               <p
                 role="status"

@@ -12,6 +12,7 @@ cannot serve it.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from datetime import UTC, datetime
 from typing import Any
@@ -34,7 +35,6 @@ from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_gateway_client, get_grant_client, get_storage
 from cloud_agent.application import session_fork
 from cloud_agent.application.follow_ups import prepare_follow_up
-from cloud_agent.application.model_connection_check import CheckResult
 from cloud_agent.application.model_connections import (
     access_for_job,
     invalidate_connection,
@@ -82,7 +82,8 @@ class FakeModelConnections:
             "credential_revision": 1,
             "config_revision": 1,
             "enabled": True,
-            "last_check": None,
+            "model_checks": {},
+            "protocols": [],
             "created_at": now,
             "updated_at": now,
             "deleted_at": None,
@@ -106,14 +107,19 @@ class FakeModelConnections:
         row = self.rows.get(connection_id)
         if row is None or row["user_id"] != user_id or row["deleted_at"] is not None:
             return None
+        # As the store does: only a value that differs from the stored one counts.
+        changed = {c for c, v in changes.items() if c == "api_key_ciphertext" or row.get(c) != v}
+        disabling = row["enabled"] and changes.get("enabled") is False
         row.update(changes)
-        if {"api_key_ciphertext", "base_url", "protocols"} & set(changes) or (
-            changes.get("enabled") is False
-        ):
+        if changed & {"api_key_ciphertext", "base_url", "protocols"} or disabling:
             row["credential_revision"] += 1
-        if {"api_key_ciphertext", "base_url", "protocols", "models"} & set(changes):
+        if changed & {"api_key_ciphertext", "base_url"}:
             row["config_revision"] += 1
-            row["last_check"] = None
+            row["model_checks"] = {}
+        elif "models" in changes:
+            row["model_checks"] = {
+                m: r for m, r in row["model_checks"].items() if m in row["models"]
+            }
         return copy.deepcopy(row)
 
     async def delete_model_connection(self, *, user_id, connection_id):
@@ -137,13 +143,23 @@ class FakeModelConnections:
         self.checks.append(connection_id)
         return {"connection": row}
 
-    async def record_model_connection_check(
-        self, *, user_id, connection_id, config_revision, result
+    async def record_model_verification(
+        self, *, user_id, connection_id, config_revision, credential_revision, model, result
     ):
         row = self.rows[connection_id]
-        if row["config_revision"] != config_revision or row["deleted_at"] is not None:
+        if (
+            row["user_id"] != user_id
+            or row["deleted_at"] is not None
+            or not row["enabled"]
+            or row["config_revision"] != config_revision
+            or row["credential_revision"] != credential_revision
+            or model not in row["models"]
+        ):
             return False
-        row["last_check"] = result
+        row["model_checks"] = {
+            **row["model_checks"],
+            model: {**result, "revision": config_revision},
+        }
         return True
 
     async def scan_key_ciphertexts(self, *, sandbox_id, limit):
@@ -198,9 +214,40 @@ _CREATE = {
     "name": "My provider",
     "base_url": "https://models.example/v1/",
     "api_key": _KEY,
-    "protocols": ["chat_completions"],
     "models": ["gpt-4.1", " openai/gpt-4.1 "],
 }
+
+
+def _facts(
+    chat: str = "supported", responses: str = "unsupported", anthropic: str = "unsupported"
+) -> dict[str, Any]:
+    """What ``verify_model`` returns: one native outcome per API."""
+    category = {
+        "supported": "supported",
+        "unsupported": "endpoint_missing",
+        "failed": "rate_limited",
+    }
+    return {
+        "checked_at": "2026-10-28T00:00:00+00:00",
+        "protocols": {
+            protocol: {"status": status, "category": category[status], "http_status": None}
+            for protocol, status in (
+                ("chat_completions", chat),
+                ("responses", responses),
+                ("anthropic_messages", anthropic),
+            )
+        },
+    }
+
+
+def _verifier(seen: list[dict[str, Any]], *answers: dict[str, Any]):
+    queue = list(answers)
+
+    async def fake_verify(**kwargs):
+        seen.append(kwargs)
+        return queue.pop(0) if queue else _facts()
+
+    return fake_verify
 
 
 async def _create(store: _Store, owner: str = "owner-1", **changes: Any) -> dict[str, Any]:
@@ -216,22 +263,45 @@ async def test_a_new_connection_stores_only_ciphertext_and_never_answers_the_key
 
     assert view["base_url"] == "https://models.example/v1"
     assert view["models"] == ["gpt-4.1", "openai/gpt-4.1"]
-    # Chat Completions natively for three, translated for Codex and Claude Code;
-    # the connection's own protocols stay what the upstream offers.
-    assert view["runtimes"] == ["claude-code", "codex", "kilo", "opencode", "pi"]
-    assert view["translated_runtimes"] == ["claude-code", "codex"]
-    assert view["protocols"] == ["chat_completions"]
+    # Nothing is probed on save: automatic, and every model waits for verification.
+    assert view["protocol_mode"] == "auto" and view["manual_protocols"] == []
+    assert view["runtimes"] == []
+    assert [(m["model"], m["status"], m["runtimes"]) for m in view["model_status"]] == [
+        ("gpt-4.1", "unverified", []),
+        ("openai/gpt-4.1", "unverified", []),
+    ]
     assert view["has_api_key"] is True
     assert _KEY not in str(view)
     stored = store.model_connections.rows[view["id"]]
     assert _KEY not in str(stored)
+    assert stored["protocols"] == [] and stored["model_checks"] == {}
     assert model_connection_cipher().decrypt(stored["api_key_ciphertext"]) == _KEY
 
     async with await _client(_settings_app(store)) as client:
         listed = await client.get(PATH)
     assert listed.headers["Cache-Control"] == "no-store"
     assert listed.json()["configured"] is True
+    assert listed.json()["checks_per_hour"] == api.CHECKS_PER_HOUR
     assert _KEY not in listed.text
+
+
+async def test_a_manual_declaration_is_kept_as_an_advanced_override():
+    store = _Store()
+    view = await _create(store, protocols=["responses", "chat_completions"])
+
+    assert view["protocol_mode"] == "manual"
+    assert view["manual_protocols"] == ["chat_completions", "responses"]
+    # Declared: every listed model runs on it unverified, Codex natively.
+    statuses = {m["model"]: m for m in view["model_status"]}
+    assert statuses["gpt-4.1"]["status"] == "declared"
+    assert statuses["gpt-4.1"]["runtimes"] == ["claude-code", "codex", "kilo", "opencode", "pi"]
+    codex = next(p for p in statuses["gpt-4.1"]["paths"] if p["runtime"] == "codex")
+    assert codex["mode"] == "direct" and codex["upstream_protocol"] == "responses"
+
+    async with await _client(_settings_app(store)) as client:
+        back = await client.patch(f"{PATH}/{view['id']}", json={"protocols": []})
+    assert back.json()["protocol_mode"] == "auto"
+    assert store.model_connections.rows[view["id"]]["credential_revision"] == 2
 
 
 async def test_a_rejected_request_names_the_field_and_never_echoes_what_was_sent():
@@ -255,9 +325,7 @@ async def test_another_owner_can_neither_see_nor_change_nor_check_a_connection()
         listed = await client.get(PATH)
         changed = await client.patch(f"{PATH}/{mine['id']}", json={"enabled": False})
         deleted = await client.delete(f"{PATH}/{mine['id']}")
-        checked = await client.post(
-            f"{PATH}/{mine['id']}/check", json={"model": "gpt-4.1", "protocol": "chat_completions"}
-        )
+        checked = await client.post(f"{PATH}/{mine['id']}/verify", json={"model": "gpt-4.1"})
 
     assert listed.json()["connections"] == []
     assert [changed.status_code, deleted.status_code, checked.status_code] == [404, 404, 404]
@@ -293,108 +361,187 @@ async def test_deleting_erases_the_key_and_closes_its_processes():
     assert again.status_code == 404, "a deleted connection is never brought back"
 
 
-async def test_a_check_runs_only_for_a_listed_model_and_protocol_and_keeps_its_result(
-    monkeypatch,
+@pytest.mark.parametrize(
+    "same",
+    [
+        {"name": "Renamed"},
+        {
+            "name": "Renamed",
+            "base_url": "https://models.example/v1/",
+            "models": ["gpt-4.1", "openai/gpt-4.1"],
+        },
+        {"name": "Renamed", "protocols": [], "api_key": _KEY},
+    ],
+)
+async def test_a_rename_with_unchanged_fields_keeps_credential_processes_and_checks(
+    monkeypatch, same
 ):
+    """F1: the settings form sends every field; only real changes count."""
     store = _Store()
     view = await _create(store)
-    seen: list[dict[str, Any]] = []
-
-    async def fake_check(**kwargs):
-        seen.append(kwargs)
-        return CheckResult(
-            protocol=kwargs["protocol"], model=kwargs["model"], category="auth", http_status=401
-        )
-
-    monkeypatch.setattr(api, "check_connection", fake_check)
+    monkeypatch.setattr(api, "verify_model", _verifier([]))
     async with await _client(_settings_app(store)) as client:
-        unlisted = await client.post(
-            f"{PATH}/{view['id']}/check", json={"model": "gpt-4o", "protocol": "chat_completions"}
-        )
-        # No plan serves an unknown protocol on any connection.
-        wrong = await client.post(
-            f"{PATH}/{view['id']}/check", json={"model": "gpt-4.1", "protocol": "messages"}
-        )
-        checked = await client.post(
-            f"{PATH}/{view['id']}/check", json={"model": "gpt-4.1", "protocol": "chat_completions"}
-        )
+        await client.post(f"{PATH}/{view['id']}/verify", json={"model": "gpt-4.1"})
+        before = copy.deepcopy(store.model_connections.rows[view["id"]])
+        renamed = await client.patch(f"{PATH}/{view['id']}", json=same)
+        monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "")
+        # With the deployment gate off, renaming through the same form still works.
+        gate_off = await client.patch(f"{PATH}/{view['id']}", json={**same, "name": "Again"})
 
-    assert [unlisted.status_code, wrong.status_code] == [400, 400]
-    assert checked.json()["status"] == "failed" and checked.json()["category"] == "auth"
-    assert seen[0]["api_key"] == _KEY and seen[0]["base_url"] == "https://models.example/v1"
-    assert store.model_connections.rows[view["id"]]["last_check"]["category"] == "auth"
-    assert _KEY not in checked.text
-    assert seen[0]["upstream_protocol"] == "chat_completions"
+    assert renamed.status_code == 200, renamed.text
+    assert gate_off.status_code == 200, gate_off.text
+    row = store.model_connections.rows[view["id"]]
+    assert row["credential_revision"] == before["credential_revision"]
+    assert row["config_revision"] == before["config_revision"]
+    assert row["model_checks"] == before["model_checks"]
+    assert row["api_key_ciphertext"] == before["api_key_ciphertext"]
+    assert renamed.json()["model_status"][0]["status"] == "ready"
 
 
-async def test_a_check_tests_the_same_plan_a_runtime_would_use(monkeypatch):
+async def test_a_model_list_edit_keeps_other_models_verified_and_new_ones_unverified(monkeypatch):
     store = _Store()
-    chat_only = await _create(store)
-    both = await _create(store, name="Both", protocols=["chat_completions", "responses"])
-    seen: list[dict[str, Any]] = []
-
-    async def fake_check(**kwargs):
-        seen.append(kwargs)
-        return CheckResult(
-            protocol=kwargs["protocol"],
-            model=kwargs["model"],
-            category="supported",
-            upstream_protocol=kwargs["upstream_protocol"]
-            if kwargs["upstream_protocol"] != kwargs["protocol"]
-            else "",
-        )
-
-    monkeypatch.setattr(api, "check_connection", fake_check)
+    view = await _create(store)
+    monkeypatch.setattr(api, "verify_model", _verifier([]))
     async with await _client(_settings_app(store)) as client:
-        translated = await client.post(
-            f"{PATH}/{chat_only['id']}/check", json={"model": "gpt-4.1", "protocol": "responses"}
-        )
-        claude = await client.post(
-            f"{PATH}/{chat_only['id']}/check",
-            json={"model": "gpt-4.1", "protocol": "anthropic_messages"},
-        )
-        native = await client.post(
-            f"{PATH}/{both['id']}/check", json={"model": "gpt-4.1", "protocol": "responses"}
-        )
+        await client.post(f"{PATH}/{view['id']}/verify", json={"model": "gpt-4.1"})
+        await client.post(f"{PATH}/{view['id']}/verify", json={"model": "openai/gpt-4.1"})
+        edited = await client.patch(f"{PATH}/{view['id']}", json={"models": ["gpt-4.1", "gpt-5"]})
 
-    assert [r.status_code for r in (translated, claude, native)] == [200, 200, 200]
-    assert [kw["upstream_protocol"] for kw in seen] == [
-        "chat_completions",
-        "chat_completions",
-        "responses",
+    statuses = {m["model"]: m["status"] for m in edited.json()["model_status"]}
+    assert statuses == {"gpt-4.1": "ready", "gpt-5": "unverified"}
+    row = store.model_connections.rows[view["id"]]
+    assert set(row["model_checks"]) == {"gpt-4.1"}, "a removed model's result goes with it"
+    assert row["credential_revision"] == 1 and store.model_connections.release_calls == [
+        ("owner-1", view["id"])
     ]
-    assert (translated.json()["mode"], translated.json()["upstream_protocol"]) == (
-        "translated",
-        "chat_completions",
-    )
-    # Native first: the connection that offers Responses is tested on Responses itself.
-    assert (native.json()["mode"], native.json()["upstream_protocol"]) == ("direct", "responses")
-    stored = store.model_connections.rows[chat_only["id"]]["last_check"]
-    assert stored["mode"] == "translated" and stored["protocol"] == "anthropic_messages"
 
 
-async def test_a_check_that_finishes_after_an_edit_does_not_vouch_for_the_new_config(
-    monkeypatch,
-):
+async def test_verifying_one_model_records_its_native_facts_and_derives_agent_paths(monkeypatch):
     store = _Store()
     view = await _create(store)
-
-    async def edit_while_checking(**kwargs):
-        # The owner changes the Base URL while the old one is being checked.
-        await store.model_connections.update_model_connection(
-            user_id="owner-1", connection_id=view["id"], changes={"base_url": "https://b.example"}
-        )
-        return CheckResult(protocol=kwargs["protocol"], model=kwargs["model"], category="supported")
-
-    monkeypatch.setattr(api, "check_connection", edit_while_checking)
+    seen: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        api,
+        "verify_model",
+        _verifier(seen, _facts(chat="supported", responses="supported", anthropic="failed")),
+    )
     async with await _client(_settings_app(store)) as client:
-        checked = await client.post(
-            f"{PATH}/{view['id']}/check", json={"model": "gpt-4.1", "protocol": "chat_completions"}
+        unlisted = await client.post(f"{PATH}/{view['id']}/verify", json={"model": "gpt-4o"})
+        verified = await client.post(f"{PATH}/{view['id']}/verify", json={"model": "gpt-4.1"})
+        listed = await client.get(PATH)
+
+    assert unlisted.status_code == 400
+    assert verified.status_code == 200, verified.text
+    body = verified.json()
+    assert body["recorded"] is True and body["status"] == "ready"
+    assert seen == [{"base_url": "https://models.example/v1", "api_key": _KEY, "model": "gpt-4.1"}]
+    assert _KEY not in verified.text
+    paths = {p["runtime"]: (p["mode"], p["upstream_protocol"]) for p in body["paths"]}
+    # Codex natively on its verified Responses; Claude Code's Messages could
+    # not be determined, so it goes through the helper onto verified Chat.
+    assert paths["codex"] == ("direct", "responses")
+    assert paths["claude-code"] == ("translated", "chat_completions")
+    assert paths["opencode"] == ("direct", "chat_completions")
+    assert body["protocols"]["anthropic_messages"]["status"] == "failed"
+    stored = store.model_connections.rows[view["id"]]["model_checks"]
+    # Only upstream facts are kept; paths are derived.
+    assert set(stored) == {"gpt-4.1"} and "paths" not in stored["gpt-4.1"]
+    # One model's verification makes only that model usable.
+    statuses = {m["model"]: m["status"] for m in listed.json()["connections"][0]["model_status"]}
+    assert statuses == {"gpt-4.1": "ready", "openai/gpt-4.1": "unverified"}
+
+
+@pytest.mark.parametrize(
+    ("facts", "status", "category"),
+    [
+        (_facts("failed", "failed", "failed"), "failed", "rate_limited"),
+        (_facts("unsupported", "unsupported", "unsupported"), "unsupported", "endpoint_missing"),
+        (_facts("unsupported", "supported", "unsupported"), "ready", None),
+    ],
+)
+async def test_unknown_failed_and_unsupported_stay_distinct(monkeypatch, facts, status, category):
+    store = _Store()
+    view = await _create(store)
+    monkeypatch.setattr(api, "verify_model", _verifier([], facts))
+    async with await _client(_settings_app(store)) as client:
+        body = (await client.post(f"{PATH}/{view['id']}/verify", json={"model": "gpt-4.1"})).json()
+
+    assert (body["status"], body["category"]) == (status, category)
+    if status == "ready":
+        # Responses alone serves Codex, and nothing else.
+        assert body["runtimes"] == ["codex"]
+    else:
+        assert body["runtimes"] == [] and body["message"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"base_url": "https://b.example"},
+        {"api_key": "sk-rotated-key-0000"},
+        {"enabled": False},
+        {"models": ["openai/gpt-4.1"]},
+    ],
+)
+async def test_a_verification_that_finishes_after_a_change_is_not_kept(monkeypatch, change):
+    store = _Store()
+    view = await _create(store)
+    rows = store.model_connections.rows
+
+    async def edit_while_verifying(**kwargs):
+        async with await _client(_settings_app(store)) as client:
+            await client.patch(f"{PATH}/{view['id']}", json=change)
+            if change.get("enabled") is False:
+                # Re-enabled before the answer: still not the state it read.
+                await client.patch(f"{PATH}/{view['id']}", json={"enabled": True})
+        return _facts()
+
+    monkeypatch.setattr(api, "verify_model", edit_while_verifying)
+    async with await _client(_settings_app(store)) as client:
+        verified = await client.post(f"{PATH}/{view['id']}/verify", json={"model": "gpt-4.1"})
+
+    assert verified.json()["recorded"] is False
+    assert "gpt-4.1" not in rows[view["id"]]["model_checks"]
+    assert rows[view["id"]]["enabled"] is True or change.get("enabled") is False
+
+
+async def test_concurrent_verifications_of_different_models_both_survive(monkeypatch):
+    store = _Store()
+    view = await _create(store)
+    other = asyncio.Event()
+
+    async def overlapping(**kwargs):
+        if kwargs["model"] == "gpt-4.1":
+            await other.wait()
+        else:
+            other.set()
+        return _facts()
+
+    monkeypatch.setattr(api, "verify_model", overlapping)
+    async with await _client(_settings_app(store)) as client:
+        first, second = await asyncio.gather(
+            client.post(f"{PATH}/{view['id']}/verify", json={"model": "gpt-4.1"}),
+            client.post(f"{PATH}/{view['id']}/verify", json={"model": "openai/gpt-4.1"}),
         )
 
-    assert checked.json()["status"] == "supported"
-    assert checked.json()["recorded"] is False
-    assert store.model_connections.rows[view["id"]]["last_check"] is None
+    assert first.json()["recorded"] and second.json()["recorded"]
+    assert set(store.model_connections.rows[view["id"]]["model_checks"]) == {
+        "gpt-4.1",
+        "openai/gpt-4.1",
+    }
+
+
+async def test_a_disabled_connection_is_not_verified(monkeypatch):
+    store = _Store()
+    view = await _create(store)
+    seen: list[dict[str, Any]] = []
+    monkeypatch.setattr(api, "verify_model", _verifier(seen))
+    async with await _client(_settings_app(store)) as client:
+        await client.patch(f"{PATH}/{view['id']}", json={"enabled": False})
+        refused = await client.post(f"{PATH}/{view['id']}/verify", json={"model": "gpt-4.1"})
+
+    assert refused.status_code == 409 and seen == []
+    assert store.model_connections.rows[view["id"]]["enabled"] is False
 
 
 async def test_with_the_gate_off_nothing_new_can_be_made_usable(monkeypatch):
@@ -405,9 +552,7 @@ async def test_with_the_gate_off_nothing_new_can_be_made_usable(monkeypatch):
         listed = await client.get(PATH)
         created = await client.post(PATH, json={**_CREATE, "name": "Second"})
         rotated = await client.patch(f"{PATH}/{view['id']}", json={"api_key": "sk-other-0000"})
-        checked = await client.post(
-            f"{PATH}/{view['id']}/check", json={"model": "gpt-4.1", "protocol": "chat_completions"}
-        )
+        checked = await client.post(f"{PATH}/{view['id']}/verify", json={"model": "gpt-4.1"})
         disabled = await client.patch(f"{PATH}/{view['id']}", json={"enabled": False})
         deleted = await client.delete(f"{PATH}/{view['id']}")
 
@@ -416,16 +561,16 @@ async def test_with_the_gate_off_nothing_new_can_be_made_usable(monkeypatch):
     assert [disabled.status_code, deleted.status_code] == [200, 204]
 
 
-async def test_checks_are_limited_per_owner(monkeypatch):
+async def test_verifications_are_limited_per_owner(monkeypatch):
     store = _Store()
     view = await _create(store)
     store.model_connections.checks = [view["id"]] * api.CHECKS_PER_HOUR
+    seen: list[dict[str, Any]] = []
+    monkeypatch.setattr(api, "verify_model", _verifier(seen))
 
     async with await _client(_settings_app(store)) as client:
-        response = await client.post(
-            f"{PATH}/{view['id']}/check", json={"model": "gpt-4.1", "protocol": "chat_completions"}
-        )
-    assert response.status_code == 429
+        response = await client.post(f"{PATH}/{view['id']}/verify", json={"model": "gpt-4.1"})
+    assert response.status_code == 429 and seen == []
 
 
 # -- turns ---------------------------------------------------------------------------
@@ -469,8 +614,9 @@ def _connection_row(
         "models": list(models),
         "api_key_ciphertext": model_connection_cipher().encrypt(_KEY),
         "credential_revision": 1,
+        "config_revision": 1,
         "enabled": True,
-        "last_check": None,
+        "model_checks": {},
         "created_at": datetime.now(UTC),
         "updated_at": datetime.now(UTC),
         "deleted_at": None,
@@ -907,10 +1053,10 @@ async def test_a_residency_on_a_connection_gets_its_key_bound_to_the_current_rev
         async def mint(self, **kwargs):
             raise AssertionError("a residency on an owner connection minted a Gateway grant")
 
-    credential, revision = await residency_credential(
+    credential, revision, plan = await residency_credential(
         store, _NoGrants(), job=_JOB, row=dict(_ROW), host="h", fence=_FENCE
     )
-    assert (credential, revision) == (_KEY, 1)
+    assert (credential, revision, plan) == (_KEY, 1, "responses>responses")
     assert connections.bound == [{"thread_id": "athr_1", "generation": 4}]
 
 
@@ -1006,9 +1152,8 @@ async def test_config_offers_the_owners_connections_and_their_last_use_without_t
             "id": row["id"],
             "name": "Mine",
             "models": ["gpt-4.1"],
-            # Codex is native on Responses here; Claude Code goes through the helper.
-            "runtimes": ["claude-code", "codex", "kilo", "opencode", "pi"],
-            "translated_runtimes": ["claude-code"],
+            # Declared: every agent; the composer is not told which go through the helper.
+            "model_runtimes": {"gpt-4.1": ["claude-code", "codex", "kilo", "opencode", "pi"]},
         }
     ]
     assert _KEY not in str(config)
@@ -1078,3 +1223,117 @@ async def test_a_gateway_pin_still_outranks_a_remembered_connection(monkeypatch)
         config = (await c.get("/v1/agent/config")).json()
 
     assert (config["default_model"], config["default_model_connection_id"]) == ("qwen-next", None)
+
+
+# -- automatic detection: one model at a time ---------------------------------------
+
+
+def _auto_row(**checks: dict[str, Any]) -> dict[str, Any]:
+    """An automatic connection with three models, ``checks`` verified at revision 1."""
+    return _connection_row(
+        protocols=(),
+        models=("chat-only", "responses-only", "never-checked"),
+        model_checks={model: {**facts, "revision": 1} for model, facts in checks.items()},
+    )
+
+
+_MIXED = {
+    "chat-only": _facts(chat="supported"),
+    "responses-only": _facts(chat="unsupported", responses="supported"),
+}
+
+
+@pytest.mark.parametrize(
+    ("runtime", "model", "status", "reason"),
+    [
+        ("opencode", "chat-only", 201, None),
+        ("codex", "chat-only", 201, None),  # through the helper
+        ("claude-code", "chat-only", 201, None),
+        ("codex", "responses-only", 201, None),  # natively
+        ("claude-code", "responses-only", 400, "protocol_unsupported"),
+        ("opencode", "responses-only", 400, "protocol_unsupported"),
+        ("opencode", "never-checked", 400, "model_unverified"),
+    ],
+)
+async def test_admission_asks_the_models_own_verification(runtime, model, status, reason):
+    store = _TurnStorage()
+    row = _auto_row(**_MIXED)
+    store.connections.rows[row["id"]] = row
+    async with AsyncClient(transport=ASGITransport(app=_turn_app(store)), base_url="http://t") as c:
+        created = await _create_job(c, runtime=runtime, model=model, model_connection_id=row["id"])
+
+    assert created.status_code == status, created.text
+    if reason:
+        assert created.json()["detail"]["error"]["reason"] == reason
+
+
+async def test_a_result_from_an_earlier_key_or_url_verifies_nothing():
+    store = _TurnStorage()
+    row = _auto_row(**_MIXED)
+    row["config_revision"] = 2  # the key changed after these were verified
+    store.connections.rows[row["id"]] = row
+    async with AsyncClient(transport=ASGITransport(app=_turn_app(store)), base_url="http://t") as c:
+        created = await _create_job(c, model="chat-only", model_connection_id=row["id"])
+    async with AsyncClient(
+        transport=ASGITransport(app=_build_app(store)), base_url="http://t"
+    ) as c:
+        config = (await c.get("/v1/agent/config")).json()
+
+    assert created.json()["detail"]["error"]["reason"] == "model_unverified"
+    assert config["model_connections"][0]["model_runtimes"] == {}
+
+
+async def test_the_composer_offers_exactly_what_the_gates_accept():
+    store = _TurnStorage()
+    row = _auto_row(**_MIXED)
+    store.connections.rows[row["id"]] = row
+    async with AsyncClient(
+        transport=ASGITransport(app=_build_app(store)), base_url="http://t"
+    ) as c:
+        config = (await c.get("/v1/agent/config")).json()
+
+    option = config["model_connections"][0]
+    assert option["models"] == ["chat-only", "responses-only", "never-checked"]
+    assert option["model_runtimes"] == {
+        "chat-only": ["claude-code", "codex", "kilo", "opencode", "pi"],
+        "responses-only": ["codex"],
+    }
+    assert "chat_completions" not in str(option) and "translated" not in str(option)
+
+
+@pytest.mark.parametrize(("model", "client"), [("chat-only", "responses"), ("responses-only", "")])
+async def test_a_claim_resolves_codex_natively_or_through_the_helper_per_model(model, client):
+    store = _ConnectionClaimStore(_auto_row(**_MIXED), runtime="codex", model=model)
+    response = await _claim(
+        store, _Grants(), ("model-connections-v1", "model-protocol-translation-v1")
+    )
+
+    assert response.status_code == 200, response.text
+    access = response.json()["model_connection"]
+    assert access.get("client_protocol", "") == client
+    assert access["protocol"] == ("chat_completions" if client else "responses")
+
+
+async def test_a_claim_on_an_unverified_model_ends_the_turn_with_the_reason():
+    store = _ConnectionClaimStore(_auto_row(**_MIXED), model="never-checked")
+    response = await _claim(store, _Grants())
+    assert response.status_code == 403
+    assert response.json()["detail"]["error"]["reason"] == "model_unverified"
+
+
+async def test_a_residency_names_the_plan_its_model_has_now():
+    """Codex review 1: a re-verification between claim and residency changes the plan."""
+    connections = FakeModelConnections()
+    row = _auto_row(**{"gpt-5.1-codex": _facts(chat="supported", responses="supported")})
+    row["models"] = ["gpt-5.1-codex"]
+    connections.rows[row["id"]] = row
+    store = _ResidencyStore(connections)
+    *_, native = await residency_credential(
+        store, None, job=_JOB, row=dict(_ROW), host="h", fence=_FENCE
+    )
+    # Verified again meanwhile: Responses is gone, Chat remains.
+    row["model_checks"]["gpt-5.1-codex"] = {**_facts(chat="supported"), "revision": 1}
+    *_, translated = await residency_credential(
+        store, None, job=_JOB, row=dict(_ROW), host="h", fence=_FENCE
+    )
+    assert (native, translated) == ("responses>responses", "responses>chat_completions")

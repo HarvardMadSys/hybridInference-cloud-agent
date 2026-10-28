@@ -3,6 +3,15 @@
 Pure rules, no I/O. The address checks that need a resolver live in
 ``application.model_connections``; here is what the owner typed, normalized,
 and the one predicate every path that hands a connection to a turn asks.
+
+**Which APIs a model is reached on is per model.** A connection either leaves
+it to verification (``protocols`` empty, the default) or carries its owner's
+manual declaration. Automatically, a model runs only on the native APIs its
+own verification at the connection's current ``config_revision`` showed
+streaming a tool round trip (``model_checks``); a model never verified, or
+verified against an earlier key or Base URL, runs on nothing. Codex and Claude
+Code reach a model whose only verified API is Chat Completions through the
+member's compatibility helper; that path is derived here, never stored.
 """
 
 from __future__ import annotations
@@ -18,7 +27,7 @@ from cloud_agent_shared.model_connections import (
     MODEL_ID,
     PROTOCOLS,
     ProtocolPlan,
-    protocol_plan,
+    runtime_plans,
     runtime_protocol,
 )
 
@@ -30,6 +39,7 @@ UnusableReason = Literal[
     "deleted",
     "model_not_listed",
     "runtime_unsupported",
+    "model_unverified",
     "protocol_unsupported",
     "effort_unsupported",
     "changed",
@@ -44,10 +54,13 @@ UNUSABLE_MESSAGES: dict[str, str] = {
     "deleted": "This task's model connection was deleted. Choose another model.",
     "model_not_listed": "That model is not listed on its connection. Add it, or choose another.",
     "runtime_unsupported": "This agent cannot run on a model connection.",
+    "model_unverified": (
+        "This model has not been verified on its connection yet, or the connection's key or "
+        "Base URL changed since. Verify it in Settings, or choose another model."
+    ),
     "protocol_unsupported": (
-        "This connection does not offer a protocol this agent can use: OpenCode, Kilo and pi "
-        "need Chat Completions; Codex needs Responses or Chat Completions; Claude Code needs "
-        "Anthropic Messages or Chat Completions."
+        "This model's verification found no way for this agent to use it. Verify it again, "
+        "or choose another agent or model."
     ),
     "effort_unsupported": (
         "Reasoning effort cannot be set for a model connection; leave it on Auto."
@@ -124,11 +137,11 @@ def clean_base_url(value: str) -> str:
 
 
 def clean_protocols(values: list[str]) -> list[str]:
-    """The protocols a connection offers, in the platform's order, at least one."""
+    """A manual declaration in the platform's order; empty is automatic detection."""
     chosen = set(values)
-    if not chosen or not chosen <= set(PROTOCOLS):
+    if not chosen <= set(PROTOCOLS):
         raise ModelConnectionInvalid(
-            "Choose at least one of Chat Completions, Responses and Anthropic Messages."
+            "Declare only Chat Completions, Responses or Anthropic Messages."
         )
     return [protocol for protocol in PROTOCOLS if protocol in chosen]
 
@@ -162,6 +175,56 @@ class TurnSource:
     connection_id: str | None = None
 
 
+#: A verification outcome for one native API: the round trip worked, the
+#: provider answered that it cannot, or it could not be determined.
+SUPPORTED = "supported"
+UNSUPPORTED = "unsupported"
+FAILED = "failed"
+
+
+def is_manual(connection: dict[str, Any]) -> bool:
+    """Whether the owner declared the APIs instead of leaving them to verification."""
+    return bool(connection.get("protocols"))
+
+
+def current_check(connection: dict[str, Any], model: str) -> dict[str, Any] | None:
+    """``model``'s verification, if it tested the connection as it is now; else ``None``."""
+    checks = connection.get("model_checks")
+    entry = checks.get(model) if isinstance(checks, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("revision") != connection.get("config_revision"):
+        return None
+    return entry
+
+
+def verified_protocols(connection: dict[str, Any], model: str) -> list[str]:
+    """The native APIs ``model`` runs on: declared, or verified for it at this revision."""
+    if is_manual(connection):
+        return list(connection.get("protocols") or [])
+    entry = current_check(connection, model)
+    results = entry.get("protocols") if entry is not None else None
+    if not isinstance(results, dict):
+        return []
+    return [
+        protocol
+        for protocol in PROTOCOLS
+        if isinstance(results.get(protocol), dict) and results[protocol].get("status") == SUPPORTED
+    ]
+
+
+def model_paths(connection: dict[str, Any], model: str) -> dict[str, ProtocolPlan]:
+    """Every runtime ``model`` can run on through ``connection``, with its plan.
+
+    Native first, then Codex and Claude Code over Chat Completions through the
+    helper (``protocol_plan``). Empty for a model that is not listed, not
+    verified, or verified with no API an agent can use.
+    """
+    if model not in (connection.get("models") or []):
+        return {}
+    return runtime_plans(verified_protocols(connection, model))
+
+
 def require_usable(
     connection: dict[str, Any] | None,
     *,
@@ -171,14 +234,15 @@ def require_usable(
 ) -> ProtocolPlan:
     """The plan ``runtime`` will use on ``connection`` for ``model``, or refuse.
 
-    The plan is ``protocol_plan``'s: the runtime's own protocol when the
-    connection offers it, else one of the two translations onto Chat
-    Completions.
+    The plan is ``model_paths``': for this model, the runtime's own protocol
+    when it was verified (or declared), else one of the two translations onto
+    a verified Chat Completions.
 
     The one predicate admission, follow-ups, waiting messages, goal rounds,
-    claims, residencies and Fork all ask. ``connection`` is the owner's own
-    row: callers read it scoped to the turn's owner, so another owner's
-    connection is ``not_found`` here exactly as a missing one is.
+    claims, residencies and Fork all ask, and the composer offers exactly what
+    it accepts. ``connection`` is the owner's own row: callers read it scoped
+    to the turn's owner, so another owner's connection is ``not_found`` here
+    exactly as a missing one is.
     """
     if connection is None:
         raise ModelConnectionUnusable("not_found")
@@ -188,18 +252,23 @@ def require_usable(
         raise ModelConnectionUnusable("disabled")
     if runtime_protocol(runtime) is None:
         raise ModelConnectionUnusable("runtime_unsupported")
-    plan = protocol_plan(runtime, list(connection.get("protocols") or []))
-    if plan is None:
-        raise ModelConnectionUnusable("protocol_unsupported")
     if model not in (connection.get("models") or []):
         raise ModelConnectionUnusable("model_not_listed")
+    if not is_manual(connection) and current_check(connection, model) is None:
+        raise ModelConnectionUnusable("model_unverified")
+    plan = model_paths(connection, model).get(runtime)
+    if plan is None:
+        raise ModelConnectionUnusable("protocol_unsupported")
     if reasoning_effort is not None:
         raise ModelConnectionUnusable("effort_unsupported")
     return plan
 
 
 __all__ = [
+    "FAILED",
     "MAX_NAME_CHARS",
+    "SUPPORTED",
+    "UNSUPPORTED",
     "UNUSABLE_MESSAGES",
     "ModelConnectionConflict",
     "ModelConnectionInvalid",
@@ -210,6 +279,10 @@ __all__ = [
     "clean_models",
     "clean_name",
     "clean_protocols",
+    "current_check",
     "is_connection_id",
+    "is_manual",
+    "model_paths",
     "require_usable",
+    "verified_protocols",
 ]

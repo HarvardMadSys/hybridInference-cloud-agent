@@ -16,46 +16,50 @@ const PROTOCOL_NAMES: Record<ModelProtocol, string> = {
   anthropic_messages: 'Anthropic Messages',
 };
 
-/** Client protocols the helper can run on a Chat Completions connection. */
-const TRANSLATED_CLIENTS: readonly ModelProtocol[] = ['responses', 'anthropic_messages'];
-
-export interface CheckTarget {
-  protocol: ModelProtocol;
-  translated: boolean;
-}
-
-/**
- * What a connection can be tested as: each protocol it declares, natively,
- * then each client protocol it serves only through translation. Native first,
- * as a task would run; the declared protocols are never rewritten.
- */
-export function checkTargets(protocols: readonly ModelProtocol[]): CheckTarget[] {
-  const native = protocols.map((protocol) => ({ protocol, translated: false }));
-  if (!protocols.includes('chat_completions')) return native;
-  const translated = TRANSLATED_CLIENTS.filter((client) => !protocols.includes(client));
-  return [...native, ...translated.map((protocol) => ({ protocol, translated: true }))];
-}
-
-/** A protocol's proper name, the same in every language. */
+/** A protocol's proper name, the same in every language. Diagnostics only. */
 export function protocolName(protocol: ModelProtocol): string {
   return PROTOCOL_NAMES[protocol] ?? protocol;
 }
 
-export interface ModelConnectionCheck {
+/**
+ * One listed model's state. `ready`: verified, with the agents in `runtimes`;
+ * `declared`: the owner declared the APIs manually; `unverified`: not checked
+ * against the current key and Base URL; `failed`: the check could not
+ * determine anything (unreachable, key refused, rate limited…); `unsupported`:
+ * the provider answered and no API completed a streaming tool call.
+ */
+export type ModelStatusKind = 'ready' | 'declared' | 'unverified' | 'failed' | 'unsupported';
+
+/** What one native API's check found for a model. Diagnostics only. */
+export interface ProtocolResult {
   status: string;
   category: string;
   message: string;
-  /** The client protocol tested: what the agent's CLI speaks. */
-  protocol: ModelProtocol;
-  /** What the request went out as; differs from `protocol` when translated. */
-  upstream_protocol?: ModelProtocol;
-  mode?: 'direct' | 'translated';
-  model: string;
-  streaming: boolean;
-  tool_call: boolean;
-  final_answer: boolean;
   http_status: number | null;
-  checked_at: string;
+}
+
+/** How one agent reaches a model. Diagnostics only. */
+export interface AgentPath {
+  runtime: string;
+  mode: 'direct' | 'translated';
+  client_protocol: ModelProtocol;
+  upstream_protocol: ModelProtocol;
+}
+
+export interface ModelStatus {
+  model: string;
+  status: ModelStatusKind;
+  category: string | null;
+  message: string;
+  /** The agents a task may run this model with now: what the server accepts. */
+  runtimes: string[];
+  paths: AgentPath[];
+  protocols: Partial<Record<ModelProtocol, ProtocolResult>>;
+  checked_at: string | null;
+}
+
+export interface ModelVerification extends ModelStatus {
+  /** False when the connection changed while it ran; nothing was kept. */
   recorded: boolean;
 }
 
@@ -63,14 +67,15 @@ export interface ModelConnection {
   id: string;
   name: string;
   base_url: string;
-  protocols: ModelProtocol[];
+  /** `auto`: each model's APIs come from verifying it; `manual`: declared. */
+  protocol_mode: 'auto' | 'manual';
+  manual_protocols: ModelProtocol[];
   models: string[];
   enabled: boolean;
   has_api_key: boolean;
+  /** Every agent at least one listed model can run with now. */
   runtimes: string[];
-  /** Agents that reach this connection through the compatibility helper. */
-  translated_runtimes?: string[];
-  last_check: ModelConnectionCheck | null;
+  model_status: ModelStatus[];
   created_at: string;
   updated_at: string;
 }
@@ -79,14 +84,41 @@ export interface ModelConnectionInput {
   name: string;
   base_url: string;
   api_key: string;
-  protocols: ModelProtocol[];
   models: string[];
+  /** Advanced: declared APIs; empty (or omitted) is automatic detection. */
+  protocols?: ModelProtocol[];
 }
 
 export interface ModelConnectionList {
   configured: boolean;
   enabled: boolean;
+  /** How many models one owner may verify per hour. */
+  checks_per_hour?: number;
   connections: ModelConnection[];
+}
+
+/** How many models one "verify" action checks, one after another. */
+export const VERIFY_BATCH = 3;
+
+/** The models a "verify" action should check: never verified, or stale. */
+export function unverifiedModels(connection: ModelConnection): string[] {
+  return connection.model_status
+    .filter((status) => status.status === 'unverified')
+    .map((status) => status.model);
+}
+
+/** `connection` with one model's kept verification applied, as the server now holds it. */
+export function withVerification(
+  connection: ModelConnection,
+  verification: ModelVerification,
+): ModelConnection {
+  if (!verification.recorded) return connection;
+  const { recorded: _recorded, ...status } = verification;
+  const model_status = connection.model_status.map((item) =>
+    item.model === status.model ? status : item,
+  );
+  const runtimes = [...new Set(model_status.flatMap((item) => item.runtimes))].sort();
+  return { ...connection, model_status, runtimes };
 }
 
 const ROOT = '/v1/agent/model-connections';
@@ -117,13 +149,10 @@ export async function deleteModelConnection(id: string): Promise<void> {
   if (!response.ok) await jsonOrThrow(response);
 }
 
-export async function checkModelConnection(
-  id: string,
-  model: string,
-  protocol: ModelProtocol,
-): Promise<ModelConnectionCheck> {
+/** Verify one model: a few billable provider requests, made only when asked. */
+export async function verifyModelConnection(id: string, model: string): Promise<ModelVerification> {
   return jsonOrThrow(
-    await fetchWithAuth(config.apiBase, path(id, '/check'), json('POST', { model, protocol })),
+    await fetchWithAuth(config.apiBase, path(id, '/verify'), json('POST', { model })),
   );
 }
 

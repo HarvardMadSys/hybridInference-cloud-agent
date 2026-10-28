@@ -6395,6 +6395,39 @@
         "title": "AgentOperationProfilingFragment",
         "type": "object"
       },
+      "AgentPathView": {
+        "description": "How one agent reaches a model: directly, or through the member's helper.",
+        "properties": {
+          "client_protocol": {
+            "title": "Client Protocol",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "direct",
+              "translated"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "runtime": {
+            "title": "Runtime",
+            "type": "string"
+          },
+          "upstream_protocol": {
+            "title": "Upstream Protocol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "runtime",
+          "mode",
+          "client_protocol",
+          "upstream_protocol"
+        ],
+        "title": "AgentPathView",
+        "type": "object"
+      },
       "AgentPendingMessageAttachment": {
         "description": "One upload a waiting message holds, without its bytes.",
         "properties": {
@@ -12767,6 +12800,17 @@
             ],
             "title": "Model"
           },
+          "model_connection_plan": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Connection Plan"
+          },
           "model_connection_revision": {
             "anyOf": [
               {
@@ -14234,112 +14278,9 @@
         "title": "ModelConnectionAccess",
         "type": "object"
       },
-      "ModelConnectionCheckRequest": {
-        "additionalProperties": false,
-        "description": "Which model and protocol to check.",
-        "properties": {
-          "model": {
-            "maxLength": 200,
-            "minLength": 1,
-            "title": "Model",
-            "type": "string"
-          },
-          "protocol": {
-            "maxLength": 32,
-            "title": "Protocol",
-            "type": "string"
-          }
-        },
-        "required": [
-          "model",
-          "protocol"
-        ],
-        "title": "ModelConnectionCheckRequest",
-        "type": "object"
-      },
-      "ModelConnectionCheckView": {
-        "description": "One check's result, as stored on the connection.",
-        "properties": {
-          "category": {
-            "title": "Category",
-            "type": "string"
-          },
-          "checked_at": {
-            "title": "Checked At",
-            "type": "string"
-          },
-          "final_answer": {
-            "title": "Final Answer",
-            "type": "boolean"
-          },
-          "http_status": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Http Status"
-          },
-          "message": {
-            "title": "Message",
-            "type": "string"
-          },
-          "mode": {
-            "default": "direct",
-            "title": "Mode",
-            "type": "string"
-          },
-          "model": {
-            "title": "Model",
-            "type": "string"
-          },
-          "protocol": {
-            "title": "Protocol",
-            "type": "string"
-          },
-          "recorded": {
-            "default": true,
-            "title": "Recorded",
-            "type": "boolean"
-          },
-          "status": {
-            "title": "Status",
-            "type": "string"
-          },
-          "streaming": {
-            "title": "Streaming",
-            "type": "boolean"
-          },
-          "tool_call": {
-            "title": "Tool Call",
-            "type": "boolean"
-          },
-          "upstream_protocol": {
-            "default": "",
-            "title": "Upstream Protocol",
-            "type": "string"
-          }
-        },
-        "required": [
-          "status",
-          "category",
-          "message",
-          "protocol",
-          "model",
-          "streaming",
-          "tool_call",
-          "final_answer",
-          "checked_at"
-        ],
-        "title": "ModelConnectionCheckView",
-        "type": "object"
-      },
       "ModelConnectionCreate": {
         "additionalProperties": false,
-        "description": "A new connection; every field is required.",
+        "description": "A new connection. ``protocols`` is the advanced manual declaration; omitted is automatic.",
         "properties": {
           "api_key": {
             "maxLength": 4160,
@@ -14377,7 +14318,6 @@
           "name",
           "base_url",
           "api_key",
-          "protocols",
           "models"
         ],
         "title": "ModelConnectionCreate",
@@ -14386,6 +14326,11 @@
       "ModelConnectionList": {
         "description": "The owner's connections, and whether this deployment can store keys at all.",
         "properties": {
+          "checks_per_hour": {
+            "default": 20,
+            "title": "Checks Per Hour",
+            "type": "integer"
+          },
           "configured": {
             "title": "Configured",
             "type": "boolean"
@@ -14411,11 +14356,21 @@
         "type": "object"
       },
       "ModelConnectionOption": {
-        "description": "One of the owner's enabled model connections, as the composer offers it.\n\nEverything needed to offer its models beside the Gateway's and to know\nwhich agents can use it; nothing about its key.",
+        "description": "One of the owner's enabled model connections, as the composer offers it.\n\nEverything needed to offer its models beside the Gateway's, and which\nagents can run each one now; nothing about its key or its APIs.",
         "properties": {
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "model_runtimes": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": "Model Runtimes",
+            "type": "object"
           },
           "models": {
             "items": {
@@ -14427,34 +14382,19 @@
           "name": {
             "title": "Name",
             "type": "string"
-          },
-          "runtimes": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Runtimes",
-            "type": "array"
-          },
-          "translated_runtimes": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Translated Runtimes",
-            "type": "array"
           }
         },
         "required": [
           "id",
           "name",
-          "models",
-          "runtimes"
+          "models"
         ],
         "title": "ModelConnectionOption",
         "type": "object"
       },
       "ModelConnectionUpdate": {
         "additionalProperties": false,
-        "description": "Change some fields; an omitted field keeps its value. ``api_key`` rotates the key.",
+        "description": "Change some fields; an omitted field keeps its value. ``api_key`` rotates the key.\n\n``protocols`` set to ``[]`` returns the connection to automatic detection.",
         "properties": {
           "api_key": {
             "anyOf": [
@@ -14560,17 +14500,19 @@
             "title": "Id",
             "type": "string"
           },
-          "last_check": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Last Check"
+          "manual_protocols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Manual Protocols",
+            "type": "array"
+          },
+          "model_status": {
+            "items": {
+              "$ref": "#/components/schemas/ModelStatusView"
+            },
+            "title": "Model Status",
+            "type": "array"
           },
           "models": {
             "items": {
@@ -14583,25 +14525,19 @@
             "title": "Name",
             "type": "string"
           },
-          "protocols": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Protocols",
-            "type": "array"
+          "protocol_mode": {
+            "enum": [
+              "auto",
+              "manual"
+            ],
+            "title": "Protocol Mode",
+            "type": "string"
           },
           "runtimes": {
             "items": {
               "type": "string"
             },
             "title": "Runtimes",
-            "type": "array"
-          },
-          "translated_runtimes": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Translated Runtimes",
             "type": "array"
           },
           "updated_at": {
@@ -14613,11 +14549,12 @@
           "id",
           "name",
           "base_url",
-          "protocols",
+          "protocol_mode",
           "models",
           "enabled",
           "has_api_key",
           "runtimes",
+          "model_status",
           "created_at",
           "updated_at"
         ],
@@ -14692,6 +14629,178 @@
           }
         },
         "title": "ModelPreferenceResponse",
+        "type": "object"
+      },
+      "ModelStatusView": {
+        "description": "One listed model as its owner sees it.\n\n``status`` is ``ready``, ``declared``, ``unverified``, ``failed`` or\n``unsupported``; ``runtimes`` are the agents a task may run it with now,\nexactly what the execution gates accept. ``paths`` and ``protocols`` are\ndiagnostics.",
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "checked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checked At"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "paths": {
+            "items": {
+              "$ref": "#/components/schemas/AgentPathView"
+            },
+            "title": "Paths",
+            "type": "array"
+          },
+          "protocols": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ProtocolResultView"
+            },
+            "title": "Protocols",
+            "type": "object"
+          },
+          "runtimes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Runtimes",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "declared",
+              "unverified",
+              "failed",
+              "unsupported"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "status",
+          "runtimes"
+        ],
+        "title": "ModelStatusView",
+        "type": "object"
+      },
+      "ModelVerificationView": {
+        "description": "A finished verification of one model.",
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "checked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checked At"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "paths": {
+            "items": {
+              "$ref": "#/components/schemas/AgentPathView"
+            },
+            "title": "Paths",
+            "type": "array"
+          },
+          "protocols": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ProtocolResultView"
+            },
+            "title": "Protocols",
+            "type": "object"
+          },
+          "recorded": {
+            "default": true,
+            "title": "Recorded",
+            "type": "boolean"
+          },
+          "runtimes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Runtimes",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "declared",
+              "unverified",
+              "failed",
+              "unsupported"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "status",
+          "runtimes"
+        ],
+        "title": "ModelVerificationView",
+        "type": "object"
+      },
+      "ModelVerifyRequest": {
+        "additionalProperties": false,
+        "description": "Which of the connection's models to verify.",
+        "properties": {
+          "model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "ModelVerifyRequest",
         "type": "object"
       },
       "NodeRegistrationRequest": {
@@ -15660,6 +15769,41 @@
           "model"
         ],
         "title": "PromptRewriteRequest",
+        "type": "object"
+      },
+      "ProtocolResultView": {
+        "description": "What one native API's check found for a model: a diagnostic.",
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "http_status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Status"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "category",
+          "message"
+        ],
+        "title": "ProtocolResultView",
         "type": "object"
       },
       "RebuildInput": {
@@ -35830,7 +35974,7 @@
         ]
       },
       "patch": {
-        "description": "Edit, rotate the key of, enable or disable a connection.",
+        "description": "Edit, rotate the key of, enable or disable a connection.\n\nA field sent with the value it already has is not a change: a rename that\ncarries the same Base URL and models keeps the credential, every running\nprocess and every model's verification (the repository compares each one).",
         "operationId": "update_connection_v1_agent_model_connections__connection_id__patch",
         "parameters": [
           {
@@ -35897,78 +36041,9 @@
         ]
       }
     },
-    "/v1/agent/model-connections/{connection_id}/check": {
-      "post": {
-        "description": "Stream a tool call and its result through the connection, for one model and protocol.\n\nSpends the owner's own quota upstream. Answers what the check found; an\nunreachable or refusing provider is a result, not an error. The result is\nkept on the connection only if nothing it depends on -- key, Base URL,\nprotocols, models -- changed while it ran (``recorded``).",
-        "operationId": "check_v1_agent_model_connections__connection_id__check_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "connection_id",
-            "required": true,
-            "schema": {
-              "title": "Connection Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ModelConnectionCheckRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ModelConnectionCheckView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Check",
-        "tags": [
-          "model-connections"
-        ]
-      }
-    },
     "/v1/agent/model-connections/{connection_id}/discover-models": {
       "post": {
-        "description": "List the ids the provider's model list offers, for the owner to choose from.\n\n``GET /models`` under the Base URL, or ``GET /v1/models`` with Messages\nauthentication for a connection that offers only Anthropic Messages.",
+        "description": "List the ids the provider's model list offers, for the owner to choose from.\n\nAutomatically, ``GET /models`` under the Base URL and, only if that listing\nis missing or refused, ``GET /v1/models`` with Messages authentication: at\nmost two requests and one hourly check. A manual declaration asks only the\nlisting that fits it.",
         "operationId": "discover_v1_agent_model_connections__connection_id__discover_models_post",
         "parameters": [
           {
@@ -36020,6 +36095,75 @@
           }
         },
         "summary": "Discover",
+        "tags": [
+          "model-connections"
+        ]
+      }
+    },
+    "/v1/agent/model-connections/{connection_id}/verify": {
+      "post": {
+        "description": "Find which APIs one model streams a tool round trip on, and keep the result.\n\nSpends the owner's own quota upstream: at most three checks of two\nrequests each, and one of the owner's hourly checks. Answers the model's\nstate as it now is; an unreachable or refusing provider is a result, not\nan error. The result is kept only if the connection's key and Base URL did\nnot change and the model is still listed (``recorded``); other models'\nresults are never touched.",
+        "operationId": "verify_v1_agent_model_connections__connection_id__verify_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelVerificationView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Verify",
         "tags": [
           "model-connections"
         ]

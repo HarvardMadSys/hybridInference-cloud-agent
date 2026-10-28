@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { chatOnly, connectionView, unverified } from './modelConnectionFixtures';
 
 const tableNames = [
   'agent_admin_audit_log',
@@ -252,7 +253,7 @@ for (const variant of [
   { name: 'desktop light', width: 1440, height: 900, theme: 'light' },
   { name: 'mobile dark', width: 390, height: 844, theme: 'dark' },
 ]) {
-  test(`model connection test menus submit exact values and fit the viewport (${variant.name})`, async ({
+  test(`model verification needs no protocol menu and fits the viewport (${variant.name})`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width: variant.width, height: variant.height });
@@ -271,95 +272,59 @@ for (const variant of [
         },
       }),
     );
-    // A synthetic Chat-only connection: no request leaves the browser.
     await page.route('**/api/v1/agent/model-connections', (route) =>
       route.fulfill({
         json: {
           enabled: true,
           configured: true,
           connections: [
-            {
+            connectionView({
               id: connectionId,
               name: 'Fixture provider',
               base_url: 'https://provider.example/v1',
-              protocols: ['chat_completions'],
-              models: ['fixture-small', 'fixture-large'],
-              enabled: true,
-              has_api_key: true,
-              runtimes: ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
-              translated_runtimes: ['claude-code', 'codex'],
-              last_check: null,
-              created_at: '2026-10-28',
-              updated_at: '2026-10-28',
-            },
+              model_status: [unverified('fixture-small'), unverified('fixture-large')],
+            }),
           ],
         },
       }),
     );
     const checked: unknown[] = [];
-    await page.route(`**/api/v1/agent/model-connections/${connectionId}/check`, (route) => {
+    let release!: () => void;
+    const allowed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(`**/api/v1/agent/model-connections/${connectionId}/verify`, async (route) => {
       checked.push(route.request().postDataJSON());
-      return route.fulfill({
-        json: {
-          status: 'supported',
-          category: 'supported',
-          message: 'Streaming and a tool call round trip both worked.',
-          protocol: 'anthropic_messages',
-          upstream_protocol: 'chat_completions',
-          mode: 'translated',
-          model: 'fixture-large',
-          streaming: true,
-          tool_call: true,
-          final_answer: true,
-          http_status: 200,
-          checked_at: '2026-10-28T08:00:00Z',
-          recorded: true,
-        },
-      });
+      await allowed;
+      return route.fulfill({ json: { ...chatOnly('fixture-large'), recorded: true } });
     });
     await page.goto('/settings/my-settings');
     const card = page.getByRole('article', { name: 'Fixture provider' });
-    await card.locator('summary').filter({ hasText: 'Test model' }).click();
-
-    const model = card.getByRole('combobox', { name: 'Model to test', exact: true });
-    await model.click();
-    await page.getByRole('option', { name: 'fixture-large', exact: true }).click();
-    await expect(model).toHaveText('fixture-large');
-
-    const api = card.getByRole('combobox', { name: 'API to test', exact: true });
-    await expect(api).toHaveText('Chat Completions');
-    await api.click();
-    const list = page.getByRole('listbox', { name: 'API to test', exact: true });
-    await expect(list.getByRole('option')).toHaveText([
-      'Chat Completions',
-      'Responses via Chat Completions',
-      'Anthropic Messages via Chat Completions',
-    ]);
-    const bounds = await list.boundingBox();
-    expect(bounds).not.toBeNull();
-    expect(bounds!.x).toBeGreaterThanOrEqual(0);
-    expect(bounds!.y).toBeGreaterThanOrEqual(0);
-    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(variant.width);
-    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(variant.height);
-    await page.screenshot({
-      path: testInfo.outputPath('model-connection-test-api.png'),
-      animations: 'disabled',
-    });
-    await page.keyboard.press('End');
-    await page.keyboard.press('Enter');
-    await expect(list).toHaveCount(0);
-    await expect(api).toBeFocused();
-    await expect(api).toHaveText('Anthropic Messages via Chat Completions');
+    await expect(card.getByRole('combobox')).toHaveCount(0);
+    await expect(page.locator('select:visible')).toHaveCount(0);
+    await expect(page.locator('datalist')).toHaveCount(0);
     expect(checked).toEqual([]);
-
-    await card.getByRole('button', { name: 'Test model', exact: true }).click();
-    await expect(card.getByRole('status')).toContainText(
-      'fixture-large · Anthropic Messages via Chat Completions.',
-    );
-    expect(checked).toEqual([{ model: 'fixture-large', protocol: 'anthropic_messages' }]);
+    await card.getByRole('button', { name: 'Verify fixture-large', exact: true }).click();
+    await expect.poll(() => checked.length).toBe(1);
+    await expect(
+      card.getByRole('button', { name: 'Verify fixture-small', exact: true }),
+    ).toBeDisabled();
+    await expect(
+      card.getByRole('button', { name: 'Verify fixture-large', exact: true }),
+    ).toBeDisabled();
+    expect(checked).toEqual([{ model: 'fixture-large' }]);
+    release();
+    await expect(card.getByText('Ready', { exact: true })).toHaveCount(1);
+    await expect(card.getByText('Not verified', { exact: true })).toHaveCount(1);
+    await expect(
+      card.getByRole('button', { name: 'Verify fixture-large', exact: true }),
+    ).toBeEnabled();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       variant.width,
     );
-    await expect(page.locator('select:visible')).toHaveCount(0);
+    await card.screenshot({
+      path: testInfo.outputPath('model-verification-no-protocol-menu.png'),
+      animations: 'disabled',
+    });
   });
 }

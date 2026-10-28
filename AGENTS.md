@@ -310,7 +310,7 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   reads back. See the
   [SSH server design](docs/agents/specs/2026-10-15-user-ssh-servers-design.zh-CN.md).
 - **Owner model connections (2026-10-27).** An owner may add their own
-  OpenAI- or Anthropic-API endpoint (Base URL, API key, protocols, model ids) and run
+  inference endpoint (Base URL, API key, model ids) and run
   their own tasks on it instead of the Gateway; they pay the provider. It is
   private to them: never shared with a team, never reachable through another
   owner's Fork, and every claim, residency, follow-up, waiting message, goal
@@ -328,21 +328,35 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   does not revoke it upstream. Other groups' keys never enter this scan;
   exceeding its bounded history fails closed. Such a turn needs no
   Gateway grant, catalog or quota, but login and Agent admission stay
-  Gateway-backed. A runtime runs on the connection's protocol when the
-  connection offers its own (Chat Completions: OpenCode, Kilo, pi;
-  Responses: Codex; Anthropic Messages: Claude Code). Otherwise only Codex
-  and Claude Code may run on a Chat Completions connection, through a
-  member-private translator: the CLI is exec'd behind a launcher that forks a
+  Gateway-backed. Which APIs a model is reached on is per model, found only
+  by its owner's explicit verification of that model: a streaming tool round
+  trip on each of Chat Completions, Responses and Anthropic Messages (at most
+  six provider requests and one hourly check), stored as native outcomes
+  (supported, unsupported or failed) against the connection's current key and
+  Base URL. A model never verified, verified on an older key or Base URL, or
+  with no usable API runs on nothing; an advanced manual declaration of the
+  APIs is the only override. A runtime runs on its own API when verified for
+  that model (Chat Completions: OpenCode, Kilo, pi; Responses: Codex;
+  Anthropic Messages: Claude Code). Otherwise only Codex and Claude Code may
+  run on a model verified for Chat Completions, through a member-private
+  translator: the CLI is exec'd behind a launcher that forks a
   loopback service as the same member UID, bound to that one upstream, key
   and model, answering only a token derived from the key and the member's
   thread id (masked by the runner like the key; a sibling's token is refused)
   and dying with the CLI. The CLI never holds the key on that path, and the
-  service refuses, rather than drops, what Chat Completions cannot carry. No
-  other pair is translated, and nothing falls back to the Gateway or another
-  model. See the
+  service refuses, rather than drops, what Chat Completions cannot carry
+  (an image a tool returned goes to the upstream as a following user image
+  part). No other pair is translated, and nothing falls back to the Gateway,
+  another model or another API at inference time; the composer offers, and
+  every gate accepts, the same per-model paths. A claim and its residency must
+  agree on both the credential revision and the plan. See the
   [protocol compatibility design](docs/agents/specs/2026-10-28-model-protocol-compatibility.zh-CN.md).
-  Rotating, disabling or deleting it closes every process still running on
-  the old state. The control plane's check dials only public IPv4 HTTPS under
+  Changing the key or Base URL clears every model's verification; that, a
+  change to the manual declaration, disabling or deleting closes every process
+  still running on the old state, while a rename or a model-list edit closes
+  nothing and a newly listed model starts unverified. A verification is kept
+  only if the key, Base URL, enabled state and model list are still what it
+  tested, merged per model. The control plane's verification dials only public IPv4 HTTPS under
   the MCP connection policy and the sandbox's protected ranges, pinned, with no
   redirects and no upstream body echoed. See the
   [model connection design](docs/agents/specs/2026-10-27-user-model-connections.zh-CN.md).

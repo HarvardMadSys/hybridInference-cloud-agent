@@ -35,10 +35,12 @@ class ModelConnectionRepository(Protocol):
     ) -> dict[str, Any] | None:
         """Apply ``changes`` to a live connection; ``None`` when it is gone.
 
-        A change to the key, Base URL or protocols raises its credential
-        revision, and so does disabling it: a member process started under the
-        old revision must not serve another turn. A change to any of those or
-        to the models raises its config revision and clears its check result.
+        Only a value that actually differs counts. A changed key, Base URL or
+        protocol declaration raises its credential revision, and so does
+        disabling it: a member process started under the old revision must not
+        serve another turn. A changed key or Base URL also raises its config
+        revision and clears every model's verification; a changed model list
+        drops only the verifications of models no longer listed.
         """
         ...
 
@@ -58,15 +60,17 @@ class ModelConnectionRepository(Protocol):
         """
         ...
 
-    async def record_model_connection_check(
+    async def record_model_verification(
         self,
         *,
         user_id: str,
         connection_id: str,
         config_revision: int,
+        credential_revision: int,
+        model: str,
         result: dict[str, Any],
     ) -> bool:
-        """Keep a check's result only while the connection is at ``config_revision``."""
+        """Merge one model's verification, only while the connection is still enabled and at both revisions."""
         ...
 
     async def scan_key_ciphertexts(self, *, sandbox_id: str, limit: int) -> list[str]:
