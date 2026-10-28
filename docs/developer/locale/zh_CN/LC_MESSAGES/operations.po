@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 09:26-0400\n"
+"POT-Creation-Date: 2026-10-28 21:29+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -8515,19 +8515,18 @@ msgid ""
 "Anthropic-style `…/v1/models` with `x-api-key` (at most two requests). "
 "Failures answer only a category. It writes nothing, and a listed ID means"
 " nothing until the form's save verifies it; listing is optional, and any "
-"ID can be typed. The older `POST …/{connection_id}/discover-models` "
-"remains for one release."
+"ID can be typed."
 msgstr ""
-"**模型 ID 建议。** 新增和编辑表单可以按需读取服务商的模型列表，从中挑选 ID：`POST "
-"/v1/agent/model-connections/discover-models`，带上表单的 `base_url`，以及刚填写的 "
+"**模型 ID 建议。** 新增和编辑表单可以按需读取服务商的模型列表，从中挑选 ID：`POST /v1/agent/model-"
+"connections/discover-models`，带上表单的 `base_url`，以及刚填写的 "
 "`api_key`，或者（编辑时）要使用其已保存密钥的 `connection_id`，二者取其一。只有当 `base_url` "
 "仍是保存时的地址，才会使用已保存的密钥（否则返回 `422 "
-"model_connection_key_required`），填写的密钥也绝不会被已保存的密钥替换。该接口要求本人登录并开启部署开关，在任何调用之前先预留本人每小时检查次数中的一次，并按与验证相同的地址规则连接。它先读 "
-"OpenAI 风格的 `GET /models`，只有在该列表不存在或被拒绝时，才用 `x-api-key` 读 Anthropic 风格的 "
-"`…/v1/models`（最多两次请求）。失败时只返回类别。它不写入任何内容，列出的 ID 在表单保存并验证之前不代表任何结论；读取列表是可选的，任何 "
-"ID 都可以手动输入。旧的 `POST …/{connection_id}/discover-models` 再保留一个版本。"
+"model_connection_key_required`），填写的密钥也绝不会被已保存的密钥替换。该接口要求本人登录并开启部署开关，在任何调用之前先预留本人每小时检查次数中的一次，并按与验证相同的地址规则连接。它先读"
+" OpenAI 风格的 `GET /models`，只有在该列表不存在或被拒绝时，才用 `x-api-key` 读 Anthropic 风格的 "
+"`…/v1/models`（最多两次请求）。失败时只返回类别。它不写入任何内容，列出的 ID "
+"在表单保存并验证之前不代表任何结论；读取列表是可选的，任何 ID 都可以手动输入。"
 
-#: ../developer/operations.md:4271
+#: ../developer/operations.md:4270
 msgid ""
 "**Host rollout.** Runners advertise `model-connections-v1`, and `model-"
 "protocol-translation-v1` when they can run a translated member. A claim "
@@ -8539,7 +8538,7 @@ msgstr ""
 "**主机发布。** 运行器会声明 `model-connections-v1`，能运行需要转换的成员时还会声明 `model-protocol-"
 "translation-v1`。连接上的轮次或需要转换的轮次如果被没有声明所需能力的运行器领取，会被释放且不消耗尝试次数，所以要先发布主机。连接被停用、删除或不再适用时，轮次在领取时以相应原因失败。"
 
-#: ../developer/operations.md:4277
+#: ../developer/operations.md:4276
 msgid ""
 "**What a turn does.** The claim carries the connection's exact Base URL, "
 "protocol, credential revision and key; the runner masks the key. The "
@@ -8561,7 +8560,7 @@ msgstr ""
 "连接的密钥。密钥、Base URL "
 "或该模型经验证的路径变了之后，下一轮会启动新进程，因为计划和令牌都属于进程复用的身份。领取和它的驻留必须在凭据版本和计划（`client>upstream`）两方面都一致；如果轮次启动期间路径变了，这次启动会失败，而不会把两者混在一起。"
 
-#: ../developer/operations.md:4289
+#: ../developer/operations.md:4288
 msgid ""
 "**Scan history.** When a key is bound to a residency, an encrypted "
 "scanning copy is recorded under a separate domain against that sandbox "
@@ -8578,7 +8577,7 @@ msgstr ""
 " Fork "
 "成员的密钥，不包括其他组的密钥。删除连接后，副本仍随沙箱组记录保留；它仍然是真实的服务商密钥，在这里删除连接并不会在服务商处撤销它。如果某个组的历史超出扫描上限，扫描会失败关闭，而不会跳过密钥。"
 
-#: ../developer/operations.md:4298
+#: ../developer/operations.md:4297
 msgid ""
 "**Translated turns.** For Codex or Claude Code on a model whose only "
 "usable API is Chat Completions, the host installs `/usr/local/libexec"
@@ -8622,7 +8621,7 @@ msgstr ""
 "Code 不带 WebSearch 工具；其他工具照常可用，包括 Codex 子智能体和 MCP 工具。之前的推理或 thinking 不会发给 "
 "Chat Completions 服务商。`AGENT_COMPAT_*` 变量属于启动器，永远不会传到 CLI。"
 
-#: ../developer/operations.md:4322
+#: ../developer/operations.md:4321
 msgid ""
 "**Changes take effect at once.** A verified new key or Base URL, "
 "disabling or deleting a connection releases every residency started on "
@@ -8639,7 +8638,7 @@ msgstr ""
 " "
 "会替换所有模型的验证结果。保存时与已存值相同的字段（包括重新填入的同一个密钥）不算变更：重命名连接或移除模型不会关闭任何进程，其他模型的验证结果也保持不变。控制平面暂时联系不上的主机，会在下一次驻留心跳被拒绝时关闭进程。"
 
-#: ../developer/operations.md:4330
+#: ../developer/operations.md:4329
 msgid ""
 "**Verification dials out from the control plane.** It runs only on the "
 "owner's explicit save, never when a page opens or a field is typed in. "
@@ -8667,7 +8666,7 @@ msgstr ""
 " 端口 HTTPS：每个解析出的地址都必须通过 MCP 连接策略和沙箱的受保护网段（包括 "
 "`AGENT_EGRESS_PROTECTED_CIDRS`），连接固定到检查过的地址，不跟随重定向，不使用代理，也不回显或记录上游响应体和密钥。"
 
-#: ../developer/operations.md:4345
+#: ../developer/operations.md:4344
 msgid ""
 "**Usage.** The owner's provider bills these turns and the Gateway ledger "
 "records none of them. A turn's usage shows runtime token counts and says "
@@ -8681,11 +8680,11 @@ msgstr ""
 "数，并说明费用归服务商；会话合计会标记为不完整，管理员的运行详情也会说明由所有者的服务商计费。所有者和管理员的用量汇总仍把这样的轮次计为网关用量 "
 "`unavailable` 的运行——绝不会算成零费用，但也不会注明服务商。"
 
-#: ../developer/operations.md:4352
+#: ../developer/operations.md:4351
 msgid "Reusable cloud environments"
 msgstr "可复用的云环境"
 
-#: ../developer/operations.md:4354
+#: ../developer/operations.md:4353
 msgid ""
 "Migration `0065_environments` adds owner configuration, immutable "
 "encrypted versions, fixed workspace bindings, isolated test leases and "
@@ -8701,7 +8700,7 @@ msgstr ""
 "variable/v1` 域下加密。这把密钥要和现有的凭据存储一起备份；不经重新加密就换掉它，旧的绑定就读不出来了。Secrets "
 "无法通过所有者的读取或历史 API 拿到。"
 
-#: ../developer/operations.md:4361
+#: ../developer/operations.md:4360
 msgid ""
 "Repository environments are a standard product feature, available without"
 " an admin switch. Settings, task selection and the Environment tab are "
@@ -8717,7 +8716,7 @@ msgstr ""
 "`AGENT_REPOSITORY_ENVIRONMENTS_ENABLED`，都会被忽略，也不再出现在设置编辑器里。没有配置环境的任务，仍按基础环境运行，不做准备；配置了环境的工作区，仍然要求"
 " runner 和 sandbox manager 实际支持 `environment-v1`。"
 
-#: ../developer/operations.md:4369
+#: ../developer/operations.md:4368
 msgid ""
 "Upgrade every control-plane replica before creating any new environment-"
 "bound workspace; mixed old/new admission, Fork and terminal handlers may "
@@ -8729,7 +8728,7 @@ msgstr ""
 "在创建任何新的、绑定了环境的工作区之前，先把每一个控制平面副本都升级好；如果新旧版本混着处理准入、Fork "
 "和终端请求，绑定信息可能会悄悄丢失。一旦出现了第一个绑定，就不要再回滚到读不懂它的二进制版本。如果非要回滚：先关掉这些执行入口，把环境测试和环境准备都排空，并让已绑定的工作区留在兼容的主机上，或者隔离起来。"
 
-#: ../developer/operations.md:4375
+#: ../developer/operations.md:4374
 msgid ""
 "Roll out the environment-capable runner and sandbox manager together. A "
 "claiming replica must attest `environment-v1`, and the actual "
@@ -8746,7 +8745,7 @@ msgstr ""
 "attempt；它绝不能在缺少变量的情况下运行这些任务。环境测试同样遵守部署固定、计算资源准入、副本证明和主机槽位的限制，并且只拿到只读的源码凭据，拿不到推理、MCP"
 " 或仓库写入的授权。"
 
-#: ../developer/operations.md:4383
+#: ../developer/operations.md:4382
 msgid ""
 "Preparation receipts live in the host credential directory under "
 "`environment-preparation`, outside container mounts and source archives. "
@@ -8761,7 +8760,7 @@ msgstr ""
 "重启时，这份主机状态要保留。安装在每个固定的工作区上只会成功一次；startup 在每次实际启动时运行一次。失败的步骤会一直显示在 "
 "Environment 标签页里，可以针对原来的绑定重试。"
 
-#: ../developer/operations.md:4390
+#: ../developer/operations.md:4389
 msgid ""
 "Manual-action receipts live next to preparation state under `environment-"
 "actions`. They reserve the run before launching a command and retain its "
@@ -8779,7 +8778,7 @@ msgstr ""
 " "
 "`unknown`，绝不会自动重放。换一个幂等键开始新的运行之前，先检查一下它在外部已经造成了哪些影响。这些回执并不能保证外部服务里的副作用恰好只发生一次。"
 
-#: ../developer/operations.md:4399
+#: ../developer/operations.md:4398
 msgid ""
 "The output of a test, a preparation or an action is stored masked and "
 "bounded, with each NUL and unpaired surrogate replaced by U+FFFD: "
@@ -8789,7 +8788,7 @@ msgstr ""
 "测试、准备步骤或操作的输出，会经过遮蔽、限制长度后存储，其中每个 NUL 和落单的代理项都会替换为 U+FFFD：这两种字符 Postgres "
 "都存不了，而拒绝这段输出，会让测试或命令一直完不成。"
 
-#: ../developer/operations.md:4403
+#: ../developer/operations.md:4402
 msgid ""
 "Empty bindings still pin the original task's selection, but require "
 "neither `environment-v1` nor preparation. Each environment test reserves "
@@ -8801,7 +8800,7 @@ msgstr ""
 "上占用一个本地槽位，这样其他空闲槽位还能继续认领编码任务。主机上的孤儿查询是只读的，并且限流；租约过期和历史记录的维护，由控制平面的 reaper"
 " 负责。"
 
-#: ../developer/operations.md:4409
+#: ../developer/operations.md:4408
 msgid ""
 "Cancellation fences the result immediately but keeps the leased slot "
 "until cleanup is confirmed or the lease expires. An expired orphan no "
@@ -8819,7 +8818,7 @@ msgstr ""
 "ID，并在确认清理之前，删掉那些确切的、带标签的容器。不要为了腾容量去删无关的沙箱组，也不要绕过租约和容器身份的检查。已经归档、并且没人再引用的版本，30"
 " 天后回收；已有的工作区、测试和发布绑定，会保留它们当时的加密值，用于遮蔽和扫描。"
 
-#: ../developer/operations.md:4418
+#: ../developer/operations.md:4417
 msgid ""
 "Owner-provided credentials can be read and sent outside by user code "
 "through the existing network. Known-value masking and trusted publish "
@@ -8830,7 +8829,7 @@ msgstr ""
 "所有者提供的凭据，可以被用户代码读取，并通过现有的网络发送出去。按已知值做的遮蔽，以及受信任的发布扫描，都覆盖不到编码过的 "
 "secret、所有者原始的终端和文件，或者直接的 Git 推送。平台持有的长期凭据、保留的变量名，以及固定的出口规则，仍然受保护。"
 
-#: ../developer/operations.md:4423
+#: ../developer/operations.md:4422
 msgid ""
 "Environment setup, startup and actions share executable package data in "
 "`/workspace/.cloud-agent-tools`, excluded through Git's local exclude "
@@ -8845,11 +8844,11 @@ msgstr ""
 "目录仍然是私有的。显式刷新运行时会保留安装时的输入，并从下一轮开始生效；已经在运行的服务继续用旧值。startup "
 "恢复只是明确放行接下来的一次人工轮次，绝不是一张永久的成功回执。"
 
-#: ../developer/operations.md:4430
+#: ../developer/operations.md:4429
 msgid "Team environments"
 msgstr "团队环境"
 
-#: ../developer/operations.md:4432
+#: ../developer/operations.md:4431
 msgid ""
 "A team's owner and admins can create environments for the team: in "
 "Settings → Environments, **New environment** or **Copy** offers the teams"
@@ -8867,7 +8866,7 @@ msgstr ""
 " 403。创建、编辑和移除团队环境，都会记在团队的审计日志里。设计见[团队](../agents/specs/2026-10-15-team-"
 "shared-workspace-design.zh-CN.md) §6。"
 
-#: ../developer/operations.md:4441
+#: ../developer/operations.md:4440
 msgid ""
 "**Each member's own container.** A team environment is shared "
 "configuration, not a shared workspace. A member's task runs in that "
@@ -8880,7 +8879,7 @@ msgstr ""
 "**每位成员用自己的容器。** "
 "团队环境共享的是配置，而不是工作区。成员的任务在这个成员自己的容器里运行，用的是团队的变量和脚本、这个成员自己的推理授权和连接；这个成员个人的全局变量只在运行时使用（只用于安装的那些会被排除；如果名字相同，以团队的定义为准）。所以安装结果对每位成员都一样，团队才能共享快照。"
 
-#: ../developer/operations.md:4448
+#: ../developer/operations.md:4447
 msgid ""
 "**Secrets are shared.** Every member who can run a task with a team "
 "environment can read its Secrets from inside that task; the dialog says "
@@ -8890,7 +8889,7 @@ msgstr ""
 "**Secrets 是共享的。** 只要能用团队环境运行任务，成员就能在任务里读到它的 "
 "Secrets，对话框里也会说明这一点。请把它们当作整个团队都知道的内容；如果某位成员离开后不应该再持有某个 Secret，就把它轮换掉。"
 
-#: ../developer/operations.md:4452
+#: ../developer/operations.md:4451
 msgid ""
 "**Leaving.** A binding records the team and the member's access "
 "generation. When a member leaves, is removed, or the team is deleted, "
@@ -8909,14 +8908,14 @@ msgstr ""
 " "
 "409；遮蔽和发布扫描仍然会读取它的值。重新加入团队也不会让旧对话恢复，因为代次已经往前走了。如果成员的仓库默认设置指向一个他已经不能再用的团队环境，下次他开始任务时，这个默认设置会被清掉。"
 
-#: ../developer/operations.md:4463
+#: ../developer/operations.md:4462
 msgid ""
 "**Removal.** Removing a team environment clears every member's default "
 "that names it. Conversations already bound keep their fixed "
 "configuration, as with a personal environment."
 msgstr "**移除环境。** 移除一个团队环境，会清掉所有指向它的成员默认设置。已经绑定的对话，和个人环境一样，保持它们固定下来的配置。"
 
-#: ../developer/operations.md:4466
+#: ../developer/operations.md:4465
 msgid ""
 "**Rollback.** Downgrading below `0082_team_environments` is refused while"
 " any team environment exists, archived ones included."

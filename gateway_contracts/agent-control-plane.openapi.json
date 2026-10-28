@@ -36255,65 +36255,6 @@
         ]
       }
     },
-    "/v1/agent/model-connections/{connection_id}/discover-models": {
-      "post": {
-        "description": "List the ids the provider's model list offers for a saved connection.\n\n``GET /models`` under the Base URL and, only if that listing is missing or\nrefused, ``GET /v1/models`` with Messages authentication: at most two\nrequests and one hourly check. Picked ids are added by an edit, which\nverifies them before saving.",
-        "operationId": "discover_v1_agent_model_connections__connection_id__discover_models_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "connection_id",
-            "required": true,
-            "schema": {
-              "title": "Connection Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DiscoveredModels"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Discover",
-        "tags": [
-          "model-connections"
-        ]
-      }
-    },
     "/v1/agent/model-preference": {
       "get": {
         "description": "Read what a new task would start on, and where that came from.",
