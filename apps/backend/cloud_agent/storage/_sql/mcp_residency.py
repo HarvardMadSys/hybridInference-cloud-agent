@@ -9,16 +9,15 @@ def mint_residency_sql(lease_seconds: str) -> str:
     """SET-clause fragment for a membership: mint its next residency generation.
 
     The new generation is hot, leased for ``lease_seconds`` from now, and has
-    no grant, binding or model connection yet. A fence that captured an earlier generation stops
-    matching (:func:`residency_fence_sql`).
+    no grant or binding yet. Model connection bindings name their generation,
+    so a prior binding cannot authorize or release this new process. A fence
+    that captured an earlier generation stops matching (:func:`residency_fence_sql`).
     """
     return f"""residency_generation = residency_generation + 1,
         residency_status = 'hot',
         residency_lease_expires_at = clock_timestamp() + make_interval(secs => {lease_seconds}),
         residency_grant_id = NULL,
         residency_binding_id = NULL,
-        residency_model_connection_id = NULL,
-        residency_model_connection_revision = NULL,
         residency_established_at = NOW(),
         residency_last_active_at = NOW()"""
 

@@ -229,9 +229,13 @@ async def test_a_waiting_message_keeps_the_source_sent_with_its_model(store):
 async def _membership(pool, thread_id: str) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT residency_status, residency_generation, residency_model_connection_id, "
-            "residency_model_connection_revision FROM agent_thread_sandbox_memberships "
-            "WHERE thread_id = $1",
+            "SELECT m.residency_status, m.residency_generation, "
+            "b.connection_id AS residency_model_connection_id, "
+            "b.credential_revision AS residency_model_connection_revision "
+            "FROM agent_thread_sandbox_memberships m "
+            "LEFT JOIN agent_model_connection_residencies b "
+            "ON b.thread_id = m.thread_id AND b.residency_generation = m.residency_generation "
+            "WHERE m.thread_id = $1",
             thread_id,
         )
     return dict(row)
@@ -277,6 +281,21 @@ async def test_a_residency_binds_only_to_its_owners_current_connection(pool, sto
     assert member["residency_generation"] == rotated["generation"]
     assert member["residency_model_connection_id"] is None
     assert rotated["model_connection_id"] is None and rotated["runtime"] == "claude-code"
+
+    # A key rotation must not stop a newer Gateway process merely because an
+    # older generation of this member used the key.
+    await store.model_connections.update_model_connection(
+        user_id="user-1",
+        connection_id=connection["id"],
+        changes={"api_key_ciphertext": "ciphertext-2"},
+    )
+    assert (
+        await store.model_connections.release_stale_residencies(
+            user_id="user-1", connection_id=connection["id"]
+        )
+        == []
+    )
+    assert (await _membership(pool, job["thread_id"]))["residency_status"] == "hot"
 
 
 @pytest.mark.parametrize("change", ["rotate", "disable", "delete"])

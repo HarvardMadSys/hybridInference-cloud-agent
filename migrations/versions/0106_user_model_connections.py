@@ -112,19 +112,24 @@ def upgrade() -> None:
     # to NULL, which would read as the Gateway.
     op.execute("ALTER TABLE agent_jobs ADD COLUMN model_connection_id TEXT")
     op.execute("ALTER TABLE agent_pending_messages ADD COLUMN model_connection_id TEXT")
+    # The previous release prepares SELECT m.* inside a transaction. Adding
+    # columns to memberships changes that result type and fails its next turn
+    # with InvalidCachedStatementError during a rolling deployment. Keep the
+    # new binding in its own table, fenced to one residency generation.
     op.execute(
         """
-        ALTER TABLE agent_thread_sandbox_memberships
-            ADD COLUMN residency_model_connection_id TEXT,
-            ADD COLUMN residency_model_connection_revision BIGINT
+        CREATE TABLE agent_model_connection_residencies (
+            thread_id TEXT PRIMARY KEY
+                REFERENCES agent_thread_sandbox_memberships (thread_id) ON DELETE CASCADE,
+            residency_generation BIGINT NOT NULL CHECK (residency_generation >= 1),
+            connection_id TEXT NOT NULL REFERENCES agent_model_connections (id),
+            credential_revision BIGINT NOT NULL CHECK (credential_revision >= 1)
+        )
         """
     )
     op.execute(
-        """
-        CREATE INDEX idx_agent_memberships_model_connection
-            ON agent_thread_sandbox_memberships (residency_model_connection_id)
-            WHERE residency_model_connection_id IS NOT NULL
-        """
+        "CREATE INDEX idx_agent_model_connection_residencies_connection "
+        "ON agent_model_connection_residencies (connection_id)"
     )
 
 
@@ -150,8 +155,7 @@ def downgrade() -> None:
                    SELECT 1 FROM agent_pending_messages WHERE model_connection_id IS NOT NULL
                )
                OR EXISTS (
-                   SELECT 1 FROM agent_thread_sandbox_memberships
-                   WHERE residency_model_connection_id IS NOT NULL
+                   SELECT 1 FROM agent_model_connection_residencies
                )
             THEN
                 RAISE EXCEPTION
@@ -161,14 +165,7 @@ def downgrade() -> None:
         $$
         """
     )
-    op.execute("DROP INDEX idx_agent_memberships_model_connection")
-    op.execute(
-        """
-        ALTER TABLE agent_thread_sandbox_memberships
-            DROP COLUMN residency_model_connection_revision,
-            DROP COLUMN residency_model_connection_id
-        """
-    )
+    op.execute("DROP TABLE agent_model_connection_residencies")
     op.execute("ALTER TABLE agent_pending_messages DROP COLUMN model_connection_id")
     op.execute("ALTER TABLE agent_jobs DROP COLUMN model_connection_id")
     op.execute("DROP TABLE agent_model_connection_scan_keys")

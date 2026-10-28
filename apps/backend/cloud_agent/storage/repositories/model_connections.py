@@ -27,12 +27,12 @@ _CHECKED_COLUMNS = _CREDENTIAL_COLUMNS | {"models"}
 _ARRAY_COLUMNS = frozenset({"protocols", "models"})
 
 #: A connection a residency may still run on: the owner's, live, enabled, and
-#: at the revision the residency was started with. ``m`` is the membership.
+#: at the revision the residency was started with. ``b`` is its generation-bound binding.
 _STILL_CURRENT = """EXISTS (
     SELECT 1 FROM agent_model_connections c
-    WHERE c.id = m.residency_model_connection_id
+    WHERE c.id = b.connection_id
       AND c.deleted_at IS NULL AND c.enabled
-      AND c.credential_revision = m.residency_model_connection_revision
+      AND c.credential_revision = b.credential_revision
 )"""
 
 
@@ -278,24 +278,35 @@ class PostgresModelConnectionRepository:
                 return False
             sandbox_id = await conn.fetchval(
                 """
-                UPDATE agent_thread_sandbox_memberships m
-                SET residency_model_connection_id = $3,
-                    residency_model_connection_revision = $4
-                FROM agent_threads t
+                SELECT m.sandbox_id FROM agent_thread_sandbox_memberships m
+                JOIN agent_threads t ON t.id = m.thread_id
                 WHERE m.thread_id = $1 AND m.residency_generation = $2
                   AND m.residency_status = 'hot'
                   AND m.residency_lease_expires_at > clock_timestamp()
-                  AND t.id = m.thread_id AND t.user_id = $5
-                RETURNING m.sandbox_id
+                  AND t.user_id = $3
+                FOR UPDATE OF m
+                """,
+                thread_id,
+                generation,
+                user_id,
+            )
+            if sandbox_id is None:
+                return False
+            await conn.execute(
+                """
+                INSERT INTO agent_model_connection_residencies
+                    (thread_id, residency_generation, connection_id, credential_revision)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (thread_id) DO UPDATE
+                SET residency_generation = EXCLUDED.residency_generation,
+                    connection_id = EXCLUDED.connection_id,
+                    credential_revision = EXCLUDED.credential_revision
                 """,
                 thread_id,
                 generation,
                 connection_id,
                 revision,
-                user_id,
             )
-            if sandbox_id is None:
-                return False
             await conn.execute(
                 """
                 INSERT INTO agent_model_connection_scan_keys
@@ -320,8 +331,10 @@ class PostgresModelConnectionRepository:
                 f"""
                 UPDATE agent_thread_sandbox_memberships m
                 SET residency_status = 'none', residency_last_active_at = NOW()
-                FROM agent_sandboxes g, agent_threads t
-                WHERE m.residency_model_connection_id = $1
+                FROM agent_sandboxes g, agent_threads t, agent_model_connection_residencies b
+                WHERE b.thread_id = m.thread_id
+                  AND b.residency_generation = m.residency_generation
+                  AND b.connection_id = $1
                   AND m.residency_status <> 'none'
                   AND g.id = m.sandbox_id
                   AND t.id = m.thread_id AND t.user_id = $2
