@@ -53,4 +53,14 @@ regexTarget = "secret"
 regexes = [
   '''^fixture-anthropic-key-0123456789$''',
   '''^sk-owner-secret-0123456789$''',
+  '''^sk-fixture-owner-key-0123456789$''',
+  '''^sk-fixture-replacement-0000$''',
+]
+
+[[allowlists]]
+description = "Fixed fake encryption key in the verified-save PostgreSQL route tests."
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = [
+  '''^verified-save-test-key-0123456789ab$''',
 ]
