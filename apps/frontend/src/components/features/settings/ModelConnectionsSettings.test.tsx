@@ -370,7 +370,9 @@ describe('a saved connection', () => {
     expect(card.querySelector('details, summary')).toBeNull();
     expect(card).not.toHaveTextContent(/Chat Completions|Responses|Anthropic Messages|translated/);
     // Listing model IDs lives in the add and edit forms, not on the card.
-    expect(within(card).queryByRole('button', { name: /models from provider|Discover/ })).toBeNull();
+    expect(
+      within(card).queryByRole('button', { name: /models from provider|Discover/ }),
+    ).toBeNull();
     expect(api.discoverModels).not.toHaveBeenCalled();
   });
 
