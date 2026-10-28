@@ -1,7 +1,9 @@
 # Cloud Agent 设置管理与部署操作设计
 
-日期：2026-10-28  
-基线：`dev@3f60b6afbb86c67422b3c237c3e9ab68ed2effac`  
+日期：2026-10-28
+
+基线：`dev@3f60b6afbb86c67422b3c237c3e9ab68ed2effac`
+
 状态：Codex 与 Claude Code 三轮讨论后的设计；实现和验收分别记录，不把设计当作已上线能力。
 
 ## 1. 目标与用户要求

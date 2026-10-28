@@ -42,7 +42,8 @@ S30–S47 仍需各自 ADR 与实施设计，不能当作本批已有能力。
 ## 独立验证
 
 执行地点：已授权的 staging 开发主机，Linux ARM64 独立临时 checkout；
-没有使用线上服务或线上数据。腾讯开发机的已知登录路径不可用，本次没有该环境验收。
+没有使用线上服务或线上数据。首轮未连接腾讯开发机；后续查明当时使用了错误用户名，
+按历史成功记录显式指定完整账号后已连接，补验收见本文末节。
 Python 3.13.12，Node.js 22.23.4。前端运行真实生产构建，API 使用生成的 fixture。
 
 | 检查 | 结果 |
@@ -76,3 +77,30 @@ Python 3.13.12，Node.js 22.23.4。前端运行真实生产构建，API 使用�
 下一组从 S13 开始：按实际读取点标注生效方式、Review 提示和操作文档。
 S21–S29 再做 Common、通常只设置一次、缺项筛选与原地编辑。
 管理员凭据、轮换、迁库和实例应用状态仍分别经过设计门；本记录不表示其已经实施。
+
+## 腾讯开发机补验收（2026-10-28）
+
+查阅 10 月 17 日、20 日的原始成功命令后，显式指定正确的完整账号，使用现有
+SSH 配置即可连接。首轮失败由错误用户名造成，不能据此断言密钥失效。
+准确连接方法已按用户要求写入本机全局 Codex `AGENTS.md`，未把私有连接信息放入仓库。
+
+在已确认的腾讯开发机新建独立 checkout，分支 `codex/settings-management-design`，
+提交 `9beb69aeff544aba7c521e3ab625ff0e735ab478`。Linux x86_64，Python 3.12.11，
+Node.js 22.23.3；19 个改动代码/测试文件的 SHA-256 与本地受审查版本一致，工作区干净。
+
+| 检查 | 结果 |
+|---|---|
+| `make check PYTEST_WORKERS=4` | 退出码 0；format、lint、mypy 通过；12,408 passed、7 个已有 root-only skips |
+| Node 22 `make ci-frontend` | 退出码 0；八个子项全部 PASS |
+| 前端 Vitest | 274 files、4,418 passed |
+| Chromium | 14 passed，包含 1440px 与 390px 的部署入口、深链接、草稿回归 |
+| Compose 相关补查 | 159 passed |
+
+第一次后端检查发现 6 个 Compose 调用失败、另有 2 个 Compose 用例跳过，原因是
+默认 Docker CLI 没有可发现的 Compose 插件。复用之前测试目录中已有的 Compose
+2.39.4，仅在本次临时 `DOCKER_CONFIG/cli-plugins` 建立引用后，相关补查和完整
+门禁均通过。没有修改系统包、全局 Docker 配置、SSH 授权或生产环境。
+前端复用已有隔离 Chromium 运行库；进程内的 PATH / OPENSSL_CONF 等环境调整
+不改变主机默认配置，TLS 证书和主机名校验仍开启。
+
+本节补齐腾讯环境验证，不改变前文的实现范围或 fixture 验收边界；未推送或部署。
