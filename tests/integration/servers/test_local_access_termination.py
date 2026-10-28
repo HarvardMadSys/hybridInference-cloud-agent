@@ -108,6 +108,7 @@ async def _local_owner(api, monkeypatch):
     """Make the queue fixture's owner a local account whose turns run on its own connection."""
     monkeypatch.setenv(config.ENV_AUTH_MODE, "local")
     monkeypatch.setenv(config.ENV_LOCAL_SESSION_SECRET, LOCAL_SECRET)
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "true")
     use_test_cipher(monkeypatch)
     # The fixture's owner override reads this name on every request.
     monkeypatch.setattr(queue, "_OWNER", OWNER)

@@ -47,39 +47,33 @@ async def verified_connection(
     *,
     name: str = "My provider",
     models: tuple[str, ...] = ("provider-model",),
-    verified: tuple[str, ...] | None = None,
     result: dict[str, Any] | None = None,
     api_key: str = TEST_API_KEY,
 ) -> dict[str, Any]:
-    """Create ``user_id``'s connection and record each of ``verified`` as checked.
+    """Create ``user_id``'s connection with every model's verification atomically.
 
-    ``verified`` defaults to every model; ``result`` to every API supported.
-    Returns the stored row as it stands after the verifications.
+    ``result`` defaults to every API supported. Like the verified-save API,
+    the encrypted key and every listed model's facts enter the same insert.
     """
+    checks = dict.fromkeys(models, result or ALL_SUPPORTED)
     row = await store.model_connections.create_model_connection(
         user_id=user_id,
         values={
             "id": new_connection_id(),
             "name": name,
             "base_url": "https://provider.example/v1",
-            "protocols": [],
             "models": list(models),
             "api_key_ciphertext": model_connection_cipher().encrypt(api_key),
+            "model_checks": checks,
         },
     )
-    for model in models if verified is None else verified:
-        assert await store.model_connections.record_model_verification(
-            user_id=user_id,
-            connection_id=row["id"],
-            config_revision=row["config_revision"],
-            credential_revision=row["credential_revision"],
-            model=model,
-            result=result or ALL_SUPPORTED,
-        )
     current = await store.model_connections.get_model_connection(
         user_id=user_id, connection_id=row["id"]
     )
     assert current is not None
+    assert current["model_checks"] == {
+        model: {**facts, "revision": current["config_revision"]} for model, facts in checks.items()
+    }
     return current
 
 

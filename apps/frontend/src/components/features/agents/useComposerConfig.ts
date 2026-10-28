@@ -14,11 +14,15 @@ export function useComposerConfig(
   const handlers = useRef({ onLoaded, onError });
   handlers.current = { onLoaded, onError };
   const latest = useRef(0);
+  // Only background polling waits. Owner-triggered reads can still supersede
+  // a slow request, whose eventual completion must not clear this flag.
+  const pendingLatest = useRef(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const refresh = useCallback(async (options: { fresh?: boolean } = {}) => {
     const request = ++latest.current;
+    pendingLatest.current = true;
     setRefreshing(true);
     try {
       const config = await getAgentConfig(options);
@@ -30,6 +34,7 @@ export function useComposerConfig(
       return undefined;
     } finally {
       if (request === latest.current) {
+        pendingLatest.current = false;
         setLoading(false);
         setRefreshing(false);
       }
@@ -61,7 +66,7 @@ export function useComposerConfig(
   useEffect(() => {
     if (!retrySourceControl) return;
     const timer = window.setInterval(() => {
-      if (document.visibilityState !== 'hidden') void refresh();
+      if (document.visibilityState !== 'hidden' && !pendingLatest.current) void refresh();
     }, SOURCE_CONTROL_RECHECK_MS);
     return () => window.clearInterval(timer);
   }, [retrySourceControl, refresh]);

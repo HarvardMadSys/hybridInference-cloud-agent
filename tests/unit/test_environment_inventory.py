@@ -77,15 +77,15 @@ _PYTHON_SOURCES = (
     "migrations/**/*.py",
 )
 
-#: Control-plane modules that write a *host's* environment: compute setup and
-#: the host bootstrap render, require and forbid the names in a new machine's
-#: `.env`. Those names are host variables, which the control plane's compose
-#: file has no business setting, so in these two modules only an actual read of
-#: the control plane's own environment counts. The names still need rows in
-#: ENVIRONMENT.md, which the inventory check below enforces.
+#: Control-plane modules that write a *host's* environment. Compute setup,
+#: bootstrap and its inference helper render, require and forbid names in the
+#: host's `.env`. Only actual reads of the control plane's own environment
+#: count toward Compose wiring here. The inventory check still requires an
+#: ENVIRONMENT.md row for every name.
 _HOST_ENV_WRITERS = (
     "apps/backend/cloud_agent/application/compute_setup.py",
     "apps/backend/cloud_agent/providers/compute/host_bootstrap.py",
+    "apps/backend/cloud_agent/providers/compute/host_inference.py",
 )
 
 #: An actual read: `os.environ.get(...)`, `os.environ[...]`, `getenv(...)` or
