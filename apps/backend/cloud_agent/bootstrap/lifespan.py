@@ -162,6 +162,7 @@ _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "publish_task",
     "profiling_policy_task",
     "compute_resource_task",
+    "account_access_task",
     "notification_listener_task",
 )
 
@@ -409,7 +410,6 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     from cloud_agent.settings import (
         initialize_settings,
         reset_settings,
-        setting_env,
         synchronize_settings,
     )
     from cloud_agent.storage.assembly import Storage
@@ -433,12 +433,15 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # Schema is Alembic's. There is no initialize step to run: the store's
         # no-op one went with the store, and the DDL and backfills it used to
         # carry have been migrations since 0001.
-        from cloud_agent.identity_namespace import ensure_gateway_namespace
+        from cloud_agent.bootstrap.identity import (
+            attach_local_identity,
+            bind_identity_source,
+            local_identity_tasks,
+        )
 
-        # An empty deployment must remain reachable through recovery-token setup.
-        # A recorded foreign namespace still refuses startup before workers run.
-        issuer = (setting_env("GATEWAY_ISSUER") or "").strip() or None
-        app.state.gateway_issuer = await ensure_gateway_namespace(pool, issuer)
+        # Gateway issuer or local accounts: a database the configured source
+        # cannot own refuses startup before any worker runs.
+        local = await bind_identity_source(app, pool) == "local"
 
         app.state.storage = storage
         # A task this process does not start stays None.
@@ -472,6 +475,8 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # building their own per call. They take the same seam; until this was
         # wired, the comment here described sharing that was not happening.
         app.state.grants = GrantClient(client=http)
+        # Local accounts: no Gateway call answers identity, admission or grants.
+        attach_local_identity(app, storage, local=local)
         # What each grant's last renewal bought, so a grant with plenty left is
         # not renewed again on every pass. One per process, read and fed by the
         # renewal task below and by the host heartbeat, which only this main
@@ -573,6 +578,8 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             # heartbeat or the reaper.
             _spawn(app, "capacity_task", prune_host_capacity_history(storage.host_capacity))
             _spawn(app, "agent_memory_task", maintain_agent_memories(storage.agent_memory))
+            for name, work in local_identity_tasks(storage, app.state.grants, local=local):
+                _spawn(app, name, work)
             # The profiling policy loop runs only here, in the one main process
             # that owns the reaper: file and terminal requests are rooted in this
             # process alone (the relay listener roots none, see below), so this is

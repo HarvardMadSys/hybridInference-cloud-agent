@@ -20,19 +20,25 @@ build a schema for it.
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 from fastapi import Depends, Header, HTTPException, Request
 
+from cloud_agent.accounts.config import local_mode
+from cloud_agent.accounts.session_cookie import local_session_from_cookies
 from cloud_agent.api.deps import (
     bearer_token,
     get_current_user,
     get_gateway_client,
+    local_session_owner,
     looks_like_agent_token,
+    resolve_agent_access,
 )
 from cloud_agent.identity import session_from_cookies
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from typing import Any
 
     from cloud_agent.gateway import GatewayClient
@@ -47,6 +53,45 @@ if TYPE_CHECKING:
 #: terminal sequence, or a ``hello`` that re-reads its lists), and that
 #: reconnect is admitted again.
 OWNER_STREAM_MAX_S = 15 * 60.0
+
+#: In local mode an open owner stream also re-reads its session and the
+#: account's admission this often, and ends on a refusal. Revoking or
+#: suspending an account therefore ends its streams within this bound plus
+#: one keepalive, not :data:`OWNER_STREAM_MAX_S`.
+LOCAL_STREAM_RECHECK_S = 30.0
+
+
+def owner_stream_guard(request: Request, user_id: str) -> Callable[[], Awaitable[bool]]:
+    """A check an owner stream calls between frames; ``False`` ends the stream.
+
+    Gateway mode keeps its behaviour: always ``True``, and the stream cap is
+    the bound. Local mode re-reads the session and the account at most every
+    :data:`LOCAL_STREAM_RECHECK_S`, from this database, and fails closed.
+    """
+    if not local_mode():
+
+        async def always() -> bool:
+            return True
+
+        return always
+    checked = time.monotonic()
+
+    async def admitted() -> bool:
+        nonlocal checked
+        if time.monotonic() - checked < LOCAL_STREAM_RECHECK_S:
+            return True
+        checked = time.monotonic()
+        request.state.local_session = None
+        try:
+            owner = await local_session_owner(request, request.headers.get("authorization"))
+            if owner is None or owner.account.id != user_id:
+                return False
+            decision = await resolve_agent_access(get_gateway_client(request), user_id)
+        except HTTPException:
+            return False
+        return decision.permits("agent.use")
+
+    return admitted
 
 
 async def authenticate_agent_owner(
@@ -82,7 +127,10 @@ async def authenticate_agent_owner(
     both are present, which is the precedence ``session_token`` documents.
     """
     presented = bearer_token(authorization)
-    if not session_from_cookies(request.cookies) and looks_like_agent_token(presented):
+    cookie = session_from_cookies(request.cookies) or (
+        local_mode() and local_session_from_cookies(request.cookies)
+    )
+    if not cookie and looks_like_agent_token(presented):
         raise HTTPException(
             status_code=403,
             detail={

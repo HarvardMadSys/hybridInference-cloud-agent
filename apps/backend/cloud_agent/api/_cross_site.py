@@ -24,6 +24,11 @@ bearer credential is not ambient: a page cannot make a browser attach one. So
 hosts, workers, the on-call relay and every other machine caller are untouched,
 and so is sign-in's callback, which is a GET.
 
+The one exception is local sign-in (``/v1/auth/*``, ``AGENT_AUTH_MODE=local``):
+its writes carry no session yet, and a cross-site sign-in would put an
+attacker's account in the victim's browser. Those are checked whether or not
+a cookie is present. The local session cookie counts as a session cookie too.
+
 A plain ASGI middleware rather than Starlette's ``BaseHTTPMiddleware``: it
 answers or passes before a response starts and never wraps one, so the
 long-lived event streams behind it are not buffered or re-framed.
@@ -39,6 +44,7 @@ from starlette.requests import cookie_parser
 from starlette.responses import JSONResponse
 
 from cloud_agent import identity
+from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE, LOCAL_SESSION_COOKIE_INSECURE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import setting_env
 
@@ -57,6 +63,17 @@ _FIRST_PARTY = frozenset({"same-origin", "none"})
 _TRUSTED_ORIGIN_SETTINGS = ("AGENT_WEB_BASE_URL", "AGENT_PGADMIN_PUBLIC_URL")
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+
+#: Every cookie name a session is read from, in either identity mode.
+_SESSION_COOKIES = (
+    identity.SESSION_COOKIE,
+    identity.LEGACY_SESSION_COOKIE,
+    LOCAL_SESSION_COOKIE,
+    LOCAL_SESSION_COOKIE_INSECURE,
+)
+
+#: Unauthenticated writes that establish or recover a session.
+_ALWAYS_CHECKED_PREFIX = "/v1/auth/"
 
 
 def _origin(url: str) -> str | None:
@@ -130,9 +147,7 @@ def _carries_session(headers: Headers) -> bool:
     if not raw:
         return False
     cookies = cookie_parser(raw)
-    return any(
-        cookies.get(name) for name in (identity.SESSION_COOKIE, identity.LEGACY_SESSION_COOKIE)
-    )
+    return any(cookies.get(name) for name in _SESSION_COOKIES)
 
 
 class CrossSiteWriteGuard:
@@ -148,7 +163,8 @@ class CrossSiteWriteGuard:
             await self.app(scope, receive, send)
             return
         headers = Headers(scope=scope)
-        if not _carries_session(headers) or first_party(headers):
+        checked = str(scope.get("path", "")).startswith(_ALWAYS_CHECKED_PREFIX)
+        if (not checked and not _carries_session(headers)) or first_party(headers):
             await self.app(scope, receive, send)
             return
         logger.warning(

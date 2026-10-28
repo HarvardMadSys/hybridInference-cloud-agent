@@ -45,8 +45,12 @@ _EXPECTED_SHUTDOWN_TASKS = (
     "publish_task",
     "profiling_policy_task",
     "compute_resource_task",
+    "account_access_task",
     "notification_listener_task",
 )
+
+#: Started only with AGENT_AUTH_MODE=local.
+_LOCAL_MODE_TASKS = frozenset({"account_access_task"})
 
 _BEFORE_SETTINGS_TASK = frozenset(
     {
@@ -536,7 +540,8 @@ async def test_successful_shutdown_keeps_its_order(
     caplog.set_level("INFO", logger="cloud_agent.app")
     prepared = _prepare(monkeypatch)
     expected_tasks = (
-        list(_EXPECTED_SHUTDOWN_TASKS)
+        # A Gateway-mode lifespan, which starts no local-account loop.
+        [name for name in _EXPECTED_SHUTDOWN_TASKS if name not in _LOCAL_MODE_TASKS]
         if background
         else ["settings_task", "mcp_maintenance_task", "notification_listener_task"]
     )

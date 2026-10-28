@@ -56,6 +56,7 @@ translations
 
 context-recall
 agent-access-policy
+local-accounts
 minimal-identity
 gateway-contracts
 security

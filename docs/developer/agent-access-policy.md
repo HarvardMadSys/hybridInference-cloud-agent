@@ -4,6 +4,10 @@ The Gateway decides who may use Cloud Agent. Cloud Agent represents the account
 with its user ID and issuer, then checks the Gateway again on each protected
 owner/admin request and on `/v1/session/me`.
 
+This page describes Gateway mode, the default. A deployment that sets
+`AGENT_AUTH_MODE=local` answers the same questions from its own accounts and
+waiting list instead; see [local accounts](local-accounts.md).
+
 To get the current decision, Agent reads
 `GET /internal/users/{user_id}/agent-access` over HTTP with its dispatch
 credential. The response contains `user_id`, `allowed`, and `permissions`.

@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-22 19:03-0400\n"
+"POT-Creation-Date: 2026-10-28 00:30-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -36,14 +36,15 @@ msgid "Before starting this release"
 msgstr "启动本次发布之前"
 
 #: ../developer/upgrade-notes.md:11
+#, fuzzy
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0105_job_event_usage_summary`. The supported deployment scripts run "
-"migrations before replacing the API; every migration listed here is "
-"additive and safe under the running previous release unless it says "
-"otherwise. The few transitions that need stopped writers are listed in "
-"[applying migrations that are not backwards-compatible](operations.md"
-"#applying-migrations-that-are-not-backwards-compatible)."
+"`0106_local_accounts`. The supported deployment scripts run migrations "
+"before replacing the API; every migration listed here is additive and "
+"safe under the running previous release unless it says otherwise. The few"
+" transitions that need stopped writers are listed in [applying migrations"
+" that are not backwards-compatible](operations.md#applying-migrations-"
+"that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
 "`0105_job_event_usage_summary`。官方支持的部署脚本会在替换 API "
@@ -135,6 +136,20 @@ msgid "What it changes"
 msgstr "改了什么"
 
 #: ../developer/upgrade-notes.md
+msgid "`0106_local_accounts`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Creates the empty tables local accounts use (`AGENT_AUTH_MODE=local`): "
+"accounts, password sign-in, waiting-list admissions, server-side "
+"sessions, emailed tokens, abuse counters, access terminations and the "
+"local identity marker. It changes no existing row and locks no existing "
+"table. A Gateway-mode deployment never writes them. A downgrade drops "
+"them, and with them every local account."
+msgstr ""
+
+#: ../developer/upgrade-notes.md
 msgid "`0105_job_event_usage_summary`"
 msgstr "`0105_job_event_usage_summary`"
 
@@ -167,8 +182,9 @@ msgid ""
 "concurrently."
 msgstr ""
 "先并发构建 `(user_id, kind, change_xid, entity_id)` 索引，再删除原来的所有者/XID "
-"索引，让通知增量的续页直接定位，不再扫描整个快照区间。这个迁移不改动任何行，也不阻塞前台写入。已有的 v1 "
-"续页会继续按原先的 kind/identity 顺序读完，再升级到 v2。迁移期间旧版 API 的功能仍兼容，但在替换前，它的增量读取可能使用选择性较差的索引。降级会并发恢复原索引。"
+"索引，让通知增量的续页直接定位，不再扫描整个快照区间。这个迁移不改动任何行，也不阻塞前台写入。已有的 v1 续页会继续按原先的 "
+"kind/identity 顺序读完，再升级到 v2。迁移期间旧版 API "
+"的功能仍兼容，但在替换前，它的增量读取可能使用选择性较差的索引。降级会并发恢复原索引。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0103_terminal_resume_keyset`"
@@ -733,7 +749,7 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:100
+#: ../developer/upgrade-notes.md:102
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
@@ -747,11 +763,11 @@ msgstr ""
 "之前已退役的旧迁移链，就无法直接升级；见[保留旧迁移链的数据库](operations.md#preserving-an-old-chain-"
 "database)。"
 
-#: ../developer/upgrade-notes.md:106
+#: ../developer/upgrade-notes.md:108
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:108
+#: ../developer/upgrade-notes.md:110
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"
@@ -764,3 +780,4 @@ msgstr ""
 "里给上表加一行，写清楚升级线上部署的运维人员需要知道什么：会改动哪些已有数据、可能锁表多久、降级会不会被拒绝。然后把 *启动本次发布之前* 一节和"
 " [ENVIRONMENT.md](../../ENVIRONMENT.md) 里写的 head 修订号也更新掉；有测试会检查这两处写的都是当前的"
 " head。"
+

@@ -81,7 +81,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0105_job_event_usage_summary`) before
+Run `alembic upgrade head` (through `0106_local_accounts`) before
 starting this release; the [upgrade notes](docs/developer/upgrade-notes.md)
 say what each recent migration changes. The main control-plane listener then
 initializes the settings document once from its existing environment. The
@@ -267,6 +267,21 @@ accounts, sessions, and saved connections persist in `agent-pgadmin`.
 | `AGENT_ALERT_WEBHOOK_URL` | Operator-owned JSON webhook for queue incidents, recovery and compute replacement events. Queue monitoring runs every minute, reports ten-minute-old runnable queue heads after two observations, retries delivery on the next pass and repeats unchanged incidents at most every 30 minutes. Delivery timeout: five seconds. Queue payloads contain event, deployment SHA and aggregate counts; compute events also contain Host identity and reason codes. Unset retains structured logs. Downstream distributions own deployment-workflow alerts. This URL never enters runners or sandboxes. |
 | `AGENT_RESIDENCY_TTL_S` | How long a member's independently fenced live-process residency and short-lived inference grant survive between host heartbeats. Default 1800. Shared-live uses one residency per chat membership. This is credential/process ownership, not a second chat lifecycle clock: `AGENT_CHAT_IDLE_TIMEOUT_S` alone decides when a settled retained sandbox group is stopped. |
 | `ADMIN_TOKEN` | Optional machine-to-machine admin credential. An unset value opens no token access; admin sessions remain a separate authorization path. Use at least 32 random bytes; startup logs `agent_weak_credential` for a shorter value. |
+
+### Local accounts (`AGENT_AUTH_MODE=local`)
+
+Off by default. Read from the process environment only, never from Admin Settings, by both
+listeners. See [local accounts](docs/developer/local-accounts.md).
+
+| Variable | Value / who provisions |
+|---|---|
+| `AGENT_AUTH_MODE` | `gateway` (default) or `local`. `local` serves Cloud Agent's own email/password accounts, sessions and waiting list instead of Gateway sign-in, answers identity and admission from this database, and makes no Gateway identity, admission, catalog or grant call. It starts only on a database with no Gateway issuer binding and no owner data; a Gateway-bound database refuses it. Any other value stops startup. Set the same value on the main API and the MCP-only listener. |
+| `AGENT_LOCAL_SESSION_SECRET` | Required in local mode: at least 32 random bytes, different from `AGENT_SESSION_SECRET`. Keys the hashes of local session cookies, emailed tokens and abuse counters. Rotating it ends every local session and outstanding link. |
+| `AGENT_LOCAL_SIGNUP_ENABLED` | Defaults to on in local mode. `false` closes public sign-up; existing accounts still sign in. Signing up never grants Agent use. |
+| `AGENT_SMTP_HOST` / `AGENT_SMTP_PORT` | Mail relay for verification and password-reset links. Port defaults to 587, or 465 with `AGENT_SMTP_SECURITY=tls`. Without a host and sender, sign-up is closed and recovery answers 503. |
+| `AGENT_SMTP_SECURITY` | `starttls` (default), `tls` for implicit TLS, or `none` for a local relay. |
+| `AGENT_SMTP_USERNAME` / `AGENT_SMTP_PASSWORD` | Optional relay credentials. Never logged. |
+| `AGENT_SMTP_FROM` | Sender address of account mail, e.g. `Cloud Agent <no-reply@example.org>`. Links in it are built from `AGENT_WEB_BASE_URL` only. |
 
 ### Sandbox deletion archives
 

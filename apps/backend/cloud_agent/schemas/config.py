@@ -40,6 +40,13 @@ class AgentConfigResponse(BaseModel):
         default_factory=list,
         description="Runtime ids that support plugins installed at sandbox initialization.",
     )
+    model_connection_required: bool = Field(
+        default=False,
+        description=(
+            "True when this local account has no model connection, so no model can run "
+            "(AGENT_AUTH_MODE=local without personal model connections)."
+        ),
+    )
     models: list[str] = Field(
         default_factory=list,
         description=(

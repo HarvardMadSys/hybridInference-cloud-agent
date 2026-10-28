@@ -40,12 +40,14 @@ from cloud_agent.storage.repositories import (
     PostgresHostCapacityRepository,
     PostgresHostPoolRepository,
     PostgresLedgerRepository,
+    PostgresLocalAccountRepository,
     PostgresMcpCatalogRepository,
     PostgresMcpConnectionRepository,
     PostgresModelPreferenceRepository,
     PostgresNotificationMaintenanceRepository,
     PostgresOperationMeasurementRepository,
     PostgresOwnerUsageRepository,
+    PostgresOwnerWorkRepository,
     PostgresPendingMessageRepository,
     PostgresProfilingControlRepository,
     PostgresResidencyRepository,
@@ -87,12 +89,14 @@ if TYPE_CHECKING:
         HostCapacityRepository,
         HostPoolRepository,
         LedgerRepository,
+        LocalAccountRepository,
         McpCatalogRepository,
         McpConnectionRepository,
         ModelPreferenceRepository,
         NotificationMaintenanceRepository,
         OperationMeasurements,
         OwnerUsageQueries,
+        OwnerWorkTermination,
         PendingMessageRepository,
         ProfilingControl,
         ResidencyRepository,
@@ -173,3 +177,6 @@ class Storage:
         self.teams: TeamRepository = PostgresTeamRepository(pool)
         self.team_admin: TeamAdminQueries = PostgresTeamAdminQueries(pool)
         self.web_search: WebSearchRepository = PostgresWebSearchRepository(pool)
+        #: Local accounts (AGENT_AUTH_MODE=local only) and the work they end.
+        self.local_accounts: LocalAccountRepository = PostgresLocalAccountRepository(pool)
+        self.owner_work: OwnerWorkTermination = PostgresOwnerWorkRepository(pool)

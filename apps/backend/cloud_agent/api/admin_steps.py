@@ -37,6 +37,7 @@ from cloud_agent.admin_observability import (
     resolve_run_window,
     response_body_bytes,
 )
+from cloud_agent.api._local_auth import refuse_in_local_mode
 from cloud_agent.api.admin_llm_requests import _refuse
 from cloud_agent.api.admin_runs import _no_store, get_admin_run_queries
 from cloud_agent.api.deps import (
@@ -59,7 +60,7 @@ logger = get_logger(__name__)
 # inherits it, so the next steps read cannot ship without one by omission.
 router = APIRouter(
     prefix="/admin/agent/steps",
-    dependencies=[Depends(_no_store), Depends(verify_admin_access)],
+    dependencies=[Depends(_no_store), Depends(verify_admin_access), Depends(refuse_in_local_mode)],
 )
 
 #: Turns one page reads. Each costs a reference read and a gateway read per

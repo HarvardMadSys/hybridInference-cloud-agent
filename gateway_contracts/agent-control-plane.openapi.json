@@ -1,6 +1,97 @@
 {
   "components": {
     "schemas": {
+      "AccountActionRequest": {
+        "additionalProperties": false,
+        "description": "One administrator action, at the version the administrator read.",
+        "properties": {
+          "action": {
+            "enum": [
+              "approve",
+              "reject",
+              "revoke",
+              "suspend",
+              "restore",
+              "grant_admin",
+              "revoke_admin"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "expected_version": {
+            "maximum": 4.611686018427388e+18,
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "action",
+          "expected_version"
+        ],
+        "title": "AccountActionRequest",
+        "type": "object"
+      },
+      "AccountEntry": {
+        "description": "One account as the administration page lists it.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "email_verified": {
+            "title": "Email Verified",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "is_admin": {
+            "title": "Is Admin",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "suspended"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "waitlist": {
+            "$ref": "#/components/schemas/WaitlistEntry"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "email_verified",
+          "status",
+          "is_admin",
+          "waitlist",
+          "created_at"
+        ],
+        "title": "AccountEntry",
+        "type": "object"
+      },
       "AcquireHostDrainFenceRequest": {
         "description": "Atomically replace the expected drain owner with a new opaque owner.",
         "properties": {
@@ -291,6 +382,28 @@
           "connection_id"
         ],
         "title": "AddServerRequest",
+        "type": "object"
+      },
+      "AdminAccountsResponse": {
+        "description": "One page of accounts and the filtered total.",
+        "properties": {
+          "accounts": {
+            "items": {
+              "$ref": "#/components/schemas/AccountEntry"
+            },
+            "title": "Accounts",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "accounts",
+          "total"
+        ],
+        "title": "AdminAccountsResponse",
         "type": "object"
       },
       "AdminAttempt": {
@@ -4127,6 +4240,12 @@
             },
             "title": "Mcp Runtimes",
             "type": "array"
+          },
+          "model_connection_required": {
+            "default": false,
+            "description": "True when this local account has no model connection, so no model can run (AGENT_AUTH_MODE=local without personal model connections).",
+            "title": "Model Connection Required",
+            "type": "boolean"
           },
           "model_reasoning_efforts": {
             "additionalProperties": {
@@ -9356,6 +9475,29 @@
         "title": "AttemptResources",
         "type": "object"
       },
+      "AuthConfigResponse": {
+        "description": "Which sign-in this deployment offers. Public; carries no secret.",
+        "properties": {
+          "mode": {
+            "enum": [
+              "gateway",
+              "local"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "signup_enabled": {
+            "title": "Signup Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "mode",
+          "signup_enabled"
+        ],
+        "title": "AuthConfigResponse",
+        "type": "object"
+      },
       "AuthorizeRequest": {
         "additionalProperties": false,
         "description": "The client to authorize as, when the server cannot register one for us.\n\nOptional, and it exists because some servers expect the user to bring a\nclient id: refusing to accept one would leave the browser flow permanently\nunavailable on exactly the servers that document it as the way in.",
@@ -10956,6 +11098,47 @@
           "revision"
         ],
         "title": "DefaultInput",
+        "type": "object"
+      },
+      "EmailPasswordRequest": {
+        "additionalProperties": false,
+        "description": "Sign-up and sign-in.",
+        "properties": {
+          "email": {
+            "maxLength": 320,
+            "minLength": 1,
+            "title": "Email",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "EmailPasswordRequest",
+        "type": "object"
+      },
+      "EmailRequest": {
+        "additionalProperties": false,
+        "description": "Resend verification, and forgot password.",
+        "properties": {
+          "email": {
+            "maxLength": 320,
+            "minLength": 1,
+            "title": "Email",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "title": "EmailRequest",
         "type": "object"
       },
       "EnableConnectionRequest": {
@@ -14172,6 +14355,19 @@
         "title": "OAuthConnectRequest",
         "type": "object"
       },
+      "OkResponse": {
+        "description": "The same answer whatever happened, where saying more would leak.",
+        "properties": {
+          "ok": {
+            "const": true,
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "title": "OkResponse",
+        "type": "object"
+      },
       "OwnJoinRequestListResponse": {
         "description": "The caller's recent join requests.",
         "properties": {
@@ -15305,6 +15501,30 @@
           "version"
         ],
         "title": "RequestRuntimeUpgradeRequest",
+        "type": "object"
+      },
+      "ResetPasswordRequest": {
+        "additionalProperties": false,
+        "description": "Choose a new password from a reset link.",
+        "properties": {
+          "password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          },
+          "token": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "password"
+        ],
+        "title": "ResetPasswordRequest",
         "type": "object"
       },
       "ResidencyBeat": {
@@ -16754,14 +16974,50 @@
         "type": "object"
       },
       "SessionUserResponse": {
-        "description": "Who the session says the caller is.\n\n``id`` rather than ``user_id``: this is the shape ``apps/frontend/src/lib/api/\nsession.ts`` was written against, and it is the contract for all three\nsession routes.",
+        "description": "Who the session says the caller is.\n\n``id`` rather than ``user_id``: this is the shape ``apps/frontend/src/lib/api/\nsession.ts`` was written against, and it is the contract for all three\nsession routes.\n\n``auth_mode`` says which identity source answered. ``email`` and\n``waitlist`` are present for a local account only, and left out of the\nbody otherwise; the Gateway owns those for its accounts.",
         "properties": {
           "agent_access": {
             "$ref": "#/components/schemas/AgentAccess"
           },
+          "auth_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "local",
+                  "gateway"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth Mode"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "waitlist": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WaitlistEntry"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -18603,6 +18859,23 @@
         "title": "TestUpdate",
         "type": "object"
       },
+      "TokenRequest": {
+        "additionalProperties": false,
+        "description": "Verify an email from its link.",
+        "properties": {
+          "token": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "TokenRequest",
+        "type": "object"
+      },
       "ToolCallResources": {
         "description": "Timing and attributable process resources for one tool call.\n\nCurrent shared turns leave whole-container sample fields empty because\nsibling members can execute concurrently. Kata may still attach exact\nexit-time accounting for child processes attributed to this call. Older\nrows can contain periodic sample windows; both shapes remain readable.\n\nA call that ran alongside others could not have its readings separated\nfrom theirs, so its numbers arrive in the ``shared`` fields with\n``overlap_n`` above one. Those are upper bounds and must be presented as\nsuch; a reader that only understands the exclusive fields correctly shows\nnothing for them.",
         "properties": {
@@ -19603,6 +19876,89 @@
           "name"
         ],
         "title": "VariableEdit",
+        "type": "object"
+      },
+      "WaitlistEntry": {
+        "description": "An account's Agent application and its review.\n\n``version`` is the account's one edit version, the value an\nadministrator's ``expected_version`` must match.",
+        "properties": {
+          "purpose": {
+            "title": "Purpose",
+            "type": "string"
+          },
+          "review_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Reason"
+          },
+          "reviewed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed At"
+          },
+          "status": {
+            "enum": [
+              "not_applied",
+              "pending",
+              "approved",
+              "rejected",
+              "revoked"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "submitted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submitted At"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "purpose",
+          "review_reason",
+          "version",
+          "submitted_at",
+          "reviewed_at"
+        ],
+        "title": "WaitlistEntry",
+        "type": "object"
+      },
+      "WaitlistSubmitRequest": {
+        "additionalProperties": false,
+        "description": "Apply for Agent use, or apply again after a rejection or revocation.",
+        "properties": {
+          "purpose": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Purpose",
+            "type": "string"
+          }
+        },
+        "title": "WaitlistSubmitRequest",
         "type": "object"
       },
       "WorkInsights": {
@@ -28126,6 +28482,172 @@
           }
         },
         "summary": "Healthz"
+      }
+    },
+    "/v1/admin/accounts": {
+      "get": {
+        "description": "One page of accounts, newest first, optionally by application status.",
+        "operationId": "list_accounts_v1_admin_accounts_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 1000000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "not_applied",
+                    "pending",
+                    "approved",
+                    "rejected",
+                    "revoked"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAccountsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Accounts",
+        "tags": [
+          "admin-accounts"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account_id}": {
+      "patch": {
+        "description": "Apply one action at the version the administrator read.",
+        "operationId": "change_account_v1_admin_accounts__account_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountEntry"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Change Account",
+        "tags": [
+          "admin-accounts"
+        ]
       }
     },
     "/v1/agent/branches": {
@@ -41329,6 +41851,280 @@
         "summary": "Worker Wait"
       }
     },
+    "/v1/auth/config": {
+      "get": {
+        "description": "Which sign-in this deployment offers.",
+        "operationId": "auth_config_v1_auth_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Auth Config",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/forgot-password": {
+      "post": {
+        "description": "Mail a reset link, if the address has an account.",
+        "operationId": "forgot_password_v1_auth_forgot_password_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Forgot Password",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/login": {
+      "post": {
+        "description": "Check the password and set the session cookie.",
+        "operationId": "sign_in_v1_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailPasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionUserResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sign In",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/resend-verification": {
+      "post": {
+        "description": "Mail a fresh verification link, if the address has an unverified account.",
+        "operationId": "resend_verification_v1_auth_resend_verification_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resend Verification",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/reset-password": {
+      "post": {
+        "description": "Set a new password from a reset link; every session of the account ends.",
+        "operationId": "reset_password_v1_auth_reset_password_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetPasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reset Password",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/signup": {
+      "post": {
+        "description": "Create an account and mail its verification link; the same answer for a taken address.",
+        "operationId": "sign_up_v1_auth_signup_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailPasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sign Up",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/verify-email": {
+      "post": {
+        "description": "Redeem a verification link. Does not sign in.",
+        "operationId": "verify_email_v1_auth_verify_email_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Verify Email",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/v1/compute/node-registrations": {
       "post": {
         "description": "Record the node's host keys once; repeating the same keys is harmless.",
@@ -41374,7 +42170,7 @@
     },
     "/v1/session/callback": {
       "get": {
-        "description": "Finish a sign-in: validate, exchange, and set the session cookie.\n\nArgs:\n    request: The incoming request, for the parked login-flow cookie.\n    code: The one-time authorization code the gateway sent back.\n    state: The CSRF value the gateway echoed.\n    gateway: The gateway's contracts.\n\nReturns:\n    A redirect into the app with a session, or to the public login page\n    explaining account denial or temporary failure when a web URL is set.\n\nRaises:\n    HTTPException: 400 if the flow is missing, mismatched, replayed or\n        unredeemable, 403 if the account may not sign in, 503 if this\n        deployment cannot verify identity or could not reach the gateway.",
+        "description": "Finish a sign-in: validate, exchange, and set the session cookie.\n\nArgs:\n    request: The incoming request, for the parked login-flow cookie.\n    code: The one-time authorization code the gateway sent back.\n    state: The CSRF value the gateway echoed.\n    gateway: The gateway's contracts.\n\nReturns:\n    A redirect into the app with a session, or to the public login page\n    explaining account denial or temporary failure when a web URL is set.\n\nRaises:\n    HTTPException: 400 if the flow is missing, mismatched, replayed or\n        unredeemable, 403 if the account may not sign in, 503 if this\n        deployment cannot verify identity or could not reach the gateway,\n        404 in local mode.",
         "operationId": "session_callback_v1_session_callback_get",
         "parameters": [
           {
@@ -41423,7 +42219,7 @@
     },
     "/v1/session/login": {
       "get": {
-        "description": "Start a sign-in: park the PKCE flow and redirect to the gateway.\n\nArgs:\n    return_to: Where in the app to land afterwards. Reduced to a same-site\n        path before it is parked.\n    prompt: ``select_account`` to have the gateway list the browser's\n        accounts. Any other value is dropped.\n    login_hint: The gateway account id to preselect there. Dropped unless\n        it looks like one.\n\nReturns:\n    A redirect to the gateway's consent page.\n\nRaises:\n    HTTPException: 503 if this deployment cannot sign anyone in.",
+        "description": "Start a sign-in: park the PKCE flow and redirect to the gateway.\n\nArgs:\n    return_to: Where in the app to land afterwards. Reduced to a same-site\n        path before it is parked.\n    prompt: ``select_account`` to have the gateway list the browser's\n        accounts. Any other value is dropped.\n    login_hint: The gateway account id to preselect there. Dropped unless\n        it looks like one.\n\nReturns:\n    A redirect to the gateway's consent page.\n\nRaises:\n    HTTPException: 503 if this deployment cannot sign anyone in, 404 in\n        local mode, where sign-in is ``/v1/auth/login``.",
         "operationId": "session_login_v1_session_login_get",
         "parameters": [
           {
@@ -41494,7 +42290,7 @@
     },
     "/v1/session/logout": {
       "post": {
-        "description": "Clear the session cookie.\n\nUnauthenticated on purpose: signing out must work when the session is\nalready expired or malformed, which is exactly when a browser most wants\nit. There is nothing to protect — the only effect is deleting a cookie the\ncaller already holds.\n\nWhere the cookie is ``Secure`` both of its names are expired: a browser\nsigned in before the ``__Host-`` rename holds only the plain one. Without\n``Secure`` the prefixed name cannot exist.",
+        "description": "Clear the session cookie, and in local mode end the session first.\n\nUnauthenticated on purpose: signing out must work when the session is\nalready expired or malformed, which is exactly when a browser most wants\nit. There is nothing to protect — the only effect is deleting a cookie the\ncaller already holds.\n\nWhere the cookie is ``Secure`` both of its names are expired: a browser\nsigned in before the ``__Host-`` rename holds only the plain one. Without\n``Secure`` the prefixed name cannot exist.\n\nIn local mode the session is a server-side row, revoked before the cookie\nis cleared, so a copy of the cookie stops working too. A store that cannot\nrevoke it answers 503 rather than claiming the session ended.",
         "operationId": "session_logout_v1_session_logout_post",
         "responses": {
           "200": {
@@ -41532,6 +42328,114 @@
           }
         },
         "summary": "Session Me"
+      }
+    },
+    "/v1/waitlist": {
+      "get": {
+        "description": "The caller's application, as of this request.",
+        "operationId": "read_application_v1_waitlist_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WaitlistEntry"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Application",
+        "tags": [
+          "waitlist"
+        ]
+      },
+      "post": {
+        "description": "Apply, or apply again after a rejection or revocation.",
+        "operationId": "submit_application_v1_waitlist_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WaitlistSubmitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WaitlistEntry"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Application",
+        "tags": [
+          "waitlist"
+        ]
       }
     }
   }

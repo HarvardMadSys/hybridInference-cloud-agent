@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api._environment_route_policy import EnvironmentSensitiveRoute
+from cloud_agent.api._local_auth import terminal_open_fence
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._workspace_access import fence_workspace_start
 from cloud_agent.api.deps import (
@@ -863,14 +864,18 @@ async def start_action(
         job_id=job_id, user=user, store=store, app_credentials=credentials, require_ready=True
     )
     bound = await store.environments.get_environment_binding(user["user_id"], run["binding_id"])
-    terminal = await broker.create_terminal(
-        str(job["thread_id"]),
-        rows=24,
-        cols=100,
-        environment=bound,
-        action_id=action_id,
-        run_id=run["id"],
-    )
+    async with terminal_open_fence(
+        store, str(user["user_id"]), broker, str(job["thread_id"])
+    ) as opened:
+        terminal = await broker.create_terminal(
+            str(job["thread_id"]),
+            rows=24,
+            cols=100,
+            environment=bound,
+            action_id=action_id,
+            run_id=run["id"],
+        )
+        opened["terminal"] = terminal
     updated = await store.environments.update_environment_action_run(
         user["user_id"], run["id"], {"terminal_id": terminal["id"], **_action_result(terminal)}
     )

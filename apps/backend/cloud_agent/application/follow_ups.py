@@ -154,8 +154,8 @@ async def prepare_follow_up(
     if model:
         try:
             catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
-        except ModelCatalogUnavailable:
-            raise model_catalog_unavailable() from None
+        except ModelCatalogUnavailable as exc:
+            raise model_catalog_unavailable(exc) from None
         canonical = await require_resolvable_model(
             model, gateway=gateway, user=user, catalog=catalog
         )

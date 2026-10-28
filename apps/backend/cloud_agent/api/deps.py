@@ -63,6 +63,7 @@ from cloud_agent import identity
 
 #: Whatever a surface narrowed the store to; this only removes the ``None``.
 _StoreT = TypeVar("_StoreT")
+from cloud_agent.accounts.config import local_mode
 from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.api.errors import AgentConfigurationError
 from cloud_agent.gateway import GatewayError
@@ -83,6 +84,7 @@ if TYPE_CHECKING:
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient, RenewalSchedule
     from cloud_agent.ports import AuditRepository
+    from cloud_agent.ports.accounts import SessionOwner
     from cloud_agent.storage.assembly import Storage
     from cloud_agent.workers.job_event_signal import JobEventSignal
     from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
@@ -506,7 +508,13 @@ def agent_access_admission(request: Request) -> AgentAccessAdmission:
 
 
 async def admit_agent_owner(request: Request, gateway: Any, user_id: str) -> AgentAccessDecision:
-    """Admit an owner request on a current or briefly kept ``agent.use`` grant."""
+    """Admit an owner request on a current or briefly kept ``agent.use`` grant.
+
+    Local mode keeps nothing: the decision is one primary-key read of this
+    database, so every request is admitted on the account as it is now.
+    """
+    if local_mode():
+        return await require_agent_access(gateway, user_id)
     decision = await agent_access_admission(request).decision(gateway, user_id)
     return _permitted(decision, "agent.use")
 
@@ -578,7 +586,11 @@ async def get_current_user(
 
     Agent permissions are resolved separately at the Gateway on every
     protected request. A role in an old session never grants Agent access.
+    In local mode the session is a server-side row instead; see
+    :func:`local_session_owner`.
     """
+    if local_mode():
+        return await _local_current_user(request, authorization)
     token = session_token(request, authorization)
     if not token:
         raise HTTPException(
@@ -629,6 +641,8 @@ async def verify_admin_access(
     # header value is whatever latin-1 the caller sent. A refusal, not a 500.
     if configured and presented and hmac.compare_digest(presented.encode(), configured.encode()):
         return "admin-token"
+    if local_mode():
+        return await _local_admin(request, authorization, gateway)
 
     token = session_token(request, authorization)
     if token:
@@ -650,6 +664,83 @@ async def verify_admin_access(
             detail="Missing authentication. Provide a JWT or admin token via Authorization header.",
         )
     raise HTTPException(status_code=401, detail="Invalid authentication token.")
+
+
+# ── Local accounts (AGENT_AUTH_MODE=local) ─────────────────────────────
+
+
+async def local_session_owner(request: Request, authorization: str | None) -> SessionOwner | None:
+    """The live local session a request presents, read from this database.
+
+    The local cookie, or a bearer of the local session's shape; a Gateway-mode
+    cookie or JWT is neither, and finds nothing. One read per request: the
+    answer is kept on the request, never across requests.
+
+    Raises:
+        HTTPException: 503 when the session store cannot be read.
+    """
+    from cloud_agent.accounts.session_cookie import presented_local_token
+
+    token = presented_local_token(request.cookies, bearer_token(authorization))
+    if token is None:
+        return None
+    kept = getattr(request.state, "local_session", None)
+    if kept is not None and kept[0] == token:
+        return kept[1]
+    owner = await _read_local_session(request, token)
+    request.state.local_session = (token, owner)
+    return owner
+
+
+async def _read_local_session(request: Request, token: str) -> SessionOwner | None:
+    from cloud_agent.accounts.config import LocalAuthNotConfigured
+    from cloud_agent.accounts.tokens import session_hash
+    from cloud_agent.domain.accounts import may_sign_in
+
+    storage = require_store(get_storage(request))
+    try:
+        owner = await storage.local_accounts.session_owner(session_hash(token))
+    except LocalAuthNotConfigured:
+        raise AgentConfigurationError() from None
+    except Exception:
+        get_logger(__name__).warning(
+            "agent_local_session_unavailable",
+            exc_info=True,
+            extra={"event": "agent_local_session_unavailable"},
+        )
+        raise HTTPException(
+            status_code=503, detail="Cannot confirm your session; try again shortly."
+        ) from None
+    if owner is None or not may_sign_in(owner.account):
+        return None
+    return owner
+
+
+async def _local_current_user(request: Request, authorization: str | None) -> dict[str, Any]:
+    owner = await local_session_owner(request, authorization)
+    if owner is not None:
+        return {"user_id": owner.account.id, "authenticated": True}
+    from cloud_agent.accounts.session_cookie import presented_local_token
+
+    if presented_local_token(request.cookies, bearer_token(authorization)) is None:
+        raise HTTPException(status_code=401, detail="Missing authentication token.")
+    raise HTTPException(status_code=401, detail="Invalid authentication token.")
+
+
+async def require_local_admission(request: Request, user_id: str) -> None:
+    """In local mode, refuse an identity-only route to an account without ``agent.use``.
+
+    Gateway mode is unchanged: those routes keep their identity-only check.
+    """
+    if local_mode():
+        await require_agent_access(get_gateway_client(request), user_id)
+
+
+async def _local_admin(request: Request, authorization: str | None, gateway: Any) -> str:
+    """Admit a local session holding current local ``agent.admin``, never a Gateway role."""
+    user = await _local_current_user(request, authorization)
+    await require_agent_access(gateway, user["user_id"], "agent.admin")
+    return f"admin:{user['user_id']}"
 
 
 # ── The admin audit trail ──────────────────────────────────────────────

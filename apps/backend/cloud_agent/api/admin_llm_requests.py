@@ -44,6 +44,7 @@ from cloud_agent.admin_observability import (
     request_source_fingerprint,
     response_body_bytes,
 )
+from cloud_agent.api._local_auth import refuse_in_local_mode
 from cloud_agent.api.admin_runs import _no_store, _run, get_admin_run_queries
 from cloud_agent.api.deps import get_grant_client, verify_admin_access
 from cloud_agent.api.errors import AgentConfigurationError
@@ -65,7 +66,8 @@ logger = get_logger(__name__)
 # per-route ``admin`` parameter — FastAPI runs a shared dependency once per
 # request, so the two do not double-ask the gateway.
 router = APIRouter(
-    prefix="/admin/agent/runs", dependencies=[Depends(_no_store), Depends(verify_admin_access)]
+    prefix="/admin/agent/runs",
+    dependencies=[Depends(_no_store), Depends(verify_admin_access), Depends(refuse_in_local_mode)],
 )
 
 #: Query parameters each route accepts. Anything else is refused rather than

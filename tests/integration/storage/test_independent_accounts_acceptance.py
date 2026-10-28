@@ -15,12 +15,12 @@ from urllib.parse import parse_qs, urlsplit
 import asyncpg
 import pytest
 import pytest_asyncio
-from cloud_agent.bootstrap.identity import attach_local_identity, bind_identity_source
 from httpx import ASGITransport, AsyncClient
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
 from cloud_agent.app import create_app
+from cloud_agent.bootstrap.identity import attach_local_identity, bind_identity_source
 from cloud_agent.gateway import GatewayClient
 from cloud_agent.grants import GrantClient
 from cloud_agent.storage.assembly import Storage

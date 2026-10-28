@@ -121,8 +121,8 @@ async def save_model_preference(
         # creation does, as a 503 the Settings card can tell from a refusal.
         try:
             canonical = await agent_canonical_model(requested, gateway, user_id=user["user_id"])
-        except ModelCatalogUnavailable:
-            raise model_catalog_unavailable() from None
+        except ModelCatalogUnavailable as exc:
+            raise model_catalog_unavailable(exc) from None
         if canonical is None:
             raise HTTPException(
                 status_code=400,

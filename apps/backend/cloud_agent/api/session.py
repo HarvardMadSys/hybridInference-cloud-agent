@@ -58,13 +58,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 
 from cloud_agent import identity
+from cloud_agent.accounts.config import local_mode
 from cloud_agent.api.deps import (
     agent_access_admission,
     get_current_user,
     get_gateway_client,
     resolve_agent_access,
 )
-from cloud_agent.api.errors import AgentConfigurationError
+from cloud_agent.api.errors import AgentConfigurationError, local_auth_disabled
 from cloud_agent.gateway import GatewayClient, GatewayError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import SessionUserResponse
@@ -262,8 +263,11 @@ async def session_login(
         A redirect to the gateway's consent page.
 
     Raises:
-        HTTPException: 503 if this deployment cannot sign anyone in.
+        HTTPException: 503 if this deployment cannot sign anyone in, 404 in
+            local mode, where sign-in is ``/v1/auth/login``.
     """
+    if local_mode():
+        raise local_auth_disabled()
     authorize_url = _env(ENV_AUTHORIZE_URL)
     redirect_uri = _env(ENV_REDIRECT_URI)
     if not authorize_url or not redirect_uri:
@@ -337,8 +341,11 @@ async def session_callback(
     Raises:
         HTTPException: 400 if the flow is missing, mismatched, replayed or
             unredeemable, 403 if the account may not sign in, 503 if this
-            deployment cannot verify identity or could not reach the gateway.
+            deployment cannot verify identity or could not reach the gateway,
+            404 in local mode.
     """
+    if local_mode():
+        raise local_auth_disabled()
     redirect_uri = _env(ENV_REDIRECT_URI)
     if not redirect_uri:
         return _unavailable_response(f"{ENV_REDIRECT_URI} must be set to sign anyone in.")
@@ -548,8 +555,8 @@ def _expire_session_cookie(response: Response, name: str) -> None:
 
 
 @router.post("/logout")
-async def session_logout(response: Response) -> dict[str, bool]:
-    """Clear the session cookie.
+async def session_logout(request: Request, response: Response) -> dict[str, bool]:
+    """Clear the session cookie, and in local mode end the session first.
 
     Unauthenticated on purpose: signing out must work when the session is
     already expired or malformed, which is exactly when a browser most wants
@@ -559,14 +566,58 @@ async def session_logout(response: Response) -> dict[str, bool]:
     Where the cookie is ``Secure`` both of its names are expired: a browser
     signed in before the ``__Host-`` rename holds only the plain one. Without
     ``Secure`` the prefixed name cannot exist.
+
+    In local mode the session is a server-side row, revoked before the cookie
+    is cleared, so a copy of the cookie stops working too. A store that cannot
+    revoke it answers 503 rather than claiming the session ended.
     """
+    if local_mode():
+        await _end_local_session(request, response)
     if _cookie_is_secure():
         _expire_session_cookie(response, identity.SESSION_COOKIE)
     _expire_session_cookie(response, identity.LEGACY_SESSION_COOKIE)
     return {"ok": True}
 
 
-@router.get("/me", response_model=SessionUserResponse)
+async def _end_local_session(request: Request, response: Response) -> None:
+    from cloud_agent.accounts.session_cookie import (
+        expire_local_session_cookies,
+        presented_local_token,
+    )
+    from cloud_agent.api._local_auth import local_flows
+    from cloud_agent.api.deps import bearer_token
+
+    token = presented_local_token(
+        request.cookies, bearer_token(request.headers.get("authorization"))
+    )
+    if token is not None:
+        try:
+            await local_flows(request).sign_out(token)
+        except Exception:
+            logger.warning(
+                "agent_local_sign_out_failed",
+                exc_info=True,
+                extra={"event": "agent_local_sign_out_failed"},
+            )
+            raise HTTPException(
+                status_code=503, detail="Could not end the session; try again shortly."
+            ) from None
+    expire_local_session_cookies(response)
+
+
+async def _local_me(request: Request, gateway: Any, user_id: str) -> SessionUserResponse:
+    """The local account, its current access and its application, all read just now."""
+    from cloud_agent.api._local_auth import local_session_user
+    from cloud_agent.api.deps import local_session_owner
+
+    owner = await local_session_owner(request, request.headers.get("authorization"))
+    if owner is None or owner.account.id != user_id:
+        raise HTTPException(status_code=401, detail="Invalid authentication token.")
+    decision = await resolve_agent_access(gateway, user_id)
+    return local_session_user(owner.account, decision)
+
+
+@router.get("/me", response_model=SessionUserResponse, response_model_exclude_none=True)
 async def session_me(
     request: Request, gateway: Any = Depends(get_gateway_client)
 ) -> SessionUserResponse:
@@ -579,6 +630,8 @@ async def session_me(
     user = await get_current_user(
         request=request, authorization=request.headers.get("authorization")
     )
+    if local_mode():
+        return await _local_me(request, gateway, user["user_id"])
     # Always asked for here, and it replaces what owner admission keeps: a page
     # load's owner requests are admitted on it, and a withdrawal seen here
     # stops admitting them at once.

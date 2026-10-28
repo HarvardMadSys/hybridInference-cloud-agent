@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Query
 
+from cloud_agent.accounts.config import local_mode
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import (
     get_gateway_client,
@@ -134,6 +135,9 @@ async def get_agent_config(
         # will hit — not /v1/models, which answers for the *browsing* user and
         # offered models whose first agent call then 404ed.
         models=models,
+        # A local account runs nothing until it has a model connection; the
+        # composer says so instead of showing an empty picker as an outage.
+        model_connection_required=local_mode() and not models,
         # What each runtime can express, and which models take the parameter at
         # all. The composer offers the platform's levels narrowed to the first
         # and gated on the second, and no control when either is empty — which

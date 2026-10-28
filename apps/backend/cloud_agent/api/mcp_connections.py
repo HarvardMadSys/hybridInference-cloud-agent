@@ -38,7 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # reimplemented, and deliberately one-directional: this module depends on
 # ``_owner_auth`` and never the reverse, so there is no cycle to reason about.
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_current_user, get_storage
+from cloud_agent.api.deps import get_current_user, get_storage, require_local_admission
 from cloud_agent.api.mcp_connections_shared import (
     _bad_request,
     _capability_payload,
@@ -1339,14 +1339,13 @@ async def _callback_session_user(request: Request) -> str | None:
 
     Read by the same verifier as every owner route, but answered rather than
     raised: the callback is a browser navigation, and a 401 body is a dead end
-    where a redirect back to the app can say what to do. The session cookie is
-    ``SameSite=Lax``, so it travels on this top-level GET from the provider.
-    Only the cookie is read: a provider's redirect cannot carry a bearer, and
-    declaring that header would add a parameter to the served contract that no
-    real callback could use.
+    where a redirect back to the app can say what to do. The cookie is ``Lax``,
+    so it travels on this top-level GET; a redirect cannot carry a bearer. A
+    local account must also still hold ``agent.use``.
     """
     try:
         user = await get_current_user(request, authorization=None)
+        await require_local_admission(request, str(user["user_id"]))
     except HTTPException:
         return None
     return str(user["user_id"])

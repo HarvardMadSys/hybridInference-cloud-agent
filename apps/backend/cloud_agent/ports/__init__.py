@@ -8,6 +8,7 @@ handed any object with the right shape.
 
 from __future__ import annotations
 
+from cloud_agent.ports.accounts import LocalAccountRepository, OwnerWorkTermination
 from cloud_agent.ports.agent_memory import AgentMemoryRepository
 from cloud_agent.ports.attachments import AttachmentRepository
 from cloud_agent.ports.attempt_commands import AttemptCommands
@@ -88,6 +89,7 @@ __all__ = [
     "HostCapacityRepository",
     "HostPoolRepository",
     "LedgerRepository",
+    "LocalAccountRepository",
     "McpCatalogRepository",
     "McpConnectionRepository",
     "MeasurementWriteResult",
@@ -95,6 +97,7 @@ __all__ = [
     "NotificationMaintenanceRepository",
     "OperationMeasurements",
     "OwnerUsageQueries",
+    "OwnerWorkTermination",
     "PendingMessageRepository",
     "ProfilingControl",
     "ResidencyRepository",

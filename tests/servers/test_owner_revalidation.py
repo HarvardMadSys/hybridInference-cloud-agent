@@ -253,6 +253,21 @@ PUBLIC_ROUTES = {
     ("GET", "/v1/agent/mcp/oauth/callback/{provider}"): (
         "finishes only the OAuth flow the signed-in account started"
     ),
+    # Local accounts (AGENT_AUTH_MODE=local). Sign-in and recovery run before
+    # there is a session; each is 404 in Gateway mode.
+    ("GET", "/v1/auth/config"): "says which sign-in this deployment offers, before sign-in",
+    ("POST", "/v1/auth/signup"): "creates an unverified account, so there is no session yet",
+    ("POST", "/v1/auth/login"): "creates the session",
+    ("POST", "/v1/auth/verify-email"): "redeems a single-use emailed token",
+    ("POST", "/v1/auth/resend-verification"): "mails a link; answers the same for any address",
+    ("POST", "/v1/auth/forgot-password"): "mails a link; answers the same for any address",
+    ("POST", "/v1/auth/reset-password"): "redeems a single-use emailed token",
+    ("GET", "/v1/waitlist"): (
+        "identity only by design: the server-side session row is read on every request"
+    ),
+    ("POST", "/v1/waitlist"): (
+        "identity only by design: applying is what an unadmitted account may do"
+    ),
 }
 
 

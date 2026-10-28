@@ -83,13 +83,30 @@ class _JobCreationStorage(Protocol):
     source_control: SourceControlPort
 
 
-def model_catalog_unavailable() -> HTTPException:
+def model_catalog_unavailable(cause: BaseException | None = None) -> HTTPException:
     """503 while the gateway cannot say which models this owner may call.
 
     Not a 400: an outage is no verdict on the model or the effort, and a
     waiting message's check reads anything below 500 as one and holds the
     message until its owner releases it.
+
+    The exception is a local account with no model connection: that is a
+    verdict, so it is a 409 ``model_connection_required``, and a waiting
+    message is held with it rather than retried.
     """
+    if _needs_model_connection(cause):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "model_connection_required",
+                    "message": (
+                        "This account has no model connection. "
+                        "Add a personal model connection to run tasks."
+                    ),
+                }
+            },
+        )
     return HTTPException(
         status_code=503,
         detail={
@@ -99,6 +116,15 @@ def model_catalog_unavailable() -> HTTPException:
             }
         },
     )
+
+
+def _needs_model_connection(cause: BaseException | None) -> bool:
+    """Whether a catalog failure was local mode's typed refusal, not an outage."""
+    while cause is not None:
+        if getattr(cause, "error_type", None) == "model_connection_required":
+            return True
+        cause = cause.__cause__
+    return False
 
 
 async def require_resolvable_model(
@@ -130,8 +156,8 @@ async def require_resolvable_model(
     if catalog is None:
         try:
             catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
-        except ModelCatalogUnavailable:
-            raise model_catalog_unavailable() from None
+        except ModelCatalogUnavailable as exc:
+            raise model_catalog_unavailable(exc) from None
     models, aliases, _efforts = catalog
     canonical = resolve_model_in_catalog(model, models, aliases)
     if canonical is not None:
@@ -385,8 +411,8 @@ async def require_offered_effort(
     if efforts is None:
         try:
             efforts = await agent_model_reasoning_efforts(gateway, user_id=user["user_id"])
-        except ModelCatalogUnavailable:
-            raise model_catalog_unavailable() from None
+        except ModelCatalogUnavailable as exc:
+            raise model_catalog_unavailable(exc) from None
     # The model's entry is read as a yes/no — does it take the parameter at
     # all — and not for its contents. Per-model domains were tried and
     # withdrawn: the providers' documented lists disagreed with what their
@@ -614,8 +640,8 @@ async def create_job_as(  # noqa: PLR0912 complexity baseline, #771
     # One catalog read serves both admission checks (issue #781).
     try:
         catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
-    except ModelCatalogUnavailable:
-        raise model_catalog_unavailable() from None
+    except ModelCatalogUnavailable as exc:
+        raise model_catalog_unavailable(exc) from None
     model = await require_resolvable_model(body.model, gateway=gateway, user=user, catalog=catalog)
     # Checked against the *resolved* model, not the requested spelling: the
     # domain belongs to the model the turn will actually call.

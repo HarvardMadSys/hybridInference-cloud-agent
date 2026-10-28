@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Path, Response
 from pydantic import BaseModel
 
+from cloud_agent.api._local_auth import refuse_in_local_mode
 from cloud_agent.api._owner_auth import _owned_job, _require_owned_job, require_agent_owner
 from cloud_agent.api.deps import get_grant_client, get_storage, require_store
 from cloud_agent.domain.execution import TERMINAL_STATES
@@ -54,6 +55,7 @@ class MessageRequestDetail(BaseModel):
 @router.get(
     "/jobs/{job_id}/attempts/{attempt_id}/messages/{message_id}/request",
     response_model=MessageRequestDetail,
+    dependencies=[Depends(refuse_in_local_mode)],
 )
 async def get_message_request(
     response: Response,

@@ -8,6 +8,7 @@ transaction ownership it has here.
 
 from __future__ import annotations
 
+from cloud_agent.storage.repositories.accounts import PostgresLocalAccountRepository
 from cloud_agent.storage.repositories.agent_memory import PostgresAgentMemoryRepository
 from cloud_agent.storage.repositories.attachments import PostgresAttachmentRepository
 from cloud_agent.storage.repositories.attempt_commands import PostgresAttemptCommands
@@ -36,6 +37,7 @@ from cloud_agent.storage.repositories.operation_measurements import (
     PostgresOperationMeasurementRepository,
 )
 from cloud_agent.storage.repositories.owner_usage import PostgresOwnerUsageRepository
+from cloud_agent.storage.repositories.owner_work import PostgresOwnerWorkRepository
 from cloud_agent.storage.repositories.pending_messages import PostgresPendingMessageRepository
 from cloud_agent.storage.repositories.profiling_control import (
     PostgresProfilingControlRepository,
@@ -71,12 +73,14 @@ __all__ = [
     "PostgresHostCapacityRepository",
     "PostgresHostPoolRepository",
     "PostgresLedgerRepository",
+    "PostgresLocalAccountRepository",
     "PostgresMcpCatalogRepository",
     "PostgresMcpConnectionRepository",
     "PostgresModelPreferenceRepository",
     "PostgresNotificationMaintenanceRepository",
     "PostgresOperationMeasurementRepository",
     "PostgresOwnerUsageRepository",
+    "PostgresOwnerWorkRepository",
     "PostgresPendingMessageRepository",
     "PostgresProfilingControlRepository",
     "PostgresResidencyRepository",

@@ -29,6 +29,7 @@ from cloud_agent.api._owner_auth import (
     OWNER_STREAM_MAX_S,
     _owned_job,
     _require_owned_job,
+    owner_stream_guard,
     require_agent_owner,
 )
 from cloud_agent.api._stream_slots import STREAM_SLOTS
@@ -288,6 +289,7 @@ async def stream_agent_job_events(  # noqa: C901 complexity baseline, #771
         # Admission was checked once, for this connection, so the connection
         # does not outlive the cap.
         closes_at = clock() + OWNER_STREAM_MAX_S
+        still_admitted = owner_stream_guard(request, str(user["user_id"]))
         # Between reads the stream waits for its job to notify that it stored
         # an event or changed state, and reads again at once. The notification
         # only says when to read; the cursor says what, so one that is lost
@@ -299,6 +301,8 @@ async def stream_agent_job_events(  # noqa: C901 complexity baseline, #771
             with subscription as woken:
                 while True:
                     if await request.is_disconnected() or clock() >= closes_at:
+                        return
+                    if not await still_admitted():
                         return
                     # The next events and the job's state, in one read.
                     page = await job_store.execution_queries.job_stream_page(

@@ -1,0 +1,758 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, The HybridInference contributors
+# This file is distributed under the same license as the HybridInference
+# Cloud Agent package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-28 00:30-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../developer/local-accounts.md:1
+msgid "Local accounts and the waiting list"
+msgstr ""
+
+#: ../developer/local-accounts.md:3
+msgid ""
+"Cloud Agent can run with its own accounts instead of HybridInference "
+"Gateway sign-in. Set `AGENT_AUTH_MODE=local` and people sign up with an "
+"email address and a password, verify the address, sign in, and apply for "
+"Agent use through a waiting list that administrators review. Gateway mode"
+" remains the default, and nothing in this page changes it."
+msgstr ""
+
+#: ../developer/local-accounts.md:9
+msgid ""
+"The design is [independent accounts and waiting "
+"list](../agents/specs/2026-10-27-independent-accounts-and-waitlist-design"
+".zh-CN.md). This page describes what is implemented."
+msgstr ""
+
+#: ../developer/local-accounts.md:13
+msgid "What local mode changes"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Concern"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Gateway mode (default)"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Local mode"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Sign-in"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "PKCE round trip to the Gateway (`/v1/session/login`)"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`POST /v1/auth/login`; Gateway sign-in routes answer 404"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Session"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "HS256 cookie `__Host-cloud_agent_session`, not revocable"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Server-side row, cookie `__Host-cloud_agent_local_session`, revocable"
+msgstr ""
+
+#: ../developer/local-accounts.md ../developer/local-accounts.md:97
+msgid "Identity and admission"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Gateway `agent-access` lookup"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "This database, read on every check, with no cache"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Profile and team emails"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Gateway user status"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "The local account's email"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Administration"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`ADMIN_TOKEN` or Gateway `agent.admin`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`ADMIN_TOKEN` or a local account with `agent.admin`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Inference"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Gateway grants and catalog"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"None: no Gateway grant is minted for a local account (see "
+"[Models](#models))"
+msgstr ""
+
+#: ../developer/local-accounts.md:24
+msgid ""
+"In local mode `app.state.gateway` is `LocalModeGateway` "
+"(`cloud_agent/accounts/directory.py`). It has the methods the Gateway "
+"client has. Identity and admission are answered from this database, and "
+"each Gateway-only method is refused with a typed error, without a network"
+" call. Every existing owner check therefore reads the local decision: "
+"request admission, claims, goal rounds, waiting messages, team approval "
+"and ownership transfer, the on-call service account, Profile and team "
+"rosters. A local account ID never reaches the Gateway."
+msgstr ""
+
+#: ../developer/local-accounts.md:33
+msgid "Enabling it"
+msgstr ""
+
+#: ../developer/local-accounts.md:35
+msgid ""
+"Local mode needs its own database. At startup it binds an empty database "
+"to local identity (`agent_local_identity_namespace`). It refuses a "
+"database bound to a Gateway issuer, or one that holds owner data without "
+"a binding. Gateway mode, in turn, refuses a database bound to local "
+"identity. Both checks take the same table lock, so two listeners that "
+"start in different modes cannot each bind the database. No setting skips "
+"these checks. Moving an existing Gateway-bound database to local accounts"
+" is a separate identity migration (phase A3 in the design), and it is not"
+" implemented."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Variable"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Purpose"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`AGENT_AUTH_MODE=local`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Selects local accounts. Set it on both listeners."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`AGENT_LOCAL_SESSION_SECRET`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"At least 32 random bytes, different from `AGENT_SESSION_SECRET`. Keys the"
+" stored hashes of sessions, emailed tokens and abuse counters."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`AGENT_LOCAL_SIGNUP_ENABLED`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "On by default. Set `false` to close public sign-up."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`AGENT_SMTP_*`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"The mail relay. Without a host and a sender, sign-up is closed and "
+"recovery answers 503."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`AGENT_WEB_BASE_URL`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "The only base used for emailed links. A request's `Host` is never used."
+msgstr ""
+
+#: ../developer/local-accounts.md:52
+msgid ""
+"The web server must reach the same control plane "
+"(`AGENT_CONTROL_PLANE_URL`). The web app reads `GET /v1/auth/config` to "
+"choose its sign-in pages."
+msgstr ""
+
+#: ../developer/local-accounts.md:55
+msgid "The first administrator"
+msgstr ""
+
+#: ../developer/local-accounts.md:57
+msgid ""
+"No endpoint grants the first administrator, and the first account to sign"
+" up gets nothing. Someone who holds the deployment's database credential "
+"and local secret runs:"
+msgstr ""
+
+#: ../developer/local-accounts.md:66
+msgid ""
+"The account must exist and must have verified its email. `--approve` also"
+" approves its Agent application, because administration is granted only "
+"to an approved account. Each step goes through the same audited, "
+"versioned action the administration API uses, with the actor `deployment-"
+"bootstrap`."
+msgstr ""
+
+#: ../developer/local-accounts.md:71
+msgid "The HTTP surface"
+msgstr ""
+
+#: ../developer/local-accounts.md:73
+#, python-brace-format
+msgid ""
+"Errors use the usual envelope, `{\"detail\": {\"error\": {\"type\", "
+"\"message\"}}}`. Every response is `no-store`. A refused body is reported"
+" by field and rule only, so a 422 never repeats a password or a token."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Route"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Notes"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`GET /v1/auth/config`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+#, python-brace-format
+msgid "`{mode, signup_enabled}`. Public, in both modes."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`POST /v1/auth/signup`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+#, python-brace-format
+msgid ""
+"`{ok: true}` for every address. A registered address gets a password-"
+"reset link, not a second account, and its password is not changed."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`POST /v1/auth/login`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"Sets the cookie and returns the session body. `invalid_credentials` for "
+"an unknown email and for a wrong password alike. `email_not_verified` and"
+" `account_suspended` only after the right password."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"`POST /v1/auth/verify-email`, `/resend-verification`, `/forgot-password`,"
+" `/reset-password`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+#, python-brace-format
+msgid ""
+"`{ok: true}`. Tokens are single-use and expire (24 hours to verify, 1 "
+"hour to reset); a newer token replaces older ones. A reset verifies the "
+"email and ends every session of the account."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`GET /v1/session/me`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"Adds `auth_mode`, `email` and `waitlist` for a local account. The "
+"Gateway-mode body is unchanged."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`POST /v1/session/logout`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Revokes the local session, then clears the cookie."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`GET`/`POST /v1/waitlist`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"Needs a verified, signed-in account only. Submitting again while pending "
+"changes nothing. A rejected or revoked application is submitted again "
+"only when its owner asks."
+msgstr ""
+
+#: ../developer/local-accounts.md
+#, python-brace-format
+msgid "`GET /v1/admin/accounts`, `PATCH /v1/admin/accounts/{id}`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"`approve`, `reject`, `revoke`, `suspend`, `restore`, `grant_admin`, "
+"`revoke_admin`, at `expected_version`."
+msgstr ""
+
+#: ../developer/local-accounts.md:88
+msgid ""
+"Mail links point at the web app's `/verify-email#token=…` and `/reset-"
+"password#token=…`. A browser never sends the fragment to a server, so the"
+" token stays out of access logs. The page sends the token in an explicit "
+"POST, and following a link changes nothing by itself."
+msgstr ""
+
+#: ../developer/local-accounts.md:93
+msgid ""
+"Each unsafe `/v1/auth/*` request is checked by the cross-site write "
+"guard, whether or not it carries a cookie, and the body must be JSON. A "
+"cross-site sign-in would otherwise put an attacker's account in the "
+"victim's browser."
+msgstr ""
+
+#: ../developer/local-accounts.md:99
+msgid ""
+"An account is who signs in. Its admission is whether that person may use "
+"Agent. These are separate records:"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Account and admission"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Signs in, reads the application"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Owner routes, tasks, terminals, MCP"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Email unverified"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Verification and recovery only"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "No"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Verified, not applied or pending"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Yes"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Verified, approved"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Yes, with ownership checks"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Verified, rejected or revoked"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Yes, with the reason"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Approved and marked administrator"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Suspended"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "No; every session is revoked"
+msgstr ""
+
+#: ../developer/local-accounts.md:111
+msgid ""
+"`agent.use` needs a verified, active, approved account. `agent.admin` "
+"also needs the explicit administrator flag; the flag alone grants "
+"nothing. Granting administration never approves an account. Suspension "
+"revokes the account's sessions, clears the administrator flag and turns "
+"an approval into a revocation. Restoring an account lets it sign in and "
+"apply again, and grants nothing back. An administrator cannot suspend "
+"themself or remove their own access; the `ADMIN_TOKEN` can."
+msgstr ""
+
+#: ../developer/local-accounts.md:119
+msgid ""
+"Every account or admission change increments the account's `version`, "
+"which is `WaitlistEntry.version`. An administrator action names the "
+"version it read and is refused with 409 `version_conflict` when the "
+"account has changed since. The change and its `agent_admin_audit_log` row"
+" commit in one transaction. The audit row records the states, the version"
+" and whether a reason was given; it never records an email address, "
+"password, hash or token. The acting administrator's own permission is "
+"checked again inside that transaction, so an administrator who is "
+"suspended while a request is in flight changes nothing "
+"(`actor_not_admin`)."
+msgstr ""
+
+#: ../developer/local-accounts.md:129
+msgid "Sessions and credentials"
+msgstr ""
+
+#: ../developer/local-accounts.md:131
+msgid ""
+"Passwords use HybridInference's Argon2id parameters and rules (see "
+"[Reused code](#reused-code)). Hashing runs on a pool of four threads; at "
+"most 64 hashes may wait, and beyond that a request is refused with 503 "
+"instead of being queued."
+msgstr ""
+
+#: ../developer/local-accounts.md:135
+msgid ""
+"A session value is `cals1.` followed by 256 random bits. The database "
+"keeps only an HMAC of it, keyed from `AGENT_LOCAL_SESSION_SECRET`. A "
+"Gateway-mode cookie or JWT is never read in local mode."
+msgstr ""
+
+#: ../developer/local-accounts.md:138
+msgid ""
+"A session lasts 30 days and is never extended. Sign-out, a password reset"
+" and a suspension revoke it."
+msgstr ""
+
+#: ../developer/local-accounts.md:140
+msgid ""
+"Opening a session takes a lock on the account row before it reads the "
+"password, so a session cannot be opened with a password that a concurrent"
+" reset has replaced, or for an account that a concurrent suspension has "
+"suspended."
+msgstr ""
+
+#: ../developer/local-accounts.md:144
+msgid ""
+"Abuse limits are fixed-window counters in Postgres, so every worker and "
+"replica shares them. Their keys are keyed hashes. Sign-in allows 5 "
+"attempts per email and address and 50 per email in 15 minutes, and 20 per"
+" address in an hour. Sign-up allows 5 per address in an hour and 10 in a "
+"day. Mail allows 3 per email in an hour, 10 per email in a day and 10 per"
+" address in an hour. Token redemption allows 30 per address in 15 "
+"minutes."
+msgstr ""
+
+#: ../developer/local-accounts.md:150
+msgid "Neither a recipient address nor a link is written to a log."
+msgstr ""
+
+#: ../developer/local-accounts.md:152
+msgid "Stopping an account's work"
+msgstr ""
+
+#: ../developer/local-accounts.md:154
+msgid ""
+"Revoking or suspending an account commits the change and opens a "
+"termination record (`agent_local_access_terminations`) for the new "
+"version in the same transaction. From that commit on, every new owner "
+"request, claim, goal round and waiting message reads the denial. "
+"Residency establishment and residency heartbeats carry the same condition"
+" in their own SQL, so an attempt admitted before the revocation cannot "
+"establish or extend a residency afterwards."
+msgstr ""
+
+#: ../developer/local-accounts.md:162
+msgid ""
+"`terminate_owner_access` (`application/owner_termination.py`) then stops "
+"the work already running, using the paths that already end work safely. "
+"It cancels queued turns, asks running turns to stop, pauses waiting "
+"messages and active goals, cancels environment tests and prebuilds, stops"
+" environment actions, and releases every residency. It closes the "
+"released member processes. In each sandbox group whose members all belong"
+" to the account, it freezes the group's terminals, kills them and lifts "
+"the freeze. Groups shared with another owner's chat are never touched. A "
+"terminal that a request admitted before the revocation opens afterwards "
+"is killed by that request itself."
+msgstr ""
+
+#: ../developer/local-accounts.md:173
+msgid ""
+"The record stays open until a pass finds the terminal cleanup "
+"acknowledged and none of the account's turns running. The background pass"
+" retries open records every 30 seconds. A per-account advisory lock "
+"serializes passes across processes. Approving the account or granting it "
+"administration needs that same lock and no open record (otherwise 409 "
+"`access_cleanup_pending`), so a delayed pass never stops work that a "
+"newer approval allows. Restoring access replays nothing: cancelled turns "
+"stay cancelled, and paused goals and queues wait for their owner."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Work"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Stops within (default settings)"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"New requests, claims, goal rounds, waiting messages, residency "
+"establishment and heartbeats"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "At commit"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Open owner event, change and terminal streams"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "30 s (`LOCAL_STREAM_RECHECK_S`) plus one keepalive"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "A running turn"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"At its next host heartbeat, about 30 s, or when its 120 s attempt lease "
+"lapses if the host is silent"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Resident member processes"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "When the pass closes them, or at the host's next residency heartbeat"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Group terminals and environment actions"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "When the pass reaches the group; retried every 30 s until acknowledged"
+msgstr ""
+
+#: ../developer/local-accounts.md:190
+msgid "Models"
+msgstr ""
+
+#: ../developer/local-accounts.md:192
+msgid ""
+"Local accounts have no Gateway inference. A model lookup raises "
+"`ModelConnectionRequired`. Job, turn and model-preference requests answer"
+" 409 `model_connection_required`, a waiting message is held with that "
+"reason, and `GET /v1/agent/config` reports `model_connection_required: "
+"true` with no models. A Gateway grant is never minted for a local "
+"account, and its ID is never sent to the Gateway's catalog or quota."
+msgstr ""
+
+#: ../developer/local-accounts.md:199
+msgid ""
+"Personal model connections are a separate feature on another branch. They"
+" plug into `LocalModeGateway(catalog=...)`, the model catalog seam. "
+"Running a task end to end in local mode needs that branch; this one does "
+"not claim it. Repository, team, profile and other account workflows that "
+"need no model are unaffected."
+msgstr ""
+
+#: ../developer/local-accounts.md:205
+#, python-brace-format
+msgid ""
+"The Gateway-only per-request usage views (`/admin/agent/runs/{id}/llm-"
+"requests`, `/admin/agent/steps`, and an owner's per-message request "
+"detail) answer 503 `gateway_feature_unavailable` in local mode, without a"
+" Gateway call."
+msgstr ""
+
+#: ../developer/local-accounts.md:209
+msgid "Data model"
+msgstr ""
+
+#: ../developer/local-accounts.md:211
+msgid ""
+"Migration `0106_local_accounts` adds empty tables. Gateway mode never "
+"writes them."
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Table"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Holds"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_accounts`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "ID (ULID), status, administrator flag and version"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_password_logins`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Email, normalized email (unique), Argon2id hash, verification time"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_admissions`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"Application status, purpose, public review reason, review time and "
+"reviewer"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_sessions`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Session HMAC, expiry and revocation"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_auth_tokens`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Hashes of emailed tokens, their purpose, expiry and consumption"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_auth_rate_limits`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Abuse counters"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_access_terminations`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "One record per revocation or suspension, until its cleanup is acknowledged"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_identity_namespace`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "The marker that binds a database to local identity"
+msgstr ""
+
+#: ../developer/local-accounts.md:225
+msgid "Tests"
+msgstr ""
+
+#: ../developer/local-accounts.md:227
+msgid ""
+"`tests/unit/test_local_account_rules.py` and "
+"`tests/unit/test_local_account_credentials.py` cover the rules, the "
+"password policy, credentials, configuration and mail."
+msgstr ""
+
+#: ../developer/local-accounts.md:230
+msgid ""
+"`tests/servers/test_local_auth_surface.py` checks that Gateway mode is "
+"unchanged, and covers the cross-site guard, JSON-only bodies, 422 bodies "
+"without secrets, the refusal of Gateway sessions in local mode, and the "
+"Gateway-only views."
+msgstr ""
+
+#: ../developer/local-accounts.md:234
+msgid ""
+"The real-Postgres tier (`make test-db-local`) has three files: "
+"`tests/integration/storage/test_local_account_store.py` (races, replay, "
+"versions, the reset and suspension barriers, shared counters and the "
+"namespace), `tests/integration/servers/test_local_access_termination.py` "
+"(stopping work, the residency fence, cleanup barriers and delayed passes)"
+" and `tests/integration/servers/test_local_accounts_flow.py` (the whole "
+"flow over HTTP)."
+msgstr ""
+
+#: ../developer/local-accounts.md:242
+msgid "Reused code"
+msgstr ""
+
+#: ../developer/local-accounts.md:244
+msgid ""
+"The password hashing and policy, the sign-up, sign-in, verification and "
+"recovery behaviour, the mail templates and the abuse limits are adapted "
+"from HybridInference (`HarvardMadSys/hybridInference` at "
+"`321e9a6c457dcc80d35977aaac472d54041204a8`, MIT License, Copyright (c) "
+"2026 Harvard SEAS: the same license and holder as this repository). Each "
+"adapted module names its source file. Nothing imports `serving.*`, and "
+"nothing shares HybridInference's database, sessions, secrets or tokens. "
+"The deliberate differences: a pending account can sign in, a sign-up with"
+" a registered address changes nothing, the abuse counters are persisted "
+"rather than kept per process, tokens travel in URL fragments, and "
+"`argon2-cffi` is called directly rather than through `passlib`."
+msgstr ""
+

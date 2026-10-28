@@ -38,6 +38,8 @@ dependencies = [
     "google-re2>=1.1.20251105",
     "uritemplate>=4.2.0",
     "email-validator>=2.2",
+    # Local accounts (AGENT_AUTH_MODE=local) hash passwords with Argon2id.
+    "argon2-cffi>=23.1.0",
     "pillow>=12.3.0",
 ]
 

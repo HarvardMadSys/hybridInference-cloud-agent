@@ -1,4 +1,11 @@
-"""Pin an Agent database to one Gateway identity issuer."""
+"""Pin an Agent database to one identity source: a Gateway issuer, or local accounts.
+
+The two never share a database. Gateway mode refuses a database bound to local
+accounts, and local mode (``AGENT_AUTH_MODE=local``) initializes only a
+database with no Gateway binding and no owner data. Moving an existing
+Gateway-bound database to local accounts is a separate, reviewed identity
+migration; there is no switch that skips these checks.
+"""
 
 from __future__ import annotations
 
@@ -30,6 +37,38 @@ async def _has_owner_data(conn: asyncpg.Connection) -> bool:
     return False
 
 
+async def _bound_to_local_accounts(conn: asyncpg.Connection) -> bool:
+    # A schema from before local accounts has no marker table, and is not bound.
+    if await conn.fetchval("SELECT to_regclass('agent_local_identity_namespace')") is None:
+        return False
+    return bool(await conn.fetchval("SELECT EXISTS (SELECT 1 FROM agent_local_identity_namespace)"))
+
+
+async def ensure_local_namespace(pool: asyncpg.Pool) -> None:
+    """Bind an empty database to local accounts exactly once, or check it already is.
+
+    Raises:
+        IdentityNamespaceError: The database is bound to a Gateway issuer, or
+            holds owner data without any binding.
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute("LOCK TABLE agent_identity_namespace IN EXCLUSIVE MODE")
+        if await conn.fetchval("SELECT gateway_issuer FROM agent_identity_namespace") is not None:
+            raise IdentityNamespaceError(
+                "This Agent database's owners are Gateway accounts, so AGENT_AUTH_MODE=local "
+                "cannot serve it. Use a separate database for local accounts; moving these "
+                "owners needs the identity migration, not a configuration change."
+            )
+        if await _bound_to_local_accounts(conn):
+            return
+        if await _has_owner_data(conn):
+            raise IdentityNamespaceError(
+                "This Agent database has owner data but no identity binding. "
+                "AGENT_AUTH_MODE=local initializes only an empty database."
+            )
+        await conn.execute("INSERT INTO agent_local_identity_namespace (singleton) VALUES (TRUE)")
+
+
 async def ensure_gateway_namespace(
     pool: asyncpg.Pool, issuer: str | None, *, adopt_existing: bool = False
 ) -> str | None:
@@ -48,6 +87,11 @@ async def check_gateway_namespace(
 ) -> str | None:
     """Bind or check the issuer in the same transaction as its settings update."""
     await conn.execute("LOCK TABLE agent_identity_namespace IN EXCLUSIVE MODE")
+    if await _bound_to_local_accounts(conn):
+        raise IdentityNamespaceError(
+            "This Agent database's owners are local accounts. Start it with "
+            "AGENT_AUTH_MODE=local, or use a separate database for Gateway sign-in."
+        )
     stored = await conn.fetchval("SELECT gateway_issuer FROM agent_identity_namespace")
     if stored is not None:
         if issuer != stored:
@@ -73,6 +117,7 @@ async def check_gateway_namespace(
 async def _check_or_adopt(issuer: str | None, *, adopt_existing: bool) -> None:
     import asyncpg
 
+    from cloud_agent.accounts.config import local_mode
     from cloud_agent.settings import setting_env
 
     dsn = os.environ.get("AGENT_DATABASE_URL")
@@ -80,6 +125,11 @@ async def _check_or_adopt(issuer: str | None, *, adopt_existing: bool) -> None:
         raise IdentityNamespaceError("AGENT_DATABASE_URL must be set.")
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
     try:
+        if local_mode():
+            if adopt_existing:
+                raise IdentityNamespaceError("--adopt-existing applies only to Gateway sign-in.")
+            await ensure_local_namespace(pool)
+            return
         from cloud_agent.settings import apply_settings
         from cloud_agent.storage.assembly import Storage
 

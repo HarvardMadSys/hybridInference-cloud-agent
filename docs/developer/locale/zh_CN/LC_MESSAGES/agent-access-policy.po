@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-16 01:54-0400\n"
+"POT-Creation-Date: 2026-10-28 00:30-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -29,6 +29,13 @@ msgstr ""
 "加签发方（issuer）来标识一个账号；每个受保护的所有者/管理员请求，以及 `/v1/session/me`，都会再向网关确认一次。"
 
 #: ../developer/agent-access-policy.md:7
+msgid ""
+"This page describes Gateway mode, the default. A deployment that sets "
+"`AGENT_AUTH_MODE=local` answers the same questions from its own accounts "
+"and waiting list instead; see [local accounts](local-accounts.md)."
+msgstr ""
+
+#: ../developer/agent-access-policy.md:11
 #, python-brace-format
 msgid ""
 "To get the current decision, Agent reads `GET /internal/users/{user_id"
@@ -40,7 +47,7 @@ msgstr ""
 "/internal/users/{user_id}/agent-access`。响应里有 `user_id`、`allowed` 和 "
 "`permissions`。账号角色和个人资料字段都不参与授权判断。"
 
-#: ../developer/agent-access-policy.md:12
+#: ../developer/agent-access-policy.md:16
 msgid "Permissions and request checks"
 msgstr "权限与请求检查"
 
@@ -70,7 +77,7 @@ msgid ""
 "`agent.use`"
 msgstr "经网关授权的管理操作，包括 runner 主机相关的 API；必须同时拥有 `agent.use`"
 
-#: ../developer/agent-access-policy.md:19
+#: ../developer/agent-access-policy.md:23
 msgid ""
 "`allowed` must agree with the presence of `agent.use`. Permissions must "
 "be unique, use recognized values and include `agent.use` whenever "
@@ -80,7 +87,7 @@ msgstr ""
 "`allowed` 必须和有没有 `agent.use` 保持一致。权限列表不能重复，只能用认得的取值，并且有 `agent.admin` "
 "就必须有 `agent.use`。如果判定针对的是另一个用户，或者响应格式不对、前后矛盾，一律不放行。"
 
-#: ../developer/agent-access-policy.md:24
+#: ../developer/agent-access-policy.md:28
 msgid ""
 "The FreeInference policy documented by the original rollout grants both "
 "permissions to active admin accounts. Another deployment can register a "
@@ -91,7 +98,7 @@ msgstr ""
 "按最初上线时记录的 FreeInference 策略，这两项权限都授予状态正常的管理员账号。其他部署可以注册自己的策略，放行别的账号，不用改 "
 "Agent。没有注册任何策略的中立网关会一律拒绝。请在你运维的那套部署里核实实际策略；本仓库只负责执行网关给出的判定。"
 
-#: ../developer/agent-access-policy.md:30
+#: ../developer/agent-access-policy.md:34
 #, python-brace-format
 msgid ""
 "An active account denied Agent permission can still sign in to see the "
@@ -116,7 +123,7 @@ msgstr ""
 " `/v1/session/me` 收到一次拒绝，缓存的放行结果立刻作废。会话响应里带有 `agent_access: {allowed, "
 "permissions}`。如果没有这个字段（包括旧版后端返回的响应），Web 应用会拒绝访问。"
 
-#: ../developer/agent-access-policy.md:43
+#: ../developer/agent-access-policy.md:47
 msgid ""
 "Checks govern admission of each request. A policy change does not itself "
 "close an open stream or cancel a running job. An owner stream (a job's "
@@ -134,7 +141,7 @@ msgstr ""
 "不在会话里存权限，所有者请求缓存的放行结果最多保留 10 "
 "秒。不过，网关自己的账号缓存在过期之前，可能还看不到直接改数据库造成的变化；通过网关正常的账号管理操作修改，则会让这份缓存立即失效。"
 
-#: ../developer/agent-access-policy.md:53
+#: ../developer/agent-access-policy.md:57
 msgid "Failure behavior"
 msgstr "出错时的表现"
 
@@ -190,7 +197,7 @@ msgstr "登录流程的状态已过期或无效"
 msgid "Return to login and start a fresh flow"
 msgstr "回到登录页，重新走一遍登录流程"
 
-#: ../developer/agent-access-policy.md:63
+#: ../developer/agent-access-policy.md:67
 msgid ""
 "When `/me` cannot confirm current access, the web app hides protected "
 "content and offers a retry without forcing another sign-in. A callback "
@@ -206,11 +213,11 @@ msgstr ""
 " cookie。配置错误会提示运维人员修正部署。`/me` 返回的数据格式不对时，有专门的说明。没有配置 Web 跳转地址时，API 就直接返回 "
 "HTTP 错误。未经验证的状态和用过的授权码，永远不会再次使用。"
 
-#: ../developer/agent-access-policy.md:71
+#: ../developer/agent-access-policy.md:75
 msgid "Infrastructure credentials"
 msgstr "基础设施凭据"
 
-#: ../developer/agent-access-policy.md:73
+#: ../developer/agent-access-policy.md:77
 msgid ""
 "`ADMIN_TOKEN` independently authorizes infrastructure administration even"
 " when the Gateway is unavailable. The on-call dispatch credential must "
@@ -223,17 +230,17 @@ msgstr ""
 "`agent.use` 检查；它查询和取消任务的权限始终保留，方便清理。主机/worker 凭据、attempt "
 "租约栅栏和所有者检查是彼此独立的几道控制。"
 
-#: ../developer/agent-access-policy.md:79
+#: ../developer/agent-access-policy.md:83
 msgid ""
 "Sessions carry minimal identity only. See [minimal identity](minimal-"
 "identity.md) for cookie contents, issuer binding and upgrade constraints."
 msgstr "会话只携带最少的身份信息。cookie 里有什么、签发方如何绑定、升级时有哪些限制，见[最小身份](minimal-identity.md)。"
 
-#: ../developer/agent-access-policy.md:83
+#: ../developer/agent-access-policy.md:87
 msgid "Verify the Gateway contract"
 msgstr "验证网关契约"
 
-#: ../developer/agent-access-policy.md:85
+#: ../developer/agent-access-policy.md:89
 msgid ""
 "The schema is in [`internal-"
 "lookups.openapi.yaml`](../../gateway_contracts/internal-"
@@ -245,7 +252,7 @@ msgstr ""
 "/internal-lookups.openapi.yaml)。本地测试会拿其中的错误类型去核对 Agent 客户端和权限解析器。要通过 HTTP"
 " 验证一个隔离的、或者其他已获授权的网关，运行："
 
-#: ../developer/agent-access-policy.md:97
+#: ../developer/agent-access-policy.md:101
 msgid ""
 "The probe queries a randomly named missing account and checks the real "
 "403 against the schema and consumer. It creates no accounts and opens "
@@ -260,19 +267,19 @@ msgstr ""
 "上，用一个隔离的空存储夹具，跑了 "
 "`c7987680`（hybridInference#1408）里生产网关的路由和错误处理；那次并没有验证线上部署。"
 
-#: ../developer/agent-access-policy.md:104
+#: ../developer/agent-access-policy.md:108
 msgid "Rollout"
 msgstr "上线步骤"
 
-#: ../developer/agent-access-policy.md:106
+#: ../developer/agent-access-policy.md:110
 msgid "For a deployment first adopting permission-based access:"
 msgstr "一套部署第一次改用基于权限的访问控制时："
 
-#: ../developer/agent-access-policy.md:108
+#: ../developer/agent-access-policy.md:112
 msgid "Configure its Gateway policy registration."
 msgstr "在网关上注册好策略。"
 
-#: ../developer/agent-access-policy.md:109
+#: ../developer/agent-access-policy.md:113
 msgid ""
 "Release the Gateway policy hook and access endpoint together with "
 "compatible distribution backend/frontend artifacts. Verify an admitted "
@@ -281,13 +288,13 @@ msgid ""
 "correctly."
 msgstr "把网关的策略钩子和访问端点，连同兼容的发行版前后端产物一起发布。分别用一个已放行的账号、一个状态正常但没有权限的账号，以及一个不存在或已停用的账号验证一遍。确认部署的代理能把内部访问路径转发到正确的地方。"
 
-#: ../developer/agent-access-policy.md:113
+#: ../developer/agent-access-policy.md:117
 msgid ""
 "Release Agent backend and web app together. Check fresh login, existing "
 "sessions, owner APIs and administration."
 msgstr "Agent 后端和 Web 应用一起发布。检查全新登录、已有会话、所有者 API 和管理功能。"
 
-#: ../developer/agent-access-policy.md:116
+#: ../developer/agent-access-policy.md:120
 msgid ""
 "A Gateway without the access endpoint is incompatible and causes "
 "protected requests to fail closed. Do not add role-based fallback to "
@@ -301,7 +308,7 @@ msgstr ""
 "](minimal-identity.md#upgrade-an-existing-deployment)：旧版 Agent "
 "不会校验数据库里的签发方，而带有个人资料的旧 cookie 需要重新登录。光改源代码不会更新固定的镜像版本，也不会部署任何一个服务。"
 
-#: ../developer/agent-access-policy.md:124
+#: ../developer/agent-access-policy.md:128
 msgid ""
 "The implementation is in "
 "[`agent_access.py`](../../apps/backend/cloud_agent/agent_access.py), "

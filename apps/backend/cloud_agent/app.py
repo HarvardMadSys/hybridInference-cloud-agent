@@ -158,6 +158,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
 
     from cloud_agent.api import (
         _cross_site,
+        admin_accounts,
         admin_audit,
         admin_compute,
         admin_conversations,
@@ -175,6 +176,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         admin_teams,
         admin_usage,
         agent_memory,
+        auth,
         compute_registration,
         environments,
         host_profiling,
@@ -192,6 +194,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         uploads,
         usage,
         user_profile,
+        waitlist,
         work_insights,
     )
 
@@ -316,6 +319,11 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     # ``routes.py`` because it authenticates nothing on entry — it is the route
     # that *creates* the credential every other route requires.
     app.include_router(session.router)
+    # Local accounts (AGENT_AUTH_MODE=local): sign-in, the waiting list and
+    # their administration. Each answers 404 in Gateway mode.
+    app.include_router(auth.router)
+    app.include_router(waitlist.router)
+    app.include_router(admin_accounts.router)
     app.include_router(site_config.router)
 
     @app.get("/healthz")
