@@ -1120,7 +1120,7 @@ describe('application settings', () => {
     editField('Service token');
     expect(editField('Service token')).toHaveValue('');
     expect(screen.getByRole('button', { name: 'Review Connections changes' })).toBeDisabled();
-    fireEvent.click(screen.getByText('Deployment setup'));
+    expect(screen.getByText('Deployment setup')).toBeVisible();
     expect(screen.getByText('DATABASE_URL')).toBeInTheDocument();
     expect(screen.queryByLabelText('Database connection')).not.toBeInTheDocument();
   });

@@ -25,7 +25,7 @@
 | S07 | S06 | settings/page.tsx 新增末尾 Deployment tab，移走共享页脚 | 页面只挂载一份；其他 editor 保持 mounted；键盘 tab 顺序正确 |
 | S08 | S07 | 复用独立组件到 ApplicationSettings 的 /setup 使用处 | 恢复页仍可看部署说明；recovery token 行为不变 |
 | S09 | S07 | settingsSearchIndex 改为 Deployment 定位；稳定 id 与旧锚点兼容 | 搜索 key/描述均可达；旧 hash 仍定位；未知项回退可见 |
-| S10 | S06 | 将 GitHub/pgAdmin/Compute actions 接到真实页面/字段 | 点击后目标可见；缺少 Compute 锚点只加锚点，不重写管理页面 |
+| S10 | S06 | 将 GitHub/pgAdmin/Compute actions 接到真实页面/字段 | 点击后目标可见；Compute 只补稳定锚点与打开既有面板的小范围处理，不重写管理页面 |
 | S11 | S08–10 | 新增行为测试：旧后端、未知 target、搜索、hash、draft、401/403 | 真实组件交互覆盖；不只断言源码字符串 |
 | S12 | S11 | Node22 前端检查、后端相关测试、浏览器窄屏验收，写 review 记录 | 说明实际机器；未通过不得标完成；不等于部署验收 |
 

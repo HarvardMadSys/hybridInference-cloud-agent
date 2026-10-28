@@ -65,7 +65,6 @@ function items(over: Partial<Parameters<typeof buildSettingsSearchItems>[0]> = {
     hostDefinitions: [hostDefinition],
     runtimes: ['claude-code', 'future-agent'],
     archiveAvailable: true,
-    applicationTab: 'application-Source%20control',
     ...over,
   });
 }
@@ -117,9 +116,9 @@ describe('settings search', () => {
     const catalog = items();
     expect(searchSettingsItems(catalog, 'agent_database_url')).toEqual([
       expect.objectContaining({
-        tab: 'application-Source%20control',
+        tab: 'deployment',
         section: 'Deployment setup',
-        targetId: 'application-bootstrap-AGENT_DATABASE_URL',
+        targetId: 'deployment-AGENT_DATABASE_URL',
       }),
     ]);
     expect(searchSettingsItems(catalog, 'terminal_max_sessions')).toEqual([

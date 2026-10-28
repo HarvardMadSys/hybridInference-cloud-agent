@@ -13,6 +13,7 @@ import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import { SettingsSection } from '../SettingsSection';
 import { ApplicationSettingGroup, SettingsIcon } from './ApplicationSettingGroup';
+import { DeploymentSetup } from './DeploymentSetup';
 import {
   applicationCategory,
   applicationSettingGroup,
@@ -413,37 +414,15 @@ export function ApplicationSettingsCategory({
 }
 
 export function ApplicationDeploymentSetup({ settings }: { settings: ApplicationSettingsState }) {
-  const { snapshot } = settings;
+  const { snapshot, recoveryToken, revealSetting } = settings;
   return (
-    <>
-      {(snapshot?.bootstrap.length ?? 0) > 0 && (
-        <details className="mt-6 border-t border-border pt-4">
-          <summary className="ui-focus-ring min-h-11 cursor-pointer rounded-lg py-3 text-sm font-medium text-foreground">
-            Deployment setup
-          </summary>
-          <p className="mt-2 text-sm leading-6 text-muted">
-            These settings are supplied when the service starts. Their values are hidden here.
-          </p>
-          <dl className="mt-3 space-y-3">
-            {snapshot?.bootstrap.map((definition) => (
-              <div
-                key={definition.key}
-                id={`application-bootstrap-${definition.key}`}
-                tabIndex={-1}
-              >
-                <dt className="text-sm font-medium text-foreground">
-                  {definition.label}{' '}
-                  <code className="ml-1 break-all rounded bg-surface-muted px-1.5 py-0.5 text-xs font-normal text-muted">
-                    {definition.key}
-                  </code>
-                </dt>
-                <dd className="mt-1 text-sm leading-6 text-muted">{definition.description}</dd>
-              </div>
-            ))}
-          </dl>
-        </details>
-      )}
-    </>
+    <div className="mt-6 border-t border-border pt-4">
+      <DeploymentSetup
+        definitions={snapshot?.bootstrap ?? []}
+        recoveryToken={recoveryToken}
+        onRevealSetting={revealSetting}
+      />
+    </div>
   );
 }
 

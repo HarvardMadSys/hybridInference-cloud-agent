@@ -17,7 +17,6 @@ import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import AgentVersions, { agentName } from './AgentVersions';
 import {
-  ApplicationDeploymentSetup,
   ApplicationSettingsCategory,
   ApplicationSettingsFeedback,
   ApplicationSettingsHeader,
@@ -25,6 +24,7 @@ import {
   useApplicationSettings,
 } from './ApplicationSettings';
 import CloudLabSettings from './CloudLabSettings';
+import { DeploymentSetup, deploymentHashTarget } from './DeploymentSetup';
 import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
 import { SettingsSearch } from './SettingsSearchPanel';
 import { useRuntimeUpgrades } from './useRuntimeUpgrades';
@@ -40,6 +40,7 @@ const OTHER_SETTINGS_TABS = [
   { id: 'versions', label: 'Agent versions' },
   { id: 'sandbox', label: 'Sandbox' },
   { id: 'cloudlab', label: 'CloudLab' },
+  { id: 'deployment', label: 'Deployment' },
 ] as const;
 
 export default function AdminSettingsPage() {
@@ -70,6 +71,7 @@ function AccessDenied() {
 function SettingsView() {
   const queryTab = useSearchParams().get('tab');
   const content = useRef<HTMLDivElement>(null);
+  const previousHash = useRef<string | null>(null);
   const [searchTarget, setSearchTarget] = useState<string | null>(null);
   const [cloudLabVisited, setCloudLabVisited] = useState(queryTab === 'cloudlab');
   const tabButtons = useRef<(HTMLButtonElement | null)[]>([]);
@@ -265,9 +267,6 @@ function SettingsView() {
       ]),
     ],
     archiveAvailable: archiveSettings !== null,
-    applicationTab: applicationCategories.length
-      ? categoryTabId(applicationCategories[0])
-      : 'application',
   });
 
   const selectSearchResult = (item: SettingsSearchItem) => {
@@ -279,6 +278,35 @@ function SettingsView() {
       setSearchTarget(item.targetId);
     }
   };
+
+  useEffect(() => {
+    const revealHash = () => {
+      const hash = window.location.hash;
+      if (hash === previousHash.current) return;
+      if (!hash.startsWith('#deployment-') && !hash.startsWith('#application-bootstrap-')) {
+        previousHash.current = hash;
+        return;
+      }
+      const target = deploymentHashTarget(hash, applicationSettings.snapshot?.bootstrap ?? []);
+      // A legacy hash can be recognized only once the definitions arrive, so a
+      // miss stays pending rather than being recorded as handled.
+      if (!target) {
+        // Before definitions load, leave any deployment hash pending. Once they
+        // do, an unknown semantic ID still opens Deployment for a visible fallback.
+        if (applicationSettings.snapshot) {
+          previousHash.current = hash;
+          selectUrlTab('deployment');
+        }
+        return;
+      }
+      previousHash.current = hash;
+      selectUrlTab('deployment');
+      setSearchTarget(target);
+    };
+    revealHash();
+    window.addEventListener('hashchange', revealHash);
+    return () => window.removeEventListener('hashchange', revealHash);
+  }, [applicationSettings.snapshot, selectUrlTab]);
 
   useEffect(() => {
     if (!searchTarget || !content.current || denied) return;
@@ -450,7 +478,6 @@ function SettingsView() {
                 No application settings are available.
               </p>
             )}
-            <ApplicationDeploymentSetup settings={applicationSettings} />
           </section>
           <div
             role="tabpanel"
@@ -580,6 +607,25 @@ function SettingsView() {
             {(cloudLabVisited || selectedTab === 'cloudlab') && (
               <CloudLabSettings onAccessDenied={fail} />
             )}
+          </div>
+          <div
+            role="tabpanel"
+            id="admin-settings-panel-deployment"
+            aria-labelledby="admin-settings-tab-deployment"
+            hidden={selectedTab !== 'deployment'}
+            tabIndex={0}
+            className="ui-card mt-6 p-4 sm:p-6"
+          >
+            <DeploymentSetup
+              definitions={applicationSettings.snapshot?.bootstrap ?? []}
+              onRevealSetting={(key) => {
+                const url = new URL(window.location.href);
+                url.hash = `application-setting-${encodeURIComponent(key)}`;
+                window.history.replaceState(window.history.state, '', url);
+                previousHash.current = url.hash;
+                applicationSettings.revealSetting(key);
+              }}
+            />
           </div>
         </>
       </section>

@@ -80,6 +80,7 @@ import { getCloudLabDefaults, saveCloudLabDefaults } from '@/lib/api/compute';
 
 import { categoryTabId } from './ApplicationSettings';
 import AdminSettingsPage from './page';
+import { applicationSnapshot } from './settingsTestFixtures';
 import { chooseOption, openSelect, optionNames } from '@/components/ui/__tests__/select';
 
 const list = vi.mocked(getAgentRunnerHosts);
@@ -113,51 +114,6 @@ const archiveSettings: SandboxArchiveSettings = {
   revision: 1,
   updated_at: null,
 };
-
-function applicationSnapshot(over: Partial<AgentAdminSettings> = {}): AgentAdminSettings {
-  return {
-    revision: 1,
-    definitions: [
-      {
-        key: 'site.app_name',
-        label: 'Application name',
-        description: 'Name shown in the application.',
-        category: 'Appearance',
-        kind: 'string',
-        default: 'Cloud Agent',
-        secret: false,
-      },
-      {
-        key: 'identity.registration_enabled',
-        label: 'Registration enabled',
-        description: 'Allow new users to register.',
-        category: 'Identity & access',
-        kind: 'boolean',
-        default: true,
-        secret: false,
-      },
-      {
-        key: 'future.maximum',
-        label: 'Future limit',
-        description: 'A setting introduced by the server.',
-        category: 'Future / category ✓',
-        kind: 'integer',
-        default: 10,
-        minimum: 1,
-        maximum: 100,
-        secret: false,
-      },
-    ],
-    values: {
-      'site.app_name': 'Cloud Agent',
-      'identity.registration_enabled': true,
-      'future.maximum': 10,
-    },
-    secret_configured: {},
-    bootstrap: [],
-    ...over,
-  };
-}
 
 function organizedApplicationSnapshot(): AgentAdminSettings {
   const fields = [
@@ -466,9 +422,15 @@ describe('admin Settings', () => {
     renderSettings();
     await screen.findByText('No application settings are available.');
     const tablist = screen.getByRole('tablist', { name: 'Settings sections' });
-    const names: SettingsTab[] = ['Application', 'Agent versions', 'Sandbox', 'CloudLab'];
-    expect(within(tablist).getAllByRole('tab')).toHaveLength(4);
-    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(4);
+    const names: SettingsTab[] = [
+      'Application',
+      'Agent versions',
+      'Sandbox',
+      'CloudLab',
+      'Deployment',
+    ];
+    expect(within(tablist).getAllByRole('tab')).toHaveLength(5);
+    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(5);
 
     for (const name of names) {
       selectSettingsTab(name);
@@ -501,9 +463,9 @@ describe('admin Settings', () => {
       expect(screen.getByRole('tabpanel', { name })).toBeVisible();
     };
     move('ArrowRight', 'Agent versions');
-    move('End', 'CloudLab');
+    move('End', 'Deployment');
     move('ArrowRight', 'Application');
-    move('ArrowLeft', 'CloudLab');
+    move('ArrowLeft', 'Deployment');
     move('Home', 'Application');
   });
 
@@ -811,6 +773,7 @@ describe('application category tabs', () => {
       'Agent versions',
       'Sandbox',
       'CloudLab',
+      'Deployment',
     ];
     expect(
       within(tablist)
@@ -869,9 +832,9 @@ describe('application category tabs', () => {
     move('ArrowRight', 'Identity & access');
     move('ArrowRight', 'Future / category ✓');
     move('ArrowRight', 'Agent versions');
-    move('End', 'CloudLab');
+    move('End', 'Deployment');
     move('ArrowRight', 'Appearance');
-    move('ArrowLeft', 'CloudLab');
+    move('ArrowLeft', 'Deployment');
     move('Home', 'Appearance');
   });
 
@@ -1866,11 +1829,11 @@ describe('settings search', () => {
       }),
     );
 
-    const target = screen.getByText('Database connection').closest('div')!;
+    const target = document.getElementById('deployment-AGENT_DATABASE_URL')!;
     await waitFor(() => expect(target).toHaveFocus());
-    expect(target.closest('details')).toHaveAttribute('open');
-    expect(screen.getByRole('tabpanel', { name: 'Appearance' })).toBeVisible();
+    expect(screen.getByRole('tabpanel', { name: 'Deployment' })).toBeVisible();
     expect(target).toBeVisible();
+    expect(document.getElementById('application-bootstrap-AGENT_DATABASE_URL')).not.toBeNull();
   });
 
   it('focuses the current value when an application result is read-only', async () => {

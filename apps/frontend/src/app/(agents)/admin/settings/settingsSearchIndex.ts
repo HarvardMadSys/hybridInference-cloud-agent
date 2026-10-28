@@ -142,13 +142,11 @@ export function buildSettingsSearchItems({
   hostDefinitions,
   runtimes,
   archiveAvailable,
-  applicationTab,
 }: {
   snapshot: AgentAdminSettings | null;
   hostDefinitions: HostSettingDefinition[];
   runtimes: string[];
   archiveAvailable: boolean;
-  applicationTab: string;
 }): SettingsSearchItem[] {
   return [
     ...(snapshot?.definitions ?? []).map((definition) => {
@@ -171,9 +169,10 @@ export function buildSettingsSearchItems({
       label: definition.label,
       description: definition.description,
       section: 'Deployment setup',
-      tab: applicationTab,
-      targetId: `application-bootstrap-${definition.key}`,
-      keywords: [definition.key],
+      tab: 'deployment',
+      // Keep the legacy response key as the fallback row identity.
+      targetId: `deployment-${definition.id || definition.key}`,
+      keywords: [definition.key, definition.id ?? ''],
     })),
     ...hostDefinitions.map((definition) => ({
       id: `host:${definition.key}`,
