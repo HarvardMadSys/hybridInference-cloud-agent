@@ -32,6 +32,26 @@ const connection: api.ModelConnection = {
   updated_at: '2026-10-27T00:00:00Z',
 };
 
+/** The labels a themed select's menu offers; the menu closes again with Escape. */
+function menuLabels(combobox: HTMLElement): (string | null)[] {
+  fireEvent.click(combobox);
+  const label = (combobox as HTMLButtonElement).labels?.[0]?.textContent ?? '';
+  const menu = screen.getByRole('listbox', { name: label });
+  const labels = within(menu)
+    .getAllByRole('option')
+    .map((option) => option.textContent);
+  fireEvent.keyDown(menu, { key: 'Escape' });
+  expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+  return labels;
+}
+
+/** Choose an option from a themed select's menu with the pointer. */
+function choose(combobox: HTMLElement, label: string) {
+  fireEvent.click(combobox);
+  fireEvent.click(screen.getByRole('option', { name: label }));
+  expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+}
+
 function renderSettings() {
   return render(
     <LocaleProvider>
@@ -167,12 +187,22 @@ describe('personal model connections', () => {
     renderSettings();
     const card = await screen.findByRole('article', { name: connection.name });
     fireEvent.click(within(card).getByText('Test model', { selector: 'summary' }));
-    fireEvent.change(screen.getByRole('combobox', { name: 'Model to test' }), {
-      target: { value: 'another-model' },
-    });
-    fireEvent.change(screen.getByRole('combobox', { name: 'API to test' }), {
-      target: { value: 'responses' },
-    });
+    const model = screen.getByRole('combobox', { name: 'Model to test' });
+    const protocol = screen.getByRole('combobox', { name: 'API to test' });
+    expect(model).toHaveTextContent('shared-model');
+    expect(protocol).toHaveTextContent('Chat Completions');
+    choose(model, 'another-model');
+    expect(model).toHaveTextContent('another-model');
+    // The keyboard reaches the same menu: open on the chosen option, step, choose.
+    fireEvent.keyDown(protocol, { key: 'ArrowDown' });
+    const menu = screen.getByRole('listbox', { name: 'API to test' });
+    expect(within(menu).getByRole('option', { selected: true })).toHaveTextContent(
+      'Chat Completions',
+    );
+    fireEvent.keyDown(menu, { key: 'ArrowDown' });
+    fireEvent.keyDown(menu, { key: 'Enter' });
+    expect(protocol).toHaveTextContent('Responses');
+    expect(protocol).toHaveFocus();
     fireEvent.click(screen.getByRole('button', { name: 'Test model' }));
     await waitFor(() =>
       expect(api.checkModelConnection).toHaveBeenCalledWith(
@@ -305,11 +335,7 @@ describe('an Anthropic Messages connection', () => {
     const card = await screen.findByRole('article', { name: 'Claude provider' });
     fireEvent.click(within(card).getByText('Test model', { selector: 'summary' }));
     const protocol = screen.getByRole('combobox', { name: 'API to test' });
-    expect(
-      within(protocol)
-        .getAllByRole('option')
-        .map((option) => option.textContent),
-    ).toEqual(['Anthropic Messages']);
+    expect(menuLabels(protocol)).toEqual(['Anthropic Messages']);
     fireEvent.click(screen.getByRole('button', { name: 'Test model' }));
     await waitFor(() =>
       expect(api.checkModelConnection).toHaveBeenCalledWith(
@@ -366,18 +392,19 @@ describe('a Chat Completions connection used through translation', () => {
     // Nothing is tested until asked: opening the page spends no quota.
     expect(api.checkModelConnection).not.toHaveBeenCalled();
     fireEvent.click(within(card).getByText('Test model', { selector: 'summary' }));
-    const protocol = within(card).getByLabelText('API to test');
-    expect(
-      within(protocol)
-        .getAllByRole('option')
-        .map((option) => option.textContent),
-    ).toEqual([
+    const protocol = within(card).getByRole('combobox', { name: 'API to test' });
+    expect(menuLabels(protocol)).toEqual([
       'Chat Completions',
       'Responses via Chat Completions',
       'Anthropic Messages via Chat Completions',
     ]);
-    fireEvent.change(protocol, { target: { value: 'responses' } });
+    choose(protocol, 'Responses via Chat Completions');
+    // The menu shows the translated label but submits the exact protocol value.
+    expect(protocol).toHaveTextContent('Responses via Chat Completions');
     fireEvent.click(within(card).getByRole('button', { name: 'Test model' }));
+    // Both menus are disabled while the test runs.
+    expect(protocol).toBeDisabled();
+    expect(within(card).getByRole('combobox', { name: 'Model to test' })).toBeDisabled();
     await waitFor(() =>
       expect(api.checkModelConnection).toHaveBeenCalledWith(chat.id, 'chat-model', 'responses'),
     );
@@ -397,11 +424,7 @@ describe('a Chat Completions connection used through translation', () => {
     renderSettings();
     const card = await screen.findByRole('article', { name: 'Chat provider' });
     fireEvent.click(within(card).getByText('Test model', { selector: 'summary' }));
-    const protocol = within(card).getByLabelText('API to test');
-    expect(
-      within(protocol)
-        .getAllByRole('option')
-        .map((option) => option.textContent),
-    ).toEqual(['Chat Completions', 'Responses', 'Anthropic Messages']);
+    const protocol = within(card).getByRole('combobox', { name: 'API to test' });
+    expect(menuLabels(protocol)).toEqual(['Chat Completions', 'Responses', 'Anthropic Messages']);
   });
 });

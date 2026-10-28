@@ -245,3 +245,121 @@ test('default model suggestions preserve free text and support keyboard and poin
   await expect(page.getByText(/Your account is not offered this model/)).toBeVisible();
   await expect(page.locator('datalist')).toHaveCount(0);
 });
+
+const connectionId = `mconn_${'e'.repeat(32)}`;
+
+for (const variant of [
+  { name: 'desktop light', width: 1440, height: 900, theme: 'light' },
+  { name: 'mobile dark', width: 390, height: 844, theme: 'dark' },
+]) {
+  test(`model connection test menus submit exact values and fit the viewport (${variant.name})`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: variant.width, height: variant.height });
+    await page.addInitScript((theme) => {
+      localStorage.setItem('agents.locale', 'en');
+      localStorage.setItem('agents.theme', theme);
+    }, variant.theme);
+    await page.route('**/api/v1/agent/model-preference', (route) =>
+      route.fulfill({
+        json: {
+          default_model: null,
+          last_model: null,
+          effective_model: null,
+          deployment_default: null,
+          models: ['fixture-model'],
+        },
+      }),
+    );
+    // A synthetic Chat-only connection: no request leaves the browser.
+    await page.route('**/api/v1/agent/model-connections', (route) =>
+      route.fulfill({
+        json: {
+          enabled: true,
+          configured: true,
+          connections: [
+            {
+              id: connectionId,
+              name: 'Fixture provider',
+              base_url: 'https://provider.example/v1',
+              protocols: ['chat_completions'],
+              models: ['fixture-small', 'fixture-large'],
+              enabled: true,
+              has_api_key: true,
+              runtimes: ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
+              translated_runtimes: ['claude-code', 'codex'],
+              last_check: null,
+              created_at: '2026-10-28',
+              updated_at: '2026-10-28',
+            },
+          ],
+        },
+      }),
+    );
+    const checked: unknown[] = [];
+    await page.route(`**/api/v1/agent/model-connections/${connectionId}/check`, (route) => {
+      checked.push(route.request().postDataJSON());
+      return route.fulfill({
+        json: {
+          status: 'supported',
+          category: 'supported',
+          message: 'Streaming and a tool call round trip both worked.',
+          protocol: 'anthropic_messages',
+          upstream_protocol: 'chat_completions',
+          mode: 'translated',
+          model: 'fixture-large',
+          streaming: true,
+          tool_call: true,
+          final_answer: true,
+          http_status: 200,
+          checked_at: '2026-10-28T08:00:00Z',
+          recorded: true,
+        },
+      });
+    });
+    await page.goto('/settings/my-settings');
+    const card = page.getByRole('article', { name: 'Fixture provider' });
+    await card.locator('summary').filter({ hasText: 'Test model' }).click();
+
+    const model = card.getByRole('combobox', { name: 'Model to test', exact: true });
+    await model.click();
+    await page.getByRole('option', { name: 'fixture-large', exact: true }).click();
+    await expect(model).toHaveText('fixture-large');
+
+    const api = card.getByRole('combobox', { name: 'API to test', exact: true });
+    await expect(api).toHaveText('Chat Completions');
+    await api.click();
+    const list = page.getByRole('listbox', { name: 'API to test', exact: true });
+    await expect(list.getByRole('option')).toHaveText([
+      'Chat Completions',
+      'Responses via Chat Completions',
+      'Anthropic Messages via Chat Completions',
+    ]);
+    const bounds = await list.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(variant.width);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(variant.height);
+    await page.screenshot({
+      path: testInfo.outputPath('model-connection-test-api.png'),
+      animations: 'disabled',
+    });
+    await page.keyboard.press('End');
+    await page.keyboard.press('Enter');
+    await expect(list).toHaveCount(0);
+    await expect(api).toBeFocused();
+    await expect(api).toHaveText('Anthropic Messages via Chat Completions');
+    expect(checked).toEqual([]);
+
+    await card.getByRole('button', { name: 'Test model', exact: true }).click();
+    await expect(card.getByRole('status')).toContainText(
+      'fixture-large · Anthropic Messages via Chat Completions.',
+    );
+    expect(checked).toEqual([{ model: 'fixture-large', protocol: 'anthropic_messages' }]);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      variant.width,
+    );
+    await expect(page.locator('select:visible')).toHaveCount(0);
+  });
+}

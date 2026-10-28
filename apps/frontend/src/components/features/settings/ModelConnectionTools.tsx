@@ -2,6 +2,7 @@
 
 import { useId, useState } from 'react';
 import { useT } from '@/components/providers';
+import { Select } from '@/components/ui/Select';
 import {
   checkModelConnection,
   checkTargets,
@@ -79,37 +80,34 @@ export function ModelConnectionTools({
         <div className="mt-2 grid gap-3 sm:grid-cols-2">
           <div className="text-sm">
             {/* Associated by id rather than wrapped, so the label's text is
-                its name alone and not the options inside it. */}
+                its name alone and not the chosen value inside it. */}
             <label htmlFor={`${fieldId}-model`}>{t('connections.checkModel')}</label>
-            <select
+            <Select
               id={`${fieldId}-model`}
               className={selectClass}
               value={model}
-              onChange={(event) => setModel(event.target.value)}
+              onValueChange={setModel}
               disabled={busy}
-            >
-              {connection.models.map((value) => (
-                <option key={value}>{value}</option>
-              ))}
-            </select>
+              options={connection.models.map((value) => ({ value, label: value }))}
+            />
           </div>
           <div className="text-sm">
             <label htmlFor={`${fieldId}-protocol`}>{t('connections.checkProtocol')}</label>
-            <select
+            <Select
               id={`${fieldId}-protocol`}
               className={selectClass}
               value={protocol}
-              onChange={(event) => setProtocol(event.target.value as ModelProtocol)}
+              onValueChange={setProtocol}
               disabled={busy}
-            >
-              {checkTargets(connection.protocols).map(({ protocol: value, translated }) => (
-                <option key={value} value={value}>
-                  {translated
+              options={checkTargets(connection.protocols).map(
+                ({ protocol: value, translated }) => ({
+                  value,
+                  label: translated
                     ? t('connections.checkTranslated', { protocol: protocolName(value) })
-                    : protocolName(value)}
-                </option>
-              ))}
-            </select>
+                    : protocolName(value),
+                }),
+              )}
+            />
           </div>
         </div>
         <p className="my-3 text-xs leading-5 text-muted">{t('connections.checkHint')}</p>

@@ -101,9 +101,9 @@ for (const locale of ['en', 'zh-CN'] as const) {
       .locator('summary')
       .filter({ hasText: zh ? '测试模型' : 'Test model' })
       .click();
-    await expect(card.getByLabel(zh ? '测试 API' : 'API to test', { exact: true })).toHaveValue(
-      'anthropic_messages',
-    );
+    await expect(
+      card.getByRole('combobox', { name: zh ? '测试 API' : 'API to test', exact: true }),
+    ).toHaveText('Anthropic Messages');
     await card.getByRole('button', { name: zh ? '测试模型' : 'Test model', exact: true }).click();
     await expect(card.getByRole('status')).toContainText('Anthropic Messages');
     expect(checked).toEqual({ model, protocol: 'anthropic_messages' });

@@ -84,14 +84,18 @@ for (const viewport of [
     // The stored declaration is the upstream's: only Chat Completions.
     await expect(card).not.toContainText('Responses ·');
     await card.locator('summary').filter({ hasText: 'Test model' }).click();
-    const api = card.getByLabel('API to test', { exact: true });
-    await expect(api.locator('option')).toHaveText([
+    const api = card.getByRole('combobox', { name: 'API to test', exact: true });
+    await api.click();
+    const menu = page.getByRole('listbox', { name: 'API to test', exact: true });
+    await expect(menu.getByRole('option')).toHaveText([
       'Chat Completions',
       'Responses via Chat Completions',
       'Anthropic Messages via Chat Completions',
     ]);
     expect(checked).toEqual([]);
-    await api.selectOption('anthropic_messages');
+    await menu.getByRole('option', { name: 'Anthropic Messages via Chat Completions' }).click();
+    await expect(menu).toHaveCount(0);
+    await expect(api).toContainText('Anthropic Messages via Chat Completions');
     await card.getByRole('button', { name: 'Test model', exact: true }).click();
     await expect(card.getByRole('status')).toContainText(
       'chat-model · Anthropic Messages via Chat Completions.',
