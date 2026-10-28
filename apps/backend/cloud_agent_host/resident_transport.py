@@ -783,6 +783,27 @@ class ResidentTransportFactory:
                 + result.stderr.decode("utf-8", "replace")[-300:]
             )
 
+    def _prepare_runtime_helpers(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> None:
+        """Install the selected runtime and trusted adapters before its first spawn."""
+        runtime_id = launch.runtime_id
+        # HTTP dialects always use the trusted live bridge, including
+        # turns without MCP. Refresh it from the host when resuming a
+        # retained container so new native-question commands are
+        # available without replacing its persisted session state.
+        if launch.runtime_version:
+            # A version an admin updated to after the image was built
+            # is copied in the first time; one the image has is not.
+            self._manager.ensure_downloaded_runtime(spec, runtime_id, launch.runtime_version)
+        if launch.mcp_server_ids or runtime_id in {"opencode", "kilo"}:
+            self._manager.ensure_mcp_helpers(spec, runtime_id)
+        if runtime_id == "kilo":
+            self._manager.ensure_kilo_mcp_runtime(spec, launch.runtime_version or KILO_MCP_VERSION)
+        if runtime_id == "codex" and launch.mcp_server_ids:
+            self._manager.ensure_codex_mcp_policy(spec, launch.mcp_base_url)
+        if launch.inference_client_protocol:
+            # A retained container gets this host's helper, not its image's.
+            install_compat_helper(self._manager, spec)
+
     def _launch_context(
         self,
         spec: ChatSandboxSpec,
@@ -887,27 +908,7 @@ class ResidentTransportFactory:
                         user_uid=uid,
                         user_gid=self._manager.backend.gid,
                     )
-                # HTTP dialects always use the trusted live bridge, including
-                # turns without MCP. Refresh it from the host when resuming a
-                # retained container so new native-question commands are
-                # available without replacing its persisted session state.
-                if launch.runtime_version:
-                    # A version an admin updated to after the image was built
-                    # is copied in the first time; one the image has is not.
-                    self._manager.ensure_downloaded_runtime(
-                        spec, runtime_id, launch.runtime_version
-                    )
-                if launch.mcp_server_ids or runtime_id in {"opencode", "kilo"}:
-                    self._manager.ensure_mcp_helpers(spec, runtime_id)
-                if runtime_id == "kilo":
-                    self._manager.ensure_kilo_mcp_runtime(
-                        spec, launch.runtime_version or KILO_MCP_VERSION
-                    )
-                if runtime_id == "codex" and launch.mcp_server_ids:
-                    self._manager.ensure_codex_mcp_policy(spec, launch.mcp_base_url)
-                if launch.inference_client_protocol:
-                    # A retained container gets this host's helper, not its image's.
-                    install_compat_helper(self._manager, spec)
+                self._prepare_runtime_helpers(spec, launch)
                 reaped = True
             pidfile = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/resident-{secrets.token_hex(16)}.pid"
             return self._manager.spawn(

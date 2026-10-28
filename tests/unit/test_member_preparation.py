@@ -238,10 +238,11 @@ def test_each_step_sees_the_environment_its_own_exec_gave_it(tmp_path):
 
     preparation.run()
 
-    alone = subprocess.run(
-        ["/bin/sh", "-c", "env"], env=exec_environment, cwd="/", capture_output=True, check=True
-    )
-    assert sorted(seen.read_bytes().splitlines()) == sorted(alone.stdout.splitlines())
+    # Run the same redirected command: bash can exec-optimize a bare `env`,
+    # changing SHLVL even without the preparation runner.
+    alone = tmp_path / "seen-alone"
+    subprocess.run(["/bin/sh", "-c", f"env > {alone}"], env=exec_environment, cwd="/", check=True)
+    assert sorted(seen.read_bytes().splitlines()) == sorted(alone.read_bytes().splitlines())
     assert b"LC_CTYPE" not in seen.read_bytes()
 
 
