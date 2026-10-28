@@ -31,6 +31,7 @@ const TEXT = {
     remove: (model: string) => `Remove ${model}`,
     refused: /Not saved/,
     reason: 'The model did not call the offered tool exactly once.',
+    authReason: 'The provider refused the API key (401/403).',
     works: 'Works with',
     details: 'Technical details',
     model: 'Model',
@@ -49,6 +50,7 @@ const TEXT = {
     remove: (model: string) => `移除 ${model}`,
     refused: /未保存/,
     reason: '模型未按要求调用工具。',
+    authReason: '服务商拒绝了 API key（401/403），请检查密钥。',
     works: '可用于',
     details: '技术详情',
     model: '模型',
@@ -137,9 +139,9 @@ for (const locale of ['en', 'zh-CN'] as const) {
           return route.fulfill({
             status: 422,
             json: verificationRefusal([
-              { ...refusedStatus('chat-model', 'The provider refused the key.'), status: 'failed' },
+              { ...refusedStatus('chat-model', 'The provider refused the key.', 'auth'), status: 'failed' },
               {
-                ...refusedStatus('claude-model', 'The provider refused the key.'),
+                ...refusedStatus('claude-model', 'The provider refused the key.', 'auth'),
                 status: 'failed',
               },
             ]),
@@ -213,7 +215,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
       await page.getByLabel('API key', { exact: true }).fill('fixture-replacement-key');
       await form.getByRole('button', { name: text.verifySave, exact: true }).click();
       await expect(form.getByRole('alert')).toContainText(text.refused);
-      await expect(form).toContainText('The provider refused the key.');
+      await expect(form).toContainText(text.authReason);
       await form.getByRole('button', { name: text.cancel, exact: true }).click();
       await expect(card).toContainText(`${text.works} Claude Code, Codex, Kilo Code, OpenCode, pi`);
 

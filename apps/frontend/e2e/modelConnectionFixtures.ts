@@ -77,8 +77,8 @@ export function messagesOnly(model: string) {
 type Status = ReturnType<typeof unverified>;
 
 /** A model whose verification found no API an agent can use. */
-export function refusedStatus(model: string, message: string) {
-  return { ...unverified(model), status: 'unsupported', category: 'no_tool_call', message };
+export function refusedStatus(model: string, message: string, category = 'no_tool_call') {
+  return { ...unverified(model), status: 'unsupported', category, message };
 }
 
 /** The 422 a save answers when a model could not be verified: nothing was stored. */
