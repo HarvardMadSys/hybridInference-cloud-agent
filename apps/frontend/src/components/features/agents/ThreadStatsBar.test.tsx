@@ -4,13 +4,19 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { getAgentThreadStats, type AgentThreadStatsApi } from '@/lib/api/agents';
+import {
+  getAgentThreadModelTtft,
+  getAgentThreadStats,
+  type AgentThreadStatsApi,
+  type ModelTtftApi,
+} from '@/lib/api/agents';
 
 import { ThreadStatsBar, formatCount, statSegments } from './ThreadStatsBar';
 import type { AgentJob } from './types';
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentThreadStats: vi.fn(),
+  getAgentThreadModelTtft: vi.fn(),
 }));
 
 function makeStats(overrides: Partial<AgentThreadStatsApi> = {}): AgentThreadStatsApi {
@@ -22,7 +28,8 @@ function makeStats(overrides: Partial<AgentThreadStatsApi> = {}): AgentThreadSta
     wall_seconds: 798,
     model_seconds: 778,
     tool_seconds: 19.7,
-    ttft_seconds: 2,
+    // 85 s of sandbox and CLI startup plus a whole first block: never TTFT.
+    first_output_seconds: 96,
     input_tokens: 5_800_000,
     output_tokens: 89_700,
     cache_read_tokens: 0,
@@ -34,20 +41,79 @@ function makeStats(overrides: Partial<AgentThreadStatsApi> = {}): AgentThreadSta
   };
 }
 
+function makeTtft(overrides: Partial<ModelTtftApi> = {}): ModelTtftApi {
+  return {
+    source: 'gateway_request_log',
+    status: 'available',
+    mean_ttft_ms: 10_400,
+    samples: 12,
+    requests_read: 14,
+    sources_read: 3,
+    sources_total: 3,
+    complete: true,
+    reason: null,
+    ...overrides,
+  };
+}
+
 function makeJob(): AgentJob {
   return { id: 'ajob_1', state: 'done' } as AgentJob;
 }
 
 describe('statSegments', () => {
   it('states the whole conversation when every measure is available', () => {
-    const text = statSegments(makeStats())
+    const text = statSegments(makeStats(), makeTtft())
       .map((segment) => segment.text)
       .join(' | ');
 
     expect(text).toBe(
       '3 turns · 56 tool calls | Model 12m 58s · Tools 19.7s | ' +
-        'TTFT 2s · 135 tok/s | Cache hit 0% | Input 5.8M tok · Output 89.7k tok',
+        'TTFT 10.4s · 135 tok/s | Cache hit 0% | Input 5.8M tok · Output 89.7k tok',
     );
+  });
+
+  it('takes TTFT from the gateway, never from startup-inclusive first output', () => {
+    const speed = statSegments(makeStats(), makeTtft()).find((segment) => segment.key === 'speed');
+
+    expect(speed?.text).toBe('TTFT 10.4s · 135 tok/s');
+    expect(speed?.text).not.toMatch(/96s|1m 36s/);
+    expect(speed?.title).toMatch(/gateway receiving a model request to its first streamed token/);
+    expect(speed?.title).toMatch(/over 12 successful streamed requests/);
+    expect(speed?.title).toMatch(/startup are not included/);
+  });
+
+  it.each([
+    ['no reading', null],
+    [
+      'an old gateway with no request timing',
+      makeTtft({ status: 'not_recorded', mean_ttft_ms: null, samples: 0 }),
+    ],
+    ['an unreadable gateway', makeTtft({ status: 'unavailable', mean_ttft_ms: null, samples: 0 })],
+  ])('shows no TTFT for %s, even with an event-derived first output', (_, ttft) => {
+    const speed = statSegments(makeStats({ first_output_seconds: 96 }), ttft).find(
+      (segment) => segment.key === 'speed',
+    );
+
+    expect(speed?.text).toBe('135 tok/s');
+    expect(speed?.title).not.toMatch(/first/);
+  });
+
+  it('says when TTFT covers only part of the conversation', () => {
+    const speed = statSegments(
+      makeStats(),
+      makeTtft({ complete: false, reason: 'sources_truncated', samples: 1 }),
+    ).find((segment) => segment.key === 'speed');
+
+    expect(speed?.text).toBe('TTFT 10.4s (partial) · 135 tok/s');
+    expect(speed?.title).toMatch(/over 1 successful streamed request\./);
+    expect(speed?.title).toMatch(/Partial: only some runs were read\./);
+  });
+
+  it('shows a measured zero instead of treating it as missing', () => {
+    const speed = statSegments(makeStats(), makeTtft({ mean_ttft_ms: 0 })).find(
+      (segment) => segment.key === 'speed',
+    );
+    expect(speed?.text).toBe('TTFT 0ms · 135 tok/s');
   });
 
   it('renders a dash for tokens a runtime does not report, never a zero', () => {
@@ -91,9 +157,7 @@ describe('statSegments', () => {
   });
 
   it('omits the speed segment when neither number exists', () => {
-    const segments = statSegments(
-      makeStats({ ttft_seconds: null, output_tokens_per_second: null }),
-    );
+    const segments = statSegments(makeStats({ output_tokens_per_second: null }), null);
 
     expect(segments.some((segment) => segment.key === 'speed')).toBe(false);
   });
@@ -109,6 +173,7 @@ describe('ThreadStatsBar live totals', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.mocked(getAgentThreadStats).mockReset();
+    vi.mocked(getAgentThreadModelTtft).mockReset().mockResolvedValue(null);
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
   });
 
@@ -153,11 +218,40 @@ describe('ThreadStatsBar live totals', () => {
     expect(screen.getByText('Input 385k tok · Output 1.5k tok')).toBeInTheDocument();
   });
 
+  it('reads gateway TTFT on state changes only, never on the totals poll', async () => {
+    vi.mocked(getAgentThreadStats).mockResolvedValue(makeStats());
+    vi.mocked(getAgentThreadModelTtft).mockResolvedValue(makeTtft());
+    const { rerender } = render(<ThreadStatsBar job={running} />);
+    await tick(6_000);
+    expect(getAgentThreadStats).toHaveBeenCalledTimes(4);
+    expect(getAgentThreadModelTtft).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('TTFT 10.4s · 135 tok/s')).toBeInTheDocument();
+
+    rerender(<ThreadStatsBar job={{ ...running, state: 'done' }} />);
+    await tick(10_000);
+    expect(getAgentThreadModelTtft).toHaveBeenCalledTimes(2);
+  });
+
   it('refreshes while the job is queued', async () => {
     vi.mocked(getAgentThreadStats).mockResolvedValue(makeStats());
     render(<ThreadStatsBar job={{ ...running, state: 'queued' }} />);
     await tick(4_000);
     expect(getAgentThreadStats).toHaveBeenCalledTimes(3);
+  });
+
+  it('drops an earlier state’s TTFT when the completed turn cannot be measured', async () => {
+    vi.mocked(getAgentThreadStats).mockResolvedValue(makeStats());
+    vi.mocked(getAgentThreadModelTtft)
+      .mockResolvedValueOnce(makeTtft())
+      .mockRejectedValueOnce(new Error('gateway unavailable'));
+    const { rerender } = render(<ThreadStatsBar job={running} />);
+    await tick();
+    expect(screen.getByText('TTFT 10.4s · 135 tok/s')).toBeInTheDocument();
+
+    rerender(<ThreadStatsBar job={{ ...running, state: 'done' }} />);
+    await tick();
+    expect(screen.queryByText(/TTFT/)).not.toBeInTheDocument();
+    expect(screen.getByText('135 tok/s')).toBeInTheDocument();
   });
 
   it('refreshes a historical turn while another turn in its conversation is active', async () => {
@@ -306,6 +400,7 @@ describe('formatCount', () => {
 describe('ThreadStatsBar', () => {
   beforeEach(() => {
     vi.mocked(getAgentThreadStats).mockReset();
+    vi.mocked(getAgentThreadModelTtft).mockReset().mockResolvedValue(null);
   });
 
   afterEach(() => cleanup());

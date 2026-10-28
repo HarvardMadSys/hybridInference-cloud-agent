@@ -49,6 +49,7 @@ from cloud_agent.api.deps import get_grant_client, verify_admin_access
 from cloud_agent.api.errors import AgentConfigurationError
 from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.model_ttft import ModelTtftSummary, read_model_ttft
 from cloud_agent.storage.admin_queries import (  # noqa: TC001 — FastAPI resolves this at runtime.
     AdminRunQueries,
 )
@@ -228,6 +229,31 @@ async def list_admin_llm_request_sources(
         next_cursor=next_cursor,
         reason=None if rows else "not_started",
     )
+
+
+#: Executions of one run a model TTFT read covers, in execution order. A run
+#: restarted more often than this reports a partial sample.
+RUN_TTFT_SOURCES = 10
+
+
+@router.get("/{job_id}/model-ttft", response_model=ModelTtftSummary)
+async def get_admin_run_model_ttft(
+    request: Request,
+    job_id: str = Path(max_length=256),
+    queries: AdminRunQueries = Depends(get_admin_run_queries),
+    grants: GrantClient = Depends(get_grant_client),
+) -> ModelTtftSummary:
+    """Mean gateway time to first token over this run's executions.
+
+    The same stored references and the same rules as the request pages; the
+    run's session statistics keep event-derived first output separately.
+    """
+    _reject_unknown_query(request, frozenset())
+    await _run(queries, job_id)
+    rows, more = await queries.llm_request_sources(
+        job_id, attempt_id=None, cursor=None, limit=RUN_TTFT_SOURCES
+    )
+    return await read_model_ttft(rows, more_sources=more, grants=grants, scope=job_id)
 
 
 @router.get("/{job_id}/llm-requests", response_model=AdminLlmRequestPage)
