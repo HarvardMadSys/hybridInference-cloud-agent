@@ -33,7 +33,7 @@ msgid ""
 "This page describes Gateway mode, the default. A deployment that sets "
 "`AGENT_AUTH_MODE=local` answers the same questions from its own accounts "
 "and waiting list instead; see [local accounts](local-accounts.md)."
-msgstr ""
+msgstr "本文说明默认的网关模式。部署若设置 `AGENT_AUTH_MODE=local`，则改为从自己的账号和等候名单中回答同样的准入问题；见[本地账号](local-accounts.md)。"
 
 #: ../developer/agent-access-policy.md:11
 #, python-brace-format
