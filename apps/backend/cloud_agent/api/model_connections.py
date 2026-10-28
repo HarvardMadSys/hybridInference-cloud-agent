@@ -44,6 +44,7 @@ from cloud_agent.application.model_connection_save import (
     CheckLimitReached,
     EditPlan,
     VerificationRefused,
+    VerificationTimedOut,
     kept_checks,
     plan_edit,
     verify_for_save,
@@ -344,6 +345,7 @@ _VERIFY_RESPONSES: dict[int | str, dict[str, Any]] = {
         "description": "A model has no agent that can use it; nothing was saved.",
     },
     429: {"description": "The owner's hourly checks cannot cover the models to verify."},
+    504: {"description": "Verification outlasted the save's bound; nothing was saved."},
 }
 
 
@@ -364,6 +366,12 @@ async def _verified(
             429,
             "model_connection_check_limit",
             "Too many verifications in the last hour. Nothing was saved; try again later.",
+        ) from None
+    except VerificationTimedOut:
+        raise _refused(
+            504,
+            "model_connection_verification_timeout",
+            "Verification took too long. Nothing was saved; check the Base URL and try again.",
         ) from None
     except VerificationRefused as refused:
         raise HTTPException(

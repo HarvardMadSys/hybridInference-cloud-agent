@@ -8,6 +8,7 @@ import {
   updateModelConnection,
   type ModelConnection,
 } from '@/lib/api/modelConnections';
+import type { Operate } from './connectionOps';
 
 const buttonClass = 'ui-button ui-button-secondary min-h-11';
 
@@ -20,6 +21,7 @@ export function ModelConnectionTools({
   connection,
   available,
   maxModels,
+  operate,
   busy,
   run,
   onChange,
@@ -27,6 +29,7 @@ export function ModelConnectionTools({
   connection: ModelConnection;
   available: boolean;
   maxModels: number;
+  operate: Operate;
   busy: boolean;
   run: (action: () => Promise<void>) => Promise<void>;
   onChange: (connection: ModelConnection) => void;
@@ -39,11 +42,11 @@ export function ModelConnectionTools({
   async function addSelected() {
     setRefused([]);
     try {
-      onChange(
-        await updateModelConnection(connection.id, {
-          models: [...connection.models, ...selected],
-        }),
+      const changed = await operate(connection.id, () =>
+        updateModelConnection(connection.id, { models: [...connection.models, ...selected] }),
       );
+      if (changed) onChange(changed);
+      setSelected([]);
     } catch (cause) {
       const models = refusedModels(cause);
       if (!models) throw cause;

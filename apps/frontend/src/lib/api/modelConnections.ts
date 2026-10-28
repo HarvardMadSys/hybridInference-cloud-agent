@@ -96,24 +96,42 @@ export function refusedModels(cause: unknown): ModelStatus[] | null {
   return Array.isArray(models) ? (models as ModelStatus[]) : null;
 }
 
+/** The fields a refused request named (`base_url`, `models.0`…); `null` for other failures. */
+export function invalidFields(cause: unknown): string[] | null {
+  if (!(cause instanceof APIError)) return null;
+  const fields = cause.details?.fields;
+  return Array.isArray(fields) ? (fields as string[]) : null;
+}
+
+interface ErrorBody {
+  models?: unknown;
+  fields?: { field?: unknown }[];
+}
+
 /**
- * `jsonOrThrow`, keeping the per-model results a refused save carries; the
- * shared error parser keeps only the type and the message.
+ * `jsonOrThrow`, keeping what a refusal adds: each model's result from a
+ * refused verification, and which fields an invalid request named (never
+ * the values). The shared error parser keeps only the type and the message.
  */
 async function connectionJson<T>(resp: Response): Promise<T> {
   if (resp.ok) return resp.json() as Promise<T>;
-  let models: unknown = null;
+  let error: ErrorBody | undefined;
   try {
-    const body = (await resp.clone().json()) as { detail?: { error?: { models?: unknown } } };
-    models = body?.detail?.error?.models ?? null;
+    const body = (await resp.clone().json()) as { error?: ErrorBody; detail?: { error?: ErrorBody } };
+    error = body?.error ?? body?.detail?.error;
   } catch {
     // Not JSON: jsonOrThrow classifies it by status.
   }
   try {
     return await jsonOrThrow<T>(resp);
   } catch (cause) {
-    if (cause instanceof APIError && Array.isArray(models)) {
-      cause.details = { ...(cause.details ?? {}), models };
+    if (cause instanceof APIError && error) {
+      const extra: Record<string, unknown> = {};
+      if (Array.isArray(error.models)) extra.models = error.models;
+      if (Array.isArray(error.fields)) {
+        extra.fields = error.fields.map((item) => String(item?.field ?? ''));
+      }
+      cause.details = { ...(cause.details ?? {}), ...extra };
     }
     throw cause;
   }

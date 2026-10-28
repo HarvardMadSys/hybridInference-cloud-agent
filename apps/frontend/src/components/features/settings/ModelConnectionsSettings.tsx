@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import {
   listModelConnections,
@@ -10,6 +10,7 @@ import {
 } from '@/lib/api/modelConnections';
 import { ModelConnectionCard } from './ModelConnectionCard';
 import { ModelConnectionForm } from './ModelConnectionForm';
+import { ConnectionOps, type Operate, type Settlement } from './connectionOps';
 
 export function ModelConnectionsSettings() {
   const t = useT();
@@ -17,6 +18,23 @@ export function ModelConnectionsSettings() {
   const [failed, setFailed] = useState(false);
   const [reload, setReload] = useState(0);
   const [editing, setEditing] = useState<ModelConnection | 'new' | null>(null);
+  // Answers about one connection apply only when nothing else touched it
+  // meanwhile; otherwise the list is re-read once they all settle.
+  const ops = useRef(new ConnectionOps());
+  const operate = useCallback<Operate>(async (id, action) => {
+    const ticket = ops.current.begin(id);
+    let outcome: Settlement | undefined;
+    try {
+      const value = await action();
+      outcome = ops.current.settle(ticket);
+      return outcome === 'apply' ? value : undefined;
+    } catch (cause) {
+      outcome = ops.current.settle(ticket);
+      throw cause;
+    } finally {
+      if (outcome === 'refresh') setReload((value) => value + 1);
+    }
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -93,8 +111,9 @@ export function ModelConnectionsSettings() {
           key={editing === 'new' ? 'new' : editing.id}
           connection={editing === 'new' ? undefined : editing}
           maxModels={maxModels}
+          operate={operate}
           onSaved={(connection) => {
-            saved(connection, { created: editing === 'new' });
+            if (connection) saved(connection, { created: editing === 'new' });
             setEditing(null);
           }}
           onSettledAfterLeaving={() => setReload((value) => value + 1)}
@@ -111,6 +130,7 @@ export function ModelConnectionsSettings() {
             connection={connection}
             available={available && !editing}
             maxModels={maxModels}
+            operate={operate}
             onEdit={() => setEditing(connection)}
             onChange={(changed) => saved(changed)}
             onDelete={() => {

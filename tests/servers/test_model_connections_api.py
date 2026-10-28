@@ -33,7 +33,11 @@ from tests.servers.test_grant_at_claim import _app as _claim_app, _ClaimStore, _
 from cloud_agent.api import model_connections as api
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_gateway_client, get_grant_client, get_storage
-from cloud_agent.application import model_connection_check as check, session_fork
+from cloud_agent.application import (
+    model_connection_check as check,
+    model_connection_save as save,
+    session_fork,
+)
 from cloud_agent.application.follow_ups import prepare_follow_up
 from cloud_agent.application.model_connections import (
     access_for_job,
@@ -134,6 +138,7 @@ class FakeModelConnections:
             or row["credential_revision"] != expected["credential_revision"]
             or row["config_revision"] != expected["config_revision"]
             or row["models"] != list(expected["models"])
+            or row["model_checks"] != expected["model_checks"]
         ):
             return None
         endpoint = bool({"base_url", "api_key_ciphertext"} & set(changes))
@@ -689,6 +694,48 @@ async def test_a_rename_made_while_a_new_key_is_verified_does_not_conflict(provi
     row = store.model_connections.rows[view["id"]]
     assert row["name"] == "Renamed meanwhile"
     assert model_connection_cipher().decrypt(row["api_key_ciphertext"]) == "sk-mine-0000"
+
+
+async def test_a_verification_past_the_save_bound_writes_nothing(provider, monkeypatch):
+    store = _Store()
+    view = await _create(store)
+    before = copy.deepcopy(store.model_connections.rows[view["id"]])
+    monkeypatch.setattr(save, "SAVE_TIMEOUT_S", 0.01)
+
+    async def hang(kwargs):
+        await asyncio.sleep(1)
+
+    provider.during = hang
+    late = await _patch(store, view["id"], {"api_key": "sk-mine-0000"})
+    async with await _client(_settings_app(store)) as client:
+        created = await client.post(PATH, json={**_CREATE, "name": "Second"})
+
+    assert late.status_code == 504, late.text
+    assert late.json()["detail"]["error"]["type"] == "model_connection_verification_timeout"
+    assert created.status_code == 504
+    assert store.model_connections.rows == {view["id"]: before}
+
+
+async def test_a_model_removed_and_re_added_meanwhile_keeps_its_newer_facts(provider):
+    """Review 3: a model edit raises no revision, so the facts fence the late save."""
+    store = _Store()
+    view = await _create(store)
+    rows = store.model_connections.rows
+
+    async def remove_and_re_add(kwargs):
+        provider.during = None
+        row = rows[view["id"]]
+        row["models"] = ["gpt-4.1"]
+        row["model_checks"] = {"gpt-4.1": row["model_checks"]["gpt-4.1"]}
+        row["models"] = ["gpt-4.1", "openai/gpt-4.1"]
+        row["model_checks"]["openai/gpt-4.1"] = {**_facts(), "checked_at": "newer", "revision": 1}
+
+    provider.during = remove_and_re_add
+    late = await _patch(store, view["id"], {"models": ["gpt-4.1", "openai/gpt-4.1", "gpt-5"]})
+
+    assert late.status_code == 409, late.text
+    assert rows[view["id"]]["model_checks"]["openai/gpt-4.1"]["checked_at"] == "newer"
+    assert rows[view["id"]]["models"] == ["gpt-4.1", "openai/gpt-4.1"]
 
 
 async def test_an_edit_past_the_hourly_limit_changes_nothing(provider):

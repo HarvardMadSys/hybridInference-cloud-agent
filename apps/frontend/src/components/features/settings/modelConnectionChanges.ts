@@ -8,6 +8,33 @@ export interface ConnectionFields {
   key: string;
 }
 
+/** A model ID as the server accepts it (`cloud_agent_shared.model_connections.MODEL_ID`). */
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$/;
+
+export function isModelId(text: string): boolean {
+  return MODEL_ID.test(text.trim());
+}
+
+/** A field the owner can fix, as the form and the server name it. */
+export type ConnectionField = 'name' | 'base_url' | 'api_key' | 'models';
+
+/** What is wrong with each field before anything is sent; empty when nothing is. */
+export function fieldProblems(fields: ConnectionFields): Partial<Record<ConnectionField, true>> {
+  const problems: Partial<Record<ConnectionField, true>> = {};
+  let url: URL | null = null;
+  try {
+    url = new URL(fields.base_url);
+  } catch {
+    url = null;
+  }
+  if (fields.base_url && (url?.protocol !== 'https:' || /\s/.test(fields.base_url))) {
+    problems.base_url = true;
+  }
+  if (/\s/.test(fields.key)) problems.api_key = true;
+  if (fields.models.some((model) => !isModelId(model))) problems.models = true;
+  return problems;
+}
+
 /** One typed model ID, trimmed; `''` adds nothing. */
 export function cleanModel(text: string): string {
   return text.trim();

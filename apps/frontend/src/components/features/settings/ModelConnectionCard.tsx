@@ -10,6 +10,7 @@ import {
 
 import { ModelConnectionTools } from './ModelConnectionTools';
 import { ModelStatusList } from './ModelStatusList';
+import type { Operate } from './connectionOps';
 
 const buttonClass = 'ui-button ui-button-secondary min-h-11';
 
@@ -17,6 +18,7 @@ export function ModelConnectionCard({
   connection,
   available,
   maxModels,
+  operate,
   onEdit,
   onChange,
   onDelete,
@@ -24,6 +26,7 @@ export function ModelConnectionCard({
   connection: ModelConnection;
   available: boolean;
   maxModels: number;
+  operate: Operate;
   onEdit: () => void;
   onChange: (connection: ModelConnection) => void;
   onDelete: () => void;
@@ -46,12 +49,21 @@ export function ModelConnectionCard({
     }
   }
 
+  /** A change whose answer applies only if nothing else touched the connection meanwhile. */
+  async function change(changes: { enabled: boolean }) {
+    const changed = await operate(connection.id, () =>
+      updateModelConnection(connection.id, changes),
+    );
+    if (changed) onChange(changed);
+  }
+
   async function confirmAction() {
     if (confirm === 'delete') {
-      await deleteModelConnection(connection.id);
+      await operate(connection.id, () => deleteModelConnection(connection.id));
+      // Deleted is final whatever else was running: nothing can bring it back.
       onDelete();
     } else {
-      onChange(await updateModelConnection(connection.id, { enabled: false }));
+      await change({ enabled: false });
     }
     setConfirm(null);
   }
@@ -82,9 +94,7 @@ export function ModelConnectionCard({
             onClick={() => {
               if (connection.enabled) setConfirm('disable');
               else
-                void run(async () =>
-                  onChange(await updateModelConnection(connection.id, { enabled: true })),
-                );
+                void run(() => change({ enabled: true }));
             }}
           >
             {t(connection.enabled ? 'connections.disable' : 'connections.enable')}
@@ -135,6 +145,7 @@ export function ModelConnectionCard({
         connection={connection}
         available={available}
         maxModels={maxModels}
+        operate={operate}
         busy={busy}
         run={run}
         onChange={onChange}

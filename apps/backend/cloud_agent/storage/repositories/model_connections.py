@@ -248,9 +248,13 @@ class PostgresModelConnectionRepository:
 
         ``expected`` is the row the verification started from. The update
         lands only while the connection is live and still at that row's
-        ``credential_revision``, ``config_revision`` and model list: a
-        rotation, Base URL change, disable, delete or model edit made during
-        the verification wins, and ``None`` is answered with nothing written.
+        ``credential_revision``, ``config_revision``, model list and stored
+        facts: a rotation, Base URL change, disable, delete or model edit made
+        during the verification wins, and ``None`` is answered with nothing
+        written. The facts are compared too because a model edit raises no
+        revision: removing a model and adding it back, freshly verified,
+        restores the list but not the facts, and a late save must not put the
+        old ones back.
         A concurrent rename does not conflict, since only ``changes`` are
         written. ``model_checks`` is the whole verified map for the new state;
         a new endpoint raises both revisions and stamps it with the new
@@ -269,6 +273,7 @@ class PostgresModelConnectionRepository:
             int(expected["config_revision"]),
             list(expected["models"]),
             json.dumps(checks),
+            json.dumps(expected["model_checks"]),
         ]
         assignments = ["model_checks = $6::jsonb"]
         for column, value in changes.items():
@@ -287,7 +292,7 @@ class PostgresModelConnectionRepository:
                     SET {", ".join(assignments)}, updated_at = NOW()
                     WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
                       AND credential_revision = $3 AND config_revision = $4
-                      AND models = $5::text[]
+                      AND models = $5::text[] AND model_checks = $7::jsonb
                     RETURNING {_COLUMNS}
                     """,
                     *args,

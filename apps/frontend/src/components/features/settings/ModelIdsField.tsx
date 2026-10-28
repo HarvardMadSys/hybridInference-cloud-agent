@@ -1,9 +1,9 @@
 'use client';
 
-import { useId, type KeyboardEvent } from 'react';
+import { useId, useState, type KeyboardEvent } from 'react';
 import { useT } from '@/components/providers';
 import type { ModelStatus } from '@/lib/api/modelConnections';
-import { withModel } from './modelConnectionChanges';
+import { isModelId, withModel } from './modelConnectionChanges';
 
 const inputClass = 'ui-input block min-h-11 w-full min-w-0 rounded-lg font-mono text-sm';
 
@@ -31,7 +31,7 @@ function ModelChip({
   const refused = result !== undefined && result.runtimes.length === 0;
   return (
     <li
-      className={`flex max-w-full min-w-0 items-start gap-1.5 rounded-md border px-2 py-1 ${
+      className={`flex max-w-full min-w-0 items-center gap-1 rounded-md border py-1 pl-2 ${
         refused
           ? 'border-amber-300 bg-amber-50 dark:border-amber-500/40 dark:bg-amber-500/10'
           : 'border-gray-200 bg-gray-50 dark:border-white/10 dark:bg-white/5'
@@ -58,7 +58,8 @@ function ModelChip({
         disabled={disabled}
         aria-label={t('connections.removeModel', { model })}
         onClick={onRemove}
-        className="ui-focus-ring mt-0.5 shrink-0 rounded text-gray-400 hover:text-gray-700 disabled:opacity-50 dark:text-gray-500 dark:hover:text-gray-200"
+        // A small icon in a touch-sized target, kept inside the chip's height.
+        className="ui-focus-ring -my-1 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded text-gray-400 hover:text-gray-700 disabled:opacity-50 dark:text-gray-500 dark:hover:text-gray-200"
       >
         <RemoveIcon />
       </button>
@@ -75,6 +76,7 @@ export function ModelIdsField({
   draft,
   max,
   results,
+  invalid,
   disabled,
   onModels,
   onDraft,
@@ -84,6 +86,8 @@ export function ModelIdsField({
   max: number;
   /** Each model's result from the last refused save, by model ID. */
   results: Record<string, ModelStatus>;
+  /** A model ID the form or the server found malformed. */
+  invalid: boolean;
   disabled: boolean;
   onModels: (models: string[]) => void;
   onDraft: (draft: string) => void;
@@ -91,9 +95,15 @@ export function ModelIdsField({
   const t = useT();
   const id = useId();
   const full = models.length >= max;
+  const [malformed, setMalformed] = useState(false);
+  const problem = malformed || invalid;
 
   function add() {
     if (!draft.trim() || full) return;
+    if (!isModelId(draft)) {
+      setMalformed(true);
+      return;
+    }
     onModels(withModel(models, draft));
     onDraft('');
   }
@@ -129,14 +139,18 @@ export function ModelIdsField({
           id={`${id}-model`}
           className={inputClass}
           value={draft}
-          onChange={(event) => onDraft(event.target.value)}
+          onChange={(event) => {
+            setMalformed(false);
+            onDraft(event.target.value);
+          }}
           onKeyDown={onKeyDown}
           disabled={disabled || full}
           maxLength={200}
           placeholder={models.length ? t('connections.anotherModel') : 'gpt-4.1'}
           spellCheck={false}
           autoComplete="off"
-          aria-describedby={`${id}-hint`}
+          aria-invalid={problem || undefined}
+          aria-describedby={problem ? `${id}-problem ${id}-hint` : `${id}-hint`}
         />
         <button
           type="button"
@@ -147,6 +161,11 @@ export function ModelIdsField({
           {t('connections.addModel')}
         </button>
       </div>
+      {problem ? (
+        <p id={`${id}-problem`} className="mt-1 text-xs leading-5 text-status-error">
+          {t('connections.invalid.model')}
+        </p>
+      ) : null}
       <p id={`${id}-hint`} className="mt-1 text-xs leading-5 text-muted">
         {t('connections.modelsHint', { max })}
       </p>

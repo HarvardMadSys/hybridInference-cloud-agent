@@ -22,6 +22,7 @@ disabling needs no verification and makes no provider call.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -33,8 +34,18 @@ if TYPE_CHECKING:
     from cloud_agent.ports import ModelConnectionRepository
 
 
+#: The longest a save waits for its verification, whatever the per-check
+#: timeouts allow (two waves of 150 s for eight models); past it the save fails
+#: and writes nothing. A proxy in front of the control plane must allow more.
+SAVE_TIMEOUT_S = 240.0
+
+
 class CheckLimitReached(Exception):
     """The owner's hourly checks cannot cover this save; no provider was called."""
+
+
+class VerificationTimedOut(Exception):
+    """The verification outlasted ``SAVE_TIMEOUT_S``; nothing was written."""
 
 
 class VerificationRefused(Exception):
@@ -110,7 +121,8 @@ async def verify_for_save(
     """Verify ``models`` at this endpoint for a save, or refuse it.
 
     Reserves one hourly check per model, all or none, before any call
-    (``CheckLimitReached``). Answers each model's native facts when every one
+    (``CheckLimitReached``), and gives up after ``SAVE_TIMEOUT_S``
+    (``VerificationTimedOut``). Answers each model's native facts when every one
     has an agent that can use it; otherwise raises ``VerificationRefused``
     with every model's status. A failing model is never dropped from the save.
     """
@@ -119,7 +131,11 @@ async def verify_for_save(
     )
     if not reserved:
         raise CheckLimitReached
-    results = await verify_models(base_url=base_url, api_key=api_key, models=models)
+    try:
+        async with asyncio.timeout(SAVE_TIMEOUT_S):
+            results = await verify_models(base_url=base_url, api_key=api_key, models=models)
+    except TimeoutError:
+        raise VerificationTimedOut from None
     statuses = [verification_status(model, results[model]) for model in models]
     if any(not status["runtimes"] for status in statuses):
         raise VerificationRefused(statuses)
@@ -127,9 +143,11 @@ async def verify_for_save(
 
 
 __all__ = [
+    "SAVE_TIMEOUT_S",
     "CheckLimitReached",
     "EditPlan",
     "VerificationRefused",
+    "VerificationTimedOut",
     "kept_checks",
     "plan_edit",
     "verify_for_save",

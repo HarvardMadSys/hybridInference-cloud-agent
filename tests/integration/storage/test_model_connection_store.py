@@ -638,6 +638,30 @@ async def test_a_verified_edit_lands_only_on_the_row_its_verification_read(store
     assert await _get(store, row) == before, "the change made meanwhile stands"
 
 
+async def test_a_model_removed_and_re_added_meanwhile_is_not_overwritten(store):
+    """Review 3: the model list returns, the facts do not; a late save must lose."""
+    row = await _connection(store, models=("gpt-4.1", "o4-mini"))
+    read = await _get(store, row)
+    removed = await store.model_connections.update_model_connection(
+        user_id="user-1", connection_id=row["id"], changes={"models": ["gpt-4.1"]}
+    )
+    readded = await store.model_connections.commit_verified_update(
+        user_id="user-1",
+        connection_id=row["id"],
+        expected=removed,
+        changes={"models": ["gpt-4.1", "o4-mini"]},
+        model_checks={"gpt-4.1": _facts(), "o4-mini": _facts("newer")},
+    )
+    assert readded["models"] == read["models"], "the list is back where the late save read it"
+
+    late = await _commit(store, read, {"name": "Late"}, models=["gpt-4.1", "o4-mini"])
+
+    assert late is None
+    stored = await _get(store, row)
+    assert stored["model_checks"]["o4-mini"]["checked_at"] == "newer"
+    assert stored["name"] == "Mine"
+
+
 async def test_a_rename_made_meanwhile_does_not_block_a_verified_edit(store):
     row = await _connection(store)
     read = await _get(store, row)

@@ -35826,6 +35826,9 @@
           },
           "429": {
             "description": "The owner's hourly checks cannot cover the models to verify."
+          },
+          "504": {
+            "description": "Verification outlasted the save's bound; nothing was saved."
           }
         },
         "summary": "Create Connection",
@@ -35948,6 +35951,9 @@
           },
           "429": {
             "description": "The owner's hourly checks cannot cover the models to verify."
+          },
+          "504": {
+            "description": "Verification outlasted the save's bound; nothing was saved."
           }
         },
         "summary": "Update Connection",
