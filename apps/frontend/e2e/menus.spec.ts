@@ -365,3 +365,45 @@ test('account navigation links and repository footer anchors highlight on hover'
     .poll(() => footer.evaluate((element) => getComputedStyle(element).backgroundColor))
     .toBe('rgb(240, 240, 243)');
 });
+
+test('action rows keep a common inset and open from trigger arrows', async ({ page, request }) => {
+  expect((await request.post('/__fixture/reset')).ok()).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/source');
+  await expect(page.getByLabel('Add a follow-up', { exact: true })).toBeVisible();
+  await settled(page);
+
+  const actions = page.getByRole('button', { name: 'Task actions', exact: true });
+  await actions.focus();
+  await page.keyboard.press('ArrowDown');
+  const menu = page.getByRole('menu', { name: 'Task actions' });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole('menuitem').first()).toBeFocused();
+
+  const panelBox = await menu.boundingBox();
+  const firstRow = await menu.getByRole('menuitem').first().boundingBox();
+  expect(panelBox).not.toBeNull();
+  expect(firstRow).not.toBeNull();
+  // The shared 6px body inset, on each side and above the first row.
+  expect(Math.round(firstRow!.x - panelBox!.x)).toBeGreaterThanOrEqual(6);
+  expect(Math.round(firstRow!.y - panelBox!.y)).toBeGreaterThanOrEqual(6);
+
+  await page.keyboard.press('ArrowUp');
+  await expect(menu.getByRole('menuitem').last()).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(actions).toBeFocused();
+});
+
+test('the embedded SSH list draws one card, unlike the outer add menu', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/');
+  await settled(page);
+  await page.getByRole('button', { name: 'Add to message' }).click();
+  await page.getByRole('menuitem', { name: /SSH servers/ }).click();
+  const panel = page.getByRole('dialog', { name: 'SSH servers' });
+  await expect(panel).toBeVisible();
+  const cards = await panel.locator('.shadow-card').count();
+  expect(cards).toBe(0);
+});

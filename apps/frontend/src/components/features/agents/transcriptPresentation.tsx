@@ -4,11 +4,11 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useT } from '@/components/providers';
 import {
+  MENU_ACTIONS,
   MENU_HEADING,
   MENU_POSITIONED,
-  MENU_ROW_SELECTED,
-  MENU_ACTIONS,
-  menuRowClass,
+  MENU_ROW_SELECTED_START,
+  MENU_ROW_START,
 } from '@/components/ui/menuStyles';
 import { usePopupMenu } from '@/components/ui/usePopupMenu';
 
@@ -103,12 +103,7 @@ export function TranscriptPresentationControl({
         aria-expanded={open}
         aria-controls={open ? id : undefined}
         onClick={() => setOpen(!open)}
-        onKeyDown={(event) => {
-          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-            event.preventDefault();
-            setOpen(true);
-          }
-        }}
+        onKeyDown={popup.triggerKeyDown}
         className="ui-focus-ring inline-flex min-h-9 items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted transition-colors hover:bg-surface-hover hover:text-foreground aria-expanded:bg-surface-muted aria-expanded:text-foreground [@media(pointer:coarse)]:min-h-11"
       >
         <svg
@@ -169,7 +164,7 @@ export function TranscriptPresentationControl({
                   setOpen(false);
                   trigger.current?.focus();
                 }}
-                className={`${value === mode ? MENU_ROW_SELECTED : menuRowClass()} items-start`}
+                className={value === mode ? MENU_ROW_SELECTED_START : MENU_ROW_START}
               >
                 <span aria-hidden="true" className="w-4 shrink-0 text-sm">
                   {value === mode ? '✓' : ''}

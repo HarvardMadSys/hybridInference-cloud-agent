@@ -358,6 +358,7 @@ export function ComposerPlusMenu({
                 <span className={COMPOSER_MENU_DETAIL}>{t('attach.ssh')}</span>
               </button>
               <SshSubmenu
+                embedded
                 choices={ssh.choices}
                 loading={ssh.loading}
                 saving={ssh.saving}

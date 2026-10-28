@@ -77,6 +77,7 @@ function RowMenu({
         aria-expanded={open}
         aria-controls={open ? id : undefined}
         onClick={() => setOpen(!open)}
+        onKeyDown={popup.triggerKeyDown}
         className="ui-icon-button ui-button-ghost"
       >
         <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">

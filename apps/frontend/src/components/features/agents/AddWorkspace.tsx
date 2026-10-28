@@ -4,7 +4,8 @@ import { createPortal } from 'react-dom';
 import { useT } from '@/components/providers';
 import {
   MENU_EMPTY,
-  MENU_FOOTER_ACTION,
+  menuRowClass,
+  MENU_FOOTER_ACTION_ACCENT,
   MENU_HEADING,
   MENU_POSITIONED,
   MENU_ROW,
@@ -227,7 +228,7 @@ export function AddWorkspace({
               <Link
                 href="/settings/integrations"
                 onClick={close}
-                className={`${MENU_FOOTER_ACTION} border-t border-border text-accent`}
+                className={`${MENU_FOOTER_ACTION_ACCENT} border-t border-border`}
               >
                 {t('sidebar.manageRepositories')}
               </Link>
@@ -239,7 +240,7 @@ export function AddWorkspace({
                   close();
                   setCreatingFor(userId!);
                 }}
-                className={`${MENU_ROW} font-medium text-accent`}
+                className={`${menuRowClass({ accent: true })} font-medium`}
               >
                 {t('repositoryCreate.title')}
               </button>

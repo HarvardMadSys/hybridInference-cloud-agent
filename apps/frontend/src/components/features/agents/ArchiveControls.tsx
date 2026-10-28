@@ -126,6 +126,7 @@ export function ArchiveProjectMenu({
         disabled={disabled}
         className={`ui-icon-button ui-button-ghost h-9 w-9 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 ${ARCHIVE_FOCUS}`}
         onClick={() => setOpen(!open)}
+        onKeyDown={popup.triggerKeyDown}
       >
         <ArchiveIcon name="more" />
       </button>

@@ -22,7 +22,7 @@ export const MENU_POSITIONED = 'fixed z-[100] m-0';
  * clip the actions below the fold.
  */
 export const MENU_ACTIONS =
-  'flex flex-col overflow-y-auto overscroll-contain rounded-xl border border-border bg-surface-raised text-foreground shadow-card';
+  'flex flex-col overflow-y-auto overscroll-contain rounded-xl border border-border bg-surface-raised p-1.5 text-foreground shadow-card';
 
 /** A panel hanging off the composer, laid out by `useComposerMenuLayout`. */
 export const MENU_COMPOSER =
@@ -56,9 +56,15 @@ export const MENU_SEARCH_INPUT =
 /** A muted status line for an empty or filtered menu. */
 export const MENU_EMPTY = 'px-2.5 py-5 text-center text-[13px] text-muted';
 
+/** An empty/status note aligned with left-aligned explanatory copy. */
+export const MENU_EMPTY_START = 'px-2.5 py-5 text-left text-[13px] text-muted';
+
 /** A footer action in a menu, such as Refresh or Configure. */
 export const MENU_FOOTER_ACTION =
   'flex min-h-9 min-w-0 flex-1 items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-foreground transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover focus-visible:outline-none [@media(pointer:coarse)]:min-h-11';
+
+/** An accented footer action, such as a link to manage what the menu lists. */
+export const MENU_FOOTER_ACTION_ACCENT = `${MENU_FOOTER_ACTION} text-accent`;
 
 /**
  * The states every menu row shares. `hover:`/`focus:` work for buttons,
@@ -74,14 +80,22 @@ export function menuRowClass({
   active = false,
   disabled = false,
   destructive = false,
+  accent = false,
+  align = 'center',
 }: {
   selected?: boolean;
   active?: boolean;
   disabled?: boolean;
   destructive?: boolean;
+  /** An ordinary row whose action carries emphasis, such as creating a repo. */
+  accent?: boolean;
+  /** `start` for a two-line row whose checkmark belongs beside the title. */
+  align?: 'center' | 'start';
 } = {}): string {
-  const base =
-    'flex min-h-9 w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/40 [@media(pointer:coarse)]:min-h-11';
+  // Literal utilities, so Tailwind's scanner emits both variants.
+  const base = `flex min-h-9 w-full gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/40 [@media(pointer:coarse)]:min-h-11 ${
+    align === 'start' ? 'items-start' : 'items-center'
+  }`;
   if (disabled) return `${base} cursor-not-allowed text-muted opacity-50`;
   // Each state names its own hover/focus background, so the selected and
   // destructive treatments never fall back to the ordinary row tint.
@@ -91,7 +105,8 @@ export function menuRowClass({
     return `${base} cursor-pointer bg-accent-subtle font-medium text-accent hover:bg-accent-subtle focus:bg-accent-subtle ${
       active ? 'ring-1 ring-inset ring-accent/30' : ''
     } ${SUPPRESS_HIGHLIGHT}`;
-  return `${base} cursor-pointer text-foreground hover:bg-surface-hover focus:bg-surface-hover ${
+  const tone = accent ? 'text-accent' : 'text-foreground';
+  return `${base} cursor-pointer ${tone} hover:bg-surface-hover focus:bg-surface-hover ${
     active ? 'bg-surface-hover' : ''
   } ${SUPPRESS_HIGHLIGHT}`;
 }
@@ -116,3 +131,9 @@ export const MENU_ROW_STATIC =
 
 /** A selected (checkmarked) item in a menu. */
 export const MENU_ROW_SELECTED = menuRowClass({ selected: true });
+
+/** A two-line ordinary row whose checkmark belongs beside its title. */
+export const MENU_ROW_START = menuRowClass({ align: 'start' });
+
+/** A two-line selected row whose checkmark belongs beside its title. */
+export const MENU_ROW_SELECTED_START = menuRowClass({ selected: true, align: 'start' });

@@ -118,6 +118,7 @@ export function SkillRow({
           aria-expanded={open}
           aria-controls={open ? id : undefined}
           onClick={() => setOpen(!open)}
+          onKeyDown={popup.triggerKeyDown}
           className="ui-focus-ring flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-surface-hover hover:text-foreground"
         >
           <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">

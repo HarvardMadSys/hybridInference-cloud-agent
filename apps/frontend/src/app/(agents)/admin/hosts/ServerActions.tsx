@@ -32,6 +32,7 @@ export default function ServerActions({
         aria-controls={open ? id : undefined}
         className="ui-icon-button ui-button-ghost h-8 w-8 text-base"
         onClick={() => setOpen(!open)}
+        onKeyDown={popup.triggerKeyDown}
       >
         ⋯
       </button>

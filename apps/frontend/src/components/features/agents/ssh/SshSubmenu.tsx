@@ -43,6 +43,7 @@ export function SshSubmenu({
   error,
   onToggle,
   onRetry,
+  embedded = false,
 }: {
   choices: SshChoice[];
   loading: boolean;
@@ -50,10 +51,16 @@ export function SshSubmenu({
   error: string | null;
   onToggle: (choice: SshChoice, on: boolean) => void;
   onRetry: () => void;
+  /** Rendered inside the composer's own panel, which already draws the card. */
+  embedded?: boolean;
 }) {
   const t = useT();
   return (
-    <div className={`flex max-h-[320px] w-full flex-col overflow-hidden ${MENU_SURFACE}`}>
+    <div
+      className={`flex max-h-[320px] w-full flex-col overflow-hidden ${
+        embedded ? '' : `w-[280px] ${MENU_SURFACE}`
+      }`}
+    >
       <div className={MENU_SCROLL}>
         {loading ? (
           <p role="status" className={MENU_EMPTY}>

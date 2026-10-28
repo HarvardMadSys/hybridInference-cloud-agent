@@ -45,6 +45,7 @@ export function SidebarViewMenu({
         aria-controls={open ? id : undefined}
         className="ui-focus-ring rounded-md p-1 text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
         onClick={() => setOpen((current) => !current)}
+        onKeyDown={popup.triggerKeyDown}
       >
         <svg
           width="16"

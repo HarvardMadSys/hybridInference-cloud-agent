@@ -209,7 +209,7 @@ function saveField(label: string) {
 function resetField(label: string) {
   const group = editField(label).closest('form')!;
   fireEvent.click(within(group).getByLabelText(`More actions for ${label}`));
-  fireEvent.click(within(group).getByRole('button', { name: `Restore default for ${label}` }));
+  fireEvent.click(within(group).getByRole('menuitem', { name: `Restore default for ${label}` }));
   expect(write).not.toHaveBeenCalled();
   fireEvent.click(
     within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore default' }),
@@ -393,7 +393,7 @@ describe('application settings', () => {
     render(<ApplicationSettings />);
     fireEvent.change(await loadedField('Product name'), { target: { value: 'Keep this draft' } });
     fireEvent.click(screen.getByLabelText('More actions for Product name'));
-    fireEvent.click(screen.getByRole('button', { name: 'Restore default for Product name' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Restore default for Product name' }));
     const dialog = screen.getByRole('dialog', { name: 'Restore default value?' });
     expect(within(dialog).getByText('Default value')).toBeVisible();
     expect(within(dialog).getAllByText('Cloud Agent')).toHaveLength(2);
@@ -439,7 +439,7 @@ describe('application settings', () => {
     selectCategory('Connections');
     fireEvent.click(screen.getByRole('button', { name: 'Edit Connections settings' }));
     fireEvent.click(screen.getByLabelText('More actions for Service token'));
-    fireEvent.click(screen.getByRole('button', { name: 'Clear Service token' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear Service token' }));
     const dialog = screen.getByRole('dialog', { name: 'Clear saved secret?' });
     expect(dialog).toHaveTextContent('secret will be cleared');
     expect(dialog).toHaveTextContent('may stop working');

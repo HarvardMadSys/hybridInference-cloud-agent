@@ -40,7 +40,12 @@ function Menu({
   });
   return (
     <div>
-      <button ref={triggerRef} type="button" onClick={() => setOpen(true)}>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => setOpen(true)}
+        onKeyDown={popup.triggerKeyDown}
+      >
         Open
       </button>
       {open ? (
@@ -116,6 +121,24 @@ describe('usePopupMenu', () => {
 
     openMenu();
     fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('opens from the trigger with ArrowDown on the first row and ArrowUp on the last', () => {
+    render(<Menu />);
+    const trigger = screen.getByRole('button', { name: 'Open' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    expect(screen.getByRole('menuitem', { name: 'First' })).toHaveFocus();
+
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+    fireEvent.keyDown(trigger, { key: 'ArrowUp' });
+    expect(screen.getByRole('menuitem', { name: 'Last' })).toHaveFocus();
+  });
+
+  it('leaves other keys on the trigger untouched', () => {
+    render(<Menu />);
+    const trigger = screen.getByRole('button', { name: 'Open' });
+    expect(fireEvent.keyDown(trigger, { key: 'Enter' })).toBe(true);
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 

@@ -14,7 +14,7 @@ import { useT } from '@/components/providers';
 import { TEMPORARY_WORKSPACE } from '@/lib/temporaryWorkspace';
 import {
   MENU_COMPOSER,
-  MENU_EMPTY,
+  MENU_EMPTY_START,
   MENU_FOOTER,
   MENU_FOOTER_ACTION,
   MENU_ROW,
@@ -390,7 +390,7 @@ export function RepositoryPicker({
             })}
             {needle ? temporaryRow : null}
             {nothingToChoose ? (
-              <p className={`${MENU_EMPTY} !py-3 text-left leading-relaxed`}>
+              <p className={`${MENU_EMPTY_START} !py-3 leading-relaxed`}>
                 {needle
                   ? t('composer.repositoryNoMatch', { query: query.trim() })
                   : t('composer.repositoryEmpty')}

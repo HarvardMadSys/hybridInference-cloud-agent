@@ -18,59 +18,157 @@
     },
     {
       "files": ["src/components/features/agents/JobDetail.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 6667 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 6667
+          }
+        ]
+      }
     },
     {
       "files": ["src/components/features/agents/TaskComposer.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 3219 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 3219
+          }
+        ]
+      }
     },
     {
       "files": ["src/app/(agents)/admin/settings/page.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 2333 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 2330
+          }
+        ]
+      }
     },
     {
       "files": ["src/app/(agents)/admin/hosts/ComputeResources.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 2073 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 2073
+          }
+        ]
+      }
     },
     {
       "files": ["src/app/(agents)/admin/hosts/page.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 1910 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 1910
+          }
+        ]
+      }
     },
     {
       "files": ["src/components/features/agents/adapt.test.ts"],
-      "rules": { "max-lines": ["error", { "max": 1907 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 1907
+          }
+        ]
+      }
     },
     {
       "files": ["src/components/features/agents/ChatMessages.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 1613 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 1613
+          }
+        ]
+      }
     },
     {
       "files": ["src/components/features/agents/useAgentJob.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 1593 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 1593
+          }
+        ]
+      }
     },
     {
       "files": ["src/app/(agents)/admin/measurements/page.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 1376 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 1376
+          }
+        ]
+      }
     },
     {
       "files": ["src/app/(agents)/admin/hosts/capacity.test.ts"],
-      "rules": { "max-lines": ["error", { "max": 1354 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 1354
+          }
+        ]
+      }
     },
     {
       "files": ["src/app/(agents)/admin/settings/ApplicationSettings.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 1349 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 1349
+          }
+        ]
+      }
     },
     {
       "files": ["src/components/features/agents/SidebarNavigation.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 1356 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 1356
+          }
+        ]
+      }
     },
     {
       "files": ["src/app/(agents)/admin/sandboxes/page.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 1264 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 1264
+          }
+        ]
+      }
     },
     {
       "files": ["src/lib/api/__tests__/agents.test.ts"],
-      "rules": { "max-lines": ["error", { "max": 1241 }] }
+      "rules": {
+        "max-lines": [
+          "error",
+          {
+            "max": 1241
+          }
+        ]
+      }
     }
   ]
 }

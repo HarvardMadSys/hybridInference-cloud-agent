@@ -47,10 +47,12 @@ export function usePopupMenu({
   const listeners = useRef({ onOpenChange, onEscape, triggerRef });
   listeners.current = { onOpenChange, onEscape, triggerRef };
   const opened = useRef(false);
+  const initial = useRef<'first' | 'last' | 'selected'>(initialFocus);
 
   useLayoutEffect(() => {
     if (!open) {
       opened.current = false;
+      initial.current = initialFocus;
       return;
     }
     // The panel starts invisible until placement runs. A browser cannot focus
@@ -63,9 +65,9 @@ export function usePopupMenu({
       '[role="menuitemradio"][aria-checked="true"], [role="menuitemcheckbox"][aria-checked="true"]',
     );
     const target =
-      initialFocus === 'last'
+      initial.current === 'last'
         ? rows.at(-1)
-        : initialFocus === 'selected'
+        : initial.current === 'selected'
           ? (checked ?? rows[0])
           : rows[0];
     target?.focus();
@@ -128,5 +130,25 @@ export function usePopupMenu({
     rows[next]?.focus();
   }
 
-  return { style, onKeyDown };
+  /**
+   * The trigger half of the contract: a menu button opens with ArrowDown on
+   * its first row and ArrowUp on its last. It is a stable handler, and it
+   * leaves every other key to the trigger's own behavior.
+   */
+  function triggerKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    event.preventDefault();
+    if (open) {
+      initial.current = event.key === 'ArrowUp' ? 'last' : 'first';
+      opened.current = false;
+      const rows = items(menuRef.current);
+      (event.key === 'ArrowUp' ? rows.at(-1) : rows[0])?.focus();
+      return;
+    }
+    initial.current = event.key === 'ArrowUp' ? 'last' : 'first';
+    listeners.current.onOpenChange(true);
+  }
+
+  return { style, onKeyDown, triggerKeyDown };
 }

@@ -29,14 +29,12 @@ export function GoalActionsMenu({
   const id = useId();
   const menu = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
-  const openAtEnd = useRef(false);
   const popup = usePopupMenu({
     open,
     onOpenChange: setOpen,
     triggerRef,
     menuRef: menu,
     placement: { gap: 4, preferredHeight: 140, maxHeight: 320 },
-    initialFocus: openAtEnd.current ? 'last' : 'first',
   });
 
   function choose(action: () => void) {
@@ -56,16 +54,8 @@ export function GoalActionsMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? id : undefined}
-        onClick={() => {
-          openAtEnd.current = false;
-          setOpen((value) => !value);
-        }}
-        onKeyDown={(event) => {
-          if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-          event.preventDefault();
-          openAtEnd.current = event.key === 'ArrowUp';
-          setOpen(true);
-        }}
+        onClick={() => setOpen((value) => !value)}
+        onKeyDown={popup.triggerKeyDown}
         className="ui-focus-ring inline-flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-foreground disabled:opacity-40 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
       >
         <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">

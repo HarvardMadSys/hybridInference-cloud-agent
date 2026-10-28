@@ -1,8 +1,14 @@
 'use client';
 
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
-import { MENU_ACTIONS, MENU_ROW, MENU_ROW_DESTRUCTIVE } from '@/components/ui/menuStyles';
+import {
+  MENU_ACTIONS,
+  MENU_POSITIONED,
+  MENU_ROW,
+  MENU_ROW_DESTRUCTIVE,
+} from '@/components/ui/menuStyles';
+import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import { SettingsPage } from '@/components/features/settings/SettingsPage';
 import {
   disconnectAgentIntegration,
@@ -95,6 +101,47 @@ function connectedDescription(provider: AgentIntegrationProviderApi): React.Reac
   );
 }
 
+/** What an unconnected provider offers: a connection, or why it cannot. */
+function disconnectedAction(integration: AgentIntegrationProviderApi) {
+  // Before the `configured` check: whether an operator has set the OAuth app
+  // up is not something a user can act on while the feature is not offered,
+  // and "Admin setup required" reads as "ask someone and you can have it".
+  if (COMING_SOON.includes(integration.provider)) {
+    return (
+      <span className="rounded-full border border-border bg-surface-muted px-3 py-1.5 text-xs font-medium text-muted">
+        Coming soon
+      </span>
+    );
+  }
+  // Before the `configured` check, which is also false while the App is
+  // unavailable: that one means nobody set the provider up, and sends an
+  // operator to check configuration that is already correct.
+  if (integration.load_status === 'unavailable') {
+    return (
+      <span className="text-sm text-gray-400 dark:text-gray-500">Temporarily unavailable</span>
+    );
+  }
+  if (!integration.configured) {
+    return <span className="text-sm text-gray-500 dark:text-gray-400">Admin setup required</span>;
+  }
+  return integration.connect_url ? (
+    <a href={integration.connect_url} className="ui-button ui-button-primary min-h-11">
+      Connect
+      <svg className="h-4 w-4" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <path
+          d="M7 13 13 7m0 0H8m5 0v5"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </a>
+  ) : (
+    <span className="text-sm text-gray-400 dark:text-gray-500">Temporarily unavailable</span>
+  );
+}
+
 function ProviderActions({
   integration,
   disconnecting,
@@ -107,46 +154,27 @@ function ProviderActions({
   onDisconnectAll: () => void;
 }) {
   const copy = PROVIDER_COPY[integration.provider];
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const popup = usePopupMenu({
+    open,
+    onOpenChange: setOpen,
+    triggerRef: trigger,
+    menuRef: menu,
+    placement: { gap: 6, width: 224, maxWidth: 280, preferredHeight: 120, maxHeight: 320 },
+  });
 
-  if (!integration.connected) {
-    // Before the `configured` check: whether an operator has set the OAuth app
-    // up is not something a user can act on while the feature is not offered,
-    // and "Admin setup required" reads as "ask someone and you can have it".
-    if (COMING_SOON.includes(integration.provider)) {
-      return (
-        <span className="rounded-full border border-border bg-surface-muted px-3 py-1.5 text-xs font-medium text-muted">
-          Coming soon
-        </span>
-      );
-    }
-    // Before the `configured` check, which is also false while the App is
-    // unavailable: that one means nobody set the provider up, and sends an
-    // operator to check configuration that is already correct.
-    if (integration.load_status === 'unavailable') {
-      return (
-        <span className="text-sm text-gray-400 dark:text-gray-500">Temporarily unavailable</span>
-      );
-    }
-    if (!integration.configured) {
-      return <span className="text-sm text-gray-500 dark:text-gray-400">Admin setup required</span>;
-    }
-    return integration.connect_url ? (
-      <a href={integration.connect_url} className="ui-button ui-button-primary min-h-11">
-        Connect
-        <svg className="h-4 w-4" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-          <path
-            d="M7 13 13 7m0 0H8m5 0v5"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      </a>
-    ) : (
-      <span className="text-sm text-gray-400 dark:text-gray-500">Temporarily unavailable</span>
-    );
-  }
+  // An unconnected provider has nothing to manage; hooks above stay
+  // unconditional so the row can turn connected without remounting.
+  if (!integration.connected) return disconnectedAction(integration);
+
+  const choose = (action: () => void) => {
+    setOpen(false);
+    action();
+    trigger.current?.focus();
+  };
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -159,26 +187,41 @@ function ProviderActions({
           Configure repositories
         </a>
       ) : null}
-      <details className="group relative w-full lg:w-auto">
-        <summary className="ui-button ui-button-secondary min-h-11 cursor-pointer list-none [&::-webkit-details-marker]:hidden">
-          Manage
-          <svg
-            className="h-4 w-4 transition-transform group-open:rotate-180"
-            viewBox="0 0 20 20"
-            fill="none"
-            aria-hidden="true"
-          >
-            <path
-              d="m7 8 3 3 3-3"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </summary>
+      <button
+        ref={trigger}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={popup.triggerKeyDown}
+        className="ui-button ui-button-secondary min-h-11"
+      >
+        Manage
+        <svg
+          className={`h-4 w-4 transition-transform ${open ? 'rotate-180' : ''}`}
+          viewBox="0 0 20 20"
+          fill="none"
+          aria-hidden="true"
+        >
+          <path
+            d="m7 8 3 3 3-3"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+      {open ? (
         <div
-          className={`${MENU_ACTIONS} absolute left-0 z-10 mt-2 max-h-[min(24rem,calc(100dvh-2rem))] w-56 max-w-[calc(100vw-3rem)] p-1 lg:left-auto lg:right-0`}
+          ref={menu}
+          id={id}
+          role="menu"
+          aria-label={`Manage ${copy.name}`}
+          style={popup.style}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-56 max-w-[calc(100vw-3rem)]`}
+          onKeyDown={popup.onKeyDown}
         >
           {/* GitHub has one way out and nothing else here. Reauthorizing only
               mattered for an installation made outside this page, which
@@ -187,7 +230,12 @@ function ProviderActions({
               the grants whatever GitHub reports. Which repositories the App
               may use is changed on GitHub, through Configure repositories. */}
           {integration.provider !== 'github' && integration.connect_url ? (
-            <a href={integration.connect_url} className={MENU_ROW}>
+            <a
+              role="menuitem"
+              href={integration.connect_url}
+              className={MENU_ROW}
+              onClick={() => setOpen(false)}
+            >
               Reauthorize {copy.name}
             </a>
           ) : null}
@@ -195,9 +243,11 @@ function ProviderActions({
             <button
               key={account.id}
               type="button"
+              role="menuitem"
+              tabIndex={-1}
               disabled={disconnecting === account.id}
-              onClick={() => onDisconnect(account.id, account.label)}
-              className={MENU_ROW_DESTRUCTIVE}
+              onClick={() => choose(() => onDisconnect(account.id, account.label))}
+              className={disconnecting === account.id ? MENU_ROW : MENU_ROW_DESTRUCTIVE}
             >
               {disconnecting === account.id
                 ? `Disconnecting ${account.label}…`
@@ -207,15 +257,17 @@ function ProviderActions({
           {integration.provider === 'github' ? (
             <button
               type="button"
+              role="menuitem"
+              tabIndex={-1}
               disabled={disconnecting === GITHUB_ACCOUNT}
-              onClick={onDisconnectAll}
-              className={MENU_ROW_DESTRUCTIVE}
+              onClick={() => choose(onDisconnectAll)}
+              className={disconnecting === GITHUB_ACCOUNT ? MENU_ROW : MENU_ROW_DESTRUCTIVE}
             >
               {disconnecting === GITHUB_ACCOUNT ? 'Disconnecting GitHub…' : 'Disconnect GitHub'}
             </button>
           ) : null}
         </div>
-      </details>
+      ) : null}
     </div>
   );
 }

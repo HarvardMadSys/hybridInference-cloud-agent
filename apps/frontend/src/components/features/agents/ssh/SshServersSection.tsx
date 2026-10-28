@@ -1,8 +1,15 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
-import { MENU_ACTIONS, MENU_ROW, MENU_ROW_DESTRUCTIVE } from '@/components/ui/menuStyles';
+import {
+  MENU_ACTIONS,
+  MENU_POSITIONED,
+  MENU_ROW,
+  MENU_ROW_DESTRUCTIVE,
+  menuRowClass,
+} from '@/components/ui/menuStyles';
+import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import {
   deleteSshServer,
   listSshServers,
@@ -14,7 +21,103 @@ import { SshCheckDialog } from './SshCheckDialog';
 import { SshServerDialog } from './SshServerDialog';
 
 const ACTION = 'ui-button ui-button-secondary min-h-11';
-const MENU_ITEM = MENU_ROW;
+
+/** The per-server overflow actions, with the shared menu keyboard contract. */
+function ServerActionsMenu({
+  label,
+  manageLabel,
+  editLabel,
+  rotateLabel,
+  deleteLabel,
+  busy,
+  onEdit,
+  onRotate,
+  onDelete,
+}: {
+  label: string;
+  manageLabel: string;
+  editLabel: string;
+  rotateLabel: string;
+  deleteLabel: string;
+  busy: boolean;
+  onEdit: () => void;
+  onRotate: () => void;
+  onDelete: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const popup = usePopupMenu({
+    open,
+    onOpenChange: setOpen,
+    triggerRef: trigger,
+    menuRef: menu,
+    placement: { gap: 6, width: 192, maxWidth: 240, preferredHeight: 140, maxHeight: 320 },
+  });
+  const choose = (action: () => void) => {
+    setOpen(false);
+    action();
+    trigger.current?.focus();
+  };
+  return (
+    <>
+      <button
+        ref={trigger}
+        type="button"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={popup.triggerKeyDown}
+        className={ACTION}
+      >
+        {manageLabel}
+      </button>
+      {open ? (
+        <div
+          ref={menu}
+          id={id}
+          role="menu"
+          aria-label={label}
+          style={popup.style}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-48`}
+          onKeyDown={popup.onKeyDown}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            className={MENU_ROW}
+            onClick={() => choose(onEdit)}
+          >
+            {editLabel}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            disabled={busy}
+            className={busy ? menuRowClass({ disabled: true }) : MENU_ROW}
+            onClick={() => choose(onRotate)}
+          >
+            {rotateLabel}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            className={MENU_ROW_DESTRUCTIVE}
+            onClick={() => choose(onDelete)}
+          >
+            {deleteLabel}
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+}
 
 function ServerIcon() {
   return (
@@ -226,37 +329,17 @@ export function SshServersSection() {
                   >
                     {server.pending_public_key ? t('ssh.testNewKey') : t('ssh.check')}
                   </button>
-                  <details className="group relative">
-                    <summary className="ui-button ui-button-secondary min-h-11 cursor-pointer list-none [&::-webkit-details-marker]:hidden">
-                      {t('ssh.manage')}
-                    </summary>
-                    <div
-                      className={`${MENU_ACTIONS} absolute right-0 z-10 mt-2 max-h-[min(24rem,calc(100dvh-2rem))] w-48 p-1`}
-                    >
-                      <button
-                        type="button"
-                        className={MENU_ITEM}
-                        onClick={() => setEditing(server)}
-                      >
-                        {t('ssh.edit')}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busy === server.id}
-                        className={MENU_ITEM}
-                        onClick={() => void rotate(server)}
-                      >
-                        {t('ssh.rotate')}
-                      </button>
-                      <button
-                        type="button"
-                        className={MENU_ROW_DESTRUCTIVE}
-                        onClick={() => setConfirming(server.id)}
-                      >
-                        {t('ssh.delete')}
-                      </button>
-                    </div>
-                  </details>
+                  <ServerActionsMenu
+                    label={t('ssh.manage')}
+                    manageLabel={t('ssh.manage')}
+                    editLabel={t('ssh.edit')}
+                    rotateLabel={t('ssh.rotate')}
+                    deleteLabel={t('ssh.delete')}
+                    busy={busy === server.id}
+                    onEdit={() => setEditing(server)}
+                    onRotate={() => void rotate(server)}
+                    onDelete={() => setConfirming(server.id)}
+                  />
                 </>
               )}
             </div>
