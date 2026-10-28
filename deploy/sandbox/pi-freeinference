@@ -133,6 +133,12 @@ def main() -> None:
     with open(os.path.join(config_dir, "models.json"), "w", encoding="utf-8") as handle:
         json.dump(config, handle)
 
+    # jiti, which compiles pi's extensions, caches them by default in one
+    # directory under /tmp that every member shares, and pi 1.x turns on
+    # Node's compile cache, also under /tmp. The runner already turns both
+    # off; so does this wrapper, however pi is started.
+    os.environ["JITI_FS_CACHE"] = "false"
+    os.environ["NODE_DISABLE_COMPILE_CACHE"] = "1"
     # pi accepts explicit package directories under --no-extensions (checked on
     # 0.73.1 and 1.2.0); the CLI resolves each manifest's extensions, skills,
     # prompts, and themes.

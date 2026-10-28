@@ -117,6 +117,8 @@ def test_native_install_uses_private_prefix_and_retains_success(monkeypatch, tmp
             assert argv == ["pi", "install", "npm:example-plugin@1.2.3"]
             assert env["npm_config_prefix"] == str(root)
             assert env["PI_CODING_AGENT_DIR"] == str(root / "pi-config")
+            assert env["JITI_FS_CACHE"] == "false"
+            assert env["NODE_DISABLE_COMPILE_CACHE"] == "1"
             package = root / "lib/node_modules/example-plugin"
         else:
             assert argv[:4] == ["npm", "install", "--prefix", str(root)]
