@@ -29,8 +29,11 @@ vi.mock('@/components/features/agents/environment/EnvironmentManager', () => ({
   EnvironmentManager: () => <div data-testid="environment-manager" />,
 }));
 
+const accountMode = vi.hoisted(() => ({ value: undefined as 'local' | 'gateway' | undefined }));
+
 vi.mock('@/components/providers/AuthProvider', () => ({
   useAuth: () => ({ state: { user: { id: 'settings-owner' } } }),
+  useSignedInAuthMode: () => accountMode.value,
 }));
 
 import { listSkills } from '@/lib/api/skills';
@@ -181,6 +184,7 @@ function unloadedGithub(
 }
 
 beforeEach(() => {
+  accountMode.value = undefined;
   vi.mocked(getUserProfile).mockResolvedValue({
     email: 'owner@example.com',
     first_name: '',
@@ -754,4 +758,14 @@ describe('IntegrationsView', () => {
     // no longer carries a placeholder pill.
     expect(screen.queryAllByText('Coming soon')).toHaveLength(0);
   });
+});
+
+it('local My Settings never reads or renders the Gateway default-model preference', async () => {
+  accountMode.value = 'local';
+  render(<MySettingsView />);
+  await screen.findByRole('region', { name: 'Personal model connections' });
+  expect(screen.queryByRole('region', { name: 'Default model' })).not.toBeInTheDocument();
+  expect(getModelPreference).not.toHaveBeenCalled();
+  expect(screen.getByRole('region', { name: 'Profile' })).toBeInTheDocument();
+  expect(screen.getByRole('region', { name: 'Notifications' })).toBeInTheDocument();
 });

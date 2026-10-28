@@ -1,20 +1,20 @@
 'use client';
 
 import { useT } from '@/components/providers';
-import { getAgentConfig, type AgentConfigApi, type AgentJobApi } from '@/lib/api/agents';
+import { type AgentConfigApi, type AgentJobApi } from '@/lib/api/agents';
 import { useEffect, useMemo, useState } from 'react';
 import type { InheritedModel } from '../ConversationComposer';
 import { highestEffort, offeredEfforts } from '../effort';
 import {
   choiceLabel,
-  offeredChoices,
+  isModelUnavailable,
   rewriteProps,
-  sameChoice,
   turnChoice,
   turnModelPicker,
   type ModelChoice,
 } from '../modelSource';
 import type { AgentJob } from '../types';
+import { useComposerConfig } from '../useComposerConfig';
 
 /**
  * What a follow-up inherits when it names nothing: the thread's newest turn as
@@ -62,27 +62,8 @@ export function useJobComposerSettings(job: AgentJob, inherited: InheritedModel)
     [inheritedModel, inheritedSource],
   );
   const choice = chosenModel ?? inheritedChoice;
-  // The model remains a per-turn choice. A retained live chat reuses its CLI
-  // when the process-fixed settings match; changing the model makes only that
-  // member process restart and native-resume inside the same sandbox.
-  useEffect(() => {
-    let cancelled = false;
-    getAgentConfig()
-      .then((loaded) => {
-        if (!cancelled) setConfig(loaded);
-      })
-      .catch(() => {
-        // A list we could not load is not a list to pick from: the composer
-        // falls back to naming the inherited model, which is what a turn with
-        // no override runs on anyway.
-        if (!cancelled) setConfig(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const { refreshing } = useComposerConfig(setConfig, () => setConfig(null));
 
-  const offered = useMemo(() => offeredChoices(config, job.runtime), [config, job.runtime]);
   // The parent's model leads even when this deployment has stopped offering
   // it, so the control cannot show one model while the turn would run another.
   // A personal one that can no longer run is marked so, and is still never
@@ -95,11 +76,9 @@ export function useJobComposerSettings(job: AgentJob, inherited: InheritedModel)
     t,
     inheritedChoice,
   );
-  const inheritedUnavailable = Boolean(
-    config &&
-    inheritedChoice.connectionId &&
-    !offered.some((option) => sameChoice(option, inheritedChoice)),
-  );
+  // An explicitly selected source can also disappear while Settings is open.
+  // Keep its identity, refuse every submit path, and never substitute a same-name model.
+  const choiceUnavailable = isModelUnavailable(config, job.runtime, choice, refreshing);
 
   // Against the model this turn would run — the switched-to one, or the
   // inherited one — because a pair offered last turn need not be offered now.
@@ -119,14 +98,14 @@ export function useJobComposerSettings(job: AgentJob, inherited: InheritedModel)
   return {
     config,
     inherited,
-    inheritedLabel: choiceLabel(config, inheritedChoice, t, {
-      unavailable: inheritedUnavailable,
+    inheritedLabel: choiceLabel(config, choice, t, {
+      unavailable: choiceUnavailable,
       runtime: job.runtime,
     }),
     // Holds Send while the turn would inherit a source that can no longer run.
-    inheritedUnavailable: inheritedUnavailable && sameChoice(choice, inheritedChoice),
+    inheritedUnavailable: choiceUnavailable,
     choice,
-    rewrite: rewriteProps(choice, t),
+    rewrite: rewriteProps(choice, t, config),
     effort,
     setChosenEffort,
     modelPicker: modelPickerProps,

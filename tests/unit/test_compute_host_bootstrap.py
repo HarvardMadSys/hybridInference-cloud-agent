@@ -80,6 +80,7 @@ def setup(tmp_path, *, unsafe_member=None):
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for filename in [
             "deploy/host/sandbox_host.sh",
+            "deploy/host/inference_compose.py",
             "deploy/host/setup_kata_runtime.sh",
             "deploy/host/docker-compose.sandbox.yml",
             "pyproject.toml",
@@ -1377,11 +1378,16 @@ async def test_inventory_believes_only_its_own_reasons(tmp_path):
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
         "AGENT_CONTROL_TOKEN_SECRET",
         "AGENT_SESSION_SECRET",
+        "AGENT_LOCAL_SESSION_SECRET",
+        "AGENT_SMTP_PASSWORD",
     ],
 )
 async def test_deployment_environment_rejects_unrelated_and_control_plane_authority(tmp_path, name):
     bootstrap, profile, transport, secrets = setup(tmp_path)
     secrets["deployment:env"] += f"\n{name}=must-not-leave-control-plane"
+    with pytest.raises(ProviderError, match="security boundary"):
+        await bootstrap._archive(profile, INTENT, SecretStr("enrollment"))
+    transport.run.assert_not_awaited()
     with pytest.raises(ProviderError, match="security boundary"):
         await bootstrap.deploy(NODE, profile, INTENT, SecretStr("enrollment"))
     assert transport.run.await_count == 1
@@ -1407,3 +1413,53 @@ async def test_a_template_can_name_the_sandbox_image_published_for_the_deployed_
         "ghcr.io/harvardmadsys/cloud-agent-sandbox:sandbox-" + profile.deployment_sha
     )
     assert env["AGENT_SANDBOX_IMAGE_PULL"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_local_bootstrap_stamps_the_control_plane_mode_without_gateway_secrets(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AGENT_AUTH_MODE", "local")
+    bootstrap, profile, _transport, secrets = setup(tmp_path)
+    secrets["deployment:env"] = "\n".join(
+        line
+        for line in secrets["deployment:env"].splitlines()
+        if not line.startswith("AGENT_TUNNEL_")
+    )
+    profile = profile.model_copy(
+        update={
+            "files": {
+                name: ref for name, ref in profile.files.items() if "agent_tunnel-" not in name
+            }
+        }
+    )
+    payload = await bootstrap._archive(profile, INTENT, SecretStr("enrollment"))
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+        env = dotenv_values(stream=io.StringIO(archive.extractfile(".env").read().decode()))
+        assert env["AGENT_AUTH_MODE"] == "local"
+        assert not any(name.startswith("AGENT_TUNNEL_") for name in env)
+        assert "AGENT_MCP_TUNNEL_SSH_DESTINATION" in env
+        assert "AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION" in env
+        assert not any("agent_tunnel-" in name for name in archive.getnames())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,declared", [("local", "gateway"), ("gateway", "local")])
+async def test_profile_cannot_override_the_control_plane_account_mode(
+    tmp_path, monkeypatch, mode, declared
+):
+    monkeypatch.setenv("AGENT_AUTH_MODE", mode)
+    bootstrap, profile, transport, secrets = setup(tmp_path)
+    secrets["deployment:env"] += f"\nAGENT_AUTH_MODE={declared}"
+    with pytest.raises(ProviderError, match="must match"):
+        await bootstrap._archive(profile, INTENT, None)
+    transport.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_local_profile_refuses_a_leftover_platform_inference_relay(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_AUTH_MODE", "local")
+    bootstrap, profile, transport, _secrets = setup(tmp_path)
+    with pytest.raises(ProviderError, match="must not configure"):
+        await bootstrap._archive(profile, INTENT, None)
+    transport.run.assert_not_awaited()

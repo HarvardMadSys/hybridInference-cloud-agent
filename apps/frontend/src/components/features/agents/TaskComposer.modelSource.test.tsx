@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
@@ -15,6 +15,7 @@ import { listSshServers } from '@/lib/api/sshServers';
 import { getUserProfile } from '@/lib/api/userProfile';
 
 import { TaskComposer } from './TaskComposer';
+import { announceModelConnectionsChanged } from './modelConnectionEvents';
 import { composerDraftStorageKey } from './useComposerDraft';
 
 // A model is chosen together with the source it runs on. These cover the new
@@ -419,5 +420,84 @@ describe('TaskComposer model sources', () => {
     fireEvent.click(screen.getByLabelText('Model'));
     expect(screen.getByRole('option', { name: 'messages-only · Mixed' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'chat-model · Mixed' })).toBeInTheDocument();
+  });
+});
+
+describe('local account model onboarding', () => {
+  it('offers an actionable setup link without a shared model or Rewrite', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({
+        gateway_inference: false,
+        model_connection_required: true,
+        models: [],
+        default_model: null,
+        model_connections: [],
+      }),
+    );
+    render(<TaskComposer />);
+    expect(await screen.findByRole('link', { name: 'Set up a model connection' })).toHaveAttribute(
+      'href',
+      '/settings/my-settings#settings-connections',
+    );
+    expect(screen.getByText(/Your provider manages billing and usage limits/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Rewrite prompt' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
+  });
+
+  it('honors an explicit disabled gate even if a stale response still contains personal models', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({
+        gateway_inference: false,
+        model_connection_required: true,
+        model_connections_enabled: false,
+        default_model: 'shared',
+        default_model_connection_id: CONNECTION,
+      }),
+    );
+    render(<TaskComposer />);
+    await screen.findByText('Model connections are unavailable');
+    expect(
+      screen.queryByRole('link', { name: 'Set up a model connection' }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Rewrite prompt' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
+  });
+
+  it('refreshes setup after a verified save, then holds a disabled same-name source without fallback', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({
+        gateway_inference: false,
+        model_connection_required: true,
+        models: [],
+        default_model: null,
+        model_connections: [],
+      }),
+    );
+    render(<TaskComposer />);
+    await chooseRepository();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep my unsent task' } });
+    choose('Agent', 'codex');
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ gateway_inference: false, default_model: null }),
+    );
+    act(() => announceModelConnectionsChanged());
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('link', { name: 'Set up a model connection' }),
+      ).not.toBeInTheDocument(),
+    );
+    choose('Model', 'shared · My provider');
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Run/ })).toBeEnabled());
+    vi.mocked(getAgentConfig).mockResolvedValue(config({ model_connections: [] }));
+    act(() => announceModelConnectionsChanged());
+    await waitFor(() =>
+      expect(screen.getByLabelText('Model')).toHaveAccessibleDescription(
+        'shared · personal connection (unavailable)',
+      ),
+    );
+    expect(screen.getByRole('textbox')).toHaveValue('Keep my unsent task');
+    expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+    expect(createAgentJob).not.toHaveBeenCalled();
   });
 });

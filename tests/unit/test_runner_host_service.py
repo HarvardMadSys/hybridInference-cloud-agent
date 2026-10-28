@@ -161,6 +161,8 @@ def service(monkeypatch):
     runner_mod._STOPPING.clear()
     monkeypatch.setenv("AGENT_DEPLOYMENT_SHA", "sha")
     monkeypatch.setenv("AGENT_HOST_SLOTS", "3")
+    monkeypatch.setenv("AGENT_AUTH_MODE", "gateway")
+    monkeypatch.setenv("AGENT_GATEWAY_URL", "http://gateway")
     identity = HostIdentity(
         host="host-a",
         credential="host-cred",
@@ -182,8 +184,6 @@ def service(monkeypatch):
     monkeypatch.setattr(runner_mod, "_shared_live_deployment_ready", lambda _b, _s: True)
     # The service is a loop that idles rather than exiting, which is what a
     # host does. A test drives it by scripting the queue and lets this stop it
-    # once it has gone quiet, so a full host — which idles by design — ends the
-    # test instead of spinning in it.
     idle = {"n": 0}
 
     def sleep(_seconds: float) -> None:
@@ -1532,12 +1532,12 @@ def test_the_cli_routes_turn_mode_and_hides_its_flags(monkeypatch):
 
     calls: dict[str, Any] = {}
     monkeypatch.setenv("AGENT_CONTROL_PLANE_URL", "http://control")
+    monkeypatch.setenv("AGENT_GATEWAY_URL", "http://gateway")
     monkeypatch.setattr(runner_mod, "configure_process_logging", lambda: None)
     monkeypatch.setattr(runner_mod, "_serve_turn", lambda **kw: calls.setdefault("turn", kw) and 0)
     monkeypatch.setattr(
         runner_mod, "run_forever", lambda **kw: calls.setdefault("service", kw) and 0
     )
-
     runner_mod.main(["--turn", "--handover-fd", "9", "--host", "host-a"])
     runner_mod.main(["--host", "host-a"])
 
@@ -1548,8 +1548,8 @@ def test_the_cli_routes_turn_mode_and_hides_its_flags(monkeypatch):
 def test_turn_mode_without_a_handover_descriptor_is_refused(monkeypatch):
     """The host service supplies both flags; one alone is a hand-built command."""
     monkeypatch.setenv("AGENT_CONTROL_PLANE_URL", "http://control")
+    monkeypatch.setenv("AGENT_GATEWAY_URL", "http://gateway")
     monkeypatch.setattr(runner_mod, "configure_process_logging", lambda: None)
-
     with pytest.raises(SystemExit):
         runner_mod.main(["--turn", "--host", "host-a"])
 

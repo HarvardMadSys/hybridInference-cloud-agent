@@ -837,3 +837,10 @@ describe('LedgerUsage on an owner connection', () => {
     expect(refreshAgentJobUsage).not.toHaveBeenCalled();
   });
 });
+
+it('a personal turn names provider-owned billing before any usage response arrives', () => {
+  render(<UsageView job={{ ...job, modelConnectionId: 'mconn_personal' }} usage={null} />);
+  expect(screen.getByText(/your provider bills it/)).toBeInTheDocument();
+  expect(screen.getByLabelText('Usage')).not.toHaveTextContent('$');
+  expect(screen.queryByText('Usage temporarily unavailable.')).not.toBeInTheDocument();
+});

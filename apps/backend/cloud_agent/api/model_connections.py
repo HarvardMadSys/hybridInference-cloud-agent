@@ -63,6 +63,7 @@ from cloud_agent.application.model_connections import (
 )
 from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.domain.model_connections import (
+    ModelConnectionAccessEnded,
     ModelConnectionConflict,
     ModelConnectionInvalid,
     clean_base_url,
@@ -82,6 +83,22 @@ if TYPE_CHECKING:
 
 class _ConnectionRoute(SensitiveRoute):
     """Answer which field was invalid and why, never the value that was sent."""
+
+    def domain_response(self, exc: Exception) -> JSONResponse | None:
+        if not isinstance(exc, ModelConnectionAccessEnded):
+            return None
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": {
+                    "error": {
+                        "type": "model_connection_access_ended",
+                        "message": "Agent access ended while the connection was being saved. "
+                        "Nothing was saved.",
+                    }
+                }
+            },
+        )
 
     def validation_response(self, exc: Exception) -> JSONResponse:
         errors = exc.errors() if isinstance(exc, RequestValidationError) else []

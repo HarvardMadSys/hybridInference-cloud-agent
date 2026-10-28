@@ -109,6 +109,7 @@ from cloud_agent_host.host_runtime import (
     requested_slots,
     write_handover,
 )
+from cloud_agent_host.inference import inference_gateway_url
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
 from cloud_agent_host.measurement_delivery import (
     DELIVERY_ATTEMPTS_MAX,
@@ -3852,9 +3853,10 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     else:
         backend.preflight()
 
+    gateway_url = inference_gateway_url(gateway_url or os.environ.get("AGENT_GATEWAY_URL", ""))
     checker = getattr(backend, "check_gateway_reachable", None)
-    if checker is not None:
-        checker(gateway_url or base_url)
+    if checker is not None and gateway_url:
+        checker(gateway_url)
 
     stamper = getattr(backend, "version_stamp", None)
     stamp: dict[str, Any] = stamper() if stamper is not None else {}
@@ -3899,7 +3901,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         lambda payload: _spawn_turn(
             payload,
             base_url=base_url,
-            gateway_url=gateway_url or base_url,
+            gateway_url=gateway_url,
             worker_id=str(payload.get("_worker_id") or worker_id),
             lease_ttl=lease_ttl,
             agent_timeout_s=agent_timeout_s,
@@ -4793,16 +4795,8 @@ def build_parser() -> argparse.ArgumentParser:
     a runner container crash-loops.
     """
     parser = argparse.ArgumentParser(description="Run queued agent jobs.")
-    # **Two origins, and after the split they are two services.** The runner
-    # claims work, reports events and renews its lease against this *control
-    # plane*; the sandbox calls models against the *gateway*. They were one
-    # value while the agent lived inside the gateway, and pointing that single
-    # value at either service after the split breaks whichever half it is not.
-    #
-    # `AGENT_CONTROL_PLANE_URL` falls back to the gateway URL so a host that
-    # has not been reconfigured keeps behaving exactly as it did — wrong in the
-    # same way as before rather than newly broken, which is the only safe
-    # default while both shapes are deployed.
+    # Management and inference are separate origins. A local-account host has
+    # only the first; its owners supply their own inference connections.
     parser.add_argument(
         "--base-url",
         default=os.environ.get("AGENT_CONTROL_PLANE_URL")
@@ -4860,6 +4854,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.base_url:
         parser.error("AGENT_CONTROL_PLANE_URL (or AGENT_GATEWAY_URL) is required")
+    try:
+        args.gateway_url = inference_gateway_url(args.gateway_url)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.turn:
         if args.handover_fd is None:
@@ -4867,7 +4865,7 @@ def main(argv: list[str] | None = None) -> int:
         return _serve_turn(
             handover_fd=args.handover_fd,
             base_url=args.base_url,
-            gateway_url=args.gateway_url or args.base_url,
+            gateway_url=args.gateway_url,
             worker_id=args.worker_id,
             lease_ttl=args.lease_ttl,
             agent_timeout_s=args.agent_timeout,
@@ -4875,7 +4873,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     return run_forever(
         base_url=args.base_url,
-        gateway_url=args.gateway_url or args.base_url,
+        gateway_url=args.gateway_url,
         worker_id=args.worker_id,
         lease_ttl=args.lease_ttl,
         agent_timeout_s=args.agent_timeout,

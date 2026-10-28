@@ -1035,3 +1035,35 @@ describe('fixing completed side chat reviews', () => {
     expect(submitThreadMessage).not.toHaveBeenCalled();
   });
 });
+
+it('an open side chat keeps a deleted personal source unavailable instead of sending to its Gateway namesake', async () => {
+  const source = 'mconn_0123456789abcdef0123456789abcdef';
+  const personal = { ...anchor, model_connection_id: source };
+  jobs = jobs.map((job) => ({ ...job, model_connection_id: source }));
+  const sourceProps = { ...props(), sourceJob: toDisplayJob(personal), sourceJobs: [personal] };
+  const view = render(
+    <SideChat
+      {...sourceProps}
+      config={{
+        ...config,
+        model_connections: [
+          {
+            id: source,
+            name: 'Mine',
+            models: ['model-a'],
+            model_runtimes: { 'model-a': ['codex'] },
+          },
+        ],
+      }}
+    />,
+  );
+  await ready();
+  view.rerender(<SideChat {...sourceProps} config={{ ...config, model_connections: [] }} />);
+  expect(screen.getByRole('button', { name: 'Side chat model' })).toHaveAccessibleDescription(
+    'model-a · personal connection (unavailable)',
+  );
+  expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeDisabled();
+  fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+  fireEvent.submit(screen.getByRole('textbox').closest('form')!);
+  expect(submitThreadMessage).not.toHaveBeenCalled();
+});

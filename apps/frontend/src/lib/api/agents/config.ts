@@ -64,6 +64,10 @@ export interface AgentConfigApi {
   model_connections?: ModelConnectionOptionApi[];
   /** Whether this deployment lets owners add and run on their own connections. */
   model_connections_enabled?: boolean;
+  /** Local account without a usable personal model; setup is gated separately. */
+  model_connection_required?: boolean;
+  /** False for local accounts: no Gateway defaults, rewrite or shared inference. */
+  gateway_inference?: boolean;
   /**
    * Whether this user has done what the deployment asks before choosing a
    * repository: connected GitHub where users can, or been given a repository by

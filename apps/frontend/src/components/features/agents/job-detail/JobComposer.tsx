@@ -22,6 +22,7 @@ import type { useAttachments } from '../attachments/useAttachments';
 import { isSteerChord } from '../composerKeys';
 import { hasLostContext } from '../conversationJob';
 import { modelOverride } from '../modelSource';
+import { ModelConnectionNotice } from '../ModelConnectionNotice';
 import { GoalBar } from '../goal/GoalBar';
 import { hasLiveWork } from '../goal/liveWork';
 import { useGoalCommand, type GoalCommandControls } from '../goal/useGoalCommand';
@@ -423,6 +424,7 @@ export function JobComposer({
                 {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
                 {steerNote(queue.canSendNow, otherModel, apple, t)}
               </p>
+              <ModelConnectionNotice config={config} />
               <p
                 role="status"
                 hidden={!inheritedUnavailable}

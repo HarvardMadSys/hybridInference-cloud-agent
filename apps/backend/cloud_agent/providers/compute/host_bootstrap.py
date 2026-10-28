@@ -30,6 +30,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     RecordedHostState,
     TransferResult,
 )
+from cloud_agent.providers.compute.host_inference import profile_tunnel_prefixes
 from cloud_agent.providers.compute.release_scripts import _INVENTORY, _QUIESCE
 from cloud_agent.providers.compute.ssh import known_hosts_line
 from cloud_agent.providers.compute.transfer_scripts import (
@@ -556,7 +557,7 @@ with open(lock_path, 'a') as lock:
         run('data_mount_failed', ['systemctl', 'daemon-reload'])
     if params['install']:
         run('prerequisites_update_failed', ['apt-get', 'update'])
-        run('prerequisites_install_failed', ['apt-get', 'install', '-y', 'docker.io', 'docker-compose-v2', 'docker-buildx', 'curl', 'ca-certificates', 'xz-utils', 'zstd', 'rsync', 'nftables'])
+        run('prerequisites_install_failed', ['apt-get', 'install', '-y', 'docker.io', 'docker-compose-v2', 'docker-buildx', 'curl', 'ca-certificates', 'xz-utils', 'zstd', 'rsync', 'nftables', 'python3-yaml'])
         run('docker_start_failed', ['systemctl', 'enable', '--now', 'docker'])
         # The bundled script validates its pinned download checksum and KVM.
         run('kata_install_failed', ['bash', 'deploy/host/setup_kata_runtime.sh'])
@@ -638,13 +639,15 @@ _FORBIDDEN_ENV = {
     "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
     "AGENT_CONTROL_TOKEN_SECRET",
     "AGENT_SESSION_SECRET",
+    "AGENT_LOCAL_SESSION_SECRET",
+    "AGENT_SMTP_PASSWORD",
     "AGENT_SANDBOX_ALLOW_OPEN_NETWORK",
     "AGENT_EGRESS_AGENT_TIER",
     "ALLOW_UNSAFE_CONTAINER_BACKEND",
 }
 
 
-def _repack(source: bytes, assets: dict[str, bytes]) -> bytes:
+def _repack(source: bytes, assets: dict[str, bytes], *, local: bool = False) -> bytes:
     """Rebuild a verified release bundle with this deployment's private files.
 
     CPU-bound and synchronous: callers run it in a worker thread.
@@ -695,6 +698,8 @@ def _repack(source: bytes, assets: dict[str, bytes]) -> bytes:
                 "deploy/host/docker-compose.sandbox.yml",
                 "pyproject.toml",
             }
+            if local:
+                required_files.add("deploy/host/inference_compose.py")
             if not required_files <= found:
                 raise ProviderError(
                     "deployment_profile_invalid",
@@ -906,6 +911,7 @@ class SshHostBootstrap:
         }.items():
             template = template.replace("{" + key + "}", value)
         values = manager_environment(dotenv_values(stream=io.StringIO(template), interpolate=False))
+        tunnel_prefixes = profile_tunnel_prefixes(values)
         if (
             any(
                 not name.startswith("AGENT_") and name not in _ALLOWED_NON_AGENT_ENV
@@ -918,7 +924,12 @@ class SshHostBootstrap:
                 "deployment_profile_invalid",
                 "Deployment profile violates the approved host security boundary",
             )
-        if any(not values.get(name) for name in _REQUIRED_ENV):
+        required = {
+            name
+            for name in _REQUIRED_ENV
+            if not name.startswith("AGENT_TUNNEL_") or "AGENT_TUNNEL" in tunnel_prefixes
+        }
+        if any(not values.get(name) for name in required):
             raise ProviderError(
                 "deployment_profile_invalid",
                 "Deployment profile is missing required relay, sandbox manager or network settings",
@@ -965,7 +976,7 @@ class SshHostBootstrap:
             # OpenSSH refuses a private key without its final newline, and
             # profiles saved before inputs were kept exactly have lost it.
             assets[name] = ((await self._resolver.resolve(ref)).rstrip() + "\n").encode()
-        for prefix in ("AGENT_TUNNEL", "AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
+        for prefix in tunnel_prefixes:
             for suffix in ("SSH_KEY", "SSH_KNOWN_HOSTS"):
                 path = values[f"{prefix}_{suffix}"] or ""
                 relative = path.removeprefix(profile.deploy_root + "/")
@@ -974,7 +985,9 @@ class SshHostBootstrap:
                         "deployment_profile_invalid",
                         "Relay credentials must refer to this profile's dedicated deployed files",
                     )
-        return await asyncio.to_thread(_repack, source, assets)
+        return await asyncio.to_thread(
+            _repack, source, assets, local=values["AGENT_AUTH_MODE"] == "local"
+        )
 
     async def deploy(
         self,

@@ -75,7 +75,7 @@ def resident_launch(
     through the same egress as any other, not a relay.
     """
     gateway_base_url = (os.environ.get("AGENT_GATEWAY_URL") or body.gateway_base_url).strip()
-    if not gateway_base_url:
+    if not gateway_base_url and not body.inference_source:
         raise SandboxError("resident launch has no sandbox-reachable gateway URL")
     return ResidentLaunch(
         thread_id=thread_id,

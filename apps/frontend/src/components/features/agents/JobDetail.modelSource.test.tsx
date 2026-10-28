@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getAgentConfig, type AgentConfigApi, type AgentJobApi } from '@/lib/api/agents';
 import { submitThreadMessage } from '@/lib/api/pendingMessages';
 import { rewritePrompt } from '@/lib/api/promptRewrite';
 import { JobDetail } from './JobDetail';
+import { announceModelConnectionsChanged } from './modelConnectionEvents';
 import type { AgentJob } from './types';
 
 // A follow-up inherits its model *and* that model's source, and a switch
@@ -235,4 +236,48 @@ describe('follow-up model sources', () => {
     chooseModel('shared');
     expect(screen.getByRole('button', { name: 'Rewrite prompt' })).toBeEnabled();
   });
+});
+
+it('refreshes an explicitly switched personal source and blocks click, Enter and form submission after deletion', async () => {
+  render(<JobDetail job={makeJob()} />);
+  await screen.findByLabelText('Model for this turn');
+  chooseModel('shared · My provider');
+  fireEvent.change(screen.getByLabelText('Add a follow-up'), {
+    target: { value: 'Keep this draft' },
+  });
+  vi.mocked(getAgentConfig).mockResolvedValue({ ...CONFIG, model_connections: [] });
+  act(() => announceModelConnectionsChanged());
+  await waitFor(() =>
+    expect(screen.getByLabelText('Model for this turn')).toHaveAccessibleDescription(
+      'shared · personal connection (unavailable)',
+    ),
+  );
+  expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
+  fireEvent.keyDown(screen.getByLabelText('Add a follow-up'), { key: 'Enter' });
+  fireEvent.submit(screen.getByLabelText('Add a follow-up').closest('form')!);
+  await waitFor(() =>
+    expect(screen.getByLabelText('Add a follow-up')).toHaveValue('Keep this draft'),
+  );
+  expect(submitThreadMessage).not.toHaveBeenCalled();
+  chooseModel('shared');
+  await waitFor(() => expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeEnabled());
+  await send('Explicitly use Gateway');
+  // This is the original turn's Gateway pair, so inheritance needs no override.
+  await waitFor(() => expect(gatewayCall()).toMatchObject({ prompt: 'Explicitly use Gateway' }));
+  expect(gatewayCall()).not.toHaveProperty('model');
+});
+
+it('hides Rewrite and gives local account setup guidance when its connection is gone', async () => {
+  vi.mocked(getAgentConfig).mockResolvedValue({
+    ...CONFIG,
+    gateway_inference: false,
+    model_connection_required: true,
+    models: [],
+    model_connections: [],
+  });
+  render(<JobDetail job={makeJob({ modelConnectionId: CONNECTION })} />);
+  await screen.findByRole('link', { name: 'Set up a model connection' });
+  expect(screen.queryByRole('button', { name: 'Rewrite prompt' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeDisabled();
 });

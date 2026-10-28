@@ -68,7 +68,7 @@ UNUSABLE_MESSAGES: dict[str, str] = {
         "Reasoning effort cannot be set for a model connection; leave it on Auto."
     ),
     "feature_disabled": (
-        "This deployment has not turned on model connections. Choose a Gateway model."
+        "This deployment has not turned on model connections. Contact the deployment administrator."
     ),
     "changed": (
         "This task's model connection changed while the turn was starting. "
@@ -83,6 +83,10 @@ class ModelConnectionInvalid(ValueError):
 
 class ModelConnectionConflict(Exception):
     """The owner already has a live connection with that name."""
+
+
+class ModelConnectionAccessEnded(Exception):
+    """The local owner no longer has Agent access when a verified save commits."""
 
 
 class ModelConnectionUnusable(Exception):
@@ -264,6 +268,7 @@ __all__ = [
     "SUPPORTED",
     "UNSUPPORTED",
     "UNUSABLE_MESSAGES",
+    "ModelConnectionAccessEnded",
     "ModelConnectionConflict",
     "ModelConnectionInvalid",
     "ModelConnectionUnusable",

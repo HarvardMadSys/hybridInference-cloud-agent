@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 00:30-0400\n"
+"POT-Creation-Date: 2026-10-28 22:09+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -38,25 +38,13 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0106_local_accounts`. The supported deployment scripts run migrations "
+"`0107_local_accounts`. The supported deployment scripts run migrations "
 "before replacing the API; every migration listed here is additive and "
 "safe under the running previous release unless it says otherwise. The few"
 " transitions that need stopped writers are listed in [applying migrations"
 " that are not backwards-compatible](operations.md#applying-migrations-"
 "that-are-not-backwards-compatible)."
-msgstr "启动本次发布之前，先运行 `alembic upgrade head`，升级到 `0106_local_accounts`。官方支持的部署脚本会在替换 API 之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数需要先停掉写入操作的迁移，列在[执行不向后兼容的迁移](operations.md#applying-migrations-that-are-not-backwards-compatible)中。"
-
-"`0106_user_model_connections`. The supported deployment scripts run "
-"migrations before replacing the API; every migration listed here is "
-"additive and safe under the running previous release unless it says "
-"otherwise. The few transitions that need stopped writers are listed in "
-"[applying migrations that are not backwards-compatible](operations.md"
-"#applying-migrations-that-are-not-backwards-compatible)."
-msgstr ""
-"启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0106_user_model_connections`。官方支持的部署脚本会在替换 API "
-"之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数几个需要先停掉所有写入的迁移，列在[执行不向后兼容的迁移](operations.md"
-"#applying-migrations-that-are-not-backwards-compatible)。"
+msgstr "启动本次发布之前，先运行 `alembic upgrade head`，升级到 `0107_local_accounts`。官方支持的部署脚本会在替换 API 之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数需要先停掉写入操作的迁移，列在[执行不向后兼容的迁移](operations.md#applying-migrations-that-are-not-backwards-compatible)中。"
 
 #: ../developer/upgrade-notes.md:18
 msgid ""
@@ -143,8 +131,8 @@ msgid "What it changes"
 msgstr "改了什么"
 
 #: ../developer/upgrade-notes.md
-msgid "`0106_local_accounts`"
-msgstr "`0106_local_accounts`"
+msgid "`0107_local_accounts`"
+msgstr "`0107_local_accounts`"
 
 #: ../developer/upgrade-notes.md
 msgid ""
@@ -156,6 +144,7 @@ msgid ""
 "them, and with them every local account."
 msgstr "创建本地账号使用的空表（`AGENT_AUTH_MODE=local`）：账号、密码登录、等候名单准入、服务端会话、邮件令牌、防滥用计数器、访问终止记录和本地身份标记。它不会修改现有行，也不会锁定现有表。网关模式的部署不会写入这些表。降级会删除这些表及其中所有本地账号。"
 
+#: ../developer/upgrade-notes.md
 msgid "`0106_user_model_connections`"
 msgstr "`0106_user_model_connections`"
 
@@ -178,18 +167,16 @@ msgid ""
 "they would continue on the Gateway ([owner model "
 "connections](operations.md#owner-model-connections))."
 msgstr ""
-"为所有者自己的推理端点（Chat Completions、Responses "
-"或 Anthropic Messages）新增 `agent_model_connections`、"
-"`agent_model_connection_checks` 和 `agent_model_connection_scan_keys` "
-"三张表，新增可为空的来源列 `agent_jobs.model_connection_id` "
-"和 `agent_pending_messages.model_connection_id`，"
-"并新增单独的 `agent_model_connection_residencies` "
-"表，把驻留成员的进程在一个驻留代次内绑定到一个连接修订版本（单独建表，是为了让仍在运行的上一版本针对成员表的预编译语句继续可用）"
-"。不改写任何行，已有的轮次都读作网关轮次（NULL）。在设置 `AGENT_MODEL_CONNECTIONS_ENABLED` "
-"之前该功能保持关闭，而设置它之前，每台主机和每个控制平面副本都必须先运行本次发布。"
-"只要还存在任何连接，或者有任何轮次、等待中的消息或驻留成员指向某个连接（包括已结束的会话）"
-"，降级就会拒绝执行，因为没有这些列，它们会在网关上继续运行（见[所有者模型连接](operations.md#owner-model-connections)"
-"）。"
+"为所有者自己的推理端点（Chat Completions、Responses 或 Anthropic Messages）新增 "
+"`agent_model_connections`、`agent_model_connection_checks` 和 "
+"`agent_model_connection_scan_keys` 三张表，新增可为空的来源列 "
+"`agent_jobs.model_connection_id` 和 "
+"`agent_pending_messages.model_connection_id`，并新增单独的 "
+"`agent_model_connection_residencies` "
+"表，把驻留成员的进程在一个驻留代次内绑定到一个连接修订版本（单独建表，是为了让仍在运行的上一版本针对成员表的预编译语句继续可用）。不改写任何行，已有的轮次都读作网关轮次（NULL）。在设置"
+" `AGENT_MODEL_CONNECTIONS_ENABLED` "
+"之前该功能保持关闭，而设置它之前，每台主机和每个控制平面副本都必须先运行本次发布。只要还存在任何连接，或者有任何轮次、等待中的消息或驻留成员指向某个连接（包括已结束的会话），降级就会拒绝执行，因为没有这些列，它们会在网关上继续运行（见[所有者模型连接](operations.md"
+"#owner-model-connections)）。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0105_job_event_usage_summary`"
@@ -791,7 +778,7 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:102
+#: ../developer/upgrade-notes.md:103
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
@@ -805,11 +792,11 @@ msgstr ""
 "之前已退役的旧迁移链，就无法直接升级；见[保留旧迁移链的数据库](operations.md#preserving-an-old-chain-"
 "database)。"
 
-#: ../developer/upgrade-notes.md:108
+#: ../developer/upgrade-notes.md:109
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:110
+#: ../developer/upgrade-notes.md:111
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"

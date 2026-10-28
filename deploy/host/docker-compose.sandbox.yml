@@ -188,6 +188,7 @@ services:
       # file — setting them in the host's .env was a no-op. `json` renders the
       # structured fields these services already log.
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+      AGENT_AUTH_MODE: ${AGENT_AUTH_MODE:-gateway}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
       AGENT_OPERATION_PROFILING_ENABLED: ${AGENT_OPERATION_PROFILING_ENABLED:-false}
       AGENT_OPERATION_PROFILING_RUN: ${AGENT_OPERATION_PROFILING_RUN:-}
@@ -277,6 +278,7 @@ services:
       # file — setting them in the host's .env was a no-op. `json` renders the
       # structured fields these services already log.
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+      AGENT_AUTH_MODE: ${AGENT_AUTH_MODE:-gateway}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
       AGENT_OPERATION_PROFILING_ENABLED: ${AGENT_OPERATION_PROFILING_ENABLED:-false}
       AGENT_OPERATION_PROFILING_RUN: ${AGENT_OPERATION_PROFILING_RUN:-}

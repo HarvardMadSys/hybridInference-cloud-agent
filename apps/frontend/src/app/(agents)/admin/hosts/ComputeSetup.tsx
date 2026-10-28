@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { Select } from '@/components/ui/Select';
+import { useSignedInAuthMode } from '@/components/providers/AuthProvider';
 import { config } from '@/config/env';
 import {
   createAutomaticComputeSetup,
@@ -32,19 +33,96 @@ type SavedAutomaticSetup = {
   parameters: AutomaticSetupParameters;
 };
 
+/** Local hosts connect only to the control plane; never submit a hidden Gateway target. */
+function gatewayParameters(
+  local: boolean,
+  machine: { connection_id: string; address: string; port: string; username: string },
+  port: string,
+): Pick<AutomaticSetupParameters, 'gateway' | 'gateway_port'> {
+  if (local) return {};
+  return {
+    gateway: {
+      connection_id: machine.connection_id,
+      address: machine.address.trim(),
+      port: Number(machine.port),
+      username: machine.username.trim(),
+    },
+    gateway_port: Number(port),
+  };
+}
+
+function AutomaticSetupIntro({
+  local,
+  hasConnections,
+}: {
+  local: boolean;
+  hasConnections: boolean;
+}) {
+  const machines = local ? 'control-plane machine' : 'gateway and control-plane machines';
+  return (
+    <>
+      <p className="text-sm text-gray-600 dark:text-gray-300">
+        Select your {machines} and confirm the sandbox network. Cloud Agent uses its deployed
+        release, creates the Host environment and dedicated tunnel credentials, and configures the
+        connections automatically.
+      </p>
+      {!hasConnections && (
+        <p className="text-sm text-gray-600 dark:text-gray-300">
+          Add SSH connections for the {machines} under Connections first.
+        </p>
+      )}
+      <p className="text-sm text-gray-600 dark:text-gray-300">
+        Use SSH accounts with passwordless sudo on the stable machines.{' '}
+        {local
+          ? 'The control plane runs the main API and MCP listener. Owners provide their own inference connections.'
+          : 'The gateway serves inference; the control plane runs the main API and MCP listener.'}
+      </p>
+    </>
+  );
+}
+
+function GatewayInferencePort({
+  local,
+  value,
+  onChange,
+}: {
+  local: boolean;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  if (local) return null;
+  return (
+    <details>
+      <summary className="cursor-pointer text-sm">Custom inference port</summary>
+      <label className="mt-3 block text-sm">
+        <span className="mb-1 block font-medium">Gateway inference port</span>
+        <input
+          className={inputClass}
+          type="number"
+          min={1}
+          max={65535}
+          required
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </label>
+    </details>
+  );
+}
+
 function automaticSetupStorageKey() {
   return `cloud-agent:automatic-server-setup:${config.apiBase}:${window.location.pathname}`;
 }
 
 function setupSignature(parameters: AutomaticSetupParameters) {
-  const target = (machine: AutomaticSetupParameters['gateway']) => [
+  const target = (machine: AutomaticSetupParameters['control']) => [
     machine.connection_id,
     machine.address,
     machine.port,
     machine.username,
   ];
   return JSON.stringify([
-    target(parameters.gateway),
+    parameters.gateway ? target(parameters.gateway) : null,
     target(parameters.control),
     parameters.gateway_port,
     parameters.chat_network_pool,
@@ -67,9 +145,9 @@ function isSetupParameters(value: unknown): value is AutomaticSetupParameters {
     );
   };
   return (
-    isMachine(parameters.gateway) &&
+    (parameters.gateway == null || isMachine(parameters.gateway)) &&
     isMachine(parameters.control) &&
-    Number.isInteger(parameters.gateway_port) &&
+    (parameters.gateway_port === undefined || Number.isInteger(parameters.gateway_port)) &&
     typeof parameters.chat_network_pool === 'string' &&
     typeof parameters.dns_server === 'string' &&
     Array.isArray(parameters.protected_cidrs) &&
@@ -168,6 +246,7 @@ function AutomaticComputeSetup({
   onSaved: () => void;
   onBusy: (busy: boolean) => void;
 }) {
+  const local = useSignedInAuthMode() === 'local';
   const sshConnections = connections.filter(
     (connection) => connection.provider_id === 'existing_ssh',
   );
@@ -209,9 +288,10 @@ function AutomaticComputeSetup({
             ? result.pending_request_id
             : saved?.request_id;
         if (parameters) {
-          setGateway({ ...parameters.gateway, port: String(parameters.gateway.port) });
+          if (parameters.gateway)
+            setGateway({ ...parameters.gateway, port: String(parameters.gateway.port) });
           setControl({ ...parameters.control, port: String(parameters.control.port) });
-          setGatewayPort(String(parameters.gateway_port));
+          setGatewayPort(String(parameters.gateway_port ?? 8080));
           setNetworkPool(parameters.chat_network_pool);
           setDnsServer(parameters.dns_server);
           setProtectedCidrs(parameters.protected_cidrs.join('\n'));
@@ -222,7 +302,7 @@ function AutomaticComputeSetup({
           }
         } else if (result.machine_defaults) {
           const machines = result.machine_defaults;
-          setGateway((current) => ({ ...current, address: machines.gateway.address }));
+          setGateway((current) => ({ ...current, address: machines.gateway?.address ?? '' }));
           setControl((current) => ({ ...current, address: machines.control.address }));
         }
         setStatus(result);
@@ -240,19 +320,13 @@ function AutomaticComputeSetup({
     setError(null);
     try {
       const parameters = {
-        gateway: {
-          connection_id: gateway.connection_id,
-          address: gateway.address.trim(),
-          port: Number(gateway.port),
-          username: gateway.username.trim(),
-        },
+        ...gatewayParameters(local, gateway, gatewayPort),
         control: {
           connection_id: control.connection_id,
           address: control.address.trim(),
           port: Number(control.port),
           username: control.username.trim(),
         },
-        gateway_port: Number(gatewayPort),
         chat_network_pool: networkPool.trim(),
         dns_server: dnsServer.trim(),
         protected_cidrs: protectedCidrs.split(/[\s,]+/).filter(Boolean),
@@ -291,11 +365,7 @@ function AutomaticComputeSetup({
         void submit();
       }}
     >
-      <p className="text-sm text-gray-600 dark:text-gray-300">
-        Select your gateway and control-plane machines and confirm the sandbox network. Cloud Agent
-        uses its deployed release, creates the Host environment and dedicated tunnel credentials,
-        and configures the connections automatically.
-      </p>
+      <AutomaticSetupIntro local={local} hasConnections={sshConnections.length > 0} />
       {!status && !error && <p role="status">Checking automatic setup availability…</p>}
       {status && !status.available && (
         <div role="alert" className="space-y-2 text-sm text-amber-700 dark:text-amber-300">
@@ -305,15 +375,6 @@ function AutomaticComputeSetup({
           ))}
         </div>
       )}
-      {sshConnections.length === 0 && (
-        <p className="text-sm text-gray-600 dark:text-gray-300">
-          Add SSH connections for the gateway and control-plane machines under Connections first.
-        </p>
-      )}
-      <p className="text-sm text-gray-600 dark:text-gray-300">
-        Use SSH accounts with passwordless sudo on the stable machines. The gateway serves
-        inference; the control plane runs the main API and MCP listener.
-      </p>
       <fieldset className="space-y-4" disabled={busy || !status?.available}>
         <div className="grid gap-4 sm:grid-cols-2">
           {(
@@ -321,76 +382,64 @@ function AutomaticComputeSetup({
               ['Gateway', gateway, setGateway],
               ['Control-plane', control, setControl],
             ] as const
-          ).map(([name, value, update]) => (
-            <fieldset className="space-y-3" key={name}>
-              <legend className="mb-2 text-sm font-semibold">{name} machine</legend>
-              <label className="block text-sm">
-                <span className="mb-1 block font-medium">{name} host address</span>
-                <input
-                  className={inputClass}
-                  required
-                  value={value.address}
-                  onChange={(event) => update({ ...value, address: event.target.value })}
-                />
-              </label>
-              <label className="block text-sm">
-                <span className="mb-1 block font-medium">{name} SSH username</span>
-                <input
-                  className={inputClass}
-                  required
-                  value={value.username}
-                  onChange={(event) => update({ ...value, username: event.target.value })}
-                />
-              </label>
-              <label className="block text-sm">
-                <span className="mb-1 block font-medium">{name} SSH connection</span>
-                <Select
-                  className={inputClass}
-                  required
-                  value={value.connection_id}
-                  onValueChange={(next) => update({ ...value, connection_id: next })}
-                  options={[
-                    { value: '', label: 'Select an administrative SSH key' },
-                    ...sshConnections.map((connection) => ({
-                      value: connection.id,
-                      label: connection.name,
-                    })),
-                  ]}
-                />
-              </label>
-              <details>
-                <summary className="cursor-pointer text-sm">Custom SSH port</summary>
-                <label className="mt-3 block text-sm">
-                  <span className="mb-1 block font-medium">{name} SSH port</span>
+          )
+            .filter(([name]) => !local || name !== 'Gateway')
+            .map(([name, value, update]) => (
+              <fieldset className="space-y-3" key={name}>
+                <legend className="mb-2 text-sm font-semibold">{name} machine</legend>
+                <label className="block text-sm">
+                  <span className="mb-1 block font-medium">{name} host address</span>
                   <input
                     className={inputClass}
-                    type="number"
-                    min={1}
-                    max={65535}
                     required
-                    value={value.port}
-                    onChange={(event) => update({ ...value, port: event.target.value })}
+                    value={value.address}
+                    onChange={(event) => update({ ...value, address: event.target.value })}
                   />
                 </label>
-              </details>
-            </fieldset>
-          ))}
+                <label className="block text-sm">
+                  <span className="mb-1 block font-medium">{name} SSH username</span>
+                  <input
+                    className={inputClass}
+                    required
+                    value={value.username}
+                    onChange={(event) => update({ ...value, username: event.target.value })}
+                  />
+                </label>
+                <label className="block text-sm">
+                  <span className="mb-1 block font-medium">{name} SSH connection</span>
+                  <Select
+                    className={inputClass}
+                    required
+                    value={value.connection_id}
+                    onValueChange={(next) => update({ ...value, connection_id: next })}
+                    options={[
+                      { value: '', label: 'Select an administrative SSH key' },
+                      ...sshConnections.map((connection) => ({
+                        value: connection.id,
+                        label: connection.name,
+                      })),
+                    ]}
+                  />
+                </label>
+                <details>
+                  <summary className="cursor-pointer text-sm">Custom SSH port</summary>
+                  <label className="mt-3 block text-sm">
+                    <span className="mb-1 block font-medium">{name} SSH port</span>
+                    <input
+                      className={inputClass}
+                      type="number"
+                      min={1}
+                      max={65535}
+                      required
+                      value={value.port}
+                      onChange={(event) => update({ ...value, port: event.target.value })}
+                    />
+                  </label>
+                </details>
+              </fieldset>
+            ))}
         </div>
-        <details>
-          <summary className="cursor-pointer text-sm">Custom inference port</summary>
-          <label className="mt-3 block text-sm">
-            <span className="mb-1 block font-medium">Gateway inference port</span>
-            <input
-              className={inputClass}
-              type="number"
-              min={1}
-              max={65535}
-              required
-              value={gatewayPort}
-              onChange={(event) => setGatewayPort(event.target.value)}
-            />
-          </label>
-        </details>
+        <GatewayInferencePort local={local} value={gatewayPort} onChange={setGatewayPort} />
         <div className="grid gap-4 sm:grid-cols-2">
           <label className="text-sm">
             <span className="mb-1 block font-medium">Server setup capacity</span>

@@ -1,7 +1,7 @@
 # Cloud Agent 独立账号与 waiting list
 
-日期：2026-10-27；更新：2026-10-28。状态：账号与 waiting list 首版实现及测试已完成，
-BYOK 全链路集成待执行；未部署或迁移生产数据。
+日期：2026-10-27；更新：2026-10-28。状态：账号与 waiting list 首版已实现，
+正在整合个人模型连接及完整验收；未部署或迁移生产数据。
 
 [验收记录](../reviews/2026-10-28-independent-accounts-acceptance.md)记录代码版本、测试环境、结果及未覆盖范围。
 
@@ -13,7 +13,9 @@ HybridInference `321e9a6c457dcc80d35977aaac472d54041204a8`。
 
 - Cloud Agent 拥有独立账号、独立申请与审批，不要求用户先拥有获批的 HybridInference 账号。
 - 复用 HybridInference 已有登录系统的代码和交互，适配到 Cloud Agent；不另起一套邮箱验证码登录方案。
-- 个人模型连接由用户配置。其推理费用和上游限额归所提供的 API key，不共享 HybridInference 的个人额度。
+- 个人模型连接由用户配置，Cloud Agent 不提供共享模型、平台 key 或额外推理额度。
+  费用和限额仍归所填 key 的上游账号；若使用同一 FreeInference 账号的 key，仍可能共用其额度。
+  Cloud Agent 账号独立不等于上游额度独立。
 - 身份与 waiting list、个人模型连接两条线并行推进；先明确产品与接口，再分别实现和集成。
 - 复用代码不意味着共享用户数据库、会话、签名密钥或运行时 Python 导入。
 
@@ -25,7 +27,8 @@ HybridInference `321e9a6c457dcc80d35977aaac472d54041204a8`。
 1. 用户在 Cloud Agent 注册并验证邮箱，建立本地身份。
 2. 提交 Agent 使用申请，可填写用途；登录后看到申请状态。
 3. 管理员在 Agent 后台查看、批准或拒绝申请。批准只授予 `agent.use`。
-4. 获批用户配置自己的模型连接，创建任务、续聊和 Fork。
+4. 获批用户填写自己的 FreeInference 或其他兼容服务的 Base URL、API key 与模型；
+   验证成功才保存，然后选择该连接创建任务、续聊和 Fork。
 5. 管理员可以撤销 Agent 准入；停用账号还会撤销该账号的登录会话。
 6. 只有显式授予 `agent.admin` 的用户可管理平台；不能依据 Gateway role 或邮箱匹配隐式提权。
 
@@ -107,7 +110,7 @@ A0 同时定义 `terminate_owner_access(user_id, reason, generation)` 的应用�
 ## 5. 本地数据与会话
 
 按能力拆出账户、登录凭据/身份、会话、申请/准入、管理审计，统一由 Agent DB 持久化。
-迁移 `0106_local_accounts` 建立独立 namespace、账号、密码登录、准入、会话、一次性令牌、
+迁移 `0107_local_accounts`（接在 `0106_user_model_connections` 后）建立独立 namespace、账号、密码登录、准入、会话、一次性令牌、
 请求频率计数和撤权清理记录；字段由迁移和契约测试固定。
 
 - 账户：稳定 ID、账号状态、创建/更新时间；显示资料继续由现有 Profile 能力管理。
@@ -192,6 +195,9 @@ local 模式只允许新的独立数据库；遇到已绑定 Gateway 或已有 o
 不提供忽略冲突的开关。A3 的旧账号领取、历史数据迁移和线上切换另行审查。
 
 账号流程可在完全不调用 Gateway 的条件下注册、验证、申请、审批及管理资源权限。
-个人模型连接位于另一条实现分支；本分支独立运行时，缺少可用连接的推理请求明确返回
-`model_connection_required`，不会将本地账号 ID 发送给 Gateway，也不会隐式扣减其额度。
-本地账号与 BYOK 的真实任务、续聊及 Fork 全链路验收须在两条线集成后执行。
+本分支基于个人模型连接 PR #1029 整合：获批用户先验证并保存自己的连接，再执行任务。
+没有可用连接时明确引导配置，不会将本地账号 ID 发送给 Gateway，也不会隐式使用平台 key。
+`AGENT_MODEL_CONNECTIONS_ENABLED` 在 local 模式仍是显式开关；关闭时不提供配置入口或接纳新轮次。
+任务、续聊、队列、goal 和 Fork 保留 `(model, model_connection_id)`，连接失效不自动换源。
+现有独立账号验收记录是整合前的历史结果；整合验收另记实际版本与机器。
+模拟上游协议、真实账号和数据库的测试不能代替真实 provider 与 Kata host 的全链路验收。

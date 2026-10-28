@@ -260,6 +260,7 @@ def request(**updates: Any) -> AutomaticDeploymentSetup:
 
 @pytest.fixture
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Harness]:
+    monkeypatch.delenv("AGENT_AUTH_MODE", raising=False)
     settings.reset_settings()
     monkeypatch.setenv("AGENT_SETTINGS_ENCRYPTION_KEY", "s" * 32)
     settings.apply_settings(
@@ -272,6 +273,7 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Harness
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
         for name in (
             "deploy/host/sandbox_host.sh",
+            "deploy/host/inference_compose.py",
             "deploy/host/setup_kata_runtime.sh",
             "deploy/host/docker-compose.sandbox.yml",
             "pyproject.toml",
@@ -739,3 +741,59 @@ async def test_hosts_pull_the_release_s_published_sandbox_image_when_there_is_on
             assert environment["AGENT_SANDBOX_IMAGE"] == "cloud-agent-sandbox:" + profile["id"]
             assert "AGENT_SANDBOX_IMAGE_PULL" not in environment
             assert metadata["sandbox_image"] == "built"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sent_gateway", [False, True])
+async def test_local_setup_only_uses_control_and_mcp_and_never_records_gateway_inputs(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, sent_gateway: bool
+) -> None:
+    monkeypatch.setenv("AGENT_AUTH_MODE", "local")
+    # Removing its connection makes any accidental Gateway lookup fail, even
+    # before the tunnel provider could be called.
+    harness.repository.connections.pop("gateway-key")
+    setup_request = request() if sent_gateway else request(gateway=None)
+    result = await harness.restart().create(setup_request)
+    assert result["profiles"]
+    assert {call[0] for call in harness.tunnels.calls} == {"discover", "control"}
+    saved = harness.repository.defaults["automatic_setup"]["request"]
+    assert "gateway" not in saved and "gateway_port" not in saved
+    for profile in result["profiles"]:
+        assets = harness.assets(profile["id"])
+        env = dotenv_values(stream=io.StringIO(assets["environment"]))
+        assert env["AGENT_AUTH_MODE"] == "local"
+        assert not any(name.startswith("AGENT_TUNNEL_") for name in env)
+        assert set(assets["public_keys"]) == {"mcp", "control"}
+        assert set(assets["files"]) == {
+            ".compute-secrets/mcp.key",
+            ".compute-secrets/mcp.known_hosts",
+            ".compute-secrets/control.key",
+            ".compute-secrets/control.known_hosts",
+        }
+        assert "gateway.example.org" not in json.dumps(assets)
+    calls = len(harness.tunnels.calls)
+    assert await harness.restart().create(request(gateway=None)) == result
+    assert len(harness.tunnels.calls) == calls
+
+
+@pytest.mark.asyncio
+async def test_gateway_setup_still_requires_its_machine_before_any_effect(harness: Harness) -> None:
+    with pytest.raises(ComputeRefusal) as refused:
+        await harness.restart().create(request(gateway=None))
+    assert refused.value.code == "automatic_gateway_required"
+    assert harness.tunnels.calls == []
+    assert harness.repository.defaults == {}
+    assert harness.repository.profiles == {}
+
+
+@pytest.mark.asyncio
+async def test_local_setup_status_does_not_suggest_a_gateway(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_AUTH_MODE", "local")
+    status = await harness.restart().read_status()
+    assert set(status["machine_defaults"]) == {"control"}
+    await harness.restart().create(request(gateway=None))
+    status = await harness.restart().read_status()
+    assert "gateway" not in status["defaults"]
+    assert "gateway_port" not in status["defaults"]

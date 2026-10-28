@@ -194,6 +194,17 @@ fi
 # exotic one. A default would be a value somebody forgets to override exactly
 # once.
 COMPOSE_PROJECT="$(env_or_dotenv COMPOSE_PROJECT)"
+HOST_AUTH_MODE="$(env_or_dotenv AGENT_AUTH_MODE)"
+HOST_AUTH_MODE="${HOST_AUTH_MODE:-gateway}"
+case "$HOST_AUTH_MODE" in
+  gateway) TUNNEL_PREFIXES=(AGENT_TUNNEL AGENT_MCP_TUNNEL AGENT_CONTROL_PLANE_TUNNEL) ;;
+  local)
+    [[ -z "$(env_or_dotenv AGENT_GATEWAY_URL)" ]] \
+      || die "a local-account host must not configure AGENT_GATEWAY_URL"
+    TUNNEL_PREFIXES=(AGENT_MCP_TUNNEL AGENT_CONTROL_PLANE_TUNNEL)
+    ;;
+  *) die "AGENT_AUTH_MODE must be gateway or local" ;;
+esac
 
 # A function rather than an array, so the check happens when a compose command
 # actually runs. `preflight` and `check` answer questions about this machine and
@@ -205,8 +216,14 @@ compose() {
   # token here, then let the recipe require the canonical credential as before.
   # COMPAT(remove-after=2026-12-31): as env_or_dotenv's; then Compose reads the
   # token from .env itself, and this override goes.
-  local manager_token
+  local manager_token compose_file="$COMPOSE_FILE"
   manager_token="$(env_or_dotenv AGENT_SANDBOX_MANAGER_TOKEN)"
+  if [[ "$HOST_AUTH_MODE" == "local" ]]; then
+    compose_file="${COMPOSE_FILE%/*}/.local-inference.json"
+    "${AGENT_DEPLOY_PYTHON:-python3}" "$SCRIPT_DIR/inference_compose.py" \
+      --compose "$COMPOSE_FILE" --auth-mode local --output "$compose_file" \
+      || die "could not render the local-account host recipe (the deployment Python needs PyYAML)"
+  fi
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
     case "$1" in
       build) die "artifact deployments cannot build images" ;;
@@ -220,7 +237,7 @@ compose() {
     AGENT_SANDBOX_MANAGER_TOKEN="$manager_token" \
     docker compose \
       -p "$COMPOSE_PROJECT" \
-      -f "$COMPOSE_FILE" \
+      -f "$compose_file" \
       --env-file .env "$@"
   else
     # Compose already receives exported configuration from this process. Do not
@@ -230,7 +247,7 @@ compose() {
     AGENT_SANDBOX_MANAGER_TOKEN="$manager_token" \
     docker compose \
       -p "$COMPOSE_PROJECT" \
-      -f "$COMPOSE_FILE" "$@"
+      -f "$compose_file" "$@"
   fi
 }
 
@@ -285,11 +302,9 @@ require_env() {
   # Named up front, because each of these fails much later and much less
   # legibly: a missing token as a 401 per claim, a missing key as a container
   # that restarts forever, a missing known_hosts as a refusal nobody reads.
-  local missing=() name
+  local missing=() name prefix
   for name in AGENT_SANDBOX_IMAGE \
               AGENT_SANDBOX_MANAGER_TOKEN \
-              AGENT_TUNNEL_SSH_DESTINATION AGENT_TUNNEL_SSH_KEY \
-              AGENT_TUNNEL_SSH_KNOWN_HOSTS \
               AGENT_MCP_TUNNEL_SSH_DESTINATION AGENT_MCP_TUNNEL_SSH_KEY \
               AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS \
               AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION \
@@ -300,6 +315,11 @@ require_env() {
               AGENT_EGRESS_CHAT_NETWORK_POOL AGENT_EGRESS_DNS_SERVER; do
     [[ -n "$(env_or_dotenv "$name")" ]] || missing+=("$name")
   done
+  if [[ "$HOST_AUTH_MODE" == "gateway" ]]; then
+    for name in AGENT_TUNNEL_SSH_DESTINATION AGENT_TUNNEL_SSH_KEY AGENT_TUNNEL_SSH_KNOWN_HOSTS; do
+      [[ -n "$(env_or_dotenv "$name")" ]] || missing+=("$name")
+    done
+  fi
   if [[ ${#missing[@]} -gt 0 ]]; then
     die "missing from the environment or .env: ${missing[*]} (see ENVIRONMENT.md)"
   fi
@@ -332,8 +352,8 @@ require_env() {
     fi
   fi
 
-  local prefix key known
-  for prefix in AGENT_TUNNEL AGENT_MCP_TUNNEL AGENT_CONTROL_PLANE_TUNNEL; do
+  local key known
+  for prefix in "${TUNNEL_PREFIXES[@]}"; do
     key="$(env_or_dotenv "${prefix}_SSH_KEY")"
     known="$(env_or_dotenv "${prefix}_SSH_KNOWN_HOSTS")"
     [[ -r "$key" ]] || die "${prefix}_SSH_KEY=$key is not readable on this host"
@@ -464,9 +484,9 @@ validate_retained_config() {
   # ports: a readiness probe can win the lottery and a real job can lose it.
   # All three aliases share the runner's internal network, and the first two
   # also share the sandbox network, so pairwise uniqueness is mandatory.
-  if [[ "$GATEWAY_HOSTNAME" == "$MCP_HOSTNAME" \
-     || "$GATEWAY_HOSTNAME" == "$CONTROL_PLANE_HOSTNAME" \
-     || "$MCP_HOSTNAME" == "$CONTROL_PLANE_HOSTNAME" ]]; then
+  if [[ "$MCP_HOSTNAME" == "$CONTROL_PLANE_HOSTNAME" ]] || \
+     { [[ "$HOST_AUTH_MODE" == "gateway" ]] && \
+       [[ "$GATEWAY_HOSTNAME" == "$MCP_HOSTNAME" || "$GATEWAY_HOSTNAME" == "$CONTROL_PLANE_HOSTNAME" ]]; }; then
     die "AGENT_GATEWAY_HOSTNAME ('$GATEWAY_HOSTNAME'), AGENT_MCP_HOSTNAME ('$MCP_HOSTNAME'), and AGENT_CONTROL_PLANE_HOSTNAME ('$CONTROL_PLANE_HOSTNAME') must be distinct Docker aliases"
   fi
   # Chat files live in Docker's writable layer. Verify the daemon whose socket
@@ -1242,7 +1262,7 @@ cmd_activate() {
   prepare_storage_verdict
   drain_runners_then_sandbox_manager
 
-  log "starting the three purpose-scoped tunnels, sandbox manager, and the runner service"
+  log "starting the ${HOST_AUTH_MODE} deployment's scoped tunnels, sandbox manager, and runner"
   # `--remove-orphans` because a renamed service leaves its old container
   # running otherwise: compose only replaces containers for services the file
   # still declares, so `agent-runner` outliving `runner` would mean two sets of
@@ -1309,10 +1329,13 @@ cmd_check() {
   # itself, with this deployment's host rules around it, is proved per group by
   # the guest check that runs before any repository code.
   local network="$RELAY_NETWORK"
-  local url="http://${GATEWAY_HOSTNAME}:${TUNNEL_PORT}/health"
-  log "probing ${url} from the ${network} network"
-  probe_sandbox_relay "$network" "$url" "inference gateway" "$deadline" \
-    "Check 'docker logs' for the gateway-tunnel container: an SSH connection that cannot authenticate or bind its forward restarts." "gateway-tunnel"
+  local url
+  if [[ "$HOST_AUTH_MODE" == "gateway" ]]; then
+    url="http://${GATEWAY_HOSTNAME}:${TUNNEL_PORT}/health"
+    log "probing ${url} from the ${network} network"
+    probe_sandbox_relay "$network" "$url" "inference gateway" "$deadline" \
+      "Check 'docker logs' for the gateway-tunnel container: an SSH connection that cannot authenticate or bind its forward restarts." "gateway-tunnel"
+  fi
 
   # MCP is a second deliberately narrow destination on the same relay
   # network. A healthy model tunnel does not prove this separate SSH key,
@@ -1329,9 +1352,9 @@ cmd_check() {
 cmd_status() {
   compose ps
   printf '\n'
-  compose logs --tail 20 \
-    gateway-tunnel mcp-tunnel control-plane-tunnel \
-    sandbox-manager runner
+  local services=(mcp-tunnel control-plane-tunnel sandbox-manager runner)
+  [[ "$HOST_AUTH_MODE" != "gateway" ]] || services+=(gateway-tunnel)
+  compose logs --tail 20 "${services[@]}"
 }
 
 cmd_down() {

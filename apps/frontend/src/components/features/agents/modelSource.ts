@@ -61,13 +61,30 @@ export function storedChoice(model: unknown, connectionId: unknown): ModelChoice
  * accepts — so nothing is offered and then refused on Run.
  */
 export function offeredChoices(config: AgentConfigApi | null, runtime: string): ModelChoice[] {
-  const gateway = (config?.models ?? []).map((model) => ({ model, connectionId: null }));
-  const personal = (config?.model_connections ?? []).flatMap((connection) =>
+  const gatewayModels = config?.gateway_inference === false ? [] : (config?.models ?? []);
+  const gateway = gatewayModels.map((model) => ({ model, connectionId: null }));
+  const connections =
+    config?.model_connections_enabled === false ? [] : (config?.model_connections ?? []);
+  const personal = connections.flatMap((connection) =>
     connection.models
       .filter((model) => connection.model_runtimes?.[model]?.includes(runtime))
       .map((model) => ({ model, connectionId: connection.id })),
   );
   return [...gateway, ...personal];
+}
+
+/** A personal choice stays blocked until the current catalog confirms its exact source. */
+export function isModelUnavailable(
+  config: AgentConfigApi | null,
+  runtime: string,
+  choice: ModelChoice,
+  refreshing = false,
+): boolean {
+  const mustConfirm = Boolean(choice.connectionId) || config?.gateway_inference === false;
+  return (
+    mustConfirm &&
+    (refreshing || !offeredChoices(config, runtime).some((option) => sameChoice(option, choice)))
+  );
 }
 
 /** What the server resolved for a new task, as a choice. */
@@ -148,7 +165,8 @@ export function modelPicker(
  * The prompt rewriter's model. It runs on the Gateway, so a personal choice
  * turns it off and says why, rather than sending that model to the Gateway.
  */
-export function rewriteProps(choice: ModelChoice, t: Translator) {
+export function rewriteProps(choice: ModelChoice, t: Translator, config?: AgentConfigApi | null) {
+  if (config === null || config?.gateway_inference === false) return { model: '', hidden: true };
   return choice.connectionId
     ? { model: '', disabledReason: t('modelSource.rewriteUnavailable') }
     : { model: choice.model };
@@ -167,9 +185,11 @@ export function turnModelPicker(
   inherited: ModelChoice,
 ): ModelPickerProps | null {
   const offered = offeredChoices(config, runtime);
-  return offered.length
-    ? modelPicker(config, offered, current, onChange, t, { kept: inherited, runtime })
-    : null;
+  if (!offered.length) return null;
+  return modelPicker(config, offered, current, onChange, t, {
+    kept: current.model ? current : inherited,
+    runtime,
+  });
 }
 
 /**

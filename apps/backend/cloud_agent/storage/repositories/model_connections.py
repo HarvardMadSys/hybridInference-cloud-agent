@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
-from cloud_agent.domain.model_connections import ModelConnectionConflict
+from cloud_agent.domain.model_connections import ModelConnectionAccessEnded, ModelConnectionConflict
 from cloud_agent.storage._sql.accounts import local_access_ended
 from cloud_agent.storage._sql.rows import load_json
 
@@ -48,6 +48,38 @@ def _connection(row: Mapping[str, Any]) -> dict[str, Any]:
 #: one the connection has no facts for, and neither a rename nor enabling or
 #: disabling touches the endpoint.
 _UNVERIFIED = frozenset({"name", "models", "enabled"})
+
+
+async def _lock_admitted_local_owner(conn: asyncpg.Connection, user_id: str) -> None:
+    """Fence a save against local account edits, within the caller's transaction.
+
+    Lock the account alone before reading its joined admission and login:
+    a locking JOIN can return their old statement snapshot after waiting on
+    a revocation. The separate statement sees the committed change; this
+    SHARE lock then keeps approval stable until the connection write commits.
+    Gateway owners have no local account and keep their existing behaviour.
+    """
+    local = await conn.fetchval(
+        "SELECT 1 FROM agent_local_accounts WHERE id = $1 FOR SHARE", user_id
+    )
+    if not local:
+        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM agent_local_identity_namespace)"):
+            raise ModelConnectionAccessEnded
+        return
+    admitted = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM agent_local_accounts a
+            JOIN agent_local_admissions m ON m.account_id = a.id
+            JOIN agent_local_password_logins l ON l.account_id = a.id
+            WHERE a.id = $1 AND a.status = 'active' AND m.status = 'approved'
+              AND l.email_verified_at IS NOT NULL
+        )
+        """,
+        user_id,
+    )
+    if not admitted:
+        raise ModelConnectionAccessEnded
 
 
 def _update_sql(changes: dict[str, Any], args: list[Any]) -> tuple[list[str], list[str]]:
@@ -94,11 +126,14 @@ class PostgresModelConnectionRepository:
 
         ``values["model_checks"]`` holds each model's verification, made by the
         request that saves it; each is stamped with revision 1, the new row's.
+        A local owner's admission is re-read under its account lock at commit,
+        so a successful verification cannot outlive a completed revocation.
         """
         checks = {
             model: {**result, "revision": 1} for model, result in values["model_checks"].items()
         }
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            await _lock_admitted_local_owner(conn, user_id)
             try:
                 row = await conn.fetchrow(
                     f"""
@@ -260,6 +295,8 @@ class PostgresModelConnectionRepository:
         written. ``model_checks`` is the whole verified map for the new state;
         a new endpoint raises both revisions and stamps it with the new
         ``config_revision``.
+        The local owner's account lock and a fresh admission check also fence
+        the commit against a revocation or suspension during verification.
         """
         unknown = set(changes) - _UPDATABLE
         if unknown:
@@ -285,7 +322,8 @@ class PostgresModelConnectionRepository:
             assignments.append("credential_revision = credential_revision + 1")
         if endpoint:
             assignments.append("config_revision = config_revision + 1")
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            await _lock_admitted_local_owner(conn, user_id)
             try:
                 row = await conn.fetchrow(
                     f"""

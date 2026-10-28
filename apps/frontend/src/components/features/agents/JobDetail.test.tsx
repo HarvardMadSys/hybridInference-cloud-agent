@@ -438,7 +438,6 @@ const HISTORY = [
     createdAt: null,
   },
 ];
-
 describe('JobDetail', () => {
   it('uses a rewritten follow-up only after the owner sends it', async () => {
     vi.mocked(rewritePrompt).mockResolvedValue({
@@ -448,7 +447,9 @@ describe('JobDetail', () => {
     render(<JobDetail job={makeJob({ state: 'done' })} />);
     const box = screen.getByRole('textbox', { name: 'Add a follow-up' });
     fireEvent.change(box, { target: { value: 'Add tests' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Rewrite prompt' }));
+    const rewrite = await screen.findByRole('button', { name: 'Rewrite prompt' });
+    expect(rewrite).toBeEnabled();
+    fireEvent.click(rewrite);
     await waitFor(() =>
       expect(box).toHaveValue('Add regression coverage for CSV exports, including empty records.'),
     );
@@ -463,7 +464,6 @@ describe('JobDetail', () => {
       ),
     );
   });
-
   it('opens the latest live question while an older completed turn is being viewed', async () => {
     const job = makeJob({
       state: 'done',

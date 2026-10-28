@@ -54,7 +54,9 @@ export function useComposerModel(drafted: DraftedPick | null, runtime: string) {
   // agent call then 404ed.
   const adoptModels = useCallback((loaded: AgentConfigApi) => {
     setConfig(loaded);
-    setResolved(resolvedChoice(loaded));
+    // A source already displayed on this visit must not change silently when
+    // its connection disappears and the server resolves another default.
+    setResolved((current) => (current.connectionId ? current : resolvedChoice(loaded)));
   }, []);
   const offered = useMemo(() => offeredChoices(config, runtime), [config, runtime]);
   let choice = NO_MODEL;
@@ -99,7 +101,7 @@ export function useComposerModel(drafted: DraftedPick | null, runtime: string) {
       model: choice.model,
       ...(choice.connectionId ? { model_connection_id: choice.connectionId } : {}),
     },
-    rewrite: rewriteProps(choice, t),
+    rewrite: rewriteProps(choice, t, config),
     // Said beside the composer while a personal pick holds Run.
     unavailableHint: unavailable
       ? t('modelSource.unavailableHint', { label: picker.optionLabels[picker.value], runtime })

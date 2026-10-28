@@ -41,6 +41,7 @@ from cloud_agent_host.drivers import (
     TurnResult,
     get_driver,
 )
+from cloud_agent_host.inference import validate_resident_inference
 from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION
 from cloud_agent_host.other_plugins import install_other_runtime_plugins
 from cloud_agent_host.plugins import install_claude_plugins
@@ -213,8 +214,7 @@ class ResidentLaunch:
             raise ValueError("a translated launch needs its model connection")
         if bool(self.inference_client_protocol) != bool(self.inference_local_token):
             raise ValueError("a translated launch, and only one, carries its member's token")
-        if not self.gateway_base_url:
-            raise ValueError("resident launch gateway is required")
+        validate_resident_inference(self.gateway_base_url, self.inference_source)
         if self.slot_id < 0:
             raise ValueError("resident slot id cannot be negative")
         if self.residency_generation < 0:

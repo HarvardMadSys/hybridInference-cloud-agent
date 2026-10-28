@@ -39,6 +39,7 @@ HOST_FILES = (
     "LICENSE",
     "deploy/DEPLOY_PROTOCOL",
     "deploy/host/sandbox_host.sh",
+    "deploy/host/inference_compose.py",
     "deploy/host/storage_attestation.py",
     "deploy/host/setup_kata_runtime.sh",
     "deploy/host/kata_runtime_epoch.py",

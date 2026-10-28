@@ -19,7 +19,7 @@ This page describes what is implemented.
 | Identity and admission | Gateway `agent-access` lookup | This database, read on every check, with no cache |
 | Profile and team emails | Gateway user status | The local account's email |
 | Administration | `ADMIN_TOKEN` or Gateway `agent.admin` | `ADMIN_TOKEN` or a local account with `agent.admin` |
-| Inference | Gateway grants and catalog | None: no Gateway grant is minted for a local account (see [Models](#models)) |
+| Inference | Gateway grants and catalog, or an owner's model connection | The owner's model connection only (see [Models](#models)) |
 
 In local mode `app.state.gateway` is `LocalModeGateway`
 (`cloud_agent/accounts/directory.py`). It has the methods the Gateway client
@@ -45,12 +45,35 @@ Gateway-bound database to local accounts is a separate identity migration
 |---|---|
 | `AGENT_AUTH_MODE=local` | Selects local accounts. Set it on both listeners. |
 | `AGENT_LOCAL_SESSION_SECRET` | At least 32 random bytes, different from `AGENT_SESSION_SECRET`. Keys the stored hashes of sessions, emailed tokens and abuse counters. |
+| `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | Required at local-mode startup. Encrypts personal model keys and other stored credentials in separate domains. |
+| `AGENT_MODEL_CONNECTIONS_ENABLED=true` | Enables personal model setup and new turns. Local mode respects this explicit rollout gate; leaving it off does not enable shared inference. |
 | `AGENT_LOCAL_SIGNUP_ENABLED` | On by default. Set `false` to close public sign-up. |
 | `AGENT_SMTP_*` | The mail relay. Without a host and a sender, sign-up is closed and recovery answers 503. |
 | `AGENT_WEB_BASE_URL` | The only base used for emailed links. A request's `Host` is never used. |
 
 The web server must reach the same control plane (`AGENT_CONTROL_PLANE_URL`).
 The web app reads `GET /v1/auth/config` to choose its sign-in pages.
+
+### Hosts without a Gateway
+
+Set `AGENT_AUTH_MODE=local` in each host's deployment environment as well as
+the control plane. Keep `AGENT_GATEWAY_URL` empty. The supported
+`deploy/host/sandbox_host.sh` recipe removes the unused inference tunnel
+before Compose resolves required settings; it needs no Gateway SSH address,
+key or health check. Source deployments need Python with PyYAML to render
+this recipe; artifact deployments use their deployment Python environment.
+
+The host still requires the control-plane and MCP tunnels and their separate
+credentials. Personal model calls use the existing public HTTPS egress. No
+sandbox gains access to the management API, private networks or another
+group. Gateway-mode hosts retain their inference relay and its checks; an
+empty URL never turns a Gateway host into a local one.
+
+In **Servers → deployment setup**, local administrators enter only the
+control-plane machine. Setup derives the host mode from the control plane,
+omits Gateway provisioning, and discards stale Gateway form values. Gateway
+deployments still require the Gateway machine. A manually supplied managed
+host profile must agree with the control plane's mode.
 
 ### The first administrator
 
@@ -199,18 +222,35 @@ open, blocking re-approval, until every step is acknowledged.
 
 ## Models
 
-Local accounts have no Gateway inference. A model lookup raises
-`ModelConnectionRequired`. Job, turn and model-preference requests answer 409
-`model_connection_required`, a waiting message is held with that reason, and
-`GET /v1/agent/config` reports `model_connection_required: true` with no
-models. A Gateway grant is never minted for a local account, and its ID is
-never sent to the Gateway's catalog or quota.
+After approval, an owner opens **My settings → Model connections**, enters a
+provider's Base URL, API key and model IDs, and chooses **Verify and save**.
+FreeInference can be used as that provider with the owner's own key. The
+service checks compatibility before saving; a failed check saves no new
+connection or replacement key. Only the connection's owner can use it. If the
+account loses access while verification is in flight, saving rechecks admission
+under the account lock and refuses the late result without storing a key.
 
-Personal model connections are a separate feature on another branch. They
-plug into `LocalModeGateway(catalog=...)`, the model catalog seam. Running a
-task end to end in local mode needs that branch; this one does not claim it.
-Repository, team, profile and other account workflows that need no model are
-unaffected.
+Local accounts have no shared model, default provider credential or inference
+allowance. Inference costs and limits belong to the supplied provider key.
+Separate Cloud Agent accounts do not create separate provider quotas: keys
+from the same FreeInference account may still spend that account's shared
+upstream allowance. Cloud Agent's sandbox and concurrency limits are separate.
+
+`GET /v1/agent/config` reports `gateway_inference: false`, an empty Gateway
+catalog, and the owner's usable connections. Without a usable connection it
+sets `model_connection_required: true`; the composer links to setup when the
+feature is enabled and explains when the deployment has disabled it. Gateway
+model-preference requests answer 409 `model_connection_required`. No local
+account ID is sent to the Gateway, and no Gateway grant is minted, including
+for publication titles. Prompt rewriting through the Gateway is unavailable.
+
+A task records both the model ID and connection ID. Follow-ups, queued turns,
+goals, Fork and residency keep that source; an unavailable connection never
+falls back to a same-named Gateway model or another connection. Saving,
+disabling or deleting a connection refreshes open composers, which retain an
+unavailable selection and block submission until the owner chooses a usable
+source. See [owner model connections](operations.md#owner-model-connections)
+for verification, key handling and rollout requirements.
 
 The Gateway-only per-request usage views (`/admin/agent/runs/{id}/llm-requests`,
 `/admin/agent/steps`, and an owner's per-message request detail) answer 503
@@ -218,8 +258,8 @@ The Gateway-only per-request usage views (`/admin/agent/runs/{id}/llm-requests`,
 
 ## Data model
 
-Migration `0106_local_accounts` adds empty tables. Gateway mode never writes
-them.
+Migration `0107_local_accounts`, after `0106_user_model_connections`, adds empty
+tables. Gateway mode never writes them.
 
 | Table | Holds |
 |---|---|
@@ -254,6 +294,12 @@ them.
   password), and
   `tests/integration/storage/test_local_cleanup_lock_acceptance.py` (cancelling
   a cleanup lock acquisition before its result arrives releases the lock).
+- `tests/integration/servers/test_local_byok_acceptance.py` and
+  `test_local_model_onboarding.py` exercise approval, verified connection
+  setup, task creation, follow-ups, owner isolation, unavailable sources and
+  the explicit feature gate with real accounts and Postgres. They use a fake
+  provider transport and forbid Gateway calls; they are not live-provider or
+  Kata-host acceptance.
 
 ## Reused code
 

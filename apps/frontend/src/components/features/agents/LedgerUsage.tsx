@@ -356,8 +356,8 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
 /** Only the current run's model calls and tokens; diagnostics stay in the API. */
 export function LedgerUsage({ job, usage }: { job: AgentJob; usage: LoadedUsage | null }) {
   const result = usage?.jobId === job.id ? usage : null;
-  return result?.data?.external_provider ? (
-    <ExternalProviderUsage runtime={result.data.runtime} />
+  return job.modelConnectionId || result?.data?.external_provider ? (
+    <ExternalProviderUsage runtime={result?.data?.runtime} />
   ) : (
     <GatewayUsage job={job} result={result} />
   );
@@ -440,7 +440,7 @@ function GatewayUsage({ job, result }: { job: AgentJob; result: LoadedUsage | nu
  * A turn on the owner's own connection: the runtime's counters, and that its
  * provider bills it. Never a Gateway cost, a zero, or a wait for one.
  */
-function ExternalProviderUsage({ runtime }: { runtime: AgentJobUsageApi['runtime'] }) {
+function ExternalProviderUsage({ runtime }: { runtime: AgentJobUsageApi['runtime'] | undefined }) {
   const t = useT();
   const totals = runtimeTotals(runtime);
   const hasValues = totals && (known(totals.tokens_in) || known(totals.tokens_out));

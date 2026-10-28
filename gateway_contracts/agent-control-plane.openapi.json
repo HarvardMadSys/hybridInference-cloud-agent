@@ -9710,7 +9710,14 @@
             "type": "string"
           },
           "gateway": {
-            "$ref": "#/components/schemas/SetupMachine"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SetupMachine"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "gateway_port": {
             "default": 8080,
@@ -9744,7 +9751,6 @@
         },
         "required": [
           "request_id",
-          "gateway",
           "control",
           "chat_network_pool",
           "dns_server",

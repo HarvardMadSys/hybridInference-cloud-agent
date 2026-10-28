@@ -9,6 +9,7 @@ interface PromptRewriteProps {
   /** A Gateway model; empty disables rewriting (see `disabledReason`). */
   model: string;
   disabled?: boolean;
+  hidden?: boolean;
   /** Why rewriting is off, e.g. a personal connection is selected: it runs on the Gateway. */
   disabledReason?: string;
   compact?: boolean;
@@ -18,10 +19,16 @@ interface PromptRewriteProps {
   onActiveChange?: (active: boolean) => void;
 }
 
+function containerClass(inline: boolean, compact: boolean): string {
+  if (inline) return 'contents';
+  return compact ? 'space-y-2 px-3 pb-1' : 'space-y-3 px-4 pb-3';
+}
+
 export function PromptRewrite({
   value,
   model,
   disabled = false,
+  hidden = false,
   disabledReason,
   compact = false,
   inline = false,
@@ -66,7 +73,7 @@ export function PromptRewrite({
     setError(null);
     setAppliedPrompt((previous) => (previous === value ? previous : null));
     reportActivity(false);
-  }, [value, model, reportActivity]);
+  }, [value, model, hidden, reportActivity]);
 
   useEffect(
     () => () => {
@@ -101,7 +108,7 @@ export function PromptRewrite({
   }
 
   async function rewrite(clarifications?: PromptClarificationAnswer[]) {
-    if (disabled || controller.current || !value.trim() || !model) return;
+    if (hidden || disabled || controller.current || !value.trim() || !model) return;
     const requestId = ++generation.current;
     const source = { value, model };
     const abort = new AbortController();
@@ -162,8 +169,10 @@ export function PromptRewrite({
 
   const complete = questions.length > 0 && answers.every((answer) => answer.trim());
 
+  if (hidden) return null;
+
   return (
-    <div className={inline ? 'contents' : compact ? 'space-y-2 px-3 pb-1' : 'space-y-3 px-4 pb-3'}>
+    <div className={containerClass(inline, compact)}>
       <div
         className={
           inline

@@ -5,10 +5,13 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as api from '@/lib/api/compute';
+import { useSignedInAuthMode } from '@/components/providers/AuthProvider';
 import type { AutomaticComputeSetupRequest, ComputeConnection } from '@/lib/api/compute';
 
 import ComputeSetup from './ComputeSetup';
 import { chooseOption, optionNames } from '@/components/ui/__tests__/select';
+
+vi.mock('@/components/providers/AuthProvider', () => ({ useSignedInAuthMode: vi.fn() }));
 
 vi.mock('@/lib/api/compute', () => ({
   getComputeAutomaticSetup: vi.fn(),
@@ -62,13 +65,17 @@ function fillAutomaticSetup() {
   fireEvent.change(screen.getByLabelText('Gateway SSH username'), {
     target: { value: 'operator' },
   });
+  chooseOption(screen.getByLabelText('Gateway SSH connection'), 'Gateway administration');
+  fillControlSetup();
+}
+
+function fillControlSetup() {
   fireEvent.change(screen.getByLabelText('Control-plane host address'), {
     target: { value: 'control.example.org' },
   });
   fireEvent.change(screen.getByLabelText('Control-plane SSH username'), {
     target: { value: 'operator' },
   });
-  chooseOption(screen.getByLabelText('Gateway SSH connection'), 'Gateway administration');
   chooseOption(
     screen.getByLabelText('Control-plane SSH connection'),
     'Control-plane administration',
@@ -85,6 +92,7 @@ function fillAutomaticSetup() {
 }
 
 beforeEach(() => {
+  vi.mocked(useSignedInAuthMode).mockReturnValue(undefined);
   sessionStorage.clear();
   vi.clearAllMocks();
   vi.mocked(api.getComputeAutomaticSetup).mockResolvedValue({
@@ -346,4 +354,92 @@ describe('Server setup', () => {
     expect(request).toEqual({ ...savedParameters, request_id: expect.any(String) });
     expect(request.request_id).not.toBe('setup-stuck');
   });
+});
+
+function localParameters() {
+  const parameters = { ...savedParameters };
+  delete parameters.gateway;
+  delete parameters.gateway_port;
+  return parameters;
+}
+
+it('local automatic setup needs only a control machine and never submits hidden Gateway fields', async () => {
+  vi.mocked(useSignedInAuthMode).mockReturnValue('local');
+  // Even previously saved Gateway values cannot leak into a local request.
+  vi.mocked(api.getComputeAutomaticSetup).mockResolvedValue({
+    available: true,
+    deployment_sha: 'c'.repeat(40),
+    blocked_reasons: [],
+    defaults: savedParameters,
+  });
+  const saved = vi.fn();
+  render(<ComputeSetup connections={[connections[1]]} onSaved={saved} />);
+  const configure = screen.getByRole('button', { name: 'Configure automatically' });
+  await waitFor(() => expect(configure).toBeEnabled());
+  expect(screen.queryByLabelText('Gateway host address')).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('Gateway SSH username')).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('Gateway SSH connection')).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('Gateway inference port')).not.toBeInTheDocument();
+  expect(screen.queryByText('Gateway machine')).not.toBeInTheDocument();
+  expect(screen.getByText(/Owners provide their own inference connections/)).toBeInTheDocument();
+  fireEvent.click(configure);
+  await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+  expect(api.createAutomaticComputeSetup).toHaveBeenCalledWith({
+    ...localParameters(),
+    request_id: expect.any(String),
+  });
+  expect(vi.mocked(api.createAutomaticComputeSetup).mock.calls[0][0]).not.toHaveProperty('gateway');
+  expect(vi.mocked(api.createAutomaticComputeSetup).mock.calls[0][0]).not.toHaveProperty(
+    'gateway_port',
+  );
+});
+
+it('local setup accepts control-only defaults and resumes the same pending request', async () => {
+  vi.mocked(useSignedInAuthMode).mockReturnValue('local');
+  vi.mocked(api.getComputeAutomaticSetup).mockResolvedValue({
+    available: true,
+    deployment_sha: 'c'.repeat(40),
+    blocked_reasons: [],
+    machine_defaults: { control: { address: 'control.example.org' } },
+    defaults: localParameters(),
+    pending_request_id: 'local-setup-pending',
+  });
+  render(<ComputeSetup connections={[connections[1]]} onSaved={vi.fn()} />);
+  const retry = await screen.findByRole('button', { name: 'Retry automatic setup' });
+  expect(screen.getByLabelText('Control-plane host address')).toHaveValue('control.example.org');
+  expect(api.createAutomaticComputeSetup).not.toHaveBeenCalled();
+  fireEvent.click(retry);
+  await waitFor(() =>
+    expect(api.createAutomaticComputeSetup).toHaveBeenCalledWith({
+      ...localParameters(),
+      request_id: 'local-setup-pending',
+    }),
+  );
+});
+
+it('local setup recovers a browser retry without requiring a Gateway target', async () => {
+  vi.mocked(useSignedInAuthMode).mockReturnValue('local');
+  vi.mocked(api.getComputeAutomaticSetup).mockResolvedValue({
+    available: true,
+    deployment_sha: 'c'.repeat(40),
+    blocked_reasons: [],
+    machine_defaults: { control: { address: 'control.example.org' } },
+  });
+  vi.mocked(api.createAutomaticComputeSetup).mockRejectedValueOnce(
+    new Error('Connection timed out.'),
+  );
+  const initial = render(<ComputeSetup connections={[connections[1]]} onSaved={vi.fn()} />);
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Configure automatically' })).toBeEnabled(),
+  );
+  fillControlSetup();
+  fireEvent.click(screen.getByRole('button', { name: 'Configure automatically' }));
+  await screen.findByRole('alert');
+  const original = vi.mocked(api.createAutomaticComputeSetup).mock.calls[0][0];
+  expect(original).toEqual({ ...localParameters(), request_id: expect.any(String) });
+  initial.unmount();
+  render(<ComputeSetup connections={[connections[1]]} onSaved={vi.fn()} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry automatic setup' }));
+  await waitFor(() => expect(api.createAutomaticComputeSetup).toHaveBeenCalledTimes(2));
+  expect(vi.mocked(api.createAutomaticComputeSetup).mock.calls[1][0]).toEqual(original);
 });

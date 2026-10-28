@@ -15,7 +15,6 @@ end-to-end acceptance: no real provider, mail server or Kata host is used.
 
 from __future__ import annotations
 
-import functools
 import json
 import os
 import re
@@ -33,14 +32,14 @@ from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 from tests.support.model_connections import with_connection_capability
 
-from cloud_agent.api import model_connections as connections_api
-from cloud_agent.api.deps import get_agent_app_credentials
 from cloud_agent.api import worker
+from cloud_agent.api.deps import get_agent_app_credentials
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.application import model_connection_check
 from cloud_agent.bootstrap.identity import attach_local_identity, bind_identity_source
 from cloud_agent.gateway import GatewayClient
 from cloud_agent.grants import GrantClient
+from cloud_agent.settings import reset_settings
 from cloud_agent.storage.assembly import Storage
 from cloud_agent_shared.shared_protocol import SHARED_SANDBOX_CAPABILITY
 
@@ -114,6 +113,7 @@ async def _public_address(host: str, port: int) -> list[str]:
 
 @pytest_asyncio.fixture
 async def env(monkeypatch):
+    reset_settings()
     config = _db_config()
     apply_migrations(config)
     pool = await asyncpg.create_pool(**config, min_size=1, max_size=8)
@@ -125,13 +125,12 @@ async def env(monkeypatch):
         "AGENT_WEB_BASE_URL": "https://agents.example",
         "AGENT_LOCAL_SIGNUP_ENABLED": "true",
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": "onboarding-test-connection-key",
+        "AGENT_MODEL_CONNECTIONS_ENABLED": "true",
         "AGENT_CONTROL_TOKEN_SECRET": "onboarding-control-secret",
         "AGENT_SANDBOX_MANAGER_TOKEN": "onboarding-sandbox-manager-secret",
         "ADMIN_TOKEN": _ADMIN,
     }.items():
         monkeypatch.setenv(key, value)
-    # Not set: local mode needs no AGENT_MODEL_CONNECTIONS_ENABLED.
-    monkeypatch.delenv("AGENT_MODEL_CONNECTIONS_ENABLED", raising=False)
 
     async def forbidden(*_args: Any, **_kwargs: Any) -> Any:
         pytest.fail("a local account reached a Gateway client")
@@ -145,20 +144,9 @@ async def env(monkeypatch):
         monkeypatch.setattr(client, method, forbidden)
     provider = _ChatOnlyProvider()
     transport = httpx.MockTransport(provider)
-    monkeypatch.setattr(
-        connections_api,
-        "verify_model",
-        functools.partial(
-            model_connection_check.verify_model, resolve=_public_address, transport=transport
-        ),
-    )
-    monkeypatch.setattr(
-        connections_api,
-        "discover_models",
-        functools.partial(
-            model_connection_check.discover_models, resolve=_public_address, transport=transport
-        ),
-    )
+    monkeypatch.setattr(model_connection_check, "_system_resolve", _public_address)
+    monkeypatch.setattr(model_connection_check, "pinned_transport", lambda: transport)
+
     async def no_sandbox_manager(*_args: Any, **_kwargs: Any) -> None:
         return None
 
@@ -194,6 +182,7 @@ async def env(monkeypatch):
         async with pool.acquire() as connection:
             await reset_agent_tables(connection)
         await pool.close()
+        reset_settings()
 
 
 def _token(mail: Any) -> str:
@@ -270,29 +259,15 @@ async def test_an_approved_account_sets_up_its_own_model_and_runs_a_task_on_it(e
     assert created.status_code == 201, created.text
     connection = created.json()
     assert _PROVIDER_KEY not in created.text and connection["has_api_key"] is True
-    # Saved but unverified: still nothing to run on.
-    config = (await client.get("/v1/agent/config")).json()
-    assert config["model_connection_required"] is True
-    assert config["model_connections"][0]["model_runtimes"] == {}
-    unverified = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": None,
-            "task_prompt": "fix it",
-            "model": _MODEL,
-            "model_connection_id": connection["id"],
-            "runtime": "opencode",
-        },
-    )
-    assert unverified.status_code == 400
-    assert unverified.json()["detail"]["error"]["reason"] == "model_unverified"
-
-    verified = await client.post(
-        f"/v1/agent/model-connections/{connection['id']}/verify", json={"model": _MODEL}
-    )
-    assert verified.status_code == 200, verified.text
-    assert _PROVIDER_KEY not in verified.text
-    assert env.provider.requests, "verification reached the fake provider"
+    # The save itself completes the real streamed verification before persisting.
+    assert connection["model_status"][0]["status"] == "ready"
+    assert "opencode" in connection["model_status"][0]["runtimes"]
+    chat_requests = [
+        request
+        for request in env.provider.requests
+        if request.url.path.endswith("/chat/completions")
+    ]
+    assert len(chat_requests) == 2
     config = (await client.get("/v1/agent/config")).json()
     assert config["model_connection_required"] is False
     runtimes = config["model_connections"][0]["model_runtimes"][_MODEL]
@@ -340,10 +315,6 @@ async def test_another_account_cannot_see_or_run_on_someone_elses_connection(env
     )
     assert created.status_code == 201, created.text
     connection_id = created.json()["id"]
-    verified = await client.post(
-        f"/v1/agent/model-connections/{connection_id}/verify", json={"model": _MODEL}
-    )
-    assert verified.status_code == 200, verified.text
 
     await _approved_account(env, "other@example.org")
     listed = await client.get("/v1/agent/model-connections")
@@ -362,15 +333,17 @@ async def test_another_account_cannot_see_or_run_on_someone_elses_connection(env
     )
     assert borrowed.status_code == 400
     assert borrowed.json()["detail"]["error"]["reason"] == "not_found"
-    for method, suffix, body in (
-        ("PATCH", "", {"enabled": False}),
-        ("POST", "/verify", {"model": _MODEL}),
-        ("DELETE", "", None),
+    requests_before = len(env.provider.requests)
+    for method, body in (
+        ("PATCH", {"enabled": False}),
+        ("PATCH", {"models": [_MODEL, "another-model"]}),
+        ("DELETE", None),
     ):
         response = await client.request(
-            method, f"/v1/agent/model-connections/{connection_id}{suffix}", json=body
+            method, f"/v1/agent/model-connections/{connection_id}", json=body
         )
-        assert response.status_code == 404, (method, suffix, response.text)
+        assert response.status_code == 404, (method, response.text)
+    assert len(env.provider.requests) == requests_before
 
 
 async def test_revoked_access_stops_connection_management_and_new_turns(env):
@@ -380,12 +353,8 @@ async def test_revoked_access_stops_connection_management_and_new_turns(env):
         "/v1/agent/model-connections",
         json={"name": "Mine", "base_url": _BASE_URL, "api_key": _PROVIDER_KEY, "models": [_MODEL]},
     )
+    assert created.status_code == 201, created.text
     connection_id = created.json()["id"]
-    assert (
-        await client.post(
-            f"/v1/agent/model-connections/{connection_id}/verify", json={"model": _MODEL}
-        )
-    ).status_code == 200
     job = await client.post(
         "/v1/agent/jobs",
         json={
@@ -411,7 +380,11 @@ async def test_revoked_access_stops_connection_management_and_new_turns(env):
     assert status["waitlist"]["status"] == "revoked"
     for method, path, body in (
         ("GET", "/v1/agent/model-connections", None),
-        ("POST", f"/v1/agent/model-connections/{connection_id}/verify", {"model": _MODEL}),
+        (
+            "PATCH",
+            f"/v1/agent/model-connections/{connection_id}",
+            {"models": [_MODEL, "another-model"]},
+        ),
         ("PATCH", f"/v1/agent/model-connections/{connection_id}", {"name": "Renamed"}),
         ("GET", "/v1/agent/config", None),
         ("POST", f"/v1/agent/threads/{job.json()['thread_id']}/messages", {"prompt": "more"}),
@@ -431,12 +404,8 @@ async def test_follow_ups_keep_their_personal_source_and_never_fall_back(env):
         "/v1/agent/model-connections",
         json={"name": "Mine", "base_url": _BASE_URL, "api_key": _PROVIDER_KEY, "models": [_MODEL]},
     )
+    assert created.status_code == 201, created.text
     connection_id = created.json()["id"]
-    assert (
-        await client.post(
-            f"/v1/agent/model-connections/{connection_id}/verify", json={"model": _MODEL}
-        )
-    ).status_code == 200
     source = {"model": _MODEL, "model_connection_id": connection_id}
     job = await client.post(
         "/v1/agent/jobs",
