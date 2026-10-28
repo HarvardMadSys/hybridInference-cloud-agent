@@ -92,16 +92,13 @@ from cloud_agent_host.host_control import (
 from cloud_agent_host.host_runtime import (
     HANDOVER_ACCEPTED,
     HANDOVER_DECLINED,
-    HANDOVER_TIMEOUT_S,
     HOST_CONCURRENCY_CAPABILITY,
-    LAUNCH_NOT_STARTED,
     LAUNCH_STARTED,
     LAUNCH_UNCERTAIN,
     LaunchResult,
     TurnPool,
     decode_turn,
     default_slots,
-    encode_turn,
     read_handover,
     requested_slots,
     write_handover,
@@ -154,6 +151,13 @@ from cloud_agent_host.setup import run_setup
 from cloud_agent_host.source_prefetch import SourcePrefetch
 from cloud_agent_host.source_preparation import read_tracked_lockfiles, run_source_git
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
+from cloud_agent_host.turn_launch import (
+    TurnSpare,
+    child_turn_payload,
+    handed_worker_id,
+    read_turn_input,
+    spawn_turn,
+)
 from cloud_agent_host.upload_import import import_uploads as _import_uploads
 from cloud_agent_shared import operation_profiling, sandbox_archive_settings
 from cloud_agent_shared.environment import (
@@ -3412,19 +3416,8 @@ def _start_host_capacity_collector(backend: SandboxBackend) -> HostCapacityColle
     return collector
 
 
-#: The parent's additions a turn's child does read: the profiling selection,
-#: and the runtime settings the turn runs with. Every other underscore key is
-#: parent bookkeeping.
-_CHILD_HANDOFF_KEYS = frozenset({"_profiling", "_host_settings"})
-
-
-def _child_turn_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Strip parent bookkeeping while preserving the profiling and settings handoff."""
-    return {
-        key: value
-        for key, value in payload.items()
-        if not key.startswith("_") or key in _CHILD_HANDOFF_KEYS
-    }
+#: The runner's name for what a turn's child is handed (turn_launch).
+_child_turn_payload = child_turn_payload
 
 
 def _turn_host_settings(raw: Any) -> dict[str, float]:
@@ -3442,7 +3435,7 @@ def _turn_host_settings(raw: Any) -> dict[str, float]:
     }
 
 
-def _spawn_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+def _spawn_turn(
     payload: dict[str, Any],
     *,
     base_url: str,
@@ -3452,163 +3445,26 @@ def _spawn_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     agent_timeout_s: float,
     host: str,
     qualification: HostQualification | None = None,
+    spare: TurnSpare | None = None,
 ) -> LaunchResult:
-    """Start a child for one claimed turn and find out whether it took it.
+    """Hand one claimed turn to a child and find out whether it took it.
 
-    The turn travels on the child's standard input, because it carries this
-    attempt's credentials and both ``/proc/<pid>/cmdline`` and
-    ``/proc/<pid>/environ`` are readable by anyone who can see the process. The
-    child's answer comes back on a descriptor of its own, because its standard
-    output is the container log and a reader that stopped draining that would
-    block the turn it was waiting for.
-
-    Every path that returns ``LAUNCH_NOT_STARTED`` has shown the child never
-    had the turn: no process was created or the child explicitly declined it.
-    Silence, EOF, an unexpected answer, and any failure after spawn are
-    ambiguous: the turn stays claimed, the child stays tracked, and its lease
-    remains the backstop.
+    The handover is :func:`cloud_agent_host.turn_launch.spawn_turn`'s. This
+    is the name the service calls and its tests replace, and it reads the
+    answer with this module's ``read_handover``, which they replace too.
     """
-    child = _child_turn_payload(payload)
-    if qualification is not None:
-        # Added after the claim's own underscore keys were stripped: only this
-        # host, which proved the runtime and the network rules, can spare the
-        # child its own proof of them (HostQualification.handover).
-        child.update(qualification.handover())
-    try:
-        encoded_child = encode_turn(child)
-    except (TypeError, ValueError) as exc:
-        return LaunchResult(
-            outcome=LAUNCH_NOT_STARTED,
-            detail=f"the turn payload could not be encoded: {type(exc).__name__}: {exc}",
-        )
-    try:
-        read_fd, write_fd = os.pipe()
-    except OSError as exc:
-        return LaunchResult(
-            outcome=LAUNCH_NOT_STARTED,
-            detail=f"could not create the turn handover pipe: {exc}",
-        )
-    argv = [
-        sys.executable,
-        "-m",
-        "cloud_agent_host.runner",
-        "--turn",
-        "--handover-fd",
-        str(write_fd),
-        "--base-url",
-        base_url,
-        "--gateway-url",
-        gateway_url,
-        "--worker-id",
-        worker_id,
-        "--host",
-        host,
-        "--lease-ttl",
-        str(lease_ttl),
-        "--agent-timeout",
-        str(agent_timeout_s),
-    ]
-    try:
-        process = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE,
-            pass_fds=(write_fd,),
-        )
-    except OSError as exc:
-        os.close(read_fd)
-        os.close(write_fd)
-        return LaunchResult(
-            outcome=LAUNCH_NOT_STARTED, detail=f"could not start a turn process: {exc}"
-        )
-    read_open = True
-    write_open = True
-    try:
-        # This process's copy, closed so the read below ends at end-of-file
-        # when the child exits rather than waiting out the deadline.
-        os.close(write_fd)
-        write_open = False
-        assert process.stdin is not None
-        # Most underscore-prefixed keys are parent bookkeeping. Profiling is
-        # the one intentional child handoff: stripping it makes the deployed
-        # multi-process path silently measure nothing.
-        process.stdin.write(encoded_child)
-        process.stdin.close()
-        # read_handover owns and always closes this descriptor, including when
-        # it raises. Mark it transferred before entering the call so cleanup
-        # never closes a descriptor number that another thread could reuse.
-        read_open = False
-        answer = read_handover(read_fd)
-    except KeyboardInterrupt:
-        # Ctrl-C means immediate shutdown. This child is not in TurnPool until
-        # this function returns, so reap it here rather than orphaning it in
-        # the handover window.
-        if read_open:
-            with contextlib.suppress(OSError):
-                os.close(read_fd)
-        if write_open:
-            with contextlib.suppress(OSError):
-                os.close(write_fd)
-        if process.stdin is not None:
-            with contextlib.suppress(OSError, ValueError):
-                process.stdin.close()
-        with contextlib.suppress(OSError):
-            process.kill()
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            process.wait(timeout=10)
-        raise
-    except Exception as exc:
-        # The process exists and may already have accepted the turn. Losing
-        # the handover transport is not proof that it is safe to requeue or
-        # omit this child from graceful shutdown accounting.
-        if read_open:
-            with contextlib.suppress(OSError):
-                os.close(read_fd)
-        if write_open:
-            with contextlib.suppress(OSError):
-                os.close(write_fd)
-        if process.stdin is not None:
-            with contextlib.suppress(OSError, ValueError):
-                process.stdin.close()
-        return LaunchResult(
-            outcome=LAUNCH_UNCERTAIN,
-            handle=process,
-            detail=(
-                f"handover failed ({type(exc).__name__}); the turn stays claimed "
-                "because the spawned child may already own it"
-            ),
-        )
-    prefix = answer.split(" ", 1)[0] if answer else ""
-    if prefix == HANDOVER_ACCEPTED:
-        return LaunchResult(outcome=LAUNCH_STARTED, handle=process)
-    if prefix == HANDOVER_DECLINED:
-        _reap_unstarted(process)
-        return LaunchResult(outcome=LAUNCH_NOT_STARTED, detail=answer or HANDOVER_DECLINED)
-    if answer is None:
-        detail = f"no answer within {HANDOVER_TIMEOUT_S:.0f}s"
-    elif not answer:
-        detail = "the handover closed without a trustworthy answer"
-    else:
-        detail = f"the child returned an unexpected handover answer: {answer!r}"
-    return LaunchResult(
-        outcome=LAUNCH_UNCERTAIN,
-        handle=process,
-        detail=f"{detail}; the turn stays claimed because silence is not proof it did not start",
+    return spawn_turn(
+        payload,
+        base_url=base_url,
+        gateway_url=gateway_url,
+        worker_id=worker_id,
+        lease_ttl=lease_ttl,
+        agent_timeout_s=agent_timeout_s,
+        host=host,
+        qualification=qualification,
+        spare=spare,
+        read_answer=read_handover,
     )
-
-
-def _reap_unstarted(process: subprocess.Popen[bytes]) -> None:
-    """Collect a child that never took its turn, without waiting on it forever.
-
-    It explicitly declined, so it is on its way out. A child that somehow is
-    not gets killed: it holds no turn, so there is nothing for it to finish,
-    and leaving it would leak a process per failure.
-    """
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=10)
 
 
 def _serve_turn(
@@ -3620,6 +3476,7 @@ def _serve_turn(
     lease_ttl: float,
     agent_timeout_s: float,
     host: str | None,
+    spare: bool = False,
 ) -> int:
     """Run the one turn delivered on standard input, or decline having none.
 
@@ -3634,6 +3491,9 @@ def _serve_turn(
     image and the network without running the turn, so failing it means the
     turn has not begun — and answering first would instead strand that turn behind
     a lease it will never use, having spent one of its attempts.
+
+    ``spare`` is a child started before its turn was claimed (turn_launch).
+    One retired without a turn exits at once, without the probe.
     """
     # Install before reading the payload or probing the runtime. The parent
     # does not signal children during a graceful drain, but this also protects
@@ -3644,7 +3504,9 @@ def _serve_turn(
 
     # Drained first, and before anything slow, so the host is never left
     # blocked writing a long prompt into a pipe this process has not read yet.
-    raw = sys.stdin.read()
+    raw = read_turn_input(spare=spare)
+    if raw is None:
+        return 0
     # Recover only the parent's optional timing selection before preflight.
     # This does not accept the turn or reserve a slot: declined children
     # discard their timing without emitting, and the host retains its budget.
@@ -3708,7 +3570,7 @@ def _serve_turn(
         job,
         base_url=base_url,
         gateway_url=gateway_url,
-        worker_id=worker_id,
+        worker_id=handed_worker_id(payload, worker_id),
         lease_ttl=lease_ttl,
         agent_timeout_s=host_settings.get("agent_timeout_s", agent_timeout_s),
         backend=backend,
@@ -3806,6 +3668,17 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         )
 
     qualification_error = ""
+    # The child the next turn goes to, started after each handover so its
+    # imports are done before that claim (turn_launch). Only _spawn_turn
+    # starts one, so a host given its own launcher never has one.
+    spare = TurnSpare(
+        base_url=base_url,
+        gateway_url=gateway_url or base_url,
+        worker_id=worker_id,
+        lease_ttl=lease_ttl,
+        agent_timeout_s=agent_timeout_s,
+        host=host,
+    )
     launch = spawn_turn or (
         lambda payload: _spawn_turn(
             payload,
@@ -3816,6 +3689,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             agent_timeout_s=agent_timeout_s,
             host=host,
             qualification=qualification,
+            spare=spare,
         )
     )
     turns = TurnPool(launch=launch)
@@ -4192,6 +4066,8 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         immediate = True
     finally:
         try:
+            # It holds no turn, so a drain never waits for it.
+            spare.close(immediate=immediate)
             turns.shutdown(immediate=immediate)
         finally:
             try:
@@ -4432,10 +4308,10 @@ def _hand_over_turn(
         delivery_job = ClaimedJob.from_response(payload)
     except (KeyError, TypeError, ValueError):
         delivery_job = None
-    # Carried beside the turn rather than in it: the child logs under the same
-    # name the claim recorded as this turn's lease owner. Stripped before
-    # delivery, so the payload the child parses is the control plane's answer
-    # and nothing this host added to it.
+    # Carried beside the turn under an underscore key: the child logs under
+    # the same name the claim recorded as this turn's lease owner. The
+    # handover strips the claim's own underscore keys, then hands the child
+    # this one (turn_launch.spawn_turn), so a claim can never supply it.
     # The selection rides beside the turn for the same reason the worker id
     # does: the child runs the part worth measuring, and the parent holds the
     # budget slot. It is discarded once the child is gone, because the child's
@@ -4751,9 +4627,11 @@ def build_parser() -> argparse.ArgumentParser:
     # and the exact configuration it was given itself; the turn arrives on that
     # child's standard input and its answer goes back on the descriptor named
     # here. Started by hand, a turn process reads an empty standard input,
-    # declines, and exits.
+    # declines, and exits. A spare, started before its turn is claimed, reads
+    # an empty one as being retired and exits without the probe.
     parser.add_argument("--turn", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--handover-fd", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--spare", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -4783,7 +4661,10 @@ def main(argv: list[str] | None = None) -> int:
             lease_ttl=args.lease_ttl,
             agent_timeout_s=args.agent_timeout,
             host=args.host,
+            spare=args.spare,
         )
+    if args.spare:
+        parser.error("--spare is a turn process's flag; the host service supplies it with --turn")
     return run_forever(
         base_url=args.base_url,
         gateway_url=args.gateway_url or args.base_url,

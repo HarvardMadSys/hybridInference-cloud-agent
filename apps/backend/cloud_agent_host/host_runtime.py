@@ -7,13 +7,15 @@ for work — so changing it meant editing a host's environment and redeploying,
 and the fleet existed whether or not there was anything to run.
 
 Here the number is a *limit*, not a population. This host runs one service that
-enrolls, heartbeats and samples capacity, and it starts a child process only
-when it has actually claimed a turn. An operator's number on the admin Servers
-page arrives on the heartbeat answer and becomes the limit; nothing on this
-machine has to be resized to honour it. Raising it lets the next poll claim
-more; lowering it stops claiming and the turns already running finish. There is
-no idle process to reap, no population to reconcile, and no "which one do I
-stop" decision to get wrong.
+enrolls, heartbeats and samples capacity, and it hands a child a turn only when
+it has actually claimed one. An operator's number on the admin Servers page
+arrives on the heartbeat answer and becomes the limit; nothing on this machine
+has to be resized to honour it. Raising it lets the next poll claim more;
+lowering it stops claiming and the turns already running finish. Besides one
+spare child, started ahead of the next claim and holding nothing until it gets
+that turn (:mod:`cloud_agent_host.turn_launch`), there is no idle process to
+keep, no population to reconcile, and no "which one do I stop" decision to get
+wrong.
 
 **The handover is the whole safety argument.** A claimed turn holds a database
 slot and a lease; handing it to a process that never ran it would strand the
