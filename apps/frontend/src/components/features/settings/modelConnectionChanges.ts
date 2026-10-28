@@ -1,29 +1,69 @@
 import type {
   ModelConnection,
   ModelConnectionInput,
-  ModelProtocol,
+  ModelListRequest,
 } from '@/lib/api/modelConnections';
 
-/** What the form holds: the four ordinary fields and the advanced declaration. */
+/** What the form holds. */
 export interface ConnectionFields {
   name: string;
   base_url: string;
   models: string[];
   key: string;
-  /** Empty is automatic detection. */
-  protocols: ModelProtocol[];
 }
 
-/** The model IDs typed one per line: trimmed, de-duplicated, in order. */
-export function parseModels(text: string): string[] {
-  return [
-    ...new Set(
-      text
-        .split('\n')
-        .map((model) => model.trim())
-        .filter(Boolean),
-    ),
-  ];
+/** A model ID as the server accepts it (`cloud_agent_shared.model_connections.MODEL_ID`). */
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$/;
+
+export function isModelId(text: string): boolean {
+  return MODEL_ID.test(text.trim());
+}
+
+/** A field the owner can fix, as the form and the server name it. */
+export type ConnectionField = 'name' | 'base_url' | 'api_key' | 'models';
+
+/** What is wrong with each field before anything is sent; empty when nothing is. */
+function validBaseUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === 'https:' &&
+      !/[^\x21-\x7e]/.test(value) &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash &&
+      (!url.port || url.port === '443')
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a key could be sent as typed: printable, without spaces. */
+function validKey(value: string): boolean {
+  return Boolean(value) && !/[^\x21-\x7e]/.test(value);
+}
+
+export function fieldProblems(fields: ConnectionFields): Partial<Record<ConnectionField, true>> {
+  const problems: Partial<Record<ConnectionField, true>> = {};
+  if (!fields.name || fields.name.length > 64) problems.name = true;
+  if (!validBaseUrl(fields.base_url)) problems.base_url = true;
+  if (/[^\x21-\x7e]/.test(fields.key)) problems.api_key = true;
+  if (!fields.models.length || fields.models.some((model) => !isModelId(model)))
+    problems.models = true;
+  return problems;
+}
+
+/** One typed model ID, trimmed; `''` adds nothing. */
+export function cleanModel(text: string): string {
+  return text.trim();
+}
+
+/** `models` with `model` appended once, in order. */
+export function withModel(models: readonly string[], model: string): string[] {
+  const clean = cleanModel(model);
+  return !clean || models.includes(clean) ? [...models] : [...models, clean];
 }
 
 function sameList(a: readonly string[], b: readonly string[]): boolean {
@@ -31,7 +71,7 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
 }
 
 function sameBaseUrl(typed: string, stored: string): boolean {
-  // The server drops one trailing slash; the same address typed with it is unchanged.
+  // The server drops trailing slashes; the same address typed with one is unchanged.
   return typed.replace(/\/+$/, '') === stored;
 }
 
@@ -48,19 +88,52 @@ export function connectionChanges(
   if (fields.name !== connection.name) changes.name = fields.name;
   if (!sameBaseUrl(fields.base_url, connection.base_url)) changes.base_url = fields.base_url;
   if (!sameList(fields.models, connection.models)) changes.models = fields.models;
-  if (!sameList(fields.protocols, connection.manual_protocols))
-    changes.protocols = fields.protocols;
   if (fields.key) changes.api_key = fields.key;
   return changes;
 }
 
-/** A new connection's request: automatic unless the owner declared APIs. */
+/**
+ * Whether saving calls the provider: a new connection, a new key or Base URL,
+ * or an added model. A rename, removing models or no change does not.
+ */
+export function needsVerification(
+  connection: ModelConnection | undefined,
+  fields: ConnectionFields,
+): boolean {
+  if (!connection) return true;
+  const changes = connectionChanges(connection, fields);
+  if (changes.base_url !== undefined || changes.api_key !== undefined) return true;
+  return fields.models.some((model) => !connection.models.includes(model));
+}
+
 export function newConnection(fields: ConnectionFields): ModelConnectionInput {
   return {
     name: fields.name,
     base_url: fields.base_url,
     api_key: fields.key,
     models: fields.models,
-    ...(fields.protocols.length ? { protocols: fields.protocols } : {}),
   };
+}
+
+/**
+ * What the form can list model IDs with right now, or what it still needs:
+ * `details` (a valid Base URL and key) or, for an edit at a changed Base URL,
+ * `newKey` -- the saved key is only ever used at the URL it was saved with.
+ * A typed key is always the one used, never swapped for the saved key.
+ */
+export type ModelListSource = { request: ModelListRequest } | { missing: 'details' | 'newKey' };
+
+export function modelListSource(
+  connection: ModelConnection | undefined,
+  fields: ConnectionFields,
+): ModelListSource {
+  if (!validBaseUrl(fields.base_url)) return { missing: 'details' };
+  if (fields.key) {
+    return validKey(fields.key)
+      ? { request: { base_url: fields.base_url, api_key: fields.key } }
+      : { missing: 'details' };
+  }
+  if (!connection) return { missing: 'details' };
+  if (!sameBaseUrl(fields.base_url, connection.base_url)) return { missing: 'newKey' };
+  return { request: { base_url: fields.base_url, connection_id: connection.id } };
 }

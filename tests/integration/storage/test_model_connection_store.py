@@ -32,6 +32,14 @@ from cloud_agent_shared.model_connections import ProtocolPlan
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
+def _facts(tag: str = "") -> dict:
+    """One model's verification as a save stores it: Chat Completions worked."""
+    return {
+        "checked_at": tag or "2026-10-28T00:00:00+00:00",
+        "protocols": {"chat_completions": {"status": "supported", "category": "supported"}},
+    }
+
+
 async def _connection(store, *, owner="user-1", name="Mine", models=("gpt-4.1",)) -> dict:
     return await store.model_connections.create_model_connection(
         user_id=owner,
@@ -39,10 +47,22 @@ async def _connection(store, *, owner="user-1", name="Mine", models=("gpt-4.1",)
             "id": new_connection_id(),
             "name": name,
             "base_url": "https://models.example/v1",
-            "protocols": ["chat_completions", "responses"],
             "models": list(models),
             "api_key_ciphertext": "ciphertext-1",
+            "model_checks": {model: _facts() for model in models},
         },
+    )
+
+
+async def _commit(store, read: dict, changes: dict, models: list[str] | None = None) -> dict | None:
+    """Commit a verified edit onto ``read``, the row its verification started from."""
+    listed = changes.get("models", read["models"])
+    return await store.model_connections.commit_verified_update(
+        user_id=read["user_id"],
+        connection_id=read["id"],
+        expected=read,
+        changes=changes,
+        model_checks={model: _facts() for model in (models or listed)},
     )
 
 
@@ -77,70 +97,64 @@ async def test_connections_are_private_to_their_owner_and_names_are_unique_per_o
     assert mine["credential_revision"] == 1 and mine["enabled"] is True
 
 
-async def _record(store, row: dict, model: str, result: dict | None = None) -> bool:
-    """Record ``model``'s verification against ``row`` as a verification that read it."""
-    return await store.model_connections.record_model_verification(
-        user_id=row["user_id"],
-        connection_id=row["id"],
-        config_revision=row["config_revision"],
-        credential_revision=row["credential_revision"],
-        model=model,
-        result=result or {"protocols": {"chat_completions": {"status": "supported"}}},
-    )
-
-
 async def _get(store, row: dict) -> dict:
     return await store.model_connections.get_model_connection(
         user_id=row["user_id"], connection_id=row["id"]
     )
 
 
-async def test_only_actual_changes_raise_revisions_and_clear_verifications(store):
+async def test_a_create_stores_each_models_verification_at_the_first_revision(store):
     row = await _connection(store, models=("gpt-4.1", "o4-mini"))
-    assert await _record(store, row, "gpt-4.1")
-    assert await _record(store, row, "o4-mini")
+    assert "protocols" not in row, "there is no manual declaration of APIs"
+    assert {m: r["revision"] for m, r in row["model_checks"].items()} == {
+        "gpt-4.1": 1,
+        "o4-mini": 1,
+    }
+    assert row["config_revision"] == 1 and row["credential_revision"] == 1
 
-    # F1: the settings form sends every field; unchanged ones change nothing.
+
+async def test_only_actual_changes_raise_revisions_and_an_unverified_edit_adds_nothing(store):
+    row = await _connection(store, models=("gpt-4.1", "o4-mini"))
+
+    # F1: unchanged values change nothing.
     renamed = await store.model_connections.update_model_connection(
         user_id="user-1",
         connection_id=row["id"],
-        changes={
-            "name": "Renamed",
-            "base_url": row["base_url"],
-            "protocols": row["protocols"],
-            "models": row["models"],
-            "enabled": True,
-        },
+        changes={"name": "Renamed", "models": row["models"], "enabled": True},
     )
     assert renamed["credential_revision"] == 1 and renamed["config_revision"] == 1
     assert set(renamed["model_checks"]) == {"gpt-4.1", "o4-mini"}
 
-    # A model list edit drops only the removed model's verification.
-    remodelled = await store.model_connections.update_model_connection(
-        user_id="user-1", connection_id=row["id"], changes={"models": ["gpt-4.1", "gpt-5"]}
+    # Removing a model drops only its verification.
+    removed = await store.model_connections.update_model_connection(
+        user_id="user-1", connection_id=row["id"], changes={"models": ["gpt-4.1"]}
     )
-    assert remodelled["credential_revision"] == 1 and remodelled["config_revision"] == 1
-    assert set(remodelled["model_checks"]) == {"gpt-4.1"}
+    assert removed["credential_revision"] == 1 and set(removed["model_checks"]) == {"gpt-4.1"}
 
-    # A changed declaration restarts processes but keeps the upstream facts.
-    declared = await store.model_connections.update_model_connection(
-        user_id="user-1", connection_id=row["id"], changes={"protocols": []}
+    # Nothing unverified reaches a new model, key or Base URL.
+    assert (
+        await store.model_connections.update_model_connection(
+            user_id="user-1", connection_id=row["id"], changes={"models": ["gpt-4.1", "gpt-5"]}
+        )
+        is None
     )
-    assert declared["credential_revision"] == 2 and declared["config_revision"] == 1
-    assert set(declared["model_checks"]) == {"gpt-4.1"}
+    for field, value in (("base_url", "https://other.example"), ("api_key_ciphertext", "c-2")):
+        with pytest.raises(ValueError):
+            await store.model_connections.update_model_connection(
+                user_id="user-1", connection_id=row["id"], changes={field: value}
+            )
+    assert (await _get(store, row))["models"] == ["gpt-4.1"]
 
-    rotated = await store.model_connections.update_model_connection(
-        user_id="user-1", connection_id=row["id"], changes={"api_key_ciphertext": "ciphertext-2"}
+    # A verified new key raises both revisions and stamps the new facts with them.
+    rotated = await _commit(store, removed, {"api_key_ciphertext": "ciphertext-2"})
+    assert rotated["credential_revision"] == 2 and rotated["config_revision"] == 2
+    assert {r["revision"] for r in rotated["model_checks"].values()} == {2}
+    # A verified added model keeps the endpoint: no revision moves.
+    added = await _commit(
+        store, rotated, {"models": ["gpt-4.1", "gpt-5"]}, models=["gpt-4.1", "gpt-5"]
     )
-    assert rotated["credential_revision"] == 3 and rotated["config_revision"] == 2
-    assert rotated["model_checks"] == {}
-
-    moved = await store.model_connections.update_model_connection(
-        user_id="user-1",
-        connection_id=row["id"],
-        changes={"base_url": "https://other.example", "models": ["gpt-4.1"]},
-    )
-    assert moved["credential_revision"] == 4 and moved["config_revision"] == 3
+    assert (added["credential_revision"], added["config_revision"]) == (2, 2)
+    assert set(added["model_checks"]) == {"gpt-4.1", "gpt-5"}
 
     disabled = await store.model_connections.update_model_connection(
         user_id="user-1", connection_id=row["id"], changes={"enabled": False}
@@ -151,9 +165,10 @@ async def test_only_actual_changes_raise_revisions_and_clear_verifications(store
     enabled = await store.model_connections.update_model_connection(
         user_id="user-1", connection_id=row["id"], changes={"enabled": True}
     )
-    assert disabled["credential_revision"] == 5
-    assert again["credential_revision"] == 5, "disabling a disabled connection changes nothing"
-    assert enabled["credential_revision"] == 5 and enabled["enabled"] is True
+    assert disabled["credential_revision"] == 3
+    assert again["credential_revision"] == 3, "disabling a disabled connection changes nothing"
+    assert enabled["credential_revision"] == 3 and enabled["enabled"] is True
+    assert set(enabled["model_checks"]) == {"gpt-4.1", "gpt-5"}
 
 
 async def test_a_deleted_connection_keeps_a_keyless_tombstone_and_frees_its_name(store):
@@ -328,11 +343,7 @@ async def test_a_residency_binds_only_to_its_owners_current_connection(pool, sto
 
     # A key rotation must not stop a newer Gateway process merely because an
     # older generation of this member used the key.
-    await store.model_connections.update_model_connection(
-        user_id="user-1",
-        connection_id=connection["id"],
-        changes={"api_key_ciphertext": "ciphertext-2"},
-    )
+    assert await _commit(store, connection, {"api_key_ciphertext": "ciphertext-2"})
     assert (
         await store.model_connections.release_stale_residencies(
             user_id="user-1", connection_id=connection["id"]
@@ -357,11 +368,7 @@ async def test_a_change_to_the_connection_releases_the_residencies_started_befor
         scan_key_ciphertext="scan-1",
     )
     if change == "rotate":
-        await store.model_connections.update_model_connection(
-            user_id="user-1",
-            connection_id=connection["id"],
-            changes={"api_key_ciphertext": "ciphertext-2"},
-        )
+        assert await _commit(store, connection, {"api_key_ciphertext": "ciphertext-2"})
     elif change == "disable":
         await store.model_connections.update_model_connection(
             user_id="user-1", connection_id=connection["id"], changes={"enabled": False}
@@ -411,9 +418,9 @@ async def _keyed_connection(store, *, name: str, key: str) -> dict:
             "id": new_connection_id(),
             "name": name,
             "base_url": "https://models.example/v1",
-            "protocols": ["chat_completions"],
             "models": ["gpt-4.1"],
             "api_key_ciphertext": model_connection_cipher().encrypt(key),
+            "model_checks": {"gpt-4.1": _facts()},
         },
     )
     return row
@@ -506,10 +513,8 @@ async def test_a_key_a_group_used_stays_in_its_scan_after_rotation_or_deletion(
     job, claim, group = await _reserve_shared_chat(store)
     assert await _bind(store, row, job, group["residency_generation"])
 
-    await store.model_connections.update_model_connection(
-        user_id="user-1",
-        connection_id=row["id"],
-        changes={"api_key_ciphertext": model_connection_cipher().encrypt("second-key-bbbb")},
+    assert await _commit(
+        store, row, {"api_key_ciphertext": model_connection_cipher().encrypt("second-key-bbbb")}
     )
     # The next process gets the new key, under a new residency generation.
     renewed = await store.residency.establish_residency(
@@ -579,80 +584,107 @@ async def test_an_expired_residency_cannot_be_bound(pool, store):
         assert await conn.fetchval("SELECT count(*) FROM agent_model_connection_scan_keys") == 0
 
 
-async def test_two_concurrent_reservations_cannot_both_take_the_last_check(pool, store):
-    row = await _connection(store)
-    reserve = {"user_id": "user-1", "connection_id": row["id"], "seconds": 3600}
-    for _ in range(2):
-        assert "connection" in await store.model_connections.reserve_model_connection_check(
-            limit=3, **reserve
-        )
+async def test_reservations_are_atomic_all_or_nothing_and_need_no_connection(pool, store):
+    """The budget covers verifying a connection that does not exist yet."""
+    reserve = store.model_connections.reserve_model_connection_checks
+    assert await reserve(user_id="user-1", count=2, limit=3, seconds=3600)
     results = await asyncio.gather(
-        *(
-            store.model_connections.reserve_model_connection_check(limit=3, **reserve)
-            for _ in range(2)
-        )
+        *(reserve(user_id="user-1", count=1, limit=3, seconds=3600) for _ in range(2))
     )
-    assert sorted("connection" in result for result in results) == [False, True]
-    assert {"error": "limited"} in results
-    other = await _connection(store, owner="user-2")
-    assert "connection" in await store.model_connections.reserve_model_connection_check(
-        user_id="user-2", connection_id=other["id"], seconds=3600, limit=3
-    ), "each owner's limit is their own"
-    assert await store.model_connections.reserve_model_connection_check(
-        user_id="user-2", connection_id=row["id"], seconds=3600, limit=3
-    ) == {"error": "not_found"}
+    assert sorted(results) == [False, True], "two replicas cannot both take the last check"
+    other = await reserve(user_id="user-2", count=3, limit=3, seconds=3600)
+    assert other, "each owner's limit is their own"
+    # A save that needs more than is left takes nothing at all.
+    assert await reserve(user_id="user-2", count=1, limit=4, seconds=3600)
+    assert not await reserve(user_id="user-2", count=2, limit=4, seconds=3600)
+    async with pool.acquire() as conn:
+        counts = dict(
+            await conn.fetch(
+                "SELECT user_id, count(*) FROM agent_model_connection_checks GROUP BY user_id"
+            )
+        )
+    assert counts == {"user-1": 3, "user-2": 4}
 
 
-async def test_a_verification_is_kept_only_for_the_connection_it_read(store):
+@pytest.mark.parametrize("meanwhile", ["rotated", "moved", "disabled", "remodelled", "deleted"])
+async def test_a_verified_edit_lands_only_on_the_row_its_verification_read(store, meanwhile):
     row = await _connection(store, models=("gpt-4.1", "o4-mini"))
-    reserved = await store.model_connections.reserve_model_connection_check(
-        user_id="user-1", connection_id=row["id"], seconds=3600, limit=20
-    )
-    read = reserved["connection"]
-    await store.model_connections.update_model_connection(
-        user_id="user-1", connection_id=row["id"], changes={"base_url": "https://other.example"}
-    )
-    assert not await _record(store, read, "gpt-4.1")
-    current = await _get(store, row)
-    assert current["model_checks"] == {}
-    assert await _record(store, current, "gpt-4.1")
-    stored = (await _get(store, row))["model_checks"]["gpt-4.1"]
-    assert stored["revision"] == current["config_revision"]
-
-    # Not for a model removed meanwhile, nor a model never listed.
-    assert not await _record(store, current, "gpt-5")
-    # Not after a disable, even once enabled again; and never enabling it.
-    for enabled in (False, True):
+    read = await _get(store, row)
+    if meanwhile == "rotated":
+        assert await _commit(store, read, {"api_key_ciphertext": "ciphertext-newer"})
+    elif meanwhile == "moved":
+        assert await _commit(store, read, {"base_url": "https://newer.example"})
+    elif meanwhile == "disabled":
         await store.model_connections.update_model_connection(
-            user_id="user-1", connection_id=row["id"], changes={"enabled": enabled}
+            user_id="user-1", connection_id=row["id"], changes={"enabled": False}
         )
-        assert not await _record(store, current, "o4-mini")
-    after = await _get(store, row)
-    assert after["enabled"] is True and "o4-mini" not in after["model_checks"]
-    await store.model_connections.update_model_connection(
-        user_id="user-1", connection_id=row["id"], changes={"enabled": False}
-    )
-    disabled = await _get(store, row)
-    assert not await _record(store, disabled, "o4-mini")
-    assert (await _get(store, row))["enabled"] is False
-    # Nor for a deleted one.
-    await store.model_connections.update_model_connection(
-        user_id="user-1", connection_id=row["id"], changes={"enabled": True}
-    )
-    live = await _get(store, row)
-    await store.model_connections.delete_model_connection(user_id="user-1", connection_id=row["id"])
-    assert not await _record(store, live, "o4-mini")
+        # Even enabled again: the credential revision moved.
+        await store.model_connections.update_model_connection(
+            user_id="user-1", connection_id=row["id"], changes={"enabled": True}
+        )
+    elif meanwhile == "remodelled":
+        await store.model_connections.update_model_connection(
+            user_id="user-1", connection_id=row["id"], changes={"models": ["gpt-4.1"]}
+        )
+    else:
+        await store.model_connections.delete_model_connection(
+            user_id="user-1", connection_id=row["id"]
+        )
+    before = await _get(store, row)
+
+    late = await _commit(store, read, {"api_key_ciphertext": "ciphertext-late"})
+
+    assert late is None
+    assert await _get(store, row) == before, "the change made meanwhile stands"
 
 
-async def test_concurrent_verifications_of_different_models_both_survive(pool, store):
-    models = [f"m{i}" for i in range(8)]
-    row = await _connection(store, models=models)
+async def test_a_model_removed_and_re_added_meanwhile_is_not_overwritten(store):
+    """Review 3: the model list returns, the facts do not; a late save must lose."""
+    row = await _connection(store, models=("gpt-4.1", "o4-mini"))
+    read = await _get(store, row)
+    removed = await store.model_connections.update_model_connection(
+        user_id="user-1", connection_id=row["id"], changes={"models": ["gpt-4.1"]}
+    )
+    readded = await store.model_connections.commit_verified_update(
+        user_id="user-1",
+        connection_id=row["id"],
+        expected=removed,
+        changes={"models": ["gpt-4.1", "o4-mini"]},
+        model_checks={"gpt-4.1": _facts(), "o4-mini": _facts("newer")},
+    )
+    assert readded["models"] == read["models"], "the list is back where the late save read it"
+
+    late = await _commit(store, read, {"name": "Late"}, models=["gpt-4.1", "o4-mini"])
+
+    assert late is None
+    stored = await _get(store, row)
+    assert stored["model_checks"]["o4-mini"]["checked_at"] == "newer"
+    assert stored["name"] == "Mine"
+
+
+async def test_a_rename_made_meanwhile_does_not_block_a_verified_edit(store):
+    row = await _connection(store)
+    read = await _get(store, row)
+    await store.model_connections.update_model_connection(
+        user_id="user-1", connection_id=row["id"], changes={"name": "Renamed meanwhile"}
+    )
+    committed = await _commit(store, read, {"api_key_ciphertext": "ciphertext-2"})
+    assert committed["name"] == "Renamed meanwhile"
+    assert committed["api_key_ciphertext"] == "ciphertext-2" and committed["enabled"] is True
+
+
+async def test_two_verified_edits_from_one_read_never_both_land(store):
+    row = await _connection(store)
+    read = await _get(store, row)
     results = await asyncio.gather(
-        *(_record(store, row, model, {"checked_at": model}) for model in models)
+        _commit(store, read, {"models": ["gpt-4.1", "a"]}, models=["gpt-4.1", "a"]),
+        _commit(store, read, {"models": ["gpt-4.1", "b"]}, models=["gpt-4.1", "b"]),
     )
-    assert all(results)
-    stored = (await _get(store, row))["model_checks"]
-    assert {model: stored[model]["checked_at"] for model in models} == {m: m for m in models}
+    winners = [result for result in results if result is not None]
+    assert len(winners) == 1, "the loser is refused, never merged half-way"
+    stored = await _get(store, row)
+    assert stored["models"] == winners[0]["models"]
+    assert set(stored["model_checks"]) == set(winners[0]["models"])
 
 
 async def test_a_rename_does_not_release_a_running_residency(pool, store):
@@ -670,12 +702,7 @@ async def test_a_rename_does_not_release_a_running_residency(pool, store):
     await store.model_connections.update_model_connection(
         user_id="user-1",
         connection_id=connection["id"],
-        changes={
-            "name": "Renamed",
-            "base_url": connection["base_url"],
-            "protocols": connection["protocols"],
-            "models": [*connection["models"], "o4-mini"],
-        },
+        changes={"name": "Renamed", "models": connection["models"], "enabled": True},
     )
     assert (
         await store.model_connections.release_stale_residencies(
@@ -684,18 +711,3 @@ async def test_a_rename_does_not_release_a_running_residency(pool, store):
         == []
     )
     assert (await _membership(pool, job["thread_id"]))["residency_status"] == "hot"
-
-
-async def test_an_automatic_connection_declares_nothing_and_starts_unverified(store):
-    row = await store.model_connections.create_model_connection(
-        user_id="user-1",
-        values={
-            "id": new_connection_id(),
-            "name": "Auto",
-            "base_url": "https://models.example/v1",
-            "protocols": [],
-            "models": ["gpt-4.1"],
-            "api_key_ciphertext": "ciphertext-1",
-        },
-    )
-    assert row["protocols"] == [] and row["model_checks"] == {}

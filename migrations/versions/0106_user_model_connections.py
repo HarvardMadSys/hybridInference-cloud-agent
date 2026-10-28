@@ -31,26 +31,20 @@ def upgrade() -> None:
             base_url TEXT NOT NULL CHECK (
                 char_length(base_url) BETWEEN 9 AND 512 AND base_url LIKE 'https://%'
             ),
-            -- Empty: the APIs are detected per model by an explicit verification
-            -- (model_checks). Non-empty: the owner's manual declaration, which
-            -- every listed model runs on without verification.
-            protocols TEXT[] NOT NULL DEFAULT '{}' CHECK (
-                cardinality(protocols) <= 3
-                AND protocols <@ ARRAY[
-                    'chat_completions', 'responses', 'anthropic_messages'
-                ]::text[]
-            ),
-            models TEXT[] NOT NULL CHECK (cardinality(models) BETWEEN 1 AND 64),
+            -- At most eight: a new key or Base URL re-verifies every model in
+            -- the save that makes it, so one save stays bounded.
+            models TEXT[] NOT NULL CHECK (cardinality(models) BETWEEN 1 AND 8),
             api_key_ciphertext TEXT,
             credential_revision BIGINT NOT NULL DEFAULT 1 CHECK (credential_revision >= 1),
-            -- Raised when the endpoint a verification tested changes: its Base
+            -- Raised when the endpoint the verification tested changes: its Base
             -- URL or its key. A model's result counts only at the revision it
-            -- tested, and is recorded only if that is still the current one.
+            -- tested; a save writes the results it verified with the revision.
             config_revision BIGINT NOT NULL DEFAULT 1 CHECK (config_revision >= 1),
             enabled BOOLEAN NOT NULL DEFAULT TRUE,
-            -- Each listed model's last verification, keyed by model id: the
-            -- native APIs that did, did not, or could not be shown to stream a
-            -- tool round trip. Upstream facts only; translated paths are derived.
+            -- Each listed model's verification, keyed by model id, written by the
+            -- save that verified it: the native APIs that did, did not, or could
+            -- not be shown to stream a tool round trip. Upstream facts only;
+            -- which agents reach a model, and how, is derived from them.
             model_checks JSONB NOT NULL DEFAULT '{}'::jsonb
                 CHECK (jsonb_typeof(model_checks) = 'object'),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -76,13 +70,14 @@ def upgrade() -> None:
         "CREATE INDEX idx_agent_model_connections_owner "
         "ON agent_model_connections (user_id, created_at)"
     )
+    # One row per provider call an owner asked for -- a model verified or a
+    # model list read -- counted against a per-owner hourly budget. Owner-level,
+    # not per connection: a connection is verified before it exists.
     op.execute(
         """
         CREATE TABLE agent_model_connection_checks (
             id BIGSERIAL PRIMARY KEY,
             user_id TEXT NOT NULL,
-            connection_id TEXT NOT NULL
-                REFERENCES agent_model_connections (id) ON DELETE CASCADE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
         """

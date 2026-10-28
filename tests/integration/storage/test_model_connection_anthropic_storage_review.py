@@ -16,11 +16,18 @@ from cloud_agent.application.model_connections import new_connection_id
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
+def _verified(*protocols: str) -> dict:
+    return {
+        "checked_at": "2026-10-28T00:00:00+00:00",
+        "protocols": {p: {"status": "supported", "category": "supported"} for p in protocols},
+    }
+
+
 @pytest.mark.parametrize(
     "protocols",
     [
-        ["anthropic_messages"],
-        ["chat_completions", "responses", "anthropic_messages"],
+        ("anthropic_messages",),
+        ("chat_completions", "responses", "anthropic_messages"),
     ],
 )
 async def test_messages_connection_survives_storage_and_claude_follow_up(pool, store, protocols):
@@ -30,15 +37,15 @@ async def test_messages_connection_survives_storage_and_claude_follow_up(pool, s
             "id": new_connection_id(),
             "name": "Native Messages",
             "base_url": "https://provider.example/anthropic/v1",
-            "protocols": protocols,
             "models": ["fixture-claude"],
             "api_key_ciphertext": "fixture-encrypted-key",
+            "model_checks": {"fixture-claude": _verified(*protocols)},
         },
     )
     stored = await store.model_connections.get_model_connection(
         user_id="user-1", connection_id=source["id"]
     )
-    assert stored["protocols"] == protocols
+    assert stored["model_checks"]["fixture-claude"] == {**_verified(*protocols), "revision": 1}
     assert (
         await store.model_connections.get_model_connection(
             user_id="user-2", connection_id=source["id"]

@@ -43,6 +43,7 @@ vi.mock('@/lib/api/modelPreference', () => ({
 }));
 // My Settings also lists personal model connections; this deployment offers none.
 vi.mock('@/lib/api/modelConnections', () => ({
+  MAX_MODELS: 8,
   listModelConnections: () =>
     Promise.resolve({ configured: true, enabled: false, connections: [] }),
 }));

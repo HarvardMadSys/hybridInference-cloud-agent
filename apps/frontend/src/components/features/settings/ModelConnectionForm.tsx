@@ -1,307 +1,325 @@
 'use client';
 
-import { useId, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useT } from '@/components/providers';
 import {
   createModelConnection,
-  MODEL_PROTOCOLS,
+  invalidFields,
+  MAX_MODELS,
+  refusedModels,
   updateModelConnection,
   type ModelConnection,
-  type ModelProtocol,
+  type ModelStatus,
 } from '@/lib/api/modelConnections';
-import { connectionChanges, newConnection, parseModels } from './modelConnectionChanges';
+import { APIError } from '@/lib/utils/errors';
+import { ModelIdsField } from './ModelIdsField';
+import type { Operate } from './connectionOps';
+import { useModelSuggestions } from './useModelSuggestions';
+import {
+  connectionChanges,
+  fieldProblems,
+  modelListSource,
+  needsVerification,
+  newConnection,
+  withModel,
+  type ConnectionField,
+  type ConnectionFields,
+} from './modelConnectionChanges';
 
 const inputClass = 'ui-input mt-1 block min-h-11 w-full rounded-lg';
 
-/** Protocol names, shown only inside the advanced override. */
-const PROTOCOL_LABELS = {
-  chat_completions: 'connections.chat',
-  responses: 'connections.responses',
-  anthropic_messages: 'connections.anthropic',
-} as const satisfies Record<ModelProtocol, string>;
+type Translate = ReturnType<typeof useT>;
+type Problems = Partial<Record<ConnectionField, true>>;
+
+const PROBLEM_KEYS = {
+  name: 'connections.invalid.name',
+  base_url: 'connections.invalid.url',
+  api_key: 'connections.invalid.key',
+  models: 'connections.invalid.model',
+} as const satisfies Record<ConnectionField, string>;
+
+/** Why a save failed, in the owner's words; never the raw failure, which may echo input. */
+function failureMessage(cause: unknown, t: Translate): string {
+  if (refusedModels(cause)) return t('connections.refused');
+  if (invalidFields(cause)) return t('connections.invalid');
+  if (cause instanceof APIError) {
+    if (cause.code === 'model_connection_check_limit') return t('connections.limited');
+    if (cause.code === 'model_connection_changed') return t('connections.changed');
+    if (cause.code === 'model_connection_name_taken') return t('connections.nameTaken');
+    if (cause.code === 'model_connection_verification_timeout') return t('connections.timedOut');
+  }
+  return t('connections.error');
+}
+
+/** The fields a refused request named, as the form's own field names. */
+function serverProblems(cause: unknown): Problems {
+  const problems: Problems = {};
+  for (const field of invalidFields(cause) ?? []) {
+    const name = field.split('.')[0] as ConnectionField;
+    if (name in PROBLEM_KEYS) problems[name] = true;
+  }
+  return problems;
+}
+
+/** Whether the form can be saved yet: every field filled, within the model limit. */
+function incomplete(
+  fields: ConnectionFields,
+  connection: ModelConnection | undefined,
+  maxModels: number,
+): boolean {
+  if (!fields.name || !fields.base_url || !fields.models.length) return true;
+  return fields.models.length > maxModels || (!connection && !fields.key);
+}
+
+function actionLabel(busy: boolean, verify: boolean, t: Translate): string {
+  if (busy) return t(verify ? 'connections.verifyingShort' : 'connections.busy');
+  return t(verify ? 'connections.verifySave' : 'connections.save');
+}
 
 /**
- * The advanced override, collapsed by default: automatic detection, or a
- * manual declaration that every listed model runs on without verification.
+ * The save itself: verified by the server first when it reaches a new endpoint
+ * or model. An edit runs through `operate`, so an answer that another change
+ * to the same connection overtook is not applied (`undefined`).
  */
-function ApiDetection({
-  manual,
-  protocols,
-  onManual,
-  onChange,
-}: {
-  manual: boolean;
-  protocols: ModelProtocol[];
-  onManual: (manual: boolean) => void;
-  onChange: (protocols: ModelProtocol[]) => void;
-}) {
-  const t = useT();
-  const name = useId();
-  return (
-    <details className="rounded-lg border border-border px-3" open={manual}>
-      <summary className="ui-focus-ring cursor-pointer rounded-md py-2 text-sm font-medium">
-        {t('connections.advanced')}
-      </summary>
-      <fieldset className="space-y-2 pb-3">
-        <legend className="mb-2 text-sm font-medium">{t('connections.mode')}</legend>
-        <label className="flex min-h-9 items-center gap-2 text-sm">
-          <input
-            type="radio"
-            name={name}
-            checked={!manual}
-            onChange={() => {
-              onManual(false);
-              onChange([]);
-            }}
-          />
-          {t('connections.modeAuto')}
-        </label>
-        <label className="flex min-h-9 items-center gap-2 text-sm">
-          <input type="radio" name={name} checked={manual} onChange={() => onManual(true)} />
-          {t('connections.modeManual')}
-        </label>
-        {manual ? (
-          <div className="space-y-1 ps-6">
-            {MODEL_PROTOCOLS.map((protocol) => (
-              <label key={protocol} className="flex min-h-9 items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={protocols.includes(protocol)}
-                  onChange={() =>
-                    onChange(
-                      MODEL_PROTOCOLS.filter((value) =>
-                        value === protocol ? !protocols.includes(value) : protocols.includes(value),
-                      ),
-                    )
-                  }
-                />
-                {t(PROTOCOL_LABELS[protocol])}
-              </label>
-            ))}
-            <p className="text-xs leading-5 text-muted">{t('connections.modeManualHint')}</p>
-          </div>
-        ) : null}
-      </fieldset>
-    </details>
-  );
+async function submit(
+  connection: ModelConnection | undefined,
+  fields: ConnectionFields,
+  operate: Operate,
+): Promise<ModelConnection | undefined> {
+  if (!connection) return operate('new', () => createModelConnection(newConnection(fields)));
+  const changes = connectionChanges(connection, fields);
+  // Closing an unchanged editor must not replay its old snapshot over a
+  // disable or another update that completed while the editor was open.
+  if (!Object.keys(changes).length) return undefined;
+  return operate(connection.id, () => updateModelConnection(connection.id, changes));
 }
 
-/** Whether Save must wait: a field is missing, or a manual declaration is empty. */
-function isIncomplete(fields: {
-  name: string;
-  models: string;
-  key: string;
-  needsKey: boolean;
-  manual: boolean;
-  protocols: ModelProtocol[];
-}): boolean {
-  if (!fields.name.trim() || !fields.models.trim()) return true;
-  if (fields.needsKey && !fields.key.trim()) return true;
-  // A manual declaration with nothing declared would silently mean automatic.
-  return fields.manual && fields.protocols.length === 0;
-}
-
-/** "Save and verify", "Save" and "Cancel". Only the first leads to provider calls. */
-function FormActions({
-  busy,
-  incomplete,
-  verifyAfter,
-  onIntent,
-  onCancel,
+/** A labelled input with its field-level problem, if any. */
+function Field({
+  label,
+  problem,
+  children,
 }: {
-  busy: boolean;
-  incomplete: boolean;
-  verifyAfter: boolean;
-  onIntent: (verify: boolean) => void;
-  onCancel: () => void;
+  label: string;
+  problem: string;
+  children: (describedBy: string | undefined) => ReactNode;
 }) {
-  const t = useT();
+  const id = useId();
   return (
-    <div className="flex flex-wrap gap-2">
-      <button
-        type="submit"
-        disabled={busy || incomplete}
-        onClick={() => onIntent(true)}
-        className="ui-button ui-button-primary min-h-11"
-      >
-        {t(busy && verifyAfter ? 'connections.busy' : 'connections.saveVerify')}
-      </button>
-      <button
-        type="submit"
-        disabled={busy || incomplete}
-        onClick={() => onIntent(false)}
-        className="ui-button ui-button-secondary min-h-11"
-      >
-        {t(busy && !verifyAfter ? 'connections.busy' : 'connections.save')}
-      </button>
-      <button
-        type="button"
-        disabled={busy}
-        onClick={onCancel}
-        className="ui-button ui-button-secondary min-h-11"
-      >
-        {t('connections.cancel')}
-      </button>
+    <div>
+      <label className="block text-sm font-medium">
+        {label}
+        {children(problem ? id : undefined)}
+      </label>
+      {problem ? (
+        <p id={id} className="mt-1 text-xs leading-5 text-status-error">
+          {problem}
+        </p>
+      ) : null}
     </div>
   );
 }
 
 /**
- * Add or edit a connection: a name, a Base URL, a key and model IDs. Saving
- * never calls the provider; "Save and verify" saves, then asks the card to
- * verify its unverified models (`onSaved`'s `verify`).
+ * Add or edit a connection: a name, a Base URL, a write-only key and model
+ * IDs. **Verify and save** verifies before anything is stored; a refusal
+ * keeps every input, with each model's result on its chip, to fix and retry.
+ * A rename or removing models saves without calling the provider. While a
+ * save runs it cannot be cancelled: the server may still commit it.
+ *
+ * Model IDs can be picked from the provider's own list, loaded on request
+ * with the Base URL and key in the form (an edit at its saved Base URL may
+ * leave the key blank). Loading saves nothing and proves nothing; a save
+ * aborts a load still in flight.
  */
 export function ModelConnectionForm({
   connection,
+  maxModels = MAX_MODELS,
+  operate,
   onSaved,
   onCancel,
 }: {
   connection?: ModelConnection;
-  onSaved: (connection: ModelConnection, options: { verify: boolean }) => void;
+  maxModels?: number;
+  operate: Operate;
+  /** `null`: saved, but another change overtook its answer; the page re-reads. */
+  onSaved: (connection: ModelConnection | null) => void;
   onCancel: () => void;
 }) {
   const t = useT();
-  const id = useId();
+  const keyHint = useId();
   const [name, setName] = useState(connection?.name ?? '');
   const [url, setUrl] = useState(connection?.base_url ?? '');
   const [key, setKey] = useState('');
-  const [models, setModels] = useState(connection?.models.join('\n') ?? '');
-  const [protocols, setProtocols] = useState<ModelProtocol[]>(connection?.manual_protocols ?? []);
-  const [manual, setManual] = useState(protocols.length > 0);
+  const [models, setModels] = useState<string[]>(connection?.models ?? []);
+  const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(false);
-  const [verifyAfter, setVerifyAfter] = useState(false);
-  // Which button submitted: the submit handler runs in the same event as the
-  // click, before a state update from it would be visible.
-  const verifyIntent = useRef(false);
+  const [error, setError] = useState('');
+  const [problems, setProblems] = useState<Problems>({});
+  const [results, setResults] = useState<Record<string, ModelStatus>>({});
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const fields: ConnectionFields = {
+    name: name.trim(),
+    base_url: url.trim(),
+    models: withModel(models, draft),
+    key: key.trim(),
+  };
+  const verify = needsVerification(connection, fields);
+  const source = modelListSource(connection, fields);
+  const { suggestions, load, stop } = useModelSuggestions(
+    'request' in source ? source.request : null,
+  );
+  const problem = (field: ConnectionField) => (problems[field] ? t(PROBLEM_KEYS[field]) : '');
+
+  /** Any edit after a refusal: its results described the form as it was. */
+  function edited<T>(set: (value: T) => void) {
+    return (value: T) => {
+      set(value);
+      setResults({});
+      setProblems({});
+      setError('');
+    };
+  }
 
   async function save(event: FormEvent) {
     event.preventDefault();
     if (busy) return;
+    const found = fieldProblems(fields);
+    if (!connection && !fields.key) found.api_key = true;
+    const invalid = Object.keys(found).length > 0;
+    setProblems(found);
+    setResults({});
+    setError(invalid ? t('connections.invalid') : '');
+    if (invalid) return;
+    stop();
     setBusy(true);
-    setError(false);
-    const fields = {
-      name: name.trim(),
-      base_url: url.trim(),
-      models: parseModels(models),
-      key: key.trim(),
-      protocols,
-    };
     try {
-      let saved = connection;
-      if (!connection) {
-        saved = await createModelConnection(newConnection(fields));
-      } else {
-        const changes = connectionChanges(connection, fields);
-        if (Object.keys(changes).length)
-          saved = await updateModelConnection(connection.id, changes);
-      }
+      const saved = await submit(connection, fields, operate);
+      if (!mounted.current) return;
       setKey('');
-      if (saved) onSaved(saved, { verify: verifyIntent.current });
-    } catch {
-      setError(true);
+      onSaved(saved ?? null);
+    } catch (cause) {
+      if (!mounted.current) return;
+      const refused = refusedModels(cause) ?? [];
+      setModels(fields.models);
+      setDraft('');
+      setResults(Object.fromEntries(refused.map((status) => [status.model, status])));
+      setProblems(serverProblems(cause));
+      setError(failureMessage(cause, t));
     } finally {
-      setBusy(false);
+      if (mounted.current) setBusy(false);
     }
   }
 
-  const incomplete = isIncomplete({ name, models, key, needsKey: !connection, manual, protocols });
   return (
     <form
       onSubmit={(event) => void save(event)}
+      noValidate
       className="mt-4 space-y-4 rounded-xl border border-border p-4"
     >
       <fieldset disabled={busy} className="space-y-4">
         <legend className="sr-only">
           {t(connection ? 'connections.edit' : 'connections.add')}
         </legend>
-        <label className="block text-sm font-medium">
-          {t('connections.name')}
-          <input
-            className={inputClass}
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            required
-            maxLength={64}
-            autoComplete="off"
-          />
-        </label>
-        <label className="block text-sm font-medium">
-          {t('connections.url')}
-          <input
-            className={inputClass}
-            type="url"
-            value={url}
-            onChange={(event) => setUrl(event.target.value)}
-            required
-            maxLength={512}
-            placeholder="https://api.example.com/v1"
-            aria-describedby={`${id}-url`}
-            autoComplete="off"
-          />
-        </label>
-        <p id={`${id}-url`} className="text-xs leading-5 text-muted">
-          {t('connections.urlHint')}
-        </p>
-        <label className="block text-sm font-medium">
-          {t('connections.key')}
-          <input
-            className={inputClass}
-            type="password"
-            value={key}
-            onChange={(event) => setKey(event.target.value)}
-            required={!connection}
-            maxLength={4096}
-            autoComplete="new-password"
-            spellCheck={false}
-            aria-describedby={`${id}-key`}
-          />
-        </label>
-        <p id={`${id}-key`} className="text-xs leading-5 text-muted">
-          {connection ? `${t('connections.keyHint')} ` : ''}
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label={t('connections.name')} problem={problem('name')}>
+            {(describedBy) => (
+              <input
+                className={inputClass}
+                value={name}
+                onChange={(event) => edited(setName)(event.target.value)}
+                maxLength={64}
+                autoComplete="off"
+                aria-invalid={describedBy ? true : undefined}
+                aria-describedby={describedBy}
+              />
+            )}
+          </Field>
+          <Field label={t('connections.url')} problem={problem('base_url')}>
+            {(describedBy) => (
+              <input
+                className={inputClass}
+                type="url"
+                value={url}
+                onChange={(event) => edited(setUrl)(event.target.value)}
+                maxLength={512}
+                placeholder="https://api.example.com/v1"
+                autoComplete="off"
+                spellCheck={false}
+                aria-invalid={describedBy ? true : undefined}
+                aria-describedby={describedBy}
+              />
+            )}
+          </Field>
+        </div>
+        <Field label={t('connections.key')} problem={problem('api_key')}>
+          {(describedBy) => (
+            <input
+              className={inputClass}
+              type="password"
+              value={key}
+              onChange={(event) => edited(setKey)(event.target.value)}
+              maxLength={4096}
+              autoComplete="new-password"
+              spellCheck={false}
+              placeholder={connection ? t('connections.keyKept') : undefined}
+              aria-invalid={describedBy ? true : undefined}
+              aria-describedby={describedBy ? `${describedBy} ${keyHint}` : keyHint}
+            />
+          )}
+        </Field>
+        <p id={keyHint} className="-mt-2 text-xs leading-5 text-muted">
           {t('connections.secretHint')}
         </p>
-        <label className="block text-sm font-medium">
-          {t('connections.models')}
-          <textarea
-            className={inputClass}
-            value={models}
-            onChange={(event) => setModels(event.target.value)}
-            required
-            rows={4}
-            spellCheck={false}
-            aria-describedby={`${id}-models`}
-          />
-        </label>
-        <p id={`${id}-models`} className="text-xs leading-5 text-muted">
-          {t('connections.modelsHint')}
-        </p>
-        <ApiDetection
-          manual={manual}
-          protocols={protocols}
-          onManual={setManual}
-          onChange={setProtocols}
+        <ModelIdsField
+          models={models}
+          draft={draft}
+          max={maxModels}
+          results={results}
+          invalid={Boolean(problems.models)}
+          disabled={busy}
+          suggest={{
+            suggestions,
+            missing: 'missing' in source ? source.missing : null,
+            onLoad: () => void load(),
+          }}
+          onModels={edited(setModels)}
+          onDraft={edited(setDraft)}
         />
-        {connection ? (
-          <p className="text-sm leading-6 text-muted">{t('connections.editHint')}</p>
-        ) : null}
-        <p className="text-xs leading-5 text-muted">{t('connections.verifyHint')}</p>
       </fieldset>
+      <div role="status" aria-live="polite">
+        {busy && verify ? <p className="text-sm text-muted">{t('connections.verifying')}</p> : null}
+      </div>
       {error ? (
         <p role="alert" className="text-sm text-status-error">
-          {t('connections.error')}
+          {error}
         </p>
       ) : null}
-      <FormActions
-        busy={busy}
-        incomplete={incomplete}
-        verifyAfter={verifyAfter}
-        onIntent={(verify) => {
-          verifyIntent.current = verify;
-          setVerifyAfter(verify);
-        }}
-        onCancel={onCancel}
-      />
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="submit"
+          disabled={busy || incomplete(fields, connection, maxModels)}
+          className="ui-button ui-button-primary min-h-11"
+        >
+          {actionLabel(busy, verify, t)}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+          className="ui-button ui-button-secondary min-h-11"
+        >
+          {t('connections.cancel')}
+        </button>
+      </div>
+      {verify ? <p className="text-xs leading-5 text-muted">{t('connections.billing')}</p> : null}
     </form>
   );
 }

@@ -4169,10 +4169,10 @@ and the owner SSH servers entry in [AGENTS.md](../../AGENTS.md) §7.
 
 An owner adds their own inference endpoint under **Settings → My settings →
 Personal model connections** (`/settings/my-settings`): a name, a Base URL,
-an API key and the model ids to use. The owner then verifies each model
-(**Save and verify**, or **Verify** on a model); Cloud Agent works out which
-APIs that model serves, and the model appears in the composer beside the
-Gateway's for the agents that can use it. Such a turn runs on the owner's key and bill and
+an API key and up to eight model ids. **Verify and save** verifies every model
+before anything is stored, and Cloud Agent works out which APIs each model
+serves. The models then appear in the composer beside the Gateway's, for the
+agents that can use them. Such a turn runs on the owner's key and bill and
 needs no Gateway grant, catalog or quota; login and Agent admission still go
 through the Gateway. Design, protocol matrix and accepted risks:
 [model connection design](../agents/specs/2026-10-27-user-model-connections.zh-CN.md),
@@ -4200,7 +4200,8 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   authorized claim and residency responses do carry it: that is how the
   member's CLI gets it.
 - **Verification and protocols.** Owners are not asked which APIs their
-  provider offers. Verifying a model streams a tool call and its result on
+  provider offers, and cannot declare them. Verifying a model streams a tool
+  call and its result on
   each of OpenAI Chat Completions, OpenAI Responses and Anthropic Messages,
   side by side, and stores, per model, each API's native outcome:
   `supported`, `unsupported` (the provider answered and could not) or
@@ -4211,19 +4212,38 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   whenever it is supported for that model; otherwise Codex and Claude Code run
   on a model whose Chat Completions is supported, through the member's
   translator (below); no other pair is translated. Translated availability is
-  derived from the stored facts, never stored. A model never verified,
-  verified against an older key or Base URL, or with no usable path runs on
-  nothing, and the composer does not offer it. Reasoning effort is Auto only.
+  derived from the stored facts, never stored. A saved model always has
+  facts and at least one agent; one without current facts (a backstop that
+  should not occur) runs on nothing, and the composer does not offer it.
+  Reasoning effort is Auto only.
   A pairing a model cannot serve is refused when the task or message is
   submitted, and again at every claim and residency; nothing falls back to
   the Gateway, another model or another API, and there is no trial and error
   at inference time.
-- **Manual declaration (advanced).** Under **Advanced**, an owner may instead
-  declare the APIs the endpoint offers. Every listed model then runs on the
-  declared APIs without verification, as before automatic detection; the
-  option is for a model that does real work but fails the probe. It is off by
-  default, and returning to automatic restores the per-model results, which a
-  declaration does not erase.
+- **Verify before saving.** Creating a connection, and an edit that changes
+  its key or Base URL or adds models, verifies inside the saving request
+  before anything is written: every model the connection would list for a
+  new endpoint, or only the added models otherwise. All the checks those
+  models need are reserved from the owner's hourly budget first, all or none,
+  so a save never runs part of its verification. The save commits only if
+  every model has at least one agent that can use it; otherwise it answers
+  `422 model_connection_verification_failed` with every model's result and
+  writes nothing: a refused create leaves no connection and no key, and a
+  refused edit leaves the previous endpoint, key, results and running
+  processes untouched. A model that fails is never dropped to save the
+  others. An edit commits only while the row still has the credential
+  revision, config revision, model list and stored facts its verification read; a
+  rotation, disable, delete or model edit made meanwhile wins, and the late
+  save answers `409 model_connection_changed`. A rename, removing models,
+  enabling or disabling makes no provider call. The request carries the
+  normalized endpoint, key and models it commits, so nothing a client sends
+  can stand in for a verification. At most eight models per connection keep
+  one save to at most 48 provider requests and two waves of four models.
+  Verification has a 240-second overall deadline; exceeding it answers
+  `504 model_connection_verification_timeout` without writing anything. The
+  deployment edge permits this duration; any additional proxy must permit it
+  too. Cancelling the form is disabled while saving because the server may
+  still commit the request.
 - **Where requests go.** The OpenAI CLIs append `/chat/completions` or
   `/responses` to the Base URL exactly as written. Claude Code's SDK appends
   `/v1/messages` to `ANTHROPIC_BASE_URL`, so one trailing `/v1` of the Base URL
@@ -4231,11 +4251,22 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   `https://host/v1` and `https://host/anthropic/v1` all reach
   `…/v1/messages`. The CLI authenticates with `x-api-key` and
   `anthropic-version: 2023-06-01`; verification posts to the same URL with the
-  same headers. **Discover model IDs** first reads the OpenAI-style
-  `GET /models` and, only if that listing is missing or refused, the
-  Anthropic-style `…/v1/models` with `x-api-key` (at most two requests; a
-  manual declaration picks the one that fits it). The CLI may also call `count_tokens`, `/v1/models` and
+  same headers. The CLI may also call `count_tokens`, `/v1/models` and
   `HEAD /api/hello` on the same host; a provider that lacks them still works.
+- **Model ID suggestions.** The add and edit forms can load the provider's
+  model list on request to pick IDs from: `POST
+  /v1/agent/model-connections/discover-models` with the form's `base_url`
+  and either the `api_key` just entered or, for an edit, the `connection_id`
+  whose saved key to use. The saved key is used only while `base_url` is
+  still the one saved with it (otherwise `422 model_connection_key_required`),
+  and an entered key is never replaced by it. The route needs the owner and
+  the deployment gate, reserves one of the owner's hourly checks before any
+  call, and dials under the same address rules as verification. It first
+  reads the OpenAI-style `GET /models` and, only if that listing is missing
+  or refused, the Anthropic-style `…/v1/models` with `x-api-key` (at most two
+  requests). Failures answer only a category. It writes nothing, and a listed
+  ID means nothing until the form's save verifies it; listing is optional,
+  and any ID can be typed.
 - **Host rollout.** Runners advertise `model-connections-v1`, and
   `model-protocol-translation-v1` when they can run a translated member. A
   claim for a turn on a connection, or for a translated one, is released,
@@ -4249,12 +4280,11 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   Code, `ANTHROPIC_BASE_URL` as above) and the key in its environment and
   activation tmpfs, never in argv; an OpenAI CLI is never given a Messages
   connection's key, nor Claude Code an OpenAI one. A later turn
-  after the key, Base URL, declaration or the model's verified path changed
-  starts a new process, because the plan and token are part of the process's
-  reuse identity. A claim and its residency must agree on both the credential
-  revision and the plan (`client>upstream`); a verification that moves the
-  model between a native and a translated path while a turn starts fails that
-  start rather than mixing the two.
+  after the key, Base URL or the model's verified path changed starts a new
+  process, because the plan and token are part of the process's reuse
+  identity. A claim and its residency must agree on both the credential
+  revision and the plan (`client>upstream`); a change of path while a turn
+  starts fails that start rather than mixing the two.
 - **Scan history.** When a key is bound to a residency, an encrypted scanning
   copy is recorded under a separate domain against that sandbox group and
   connection revision. Trusted snapshot and publication scans of the group
@@ -4288,33 +4318,29 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   other tools, Codex sub-agents and MCP tools included, work. Prior
   reasoning or thinking is not sent to a Chat Completions provider. The
   `AGENT_COMPAT_*` variables are the launcher's and never reach the CLI.
-- **Changes take effect at once.** Rotating the key, changing the Base URL or
-  the manual declaration, disabling or deleting a connection releases every residency
-  started on the old state and closes its process, the same path a chat
-  deletion takes; a turn running on it stops. A new key or Base URL also
-  clears every model's verification. A field saved with its stored value
-  (including a re-entered identical key) is not a change: renaming a
-  connection or editing its model list closes nothing and keeps the other
-  models' results, and a newly listed model starts unverified. A host the control plane cannot
+- **Changes take effect at once.** A verified new key or Base URL, disabling
+  or deleting a connection releases every residency started on the old state
+  and closes its process, the same path a chat deletion takes; a turn running
+  on it stops. A new key or Base URL replaces every model's facts. A field
+  saved with its stored value (including a re-entered identical key) is not a
+  change: renaming a connection or removing models closes nothing and keeps
+  the other models' results. A host the control plane cannot
   reach closes it when its next residency heartbeat is refused.
-- **Verification dials out from the control plane.** It runs only when the
-  owner asks, one model per request: three native checks side by side, each a
-  streaming request offering one tool and a second carrying its result back
-  in that API's own format (for Messages, `tool_use` and `tool_result` blocks,
-  signed thinking carried back, and a stream that must end with
-  `message_delta` and `message_stop`). That is at most six provider requests,
-  each check under the check timeout, and one of the owner's 20 hourly checks
-  and model-list reads, reserved atomically across replicas. The UI verifies
-  at most three models per click, one at a time, and says how many remain;
-  saving, editing or opening the page never calls a provider. It dials only
-  public IPv4 HTTPS on port 443: every resolved address must pass the MCP
-  connection policy and the sandbox's protected ranges (including
-  `AGENT_EGRESS_PROTECTED_CIDRS`), the connection is pinned to the checked
-  addresses, redirects are not followed, no proxy is used and no upstream body
-  is echoed. A result is merged under its model alone, and only if the
-  connection is still enabled with the key, Base URL and model it tested;
-  otherwise it is answered with `recorded: false` and not kept, so a stale
-  probe never overwrites a newer key or re-enables anything.
+- **Verification dials out from the control plane.** It runs only on the
+  owner's explicit save, never when a page opens or a field is typed in. For
+  each model, three native checks run side by side, each a streaming request
+  offering one tool and a second carrying its result back in that API's own
+  format (for Messages, `tool_use` and `tool_result` blocks, signed thinking
+  carried back, and a stream that must end with `message_delta` and
+  `message_stop`). That is at most six provider requests per model, each
+  check under the check timeout, and one of the owner's 20 hourly checks and
+  model-list reads, reserved atomically across replicas whether or not the
+  connection exists yet. No database transaction is open during the calls.
+  It dials only public IPv4 HTTPS on port 443: every resolved address must
+  pass the MCP connection policy and the sandbox's protected ranges
+  (including `AGENT_EGRESS_PROTECTED_CIDRS`), the connection is pinned to the
+  checked addresses, redirects are not followed, no proxy is used, and no
+  upstream body or key is echoed or logged.
 - **Usage.** The owner's provider bills these turns and the Gateway ledger
   records none of them. A turn's usage shows runtime token counts and says the
   cost is the provider's; conversation totals mark themselves incomplete, and

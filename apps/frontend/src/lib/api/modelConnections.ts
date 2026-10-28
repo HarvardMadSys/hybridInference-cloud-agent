@@ -1,36 +1,19 @@
 import { config } from '@/config/env';
+import { APIError } from '@/lib/utils/errors';
 import { fetchWithAuth, jsonOrThrow } from './client';
 
 export type ModelProtocol = 'chat_completions' | 'responses' | 'anthropic_messages';
 
-/** Every protocol a connection may declare, in the platform's order. */
-export const MODEL_PROTOCOLS: readonly ModelProtocol[] = [
-  'chat_completions',
-  'responses',
-  'anthropic_messages',
-];
-
-const PROTOCOL_NAMES: Record<ModelProtocol, string> = {
-  chat_completions: 'Chat Completions',
-  responses: 'Responses',
-  anthropic_messages: 'Anthropic Messages',
-};
-
-/** A protocol's proper name, the same in every language. Diagnostics only. */
-export function protocolName(protocol: ModelProtocol): string {
-  return PROTOCOL_NAMES[protocol] ?? protocol;
-}
-
 /**
- * One listed model's state. `ready`: verified, with the agents in `runtimes`;
- * `declared`: the owner declared the APIs manually; `unverified`: not checked
- * against the current key and Base URL; `failed`: the check could not
- * determine anything (unreachable, key refused, rate limited…); `unsupported`:
- * the provider answered and no API completed a streaming tool call.
+ * One model's state. `ready`: verified, with the agents in `runtimes`;
+ * `failed`: the check could not determine anything (unreachable, key refused,
+ * rate limited…); `unsupported`: the provider answered and no API completed a
+ * streaming tool call. A saved model is always `ready`; `unverified` is a
+ * backstop the server should never answer for one.
  */
-export type ModelStatusKind = 'ready' | 'declared' | 'unverified' | 'failed' | 'unsupported';
+export type ModelStatusKind = 'ready' | 'unverified' | 'failed' | 'unsupported';
 
-/** What one native API's check found for a model. Diagnostics only. */
+/** What one native API's check found for a model. Never shown on the settings page. */
 export interface ProtocolResult {
   status: string;
   category: string;
@@ -38,7 +21,7 @@ export interface ProtocolResult {
   http_status: number | null;
 }
 
-/** How one agent reaches a model. Diagnostics only. */
+/** How one agent reaches a model. Never shown on the settings page. */
 export interface AgentPath {
   runtime: string;
   mode: 'direct' | 'translated';
@@ -51,29 +34,21 @@ export interface ModelStatus {
   status: ModelStatusKind;
   category: string | null;
   message: string;
-  /** The agents a task may run this model with now: what the server accepts. */
+  /** The agents a task may run this model with: what the server accepts. */
   runtimes: string[];
   paths: AgentPath[];
   protocols: Partial<Record<ModelProtocol, ProtocolResult>>;
   checked_at: string | null;
 }
 
-export interface ModelVerification extends ModelStatus {
-  /** False when the connection changed while it ran; nothing was kept. */
-  recorded: boolean;
-}
-
 export interface ModelConnection {
   id: string;
   name: string;
   base_url: string;
-  /** `auto`: each model's APIs come from verifying it; `manual`: declared. */
-  protocol_mode: 'auto' | 'manual';
-  manual_protocols: ModelProtocol[];
   models: string[];
   enabled: boolean;
   has_api_key: boolean;
-  /** Every agent at least one listed model can run with now. */
+  /** Every agent at least one listed model can run with. */
   runtimes: string[];
   model_status: ModelStatus[];
   created_at: string;
@@ -85,8 +60,6 @@ export interface ModelConnectionInput {
   base_url: string;
   api_key: string;
   models: string[];
-  /** Advanced: declared APIs; empty (or omitted) is automatic detection. */
-  protocols?: ModelProtocol[];
 }
 
 export interface ModelConnectionList {
@@ -94,31 +67,66 @@ export interface ModelConnectionList {
   enabled: boolean;
   /** How many models one owner may verify per hour. */
   checks_per_hour?: number;
+  /** How many models one connection may list. */
+  max_models?: number;
   connections: ModelConnection[];
 }
 
-/** How many models one "verify" action checks, one after another. */
-export const VERIFY_BATCH = 3;
+/** The server's per-connection limit, when an older answer does not say. */
+export const MAX_MODELS = 8;
 
-/** The models a "verify" action should check: never verified, or stale. */
-export function unverifiedModels(connection: ModelConnection): string[] {
-  return connection.model_status
-    .filter((status) => status.status === 'unverified')
-    .map((status) => status.model);
+/** A save refused because a model could not be verified: nothing was stored. */
+export const VERIFICATION_FAILED = 'model_connection_verification_failed';
+
+/** Each verified model's result, from a refused save; `null` for any other failure. */
+export function refusedModels(cause: unknown): ModelStatus[] | null {
+  if (!(cause instanceof APIError) || cause.code !== VERIFICATION_FAILED) return null;
+  const models = cause.details?.models;
+  return Array.isArray(models) ? (models as ModelStatus[]) : null;
 }
 
-/** `connection` with one model's kept verification applied, as the server now holds it. */
-export function withVerification(
-  connection: ModelConnection,
-  verification: ModelVerification,
-): ModelConnection {
-  if (!verification.recorded) return connection;
-  const { recorded: _recorded, ...status } = verification;
-  const model_status = connection.model_status.map((item) =>
-    item.model === status.model ? status : item,
-  );
-  const runtimes = [...new Set(model_status.flatMap((item) => item.runtimes))].sort();
-  return { ...connection, model_status, runtimes };
+/** The fields a refused request named (`base_url`, `models.0`…); `null` for other failures. */
+export function invalidFields(cause: unknown): string[] | null {
+  if (!(cause instanceof APIError)) return null;
+  const fields = cause.details?.fields;
+  return Array.isArray(fields) ? (fields as string[]) : null;
+}
+
+interface ErrorBody {
+  models?: unknown;
+  fields?: { field?: unknown }[];
+}
+
+/**
+ * `jsonOrThrow`, keeping what a refusal adds: each model's result from a
+ * refused verification, and which fields an invalid request named (never
+ * the values). The shared error parser keeps only the type and the message.
+ */
+async function connectionJson<T>(resp: Response): Promise<T> {
+  if (resp.ok) return resp.json() as Promise<T>;
+  let error: ErrorBody | undefined;
+  try {
+    const body = (await resp.clone().json()) as {
+      error?: ErrorBody;
+      detail?: { error?: ErrorBody };
+    };
+    error = body?.error ?? body?.detail?.error;
+  } catch {
+    // Not JSON: jsonOrThrow classifies it by status.
+  }
+  try {
+    return await jsonOrThrow<T>(resp);
+  } catch (cause) {
+    if (cause instanceof APIError && error) {
+      const extra: Record<string, unknown> = {};
+      if (Array.isArray(error.models)) extra.models = error.models;
+      if (Array.isArray(error.fields)) {
+        extra.fields = error.fields.map((item) => String(item?.field ?? ''));
+      }
+      cause.details = { ...(cause.details ?? {}), ...extra };
+    }
+    throw cause;
+  }
 }
 
 const ROOT = '/v1/agent/model-connections';
@@ -133,15 +141,20 @@ export async function listModelConnections(): Promise<ModelConnectionList> {
   return jsonOrThrow(await fetchWithAuth(config.apiBase, ROOT, { cache: 'no-store' }));
 }
 
+/** Verify every model, then save; a refusal stores nothing (`refusedModels`). */
 export async function createModelConnection(input: ModelConnectionInput): Promise<ModelConnection> {
-  return jsonOrThrow(await fetchWithAuth(config.apiBase, ROOT, json('POST', input)));
+  return connectionJson(await fetchWithAuth(config.apiBase, ROOT, json('POST', input)));
 }
 
+/**
+ * Save changes. A new key or Base URL, or an added model, is verified first;
+ * a refusal leaves the connection as it was (`refusedModels`).
+ */
 export async function updateModelConnection(
   id: string,
   changes: Partial<ModelConnectionInput> & { enabled?: boolean },
 ): Promise<ModelConnection> {
-  return jsonOrThrow(await fetchWithAuth(config.apiBase, path(id), json('PATCH', changes)));
+  return connectionJson(await fetchWithAuth(config.apiBase, path(id), json('PATCH', changes)));
 }
 
 export async function deleteModelConnection(id: string): Promise<void> {
@@ -149,16 +162,27 @@ export async function deleteModelConnection(id: string): Promise<void> {
   if (!response.ok) await jsonOrThrow(response);
 }
 
-/** Verify one model: a few billable provider requests, made only when asked. */
-export async function verifyModelConnection(id: string, model: string): Promise<ModelVerification> {
-  return jsonOrThrow(
-    await fetchWithAuth(config.apiBase, path(id, '/verify'), json('POST', { model })),
-  );
-}
+/**
+ * Where to list model IDs for the form: the Base URL it shows, with the key
+ * just entered or, for an edit whose Base URL is unchanged, the saved
+ * connection's key (the server refuses a saved key for any other URL).
+ */
+export type ModelListRequest =
+  | { base_url: string; api_key: string }
+  | { base_url: string; connection_id: string };
 
-export async function discoverConnectionModels(id: string): Promise<string[]> {
-  const response = await fetchWithAuth(config.apiBase, path(id, '/discover-models'), {
-    method: 'POST',
+/**
+ * The model IDs the provider lists, as suggestions only: nothing is saved,
+ * one hourly check is spent, and a picked ID is verified when the form is.
+ */
+export async function discoverModels(
+  request: ModelListRequest,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const response = await fetchWithAuth(config.apiBase, `${ROOT}/discover-models`, {
+    ...json('POST', request),
+    cache: 'no-store',
+    signal,
   });
   return (await jsonOrThrow<{ models: string[] }>(response)).models;
 }

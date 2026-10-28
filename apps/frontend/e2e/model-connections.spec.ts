@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { connectionView, unverified } from './modelConnectionFixtures';
+import { chatOnly, connectionView } from './modelConnectionFixtures';
 
 test.beforeEach(async ({ page, request }) => {
   expect((await request.post('/__fixture/reset')).ok()).toBe(true);
@@ -47,7 +47,7 @@ for (const viewport of [
         id: 'mconn_fixture',
         name: String(submitted!.name),
         base_url: String(submitted!.base_url),
-        model_status: (submitted!.models as string[]).map(unverified),
+        model_status: (submitted!.models as string[]).map(chatOnly),
       });
       await route.fulfill({ status: 201, json: saved });
     });
@@ -62,6 +62,7 @@ for (const viewport of [
     await page.getByLabel('Base URL', { exact: true }).fill('https://api.example.com/custom/v1');
     await page.getByLabel('API key', { exact: true }).fill('browser-test-not-a-real-key');
     await page.getByLabel('Model IDs', { exact: true }).fill('fixture-model');
+    await page.getByLabel('Model IDs', { exact: true }).press('Enter');
     await expect(page.getByLabel('API key', { exact: true })).toHaveAttribute('type', 'password');
     const section = page.getByRole('region', { name: 'Personal model connections', exact: true });
     await section.scrollIntoViewIfNeeded();
@@ -72,7 +73,7 @@ for (const viewport of [
       path: testInfo.outputPath('personal-connection-form.png'),
       animations: 'disabled',
     });
-    await section.getByRole('button', { name: 'Save', exact: true }).click();
+    await section.getByRole('button', { name: 'Verify and save', exact: true }).click();
     await expect(page.getByRole('article', { name: 'Personal inference' })).toBeVisible();
     expect(submitted).toEqual({
       name: 'Personal inference',

@@ -11230,6 +11230,46 @@
         "title": "DefaultInput",
         "type": "object"
       },
+      "DiscoverModelsRequest": {
+        "additionalProperties": false,
+        "description": "Where to list model ids, with which key: the form's, before anything is saved.\n\nExactly one of ``api_key`` (the key the owner just entered) and\n``connection_id`` (the owner's saved connection, whose stored key is used\nonly while ``base_url`` is still that connection's Base URL). A key that\nwas entered is never replaced by a stored one.",
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "maxLength": 4160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "base_url": {
+            "maxLength": 1024,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "connection_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Id"
+          }
+        },
+        "required": [
+          "base_url"
+        ],
+        "title": "DiscoverModelsRequest",
+        "type": "object"
+      },
       "DiscoveredModels": {
         "description": "The ids a provider's ``GET /models`` listed; a convenience, not a check.",
         "properties": {
@@ -14469,7 +14509,7 @@
       },
       "ModelConnectionCreate": {
         "additionalProperties": false,
-        "description": "A new connection. ``protocols`` is the advanced manual declaration; omitted is automatic.",
+        "description": "A new connection, saved only once every model has been verified usable.",
         "properties": {
           "api_key": {
             "maxLength": 4160,
@@ -14485,7 +14525,7 @@
             "items": {
               "type": "string"
             },
-            "maxItems": 256,
+            "maxItems": 32,
             "title": "Models",
             "type": "array"
           },
@@ -14493,14 +14533,6 @@
             "maxLength": 200,
             "title": "Name",
             "type": "string"
-          },
-          "protocols": {
-            "items": {
-              "type": "string"
-            },
-            "maxItems": 3,
-            "title": "Protocols",
-            "type": "array"
           }
         },
         "required": [
@@ -14535,6 +14567,11 @@
             "default": true,
             "title": "Enabled",
             "type": "boolean"
+          },
+          "max_models": {
+            "default": 8,
+            "title": "Max Models",
+            "type": "integer"
           }
         },
         "required": [
@@ -14583,7 +14620,7 @@
       },
       "ModelConnectionUpdate": {
         "additionalProperties": false,
-        "description": "Change some fields; an omitted field keeps its value. ``api_key`` rotates the key.\n\n``protocols`` set to ``[]`` returns the connection to automatic detection.",
+        "description": "Change some fields; an omitted field keeps its value. ``api_key`` rotates the key.\n\nA new key or Base URL, or an added model, is verified before it is saved.",
         "properties": {
           "api_key": {
             "anyOf": [
@@ -14626,7 +14663,7 @@
                 "items": {
                   "type": "string"
                 },
-                "maxItems": 256,
+                "maxItems": 32,
                 "type": "array"
               },
               {
@@ -14646,21 +14683,6 @@
               }
             ],
             "title": "Name"
-          },
-          "protocols": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "maxItems": 3,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Protocols"
           }
         },
         "title": "ModelConnectionUpdate",
@@ -14689,13 +14711,6 @@
             "title": "Id",
             "type": "string"
           },
-          "manual_protocols": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Manual Protocols",
-            "type": "array"
-          },
           "model_status": {
             "items": {
               "$ref": "#/components/schemas/ModelStatusView"
@@ -14714,14 +14729,6 @@
             "title": "Name",
             "type": "string"
           },
-          "protocol_mode": {
-            "enum": [
-              "auto",
-              "manual"
-            ],
-            "title": "Protocol Mode",
-            "type": "string"
-          },
           "runtimes": {
             "items": {
               "type": "string"
@@ -14738,7 +14745,6 @@
           "id",
           "name",
           "base_url",
-          "protocol_mode",
           "models",
           "enabled",
           "has_api_key",
@@ -14821,7 +14827,7 @@
         "type": "object"
       },
       "ModelStatusView": {
-        "description": "One listed model as its owner sees it.\n\n``status`` is ``ready``, ``declared``, ``unverified``, ``failed`` or\n``unsupported``; ``runtimes`` are the agents a task may run it with now,\nexactly what the execution gates accept. ``paths`` and ``protocols`` are\ndiagnostics.",
+        "description": "One listed model as its owner sees it.\n\n``status`` is ``ready``, ``failed``, ``unsupported`` or (a backstop that a\nsaved model never shows) ``unverified``; ``runtimes`` are the agents a task\nmay run it with now, exactly what the execution gates accept. ``paths``\nand ``protocols`` are read-only diagnostics.",
         "properties": {
           "category": {
             "anyOf": [
@@ -14878,7 +14884,6 @@
           "status": {
             "enum": [
               "ready",
-              "declared",
               "unverified",
               "failed",
               "unsupported"
@@ -14970,103 +14975,6 @@
           "complete"
         ],
         "title": "ModelTtftSummary",
-        "type": "object"
-      },
-      "ModelVerificationView": {
-        "description": "A finished verification of one model.",
-        "properties": {
-          "category": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Category"
-          },
-          "checked_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Checked At"
-          },
-          "message": {
-            "default": "",
-            "title": "Message",
-            "type": "string"
-          },
-          "model": {
-            "title": "Model",
-            "type": "string"
-          },
-          "paths": {
-            "items": {
-              "$ref": "#/components/schemas/AgentPathView"
-            },
-            "title": "Paths",
-            "type": "array"
-          },
-          "protocols": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/ProtocolResultView"
-            },
-            "title": "Protocols",
-            "type": "object"
-          },
-          "recorded": {
-            "default": true,
-            "title": "Recorded",
-            "type": "boolean"
-          },
-          "runtimes": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Runtimes",
-            "type": "array"
-          },
-          "status": {
-            "enum": [
-              "ready",
-              "declared",
-              "unverified",
-              "failed",
-              "unsupported"
-            ],
-            "title": "Status",
-            "type": "string"
-          }
-        },
-        "required": [
-          "model",
-          "status",
-          "runtimes"
-        ],
-        "title": "ModelVerificationView",
-        "type": "object"
-      },
-      "ModelVerifyRequest": {
-        "additionalProperties": false,
-        "description": "Which of the connection's models to verify.",
-        "properties": {
-          "model": {
-            "maxLength": 200,
-            "minLength": 1,
-            "title": "Model",
-            "type": "string"
-          }
-        },
-        "required": [
-          "model"
-        ],
-        "title": "ModelVerifyRequest",
         "type": "object"
       },
       "NodeRegistrationRequest": {
@@ -20677,6 +20585,47 @@
           "name"
         ],
         "title": "VariableEdit",
+        "type": "object"
+      },
+      "VerificationRefusal": {
+        "description": "Why a save was refused: every verified model's status; nothing was written.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelStatusView"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "type": {
+            "const": "model_connection_verification_failed",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "message",
+          "models"
+        ],
+        "title": "VerificationRefusal",
+        "type": "object"
+      },
+      "VerificationRefusalBody": {
+        "description": "The 422 a save answers when a model it would list has no usable agent.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/VerificationRefusal"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "VerificationRefusalBody",
         "type": "object"
       },
       "WaitlistEntry": {
@@ -36585,7 +36534,7 @@
         ]
       },
       "post": {
-        "description": "Add a connection; its key is encrypted before anything stores it.",
+        "description": "Verify every model, then add the connection; nothing is stored if one fails.\n\nThe key is encrypted only after verification succeeds, so a refused\ncreate leaves no connection and no key behind.",
         "operationId": "create_connection_v1_agent_model_connections_post",
         "parameters": [
           {
@@ -36630,6 +36579,72 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "$ref": "#/components/schemas/VerificationRefusalBody"
+                }
+              }
+            },
+            "description": "A model has no agent that can use it; nothing was saved."
+          },
+          "429": {
+            "description": "The owner's hourly checks cannot cover the models to verify."
+          },
+          "504": {
+            "description": "Verification outlasted the save's bound; nothing was saved."
+          }
+        },
+        "summary": "Create Connection",
+        "tags": [
+          "model-connections"
+        ]
+      }
+    },
+    "/v1/agent/model-connections/discover-models": {
+      "post": {
+        "description": "List the provider's model ids for the add or edit form, saving nothing.\n\nWith ``api_key``, the listing uses exactly that key at ``base_url``. With\n``connection_id``, it uses the owner's saved key, and only when\n``base_url`` is the one saved with it (422 ``model_connection_key_required``\notherwise). Same bounds as verification: public IPv4 HTTPS, pinned, no\nredirects, a bounded read, at most two requests and one hourly check. The\nlisting implies nothing about whether a model works; a picked id is\nverified when the form is saved.",
+        "operationId": "discover_for_form_v1_agent_model_connections_discover_models_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiscoverModelsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscoveredModels"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
@@ -36637,7 +36652,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Create Connection",
+        "summary": "Discover For Form",
         "tags": [
           "model-connections"
         ]
@@ -36695,7 +36710,7 @@
         ]
       },
       "patch": {
-        "description": "Edit, rotate the key of, enable or disable a connection.\n\nA field sent with the value it already has is not a change: a rename that\ncarries the same Base URL and models keeps the credential, every running\nprocess and every model's verification (the repository compares each one).",
+        "description": "Edit, rotate the key of, enable or disable a connection.\n\nA new key or Base URL verifies every model the connection would list, and\nadded models are verified; the edit is committed only if all pass and the\nconnection did not change meanwhile (409), so a failure leaves the\nprevious configuration, key, results and running processes as they were.\nA field sent with the value it already has is not a change: a rename keeps\nthe credential, every running process and every model's verification.",
         "operationId": "update_connection_v1_agent_model_connections__connection_id__patch",
         "parameters": [
           {
@@ -36749,142 +36764,20 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/VerificationRefusalBody"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "A model has no agent that can use it; nothing was saved."
+          },
+          "429": {
+            "description": "The owner's hourly checks cannot cover the models to verify."
+          },
+          "504": {
+            "description": "Verification outlasted the save's bound; nothing was saved."
           }
         },
         "summary": "Update Connection",
-        "tags": [
-          "model-connections"
-        ]
-      }
-    },
-    "/v1/agent/model-connections/{connection_id}/discover-models": {
-      "post": {
-        "description": "List the ids the provider's model list offers, for the owner to choose from.\n\nAutomatically, ``GET /models`` under the Base URL and, only if that listing\nis missing or refused, ``GET /v1/models`` with Messages authentication: at\nmost two requests and one hourly check. A manual declaration asks only the\nlisting that fits it.",
-        "operationId": "discover_v1_agent_model_connections__connection_id__discover_models_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "connection_id",
-            "required": true,
-            "schema": {
-              "title": "Connection Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DiscoveredModels"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Discover",
-        "tags": [
-          "model-connections"
-        ]
-      }
-    },
-    "/v1/agent/model-connections/{connection_id}/verify": {
-      "post": {
-        "description": "Find which APIs one model streams a tool round trip on, and keep the result.\n\nSpends the owner's own quota upstream: at most three checks of two\nrequests each, and one of the owner's hourly checks. Answers the model's\nstate as it now is; an unreachable or refusing provider is a result, not\nan error. The result is kept only if the connection's key and Base URL did\nnot change and the model is still listed (``recorded``); other models'\nresults are never touched.",
-        "operationId": "verify_v1_agent_model_connections__connection_id__verify_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "connection_id",
-            "required": true,
-            "schema": {
-              "title": "Connection Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ModelVerifyRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ModelVerificationView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Verify",
         "tags": [
           "model-connections"
         ]

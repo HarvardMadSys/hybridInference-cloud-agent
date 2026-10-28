@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class ModelConnectionRepository(Protocol):
@@ -17,7 +20,11 @@ class ModelConnectionRepository(Protocol):
     async def create_model_connection(
         self, *, user_id: str, values: dict[str, Any]
     ) -> dict[str, Any]:
-        """Insert a connection; raise ``ModelConnectionConflict`` on a taken name."""
+        """Insert a verified connection; raise ``ModelConnectionConflict`` on a taken name.
+
+        ``values["model_checks"]`` maps every model to the verification the
+        saving request made; nothing else creates a connection.
+        """
         ...
 
     async def list_model_connections(self, *, user_id: str) -> list[dict[str, Any]]:
@@ -33,14 +40,30 @@ class ModelConnectionRepository(Protocol):
     async def update_model_connection(
         self, *, user_id: str, connection_id: str, changes: dict[str, Any]
     ) -> dict[str, Any] | None:
-        """Apply ``changes`` to a live connection; ``None`` when it is gone.
+        """Rename, remove models from, enable or disable a live connection; ``None`` otherwise.
 
-        Only a value that actually differs counts. A changed key, Base URL or
-        protocol declaration raises its credential revision, and so does
-        disabling it: a member process started under the old revision must not
-        serve another turn. A changed key or Base URL also raises its config
-        revision and clears every model's verification; a changed model list
-        drops only the verifications of models no longer listed.
+        Only a value that actually differs counts; disabling raises the
+        credential revision, and a removed model's verification goes with it.
+        A Base URL, a key or an added model is refused (``ValueError`` for the
+        field, ``None`` for a model list that is not a subset): those need
+        :meth:`commit_verified_update`.
+        """
+        ...
+
+    async def commit_verified_update(
+        self,
+        *,
+        user_id: str,
+        connection_id: str,
+        expected: Mapping[str, Any],
+        changes: dict[str, Any],
+        model_checks: dict[str, dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Apply a verified edit only while the row is still ``expected``; ``None`` otherwise.
+
+        Guarded by both revisions and the model list the verification read. A
+        new key or Base URL raises both revisions; ``model_checks`` becomes the
+        whole map, at the resulting config revision.
         """
         ...
 
@@ -50,27 +73,10 @@ class ModelConnectionRepository(Protocol):
         """Tombstone a connection and erase its key; ``None`` when there was none."""
         ...
 
-    async def reserve_model_connection_check(
-        self, *, user_id: str, connection_id: str, limit: int, seconds: int
-    ) -> dict[str, Any]:
-        """Atomically count one check against the owner's limit, before it dials out.
-
-        ``{"connection": row}`` with the live connection as it will be checked,
-        or ``{"error": "not_found" | "limited"}``.
-        """
-        ...
-
-    async def record_model_verification(
-        self,
-        *,
-        user_id: str,
-        connection_id: str,
-        config_revision: int,
-        credential_revision: int,
-        model: str,
-        result: dict[str, Any],
+    async def reserve_model_connection_checks(
+        self, *, user_id: str, count: int, limit: int, seconds: int
     ) -> bool:
-        """Merge one model's verification, only while the connection is still enabled and at both revisions."""
+        """Atomically count ``count`` provider calls against the owner's hourly limit, or none."""
         ...
 
     async def scan_key_ciphertexts(self, *, sandbox_id: str, limit: int) -> list[str]:

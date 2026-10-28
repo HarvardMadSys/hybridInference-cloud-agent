@@ -26,12 +26,13 @@ Chat Completions，用户也希望用 Codex 和 Claude Code。
 
 `cloud_agent_shared/model_connections.protocol_plan(runtime, protocols)` 返回
 `ProtocolPlan(client_protocol, upstream_protocol)`，`translated` 表示是否经过转换。传入的
-`protocols` 是**这个模型**可用的原生协议：自动模式下取该模型在当前配置版本下验证为 `supported`
-的协议，手动模式下取用户的声明（`domain.model_connections.verified_protocols`）：
+`protocols` 是**这个模型**可用的原生协议，即该模型在当前配置版本下验证为 `supported` 的协议
+（`domain.model_connections.verified_protocols`）；没有手动声明：
 
 1. 运行时的客户端协议在其中 → 直连（`client == upstream`）；
 2. 否则，客户端是 Responses 或 Anthropic Messages、且其中有 `chat_completions` → 转换；
-3. 否则不可用（`protocol_unsupported`；该模型还没验证或验证已过期则是 `model_unverified`）。
+3. 否则不可用（`protocol_unsupported`；没有当前验证结果则是 `model_unverified`，这是兜底：模型在
+   保存前就已验证，见[模型连接设计](2026-10-27-user-model-connections.zh-CN.md)第十三节）。
 
 **原生优先**：一个模型的 `responses` 和 `chat_completions` 都可用时，Codex 一定直连 Responses。
 同一连接上的不同模型可以分别直连或转换。
@@ -41,9 +42,8 @@ Chat Completions，用户也希望用 Codex 和 Claude Code。
 经由 `domain.require_usable` → `model_paths` → `protocol_plan` 得到同一个计划。计划随认领载荷交给主机
 （`ModelConnectionAccess.client_protocol`，直连时不出现，直连的认领与以前完全相同），进入进程
 固定的启动字段 `inference_client_protocol` 和该成员的本地令牌 `inference_local_token`（见第五节），
-参与「能否复用进程」的判断：验证结果或手动声明的变化改变计划，常驻进程随之重启；连接编辑提升
-`credential_revision` 时旧进程照旧被关闭。由于验证可以在不提升 `credential_revision` 的情况下改变
-计划，常驻响应还带回 `model_connection_plan`（`client>upstream`），主机要求它与认领时的计划一致，
+参与「能否复用进程」的判断：验证结果的变化改变计划，常驻进程随之重启；连接编辑提升
+`credential_revision` 时旧进程照旧被关闭。作为兜底，常驻响应还带回 `model_connection_plan`（`client>upstream`），主机要求它与认领时的计划一致，
 否则这次启动失败，不会用认领时的启动参数跑另一条路径。同名模型在不同连接上
 仍是不同来源；个人连接永远不使用 Gateway grant，也不回退。
 
@@ -171,13 +171,14 @@ setsid（已有包装） ──> python3 -I model-protocol-translator.pyz <CLI a
   连接工厂（`protocol_translator.UPSTREAM_CONNECTION`），没有可配置的环境变量或启动参数。
 - 上游错误只把状态码映射成客户端格式的错误，不回显上游正文；日志只写类别，不写正文、key 或令牌。
 
-## 六、验证按钮
+## 六、验证并保存
 
-设置页不再让用户选择要测试的 API，也不显示「via Chat Completions」。用户只在某个模型上点「验证」
-（或「保存并验证」），控制面就在三种 API 上各跑一次**原生**的两步工具调用检查，并按模型保存结果；
-哪些 Agent 经转换可用由这些事实推导。转换层本身不在验证时探测：它由第七节的单元测试和固定版本
-真实 CLI 的外部测试证明。只在用户点击时运行，保存或打开页面不会触发计费请求。每种 API 的结果和每个
-Agent 的路径（直连或转换）放在折叠的「API 详情」里，供排查使用。
+设置页不让用户选择或声明 API，也不显示「via Chat Completions」。用户点「验证并保存」时，控制面在
+保存请求里对每个要保存的模型在三种 API 上各跑一次**原生**的两步工具调用检查，只有每个模型都有
+Agent 能用才保存，并按模型保存结果；哪些 Agent 经转换可用由这些事实推导。转换层本身不在验证时
+探测：它由第七节的单元测试和固定版本真实 CLI 的外部测试证明。只在用户明确保存时运行，打开页面或
+输入内容不会触发计费请求。每种 API 的结果和每个 Agent 的路径（直连或转换）放在卡片上折叠的「技术
+详情」里，只读，供排查使用。
 
 ## 七、验证
 

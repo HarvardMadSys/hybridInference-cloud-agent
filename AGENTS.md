@@ -311,7 +311,7 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   reads back. See the
   [SSH server design](docs/agents/specs/2026-10-15-user-ssh-servers-design.zh-CN.md).
 - **Owner model connections (2026-10-27).** An owner may add their own
-  inference endpoint (Base URL, API key, model ids) and run
+  inference endpoint (Base URL, API key, up to eight model ids) and run
   their own tasks on it instead of the Gateway; they pay the provider. It is
   private to them: never shared with a team, never reachable through another
   owner's Fork, and every claim, residency, follow-up, waiting message, goal
@@ -329,14 +329,20 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   does not revoke it upstream. Other groups' keys never enter this scan;
   exceeding its bounded history fails closed. Such a turn needs no
   Gateway grant, catalog or quota, but login and Agent admission stay
-  Gateway-backed. Which APIs a model is reached on is per model, found only
-  by its owner's explicit verification of that model: a streaming tool round
-  trip on each of Chat Completions, Responses and Anthropic Messages (at most
-  six provider requests and one hourly check), stored as native outcomes
-  (supported, unsupported or failed) against the connection's current key and
-  Base URL. A model never verified, verified on an older key or Base URL, or
-  with no usable API runs on nothing; an advanced manual declaration of the
-  APIs is the only override. A runtime runs on its own API when verified for
+  Gateway-backed. Nothing is saved unverified, and there is no manual
+  declaration of APIs: creating a connection, and an edit that changes its
+  key or Base URL or adds models, verifies the models it would list inside the
+  saving request, on the owner's explicit action, before anything is written.
+  Each model gets a streaming tool round trip on each of Chat Completions,
+  Responses and Anthropic Messages (at most six provider requests and one of
+  the owner's hourly checks, all reserved before any call, connection or
+  not). The save commits only if every model has an agent that can use it,
+  storing the native outcomes (supported, unsupported or failed) per model;
+  otherwise nothing is written, not even a new key, and each model's result is
+  answered. An edit commits only while the row still has the revisions and
+  model list and stored facts its verification read. Verification has a
+  240-second overall deadline; a timeout writes nothing. A model without current facts runs on
+  nothing. A runtime runs on its own API when verified for
   that model (Chat Completions: OpenCode, Kilo, pi; Responses: Codex;
   Anthropic Messages: Claude Code). Otherwise only Codex and Claude Code may
   run on a model verified for Chat Completions, through a member-private
@@ -353,12 +359,13 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   every gate accepts, the same per-model paths. A claim and its residency must
   agree on both the credential revision and the plan. See the
   [protocol compatibility design](docs/agents/specs/2026-10-28-model-protocol-compatibility.zh-CN.md).
-  Changing the key or Base URL clears every model's verification; that, a
-  change to the manual declaration, disabling or deleting closes every process
-  still running on the old state, while a rename or a model-list edit closes
-  nothing and a newly listed model starts unverified. A verification is kept
-  only if the key, Base URL and enabled state are still what it tested and
-  the model is still listed, merged per model. The control plane's verification dials only public IPv4 HTTPS under
+  Listing a provider's model ids to fill in the form writes nothing and
+  proves nothing; it uses the key just entered, or a saved key only at the
+  exact Base URL it was saved with, and spends one hourly check.
+  A verified new key or Base URL replaces every model's facts; that,
+  disabling or deleting closes every process still running on the old state,
+  while a rename, removing models or enabling makes no provider call and
+  closes nothing. The control plane's verification dials only public IPv4 HTTPS under
   the MCP connection policy and the sandbox's protected ranges, pinned, with no
   redirects and no upstream body echoed. See the
   [model connection design](docs/agents/specs/2026-10-27-user-model-connections.zh-CN.md).

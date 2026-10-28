@@ -6,7 +6,7 @@ export const modelSourcesEn = {
   'modelSource.personalUnknown': '{model} · personal connection',
   'modelSource.unavailable': '{label} (unavailable)',
   'modelSource.unavailableHint':
-    '{label} cannot run with {runtime} right now: it may need verifying in Settings, or its connection no longer offers it. Choose a model to continue.',
+    '{label} cannot run with {runtime}, or its connection no longer offers it. Choose a model to continue.',
   'modelSource.inheritedUnavailable':
     'This chat runs on {label}, which is unavailable. Choose a model for this turn.',
   'modelSource.rewriteUnavailable':
@@ -26,7 +26,7 @@ export const modelSourcesZhCN: Record<keyof typeof modelSourcesEn, string> = {
   'modelSource.personalUnknown': '{model} · 个人连接',
   'modelSource.unavailable': '{label}（不可用）',
   'modelSource.unavailableHint':
-    '{label} 当前无法与 {runtime} 一起运行：可能需要先在设置中验证，或其连接已不再提供该模型。请选择模型后继续。',
+    '{label} 无法与 {runtime} 一起运行，或其连接已不再提供该模型。请选择模型后继续。',
   'modelSource.inheritedUnavailable': '此会话使用的 {label} 当前不可用，请为本轮选择模型。',
   'modelSource.rewriteUnavailable': '改写使用平台推理，选择个人连接时不可用。',
   'modelSource.usageExternal': '使用你自己的连接运行：费用由服务商计费，此处不统计其费用。',

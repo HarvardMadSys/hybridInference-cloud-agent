@@ -7,9 +7,9 @@ deleted, rotated or foreign connection is refused wherever the turn is, and
 nothing falls back to the Gateway or to another model.
 
 The key is decrypted only for a claim and a residency of its owner's own turn,
-and for the owner's explicit check. A change that must not reach a process
-still running on the old state -- a new key, Base URL or protocols, disabling
-or deleting -- releases every residency started under the old state and closes
+and for the owner's explicit verification or model listing. A change that
+must not reach a process still running on the old state -- a new key or Base
+URL, disabling or deleting -- releases every residency started under the old state and closes
 its process, the same way a chat deletion does.
 
 See ``docs/agents/specs/2026-10-27-user-model-connections.zh-CN.md``.

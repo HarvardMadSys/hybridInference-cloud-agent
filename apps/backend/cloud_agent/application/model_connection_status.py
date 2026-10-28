@@ -1,11 +1,11 @@
 """What each model on an owner's connection can do, as its owner is shown it.
 
-Derived only from the stored row (``domain.model_connections``): the per-model
-verification facts, or the owner's manual declaration. A model is
+Derived only from the per-model verification facts (``domain.model_connections``),
+or from one verification that has not been saved. A model is
 
 - ``ready``: verified, with at least one agent that can use it;
-- ``declared``: the owner declared the APIs manually, so it runs unverified;
-- ``unverified``: never verified, or verified against an earlier key or URL;
+- ``unverified``: no facts for the connection as it is now (a saved model
+  always has them; this is a backstop);
 - ``failed``: its verification could not determine any usable API (the
   provider was unreachable, refused the key, rate limited, failed ...);
 - ``unsupported``: the provider answered, and no API completed a streaming
@@ -23,7 +23,6 @@ from cloud_agent.application.model_connection_check import CHECK_MESSAGES
 from cloud_agent.domain.model_connections import (
     FAILED,
     current_check,
-    is_manual,
     model_paths,
 )
 from cloud_agent_shared.model_connections import PROTOCOLS
@@ -44,7 +43,6 @@ _FAILURE_ORDER = (
 )
 
 READY = "ready"
-DECLARED = "declared"
 UNVERIFIED = "unverified"
 FAILED_STATUS = "failed"
 UNSUPPORTED_STATUS = "unsupported"
@@ -85,9 +83,7 @@ def model_status(row: dict[str, Any], model: str) -> dict[str, Any]:
     entry = current_check(row, model)
     results = _protocol_results(entry)
     status_category: tuple[str, str | None]
-    if is_manual(row):
-        status_category = (DECLARED, None)
-    elif entry is None:
+    if entry is None:
         status_category = (UNVERIFIED, None)
     elif paths:
         status_category = (READY, None)
@@ -116,6 +112,18 @@ def model_status(row: dict[str, Any], model: str) -> dict[str, Any]:
     }
 
 
+def verification_status(model: str, result: dict[str, Any]) -> dict[str, Any]:
+    """What one verification, saved or not, says about ``model``: the same view as a saved one."""
+    return model_status(
+        {
+            "models": [model],
+            "config_revision": 0,
+            "model_checks": {model: {**result, "revision": 0}},
+        },
+        model,
+    )
+
+
 def connection_statuses(row: dict[str, Any]) -> list[dict[str, Any]]:
     """Every listed model's state, in the owner's order."""
     return [model_status(row, model) for model in row.get("models") or []]
@@ -128,7 +136,6 @@ def usable_runtimes(row: dict[str, Any]) -> dict[str, list[str]]:
 
 
 __all__ = [
-    "DECLARED",
     "FAILED_STATUS",
     "READY",
     "UNSUPPORTED_STATUS",
@@ -136,4 +143,5 @@ __all__ = [
     "connection_statuses",
     "model_status",
     "usable_runtimes",
+    "verification_status",
 ]

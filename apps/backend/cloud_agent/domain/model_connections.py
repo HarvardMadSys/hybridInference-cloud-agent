@@ -4,14 +4,16 @@ Pure rules, no I/O. The address checks that need a resolver live in
 ``application.model_connections``; here is what the owner typed, normalized,
 and the one predicate every path that hands a connection to a turn asks.
 
-**Which APIs a model is reached on is per model.** A connection either leaves
-it to verification (``protocols`` empty, the default) or carries its owner's
-manual declaration. Automatically, a model runs only on the native APIs its
-own verification at the connection's current ``config_revision`` showed
-streaming a tool round trip (``model_checks``); a model never verified, or
-verified against an earlier key or Base URL, runs on nothing. Codex and Claude
-Code reach a model whose only verified API is Chat Completions through the
-member's compatibility helper; that path is derived here, never stored.
+**Which APIs a model is reached on is per model, and only verified.** A model
+runs only on the native APIs its own verification at the connection's current
+``config_revision`` showed streaming a tool round trip (``model_checks``). The
+save that lists a model, or changes the key or Base URL, verifies it first and
+refuses to save a model no agent could use, so a saved model always carries
+its facts; one without them (never verified, or verified against an earlier
+key or Base URL) runs on nothing. Codex and Claude Code reach a model whose
+only verified API is Chat Completions through the member's compatibility
+helper; that path is derived here, never stored. There is no manual
+declaration of APIs.
 """
 
 from __future__ import annotations
@@ -136,16 +138,6 @@ def clean_base_url(value: str) -> str:
     return f"https://{host}{path}"
 
 
-def clean_protocols(values: list[str]) -> list[str]:
-    """A manual declaration in the platform's order; empty is automatic detection."""
-    chosen = set(values)
-    if not chosen <= set(PROTOCOLS):
-        raise ModelConnectionInvalid(
-            "Declare only Chat Completions, Responses or Anthropic Messages."
-        )
-    return [protocol for protocol in PROTOCOLS if protocol in chosen]
-
-
 def clean_models(values: list[str]) -> list[str]:
     """The model ids an owner typed: trimmed, de-duplicated in order, bounded."""
     models: list[str] = []
@@ -182,11 +174,6 @@ UNSUPPORTED = "unsupported"
 FAILED = "failed"
 
 
-def is_manual(connection: dict[str, Any]) -> bool:
-    """Whether the owner declared the APIs instead of leaving them to verification."""
-    return bool(connection.get("protocols"))
-
-
 def current_check(connection: dict[str, Any], model: str) -> dict[str, Any] | None:
     """``model``'s verification, if it tested the connection as it is now; else ``None``."""
     checks = connection.get("model_checks")
@@ -198,12 +185,9 @@ def current_check(connection: dict[str, Any], model: str) -> dict[str, Any] | No
     return entry
 
 
-def verified_protocols(connection: dict[str, Any], model: str) -> list[str]:
-    """The native APIs ``model`` runs on: declared, or verified for it at this revision."""
-    if is_manual(connection):
-        return list(connection.get("protocols") or [])
-    entry = current_check(connection, model)
-    results = entry.get("protocols") if entry is not None else None
+def supported_protocols(result: dict[str, Any] | None) -> list[str]:
+    """The native APIs one verification found working, in the platform's order."""
+    results = result.get("protocols") if isinstance(result, dict) else None
     if not isinstance(results, dict):
         return []
     return [
@@ -211,6 +195,16 @@ def verified_protocols(connection: dict[str, Any], model: str) -> list[str]:
         for protocol in PROTOCOLS
         if isinstance(results.get(protocol), dict) and results[protocol].get("status") == SUPPORTED
     ]
+
+
+def verified_protocols(connection: dict[str, Any], model: str) -> list[str]:
+    """The native APIs ``model`` runs on: those its verification at this revision found."""
+    return supported_protocols(current_check(connection, model))
+
+
+def usable_runtimes(result: dict[str, Any]) -> list[str]:
+    """The agents one verification result lets run its model; empty refuses the save."""
+    return sorted(runtime_plans(supported_protocols(result)))
 
 
 def model_paths(connection: dict[str, Any], model: str) -> dict[str, ProtocolPlan]:
@@ -235,7 +229,7 @@ def require_usable(
     """The plan ``runtime`` will use on ``connection`` for ``model``, or refuse.
 
     The plan is ``model_paths``': for this model, the runtime's own protocol
-    when it was verified (or declared), else one of the two translations onto
+    when it was verified, else one of the two translations onto
     a verified Chat Completions.
 
     The one predicate admission, follow-ups, waiting messages, goal rounds,
@@ -254,7 +248,7 @@ def require_usable(
         raise ModelConnectionUnusable("runtime_unsupported")
     if model not in (connection.get("models") or []):
         raise ModelConnectionUnusable("model_not_listed")
-    if not is_manual(connection) and current_check(connection, model) is None:
+    if current_check(connection, model) is None:
         raise ModelConnectionUnusable("model_unverified")
     plan = model_paths(connection, model).get(runtime)
     if plan is None:
@@ -278,11 +272,11 @@ __all__ = [
     "clean_base_url",
     "clean_models",
     "clean_name",
-    "clean_protocols",
     "current_check",
     "is_connection_id",
-    "is_manual",
     "model_paths",
     "require_usable",
+    "supported_protocols",
+    "usable_runtimes",
     "verified_protocols",
 ]

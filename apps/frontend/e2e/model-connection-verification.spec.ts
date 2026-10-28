@@ -1,13 +1,19 @@
 import { expect, test } from '@playwright/test';
 
-import { chatOnly, connectionView, messagesOnly, unverified } from './modelConnectionFixtures';
+import {
+  chatOnly,
+  connectionView,
+  messagesOnly,
+  refusedStatus,
+  verificationRefusal,
+} from './modelConnectionFixtures';
 
-// Automatic API detection in the real Next app. The owner gives a name, a Base
-// URL, a key and model IDs; "Save and verify" checks each model on request,
-// and every model's own result decides which agents may run it. No protocol
-// is asked for or named on the normal path; the diagnostics stay one click
-// away. One model is Chat-only (Codex and Claude Code translated), the other
-// Messages-only (Claude Code only), and a model added later is unverified.
+// Verify before saving, in the real Next app. The owner gives a name, a Base
+// URL, a key and model IDs; "Verify and save" asks the server, which verifies
+// every model first and stores nothing unless each has an agent that can use
+// it. A refusal keeps every input. Model IDs can be picked from the
+// provider's own list, which saves nothing. No protocol is asked for or named,
+// in the form or on the card.
 
 const connectionId = `mconn_${'e'.repeat(32)}`;
 const name = 'Mixed provider';
@@ -19,33 +25,41 @@ const TEXT = {
     add: 'Add connection',
     name: 'Connection name',
     models: 'Model IDs',
-    saveVerify: 'Save and verify',
+    verifySave: 'Verify and save',
     save: 'Save',
+    cancel: 'Cancel',
     edit: 'Edit',
-    ready: 'Ready',
-    unverified: 'Not verified',
-    summary: '2 of 2 models ready',
-    details: 'API details',
-    advanced: 'Advanced',
+    remove: (model: string) => `Remove ${model}`,
+    refused: /Not saved/,
+    reason: 'The model did not call the offered tool exactly once.',
+    authReason: 'The provider refused the API key (401/403).',
+    works: 'Works with',
+    load: 'Load models from provider',
+    pick: (model: string) => `Add ${model}`,
     model: 'Model',
     run: 'Run',
     region: 'Personal model connections',
+    unavailable: 'unavailable',
   },
   'zh-CN': {
     add: '添加连接',
     name: '连接名称',
     models: '模型 ID',
-    saveVerify: '保存并验证',
+    verifySave: '验证并保存',
     save: '保存',
+    cancel: '取消',
     edit: '编辑',
-    ready: '可用',
-    unverified: '未验证',
-    summary: '2 个模型中有 2 个可用',
-    details: 'API 详情',
-    advanced: '高级',
+    remove: (model: string) => `移除 ${model}`,
+    refused: /未保存/,
+    reason: '模型未按要求调用工具。',
+    authReason: '服务商拒绝了 API key（401/403），请检查密钥。',
+    works: '可用于',
+    load: '从服务商获取模型',
+    pick: (model: string) => `添加 ${model}`,
     model: '模型',
     run: '运行',
     region: '个人模型连接',
+    unavailable: '不可用',
   },
 } as const;
 
@@ -69,87 +83,134 @@ test.afterEach(async ({ request }) => {
 });
 
 for (const locale of ['en', 'zh-CN'] as const) {
-  for (const viewport of [
-    { width: 1440, height: 1000 },
-    { width: 390, height: 844 },
+  for (const variant of [
+    { width: 1440, height: 1000, theme: 'light' },
+    { width: 390, height: 844, theme: 'dark' },
   ]) {
-    test(`automatic detection, per-model verification and task choice (${locale}, ${viewport.width}px)`, async ({
+    test(`verify before saving, retry after a refusal, and choose per model (${locale}, ${variant.width}px, ${variant.theme})`, async ({
       page,
     }, testInfo) => {
       const text = TEXT[locale];
-      await page.setViewportSize(viewport);
-      await page.addInitScript((value) => {
-        localStorage.setItem('agents.locale', value);
-        localStorage.setItem('agents.theme', 'light');
-      }, locale);
+      await page.setViewportSize({ width: variant.width, height: variant.height });
+      await page.addInitScript(
+        ({ value, theme }) => {
+          localStorage.setItem('agents.locale', value);
+          localStorage.setItem('agents.theme', theme);
+        },
+        { value: locale, theme: variant.theme },
+      );
 
       let saved: ReturnType<typeof connectionView> | null = null;
       const created: Record<string, unknown>[] = [];
       const patched: Record<string, unknown>[] = [];
-      const verified: unknown[] = [];
+      const listings: Record<string, unknown>[] = [];
+      await page.route('**/api/v1/agent/model-connections/discover-models', async (route) => {
+        listings.push(route.request().postDataJSON());
+        return route.fulfill({ json: { models: ['chat-model', 'claude-model', 'other-model'] } });
+      });
       await page.route('**/api/v1/agent/model-connections', async (route) => {
         if (route.request().method() === 'GET') {
           return route.fulfill({
-            json: { enabled: true, configured: true, connections: saved ? [saved] : [] },
+            json: {
+              enabled: true,
+              configured: true,
+              max_models: 8,
+              connections: saved ? [saved] : [],
+            },
           });
         }
         const input = route.request().postDataJSON();
         created.push(input);
+        if ((input.models as string[]).includes('bad-model')) {
+          // Verified first; one model is unusable, so nothing is stored.
+          return route.fulfill({
+            status: 422,
+            json: verificationRefusal([
+              chatOnly('chat-model'),
+              messagesOnly('claude-model'),
+              refusedStatus('bad-model', 'The model did not call the tool.'),
+            ]),
+          });
+        }
         saved = connectionView({
           id: connectionId,
           name: input.name,
           base_url: input.base_url,
-          model_status: input.models.map(unverified),
+          model_status: [chatOnly('chat-model'), messagesOnly('claude-model')],
         });
         return route.fulfill({ status: 201, json: saved });
       });
       await page.route(`**/api/v1/agent/model-connections/${connectionId}`, async (route) => {
         const changes = route.request().postDataJSON();
         patched.push(changes);
-        const known = new Map(saved!.model_status.map((status) => [status.model, status]));
-        saved = connectionView({
-          ...saved!,
-          ...(changes.name ? { name: changes.name } : {}),
-          model_status: (changes.models ?? saved!.models).map(
-            (model: string) => known.get(model) ?? unverified(model),
-          ),
-          updated_at: `2026-10-28T0${patched.length}:00:00Z`,
-        });
+        if (changes.api_key) {
+          return route.fulfill({
+            status: 422,
+            json: verificationRefusal([
+              {
+                ...refusedStatus('chat-model', 'The provider refused the key.', 'auth'),
+                status: 'failed',
+              },
+              {
+                ...refusedStatus('claude-model', 'The provider refused the key.', 'auth'),
+                status: 'failed',
+              },
+            ]),
+          });
+        }
+        saved = { ...saved!, ...changes, updated_at: `2026-10-28T0${patched.length}:00:00Z` };
         return route.fulfill({ json: saved });
-      });
-      await page.route(`**/api/v1/agent/model-connections/${connectionId}/verify`, (route) => {
-        const { model } = route.request().postDataJSON();
-        verified.push(model);
-        const status = model === 'chat-model' ? chatOnly(model) : messagesOnly(model);
-        // Recorded on the connection, as the server keeps it.
-        saved = connectionView({
-          ...saved!,
-          model_status: saved!.model_status.map((item) => (item.model === model ? status : item)),
-        });
-        return route.fulfill({ json: { ...status, recorded: true } });
       });
 
       await page.goto('/settings/my-settings');
       const region = page.getByRole('region', { name: text.region, exact: true });
       await page.getByRole('button', { name: text.add, exact: true }).click();
-      // The ordinary form asks for no protocol.
-      await expect(region.getByRole('checkbox')).toHaveCount(0);
-      await expect(region.locator('form')).not.toContainText(PROTOCOL_NAMES);
-      await expect(page.getByText(text.advanced, { exact: true })).toBeVisible();
+      const form = region.locator('form');
+      // Compact: no protocol control, radio, checkbox, textarea or native menu.
+      await expect(form.getByRole('checkbox')).toHaveCount(0);
+      await expect(form.getByRole('radio')).toHaveCount(0);
+      await expect(form.locator('textarea, select, datalist')).toHaveCount(0);
+      await expect(form).not.toContainText(PROTOCOL_NAMES);
       await page.getByLabel(text.name, { exact: true }).fill(name);
       await page.getByLabel('Base URL', { exact: true }).fill(baseUrl);
       await page.getByLabel('API key', { exact: true }).fill('fixture-key-not-a-credential');
-      await page.getByLabel(text.models, { exact: true }).fill('chat-model\nclaude-model');
+      // Picking from the provider's list only fills the form.
+      await form.getByRole('button', { name: text.load, exact: true }).click();
+      await form.getByRole('button', { name: text.pick('chat-model'), exact: true }).click();
+      expect(listings).toEqual([{ base_url: baseUrl, api_key: 'fixture-key-not-a-credential' }]);
+      expect(created).toEqual([]);
+      await expect(form).not.toContainText(PROTOCOL_NAMES);
+      const modelInput = page.getByLabel(text.models, { exact: true });
+      for (const model of ['claude-model', 'bad-model']) {
+        await modelInput.fill(model);
+        await modelInput.press('Enter');
+      }
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
-        viewport.width,
+        variant.width,
       );
-      await region.screenshot({ path: testInfo.outputPath('connection-form.png') });
-      expect(verified).toEqual([]);
-      await page.getByRole('button', { name: text.saveVerify, exact: true }).click();
+      await form.screenshot({ path: testInfo.outputPath('connection-form.png') });
 
+      await form.getByRole('button', { name: text.verifySave, exact: true }).click();
+      await expect(form.getByRole('alert')).toContainText(text.refused);
+      // Nothing was saved, and every input is still there to fix and retry.
+      await expect(page.getByRole('article', { name })).toHaveCount(0);
+      await expect(page.getByLabel('API key', { exact: true })).toHaveValue(
+        'fixture-key-not-a-credential',
+      );
+      await expect(form).toContainText(text.reason);
+      await form.screenshot({ path: testInfo.outputPath('connection-refused.png') });
+
+      await form.getByRole('button', { name: text.remove('bad-model'), exact: true }).click();
+      await form.getByRole('button', { name: text.verifySave, exact: true }).click();
       const card = page.getByRole('article', { name });
-      await expect(card.getByText(text.summary, { exact: true })).toBeVisible();
+      await expect(card).toBeVisible();
       expect(created).toEqual([
+        {
+          name,
+          base_url: baseUrl,
+          api_key: 'fixture-key-not-a-credential',
+          models: ['chat-model', 'claude-model', 'bad-model'],
+        },
         {
           name,
           base_url: baseUrl,
@@ -157,31 +218,33 @@ for (const locale of ['en', 'zh-CN'] as const) {
           models: ['chat-model', 'claude-model'],
         },
       ]);
-      expect(verified).toEqual(['chat-model', 'claude-model']);
-      await expect(card.getByText(text.ready, { exact: true })).toHaveCount(2);
-      await expect(card).toContainText('claude-code, codex, kilo, opencode, pi');
-      // Agents are named; protocols are not, until the diagnostics are opened.
-      const details = card.locator('details').filter({ hasText: text.details });
-      await expect(details.locator('ul').first()).toBeHidden();
-      await region.screenshot({ path: testInfo.outputPath('connection-verified.png') });
-      await details.locator('summary').click();
-      await expect(details).toContainText(/codex[:：] ?Responses/);
-      await expect(details).toContainText('Anthropic Messages');
-      await region.screenshot({ path: testInfo.outputPath('connection-diagnostics.png') });
-      await details.locator('summary').click();
+      await expect(card).toContainText(`${text.works} Claude Code, Codex, Kilo Code, OpenCode, pi`);
+      await expect(card).toContainText(`${text.works} Claude Code`);
+      // No diagnostics on the card: no expander, no API names.
+      await expect(card.locator('details, summary')).toHaveCount(0);
+      await expect(card).not.toContainText(PROTOCOL_NAMES);
+      await region.screenshot({ path: testInfo.outputPath('connection-saved.png') });
 
-      // Adding a model sends only the list; the new one waits for verification.
+      // A new key is verified first; its refusal leaves the saved card as it was.
       await card.getByRole('button', { name: text.edit, exact: true }).click();
-      // The label also holds the textarea's initial text, so find it by its accessible name.
-      const field = region.getByRole('textbox', { name: text.models, exact: true });
-      await field.fill('chat-model\nclaude-model\nnew-model');
-      await region.getByRole('button', { name: text.save, exact: true }).click();
-      await expect(card.getByText(text.unverified, { exact: true })).toBeVisible();
-      await expect(card.getByText(text.ready, { exact: true })).toHaveCount(2);
-      expect(patched).toEqual([{ models: ['chat-model', 'claude-model', 'new-model'] }]);
-      expect(verified).toHaveLength(2);
+      await page.getByLabel('API key', { exact: true }).fill('fixture-replacement-key');
+      await form.getByRole('button', { name: text.verifySave, exact: true }).click();
+      await expect(form.getByRole('alert')).toContainText(text.refused);
+      await expect(form).toContainText(text.authReason);
+      await form.getByRole('button', { name: text.cancel, exact: true }).click();
+      await expect(card).toContainText(`${text.works} Claude Code, Codex, Kilo Code, OpenCode, pi`);
+
+      // A rename alone saves without verifying.
+      await card.getByRole('button', { name: text.edit, exact: true }).click();
+      await page.getByLabel(text.name, { exact: true }).fill('Renamed provider');
+      await form.getByRole('button', { name: text.save, exact: true }).click();
+      await expect(page.getByRole('article', { name: 'Renamed provider' })).toBeVisible();
+      expect(patched).toEqual([
+        { api_key: 'fixture-replacement-key' },
+        { name: 'Renamed provider' },
+      ]);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
-        viewport.width,
+        variant.width,
       );
 
       const jobs: Record<string, unknown>[] = [];
@@ -199,7 +262,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
               {
                 id: connectionId,
                 name,
-                models: ['chat-model', 'claude-model', 'new-model'],
+                models: ['chat-model', 'claude-model'],
                 model_runtimes: {
                   'chat-model': ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
                   'claude-model': ['claude-code'],
@@ -221,23 +284,16 @@ for (const locale of ['en', 'zh-CN'] as const) {
       await agent.click();
       await page.getByRole('option', { name: 'codex', exact: true }).click();
       await model.click();
-      // Codex: only the model verified for it, and no protocol in its label.
       await expect(
         page.getByRole('option', { name: `chat-model · ${name}`, exact: true }),
       ).toBeVisible();
-      await expect(
-        page.getByRole('option', { name: new RegExp('claude-model|new-model') }),
-      ).toHaveCount(0);
+      await expect(page.getByRole('option', { name: /claude-model/ })).toHaveCount(0);
       await expect(page.getByRole('listbox')).not.toContainText(PROTOCOL_NAMES);
-      await page.screenshot({ path: testInfo.outputPath('codex-models.png') });
       await page.keyboard.press('Escape');
 
       await agent.click();
       await page.getByRole('option', { name: 'claude-code', exact: true }).click();
       await model.click();
-      await expect(
-        page.getByRole('option', { name: `chat-model · ${name}`, exact: true }),
-      ).toBeVisible();
       await page.getByRole('option', { name: `claude-model · ${name}`, exact: true }).click();
       await page.locator('#new-task-prompt').fill('Run Claude Code on my provider');
       await page.locator('#new-task-prompt').press('Enter');
@@ -247,65 +303,19 @@ for (const locale of ['en', 'zh-CN'] as const) {
         model: 'claude-model',
         model_connection_id: connectionId,
       });
-      expect(jobs[0]).not.toHaveProperty('reasoning_effort');
 
       // Codex cannot run the Messages-only model: the pick is kept, marked, and holds Run.
       await agent.click();
       await page.getByRole('option', { name: 'codex', exact: true }).click();
-      await expect(model).toContainText(locale === 'en' ? 'unavailable' : '不可用');
+      await expect(model).toContainText(text.unavailable);
       await expect(page.getByRole('button', { name: text.run, exact: true })).toBeDisabled();
     });
   }
 }
 
-test('the manual declaration stays available behind Advanced', async ({ page }) => {
-  await page.addInitScript(() => {
-    localStorage.setItem('agents.locale', 'en');
-    localStorage.setItem('agents.theme', 'light');
-  });
-  let submitted: Record<string, unknown> | null = null;
-  await page.route('**/api/v1/agent/model-connections', async (route) => {
-    if (route.request().method() === 'GET') {
-      return route.fulfill({ json: { enabled: true, configured: true, connections: [] } });
-    }
-    submitted = route.request().postDataJSON();
-    return route.fulfill({
-      status: 201,
-      json: {
-        ...connectionView({
-          id: connectionId,
-          name,
-          base_url: baseUrl,
-          model_status: [
-            { ...unverified('claude-model'), status: 'declared', runtimes: ['claude-code'] },
-          ],
-        }),
-        protocol_mode: 'manual',
-        manual_protocols: ['anthropic_messages'],
-      },
-    });
-  });
-  await page.goto('/settings/my-settings');
-  const region = page.getByRole('region', { name: 'Personal model connections', exact: true });
-  await page.getByRole('button', { name: 'Add connection', exact: true }).click();
-  await page.getByLabel('Connection name', { exact: true }).fill(name);
-  await page.getByLabel('Base URL', { exact: true }).fill(baseUrl);
-  await page.getByLabel('API key', { exact: true }).fill('fixture-key-not-a-credential');
-  await page.getByLabel('Model IDs', { exact: true }).fill('claude-model');
-  await page.getByText('Advanced', { exact: true }).click();
-  await page.getByRole('radio', { name: 'Declare the APIs this endpoint offers' }).check();
-  await expect(region.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
-  await page.getByRole('checkbox', { name: 'Anthropic Messages', exact: true }).check();
-  await region.getByRole('button', { name: 'Save', exact: true }).click();
-  const card = page.getByRole('article', { name });
-  await expect(card.getByText('APIs declared manually', { exact: true })).toBeVisible();
-  await expect(card.getByText('Declared', { exact: true })).toBeVisible();
-  expect(submitted).toMatchObject({ models: ['claude-model'], protocols: ['anthropic_messages'] });
-});
-
-// The per-model Verify buttons replace the old protocol menu. These cases run
-// with an admin session and empty admin settings, the setup they were written
-// against.
+// Moved from dropdowns.spec.ts with the dropdown scope split, and adapted to
+// verify-before-save. These cases run with an admin session and empty admin
+// settings, the setup they were written against.
 test.describe('verification without a protocol menu', () => {
   test.beforeEach(async ({ page }) => {
     await page.route('**/api/v1/session/me', (route) =>
@@ -334,7 +344,7 @@ test.describe('verification without a protocol menu', () => {
     { name: 'desktop light', width: 1440, height: 900, theme: 'light' },
     { name: 'mobile dark', width: 390, height: 844, theme: 'dark' },
   ]) {
-    test(`model verification needs no protocol menu and fits the viewport (${variant.name})`, async ({
+    test(`verify and save needs no protocol menu and fits the viewport (${variant.name})`, async ({
       page,
     }, testInfo) => {
       await page.setViewportSize({ width: variant.width, height: variant.height });
@@ -353,61 +363,68 @@ test.describe('verification without a protocol menu', () => {
           },
         }),
       );
-      await page.route('**/api/v1/agent/model-connections', (route) =>
-        route.fulfill({
-          json: {
-            enabled: true,
-            configured: true,
-            connections: [
-              connectionView({
-                id: connectionId,
-                name: 'Fixture provider',
-                base_url: 'https://provider.example/v1',
-                model_status: [unverified('fixture-small'), unverified('fixture-large')],
-              }),
-            ],
-          },
-        }),
-      );
-      const checked: unknown[] = [];
+      const posted: unknown[] = [];
       let release!: () => void;
       const allowed = new Promise<void>((resolve) => {
         release = resolve;
       });
-      await page.route(
-        `**/api/v1/agent/model-connections/${connectionId}/verify`,
-        async (route) => {
-          checked.push(route.request().postDataJSON());
-          await allowed;
-          return route.fulfill({ json: { ...chatOnly('fixture-large'), recorded: true } });
-        },
-      );
+      let saved: ReturnType<typeof connectionView> | null = null;
+      await page.route('**/api/v1/agent/model-connections', async (route) => {
+        if (route.request().method() === 'GET') {
+          return route.fulfill({
+            json: { enabled: true, configured: true, connections: saved ? [saved] : [] },
+          });
+        }
+        posted.push(route.request().postDataJSON());
+        // The server verifies before it answers; the form waits for it.
+        await allowed;
+        saved = connectionView({
+          id: connectionId,
+          name: 'Fixture provider',
+          base_url: 'https://provider.example/v1',
+          model_status: [chatOnly('fixture-small'), chatOnly('fixture-large')],
+        });
+        return route.fulfill({ status: 201, json: saved });
+      });
       await page.goto('/settings/my-settings');
-      const card = page.getByRole('article', { name: 'Fixture provider' });
-      await expect(card.getByRole('combobox')).toHaveCount(0);
+      await page.getByRole('button', { name: 'Add connection', exact: true }).click();
+      const form = page.getByRole('region', { name: 'Personal model connections' }).locator('form');
+      await expect(form.getByRole('combobox')).toHaveCount(0);
       await expect(page.locator('select:visible')).toHaveCount(0);
       await expect(page.locator('datalist')).toHaveCount(0);
-      expect(checked).toEqual([]);
-      await card.getByRole('button', { name: 'Verify fixture-large', exact: true }).click();
-      await expect.poll(() => checked.length).toBe(1);
-      await expect(
-        card.getByRole('button', { name: 'Verify fixture-small', exact: true }),
-      ).toBeDisabled();
-      await expect(
-        card.getByRole('button', { name: 'Verify fixture-large', exact: true }),
-      ).toBeDisabled();
-      expect(checked).toEqual([{ model: 'fixture-large' }]);
+      await page.getByLabel('Connection name', { exact: true }).fill('Fixture provider');
+      await page.getByLabel('Base URL', { exact: true }).fill('https://provider.example/v1');
+      await page.getByLabel('API key', { exact: true }).fill('fixture-key-not-a-credential');
+      const models = page.getByLabel('Model IDs', { exact: true });
+      await models.fill('fixture-small');
+      await models.press('Enter');
+      await models.fill('fixture-large');
+      expect(posted).toEqual([]);
+      await form.getByRole('button', { name: 'Verify and save', exact: true }).click();
+      await expect.poll(() => posted.length).toBe(1);
+      await expect(form.getByRole('button', { name: 'Verifying…', exact: true })).toBeDisabled();
+      // A pending save can still commit on the server, so Cancel is disabled.
+      await expect(form.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled();
+      expect(posted).toEqual([
+        {
+          name: 'Fixture provider',
+          base_url: 'https://provider.example/v1',
+          api_key: 'fixture-key-not-a-credential',
+          models: ['fixture-small', 'fixture-large'],
+        },
+      ]);
+      await form.screenshot({
+        path: testInfo.outputPath('verify-and-save-pending.png'),
+        animations: 'disabled',
+      });
       release();
-      await expect(card.getByText('Ready', { exact: true })).toHaveCount(1);
-      await expect(card.getByText('Not verified', { exact: true })).toHaveCount(1);
-      await expect(
-        card.getByRole('button', { name: 'Verify fixture-large', exact: true }),
-      ).toBeEnabled();
+      const card = page.getByRole('article', { name: 'Fixture provider' });
+      await expect(card.getByText(/^Works with/)).toHaveCount(2);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
         variant.width,
       );
       await card.screenshot({
-        path: testInfo.outputPath('model-verification-no-protocol-menu.png'),
+        path: testInfo.outputPath('verified-connection.png'),
         animations: 'disabled',
       });
     });
