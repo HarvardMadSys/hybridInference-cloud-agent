@@ -241,13 +241,19 @@ them.
   unchanged, and covers the cross-site guard, JSON-only bodies, 422 bodies
   without secrets, the refusal of Gateway sessions in local mode, and the
   Gateway-only views.
-- The real-Postgres tier (`make test-db-local`) has three files:
-  `tests/integration/storage/test_local_account_store.py` (races, replay,
+- The real-Postgres tier (`make test-db-local`) covers local accounts in six
+  files: `tests/integration/storage/test_local_account_store.py` (races, replay,
   versions, the reset and suspension barriers, shared counters and the
   namespace), `tests/integration/servers/test_local_access_termination.py`
-  (stopping work, the residency fence, cleanup barriers and delayed passes) and
+  (stopping work, the residency fence, cleanup barriers and delayed passes),
   `tests/integration/servers/test_local_accounts_flow.py` (the whole flow over
-  HTTP).
+  HTTP), `tests/integration/storage/test_independent_accounts_acceptance.py`
+  (the public account lifecycle through the real application with Gateway HTTP
+  forbidden), `tests/integration/storage/test_local_session_reset_race.py`
+  (a login waiting on a password reset cannot open a session with the old
+  password), and
+  `tests/integration/storage/test_local_cleanup_lock_acceptance.py` (cancelling
+  a cleanup lock acquisition before its result arrives releases the lock).
 
 ## Reused code
 

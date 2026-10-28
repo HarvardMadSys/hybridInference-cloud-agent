@@ -4414,4 +4414,3 @@ msgid ""
 "The PR checklist enforces this; a new variable without a row is a review "
 "stop."
 msgstr "PR 检查清单会检查这一点；新增了变量却没有对应的一行，评审就不会通过。"
-

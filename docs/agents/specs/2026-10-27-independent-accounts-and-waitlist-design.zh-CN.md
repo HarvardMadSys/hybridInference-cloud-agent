@@ -1,6 +1,9 @@
 # Cloud Agent 独立账号与 waiting list
 
-日期：2026-10-27；更新：2026-10-28。状态：首版实现与验收中，未部署或迁移生产数据。
+日期：2026-10-27；更新：2026-10-28。状态：账号与 waiting list 首版实现及测试已完成，
+BYOK 全链路集成待执行；未部署或迁移生产数据。
+
+[验收记录](../reviews/2026-10-28-independent-accounts-acceptance.md)记录代码版本、测试环境、结果及未覆盖范围。
 
 代码核对基线：Cloud Agent `3f60b6afbb86c67422b3c237c3e9ab68ed2effac`；
 HybridInference `321e9a6c457dcc80d35977aaac472d54041204a8`。

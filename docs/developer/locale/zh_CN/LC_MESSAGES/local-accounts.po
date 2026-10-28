@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 00:30-0400\n"
+"POT-Creation-Date: 2026-10-28 12:50+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -30,14 +30,19 @@ msgid ""
 "email address and a password, verify the address, sign in, and apply for "
 "Agent use through a waiting list that administrators review. Gateway mode"
 " remains the default, and nothing in this page changes it."
-msgstr "Cloud Agent 可以使用自己的账号体系，无需通过 HybridInference Gateway 登录。设置 `AGENT_AUTH_MODE=local` 后，用户使用邮箱和密码注册、验证邮箱并登录，再通过等候名单申请使用 Agent，由管理员审核。默认仍为网关模式，本文不会改变这一默认值。"
+msgstr ""
+"Cloud Agent 可以使用自己的账号体系，无需通过 HybridInference Gateway 登录。设置 "
+"`AGENT_AUTH_MODE=local` 后，用户使用邮箱和密码注册、验证邮箱并登录，再通过等候名单申请使用 "
+"Agent，由管理员审核。默认仍为网关模式，本文不会改变这一默认值。"
 
 #: ../developer/local-accounts.md:9
 msgid ""
 "The design is [independent accounts and waiting "
 "list](../agents/specs/2026-10-27-independent-accounts-and-waitlist-design"
 ".zh-CN.md). This page describes what is implemented."
-msgstr "设计见[独立账号与 waiting list](../agents/specs/2026-10-27-independent-accounts-and-waitlist-design.zh-CN.md)。本文说明已实现的功能。"
+msgstr ""
+"设计见[独立账号与 waiting list](../agents/specs/2026-10-27-independent-accounts-"
+"and-waitlist-design.zh-CN.md)。本文说明已实现的功能。"
 
 #: ../developer/local-accounts.md:13
 msgid "What local mode changes"
@@ -139,7 +144,10 @@ msgid ""
 "request admission, claims, goal rounds, waiting messages, team approval "
 "and ownership transfer, the on-call service account, Profile and team "
 "rosters. A local account ID never reaches the Gateway."
-msgstr "本地模式下，`app.state.gateway` 是 `LocalModeGateway`（`cloud_agent/accounts/directory.py`）。它提供与网关客户端相同的方法。身份与准入从本服务的数据库读取；仅网关支持的方法直接返回带类型的错误，不发起网络请求。因此，所有现有的所有者检查都会读取本地准入决定，包括请求准入、认领、目标轮次、等待消息、团队审批与所有权转移、值班服务账号、Profile 和团队成员名单。本地账号 ID 不会传到网关。"
+msgstr ""
+"本地模式下，`app.state.gateway` 是 "
+"`LocalModeGateway`（`cloud_agent/accounts/directory.py`）。它提供与网关客户端相同的方法。身份与准入从本服务的数据库读取；仅网关支持的方法直接返回带类型的错误，不发起网络请求。因此，所有现有的所有者检查都会读取本地准入决定，包括请求准入、认领、目标轮次、等待消息、团队审批与所有权转移、值班服务账号、Profile"
+" 和团队成员名单。本地账号 ID 不会传到网关。"
 
 #: ../developer/local-accounts.md:33
 msgid "Enabling it"
@@ -156,7 +164,9 @@ msgid ""
 "these checks. Moving an existing Gateway-bound database to local accounts"
 " is a separate identity migration (phase A3 in the design), and it is not"
 " implemented."
-msgstr "本地模式需要独立数据库。启动时会把空数据库绑定到本地身份（`agent_local_identity_namespace`）。数据库若已绑定网关签发方，或虽未绑定却已有所有者数据，启动就会被拒绝。反过来，网关模式也会拒绝已绑定本地身份的数据库。两项检查持有同一把表锁，所以两个监听器即使以不同模式同时启动，也不能分别绑定同一数据库。没有配置项可以跳过这些检查。把已绑定网关的数据库转为本地账号，需要单独实施身份迁移，即设计中的 A3 阶段，目前尚未实现。"
+msgstr ""
+"本地模式需要独立数据库。启动时会把空数据库绑定到本地身份（`agent_local_identity_namespace`）。数据库若已绑定网关签发方，或虽未绑定却已有所有者数据，启动就会被拒绝。反过来，网关模式也会拒绝已绑定本地身份的数据库。两项检查持有同一把表锁，所以两个监听器即使以不同模式同时启动，也不能分别绑定同一数据库。没有配置项可以跳过这些检查。把已绑定网关的数据库转为本地账号，需要单独实施身份迁移，即设计中的"
+" A3 阶段，目前尚未实现。"
 
 #: ../developer/local-accounts.md
 msgid "Variable"
@@ -215,7 +225,9 @@ msgid ""
 "The web server must reach the same control plane "
 "(`AGENT_CONTROL_PLANE_URL`). The web app reads `GET /v1/auth/config` to "
 "choose its sign-in pages."
-msgstr "Web 服务器必须能访问同一控制平面（`AGENT_CONTROL_PLANE_URL`）。Web 应用读取 `GET /v1/auth/config` 来选择登录页面。"
+msgstr ""
+"Web 服务器必须能访问同一控制平面（`AGENT_CONTROL_PLANE_URL`）。Web 应用读取 `GET "
+"/v1/auth/config` 来选择登录页面。"
 
 #: ../developer/local-accounts.md:55
 msgid "The first administrator"
@@ -235,7 +247,10 @@ msgid ""
 "to an approved account. Each step goes through the same audited, "
 "versioned action the administration API uses, with the actor `deployment-"
 "bootstrap`."
-msgstr "账号必须已经存在，并已验证邮箱。`--approve` 还会批准该账号的 Agent 使用申请，因为只有获批账号才能获得管理权限。每一步都使用与管理 API 相同的操作，执行版本校验并记录审计，操作者记为 `deployment-bootstrap`。"
+msgstr ""
+"账号必须已经存在，并已验证邮箱。`--approve` 还会批准该账号的 Agent "
+"使用申请，因为只有获批账号才能获得管理权限。每一步都使用与管理 API 相同的操作，执行版本校验并记录审计，操作者记为 `deployment-"
+"bootstrap`。"
 
 #: ../developer/local-accounts.md:71
 msgid "The HTTP surface"
@@ -247,7 +262,9 @@ msgid ""
 "Errors use the usual envelope, `{\"detail\": {\"error\": {\"type\", "
 "\"message\"}}}`. Every response is `no-store`. A refused body is reported"
 " by field and rule only, so a 422 never repeats a password or a token."
-msgstr "错误沿用现有格式：`{\"detail\": {\"error\": {\"type\", \"message\"}}}`。所有响应均为 `no-store`。请求体校验失败时，只报告字段和规则，因此 422 响应不会回显密码或令牌。"
+msgstr ""
+"错误沿用现有格式：`{\"detail\": {\"error\": {\"type\", \"message\"}}}`。所有响应均为 `no-"
+"store`。请求体校验失败时，只报告字段和规则，因此 422 响应不会回显密码或令牌。"
 
 #: ../developer/local-accounts.md
 msgid "Route"
@@ -286,13 +303,17 @@ msgid ""
 "Sets the cookie and returns the session body. `invalid_credentials` for "
 "an unknown email and for a wrong password alike. `email_not_verified` and"
 " `account_suspended` only after the right password."
-msgstr "设置 cookie 并返回会话响应。邮箱不存在或密码错误都返回 `invalid_credentials`；只有密码正确时才会返回 `email_not_verified` 或 `account_suspended`。"
+msgstr ""
+"设置 cookie 并返回会话响应。邮箱不存在或密码错误都返回 `invalid_credentials`；只有密码正确时才会返回 "
+"`email_not_verified` 或 `account_suspended`。"
 
 #: ../developer/local-accounts.md
 msgid ""
 "`POST /v1/auth/verify-email`, `/resend-verification`, `/forgot-password`,"
 " `/reset-password`"
-msgstr "`POST /v1/auth/verify-email`, `/resend-verification`, `/forgot-password`, `/reset-password`"
+msgstr ""
+"`POST /v1/auth/verify-email`, `/resend-verification`, `/forgot-password`,"
+" `/reset-password`"
 
 #: ../developer/local-accounts.md
 #, python-brace-format
@@ -300,7 +321,9 @@ msgid ""
 "`{ok: true}`. Tokens are single-use and expire (24 hours to verify, 1 "
 "hour to reset); a newer token replaces older ones. A reset verifies the "
 "email and ends every session of the account."
-msgstr "返回 `{ok: true}`。令牌只能使用一次，并有有效期：验证邮箱为 24 小时，重置密码为 1 小时；新令牌替换旧令牌。重置密码也会验证邮箱，并结束该账号的所有会话。"
+msgstr ""
+"返回 `{ok: true}`。令牌只能使用一次，并有有效期：验证邮箱为 24 小时，重置密码为 1 "
+"小时；新令牌替换旧令牌。重置密码也会验证邮箱，并结束该账号的所有会话。"
 
 #: ../developer/local-accounts.md
 msgid "`GET /v1/session/me`"
@@ -340,7 +363,10 @@ msgstr "`GET /v1/admin/accounts`, `PATCH /v1/admin/accounts/{id}`"
 msgid ""
 "`approve`, `reject`, `revoke`, `suspend`, `restore`, `grant_admin`, "
 "`revoke_admin`, at `expected_version`."
-msgstr "按 `expected_version` 执行 `approve`、`reject`、`revoke`、`suspend`、`restore`、`grant_admin` 或 `revoke_admin`。"
+msgstr ""
+"按 `expected_version` 执行 "
+"`approve`、`reject`、`revoke`、`suspend`、`restore`、`grant_admin` 或 "
+"`revoke_admin`。"
 
 #: ../developer/local-accounts.md:88
 msgid ""
@@ -348,7 +374,9 @@ msgid ""
 "password#token=…`. A browser never sends the fragment to a server, so the"
 " token stays out of access logs. The page sends the token in an explicit "
 "POST, and following a link changes nothing by itself."
-msgstr "邮件链接指向 Web 应用的 `/verify-email#token=…` 和 `/reset-password#token=…`。浏览器不会把 URL 片段发送给服务器，因此令牌不会进入访问日志。页面通过显式 POST 请求发送令牌，仅打开链接不会改变任何状态。"
+msgstr ""
+"邮件链接指向 Web 应用的 `/verify-email#token=…` 和 `/reset-password#token=…`。浏览器不会把"
+" URL 片段发送给服务器，因此令牌不会进入访问日志。页面通过显式 POST 请求发送令牌，仅打开链接不会改变任何状态。"
 
 #: ../developer/local-accounts.md:93
 msgid ""
@@ -356,7 +384,9 @@ msgid ""
 "guard, whether or not it carries a cookie, and the body must be JSON. A "
 "cross-site sign-in would otherwise put an attacker's account in the "
 "victim's browser."
-msgstr "所有会改变状态的 `/v1/auth/*` 请求，无论是否携带 cookie，都要经过跨站写入保护检查，且请求体必须是 JSON。否则，跨站登录可能把攻击者的账号登录到受害者的浏览器中。"
+msgstr ""
+"所有会改变状态的 `/v1/auth/*` 请求，无论是否携带 cookie，都要经过跨站写入保护检查，且请求体必须是 "
+"JSON。否则，跨站登录可能把攻击者的账号登录到受害者的浏览器中。"
 
 #: ../developer/local-accounts.md:99
 msgid ""
@@ -433,7 +463,10 @@ msgid ""
 "an approval into a revocation. Restoring an account lets it sign in and "
 "apply again, and grants nothing back. An administrator cannot suspend "
 "themself or remove their own access; the `ADMIN_TOKEN` can."
-msgstr "`agent.use` 要求账号已验证邮箱、处于有效状态且已获批。`agent.admin` 还要求显式管理员标记；只有这个标记并不授予任何权限。授予管理权限不会自动批准账号。停用账号会撤销其会话、清除管理员标记，并将已批准的准入改为撤销。恢复账号后可以重新登录和申请，但不会恢复任何权限。管理员不能停用自己或移除自己的准入权限；`ADMIN_TOKEN` 可以执行这些操作。"
+msgstr ""
+"`agent.use` 要求账号已验证邮箱、处于有效状态且已获批。`agent.admin` "
+"还要求显式管理员标记；只有这个标记并不授予任何权限。授予管理权限不会自动批准账号。停用账号会撤销其会话、清除管理员标记，并将已批准的准入改为撤销。恢复账号后可以重新登录和申请，但不会恢复任何权限。管理员不能停用自己或移除自己的准入权限；`ADMIN_TOKEN`"
+" 可以执行这些操作。"
 
 #: ../developer/local-accounts.md:119
 msgid ""
@@ -447,7 +480,12 @@ msgid ""
 "checked again inside that transaction, so an administrator who is "
 "suspended while a request is in flight changes nothing "
 "(`actor_not_admin`)."
-msgstr "每次账号或准入变化都会递增账号的 `version`，也就是 `WaitlistEntry.version`。管理员操作需要指明读取时的版本；如果账号此后已变更，则返回 409 `version_conflict`。变更与对应的 `agent_admin_audit_log` 记录在同一事务中提交。审计记录保存状态、版本以及是否填写原因，不记录邮箱、密码、哈希或令牌。该事务内还会再次检查操作者本人的管理权限，所以请求执行期间若管理员被停用，该请求不会更改任何数据，并返回 `actor_not_admin`。"
+msgstr ""
+"每次账号或准入变化都会递增账号的 `version`，也就是 "
+"`WaitlistEntry.version`。管理员操作需要指明读取时的版本；如果账号此后已变更，则返回 409 "
+"`version_conflict`。变更与对应的 `agent_admin_audit_log` "
+"记录在同一事务中提交。审计记录保存状态、版本以及是否填写原因，不记录邮箱、密码、哈希或令牌。该事务内还会再次检查操作者本人的管理权限，所以请求执行期间若管理员被停用，该请求不会更改任何数据，并返回"
+" `actor_not_admin`。"
 
 #: ../developer/local-accounts.md:129
 msgid "Sessions and credentials"
@@ -459,14 +497,18 @@ msgid ""
 "[Reused code](#reused-code)). Hashing runs on a pool of four threads; at "
 "most 64 hashes may wait, and beyond that a request is refused with 503 "
 "instead of being queued."
-msgstr "密码使用 HybridInference 的 Argon2id 参数与规则，见[复用代码](#reused-code)。哈希计算使用四个线程的线程池，最多允许 64 次哈希计算排队；超出时请求返回 503，不再入队。"
+msgstr ""
+"密码使用 HybridInference 的 Argon2id 参数与规则，见[复用代码](#reused-"
+"code)。哈希计算使用四个线程的线程池，最多允许 64 次哈希计算排队；超出时请求返回 503，不再入队。"
 
 #: ../developer/local-accounts.md:135
 msgid ""
 "A session value is `cals1.` followed by 256 random bits. The database "
 "keeps only an HMAC of it, keyed from `AGENT_LOCAL_SESSION_SECRET`. A "
 "Gateway-mode cookie or JWT is never read in local mode."
-msgstr "会话值由 `cals1.` 前缀和 256 个随机位组成。数据库只保存以 `AGENT_LOCAL_SESSION_SECRET` 为密钥计算的 HMAC。本地模式不读取网关模式的 cookie 或 JWT。"
+msgstr ""
+"会话值由 `cals1.` 前缀和 256 个随机位组成。数据库只保存以 `AGENT_LOCAL_SESSION_SECRET` 为密钥计算的 "
+"HMAC。本地模式不读取网关模式的 cookie 或 JWT。"
 
 #: ../developer/local-accounts.md:138
 msgid ""
@@ -491,7 +533,10 @@ msgid ""
 "day. Mail allows 3 per email in an hour, 10 per email in a day and 10 per"
 " address in an hour. Token redemption allows 30 per address in 15 "
 "minutes."
-msgstr "防滥用限制使用 Postgres 中的固定窗口计数器，所有 worker 和副本共享同一组计数，计数器键使用带密钥的哈希。登录限制为：每 15 分钟每个邮箱与地址组合最多 5 次、每个邮箱最多 50 次，每小时每个地址最多 20 次。注册限制为每个地址每小时 5 次、每天 10 次。邮件限制为每个邮箱每小时 3 次、每天 10 次，每个地址每小时 10 次。令牌兑换限制为每个地址每 15 分钟 30 次。"
+msgstr ""
+"防滥用限制使用 Postgres 中的固定窗口计数器，所有 worker 和副本共享同一组计数，计数器键使用带密钥的哈希。登录限制为：每 15 "
+"分钟每个邮箱与地址组合最多 5 次、每个邮箱最多 50 次，每小时每个地址最多 20 次。注册限制为每个地址每小时 5 次、每天 10 "
+"次。邮件限制为每个邮箱每小时 3 次、每天 10 次，每个地址每小时 10 次。令牌兑换限制为每个地址每 15 分钟 30 次。"
 
 #: ../developer/local-accounts.md:150
 msgid "Neither a recipient address nor a link is written to a log."
@@ -510,7 +555,9 @@ msgid ""
 "Residency establishment and residency heartbeats carry the same condition"
 " in their own SQL, so an attempt admitted before the revocation cannot "
 "establish or extend a residency afterwards."
-msgstr "撤销准入或停用账号时，在同一事务中提交变更，并为新版本创建终止记录（`agent_local_access_terminations`）。从提交完成起，所有新的所有者请求、认领、目标轮次和等待消息都会读取到拒绝决定。residency 建立和心跳也在各自的 SQL 中检查同一条件，因此撤权前已获准的 attempt 不能在撤权后建立或延长 residency。"
+msgstr ""
+"撤销准入或停用账号时，在同一事务中提交变更，并为新版本创建终止记录（`agent_local_access_terminations`）。从提交完成起，所有新的所有者请求、认领、目标轮次和等待消息都会读取到拒绝决定。residency"
+" 建立和心跳也在各自的 SQL 中检查同一条件，因此撤权前已获准的 attempt 不能在撤权后建立或延长 residency。"
 
 #: ../developer/local-accounts.md:162
 msgid ""
@@ -523,28 +570,42 @@ msgid ""
 " to the account, it freezes the group's terminals, kills them and lifts "
 "the freeze. Groups shared with another owner's chat are never touched. A "
 "terminal that a request admitted before the revocation opens afterwards "
-"is killed by that request itself."
-msgstr "随后，`terminate_owner_access`（`application/owner_termination.py`）使用现有的安全结束流程停止已经运行的工作：取消排队轮次，请求运行中的轮次停止，暂停等待消息和活动目标，取消环境测试与预构建，停止环境操作，并释放所有 residency。已释放成员的进程也会被关闭。对于成员全部属于该账号的沙箱组，先冻结该组终端，再终止终端，最后解除冻结。与其他所有者的对话共享的组不会被操作。若撤权前获准的请求在撤权后才打开终端，该请求会自行终止新开的终端。"
+"is killed by that request itself, after it has reopened the termination "
+"record, so the next pass kills the terminal if that request cannot."
+msgstr "随后，`terminate_owner_access`（`application/owner_termination.py`）使用现有的安全结束流程停止已经运行的工作：取消排队轮次，请求运行中的轮次停止，暂停等待消息和活动目标，取消环境测试与预构建，停止环境操作，并释放所有 residency。已释放成员的进程也会被关闭。对于成员全部属于该账号的沙箱组，先冻结该组终端，再终止终端，最后解除冻结。与其他所有者的对话共享的组不会被操作。若撤权前获准的请求在撤权后才打开终端，该请求会先重新开启终止记录，再自行终止新开的终端。这样，即使该请求未能终止终端，下一轮清理也会继续处理。"
 
-#: ../developer/local-accounts.md:173
+#: ../developer/local-accounts.md:174
 msgid ""
 "The record stays open until a pass finds the terminal cleanup "
-"acknowledged and none of the account's turns running. The background pass"
-" retries open records every 30 seconds. A per-account advisory lock "
-"serializes passes across processes. Approving the account or granting it "
-"administration needs that same lock and no open record (otherwise 409 "
+"acknowledged and none of the account's turns running. Each reopen "
+"increments the record's revision. A pass reads the revision before it "
+"starts and closes the record only at that revision, so a terminal "
+"reopened while a pass is running keeps the record open for the next pass."
+" The background pass checks open records every 30 seconds, up to 50 "
+"accounts per pass. A per-account advisory lock serializes passes across "
+"processes. Approving the account or granting it administration needs that"
+" same lock and no open record, at any revision (otherwise 409 "
 "`access_cleanup_pending`), so a delayed pass never stops work that a "
 "newer approval allows. Restoring access replays nothing: cancelled turns "
 "stay cancelled, and paused goals and queues wait for their owner."
-msgstr "只有一轮清理确认终端清理已完成，且该账号没有运行中的轮次，终止记录才会关闭。后台每 30 秒重试未关闭的记录。每个账号使用咨询锁，让不同进程的清理轮次串行执行。批准账号或授予管理权限也必须取得同一把锁，且不能有未关闭的终止记录，否则返回 409 `access_cleanup_pending`。因此，延迟执行的清理不会停止后来获批的新工作。恢复准入不会重放任何工作：已取消的轮次保持取消，暂停的目标和队列等待所有者操作。"
+msgstr "只有一轮清理确认终端清理已完成，且该账号没有运行中的轮次，终止记录才会关闭。每次重新开启记录都会递增其修订号。清理开始前先读取修订号，只有记录仍处于该修订号时才能关闭。因此，如果清理期间又有终端被打开，记录便保持开启，交由下一轮清理。后台每 30 秒检查未关闭的记录，每轮最多处理 50 个账号。每个账号使用咨询锁，让不同进程的清理轮次串行执行。批准账号或授予管理权限也必须取得同一把锁，且该账号在任何修订号下都不能有未关闭的终止记录，否则返回 409 `access_cleanup_pending`。因此，延迟执行的清理不会停止后来获批的新工作。恢复准入不会重放任何工作：已取消的轮次保持取消，暂停的目标和队列等待所有者操作。"
+
+#: ../developer/local-accounts.md:187
+msgid ""
+"No step has a fixed wall-clock deadline. A host that keeps failing, or a "
+"backlog of more than one batch of accounts, delays completion. What is "
+"fixed is when each kind of work is refused or checked, and that the "
+"record stays open, blocking re-approval, until every step is "
+"acknowledged."
+msgstr "各步骤都没有固定的实际完成时限。主机持续失败，或待处理账号超过一批，都会延迟完成。固定的是各类工作被拒绝或接受检查的时机，以及在所有步骤确认完成之前，终止记录始终保持开启并阻止重新批准。"
 
 #: ../developer/local-accounts.md
 msgid "Work"
 msgstr "工作"
 
 #: ../developer/local-accounts.md
-msgid "Stops within (default settings)"
-msgstr "停止时限（默认设置）"
+msgid "When it is refused or checked (default settings)"
+msgstr "拒绝或检查的时机（默认设置）"
 
 #: ../developer/local-accounts.md
 msgid ""
@@ -553,16 +614,16 @@ msgid ""
 msgstr "新的请求、认领、目标轮次、等待消息，以及 residency 建立和心跳"
 
 #: ../developer/local-accounts.md
-msgid "At commit"
-msgstr "事务提交时"
+msgid "Refused from the commit"
+msgstr "从事务提交起拒绝"
 
 #: ../developer/local-accounts.md
 msgid "Open owner event, change and terminal streams"
 msgstr "已打开的所有者事件流、变更流和终端流"
 
 #: ../developer/local-accounts.md
-msgid "30 s (`LOCAL_STREAM_RECHECK_S`) plus one keepalive"
-msgstr "30 秒（`LOCAL_STREAM_RECHECK_S`）加一次保活间隔"
+msgid "Re-checked every 30 s (`LOCAL_STREAM_RECHECK_S`), between frames"
+msgstr "每 30 秒（`LOCAL_STREAM_RECHECK_S`）重新检查一次，在帧与帧之间执行"
 
 #: ../developer/local-accounts.md
 msgid "A running turn"
@@ -570,31 +631,34 @@ msgstr "运行中的轮次"
 
 #: ../developer/local-accounts.md
 msgid ""
-"At its next host heartbeat, about 30 s, or when its 120 s attempt lease "
-"lapses if the host is silent"
-msgstr "下次主机心跳时，约 30 秒；若主机无响应，则在 120 秒的 attempt 租约到期时"
+"Asked to stop by the first pass; it stops at its host's next heartbeat "
+"(every 30 s), or when its 120 s attempt lease lapses if the host is "
+"silent"
+msgstr "首轮清理请求停止；在主机下次心跳时停止，心跳间隔为 30 秒；若主机无响应，则在 120 秒的 attempt 租约到期时停止"
 
 #: ../developer/local-accounts.md
 msgid "Resident member processes"
 msgstr "驻留成员进程"
 
 #: ../developer/local-accounts.md
-msgid "When the pass closes them, or at the host's next residency heartbeat"
-msgstr "清理轮次关闭进程时，或主机下次 residency 心跳时"
+msgid ""
+"Closed by a pass, or at the host's next residency heartbeat, which no "
+"longer extends them"
+msgstr "由清理轮次关闭，或在主机下次 residency 心跳时关闭；该心跳不再延长 residency"
 
 #: ../developer/local-accounts.md
 msgid "Group terminals and environment actions"
 msgstr "沙箱组终端与环境操作"
 
 #: ../developer/local-accounts.md
-msgid "When the pass reaches the group; retried every 30 s until acknowledged"
-msgstr "清理轮次处理到该组时；每 30 秒重试，直到确认完成"
+msgid "Killed by a pass; retried at each check until the host acknowledges"
+msgstr "由清理轮次终止；每次检查都会重试，直到主机确认完成"
 
-#: ../developer/local-accounts.md:190
+#: ../developer/local-accounts.md:200
 msgid "Models"
 msgstr "模型"
 
-#: ../developer/local-accounts.md:192
+#: ../developer/local-accounts.md:202
 msgid ""
 "Local accounts have no Gateway inference. A model lookup raises "
 "`ModelConnectionRequired`. Job, turn and model-preference requests answer"
@@ -602,31 +666,40 @@ msgid ""
 "reason, and `GET /v1/agent/config` reports `model_connection_required: "
 "true` with no models. A Gateway grant is never minted for a local "
 "account, and its ID is never sent to the Gateway's catalog or quota."
-msgstr "本地账号不使用网关推理。模型查询会抛出 `ModelConnectionRequired`。任务、轮次和模型偏好请求返回 409 `model_connection_required`，等待消息以此为原因保持等待；`GET /v1/agent/config` 返回 `model_connection_required: true`，且不提供模型。不会为本地账号签发网关授权，也不会把本地账号 ID 发送给网关的模型目录或配额接口。"
+msgstr ""
+"本地账号不使用网关推理。模型查询会抛出 `ModelConnectionRequired`。任务、轮次和模型偏好请求返回 409 "
+"`model_connection_required`，等待消息以此为原因保持等待；`GET /v1/agent/config` 返回 "
+"`model_connection_required: true`，且不提供模型。不会为本地账号签发网关授权，也不会把本地账号 ID "
+"发送给网关的模型目录或配额接口。"
 
-#: ../developer/local-accounts.md:199
+#: ../developer/local-accounts.md:209
 msgid ""
 "Personal model connections are a separate feature on another branch. They"
 " plug into `LocalModeGateway(catalog=...)`, the model catalog seam. "
 "Running a task end to end in local mode needs that branch; this one does "
 "not claim it. Repository, team, profile and other account workflows that "
 "need no model are unaffected."
-msgstr "个人模型连接是另一分支上的独立功能，通过模型目录接口 `LocalModeGateway(catalog=...)` 接入。在本地模式下端到端运行任务需要该分支，本分支不声称已完成这项能力。不需要模型的仓库、团队、资料及其他账号流程不受影响。"
+msgstr ""
+"个人模型连接是另一分支上的独立功能，通过模型目录接口 `LocalModeGateway(catalog=...)` "
+"接入。在本地模式下端到端运行任务需要该分支，本分支不声称已完成这项能力。不需要模型的仓库、团队、资料及其他账号流程不受影响。"
 
-#: ../developer/local-accounts.md:205
+#: ../developer/local-accounts.md:215
 #, python-brace-format
 msgid ""
 "The Gateway-only per-request usage views (`/admin/agent/runs/{id}/llm-"
 "requests`, `/admin/agent/steps`, and an owner's per-message request "
 "detail) answer 503 `gateway_feature_unavailable` in local mode, without a"
 " Gateway call."
-msgstr "仅网关支持的逐请求用量视图（`/admin/agent/runs/{id}/llm-requests`、`/admin/agent/steps`，以及所有者逐条消息的请求明细）在本地模式下返回 503 `gateway_feature_unavailable`，不调用网关。"
+msgstr ""
+"仅网关支持的逐请求用量视图（`/admin/agent/runs/{id}/llm-"
+"requests`、`/admin/agent/steps`，以及所有者逐条消息的请求明细）在本地模式下返回 503 "
+"`gateway_feature_unavailable`，不调用网关。"
 
-#: ../developer/local-accounts.md:209
+#: ../developer/local-accounts.md:219
 msgid "Data model"
 msgstr "数据模型"
 
-#: ../developer/local-accounts.md:211
+#: ../developer/local-accounts.md:221
 msgid ""
 "Migration `0106_local_accounts` adds empty tables. Gateway mode never "
 "writes them."
@@ -706,41 +779,38 @@ msgstr "`agent_local_identity_namespace`"
 msgid "The marker that binds a database to local identity"
 msgstr "将数据库绑定到本地身份的标记"
 
-#: ../developer/local-accounts.md:225
+#: ../developer/local-accounts.md:235
 msgid "Tests"
 msgstr "测试"
 
-#: ../developer/local-accounts.md:227
+#: ../developer/local-accounts.md:237
 msgid ""
 "`tests/unit/test_local_account_rules.py` and "
 "`tests/unit/test_local_account_credentials.py` cover the rules, the "
 "password policy, credentials, configuration and mail."
-msgstr "`tests/unit/test_local_account_rules.py` 和 `tests/unit/test_local_account_credentials.py` 覆盖规则、密码策略、凭据、配置和邮件。"
+msgstr ""
+"`tests/unit/test_local_account_rules.py` 和 "
+"`tests/unit/test_local_account_credentials.py` 覆盖规则、密码策略、凭据、配置和邮件。"
 
-#: ../developer/local-accounts.md:230
+#: ../developer/local-accounts.md:240
 msgid ""
 "`tests/servers/test_local_auth_surface.py` checks that Gateway mode is "
 "unchanged, and covers the cross-site guard, JSON-only bodies, 422 bodies "
 "without secrets, the refusal of Gateway sessions in local mode, and the "
 "Gateway-only views."
-msgstr "`tests/servers/test_local_auth_surface.py` 检查网关模式行为不变，并覆盖跨站保护、仅接受 JSON 的请求体、不含敏感信息的 422 响应、本地模式拒绝网关会话，以及仅网关支持的视图。"
+msgstr ""
+"`tests/servers/test_local_auth_surface.py` 检查网关模式行为不变，并覆盖跨站保护、仅接受 JSON "
+"的请求体、不含敏感信息的 422 响应、本地模式拒绝网关会话，以及仅网关支持的视图。"
 
-#: ../developer/local-accounts.md:234
-msgid ""
-"The real-Postgres tier (`make test-db-local`) has three files: "
-"`tests/integration/storage/test_local_account_store.py` (races, replay, "
-"versions, the reset and suspension barriers, shared counters and the "
-"namespace), `tests/integration/servers/test_local_access_termination.py` "
-"(stopping work, the residency fence, cleanup barriers and delayed passes)"
-" and `tests/integration/servers/test_local_accounts_flow.py` (the whole "
-"flow over HTTP)."
-msgstr "使用真实 Postgres 的测试层（`make test-db-local`）包含三个文件：`tests/integration/storage/test_local_account_store.py` 覆盖竞态、重放、版本、重置和停用屏障、共享计数器及命名空间；`tests/integration/servers/test_local_access_termination.py` 覆盖停止工作、residency 栅栏、清理屏障和延迟清理轮次；`tests/integration/servers/test_local_accounts_flow.py` 覆盖完整 HTTP 流程。"
+#: ../developer/local-accounts.md:244
+msgid "The real-Postgres tier (`make test-db-local`) covers local accounts in six files: `tests/integration/storage/test_local_account_store.py` (races, replay, versions, the reset and suspension barriers, shared counters and the namespace), `tests/integration/servers/test_local_access_termination.py` (stopping work, the residency fence, cleanup barriers and delayed passes), `tests/integration/servers/test_local_accounts_flow.py` (the whole flow over HTTP), `tests/integration/storage/test_independent_accounts_acceptance.py` (the public account lifecycle through the real application with Gateway HTTP forbidden), `tests/integration/storage/test_local_session_reset_race.py` (a login waiting on a password reset cannot open a session with the old password), and `tests/integration/storage/test_local_cleanup_lock_acceptance.py` (cancelling a cleanup lock acquisition before its result arrives releases the lock)."
+msgstr "使用真实 Postgres 的测试层（`make test-db-local`）通过六个文件覆盖本地账号：`tests/integration/storage/test_local_account_store.py` 覆盖竞态、重放、版本、重置和停用屏障、共享计数器及命名空间；`tests/integration/servers/test_local_access_termination.py` 覆盖停止工作、residency 栅栏、清理屏障和延迟清理轮次；`tests/integration/servers/test_local_accounts_flow.py` 覆盖完整 HTTP 流程；`tests/integration/storage/test_independent_accounts_acceptance.py` 在禁止网关 HTTP 请求的条件下，使用真实应用覆盖公开账号流程；`tests/integration/storage/test_local_session_reset_race.py` 验证等待密码重置完成的登录请求不能用旧密码创建会话；`tests/integration/storage/test_local_cleanup_lock_acceptance.py` 验证申请清理锁的结果尚未返回时取消操作，仍会释放该锁。"
 
-#: ../developer/local-accounts.md:242
+#: ../developer/local-accounts.md:252
 msgid "Reused code"
 msgstr "复用代码"
 
-#: ../developer/local-accounts.md:244
+#: ../developer/local-accounts.md:254
 msgid ""
 "The password hashing and policy, the sign-up, sign-in, verification and "
 "recovery behaviour, the mail templates and the abuse limits are adapted "
@@ -753,5 +823,11 @@ msgid ""
 " a registered address changes nothing, the abuse counters are persisted "
 "rather than kept per process, tokens travel in URL fragments, and "
 "`argon2-cffi` is called directly rather than through `passlib`."
-msgstr "密码哈希与策略、注册、登录、验证和账号恢复行为、邮件模板及防滥用限制均改编自 HybridInference（`HarvardMadSys/hybridInference` 的 `321e9a6c457dcc80d35977aaac472d54041204a8`，MIT License，Copyright (c) 2026 Harvard SEAS，与本仓库的许可证和版权持有者相同）。每个改编模块都注明来源文件。没有模块导入 `serving.*`，也不共享 HybridInference 的数据库、会话、密钥或令牌。明确保留的差异是：待审批账号可以登录，使用已注册地址注册不会改变账号状态，防滥用计数器持久化保存而非各进程分别保存，令牌通过 URL 片段传递，并直接调用 `argon2-cffi`，不经过 `passlib`。"
-
+msgstr ""
+"密码哈希与策略、注册、登录、验证和账号恢复行为、邮件模板及防滥用限制均改编自 "
+"HybridInference（`HarvardMadSys/hybridInference` 的 "
+"`321e9a6c457dcc80d35977aaac472d54041204a8`，MIT License，Copyright (c) 2026"
+" Harvard SEAS，与本仓库的许可证和版权持有者相同）。每个改编模块都注明来源文件。没有模块导入 `serving.*`，也不共享 "
+"HybridInference "
+"的数据库、会话、密钥或令牌。明确保留的差异是：待审批账号可以登录，使用已注册地址注册不会改变账号状态，防滥用计数器持久化保存而非各进程分别保存，令牌通过"
+" URL 片段传递，并直接调用 `argon2-cffi`，不经过 `passlib`。"
