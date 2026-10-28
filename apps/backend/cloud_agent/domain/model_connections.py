@@ -41,13 +41,11 @@ UNUSABLE_MESSAGES: dict[str, str] = {
     "disabled": "This task's model connection is disabled. Enable it, or choose another model.",
     "deleted": "This task's model connection was deleted. Choose another model.",
     "model_not_listed": "That model is not listed on its connection. Add it, or choose another.",
-    "runtime_unsupported": (
-        "This agent cannot run on a model connection: Claude Code speaks the Anthropic "
-        "Messages protocol, which model connections do not offer."
-    ),
+    "runtime_unsupported": "This agent cannot run on a model connection.",
     "protocol_unsupported": (
-        "This connection does not offer the protocol this agent speaks: Codex needs the "
-        "Responses protocol; OpenCode, Kilo and pi need Chat Completions."
+        "This connection does not offer the protocol this agent speaks: Claude Code needs "
+        "Anthropic Messages, Codex needs Responses, and OpenCode, Kilo and pi need Chat "
+        "Completions."
     ),
     "effort_unsupported": (
         "Reasoning effort cannot be set for a model connection; leave it on Auto."
@@ -92,8 +90,9 @@ def clean_base_url(value: str) -> str:
 
     HTTPS on the default port only: a sandbox reaches public TCP 443 and the key
     must not travel in the clear. No credentials, query or fragment, since a
-    CLI appends its own path (``/chat/completions``, ``/responses``) to it. The
-    trailing slash is dropped so the two join the same way everywhere.
+    CLI appends its own path (``/chat/completions``, ``/responses``,
+    ``/v1/messages`` after one trailing ``/v1`` -- see ``anthropic_base_url``)
+    to it. The trailing slash is dropped so they join the same way everywhere.
     """
     raw = value.strip()
     if not raw or len(raw) > MAX_BASE_URL_CHARS:
@@ -126,7 +125,9 @@ def clean_protocols(values: list[str]) -> list[str]:
     """The protocols a connection offers, in the platform's order, at least one."""
     chosen = set(values)
     if not chosen or not chosen <= set(PROTOCOLS):
-        raise ModelConnectionInvalid("Choose Chat Completions, Responses, or both.")
+        raise ModelConnectionInvalid(
+            "Choose at least one of Chat Completions, Responses and Anthropic Messages."
+        )
     return [protocol for protocol in PROTOCOLS if protocol in chosen]
 
 

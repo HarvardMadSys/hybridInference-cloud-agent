@@ -14348,7 +14348,7 @@
             "items": {
               "type": "string"
             },
-            "maxItems": 2,
+            "maxItems": 3,
             "title": "Protocols",
             "type": "array"
           }
@@ -14497,7 +14497,7 @@
                 "items": {
                   "type": "string"
                 },
-                "maxItems": 2,
+                "maxItems": 3,
                 "type": "array"
               },
               {
@@ -35934,7 +35934,7 @@
     },
     "/v1/agent/model-connections/{connection_id}/discover-models": {
       "post": {
-        "description": "List the ids the provider's ``GET /models`` offers, for the owner to choose from.",
+        "description": "List the ids the provider's model list offers, for the owner to choose from.\n\n``GET /models`` under the Base URL, or ``GET /v1/models`` with Messages\nauthentication for a connection that offers only Anthropic Messages.",
         "operationId": "discover_v1_agent_model_connections__connection_id__discover_models_post",
         "parameters": [
           {

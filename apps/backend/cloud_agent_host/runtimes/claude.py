@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_shared.model_connections import anthropic_base_url
 from cloud_agent_shared.runtime_catalog import CLAUDE_CODE
 
 from .base import (
@@ -12,6 +13,7 @@ from .base import (
     MCP_TOKEN_ENV,
     AgentRuntime,
     ExactBaseUrl,
+    MessagesBaseUrl,
     RuntimeCapabilities,
     RuntimeConnectionUnsupportedError,
     RuntimeMCPConfig,
@@ -38,7 +40,9 @@ class ClaudeCodeRuntime(AgentRuntime):
     """Claude Code headless (``claude -p --output-format stream-json``).
 
     Speaks the Anthropic Messages surface to the gateway, so ``credential``
-    (the job's capability token) rides in ``ANTHROPIC_API_KEY``.
+    (the job's capability token) rides in ``ANTHROPIC_API_KEY``. On an owner
+    connection that offers Messages, ``credential`` is the owner's own key and
+    the URL is theirs (``inference_base_url``).
     """
 
     name = CLAUDE_CODE.name
@@ -95,11 +99,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         an earlier native session after the resident process was replaced.
         """
         del workdir, provides_isolation
-        if isinstance(gateway_base_url, ExactBaseUrl):
-            # The control plane refuses this pairing; this is the last stop.
-            raise RuntimeConnectionUnsupportedError(
-                "Claude Code speaks Anthropic Messages, which no model connection offers"
-            )
+        anthropic_url = self.inference_base_url(gateway_base_url)
         argv = [
             self.binary,
             "-p",
@@ -162,7 +162,9 @@ class ClaudeCodeRuntime(AgentRuntime):
             "stdio",
         ]
         env = {
-            "ANTHROPIC_BASE_URL": gateway_base_url.rstrip("/").removesuffix("/v1"),
+            "ANTHROPIC_BASE_URL": anthropic_url,
+            # The SDK sends this as ``x-api-key``, which is what the check
+            # authenticates with too; never ``ANTHROPIC_AUTH_TOKEN``.
             "ANTHROPIC_API_KEY": credential,
             "MCP_TOOL_TIMEOUT": "1560000",
             # Remote MCP has a separate five-minute idle timer. The relay can
@@ -199,6 +201,24 @@ class ClaudeCodeRuntime(AgentRuntime):
             # process-private HOME, so docker stop/start can resume them.
             env["CLAUDE_CONFIG_DIR"] = config_dir
         return argv, env
+
+    @staticmethod
+    def inference_base_url(gateway_base_url: str) -> str:
+        """``ANTHROPIC_BASE_URL``: the Gateway relay's, or an owner connection's.
+
+        The SDK appends ``/v1/messages``, so both drop one trailing ``/v1``.
+        A connection's path is otherwise kept exactly (a gateway's
+        ``/anthropic`` prefix stays), and only a Messages connection is
+        accepted: the control plane refuses any other pairing, and this is
+        the last stop before a key reached a protocol it is not for.
+        """
+        if isinstance(gateway_base_url, MessagesBaseUrl):
+            return anthropic_base_url(str(gateway_base_url))
+        if isinstance(gateway_base_url, ExactBaseUrl):
+            raise RuntimeConnectionUnsupportedError(
+                "Claude Code speaks Anthropic Messages, which this connection does not offer"
+            )
+        return gateway_base_url.rstrip("/").removesuffix("/v1")
 
     @staticmethod
     def user_message_line(text: str) -> str:

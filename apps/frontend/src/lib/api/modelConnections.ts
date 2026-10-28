@@ -1,7 +1,25 @@
 import { config } from '@/config/env';
 import { fetchWithAuth, jsonOrThrow } from './client';
 
-export type ModelProtocol = 'chat_completions' | 'responses';
+export type ModelProtocol = 'chat_completions' | 'responses' | 'anthropic_messages';
+
+/** Every protocol a connection may declare, in the platform's order. */
+export const MODEL_PROTOCOLS: readonly ModelProtocol[] = [
+  'chat_completions',
+  'responses',
+  'anthropic_messages',
+];
+
+const PROTOCOL_NAMES: Record<ModelProtocol, string> = {
+  chat_completions: 'Chat Completions',
+  responses: 'Responses',
+  anthropic_messages: 'Anthropic Messages',
+};
+
+/** A protocol's proper name, the same in every language. */
+export function protocolName(protocol: ModelProtocol): string {
+  return PROTOCOL_NAMES[protocol] ?? protocol;
+}
 
 export interface ModelConnectionCheck {
   status: string;

@@ -4,8 +4,9 @@ The host half: the claim carries the connection, the runner masks its key,
 the resident launch fixes its identity so a rotated key restarts the
 process, the sandbox manager never replaces its URL with the Gateway relay,
 and each runtime adapter puts the exact URL and key where its CLI reads them
--- never in an argument, never the Anthropic spelling, and never for Claude
-Code, which no connection can serve.
+-- never in an argument, and never in another protocol's spelling. Claude
+Code on an Anthropic Messages connection is in
+``test_model_connection_anthropic_launch``.
 """
 
 from __future__ import annotations
@@ -70,13 +71,15 @@ def _claim_body(**changes: object) -> dict[str, object]:
 
 def test_the_capability_and_protocol_matrix_are_shared_vocabulary():
     assert MODEL_CONNECTION_CAPABILITY == "model-connections-v1"
-    assert {name: runtime_protocol(name) for name in ("opencode", "kilo", "pi", "codex")} == {
+    runtimes = ("opencode", "kilo", "pi", "codex", "claude-code")
+    assert {name: runtime_protocol(name) for name in runtimes} == {
         "opencode": "chat_completions",
         "kilo": "chat_completions",
         "pi": "chat_completions",
         "codex": "responses",
+        "claude-code": "anthropic_messages",
     }
-    assert runtime_protocol("claude-code") is None
+    assert runtime_protocol("not-a-runtime") is None
 
 
 def test_access_never_shows_its_key_and_refuses_what_a_config_cannot_carry():
@@ -91,7 +94,8 @@ def test_access_never_shows_its_key_and_refuses_what_a_config_cannot_carry():
         {"base_url": "http://plain.example/v1"},
         {"api_key": "has space"},
         {"api_key": "line\nbreak"},
-        {"protocol": "anthropic_messages"},
+        {"protocol": "anthropic"},
+        {"protocol": "messages"},
         {"connection_id": "mconn_notours"},
     ):
         with pytest.raises(ValidationError):
@@ -238,8 +242,9 @@ def test_codex_points_its_provider_at_the_exact_url_with_the_key_in_the_environm
     assert _KEY not in joined
 
 
-def test_claude_code_refuses_to_start_on_a_model_connection():
-    with pytest.raises(RuntimeConnectionUnsupportedError):
+def test_claude_code_refuses_a_connection_that_does_not_speak_anthropic_messages():
+    # The protocol, not the runtime, is what it lacks: an OpenAI-only URL.
+    with pytest.raises(RuntimeConnectionUnsupportedError, match="does not offer"):
         ClaudeCodeRuntime().prepare_live(
             workdir="/workspace",
             model="claude-sonnet",

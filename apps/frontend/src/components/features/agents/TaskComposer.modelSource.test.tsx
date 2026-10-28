@@ -283,4 +283,55 @@ describe('TaskComposer model sources', () => {
     expect(rewrite).toHaveAttribute('title', expect.stringContaining('platform inference'));
     expect(rewritePrompt).not.toHaveBeenCalled();
   });
+
+  it('offers a Messages connection to Claude Code only, and runs Claude Code on it', async () => {
+    const messages = 'mconn_fedcba9876543210fedcba9876543210';
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({
+        model_connections: [
+          { id: CONNECTION, name: 'My provider', models: ['shared', 'mine'], runtimes: ['codex'] },
+          { id: messages, name: 'Claude gateway', models: ['shared'], runtimes: ['claude-code'] },
+        ],
+      }),
+    );
+    render(<TaskComposer />);
+    await chooseRepository();
+    expect(screen.getByLabelText('Agent')).toHaveValue('claude-code');
+    fireEvent.click(screen.getByLabelText('Model'));
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'shared',
+      'gateway-only',
+      'shared · Claude gateway',
+    ]);
+    fireEvent.click(screen.getByRole('option', { name: 'shared · Claude gateway' }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Run Claude on my key' } });
+    await runWhenReady();
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+    const body = vi.mocked(createAgentJob).mock.calls[0][0];
+    expect(body).toMatchObject({
+      runtime: 'claude-code',
+      model: 'shared',
+      model_connection_id: messages,
+    });
+    expect(body).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('marks a Messages pick unavailable once the agent is switched to one it cannot serve', async () => {
+    const messages = 'mconn_fedcba9876543210fedcba9876543210';
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({
+        model_connections: [
+          { id: messages, name: 'Claude gateway', models: ['shared'], runtimes: ['claude-code'] },
+        ],
+      }),
+    );
+    render(<TaskComposer />);
+    await chooseRepository();
+    choose('Model', 'shared · Claude gateway');
+    choose('Agent', 'codex');
+    expect(screen.getByLabelText('Model')).toHaveAccessibleDescription(
+      'shared · Claude gateway (unavailable)',
+    );
+    expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
+  });
 });

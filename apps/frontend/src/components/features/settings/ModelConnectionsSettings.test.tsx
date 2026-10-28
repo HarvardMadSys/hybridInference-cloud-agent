@@ -7,7 +7,9 @@ import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import * as api from '@/lib/api/modelConnections';
 import { ModelConnectionsSettings } from './ModelConnectionsSettings';
 
-vi.mock('@/lib/api/modelConnections', () => ({
+// The calls are mocked; the protocol vocabulary is the real one.
+vi.mock('@/lib/api/modelConnections', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/modelConnections')>()),
   listModelConnections: vi.fn(),
   createModelConnection: vi.fn(),
   updateModelConnection: vi.fn(),
@@ -233,5 +235,93 @@ describe('personal model connections', () => {
     expect(screen.getByRole('button', { name: 'Edit' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Enable' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
+  });
+});
+
+describe('an Anthropic Messages connection', () => {
+  const messages: api.ModelConnection = {
+    ...connection,
+    id: 'mconn_abcdefabcdefabcdefabcdefabcdefab',
+    name: 'Claude provider',
+    base_url: 'https://gateway.example/anthropic/v1',
+    protocols: ['anthropic_messages'],
+    models: ['claude-sonnet-4-5'],
+    runtimes: ['claude-code'],
+  };
+
+  it('offers Anthropic Messages for Claude Code and saves it on its own', async () => {
+    vi.mocked(api.createModelConnection).mockResolvedValue(messages);
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
+    const anthropic = screen.getByRole('checkbox', { name: 'Anthropic Messages · Claude Code' });
+    expect(anthropic).not.toBeChecked();
+    expect(screen.getByText(/Claude Code adds \/v1\/messages/)).toBeVisible();
+    expect(screen.queryByText(/cannot use these connections/)).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Connection name'), {
+      target: { value: 'Claude provider' },
+    });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: messages.base_url } });
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-ant-private' } });
+    fireEvent.change(screen.getByLabelText('Model IDs'), {
+      target: { value: 'claude-sonnet-4-5' },
+    });
+    fireEvent.click(anthropic);
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: 'Chat Completions · OpenCode, Kilo, pi' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save connection' }));
+    await waitFor(() =>
+      expect(api.createModelConnection).toHaveBeenCalledWith({
+        name: 'Claude provider',
+        base_url: messages.base_url,
+        api_key: 'sk-ant-private',
+        protocols: ['anthropic_messages'],
+        models: ['claude-sonnet-4-5'],
+      }),
+    );
+  });
+
+  it('tests the selected model over Anthropic Messages and discovers its IDs', async () => {
+    vi.mocked(api.listModelConnections).mockResolvedValue({
+      configured: true,
+      enabled: true,
+      connections: [messages],
+    });
+    vi.mocked(api.checkModelConnection).mockResolvedValue({
+      status: 'supported',
+      category: 'supported',
+      message: 'Streaming and a tool call round trip both worked.',
+      protocol: 'anthropic_messages',
+      model: 'claude-sonnet-4-5',
+      streaming: true,
+      tool_call: true,
+      final_answer: true,
+      http_status: 200,
+      checked_at: 'now',
+      recorded: true,
+    });
+    vi.mocked(api.discoverConnectionModels).mockResolvedValue(['claude-opus-4-1']);
+    renderSettings();
+    const card = await screen.findByRole('article', { name: 'Claude provider' });
+    fireEvent.click(within(card).getByText('Test model', { selector: 'summary' }));
+    const protocol = screen.getByRole('combobox', { name: 'API to test' });
+    expect(
+      within(protocol)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['Anthropic Messages']);
+    fireEvent.click(screen.getByRole('button', { name: 'Test model' }));
+    await waitFor(() =>
+      expect(api.checkModelConnection).toHaveBeenCalledWith(
+        messages.id,
+        'claude-sonnet-4-5',
+        'anthropic_messages',
+      ),
+    );
+    expect(await screen.findByText(/claude-sonnet-4-5 · Anthropic Messages\./)).toBeVisible();
+    fireEvent.click(screen.getByText('Discover model IDs', { selector: 'summary' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Discover model IDs' }));
+    expect(await screen.findByRole('checkbox', { name: 'claude-opus-4-1' })).toBeVisible();
+    expect(api.discoverConnectionModels).toHaveBeenCalledWith(messages.id);
   });
 });

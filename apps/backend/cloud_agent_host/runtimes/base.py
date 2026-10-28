@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from cloud_agent_shared.model_connections import ANTHROPIC_MESSAGES
+
 from .events import RAW, NormalizedEvent
 
 # Where the job token is handed to the agent CLI for its MCP calls. The
@@ -53,16 +55,42 @@ class ExactBaseUrl(str):
     __slots__ = ()
 
 
+class MessagesBaseUrl(ExactBaseUrl):
+    """An owner connection's Base URL, for a member speaking Anthropic Messages.
+
+    Only Claude Code takes one, and only as ``ANTHROPIC_BASE_URL`` with one
+    trailing ``/v1`` dropped (``anthropic_base_url``), because its SDK appends
+    ``/v1/messages`` itself. An OpenAI-style adapter refuses it: the key and
+    URL belong to a protocol that adapter does not speak.
+    """
+
+    __slots__ = ()
+
+
 class RuntimeConnectionUnsupportedError(RuntimeError):
     """Raised when a runtime is asked to run on an owner connection it cannot speak to."""
+
+
+def connection_base_url(base_url: str, protocol: str) -> ExactBaseUrl:
+    """The launch-context form of an owner connection's URL, typed by its protocol."""
+    if protocol == ANTHROPIC_MESSAGES:
+        return MessagesBaseUrl(base_url)
+    return ExactBaseUrl(base_url)
 
 
 def openai_base_url(base_url: str) -> str:
     """The OpenAI-style base URL a CLI appends its own path to.
 
     An owner connection's URL is used exactly; the Gateway's is normalized
-    to end in ``/v1``.
+    to end in ``/v1``. A Messages connection is refused here, which is every
+    OpenAI-style adapter's one way to the URL: the control plane never pairs
+    them, and a runtime that got one would hand an Anthropic key to the wrong
+    protocol.
     """
+    if isinstance(base_url, MessagesBaseUrl):
+        raise RuntimeConnectionUnsupportedError(
+            "this agent speaks an OpenAI protocol, and the connection offers Anthropic Messages"
+        )
     if isinstance(base_url, ExactBaseUrl):
         return str(base_url)
     return base_url.rstrip("/").removesuffix("/v1") + "/v1"

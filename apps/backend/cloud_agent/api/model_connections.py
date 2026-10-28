@@ -1,16 +1,17 @@
 """Owner routes for their own model connections.
 
-A connection is the owner's own OpenAI-compatible endpoint: a name, a Base
-URL, an API key, the protocols it offers and the model ids it serves. The key
+A connection is the owner's own inference endpoint: a name, a Base URL, an
+API key, the protocols it offers (OpenAI Chat Completions or Responses,
+Anthropic Messages) and the model ids it serves. The key
 is write-only: it is encrypted before it is stored, no owner route answers it,
 and a validation failure answers which field was wrong without echoing what was
 sent. Every response is ``no-store``.
 
 A check calls the owner's provider with their key, so it runs only when they
-ask and within an hourly limit every replica reserves from atomically. The
-reservation is what is serialized, not the call: an owner's checks may overlap. Changing the key, Base URL or protocols, disabling or
-deleting a connection closes every member process still running on its old
-state.
+ask, and each one reserves one of the owner's hourly checks atomically across
+replicas. Only the count is bounded: an owner's checks are not serialized and
+may overlap. Changing the key, Base URL or protocols, disabling or deleting a
+connection closes every member process still running on its old state.
 """
 
 from __future__ import annotations
@@ -461,13 +462,21 @@ async def discover(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _Storage | None = Depends(get_storage),
 ) -> DiscoveredModels:
-    """List the ids the provider's ``GET /models`` offers, for the owner to choose from."""
+    """List the ids the provider's model list offers, for the owner to choose from.
+
+    ``GET /models`` under the Base URL, or ``GET /v1/models`` with Messages
+    authentication for a connection that offers only Anthropic Messages.
+    """
     _require_enabled()
     store = require_store(store)
     await _live(store, user["user_id"], connection_id)
     checked = await _reserve(store, user["user_id"], connection_id)
     try:
-        models = await discover_models(base_url=checked["base_url"], api_key=_key(checked))
+        models = await discover_models(
+            base_url=checked["base_url"],
+            api_key=_key(checked),
+            protocols=checked["protocols"],
+        )
     except CheckStop as stop:
         raise _refused(
             422, f"model_connection_{stop.category}", CHECK_MESSAGES[stop.category]

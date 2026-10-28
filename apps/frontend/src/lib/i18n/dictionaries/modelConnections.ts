@@ -1,7 +1,7 @@
 export const modelConnectionsEn = {
   'connections.title': 'Personal model connections',
   'connections.description':
-    'Use your own OpenAI-compatible provider for your tasks. Connections are private to you; your provider bills your API key separately from platform inference.',
+    'Use your own provider’s OpenAI or Anthropic API for your tasks. Connections are private to you; your provider bills your API key separately from platform inference.',
   'connections.add': 'Add connection',
   'connections.empty': 'No personal connections yet.',
   'connections.unavailable': 'Personal model connections are not available on this deployment yet.',
@@ -10,7 +10,7 @@ export const modelConnectionsEn = {
   'connections.name': 'Connection name',
   'connections.url': 'Base URL',
   'connections.urlHint':
-    'Use the provider’s API base, such as https://api.example.com/v1. Public IPv4 HTTPS on port 443 is supported.',
+    'Use the provider’s API base, such as https://api.example.com/v1. OpenAI APIs are called at this URL plus /chat/completions or /responses; Claude Code adds /v1/messages, after dropping a trailing /v1, so https://host, https://host/v1 and https://host/anthropic/v1 all work. Public IPv4 HTTPS on port 443 is supported.',
   'connections.key': 'API key',
   'connections.keyHint': 'Saved keys cannot be displayed. Leave blank to keep your current key.',
   'connections.secretHint':
@@ -18,8 +18,9 @@ export const modelConnectionsEn = {
   'connections.protocols': 'Supported APIs',
   'connections.chat': 'Chat Completions · OpenCode, Kilo, pi',
   'connections.responses': 'Responses · Codex',
+  'connections.anthropic': 'Anthropic Messages · Claude Code',
   'connections.protocolHint':
-    'Choose APIs your provider supports. Claude Code requires Anthropic Messages and cannot use these connections.',
+    'Choose the APIs your provider serves at this Base URL. Each agent runs only on the API it speaks; nothing is translated between them.',
   'connections.models': 'Model IDs',
   'connections.modelsHint':
     'One model ID per line, exactly as your provider names it. You can discover additional IDs after saving.',
@@ -65,7 +66,7 @@ export const modelConnectionsEn = {
 export const modelConnectionsZhCN: Record<keyof typeof modelConnectionsEn, string> = {
   'connections.title': '个人模型连接',
   'connections.description':
-    '使用自己的 OpenAI 兼容服务运行任务。连接仅自己可用；推理费用由服务商向你的 API key 计费，与平台推理额度分开。',
+    '使用自己服务商的 OpenAI 或 Anthropic API 运行任务。连接仅自己可用；推理费用由服务商向你的 API key 计费，与平台推理额度分开。',
   'connections.add': '添加连接',
   'connections.empty': '还没有个人模型连接。',
   'connections.unavailable': '当前部署尚未开放个人模型连接。',
@@ -74,7 +75,7 @@ export const modelConnectionsZhCN: Record<keyof typeof modelConnectionsEn, strin
   'connections.name': '连接名称',
   'connections.url': 'Base URL',
   'connections.urlHint':
-    '填写服务商的 API 基础地址，例如 https://api.example.com/v1。支持公网 IPv4 的 HTTPS 443 端口。',
+    '填写服务商的 API 基础地址，例如 https://api.example.com/v1。OpenAI API 的请求地址是该 URL 加 /chat/completions 或 /responses；Claude Code 会先去掉结尾的 /v1 再加 /v1/messages，所以 https://host、https://host/v1 和 https://host/anthropic/v1 都可以。支持公网 IPv4 的 HTTPS 443 端口。',
   'connections.key': 'API key',
   'connections.keyHint': '已保存的密钥不可查看。留空可保留当前密钥。',
   'connections.secretHint':
@@ -82,8 +83,9 @@ export const modelConnectionsZhCN: Record<keyof typeof modelConnectionsEn, strin
   'connections.protocols': '支持的 API',
   'connections.chat': 'Chat Completions · OpenCode、Kilo、pi',
   'connections.responses': 'Responses · Codex',
+  'connections.anthropic': 'Anthropic Messages · Claude Code',
   'connections.protocolHint':
-    '选择服务商实际支持的 API。Claude Code 需要 Anthropic Messages，不能使用这些连接。',
+    '选择服务商在此 Base URL 上实际提供的 API。每个 Agent 只使用它自己的 API，平台不在协议之间转换。',
   'connections.models': '模型 ID',
   'connections.modelsHint': '每行一个，须与服务商的模型 ID 一致。保存后还可发现其他模型 ID。',
   'connections.edit': '编辑',

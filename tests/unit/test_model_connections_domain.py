@@ -76,10 +76,14 @@ def test_names_models_and_protocols_are_normalized_and_bounded():
         "openai/gpt-4.1",
     ]
     assert clean_protocols(["responses", "chat_completions"]) == ["chat_completions", "responses"]
+    assert clean_protocols(["anthropic_messages", "chat_completions", "anthropic_messages"]) == [
+        "chat_completions",
+        "anthropic_messages",
+    ]
     for bad in ([], ["bad model"], ["x" * 201], [f"m{i}" for i in range(65)]):
         with pytest.raises(ModelConnectionInvalid):
             clean_models(bad)
-    for bad in ([], ["anthropic_messages"]):
+    for bad in ([], ["anthropic"], ["messages"], ["chat_completions", "gemini"]):
         with pytest.raises(ModelConnectionInvalid):
             clean_protocols(bad)
 
@@ -101,7 +105,17 @@ def _row(**changes: Any) -> dict[str, Any]:
         (None, "opencode", "gpt-4.1", None, "not_found"),
         (_row(deleted_at="now", enabled=False), "opencode", "gpt-4.1", None, "deleted"),
         (_row(enabled=False), "opencode", "gpt-4.1", None, "disabled"),
-        (_row(), "claude-code", "gpt-4.1", None, "runtime_unsupported"),
+        # Claude Code runs only on a connection that offers Anthropic Messages.
+        (_row(), "claude-code", "gpt-4.1", None, "protocol_unsupported"),
+        (
+            _row(protocols=["anthropic_messages"]),
+            "opencode",
+            "gpt-4.1",
+            None,
+            "protocol_unsupported",
+        ),
+        (_row(protocols=["anthropic_messages"]), "codex", "gpt-4.1", None, "protocol_unsupported"),
+        (_row(), "claude-desktop", "gpt-4.1", None, "runtime_unsupported"),
         (_row(), "codex", "gpt-4.1", None, "protocol_unsupported"),
         (_row(), "opencode", "gpt-4o", None, "model_not_listed"),
         (_row(), "opencode", "gpt-4.1", "high", "effort_unsupported"),
@@ -117,6 +131,16 @@ def test_a_usable_pairing_names_the_protocol_the_runtime_speaks():
     both = _row(protocols=["chat_completions", "responses"])
     assert require_usable(both, runtime="pi", model="gpt-4.1") == "chat_completions"
     assert require_usable(both, runtime="codex", model="gpt-4.1") == "responses"
+    messages = _row(protocols=["anthropic_messages"], models=["claude-sonnet-4-5"])
+    assert require_usable(messages, runtime="claude-code", model="claude-sonnet-4-5") == (
+        "anthropic_messages"
+    )
+    # Effort stays Auto on a connection, for Claude Code as for the others.
+    with pytest.raises(ModelConnectionUnusable) as refused:
+        require_usable(
+            messages, runtime="claude-code", model="claude-sonnet-4-5", reasoning_effort="high"
+        )
+    assert refused.value.reason == "effort_unsupported"
 
 
 def _resolver(*addresses: str):

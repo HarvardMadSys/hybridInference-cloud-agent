@@ -43,7 +43,7 @@ from cloud_agent_host.drivers import (
 from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION
 from cloud_agent_host.other_plugins import install_other_runtime_plugins
 from cloud_agent_host.plugins import install_claude_plugins
-from cloud_agent_host.runtimes import ExactBaseUrl, RuntimeMCPConfig
+from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
 from cloud_agent_shared.environment import inference_handoff
 from cloud_agent_shared.plugins import validate_sandbox_plugins
@@ -876,8 +876,9 @@ class ResidentTransportFactory:
             workdir=CHAT_WORKDIR,
             # An owner connection's URL is used exactly as written, never
             # normalized like the Gateway relay's (``ExactBaseUrl``).
+            # Typed by its protocol, so only the adapter that speaks it accepts it.
             gateway_base_url=(
-                ExactBaseUrl(launch.inference_base_url)
+                connection_base_url(launch.inference_base_url, launch.inference_protocol)
                 if launch.inference_source
                 else launch.gateway_base_url
             ),

@@ -4167,9 +4167,10 @@ and the owner SSH servers entry in [AGENTS.md](../../AGENTS.md) §7.
 
 ## Owner model connections
 
-An owner adds their own OpenAI-compatible endpoint under **Settings → My
-settings → Personal model connections** (`/settings/my-settings`): a name, a
-Base URL, an API key, the protocols it offers and the model ids to use. Its
+An owner adds their own inference endpoint under **Settings → My settings →
+Personal model connections** (`/settings/my-settings`): a name, a Base URL,
+an API key, the protocols it offers (OpenAI Chat Completions or Responses,
+Anthropic Messages) and the model ids to use. Its
 models then appear in the composer beside the Gateway's, for the agents that
 speak one of its protocols. Such a turn runs on the owner's key and bill and
 needs no Gateway grant, catalog or quota; login and Agent admission still go
@@ -4199,10 +4200,21 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   authorized claim and residency responses do carry it: that is how the
   member's CLI gets it.
 - **Protocols.** OpenCode, Kilo and pi need Chat Completions; Codex needs
-  Responses; Claude Code cannot run on a connection. Reasoning effort is Auto
-  only. A pairing a connection cannot serve is refused when the task or message
-  is submitted, and again at every claim; nothing falls back to the Gateway or
-  another model.
+  Responses; Claude Code needs Anthropic Messages. Nothing translates between
+  them. Reasoning effort is Auto only. A pairing a connection cannot serve is
+  refused when the task or message is submitted, and again at every claim;
+  nothing falls back to the Gateway or another model.
+- **Where requests go.** The OpenAI CLIs append `/chat/completions` or
+  `/responses` to the Base URL exactly as written. Claude Code's SDK appends
+  `/v1/messages` to `ANTHROPIC_BASE_URL`, so one trailing `/v1` of the Base URL
+  is dropped first and any other path is kept: `https://host`,
+  `https://host/v1` and `https://host/anthropic/v1` all reach
+  `…/v1/messages`. The CLI authenticates with `x-api-key` and
+  `anthropic-version: 2023-06-01`; the check posts to the same URL with the
+  same headers. A Messages-only connection lists its models at `…/v1/models`
+  the same way; one that also offers an OpenAI API is listed with that API's
+  `GET /models`. The CLI may also call `count_tokens`, `/v1/models` and
+  `HEAD /api/hello` on the same host; a provider that lacks them still works.
 - **Host rollout.** Runners advertise `model-connections-v1`. A claim for a
   turn on a connection is released, without spending an attempt, to a runner
   that does not attest it, so roll hosts out first. A disabled, deleted or no
@@ -4210,8 +4222,10 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
 - **What a turn does.** The claim carries the connection's exact Base URL,
   protocol, credential revision and key; the runner masks the key. The
   residency binds the member to that revision and hands it the key instead of
-  minting a grant. The member's CLI is configured with the URL as written and
-  the key in its environment and activation tmpfs, never in argv. A later turn
+  minting a grant. The member's CLI is configured with that URL (for Claude
+  Code, `ANTHROPIC_BASE_URL` as above) and the key in its environment and
+  activation tmpfs, never in argv; an OpenAI CLI is never given a Messages
+  connection's key, nor Claude Code an OpenAI one. A later turn
   after the key, Base URL or protocols changed starts a new process.
 - **Scan history.** When a key is bound to a residency, an encrypted scanning
   copy is recorded under a separate domain against that sandbox group and
@@ -4228,7 +4242,10 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   deletion takes; a turn running on it stops. A host the control plane cannot
   reach closes it when its next residency heartbeat is refused.
 - **Checks dial out from the control plane.** A check streams one tool call
-  and its result for a model and protocol the owner picks, and reports
+  and its result for a model and protocol the owner picks, in that protocol's
+  own format (for Messages, `tool_use` and `tool_result` blocks, signed
+  thinking carried back, and a stream that must end with `message_delta` and
+  `message_stop`), and reports
   supported, unsupported or failed for that pair only. It dials only public
   IPv4 HTTPS on port 443: every resolved address must pass the MCP connection
   policy and the sandbox's protected ranges (including

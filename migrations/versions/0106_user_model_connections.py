@@ -32,8 +32,10 @@ def upgrade() -> None:
                 char_length(base_url) BETWEEN 9 AND 512 AND base_url LIKE 'https://%'
             ),
             protocols TEXT[] NOT NULL CHECK (
-                cardinality(protocols) BETWEEN 1 AND 2
-                AND protocols <@ ARRAY['chat_completions', 'responses']::text[]
+                cardinality(protocols) BETWEEN 1 AND 3
+                AND protocols <@ ARRAY[
+                    'chat_completions', 'responses', 'anthropic_messages'
+                ]::text[]
             ),
             models TEXT[] NOT NULL CHECK (cardinality(models) BETWEEN 1 AND 64),
             api_key_ciphertext TEXT,

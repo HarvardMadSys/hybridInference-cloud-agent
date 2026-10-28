@@ -310,7 +310,7 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   reads back. See the
   [SSH server design](docs/agents/specs/2026-10-15-user-ssh-servers-design.zh-CN.md).
 - **Owner model connections (2026-10-27).** An owner may add their own
-  OpenAI-compatible endpoint (Base URL, API key, protocols, model ids) and run
+  OpenAI- or Anthropic-API endpoint (Base URL, API key, protocols, model ids) and run
   their own tasks on it instead of the Gateway; they pay the provider. It is
   private to them: never shared with a team, never reachable through another
   owner's Fork, and every claim, residency, follow-up, waiting message, goal
@@ -329,8 +329,9 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   exceeding its bounded history fails closed. Such a turn needs no
   Gateway grant, catalog or quota, but login and Agent admission stay
   Gateway-backed. Only runtimes whose own protocol the connection offers run
-  on it (Chat Completions: OpenCode, Kilo, pi; Responses: Codex; never
-  Claude Code), and nothing falls back to the Gateway or another model.
+  on it (Chat Completions: OpenCode, Kilo, pi; Responses: Codex; Anthropic
+  Messages: Claude Code). Nothing is translated between protocols, and
+  nothing falls back to the Gateway or another model.
   Rotating, disabling or deleting it closes every process still running on
   the old state. The control plane's check dials only public IPv4 HTTPS under
   the MCP connection policy and the sandbox's protected ranges, pinned, with no

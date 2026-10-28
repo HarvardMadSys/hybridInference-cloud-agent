@@ -3,8 +3,10 @@
 A ``GET /models`` that answers says the key opens *something*; it says nothing
 about whether the agent's CLI can stream a reply and call a tool through it,
 which is all the CLI does. So a check runs exactly that, for one model and
-one protocol the owner picks: a streaming request offering one tool, then a
-second streaming request carrying the tool's result back. Only both succeeding
+one protocol the owner picks, in that protocol's own wire format and at the
+URL the CLI will call: a streaming request offering one tool, then a second
+streaming request carrying the tool's result back. Chat Completions and
+Responses are read here; Anthropic Messages in ``model_connection_anthropic``. Only both succeeding
 is ``supported``. A provider that answers but cannot do one of them is
 ``unsupported``; one that cannot be reached, refuses the key or fails is
 ``failed``, with a category the owner can act on.
@@ -18,13 +20,13 @@ upstream sends is echoed back -- its bodies may repeat the key or carry
 anything else -- only the HTTP status and what was parsed out of the stream.
 
 A check spends the owner's own quota upstream, so it runs only when they press
-the button, one at a time per owner and within an hourly limit.
+the button, within an hourly limit every replica reserves from atomically.
+The reservation bounds how many checks run, not how many run at once.
 """
 
 from __future__ import annotations
 
 import asyncio
-import codecs
 import ipaddress
 import json
 import os
@@ -36,6 +38,22 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from cloud_agent.application.model_connection_anthropic import (
+    MessagesTurn,
+    anthropic_headers,
+    messages_event,
+    messages_requests,
+    messages_url,
+    models_url,
+    settle_messages,
+)
+from cloud_agent.application.model_connection_stream import (
+    CheckStop,
+    StreamedCall,
+    StreamedTurn,
+    event_items,
+    sse_events,
+)
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS, iter_response_bytes
 from cloud_agent.mcp.net_policy import (
@@ -46,11 +64,17 @@ from cloud_agent.mcp.net_policy import (
     validate_endpoint,
 )
 from cloud_agent.mcp.transports import pinned_transport
-from cloud_agent_shared.model_connections import CHAT_COMPLETIONS, MODEL_ID, RESPONSES
+from cloud_agent_shared.model_connections import (
+    ANTHROPIC_MESSAGES,
+    CHAT_COMPLETIONS,
+    MODEL_ID,
+    PROTOCOLS,
+    RESPONSES,
+)
 from cloud_agent_shared.ssh_access import SshAccessError, require_public_ipv4
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable
 
 logger = get_logger(__name__)
 
@@ -59,8 +83,6 @@ CHECKS_PER_HOUR = 20
 _CONNECT_TIMEOUT_S = 10.0
 _READ_TIMEOUT_S = 60.0
 _CHECK_TIMEOUT_S = 150.0
-#: What one streamed answer may total before the check gives up on it.
-_MAX_STREAM_BYTES = 512 * 1024
 _MAX_MODELS_BYTES = 1024 * 1024
 _MAX_DISCOVERED = 200
 _TOOL_NAME = "cloud_agent_check"
@@ -119,16 +141,6 @@ _FAILED = frozenset(
         "incomplete_stream",
     }
 )
-
-
-class CheckStop(Exception):
-    """The check ended early, for the category named."""
-
-    def __init__(self, category: str, *, http_status: int | None = None) -> None:
-        """Carry the category and, when the upstream answered, its status."""
-        super().__init__(category)
-        self.category = category
-        self.http_status = http_status
 
 
 @dataclass
@@ -248,85 +260,15 @@ def _status_category(status: int) -> str | None:
     return "unexpected_status"
 
 
-async def _sse_events(response: httpx.Response) -> AsyncIterator[dict[str, Any] | None]:
-    """Each JSON ``data:`` payload of a stream, ``None`` for ``[DONE]``; bounded."""
-    content_type = response.headers.get("content-type", "")
-    if "text/event-stream" not in content_type:
-        raise CheckStop("not_streaming", http_status=response.status_code)
-    total = 0
-    buffer = ""
-    decoder = codecs.getincrementaldecoder("utf-8")("strict")
-    async for chunk in iter_response_bytes(response):
-        total += len(chunk)
-        if total > _MAX_STREAM_BYTES:
-            raise CheckStop("too_large", http_status=response.status_code)
-        buffer += decoder.decode(chunk)
-        while "\n" in buffer:
-            line, buffer = buffer.split("\n", 1)
-            line = line.strip()
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                yield None
-                continue
-            try:
-                payload = json.loads(data)
-            except ValueError:
-                raise CheckStop("not_streaming", http_status=response.status_code) from None
-            if isinstance(payload, dict):
-                yield payload
-    # A partial UTF-8 character at EOF is a broken stream too, even if an
-    # earlier event had claimed completion.
-    decoder.decode(b"", final=True)
-
-
-@dataclass
-class _Call:
-    """One streamed tool call, assembled from its fragments."""
-
-    call_id: str = ""
-    name: str = ""
-    arguments: str = ""
-
-
-@dataclass
-class _Turn:
-    """What one streamed answer carried, and how it ended."""
-
-    events: int = 0
-    text: str = ""
-    #: Tool calls by stream index (Chat) or in output order (Responses).
-    calls: dict[int, _Call] = field(default_factory=dict)
-    #: Responses output items exactly as the provider sent them, reasoning
-    #: included, for the continuation to carry back.
-    output: list[dict[str, Any]] = field(default_factory=list)
-    #: The stream reached a successful end: a Chat ``finish_reason`` of
-    #: ``stop``/``tool_calls``, or a Responses ``response.completed``.
-    finished: bool = False
-    #: The stream said it failed: a Chat ``error`` payload, or a Responses
-    #: ``response.failed``/``response.incomplete``/``error`` event.
-    failed: bool = False
-
-
 _CHAT_FINISHED = frozenset({"stop", "tool_calls", "function_call"})
 _RESPONSES_FAILED = frozenset({"response.failed", "response.incomplete", "error"})
 
 
-def _event_items(payload: dict[str, Any], field_name: str) -> list[Any]:
-    value = payload.get(field_name)
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise CheckStop("invalid_response", http_status=200)
-    return value
-
-
-def _chat_event(turn: _Turn, payload: dict[str, Any]) -> None:
+def _chat_event(turn: StreamedTurn, payload: dict[str, Any]) -> None:
     if payload.get("error") is not None:
         turn.failed = True
         return
-    for choice in _event_items(payload, "choices"):
+    for choice in event_items(payload, "choices"):
         if not isinstance(choice, dict):
             continue
         reason = choice.get("finish_reason")
@@ -340,11 +282,11 @@ def _chat_event(turn: _Turn, payload: dict[str, Any]) -> None:
             continue
         if isinstance(delta.get("content"), str):
             turn.text += delta["content"]
-        for position, call in enumerate(_event_items(delta, "tool_calls")):
+        for position, call in enumerate(event_items(delta, "tool_calls")):
             if not isinstance(call, dict):
                 continue
             index = call.get("index", position)
-            current = turn.calls.setdefault(index if isinstance(index, int) else -1, _Call())
+            current = turn.calls.setdefault(index if isinstance(index, int) else -1, StreamedCall())
             current.call_id = current.call_id or str(call.get("id") or "")
             function = call.get("function") or {}
             if isinstance(function, dict):
@@ -352,7 +294,7 @@ def _chat_event(turn: _Turn, payload: dict[str, Any]) -> None:
                 current.arguments += str(function.get("arguments") or "")
 
 
-def _responses_event(turn: _Turn, payload: dict[str, Any]) -> None:
+def _responses_event(turn: StreamedTurn, payload: dict[str, Any]) -> None:
     kind = payload.get("type")
     if not isinstance(kind, str):
         raise CheckStop("invalid_response", http_status=200)
@@ -377,35 +319,75 @@ def _responses_event(turn: _Turn, payload: dict[str, Any]) -> None:
         turn.failed = True
 
 
-def _responses_calls(turn: _Turn) -> None:
+def _responses_calls(turn: StreamedTurn) -> None:
     for item in turn.output:
         if item.get("type") == "function_call":
-            turn.calls[len(turn.calls)] = _Call(
+            turn.calls[len(turn.calls)] = StreamedCall(
                 call_id=str(item.get("call_id") or ""),
                 name=str(item.get("name") or ""),
                 arguments=str(item.get("arguments") or ""),
             )
 
 
+@dataclass(frozen=True)
+class _Dialect:
+    """How one protocol is asked, authenticated, read and settled."""
+
+    url: Callable[[str], str]
+    headers: Callable[[str], dict[str, str]]
+    new_turn: Callable[[], StreamedTurn]
+    event: Callable[[StreamedTurn, dict[str, Any]], None]
+    settle: Callable[[StreamedTurn], None]
+
+
+def _bearer(api_key: str) -> dict[str, str]:
+    return {"authorization": f"Bearer {api_key}"}
+
+
+def _no_settle(turn: StreamedTurn) -> None:
+    del turn
+
+
+_DIALECTS: dict[str, _Dialect] = {
+    CHAT_COMPLETIONS: _Dialect(
+        url=lambda base: base + "/chat/completions",
+        headers=_bearer,
+        new_turn=StreamedTurn,
+        event=_chat_event,
+        settle=_no_settle,
+    ),
+    RESPONSES: _Dialect(
+        url=lambda base: base + "/responses",
+        headers=_bearer,
+        new_turn=StreamedTurn,
+        event=_responses_event,
+        settle=_responses_calls,
+    ),
+    ANTHROPIC_MESSAGES: _Dialect(
+        url=messages_url,
+        headers=anthropic_headers,
+        new_turn=MessagesTurn,
+        event=messages_event,
+        settle=settle_messages,
+    ),
+}
+
+
 async def _stream(
-    client: httpx.AsyncClient, url: str, api_key: str, body: dict[str, Any], protocol: str
-) -> _Turn:
+    client: httpx.AsyncClient, url: str, api_key: str, body: dict[str, Any], dialect: _Dialect
+) -> StreamedTurn:
     """One streamed answer, refused unless it ended successfully."""
-    turn = _Turn()
-    headers = {"authorization": f"Bearer {api_key}", "accept": "text/event-stream"}
+    turn = dialect.new_turn()
+    headers = {**dialect.headers(api_key), "accept": "text/event-stream"}
     try:
         async with client.stream("POST", url, json=body, headers=headers) as response:
             category = _status_category(response.status_code)
             if category is not None:
                 raise CheckStop(category, http_status=response.status_code)
-            async for payload in _sse_events(response):
+            async for payload in sse_events(response):
                 turn.events += 1
-                if payload is None:
-                    continue
-                if protocol == CHAT_COMPLETIONS:
-                    _chat_event(turn, payload)
-                else:
-                    _responses_event(turn, payload)
+                if payload is not None:
+                    dialect.event(turn, payload)
     except httpx.ConnectError as exc:
         tls = "CERTIFICATE" in str(exc).upper() or "SSL" in str(exc).upper()
         raise CheckStop("tls" if tls else "unreachable") from None
@@ -417,17 +399,20 @@ async def _stream(
         raise CheckStop("not_streaming", http_status=200)
     if turn.failed:
         raise CheckStop("stream_error", http_status=200)
+    dialect.settle(turn)
     if not turn.finished:
         raise CheckStop("incomplete_stream", http_status=200)
-    if protocol != CHAT_COMPLETIONS:
-        _responses_calls(turn)
     return turn
 
 
-def _the_call(turn: _Turn, nonce: str) -> _Call:
-    """The one call to the offered tool, with a real id and the value asked for."""
-    calls = [call for call in turn.calls.values() if call.name == _TOOL_NAME]
-    if len(calls) != 1:
+def _the_call(turn: StreamedTurn, nonce: str) -> StreamedCall:
+    """The one call to the offered tool, with a real id and the value asked for.
+
+    Exactly one call, and to the offered tool: a call to anything else, beside
+    it or instead of it, is not the round trip the agent depends on.
+    """
+    calls = list(turn.calls.values())
+    if len(calls) != 1 or calls[0].name != _TOOL_NAME:
         raise CheckStop("no_tool_call")
     call = calls[0]
     if not call.call_id:
@@ -443,13 +428,20 @@ def _the_call(turn: _Turn, nonce: str) -> _Call:
 
 def _requests(
     protocol: str, model: str, nonce: str
-) -> tuple[str, dict[str, Any], Callable[[_Turn, _Call], dict[str, Any]]]:
-    """The path, the first body, and how to build the second from the first answer."""
+) -> tuple[dict[str, Any], Callable[[StreamedTurn, StreamedCall], dict[str, Any]]]:
+    """The first body, and how to build the second from the first answer."""
     ask = (
         f"This is a connectivity check. Call the {_TOOL_NAME} tool exactly once with "
         f'value "{nonce}". Do not answer in text.'
     )
     then = "Reply with the tool's result, verbatim, and nothing else."
+    if protocol == ANTHROPIC_MESSAGES:
+        tool = {
+            "name": _TOOL_NAME,
+            "description": _TOOL_DESCRIPTION,
+            "parameters": _TOOL_PARAMETERS,
+        }
+        return messages_requests(model, nonce, ask=ask, then=then, tool=tool)
     if protocol == CHAT_COMPLETIONS:
         tool = {
             "type": "function",
@@ -462,7 +454,7 @@ def _requests(
         first = {"model": model, "stream": True, "messages": [{"role": "user", "content": ask}]}
         first["tools"] = [tool]
 
-        def second(turn: _Turn, call: _Call) -> dict[str, Any]:
+        def second(turn: StreamedTurn, call: StreamedCall) -> dict[str, Any]:
             del turn
             return {
                 "model": model,
@@ -486,7 +478,7 @@ def _requests(
                 ],
             }
 
-        return "/chat/completions", first, second
+        return first, second
     tool = {
         "type": "function",
         "name": _TOOL_NAME,
@@ -496,7 +488,7 @@ def _requests(
     user = {"role": "user", "content": ask}
     first = {"model": model, "stream": True, "input": [user], "tools": [tool]}
 
-    def second_responses(turn: _Turn, call: _Call) -> dict[str, Any]:
+    def second_responses(turn: StreamedTurn, call: StreamedCall) -> dict[str, Any]:
         # Every output item goes back as it came, reasoning included: a
         # reasoning model refuses a tool result whose reasoning context is gone.
         return {
@@ -511,7 +503,7 @@ def _requests(
             ],
         }
 
-    return "/responses", first, second_responses
+    return first, second_responses
 
 
 async def _run(
@@ -522,14 +514,17 @@ async def _run(
     transport: httpx.AsyncBaseTransport | None,
 ) -> None:
     nonce = f"check-{secrets.token_hex(4)}"
-    path, first, second = _requests(result.protocol, result.model, nonce)
+    first, second = _requests(result.protocol, result.model, nonce)
+    dialect = _DIALECTS[result.protocol]
+    url = dialect.url(base_url)
     async with _client(transport) as client:
-        turn = await _stream(client, base_url + path, api_key, first, result.protocol)
+        turn = await _stream(client, url, api_key, first, dialect)
         result.streaming = True
         call = _the_call(turn, nonce)
         result.tool_call = True
-        final = await _stream(client, base_url + path, api_key, second(turn, call), result.protocol)
-        if nonce not in final.text:
+        final = await _stream(client, url, api_key, second(turn, call), dialect)
+        # An answer that asks for another tool has not answered yet.
+        if final.calls or nonce not in final.text:
             raise CheckStop("no_final_answer")
         result.final_answer = True
 
@@ -544,7 +539,7 @@ async def check_connection(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> CheckResult:
     """Run one check and say what it found; never raises for an upstream's behaviour."""
-    if protocol not in (CHAT_COMPLETIONS, RESPONSES) or not MODEL_ID.fullmatch(model):
+    if protocol not in PROTOCOLS or not MODEL_ID.fullmatch(model):
         raise ValueError("unknown protocol or model id")
     result = CheckResult(protocol=protocol, model=model, category="supported")
     try:
@@ -560,16 +555,14 @@ async def check_connection(
 
 
 async def _bounded_get(
-    *, client_transport: httpx.AsyncBaseTransport | None, url: str, key: str
+    *, client_transport: httpx.AsyncBaseTransport | None, url: str, headers: dict[str, str]
 ) -> bytes:
     """One authenticated GET, read only up to the model-list bound."""
     chunks: list[bytes] = []
     total = 0
     async with _client(client_transport) as client:
         try:
-            async with client.stream(
-                "GET", url, headers={"authorization": f"Bearer {key}"}
-            ) as response:
+            async with client.stream("GET", url, headers=headers) as response:
                 category = _status_category(response.status_code)
                 if category is not None:
                     raise CheckStop(category, http_status=response.status_code)
@@ -585,21 +578,37 @@ async def _bounded_get(
     return b"".join(chunks)
 
 
+def _models_request(
+    base_url: str, api_key: str, protocols: Iterable[str]
+) -> tuple[str, dict[str, str]]:
+    """Where to list models, and how to authenticate, for the protocols offered.
+
+    An OpenAI-style ``GET /models`` under the Base URL whenever the connection
+    offers either OpenAI protocol; a Messages-only connection is asked the way
+    the CLI would ask it, ``GET /v1/models`` with ``x-api-key``.
+    """
+    if set(protocols) <= {ANTHROPIC_MESSAGES}:
+        return models_url(base_url), anthropic_headers(api_key)
+    return base_url + "/models", _bearer(api_key)
+
+
 async def discover_models(
     *,
     base_url: str,
     api_key: str,
+    protocols: Iterable[str] = (CHAT_COMPLETIONS,),
     resolve: Callable[[str, int], Awaitable[Iterable[str]]] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> list[str]:
-    """The model ids ``GET /models`` lists, for the owner to pick from.
+    """The model ids the provider lists, for the owner to pick from.
 
     A convenience only: many providers have no such endpoint, and a list says
     nothing about whether a model can run an agent. Raises ``CheckStop``.
     """
+    url, headers = _models_request(base_url, api_key, protocols)
     async with asyncio.timeout(_CONNECT_TIMEOUT_S + _READ_TIMEOUT_S):
         await guard_base_url(base_url, resolve=resolve)
-        body = await _bounded_get(client_transport=transport, url=base_url + "/models", key=api_key)
+        body = await _bounded_get(client_transport=transport, url=url, headers=headers)
     try:
         listed = json.loads(body).get("data")
     except (ValueError, AttributeError):

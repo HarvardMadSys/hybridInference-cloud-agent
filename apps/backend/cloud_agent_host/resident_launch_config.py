@@ -54,7 +54,7 @@ class SharedResidentLaunchConfig(BaseModel):
     inference_base_url: str = Field(
         "", max_length=MAX_BASE_URL_CHARS, pattern=r"^(https://[!-~]+)?$"
     )
-    inference_protocol: Literal["", "chat_completions", "responses"] = ""
+    inference_protocol: Literal["", "chat_completions", "responses", "anthropic_messages"] = ""
     inference_source: str = Field("", max_length=128, pattern=r"^(mconn_[0-9a-f]{32}@[0-9]+)?$")
 
 

@@ -453,8 +453,17 @@ async def test_a_task_on_an_owner_connection_needs_neither_the_gateway_catalog_n
 @pytest.mark.parametrize(
     ("runtime", "body", "row", "reason"),
     [
-        ("claude-code", {}, {}, "runtime_unsupported"),
+        # Claude Code needs Anthropic Messages; this connection offers Chat Completions.
+        ("claude-code", {}, {}, "protocol_unsupported"),
         ("codex", {}, {}, "protocol_unsupported"),
+        ("opencode", {}, {"protocols": ["anthropic_messages"]}, "protocol_unsupported"),
+        ("codex", {}, {"protocols": ["anthropic_messages"]}, "protocol_unsupported"),
+        (
+            "claude-code",
+            {"reasoning_effort": "high"},
+            {"protocols": ["anthropic_messages"]},
+            "effort_unsupported",
+        ),
         ("opencode", {"model": "gpt-4o"}, {}, "model_not_listed"),
         ("opencode", {"reasoning_effort": "high"}, {}, "effort_unsupported"),
         ("opencode", {}, {"enabled": False}, "disabled"),
@@ -479,6 +488,27 @@ async def test_a_task_its_connection_cannot_serve_is_refused_before_it_is_queued
     assert refused.status_code == 400, refused.text
     assert refused.json()["detail"]["error"]["reason"] == reason
     assert store.jobs == {}
+
+
+async def test_claude_code_runs_on_a_connection_that_offers_anthropic_messages():
+    store = _TurnStorage()
+    row = _connection_row(
+        models=("claude-sonnet-4-5",), protocols=("chat_completions", "anthropic_messages")
+    )
+    store.connections.rows[row["id"]] = row
+    async with AsyncClient(transport=ASGITransport(app=_turn_app(store)), base_url="http://t") as c:
+        created = await _create_job(
+            c, runtime="claude-code", model="claude-sonnet-4-5", model_connection_id=row["id"]
+        )
+
+    assert created.status_code == 201, created.text
+    stored = store.jobs[created.json()["id"]]
+    assert (stored["runtime"], stored["model"], stored["model_connection_id"]) == (
+        "claude-code",
+        "claude-sonnet-4-5",
+        row["id"],
+    )
+    assert stored.get("reasoning_effort") is None
 
 
 async def test_a_connection_needs_a_model_and_a_well_formed_id():
@@ -565,6 +595,22 @@ async def test_a_follow_up_switching_source_is_checked_against_the_new_one():
     assert foreign.value.detail["error"]["reason"] == "not_found"
 
 
+async def test_a_claude_follow_up_inherits_its_messages_source_and_rechecks_the_protocol():
+    connections = FakeModelConnections()
+    row = _connection_row(models=("claude-sonnet-4-5",), protocols=("anthropic_messages",))
+    connections.rows[row["id"]] = row
+    parent = _parent(runtime="claude-code", model="claude-sonnet-4-5")
+
+    inherited = await _follow_up(connections, parent)
+    assert (inherited.model, inherited.model_connection_id) == (None, None)
+
+    # The owner later unticks Messages: the inherited source no longer serves Claude Code.
+    row["protocols"] = ["chat_completions"]
+    with pytest.raises(HTTPException) as refused:
+        await _follow_up(connections, parent)
+    assert refused.value.detail["error"]["reason"] == "protocol_unsupported"
+
+
 async def test_a_waiting_message_on_a_deleted_connection_is_held_with_the_reason():
     connections = FakeModelConnections()
     row = _connection_row(deleted_at=datetime.now(UTC), enabled=False, api_key_ciphertext=None)
@@ -600,11 +646,20 @@ async def test_a_waiting_message_on_a_deleted_connection_is_held_with_the_reason
 
 
 class _ConnectionClaimStore(_ClaimStore):
-    def __init__(self, row: dict[str, Any], **kwargs: Any) -> None:
+    def __init__(
+        self,
+        row: dict[str, Any],
+        *,
+        runtime: str = "opencode",
+        model: str = "gpt-4.1",
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
         self.connections = FakeModelConnections()
         self.connections.rows[row["id"]] = row
         self.row = row
+        self.runtime = runtime
+        self.model = model
 
     async def claim_job(self, **kwargs: Any) -> dict[str, Any] | None:
         claim = await super().claim_job(**kwargs)
@@ -613,8 +668,8 @@ class _ConnectionClaimStore(_ClaimStore):
         return {
             **claim,
             "user_id": _OWNER,
-            "runtime": "opencode",
-            "model": "gpt-4.1",
+            "runtime": self.runtime,
+            "model": self.model,
             "model_connection_id": self.row["id"],
             "reasoning_effort": None,
         }
@@ -652,6 +707,25 @@ async def test_a_claim_on_a_connection_carries_its_key_and_mints_no_gateway_gran
     }
     assert body["sandbox_token"] == ""
     assert grants.calls == []
+
+
+async def test_a_claude_claim_carries_the_messages_protocol_and_mints_no_gateway_grant():
+    row = _connection_row(
+        models=("claude-sonnet-4-5",),
+        protocols=("chat_completions", "anthropic_messages"),
+        base_url="https://gateway.example/anthropic/v1",
+    )
+    store = _ConnectionClaimStore(row, runtime="claude-code", model="claude-sonnet-4-5")
+    grants = _Grants()
+    response = await _claim(store, grants)
+
+    assert response.status_code == 200, response.text
+    access = response.json()["model_connection"]
+    # The URL as the owner wrote it; the host derives ANTHROPIC_BASE_URL from it.
+    assert access["base_url"] == "https://gateway.example/anthropic/v1"
+    assert access["protocol"] == "anthropic_messages"
+    assert access["api_key"] == _KEY
+    assert response.json()["sandbox_token"] == "" and grants.calls == []
 
 
 async def test_a_host_that_cannot_launch_on_a_connection_gets_the_claim_back():

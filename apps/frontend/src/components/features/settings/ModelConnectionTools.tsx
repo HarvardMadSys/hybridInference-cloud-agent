@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { useT } from '@/components/providers';
 import {
   checkModelConnection,
@@ -8,6 +8,7 @@ import {
   updateModelConnection,
   type ModelConnection,
   type ModelConnectionCheck,
+  protocolName,
   type ModelProtocol,
 } from '@/lib/api/modelConnections';
 
@@ -25,7 +26,7 @@ function CheckResult({ result }: { result: ModelConnectionCheck }) {
       <p className="break-words text-xs text-muted">
         {t('connections.checkScope', {
           model: result.model,
-          protocol: result.protocol === 'responses' ? 'Responses' : 'Chat Completions',
+          protocol: protocolName(result.protocol),
         })}
       </p>
       <p className="text-xs text-muted">
@@ -56,6 +57,7 @@ export function ModelConnectionTools({
   onChange: (connection: ModelConnection) => void;
 }) {
   const t = useT();
+  const fieldId = useId();
   const [model, setModel] = useState(connection.models[0] ?? '');
   const [protocol, setProtocol] = useState<ModelProtocol>(
     connection.protocols[0] ?? 'chat_completions',
@@ -71,9 +73,12 @@ export function ModelConnectionTools({
           {t('connections.check')}
         </summary>
         <div className="mt-2 grid gap-3 sm:grid-cols-2">
-          <label className="text-sm">
-            {t('connections.checkModel')}
+          <div className="text-sm">
+            {/* Associated by id rather than wrapped, so the label's text is
+                its name alone and not the options inside it. */}
+            <label htmlFor={`${fieldId}-model`}>{t('connections.checkModel')}</label>
             <select
+              id={`${fieldId}-model`}
               className={selectClass}
               value={model}
               onChange={(event) => setModel(event.target.value)}
@@ -83,10 +88,11 @@ export function ModelConnectionTools({
                 <option key={value}>{value}</option>
               ))}
             </select>
-          </label>
-          <label className="text-sm">
-            {t('connections.checkProtocol')}
+          </div>
+          <div className="text-sm">
+            <label htmlFor={`${fieldId}-protocol`}>{t('connections.checkProtocol')}</label>
             <select
+              id={`${fieldId}-protocol`}
               className={selectClass}
               value={protocol}
               onChange={(event) => setProtocol(event.target.value as ModelProtocol)}
@@ -94,11 +100,11 @@ export function ModelConnectionTools({
             >
               {connection.protocols.map((value) => (
                 <option key={value} value={value}>
-                  {value === 'responses' ? 'Responses' : 'Chat Completions'}
+                  {protocolName(value)}
                 </option>
               ))}
             </select>
-          </label>
+          </div>
         </div>
         <p className="my-3 text-xs leading-5 text-muted">{t('connections.checkHint')}</p>
         <button

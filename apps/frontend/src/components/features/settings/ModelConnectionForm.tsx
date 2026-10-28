@@ -4,12 +4,20 @@ import { useId, useState, type FormEvent } from 'react';
 import { useT } from '@/components/providers';
 import {
   createModelConnection,
+  MODEL_PROTOCOLS,
   updateModelConnection,
   type ModelConnection,
   type ModelProtocol,
 } from '@/lib/api/modelConnections';
 
 const inputClass = 'ui-input mt-1 block min-h-11 w-full rounded-lg';
+
+/** Each API beside the agents that speak it. */
+const PROTOCOL_LABELS = {
+  chat_completions: 'connections.chat',
+  responses: 'connections.responses',
+  anthropic_messages: 'connections.anthropic',
+} as const satisfies Record<ModelProtocol, string>;
 
 export function ModelConnectionForm({
   connection,
@@ -132,14 +140,14 @@ export function ModelConnectionForm({
         </p>
         <fieldset className="space-y-2">
           <legend className="mb-2 text-sm font-medium">{t('connections.protocols')}</legend>
-          {(['chat_completions', 'responses'] as const).map((protocol) => (
+          {MODEL_PROTOCOLS.map((protocol) => (
             <label key={protocol} className="flex min-h-9 items-center gap-2 text-sm">
               <input
                 type="checkbox"
                 checked={protocols.includes(protocol)}
                 onChange={() => toggle(protocol)}
               />
-              {t(protocol === 'responses' ? 'connections.responses' : 'connections.chat')}
+              {t(PROTOCOL_LABELS[protocol])}
             </label>
           ))}
           <p className="text-xs leading-5 text-muted">{t('connections.protocolHint')}</p>

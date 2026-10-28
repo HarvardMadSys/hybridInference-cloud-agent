@@ -1,14 +1,14 @@
 # 用户自带模型连接（BYOK）设计与实现记录
 
 日期：2026-10-27
-状态：已实现，等待合并；部署开关默认关闭，尚未上线，也未用真实服务商做端到端验收
+状态：已实现（含 Anthropic Messages 与 Claude Code），等待合并；部署开关默认关闭，尚未上线，也未用真实服务商做端到端验收
 
 ## 一、要解决的问题
 
 到目前为止，沙箱里的 Agent CLI 只能通过 Gateway 调模型：每个成员进程拿到一张由 Gateway
 签发、按用户和模型限定的短期 grant，花的是 Gateway 给这个用户的额度。有些用户手里有自己的
-OpenAI 兼容服务（OpenAI、OpenRouter、DeepSeek、公司内部对外开放的推理服务等），希望任务直接
-用自己的 key 跑，账单记在自己头上。
+OpenAI 或 Anthropic 接口的服务（OpenAI、Anthropic、OpenRouter、DeepSeek、公司内部对外开放的推理
+服务等，HybridInference 也可以是其中一个上游），希望任务直接用自己的 key 跑，账单记在自己头上。
 
 本次做的是**用户自己的推理连接**，不是公开推理 API，也不是管理员出钱的共享 key：
 
@@ -24,7 +24,8 @@ OpenAI 兼容服务（OpenAI、OpenRouter、DeepSeek、公司内部对外开放�
 **做了的：**
 
 1. 个人设置页「模型连接」：新增、编辑、轮换 key、停用/启用、删除、测试、从 `/models` 读取模型列表。
-2. 每个连接：显示名、Base URL、API key、支持的协议（Chat Completions / Responses，可多选）、
+2. 每个连接：显示名、Base URL、API key、支持的协议（Chat Completions / Responses /
+   Anthropic Messages，可多选）、
    手填的模型 ID 列表（最多 64 个）。`/models` 只是辅助填写，没有它也能手填。
 3. 新任务、后续消息、排队消息、目标（goal）自动轮次、原生 Fork 都能用连接上的模型，并且记住
    「是哪个来源的哪个模型」。
@@ -33,8 +34,8 @@ OpenAI 兼容服务（OpenAI、OpenRouter、DeepSeek、公司内部对外开放�
 
 **没做的（有意不做）：**
 
-- 通用协议转换器。不同 CLI 说不同的协议，连接不提供某个协议，就不能给那个 CLI 用。
-- Claude Code 走连接。Claude Code 说 Anthropic Messages，连接不提供这个协议，一律拒绝。
+- 通用协议转换器、路由或计费网关、key 池。平台直接使用用户声明的协议：不同 CLI 说不同的协议，
+  连接不提供某个协议，就不能给那个 CLI 用。也不引入 HybridInference 的服务端模块。
 - 连接模型的推理强度（reasoning effort）。没有可靠的模型能力表，只允许 Auto；带强度会被拒绝，
   从 Gateway 模型切过来时也会自动清掉。
 - 在「我的设置」里把连接模型设为默认（pin）。pin 仍只针对 Gateway 模型；「沿用上次」会记住来源，
@@ -50,7 +51,7 @@ OpenAI 兼容服务（OpenAI、OpenRouter、DeepSeek、公司内部对外开放�
 | Kilo | Chat Completions | `chat_completions` | 同上 |
 | pi | Chat Completions（`openai-completions`） | `chat_completions` | 同上 |
 | Codex | Responses | `responses` | provider 的 `wire_api` 固定为 `responses` |
-| Claude Code | Anthropic Messages | —— | 不支持，创建时拒绝；主机侧再拒绝一次 |
+| Claude Code | Anthropic Messages | `anthropic_messages` | `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`，见下 |
 
 这张表放在共享词汇 `cloud_agent_shared/model_connections.py`（`RUNTIME_PROTOCOLS`），控制面和
 主机都从这里读。判断「这个回合能不能在这个连接上跑」只有一个函数：
@@ -60,6 +61,14 @@ OpenAI 兼容服务（OpenAI、OpenRouter、DeepSeek、公司内部对外开放�
 
 Base URL 原样使用，不像 Gateway 中继地址那样补 `/v1`：有的服务商路径是 `/api/v1`、
 `/v1beta/openai`。CLI 自己在后面拼 `/chat/completions` 或 `/responses`。
+
+Anthropic Messages 的约定不同：Claude Code 的 SDK 会在 `ANTHROPIC_BASE_URL` 后面拼
+`/v1/messages`（实测本地 CLI 2.1.311 请求 `/v1/messages?beta=true`，带 `x-api-key` 和
+`anthropic-version: 2023-06-01`；固定版本为 2.1.220，未单独实测）。所以对这一协议只去掉 Base URL
+结尾的**一个** `/v1`，其他路径原样保留（`anthropic_base_url`）：`https://host`、`https://host/v1`、
+`https://host/anthropic`、`https://host/anthropic/v1` 都到 `…/v1/messages`；`/v1beta` 或中间的
+`/v1` 不动。这样一个以 `/v1` 结尾的 Base URL 可以同时服务三种协议。测试用同一个函数算 URL，
+保证测试和真实 CLI 打到同一个端点；不加中继，也不随意截取或重拼路径。
 
 ## 四、数据和来源
 
@@ -105,7 +114,8 @@ Base URL 原样使用，不像 Gateway 中继地址那样补 `/v1`：有的服�
   `model` 与 `model_connection_id`；只有选择器内部用编码后的键区分同名选项：Gateway 模型的键就是
   模型名本身，个人来源的键是 `["mconn_…", model]` 的 JSON，以 `[` 开头的 Gateway 名字也编码，
   两者不会相撞。旧草稿里的模型字符串一律按 Gateway 读，不当作编码键解析。
-- 连接只出现在其协议对应的 Agent 下（Chat Completions：OpenCode、Kilo、pi；Responses：Codex）。
+- 连接只出现在其协议对应的 Agent 下（Chat Completions：OpenCode、Kilo、pi；Responses：Codex；
+  Anthropic Messages：Claude Code）。
   个人来源的推理强度只有 Auto，请求里不带 `reasoning_effort`。
 - 草稿或「上次使用」指向的个人来源当前不能运行（换了 Agent、连接停用/删除、不再列出该模型）时，
   选择器仍显示它并标注「不可用」，运行按钮保持禁用并提示原因；不会退到默认模型或同名 Gateway 模型。
@@ -181,8 +191,15 @@ Base URL 原样使用，不像 Gateway 中继地址那样补 `/v1`：有的服�
   完成时校验被测配置版本，配置已变化则不覆盖当前测试记录。
 
 测试流程：先发一个带一个工具的流式请求，要求模型调用它；再把工具结果带回去发第二个流式请求，
-要求模型给出包含本次工具结果的最终回答。校验调用 ID、工具参数、预期结果和完整终止事件，
-Responses 第二步保留第一步输出上下文。两步都成功才是该模型、该协议的测试通过，不能代表整个
+要求模型给出包含本次工具结果的最终回答。第一步必须恰好有一次调用、且调用的是提供的工具；第二步不能再请求任何工具。
+校验调用 ID、工具参数、预期结果和完整终止事件，
+Responses 第二步保留第一步输出上下文。Anthropic Messages 用原生格式：`x-api-key`、
+`anthropic-version`、`tool_use`/`tool_result` 内容块，第二步原样带回助手内容（含带签名的 thinking）；
+流必须依次有 `message_start`、每个内容块的开始/增量/结束、带正常停止原因的 `message_delta` 和
+`message_stop`，`error` 事件、块类型与增量不符、`message_delta` 之后还有内容、`max_tokens`/`refusal`
+等停止原因、未关闭的块都不算通过（`application/model_connection_anthropic.py`）。只声明
+Anthropic Messages 的连接读取模型列表时用 `GET …/v1/models` 和同样的认证头。
+两步都成功才是该模型、该协议的测试通过，不能代表整个
 连接上的所有模型均已兼容，也不等于真实 CLI 端到端验收。服务商能连上但做不到其中一步（404、400/422、
 不是流、没调工具、没给最终回答）是「不支持」；连不上、证书错、重定向、401/403、429、5xx、
 回答过大是「失败」。单纯 `GET /models` 成功不会显示为通过。
@@ -194,8 +211,11 @@ Responses 第二步保留第一步输出上下文。两步都成功才是该模�
   `inference_source`，并参与「能否复用进程」的判断。沙箱管理器只替换 Gateway 和 MCP 中继地址，
   连接的 Base URL 原样保留。
 - 运行时适配器用 `ExactBaseUrl` 类型区分「原样使用的地址」和「需要规范化的 Gateway 地址」，
-  这样不用改动每个驱动的参数。连接只设置 `OPENAI_*`，不设置 `ANTHROPIC_*`；Codex 改 provider
-  的 `base_url`；Claude Code 遇到连接直接拒绝。
+  这样不用改动每个驱动的参数。地址按协议分类型：Anthropic Messages 连接是 `MessagesBaseUrl`。
+  OpenAI 协议的连接只设置 `OPENAI_*`，不设置 `ANTHROPIC_*`；Codex 改 provider 的 `base_url`；
+  Claude Code 只接受 `MessagesBaseUrl`，设置 `ANTHROPIC_BASE_URL`（去掉结尾一个 `/v1`）和
+  `ANTHROPIC_API_KEY`，不设 `ANTHROPIC_AUTH_TOKEN` 和任何 `OPENAI_*`；MCP 中继令牌仍是单独的变量。
+  OpenAI 适配器拿到 `MessagesBaseUrl`、Claude Code 拿到其他连接地址都直接拒绝。
 - `credential` 和 `mcp_credential` 不再出现在启动配置的 repr 里。
 
 ## 十、上线顺序
@@ -219,7 +239,14 @@ Responses 第二步保留第一步输出上下文。两步都成功才是该模�
   流式工具调用往返，各类失败与不支持的区分，重定向不跟随，上游正文里的 key 不回显，模型列表读取。
 - `tests/unit/test_model_connection_launch.py`：认领载荷与脱敏，常驻版本核对，进程复用判断
   （轮换、换地址、来源切换都不复用），沙箱管理器保留连接地址，各运行时拿到的确切 URL 与 key
-  （不进参数、不设 Anthropic 变量），Claude Code 拒绝。
+  （不进参数、不设其他协议的变量），Claude Code 拒绝不提供 Messages 的连接。
+- `tests/unit/test_model_connection_anthropic_launch.py`：Claude Code 在各种 Base URL 形状下的
+  `ANTHROPIC_BASE_URL` 与测试 URL 一致，key 只在环境变量里，推理强度为 Auto，OpenAI 适配器拒绝
+  Messages 连接，轮换或协议变化不复用进程。
+- `tests/unit/test_model_connection_anthropic_check.py` 与审查回归
+  `tests/unit/test_model_connection_anthropic_review.py`：原生 SSE 往返、URL 与认证头、401/403/404/
+  429/5xx、非流式、截断、`max_tokens`/`refusal`、错误事件、帧顺序、调用 ID 与参数、结果关联、
+  带签名 thinking 的回传、Messages 专用的模型列表读取。
 - `tests/servers/test_model_connections_api.py`：只存密文、不返回 key、422 不回显、跨用户不可见
   不可改不可测、轮换/停用/删除触发失效、测试限额；新任务不读 Gateway 目录、各种不适用组合在入队前
   拒绝；后续消息继承并复查来源、切换来源时的检查、排队消息遇到已删除连接被挂起；认领带 key 且
@@ -235,7 +262,9 @@ Responses 第二步保留第一步输出上下文。两步都成功才是该模�
   与当前回合两条继承路径、继承来源不可用时禁止发送）、`SideChat.test.tsx`、
   `PendingMessageQueue.test.tsx`（只改正文保留来源）、`LedgerUsage.test.tsx`、`RunDetails.test.tsx`、
   管理员运行详情、`ModelSettings.test.tsx`。
-- 浏览器（Playwright）：`e2e/model-connections.spec.ts`（1440px 与 390px 设置流程）和
+- 浏览器（Playwright）：`e2e/model-connections-anthropic.spec.ts`（1440px 与 390px 保存只声明
+  Anthropic Messages 的连接，Claude Code 选择并提交该来源，换成 Codex 后显示不可用）、
+  `e2e/model-connections.spec.ts`（1440px 与 390px 设置流程）和
   `e2e/model-source-attribution.spec.ts`（个人来源在刷新后保留、切换到同名 Gateway 模型、变为不可用）。
 - 后端审查回归：`tests/servers/test_model_connection_usage_review.py`、
   `tests/unit/test_model_connection_message_review.py`，以及真实 PostgreSQL 的
