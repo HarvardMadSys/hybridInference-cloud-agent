@@ -84,9 +84,11 @@ async function submit(
   fields: ConnectionFields,
   operate: Operate,
 ): Promise<ModelConnection | undefined> {
-  if (!connection) return createModelConnection(newConnection(fields));
+  if (!connection) return operate('new', () => createModelConnection(newConnection(fields)));
   const changes = connectionChanges(connection, fields);
-  if (!Object.keys(changes).length) return connection;
+  // Closing an unchanged editor must not replay its old snapshot over a
+  // disable or another update that completed while the editor was open.
+  if (!Object.keys(changes).length) return undefined;
   return operate(connection.id, () => updateModelConnection(connection.id, changes));
 }
 

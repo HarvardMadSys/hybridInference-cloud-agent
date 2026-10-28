@@ -291,3 +291,59 @@ it('a delayed list refresh cannot restore a connection deleted by a later action
   await waitFor(() => expect(api.listModelConnections).toHaveBeenCalledTimes(3));
   expect(screen.queryByRole('article', { name: 'My provider' })).not.toBeInTheDocument();
 });
+
+it('saving an unchanged editor does not restore the snapshot from before a disable', async () => {
+  vi.mocked(api.updateModelConnection).mockResolvedValue({
+    ...connection,
+    enabled: false,
+    updated_at: 'disabled',
+  });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  await screen.findByRole('button', { name: 'Enable' });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(screen.queryByLabelText('API key')).not.toBeInTheDocument());
+  expect(screen.getByRole('button', { name: 'Enable' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: 'Disable' })).not.toBeInTheDocument();
+  expect(api.updateModelConnection).toHaveBeenCalledTimes(1);
+});
+
+it('a delayed list refresh cannot discard a connection created after the read began', async () => {
+  const edit = deferred<api.ModelConnection>();
+  const disable = deferred<api.ModelConnection>();
+  const refresh = deferred<api.ModelConnectionList>();
+  const added = { ...connection, id: `mconn_${'f'.repeat(32)}`, name: 'New provider' };
+  vi.mocked(api.updateModelConnection).mockImplementation((_id, changes) =>
+    changes.enabled === false ? disable.promise : edit.promise,
+  );
+  vi.mocked(api.createModelConnection).mockResolvedValue(added);
+  mount();
+  await screen.findByRole('article', { name: 'My provider' });
+  editBaseUrl('https://new.example/v1');
+  fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  vi.mocked(api.listModelConnections)
+    .mockReturnValueOnce(refresh.promise)
+    .mockResolvedValue({ configured: true, enabled: true, connections: [connection, added] });
+  await act(async () => {
+    edit.resolve(connection);
+    disable.resolve({ ...connection, enabled: false });
+    await Promise.all([edit.promise, disable.promise]);
+  });
+  await waitFor(() => expect(api.listModelConnections).toHaveBeenCalledTimes(2));
+  fireEvent.click(screen.getByRole('button', { name: 'Add connection' }));
+  fireEvent.change(screen.getByLabelText('Connection name'), { target: { value: added.name } });
+  fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: connection.base_url } });
+  fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'fixture-key' } });
+  fireEvent.change(screen.getByLabelText('Model IDs'), { target: { value: 'm1' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Verify and save' }));
+  await screen.findByRole('article', { name: added.name });
+  await act(async () => {
+    refresh.resolve({ configured: true, enabled: true, connections: [connection] });
+    await refresh.promise;
+  });
+  await waitFor(() => expect(api.listModelConnections).toHaveBeenCalledTimes(3));
+  expect(screen.getByRole('article', { name: added.name })).toBeVisible();
+});
