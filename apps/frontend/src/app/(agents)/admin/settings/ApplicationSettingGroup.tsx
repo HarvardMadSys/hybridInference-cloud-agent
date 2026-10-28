@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 
 import { useModalDialog } from '@/components/ui/useModalDialog';
 import { Select } from '@/components/ui/Select';
-import { MENU_ROW_DESTRUCTIVE, MENU_SURFACE } from '@/components/ui/menuStyles';
+import { MENU_ACTIONS, MENU_ROW_DESTRUCTIVE } from '@/components/ui/menuStyles';
 import { SuggestionInput } from '@/components/ui/SuggestionInput';
 import type {
   AdminSettingDefinition,
@@ -543,7 +543,9 @@ export function ApplicationSettingGroup({
                       >
                         ···
                       </summary>
-                      <div className={`${MENU_SURFACE} absolute right-0 z-20 mt-1 w-52 p-1`}>
+                      <div
+                        className={`${MENU_ACTIONS} absolute right-0 z-20 mt-1 max-h-[min(20rem,calc(100dvh-2rem))] w-52 p-1`}
+                      >
                         <button
                           type="button"
                           disabled={busy || (field.secret && !configured)}

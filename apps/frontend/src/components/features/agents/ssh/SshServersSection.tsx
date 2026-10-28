@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
-import { MENU_ROW, MENU_ROW_DESTRUCTIVE, MENU_SURFACE } from '@/components/ui/menuStyles';
+import { MENU_ACTIONS, MENU_ROW, MENU_ROW_DESTRUCTIVE } from '@/components/ui/menuStyles';
 import {
   deleteSshServer,
   listSshServers,
@@ -230,7 +230,9 @@ export function SshServersSection() {
                     <summary className="ui-button ui-button-secondary min-h-11 cursor-pointer list-none [&::-webkit-details-marker]:hidden">
                       {t('ssh.manage')}
                     </summary>
-                    <div className={`${MENU_SURFACE} absolute right-0 z-10 mt-2 w-48 p-1`}>
+                    <div
+                      className={`${MENU_ACTIONS} absolute right-0 z-10 mt-2 max-h-[min(24rem,calc(100dvh-2rem))] w-48 p-1`}
+                    >
                       <button
                         type="button"
                         className={MENU_ITEM}

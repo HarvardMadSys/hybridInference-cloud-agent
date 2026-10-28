@@ -6,7 +6,7 @@ import {
   MENU_POSITIONED,
   MENU_ROW,
   MENU_ROW_DESTRUCTIVE,
-  MENU_SURFACE,
+  MENU_ACTIONS,
 } from '@/components/ui/menuStyles';
 import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import { SkillIcon, SkillSwitch } from './SkillDialog';
@@ -133,7 +133,7 @@ export function SkillRow({
             role="menu"
             aria-label={`Manage ${skill.name}`}
             style={popup.style}
-            className={`${MENU_SURFACE} ${MENU_POSITIONED} w-44`}
+            className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-44`}
             onKeyDown={popup.onKeyDown}
           >
             {actions.map(({ action, label }) => (

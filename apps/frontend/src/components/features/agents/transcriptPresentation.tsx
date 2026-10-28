@@ -7,7 +7,7 @@ import {
   MENU_HEADING,
   MENU_POSITIONED,
   MENU_ROW_SELECTED,
-  MENU_SURFACE,
+  MENU_ACTIONS,
   menuRowClass,
 } from '@/components/ui/menuStyles';
 import { usePopupMenu } from '@/components/ui/usePopupMenu';
@@ -149,7 +149,7 @@ export function TranscriptPresentationControl({
             aria-labelledby={`${id}-title`}
             aria-describedby={`${id}-hint`}
             style={popup.style}
-            className={`${MENU_SURFACE} ${MENU_POSITIONED} w-72 max-w-[calc(100vw-1rem)]`}
+            className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-72 max-w-[calc(100vw-1rem)]`}
             onKeyDown={popup.onKeyDown}
           >
             <div id={`${id}-title`} className={MENU_HEADING}>

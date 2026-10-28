@@ -18,6 +18,7 @@ import {
   MENU_FOOTER,
   MENU_FOOTER_ACTION,
   MENU_ROW,
+  MENU_ROW_SELECTED,
   MENU_SCROLL,
   MENU_SEARCH,
   MENU_SEARCH_INPUT,
@@ -217,6 +218,7 @@ export function RepositoryPicker({
   }
 
   const temporary = value === TEMPORARY_WORKSPACE;
+  const rowClass = (chosen: boolean) => (chosen ? MENU_ROW_SELECTED : MENU_ROW);
   const shown = temporary ? t('temporaryWorkspace.name') : value;
   const [owner, name] = splitRepository(value);
   const temporaryRow = showTemporary ? (
@@ -227,7 +229,7 @@ export function RepositoryPicker({
       aria-current={temporary ? 'true' : undefined}
       title={t('temporaryWorkspace.optionHint')}
       onClick={() => choose(TEMPORARY_WORKSPACE)}
-      className={MENU_ROW}
+      className={rowClass(temporary)}
     >
       <TemporaryMark className="h-3.5 w-3.5 shrink-0 text-muted" />
       <span className="min-w-0 flex-1">
@@ -375,7 +377,7 @@ export function RepositoryPicker({
                   aria-current={repo === value ? 'true' : undefined}
                   title={repo}
                   onClick={() => choose(repo)}
-                  className={MENU_ROW}
+                  className={rowClass(repo === value)}
                 >
                   <GitHubMark className="h-3.5 w-3.5 shrink-0 text-muted" />
                   <span className="min-w-0 flex-1 truncate">

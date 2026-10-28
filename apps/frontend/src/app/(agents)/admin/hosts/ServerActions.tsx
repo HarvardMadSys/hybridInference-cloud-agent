@@ -1,7 +1,7 @@
 'use client';
 
 import { useId, useRef, useState } from 'react';
-import { MENU_POSITIONED, MENU_ROW, MENU_SURFACE } from '@/components/ui/menuStyles';
+import { MENU_ACTIONS, MENU_POSITIONED, MENU_ROW } from '@/components/ui/menuStyles';
 import { usePopupMenu } from '@/components/ui/usePopupMenu';
 
 export default function ServerActions({
@@ -42,7 +42,7 @@ export default function ServerActions({
           role="menu"
           aria-label="Server actions"
           style={popup.style}
-          className={`${MENU_SURFACE} ${MENU_POSITIONED} w-48`}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-48`}
           onKeyDown={popup.onKeyDown}
         >
           {items.map((item) => (

@@ -16,9 +16,17 @@ export const MENU_SURFACE =
 /** A panel placed with `useAnchoredPopover`. */
 export const MENU_POSITIONED = 'fixed z-[100] m-0';
 
+/**
+ * A panel holding only action rows: it scrolls as a whole, because those rows
+ * have no header or footer that must stay put. A short viewport must never
+ * clip the actions below the fold.
+ */
+export const MENU_ACTIONS =
+  'flex flex-col overflow-y-auto overscroll-contain rounded-xl border border-border bg-surface-raised text-foreground shadow-card';
+
 /** A panel hanging off the composer, laid out by `useComposerMenuLayout`. */
 export const MENU_COMPOSER =
-  'absolute bottom-[calc(100%+8px)] left-0 right-0 z-50 max-h-[min(28rem,60dvh)] rounded-xl border border-border bg-surface-raised text-foreground shadow-card';
+  'flex flex-col overflow-hidden absolute bottom-[calc(100%+8px)] left-0 right-0 z-50 max-h-[min(28rem,60dvh)] rounded-xl border border-border bg-surface-raised text-foreground shadow-card';
 
 /** The scrolling body of a menu, sized by its panel. */
 export const MENU_SCROLL = 'min-h-0 flex-1 overflow-y-auto overscroll-contain p-1.5 outline-none';
@@ -63,20 +71,21 @@ export function menuRowClass({
   disabled?: boolean;
   destructive?: boolean;
 } = {}): string {
-  const tone = disabled
-    ? 'cursor-not-allowed text-muted opacity-50'
-    : destructive
-      ? 'cursor-pointer text-status-error hover:bg-status-error/10 focus-visible:bg-status-error/10'
-      : selected
-        ? 'cursor-pointer bg-accent-subtle font-medium text-accent'
-        : 'cursor-pointer text-foreground';
-  const highlight =
-    !disabled && !destructive && active
-      ? selected
-        ? 'ring-1 ring-inset ring-accent/30'
-        : 'bg-surface-hover'
-      : '';
-  return `flex min-h-9 w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/40 [@media(pointer:coarse)]:min-h-11 ${tone} ${highlight}`;
+  const base =
+    'flex min-h-9 w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-50 [@media(pointer:coarse)]:min-h-11';
+  if (disabled) return `${base} cursor-not-allowed text-muted opacity-50`;
+  // Each state owns its background utilities outright. Combining a base
+  // `hover:bg-surface-hover` with `bg-accent-subtle` would leave the winner to
+  // Tailwind's stylesheet order rather than to the selected state.
+  if (destructive)
+    return `${base} cursor-pointer text-status-error enabled:hover:bg-status-error/10 enabled:focus:bg-status-error/10`;
+  if (selected)
+    return `${base} cursor-pointer bg-accent-subtle font-medium text-accent enabled:hover:bg-accent-subtle enabled:focus:bg-accent-subtle ${
+      active ? 'ring-1 ring-inset ring-accent/30' : ''
+    }`;
+  return `${base} cursor-pointer text-foreground enabled:hover:bg-surface-hover enabled:focus:bg-surface-hover ${
+    active ? 'bg-surface-hover' : ''
+  }`;
 }
 
 /** An option row for a listbox, where selection and keyboard highlight differ. */

@@ -43,6 +43,7 @@ export function usePopupMenu({
   onEscape?: () => boolean;
 }) {
   const style = useAnchoredPopover(open, triggerRef, menuRef, placement);
+  const placed = style.visibility !== 'hidden';
   const listeners = useRef({ onOpenChange, onEscape, triggerRef });
   listeners.current = { onOpenChange, onEscape, triggerRef };
   const opened = useRef(false);
@@ -52,7 +53,10 @@ export function usePopupMenu({
       opened.current = false;
       return;
     }
-    if (opened.current) return;
+    // The panel starts invisible until placement runs. A browser cannot focus
+    // a hidden row, so wait for the placed style; placement itself can change
+    // with the content's measured height.
+    if (!placed || opened.current) return;
     opened.current = true;
     const rows = items(menuRef.current);
     const checked = menuRef.current?.querySelector<HTMLElement>(
@@ -65,7 +69,7 @@ export function usePopupMenu({
           ? (checked ?? rows[0])
           : rows[0];
     target?.focus();
-  }, [open, initialFocus, menuRef]);
+  }, [open, placed, initialFocus, menuRef]);
 
   useEffect(() => {
     if (!open) return;

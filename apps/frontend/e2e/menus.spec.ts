@@ -207,3 +207,117 @@ for (const variant of variants) {
     await expect(table).toBeFocused();
   });
 }
+
+for (const variant of variants) {
+  test(`action menus focus their first and last row (${variant.name})`, async ({ page }) => {
+    await page.setViewportSize({ width: variant.width, height: variant.height });
+    await page.addInitScript((theme) => localStorage.setItem('agents.theme', theme), variant.theme);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.goto('/source');
+    await expect(page.getByLabel('Add a follow-up', { exact: true })).toBeVisible();
+    await settled(page);
+
+    // On a phone the task list starts collapsed, so the job header is visible.
+    const actions = page.getByRole('button', { name: 'Task actions', exact: true });
+    await actions.click();
+    const menu = page.getByRole('menu', { name: 'Task actions' });
+    await expect(menu).toBeVisible();
+    // A browser cannot focus a row while the panel is still visibility:hidden.
+    await expect(menu.getByRole('menuitem').first()).toBeFocused();
+
+    await page.keyboard.press('End');
+    await expect(menu.getByRole('menuitem').last()).toBeFocused();
+    await page.keyboard.press('Home');
+    await expect(menu.getByRole('menuitem').first()).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    await expect(actions).toBeFocused();
+  });
+}
+
+test('a long repository list scrolls inside its bounded panel above the footer', async ({
+  page,
+  request,
+}) => {
+  expect((await request.post('/__fixture/reset')).ok()).toBe(true);
+  const repos = Array.from({ length: 50 }, (_, index) => `owner/repository-${index}`);
+  await page.route('**/api/v1/agent/config', (route) =>
+    route.fulfill({
+      json: {
+        repos,
+        runtimes: ['codex'],
+        models: ['fixture-model'],
+        default_model: 'fixture-model',
+        github_connected: true,
+        github_install_url: null,
+      },
+    }),
+  );
+  await page.setViewportSize({ width: 390, height: 480 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/');
+  await settled(page);
+  const repository = page.getByRole('button', { name: /^Repository:/ });
+  await repository.click();
+  const panel = page.getByRole('dialog', { name: 'Repository', exact: true });
+  const search = panel.getByRole('searchbox', { name: 'Search repositories…' });
+  await expect(search).toBeFocused();
+
+  const panelBox = await panel.boundingBox();
+  expect(panelBox).not.toBeNull();
+  expect(panelBox!.y).toBeGreaterThanOrEqual(0);
+  expect(panelBox!.y + panelBox!.height).toBeLessThanOrEqual(480);
+  // The footer stays inside the panel and the rows scroll under it.
+  const footer = panel.getByRole('button', { name: 'Refresh', exact: true });
+  await expect(footer).toBeVisible();
+  const footerBox = await footer.boundingBox();
+  expect(footerBox!.y + footerBox!.height).toBeLessThanOrEqual(panelBox!.y + panelBox!.height);
+
+  const list = panel.locator('div[class*="overflow-y-auto"]').first();
+  const scroll = await list.evaluate((element) => ({
+    client: element.clientHeight,
+    total: element.scrollHeight,
+    overflow: getComputedStyle(element).overflowY,
+  }));
+  expect(scroll.overflow).toBe('auto');
+  expect(scroll.total).toBeGreaterThan(scroll.client);
+
+  // The last row is reachable, which a clipped panel would prevent.
+  const last = panel.getByRole('button', { name: 'owner/repository-49', exact: true });
+  await last.scrollIntoViewIfNeeded();
+  await expect(last).toBeVisible();
+  await expect(footer).toBeVisible();
+});
+
+test('a transformed ancestor does not displace a fixed picker', async ({ page, request }) => {
+  expect((await request.post('/__fixture/reset')).ok()).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/');
+  await settled(page);
+  // The composer's entrance wrapper is the real transformed ancestor a fixed
+  // popup can inherit. Hold a transform on it and verify the menu still lands
+  // directly below its trigger and inside the viewport.
+  await page
+    .locator('main section')
+    .first()
+    .evaluate((element) => {
+      (element as HTMLElement).style.transform = 'translateY(48px)';
+    });
+  const model = page.getByRole('button', { name: 'Model', exact: true });
+  const trigger = await model.boundingBox();
+  await model.click();
+  const panel = page.getByRole('dialog', { name: 'Model', exact: true });
+  await expect(panel).toBeVisible();
+  await expect
+    .poll(async () => {
+      const box = await panel.boundingBox();
+      return box && trigger ? Math.round(box.y - (trigger.y + trigger.height)) : null;
+    })
+    .toBe(6);
+  const box = await panel.boundingBox();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(1440);
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(900);
+});

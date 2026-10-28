@@ -7,7 +7,7 @@ import {
   MENU_POSITIONED,
   MENU_ROW,
   MENU_ROW_DESTRUCTIVE,
-  MENU_SURFACE,
+  MENU_ACTIONS,
 } from '@/components/ui/menuStyles';
 import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import { getAgentConfig } from '@/lib/api/agents';
@@ -92,7 +92,7 @@ function RowMenu({
           role="menu"
           aria-label={label}
           style={popup.style}
-          className={`${MENU_SURFACE} ${MENU_POSITIONED} w-44`}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-44`}
           onKeyDown={popup.onKeyDown}
         >
           {actions.map(({ action, label: text }) => (

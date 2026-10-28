@@ -1,6 +1,6 @@
 'use client';
 
-import { useLayoutEffect, useState, type CSSProperties, type RefObject } from 'react';
+import { useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
 
 function sameStyle(a: CSSProperties, b: CSSProperties): boolean {
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<keyof CSSProperties>;
@@ -48,12 +48,21 @@ export function useAnchoredPopover(
   }: AnchoredPopoverOptions = {},
 ): CSSProperties {
   const [style, setStyle] = useState<CSSProperties>(UNPLACED);
+  // A `position: fixed` box is placed against the viewport unless an ancestor
+  // has a transform, filter, perspective or `contain`. A dialog that animates
+  // in, or a panel with backdrop blur, becomes that containing block. Measure
+  // where the popup actually landed and carry the offset forward, so the
+  // intended viewport position is still the one it gets.
+  const correction = useRef({ x: 0, y: 0 });
 
   useLayoutEffect(() => {
     if (!open) {
+      correction.current = { x: 0, y: 0 };
       setStyle(UNPLACED);
       return;
     }
+    let frame = 0;
+
     const place = () => {
       const trigger = triggerRef.current;
       if (!trigger) return;
@@ -69,9 +78,9 @@ export function useAnchoredPopover(
       const maxW = Math.min(width ?? Math.max(maxWidth, minWidth), widest);
       // The popup's own width once its content is laid out, to keep it on
       // screen; before the first layout, assume the widest it may be.
-      const measured = popoverRef.current?.offsetWidth || maxW;
-      const actual = Math.min(Math.max(measured, minWidth), maxW);
-      const left = Math.max(
+      const measuredLength = popoverRef.current?.offsetWidth || maxW;
+      const actual = Math.min(Math.max(measuredLength, minWidth), maxW);
+      const intendedLeft = Math.max(
         left0 + margin,
         Math.min(rect.left, left0 + viewportWidth - actual - margin),
       );
@@ -79,19 +88,40 @@ export function useAnchoredPopover(
       const below = Math.max(0, top0 + viewportHeight - rect.bottom - gap - margin);
       const above = Math.max(0, rect.top - top0 - gap - margin);
       const placeBelow = below >= preferredHeight || below >= above;
+      const available = placeBelow ? below : above;
+      const height = Math.min(maxHeight, available);
+      // Measure the natural height against the available one. Always position
+      // by `top`: one coordinate makes the containing-block correction exact,
+      // where a `bottom` would mix in a stale height.
+      const natural = popoverRef.current?.offsetHeight ?? height;
+      const intendedTop = placeBelow
+        ? rect.bottom + gap
+        : rect.top - gap - Math.min(natural, height);
+      const intended = { left: intendedLeft, top: intendedTop };
       const next: CSSProperties = {
         position: 'fixed',
-        left,
+        left: intended.left - correction.current.x,
+        top: intended.top - correction.current.y,
         minWidth,
         maxWidth: maxW,
         ...(width !== undefined ? { width: minWidth } : {}),
-        maxHeight: Math.min(maxHeight, placeBelow ? below : above),
-        ...(placeBelow
-          ? { top: rect.bottom + gap }
-          : { bottom: window.innerHeight - rect.top + gap }),
+        maxHeight: height,
       };
-      // Same place, same object: nothing downstream re-runs for a no-op.
       setStyle((current) => (sameStyle(current, next) ? current : next));
+
+      // Measure after the style lands, then correct once and re-place. Two
+      // frames converge: the first finds the containing block's origin, the
+      // second lands at the intended viewport position.
+      frame = window.requestAnimationFrame(() => {
+        const element = popoverRef.current;
+        if (!element) return;
+        const landed = element.getBoundingClientRect();
+        const dx = landed.left - intended.left;
+        const dy = landed.top - intended.top;
+        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+        correction.current = { x: correction.current.x + dx, y: correction.current.y + dy };
+        place();
+      });
     };
     // The page or a container scrolling moves the trigger; the popup's own
     // list scrolling does not, and re-placing then would only churn.
@@ -100,14 +130,19 @@ export function useAnchoredPopover(
       place();
     };
     place();
-    // Once more after the content's real width is known.
-    const frame = window.requestAnimationFrame(place);
+    // Async options, a late search field or a wrapping label change the
+    // popup's size after it opens; follow it so the height stays bounded.
+    const observer =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => place());
+    if (popoverRef.current) observer?.observe(popoverRef.current);
+    if (triggerRef.current) observer?.observe(triggerRef.current);
     window.addEventListener('resize', place);
     window.addEventListener('scroll', onScroll, true);
     window.visualViewport?.addEventListener('resize', place);
     window.visualViewport?.addEventListener('scroll', place);
     return () => {
       window.cancelAnimationFrame(frame);
+      observer?.disconnect();
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', onScroll, true);
       window.visualViewport?.removeEventListener('resize', place);

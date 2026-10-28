@@ -6,8 +6,9 @@ import {
   MENU_HEADING,
   MENU_ROW,
   MENU_ROW_SELECTED,
-  MENU_SURFACE,
+  MENU_ACTIONS,
   MENU_DIVIDER,
+  MENU_POSITIONED,
 } from '@/components/ui/menuStyles';
 import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import type { SidebarPreferences } from './sidebarPreferences';
@@ -67,7 +68,7 @@ export function SidebarViewMenu({
           role="menu"
           aria-label={t('sidebar.viewOptions')}
           style={popup.style}
-          className={`${MENU_SURFACE} fixed z-[100]`}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED}`}
           onKeyDown={popup.onKeyDown}
         >
           {(['group', 'order'] as const).map((field, index) => (

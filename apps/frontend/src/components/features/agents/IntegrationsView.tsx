@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
-import { MENU_ROW, MENU_ROW_DESTRUCTIVE, MENU_SURFACE } from '@/components/ui/menuStyles';
+import { MENU_ACTIONS, MENU_ROW, MENU_ROW_DESTRUCTIVE } from '@/components/ui/menuStyles';
 import { SettingsPage } from '@/components/features/settings/SettingsPage';
 import {
   disconnectAgentIntegration,
@@ -178,7 +178,7 @@ function ProviderActions({
           </svg>
         </summary>
         <div
-          className={`${MENU_SURFACE} absolute left-0 z-10 mt-2 w-56 max-w-[calc(100vw-3rem)] p-1 lg:left-auto lg:right-0`}
+          className={`${MENU_ACTIONS} absolute left-0 z-10 mt-2 max-h-[min(24rem,calc(100dvh-2rem))] w-56 max-w-[calc(100vw-3rem)] p-1 lg:left-auto lg:right-0`}
         >
           {/* GitHub has one way out and nothing else here. Reauthorizing only
               mattered for an installation made outside this page, which

@@ -4,7 +4,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import toast from 'react-hot-toast';
 import { useT } from '@/components/providers';
-import { MENU_SURFACE, MENU_POSITIONED, MENU_ROW } from '@/components/ui/menuStyles';
+import { MENU_ACTIONS, MENU_POSITIONED, MENU_ROW } from '@/components/ui/menuStyles';
 import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import {
   listAllAgentThreadEvents,
@@ -196,7 +196,7 @@ export function ThreadActions({
           role="menu"
           aria-label={t('taskActions.options')}
           style={popup.style}
-          className={`${MENU_SURFACE} ${MENU_POSITIONED} w-48`}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-48`}
           onKeyDown={popup.onKeyDown}
         >
           <button

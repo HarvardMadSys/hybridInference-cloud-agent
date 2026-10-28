@@ -6,7 +6,7 @@ import {
   MENU_POSITIONED,
   MENU_ROW,
   MENU_ROW_DESTRUCTIVE,
-  MENU_SURFACE,
+  MENU_ACTIONS,
 } from '@/components/ui/menuStyles';
 import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import { AGENT_SESSION_SELECTION_LIMIT } from '@/lib/api/agents';
@@ -136,7 +136,7 @@ export function ArchiveProjectMenu({
           role="menu"
           aria-label={t('archive.projectActions', { project })}
           style={popup.style}
-          className={`${MENU_SURFACE} ${MENU_POSITIONED} w-56`}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-56`}
           onKeyDown={popup.onKeyDown}
         >
           <button

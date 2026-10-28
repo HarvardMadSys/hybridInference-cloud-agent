@@ -30,7 +30,12 @@ import {
   SunIcon,
 } from '@/components/features/settings/icons';
 import { isSettingsPath, SETTINGS_PATHS } from '@/components/features/settings/navigation';
-import { MENU_DIVIDER, MENU_ROW, MENU_SURFACE } from '@/components/ui/menuStyles';
+import {
+  MENU_ACTIONS,
+  MENU_DIVIDER,
+  MENU_ROW,
+  MENU_ROW_SELECTED,
+} from '@/components/ui/menuStyles';
 import { switchAccountUrl } from '@/lib/auth/signin';
 import { LOCALES, LOCALE_LABELS } from '@/lib/i18n/locales';
 import { THEME_PREFERENCES, type ThemePreference } from '@/lib/theme';
@@ -56,7 +61,7 @@ const SUBMENU_WIDTH = 216;
 const SUBMENU_MAX_WIDTH = 360;
 const EDGE = 8;
 
-const PANEL = `${MENU_SURFACE} fixed z-[70]`;
+const PANEL = `${MENU_ACTIONS} fixed z-[70] max-h-[calc(100dvh-1rem)]`;
 const ITEM = MENU_ROW;
 const SEPARATOR = MENU_DIVIDER;
 
@@ -438,7 +443,7 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
                         role="menuitemradio"
                         aria-checked={preference === option}
                         tabIndex={-1}
-                        className={ITEM}
+                        className={preference === option ? MENU_ROW_SELECTED : ITEM}
                         onClick={() => setPreference(option)}
                       >
                         <Icon className="h-4 w-4 shrink-0 text-muted" />
@@ -460,7 +465,7 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
                       aria-checked={locale === option}
                       tabIndex={-1}
                       lang={option}
-                      className={ITEM}
+                      className={locale === option ? MENU_ROW_SELECTED : ITEM}
                       onClick={() => setLocale(option)}
                     >
                       <span className="min-w-0 flex-1 truncate">{LOCALE_LABELS[option]}</span>

@@ -3,8 +3,8 @@
 import { useId, useRef, useState, type RefObject } from 'react';
 import { useT } from '@/components/providers';
 import {
+  MENU_ACTIONS,
   MENU_POSITIONED,
-  MENU_SURFACE,
   MENU_ROW,
   MENU_ROW_DESTRUCTIVE,
 } from '@/components/ui/menuStyles';
@@ -80,7 +80,7 @@ export function GoalActionsMenu({
           role="menu"
           aria-label={t('goal.options')}
           style={popup.style}
-          className={`${MENU_SURFACE} ${MENU_POSITIONED} w-44`}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-44`}
           onKeyDown={popup.onKeyDown}
         >
           {canEdit ? (

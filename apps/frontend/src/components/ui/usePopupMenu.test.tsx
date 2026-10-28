@@ -5,7 +5,15 @@ import { cleanup, fireEvent, render, renderHook, screen } from '@testing-library
 import { createRef, useRef, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { MENU_POSITIONED, MENU_ROW, MENU_SURFACE, MENU_ROW_DESTRUCTIVE } from './menuStyles';
+import {
+  MENU_ACTIONS,
+  MENU_POSITIONED,
+  MENU_ROW,
+  MENU_ROW_DESTRUCTIVE,
+  MENU_ROW_SELECTED,
+  MENU_SURFACE,
+  menuRowClass,
+} from './menuStyles';
 import { usePopupMenu } from './usePopupMenu';
 
 afterEach(cleanup);
@@ -127,11 +135,30 @@ describe('usePopupMenu', () => {
 });
 
 describe('shared menu rows', () => {
-  it('marks destructive rows and leaves plain rows on the semantic surface', () => {
+  it('gives plain rows hover and focus feedback on the semantic surface', () => {
     expect(MENU_ROW).not.toContain('gray');
     expect(MENU_ROW).not.toContain('red-');
-    expect(MENU_ROW_DESTRUCTIVE).toContain('text-status-error');
+    expect(MENU_ROW).toContain('enabled:hover:bg-surface-hover');
+    expect(MENU_ROW).toContain('enabled:focus:bg-surface-hover');
     expect(MENU_SURFACE).toContain('bg-surface-raised');
     expect(MENU_POSITIONED).toContain('fixed');
+    expect(MENU_ACTIONS).toContain('overflow-y-auto');
+  });
+
+  it('keeps selected and destructive states from being overridden by the plain hover', () => {
+    expect(MENU_ROW_SELECTED).toContain('bg-accent-subtle');
+    expect(MENU_ROW_SELECTED).toContain('enabled:hover:bg-accent-subtle');
+    expect(MENU_ROW_SELECTED).not.toContain('enabled:hover:bg-surface-hover');
+    expect(MENU_ROW_DESTRUCTIVE).toContain('text-status-error');
+    expect(MENU_ROW_DESTRUCTIVE).not.toContain('enabled:hover:bg-surface-hover');
+    expect(MENU_ROW_DESTRUCTIVE).toContain('enabled:hover:bg-status-error/10');
+  });
+
+  it('marks a disabled row unclickable and dimmed, and leaves enabled rows unaffected', () => {
+    const disabled = menuRowClass({ disabled: true });
+    expect(disabled).toContain('cursor-not-allowed');
+    expect(disabled).toContain('opacity-50');
+    expect(menuRowClass({ disabled: true, selected: true })).not.toContain('bg-accent-subtle');
+    expect(menuRowClass({ active: true })).toContain('bg-surface-hover');
   });
 });
