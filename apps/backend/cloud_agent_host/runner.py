@@ -41,7 +41,7 @@ import tempfile
 import threading
 import time
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER, manager_env
 
@@ -151,11 +151,8 @@ from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorError,
 )
 from cloud_agent_host.setup import run_setup
-from cloud_agent_host.source_preparation import (
-    SOURCE_PREFETCH_JOIN_TIMEOUT_S,
-    read_tracked_lockfiles,
-    run_source_git,
-)
+from cloud_agent_host.source_prefetch import SourcePrefetch
+from cloud_agent_host.source_preparation import read_tracked_lockfiles, run_source_git
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
 from cloud_agent_host.upload_import import import_uploads as _import_uploads
 from cloud_agent_shared import operation_profiling, sandbox_archive_settings
@@ -612,9 +609,10 @@ def _choose_environment_snapshot(
 
     Only a group this turn creates can, and only from a snapshot built on
     this host's sandbox image and from the same dependency manifests as the
-    checkout. Waiting for the checkout here costs only the turns that were
-    handed a snapshot. The outcome is ``None`` when there is nothing to
-    report: no installation to snapshot, or a checkout that failed.
+    checkout. Only the turns that were handed a snapshot wait here, for Git
+    to list the manifests; the archive is built while the group starts. The
+    outcome is ``None`` when there is nothing to report: no installation to
+    snapshot, or a checkout that failed.
     """
     environment = job.environment
     if (
@@ -1587,19 +1585,10 @@ def _handle_host_residencies_lost(lost: list[dict[str, Any]]) -> None:
             client.close()
 
 
-class _SourcePrefetch:
-    """A new chat's source, cloned and archived while its container starts.
+class _SourcePrefetch(SourcePrefetch):
+    """A new chat's source, made with this module's Git steps; see :class:`SourcePrefetch`.
 
-    Cloning outside the chat, scrubbing credentials and building the
-    normalized tar all happen on the host and need nothing from the container,
-    so they run on a thread of their own beside the activation, which creates
-    and boots the guest, instead of after it. Only the import waits for both.
-    A failure is raised where the checkout always failed, in the checkout
-    stage; a turn that stops before then discards whatever was prepared.
-
-    The thread is not a daemon: a turn that ends while the clone is still
-    running waits for it at exit, so its temporary directory is always removed.
-    Discarding cancels Git and archive preparation before joining its cleanup.
+    The steps are looked up here when they run, so they stay this module's.
     """
 
     def __init__(self, job: ClaimedJob, *, uid: int, gid: int, max_bytes: int | None) -> None:
@@ -1607,111 +1596,32 @@ class _SourcePrefetch:
         self._uid = uid
         self._gid = gid
         self._max_bytes = source_import_max_bytes() if max_bytes is None else max_bytes
-        self._lock = threading.Lock()
-        self._done = threading.Event()
-        self._stop = threading.Event()
-        self._discarded = False
-        self._base_sha = ""
-        self._lockfiles: dict[str, str] | None = None
-        self._archive: Any = None
-        self._error: BaseException | None = None
-        self._thread = threading.Thread(target=self._prepare, name="source-prefetch")
-        self._thread.start()
+        super().__init__()
 
-    def _prepare(self) -> None:
-        archive: Any = None
-        try:
-            with tempfile.TemporaryDirectory(prefix="freeinference-source-") as source:
-                check_source_stop(self._stop)
-                if self._job.repo is None:
-                    # Nothing to clone and nothing to publish, so no output branch.
-                    base_sha = prepare_temporary_worktree(workdir=source, stop=self._stop)
-                else:
-                    base_sha = prepare_worktree(
-                        workdir=source,
-                        repo=self._job.repo,
-                        base_sha=self._job.base_sha,
-                        clone_token=self._job.clone_token,
-                        remote_base=repo_clone_base_url(clone_token=self._job.clone_token),
-                        max_bytes=self._max_bytes,
-                        stop=self._stop,
-                    )
-                    check_source_stop(self._stop)
-                    checkout_output_branch(source, self._job.thread_id, stop=self._stop)
-                check_source_stop(self._stop)
-                self._lockfiles = tracked_lockfiles(source, stop=self._stop)
-                check_source_stop(self._stop)
-                # Unnamed and outside the checkout: the archive is spooled to
-                # disk, not held in this process, and gone when it is closed,
-                # which import_into or discard does once the clone is done.
-                archive = tempfile.TemporaryFile(  # noqa: SIM115 — outlives this thread.
-                    prefix="freeinference-source-", suffix=".tar"
-                )
-                build_source_archive(
-                    source,
-                    archive,
-                    uid=self._uid,
-                    gid=self._gid,
-                    max_bytes=self._max_bytes,
-                    stop=self._stop,
-                )
-                archive.flush()
-                archive.seek(0)
-        except BaseException as exc:
-            if archive is not None:
-                archive.close()
-            self._error = exc
-        else:
-            with self._lock:
-                if self._discarded:
-                    archive.close()
-                else:
-                    self._base_sha, self._archive = base_sha, archive
-        finally:
-            self._done.set()
+    def _check_out(self, workdir: str, stop: threading.Event) -> str:
+        if self._job.repo is None:
+            # Nothing to clone and nothing to publish, so no output branch.
+            return prepare_temporary_worktree(workdir=workdir, stop=stop)
+        base_sha = prepare_worktree(
+            workdir=workdir,
+            repo=self._job.repo,
+            base_sha=self._job.base_sha,
+            clone_token=self._job.clone_token,
+            remote_base=repo_clone_base_url(clone_token=self._job.clone_token),
+            max_bytes=self._max_bytes,
+            stop=stop,
+        )
+        check_source_stop(stop)
+        checkout_output_branch(workdir, self._job.thread_id, stop=stop)
+        return base_sha
 
-    def lockfiles(self) -> dict[str, str] | None:
-        """The checkout's dependency manifests, once it is prepared; ``None`` if it failed."""
-        self._done.wait()
-        return None if self._error is not None else self._lockfiles
+    def _list_lockfiles(self, workdir: str, stop: threading.Event) -> dict[str, str] | None:
+        return tracked_lockfiles(workdir, stop=stop)
 
-    def base_sha(self) -> str | None:
-        """The commit the checkout resolved, once it is prepared."""
-        self._done.wait()
-        return self._base_sha or None
-
-    def import_into(
-        self,
-        manager: ChatSandboxManager,
-        spec: ChatSandboxSpec,
-        *,
-        observer: operation_profiling.StageObserver | None = None,
-    ) -> str:
-        """Import the prepared archive into the chat and return its base commit."""
-        with operation_profiling.substage(observer, "source_wait"):
-            self._done.wait()
-        if self._error is not None:
-            raise self._error
-        with self._lock:
-            archive, self._archive = self._archive, None
-        if archive is None:
-            raise SandboxError("the prepared source was already discarded")
-        try:
-            with operation_profiling.substage(observer, "source_import"):
-                manager.import_archive(spec, CHAT_WORKDIR, archive)
-        finally:
-            archive.close()
-        return self._base_sha
-
-    def discard(self) -> None:
-        """Cancel preparation and give its owner a bounded wait to clean up."""
-        self._stop.set()
-        with self._lock:
-            self._discarded = True
-            archive, self._archive = self._archive, None
-        if archive is not None:
-            archive.close()
-        self._thread.join(timeout=SOURCE_PREFETCH_JOIN_TIMEOUT_S)
+    def _build_archive(self, workdir: str, out: BinaryIO, stop: threading.Event) -> None:
+        build_source_archive(
+            workdir, out, uid=self._uid, gid=self._gid, max_bytes=self._max_bytes, stop=stop
+        )
 
 
 def _prefetch_retained_source(
