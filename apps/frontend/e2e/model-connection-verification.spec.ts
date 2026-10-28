@@ -302,3 +302,114 @@ test('the manual declaration stays available behind Advanced', async ({ page }) 
   await expect(card.getByText('Declared', { exact: true })).toBeVisible();
   expect(submitted).toMatchObject({ models: ['claude-model'], protocols: ['anthropic_messages'] });
 });
+
+// The per-model Verify buttons replace the old protocol menu. These cases run
+// with an admin session and empty admin settings, the setup they were written
+// against.
+test.describe('verification without a protocol menu', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route('**/api/v1/session/me', (route) =>
+      route.fulfill({
+        json: {
+          id: 'browser-owner',
+          agent_access: { allowed: true, permissions: ['agent.use', 'agent.admin'] },
+        },
+      }),
+    );
+    await page.route('**/api/admin/agent/settings', (route) =>
+      route.fulfill({
+        json: {
+          revision: 1,
+          definitions: [],
+          values: {},
+          secret_configured: {},
+          bootstrap: [],
+          setup: { required: false, groups: [], bootstrap_missing: [] },
+        },
+      }),
+    );
+  });
+
+  for (const variant of [
+    { name: 'desktop light', width: 1440, height: 900, theme: 'light' },
+    { name: 'mobile dark', width: 390, height: 844, theme: 'dark' },
+  ]) {
+    test(`model verification needs no protocol menu and fits the viewport (${variant.name})`, async ({
+      page,
+    }, testInfo) => {
+      await page.setViewportSize({ width: variant.width, height: variant.height });
+      await page.addInitScript((theme) => {
+        localStorage.setItem('agents.locale', 'en');
+        localStorage.setItem('agents.theme', theme);
+      }, variant.theme);
+      await page.route('**/api/v1/agent/model-preference', (route) =>
+        route.fulfill({
+          json: {
+            default_model: null,
+            last_model: null,
+            effective_model: null,
+            deployment_default: null,
+            models: ['fixture-model'],
+          },
+        }),
+      );
+      await page.route('**/api/v1/agent/model-connections', (route) =>
+        route.fulfill({
+          json: {
+            enabled: true,
+            configured: true,
+            connections: [
+              connectionView({
+                id: connectionId,
+                name: 'Fixture provider',
+                base_url: 'https://provider.example/v1',
+                model_status: [unverified('fixture-small'), unverified('fixture-large')],
+              }),
+            ],
+          },
+        }),
+      );
+      const checked: unknown[] = [];
+      let release!: () => void;
+      const allowed = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route(
+        `**/api/v1/agent/model-connections/${connectionId}/verify`,
+        async (route) => {
+          checked.push(route.request().postDataJSON());
+          await allowed;
+          return route.fulfill({ json: { ...chatOnly('fixture-large'), recorded: true } });
+        },
+      );
+      await page.goto('/settings/my-settings');
+      const card = page.getByRole('article', { name: 'Fixture provider' });
+      await expect(card.getByRole('combobox')).toHaveCount(0);
+      await expect(page.locator('select:visible')).toHaveCount(0);
+      await expect(page.locator('datalist')).toHaveCount(0);
+      expect(checked).toEqual([]);
+      await card.getByRole('button', { name: 'Verify fixture-large', exact: true }).click();
+      await expect.poll(() => checked.length).toBe(1);
+      await expect(
+        card.getByRole('button', { name: 'Verify fixture-small', exact: true }),
+      ).toBeDisabled();
+      await expect(
+        card.getByRole('button', { name: 'Verify fixture-large', exact: true }),
+      ).toBeDisabled();
+      expect(checked).toEqual([{ model: 'fixture-large' }]);
+      release();
+      await expect(card.getByText('Ready', { exact: true })).toHaveCount(1);
+      await expect(card.getByText('Not verified', { exact: true })).toHaveCount(1);
+      await expect(
+        card.getByRole('button', { name: 'Verify fixture-large', exact: true }),
+      ).toBeEnabled();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        variant.width,
+      );
+      await card.screenshot({
+        path: testInfo.outputPath('model-verification-no-protocol-menu.png'),
+        animations: 'disabled',
+      });
+    });
+  }
+});
