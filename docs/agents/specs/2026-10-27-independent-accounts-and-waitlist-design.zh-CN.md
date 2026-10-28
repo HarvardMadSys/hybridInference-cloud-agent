@@ -1,13 +1,13 @@
 # Cloud Agent 独立账号与 waiting list
 
-日期：2026-10-27；更新：2026-10-28。状态：账号与 waiting list 首版已实现，
-正在整合个人模型连接及完整验收；未部署或迁移生产数据。
+日期：2026-10-27；更新：2026-10-28。状态：独立账号、waiting list 与个人模型连接已整合并完成代码验收；
+未合并、部署或迁移生产数据。
 
-[验收记录](../reviews/2026-10-28-independent-accounts-acceptance.md)记录代码版本、测试环境、结果及未覆盖范围。
+[整合验收记录](../reviews/2026-10-28-local-accounts-model-connections-acceptance.md)记录当前代码版本、测试环境、结果及未覆盖范围。
 
 代码核对基线：Cloud Agent `3f60b6afbb86c67422b3c237c3e9ab68ed2effac`；
 HybridInference `321e9a6c457dcc80d35977aaac472d54041204a8`。
-本文与个人模型连接的独立工作线并行推进。
+两条工作线已在 PR #1030 整合，个人模型连接基于 PR #1029。
 
 ## 1. 已确认的产品方向
 
@@ -199,5 +199,5 @@ local 模式只允许新的独立数据库；遇到已绑定 Gateway 或已有 o
 没有可用连接时明确引导配置，不会将本地账号 ID 发送给 Gateway，也不会隐式使用平台 key。
 `AGENT_MODEL_CONNECTIONS_ENABLED` 在 local 模式仍是显式开关；关闭时不提供配置入口或接纳新轮次。
 任务、续聊、队列、goal 和 Fork 保留 `(model, model_connection_id)`，连接失效不自动换源。
-现有独立账号验收记录是整合前的历史结果；整合验收另记实际版本与机器。
+原独立账号验收记录保留为历史结果；当前整合验收单独记录了实际版本与机器。
 模拟上游协议、真实账号和数据库的测试不能代替真实 provider 与 Kata host 的全链路验收。
