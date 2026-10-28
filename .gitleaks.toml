@@ -45,3 +45,12 @@ regexTarget = "line"
 regexes = [
   '''^\s*key: 'conversation-1',$''',
 ]
+
+[[allowlists]]
+description = "Fixed fake provider keys used only by model-connection wire and launch tests."
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = [
+  '''^fixture-anthropic-key-0123456789$''',
+  '''^sk-owner-secret-0123456789$''',
+]

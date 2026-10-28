@@ -20,6 +20,7 @@ Anthropic 地址规范化只去掉结尾的一个 `/v1`，保留其他前缀；�
 - `make docs-translate` 与 `make docs-verify` 完成，英文及简体中文文档与翻译目录通过检查。
 - Codex 独立使用项目固定的 Claude Code 2.1.220，对回环模拟服务发起请求。域名、`/v1`、`/anthropic`、`/anthropic/v1` 四种输入均生成预期路径，使用 `x-api-key` 和 `anthropic-version: 2023-06-01`，没有 Bearer 凭据。模拟服务故意返回 401；此项仅验证实际 CLI 的请求路径和头部。
 - 已检查桌面表单、模型来源选择器和手机中文连接卡片的浏览器截图；中英文完整流程验证保存、连接测试、Claude Code 提交以及切换不兼容 Agent 后按钮和 Enter 均不能提交。浏览器使用模拟 API。
+- PR 的 Gitleaks 把两个固定测试假 key 识别为通用 API key；仅对 `generic-api-key` 规则精确豁免这两个完整值，没有豁免路径。使用与 CI 相同的 8.30.1 验证当前文件和完整 Git 历史均无发现，改动假 key 数字后的反例仍被检出；凭据与扫描工作流的 12 项测试通过。
 
 ## 独立审查修复
 
