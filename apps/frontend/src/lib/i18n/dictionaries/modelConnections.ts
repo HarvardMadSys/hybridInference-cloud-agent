@@ -20,10 +20,10 @@ export const modelConnectionsEn = {
   'connections.reason.upstream_error': 'The provider failed to answer (5xx). Try again later.',
   'connections.reason.too_large': "The provider's answer was larger than a check reads.",
   'connections.reason.endpoint_missing':
-    'The provider has no such endpoint or model (404). Check the Base URL, the model id, and that the provider offers this protocol.',
+    'The provider has no such endpoint or model (404). Check the Base URL and model ID.',
   'connections.reason.request_rejected':
-    'The provider rejected a streaming request with a tool (400/422). The model or provider may not support tool calls in this protocol.',
-  'connections.reason.not_streaming': 'The provider did not answer with a stream in this protocol.',
+    'The provider rejected a streaming request with a tool (400/422). The model may not support tool calls.',
+  'connections.reason.not_streaming': 'The provider did not answer with a stream.',
   'connections.reason.no_tool_call': 'The model did not call the offered tool exactly once.',
   'connections.reason.missing_call_id':
     "The model's tool call carried no call id to answer it with.",

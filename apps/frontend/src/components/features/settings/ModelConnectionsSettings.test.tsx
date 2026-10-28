@@ -421,7 +421,7 @@ describe('a saved connection', () => {
     );
     expect(
       await screen.findByText(
-        'Not usable: The provider has no such endpoint or model (404). Check the Base URL, the model id, and that the provider offers this protocol.',
+        'Not usable: The provider has no such endpoint or model (404). Check the Base URL and model ID.',
       ),
     ).toBeVisible();
     // Nothing was saved, and the form still holds the picked ID to fix or remove.
