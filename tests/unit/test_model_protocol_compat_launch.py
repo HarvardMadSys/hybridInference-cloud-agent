@@ -215,6 +215,7 @@ def test_the_launch_fields_carry_the_client_protocol_and_token_only_when_transla
         {"client_protocol": "responses"},
         {"client_protocol": "responses", "local_token": "not-a-token"},
         {"local_token": _TOKEN},
+        {"local_token": "not-a-token"},
     ):
         with pytest.raises(ValueError):
             ModelConnectionAccess(**{**direct.model_dump(), **bad})

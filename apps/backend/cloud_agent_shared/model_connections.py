@@ -9,9 +9,9 @@ started on it, and hands it to that turn's member process.
 
 Which wire protocol each runtime speaks is fixed by its adapter, not by the
 connection: OpenCode, Kilo and pi are configured with Chat Completions, Codex
-with Responses, and Claude Code with Anthropic Messages. A runtime runs on a
-connection only when the connection declares the protocol that runtime speaks;
-nothing translates between them.
+with Responses, and Claude Code with Anthropic Messages. A runtime uses its
+own protocol directly when the connection offers it. Otherwise Codex and
+Claude Code can use Chat Completions through the member's private translator.
 
 **Where each protocol's requests go.** An OpenAI-style CLI appends its own
 path (``/chat/completions``, ``/responses``) to the Base URL exactly as
@@ -229,8 +229,10 @@ class ModelConnectionAccess(BaseModel):
         # Only the two pairs the helper implements; anything else is direct.
         if self.client_protocol and COMPAT_UPSTREAMS.get(self.client_protocol) != self.protocol:
             raise ValueError("unsupported translated model connection plan")
-        if bool(self.client_protocol) != bool(LOCAL_TOKEN.fullmatch(self.local_token)):
+        if bool(self.client_protocol) != bool(self.local_token):
             raise ValueError("a translated plan, and only one, carries its member's token")
+        if self.local_token and not LOCAL_TOKEN.fullmatch(self.local_token):
+            raise ValueError("a translated plan needs a valid member token")
         return self
 
     @property

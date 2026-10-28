@@ -100,7 +100,10 @@ for (const viewport of [
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       viewport.width,
     );
-    await page.screenshot({ path: testInfo.outputPath('translated-check.png') });
+    await page.screenshot({
+      path: testInfo.outputPath('translated-check.png'),
+      animations: 'disabled',
+    });
 
     const created: Record<string, unknown>[] = [];
     await page.route('**/api/v1/agent/config*', (route) =>
@@ -154,7 +157,10 @@ for (const viewport of [
     await expect(
       page.getByRole('option', { name: 'both-model · Both APIs', exact: true }),
     ).toBeVisible();
-    await page.screenshot({ path: testInfo.outputPath('codex-sources.png') });
+    await page.screenshot({
+      path: testInfo.outputPath('codex-sources.png'),
+      animations: 'disabled',
+    });
     await page
       .getByRole('option', { name: 'chat-model · Chat provider · via Chat Completions' })
       .click();
