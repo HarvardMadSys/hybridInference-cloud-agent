@@ -139,7 +139,10 @@ for (const locale of ['en', 'zh-CN'] as const) {
           return route.fulfill({
             status: 422,
             json: verificationRefusal([
-              { ...refusedStatus('chat-model', 'The provider refused the key.', 'auth'), status: 'failed' },
+              {
+                ...refusedStatus('chat-model', 'The provider refused the key.', 'auth'),
+                status: 'failed',
+              },
               {
                 ...refusedStatus('claude-model', 'The provider refused the key.', 'auth'),
                 status: 'failed',
