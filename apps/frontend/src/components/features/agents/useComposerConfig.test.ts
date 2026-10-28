@@ -43,7 +43,9 @@ function useScreen(retrySourceControl = false) {
   return { config, error, ...reading };
 }
 
-beforeEach(() => vi.mocked(getAgentConfig).mockReset());
+beforeEach(() => {
+  vi.mocked(getAgentConfig).mockReset();
+});
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
