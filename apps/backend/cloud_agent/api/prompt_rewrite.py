@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from cloud_agent.api._local_auth import refuse_in_local_mode
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_gateway_client, get_grant_client
 from cloud_agent.prompt_rewrite import (
@@ -26,6 +27,9 @@ async def rewrite_agent_prompt(
     grants: Any = Depends(get_grant_client),
 ) -> PromptRewriteResponse:
     """Ask clarifications or rewrite a draft using the selected model."""
+    # It runs on a Gateway grant; local accounts have none, and their own
+    # connections are never sent here.
+    refuse_in_local_mode()
     # The completion opens a client of its own rather than borrowing the shared
     # pool: it holds its connection for the model's whole answer, and a burst of
     # rewrites must not leave owner admission and grant calls waiting for one.

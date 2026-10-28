@@ -97,9 +97,9 @@ def model_catalog_unavailable(cause: BaseException | None = None) -> HTTPExcepti
     waiting message's check reads anything below 500 as one and holds the
     message until its owner releases it.
 
-    The exception is a local account with no model connection: that is a
-    verdict, so it is a 409 ``model_connection_required``, and a waiting
-    message is held with it rather than retried.
+    The exception is a local account asking for a Gateway model: there are
+    none, so that is a verdict, a 409 ``model_connection_required``, and a
+    waiting message is held with it rather than retried.
     """
     if _needs_model_connection(cause):
         return HTTPException(
@@ -108,8 +108,8 @@ def model_catalog_unavailable(cause: BaseException | None = None) -> HTTPExcepti
                 "error": {
                     "type": "model_connection_required",
                     "message": (
-                        "This account has no model connection. "
-                        "Add a personal model connection to run tasks."
+                        "This deployment has no shared models. Choose a model from one "
+                        "of your own model connections, or add one in Settings."
                     ),
                 }
             },

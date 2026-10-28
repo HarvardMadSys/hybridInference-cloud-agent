@@ -13,6 +13,11 @@ Two routes, both scoped to the signed-in owner:
 which models this owner may call, and a pin naming a retired model would make
 every new task start on something the create endpoint refuses. The check is
 the create endpoint's own predicate, so the two cannot disagree.
+
+**Local accounts have no pin.** A pin names a Gateway model, and with
+``AGENT_AUTH_MODE=local`` there are none: both routes answer 409
+``model_connection_required``, without asking any catalog. A new task there
+starts on the owner's last connection model, which ``/config`` reports.
 """
 
 from __future__ import annotations
@@ -22,6 +27,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import Field
 
+from cloud_agent.accounts.config import local_mode
+from cloud_agent.accounts.directory import ModelConnectionRequired
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_gateway_client, get_storage, require_store
 from cloud_agent.application.job_admission import model_catalog_unavailable
@@ -42,6 +49,12 @@ if TYPE_CHECKING:
 
 
 router = APIRouter(prefix="/v1/agent/model-preference", tags=["model-preference"])
+
+
+def _refuse_local_pin() -> None:
+    """A local account has no Gateway model to pin; see the module docstring."""
+    if local_mode():
+        raise model_catalog_unavailable(ModelConnectionRequired())
 
 
 class _ModelPreferenceStorage(Protocol):
@@ -96,6 +109,7 @@ async def read_model_preference(
 ) -> ModelPreferenceResponse:
     """Read what a new task would start on, and where that came from."""
     response.headers["Cache-Control"] = "no-store"
+    _refuse_local_pin()
     preference = await require_store(store).model_preferences.get_model_preference(user["user_id"])
     return _view(preference, await agent_visible_models(gateway, user_id=user["user_id"]))
 
@@ -115,6 +129,7 @@ async def save_model_preference(
     choice by forgetting to send one.
     """
     response.headers["Cache-Control"] = "no-store"
+    _refuse_local_pin()
     models = await agent_visible_models(gateway, user_id=user["user_id"])
     requested = body.default_model
     if requested is not None:

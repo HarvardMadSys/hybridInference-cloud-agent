@@ -98,8 +98,8 @@ async def get_agent_config(
     """
     if fresh and github.credentials is not None:
         github.credentials.forget_user(user["user_id"])
-    # Independent sources can be read together. The model fields come from
-    # one current Gateway response, without caching the owner's admission.
+    # Independent sources can be read together. The Gateway model fields come
+    # from one current Gateway response, without caching the owner's admission.
     (
         (repos, github_account),
         (models, model_efforts),
@@ -118,6 +118,7 @@ async def get_agent_config(
         # by its Gateway namesake: the control stays empty until a choice.
         model_connections = []
     connection_default = resolve_connection_default(models, preference, model_connections)
+    options = [_connection_option(row) for row in model_connections if row.get("enabled")]
     if github.load_status == "unavailable":
         # The create endpoint answers 503 until the App is back, so a form that
         # looked ready would only fail on submit — whatever else is true.
@@ -147,9 +148,12 @@ async def get_agent_config(
         # will hit — not /v1/models, which answers for the *browsing* user and
         # offered models whose first agent call then 404ed.
         models=models,
-        # A local account runs nothing until it has a model connection; the
-        # composer says so instead of showing an empty picker as an outage.
-        model_connection_required=local_mode() and not models,
+        # A local account runs nothing until one of its own connections has a
+        # model verified for some Agent; the composer then offers the way to
+        # set one up instead of an empty picker that looks like an outage.
+        model_connection_required=local_mode()
+        and not any(option.model_runtimes for option in options),
+        gateway_inference=not local_mode(),
         # What each runtime can express, and which models take the parameter at
         # all. The composer offers the platform's levels narrowed to the first
         # and gated on the second, and no control when either is empty — which
@@ -174,9 +178,7 @@ async def get_agent_config(
         model_connections_enabled=model_connections_enabled(),
         # The owner's own enabled connections, offered beside the Gateway's
         # models whether or not the Gateway catalog answered.
-        model_connections=[
-            _connection_option(row) for row in model_connections if row.get("enabled")
-        ],
+        model_connections=options,
         mcp_runtimes=runtimes_supporting_mcp(),
         github_connected=github_connected,
         # OAuth must start on the authenticated integrations page so the
@@ -209,7 +211,13 @@ async def _repositories_and_account(
 async def _model_configuration_for_user(
     gateway: Any, user_id: str
 ) -> tuple[list[str], dict[str, list[str]]]:
-    """Return one model configuration, or no options when the Gateway fails."""
+    """Return one model configuration, or no options when the Gateway fails.
+
+    Local accounts have no Gateway catalog, so it is not asked: their models
+    come from their own connections alone.
+    """
+    if local_mode():
+        return [], {}
     try:
         return await gateway.model_catalog_with_reasoning_efforts(user_id)
     except GatewayError:

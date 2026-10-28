@@ -25,8 +25,8 @@ async def bind_identity_source(app: FastAPI, pool: asyncpg.Pool) -> AuthMode:
     """Refuse a database the configured identity source cannot own; record the mode.
 
     Raises:
-        LocalAuthNotConfigured: Local mode without a usable secret, or an
-            unknown ``AGENT_AUTH_MODE``.
+        LocalAuthNotConfigured: Local mode without a usable secret or
+            credential encryption key, or an unknown ``AGENT_AUTH_MODE``.
         IdentityNamespaceError: The database belongs to the other source.
     """
     from cloud_agent.accounts.config import auth_mode, check_local_configuration
@@ -37,6 +37,7 @@ async def bind_identity_source(app: FastAPI, pool: asyncpg.Pool) -> AuthMode:
     app.state.auth_mode = mode
     if mode == "local":
         check_local_configuration()
+        _check_local_inference()
         await ensure_local_namespace(pool)
         app.state.gateway_issuer = None
         return mode
@@ -45,6 +46,29 @@ async def bind_identity_source(app: FastAPI, pool: asyncpg.Pool) -> AuthMode:
     issuer = (setting_env("GATEWAY_ISSUER") or "").strip() or None
     app.state.gateway_issuer = await ensure_gateway_namespace(pool, issuer)
     return mode
+
+
+def _check_local_inference() -> None:
+    """Refuse local mode where owners could not store a model connection.
+
+    Local accounts have no Gateway inference: their own connections are the
+    only way they run anything, and the connection keys are stored encrypted
+    under this deployment's credential key. Without it every task would fail.
+
+    Raises:
+        LocalAuthNotConfigured: The credential encryption key is unusable.
+    """
+    from cloud_agent.accounts.config import LocalAuthNotConfigured
+    from cloud_agent.application.model_connections import model_connection_cipher
+    from cloud_agent.credential_cipher import CredentialCipherError
+
+    try:
+        model_connection_cipher()
+    except CredentialCipherError:
+        raise LocalAuthNotConfigured(
+            "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY must be set in local mode: "
+            "personal model connection keys are stored encrypted under it"
+        ) from None
 
 
 def attach_local_identity(app: FastAPI, storage: Storage, *, local: bool) -> None:

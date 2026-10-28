@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 
 from cloud_agent.domain.model_connections import ModelConnectionConflict
+from cloud_agent.storage._sql.accounts import local_access_ended
 from cloud_agent.storage._sql.rows import load_json
 
 if TYPE_CHECKING:
@@ -321,6 +322,10 @@ class PostgresModelConnectionRepository:
         In the same transaction, remember the key revision as handed to this
         sandbox group, as its scan-only copy, so the group's trusted snapshots
         and publications are refused if they carry it later.
+
+        A local owner whose access has ended gets no binding, and so no key:
+        the statement is the fence, as for establishing the residency itself,
+        so a revocation that commits between the two hands the key to nobody.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             current = await conn.fetchval(
@@ -335,13 +340,14 @@ class PostgresModelConnectionRepository:
             if current is None or int(current) != revision:
                 return False
             sandbox_id = await conn.fetchval(
-                """
+                f"""
                 SELECT m.sandbox_id FROM agent_thread_sandbox_memberships m
                 JOIN agent_threads t ON t.id = m.thread_id
                 WHERE m.thread_id = $1 AND m.residency_generation = $2
                   AND m.residency_status = 'hot'
                   AND m.residency_lease_expires_at > clock_timestamp()
                   AND t.user_id = $3
+                  AND NOT {local_access_ended("t.user_id")}
                 FOR UPDATE OF m
                 """,
                 thread_id,

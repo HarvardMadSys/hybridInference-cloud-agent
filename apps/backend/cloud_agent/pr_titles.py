@@ -152,8 +152,14 @@ async def generate_pr_title(  # noqa: C901, PLR0912, PLR0915 complexity baseline
             details["status_code"] = error.response.status_code
         logger.info("agent_pr_title_generation_failed", extra=details)
 
-    if not base_url or not model or not messages or grants is None:
+    # A title is generated on a Gateway grant only: a turn on its owner's own
+    # model connection names that provider's model, which the Gateway must
+    # never be asked for. (Local accounts have no Gateway grant either; their
+    # grant client refuses every mint without a network call.)
+    personal_source = job.get("model_connection_id") is not None
+    if not base_url or not model or not messages or grants is None or personal_source:
         for reason, missing in (
+            ("personal_model_source", personal_source),
             ("missing_gateway", not base_url),
             ("missing_model", not model),
             ("missing_conversation", not messages),

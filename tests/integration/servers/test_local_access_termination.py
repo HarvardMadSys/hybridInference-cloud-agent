@@ -1,12 +1,13 @@
 """Revoking a local account stops its work: real Postgres, real claims and residencies.
 
-The owner is a local account and the Gateway stand-in is the local one, with
-the queue fixture's catalog plugged into its model seam. Each case drives the
-real worker and residency paths: a revocation must stop queued and running
-turns, release residencies, refuse a residency an attempt admitted before it
-tries to establish afterwards, hold the waiting queue, kill the group's
-terminals, and keep re-approval waiting until all of that is acknowledged —
-without a later retry touching work the new approval allows.
+The owner is a local account, the Gateway stand-ins are the local ones, and
+every turn runs on the owner's own verified model connection, as a local
+account's turns must. Each case drives the real worker and residency paths: a
+revocation must stop queued and running turns, release residencies (and the
+connection key's binding to them), refuse a residency an attempt admitted
+before it tries to establish afterwards, hold the waiting queue, kill the
+group's terminals, and keep re-approval waiting until all of that is
+acknowledged — without a later retry touching work the new approval allows.
 """
 
 from __future__ import annotations
@@ -19,11 +20,17 @@ import pytest_asyncio
 import tests.integration.servers.test_pending_message_queue as queue
 from fastapi import HTTPException
 from tests.integration.servers.test_pending_message_queue import (
-    _claim_body,
+    _claim_body as _gateway_claim_body,
     api as api,
     pool as pool,
 )
 from tests.support.local_accounts import LOCAL_SECRET, act, make_account
+from tests.support.model_connections import (
+    TEST_API_KEY,
+    use_test_cipher,
+    verified_connection,
+    with_connection_capability,
+)
 
 from cloud_agent.accounts import config
 from cloud_agent.accounts.directory import (
@@ -32,7 +39,8 @@ from cloud_agent.accounts.directory import (
     LocalOwnerDirectory,
 )
 from cloud_agent.api._local_auth import terminal_open_fence
-from cloud_agent.api.deps import get_gateway_client
+from cloud_agent.api.deps import get_gateway_client, get_grant_client
+from cloud_agent.application.model_connections import connection_residency_credential
 from cloud_agent.application.owner_termination import (
     enforce_ended_access,
     terminal_freeze_token,
@@ -40,10 +48,17 @@ from cloud_agent.application.owner_termination import (
 )
 from cloud_agent.domain.accounts import AccountTransitionRefused
 from cloud_agent.domain.execution import CANCELLED, RUNNING
+from cloud_agent.domain.model_connections import ModelConnectionUnusable
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 OWNER = "01J0000000000000000000WNER"
+MODEL = "provider-model"
+
+
+def _claim_body(worker_id: str) -> dict[str, Any]:
+    """The queue fixture's claim, from a host that runs members on owner connections."""
+    return with_connection_capability(_gateway_claim_body(worker_id))
 
 
 class _Manager:
@@ -90,16 +105,27 @@ class _Manager:
 
 @pytest_asyncio.fixture(autouse=True)
 async def _local_owner(api, monkeypatch):
-    """Make the queue fixture's owner a local account, answered by the local directory."""
+    """Make the queue fixture's owner a local account whose turns run on its own connection."""
     monkeypatch.setenv(config.ENV_AUTH_MODE, "local")
     monkeypatch.setenv(config.ENV_LOCAL_SESSION_SECRET, LOCAL_SECRET)
+    use_test_cipher(monkeypatch)
     # The fixture's owner override reads this name on every request.
     monkeypatch.setattr(queue, "_OWNER", OWNER)
+    monkeypatch.setattr(queue, "_claim_body", _claim_body)
     await make_account(api.store, "owner@example.org", admission="approved", account_id=OWNER)
-    local_gateway = LocalModeGateway(
-        LocalOwnerDirectory(api.store.local_accounts), catalog=api.gateway
-    )
+    local_gateway = LocalModeGateway(LocalOwnerDirectory(api.store.local_accounts))
     api.app.dependency_overrides[get_gateway_client] = lambda: local_gateway
+    api.app.dependency_overrides[get_grant_client] = LocalModeGrantClient
+    connection = await verified_connection(api.store, OWNER, models=(MODEL,))
+    api.connection = connection
+    create = api.create
+
+    async def create_on_connection(prompt: str = "fix it", **fields: Any) -> dict[str, Any]:
+        return await create(
+            prompt, **{"model": MODEL, "model_connection_id": connection["id"], **fields}
+        )
+
+    api.create = create_on_connection
     api.manager = _Manager()
     monkeypatch.setattr(
         "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host",
@@ -373,3 +399,63 @@ async def test_a_pass_in_flight_excludes_other_passes_and_approval(api):
     assert await _job(api, second["id"]) == {"state": "running", "cancel_requested": False}
     assert await _residency(api, turn["thread_id"]) != "none"
     assert sum(call[0] == "suspend" for call in api.manager.calls) == suspends
+
+
+async def _job_row(api, job_id: str) -> dict[str, Any]:
+    async with api.pool.acquire() as conn:
+        return dict(await conn.fetchrow("SELECT * FROM agent_jobs WHERE id = $1", job_id))
+
+
+async def test_revocation_closes_a_member_running_on_the_owner_connection(api):
+    """The member's process holds the owner's provider key; revocation takes it away."""
+    job = await api.create()
+    turn = await api.start(job)
+    row = await _job_row(api, job["id"])
+    assert (row["model"], row["model_connection_id"]) == (MODEL, api.connection["id"])
+    residency = {"thread_id": job["thread_id"], "generation": turn["residency_generation"]}
+    access = await connection_residency_credential(api.store, row, row=residency)
+    assert access.api_key == TEST_API_KEY and access.connection_id == api.connection["id"]
+
+    revoked = await act(api.store, OWNER, "revoke")
+    # From the commit, before any pass: the key is bound to no residency again.
+    with pytest.raises(ModelConnectionUnusable) as unusable:
+        await connection_residency_credential(api.store, row, row=residency)
+    assert unusable.value.reason == "changed"
+    key = (job["thread_id"], turn["residency_generation"])
+    assert (
+        await api.store.residency.heartbeat_residencies(
+            residencies=[key], ttl_seconds=1800, host=queue._HOST
+        )
+        == {}
+    )
+
+    generation = revoked.account.version
+    assert not await terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, generation)
+    assert await _residency(api, job["thread_id"]) == "none"
+    assert ("residency_lost", job["thread_id"]) in api.manager.calls
+    assert await _job(api, job["id"]) == {"state": "running", "cancel_requested": True}
+
+    await _end_turn(api, turn)
+    assert await enforce_ended_access(api.store, LocalModeGrantClient()) == 1
+    await act(api.store, OWNER, "approve")
+    # Approval resumes nothing: the stopped turn is not run again on the key.
+    assert (await _job(api, job["id"]))["state"] == "cancelled"
+    response = await api.client.post("/v1/agent/worker/claim", json=_claim_body("w"))
+    assert response.status_code == 200 and response.json() is None, response.text
+
+
+async def test_a_turn_without_a_connection_is_refused_and_never_reaches_a_gateway(api):
+    """A local account has no Gateway models: the source is never silently swapped."""
+    response = await api.client.post(
+        "/v1/agent/jobs",
+        json={"repo": queue._REPO, "task_prompt": "fix it", "model": MODEL, "base_sha": "a" * 40},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["error"]["type"] == "model_connection_required"
+
+    job = await api.create()
+    claim = await api.claim(job["id"])
+    # The claim carries the owner's own key and no Gateway grant.
+    assert claim["model_connection"]["api_key"] == TEST_API_KEY
+    assert claim["model_connection"]["connection_id"] == api.connection["id"]
+    assert not claim.get("sandbox_token")

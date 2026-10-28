@@ -13,18 +13,21 @@ administrator's change governs the next request, claim and round.
 
 ``LocalModeGrantClient`` stands in for the Gateway grant client the same way.
 Gateway grants are inference credentials keyed to a Gateway subject, and a
-local account has none; until a personal model connection supplies inference,
-every mint is refused.
+local account has none: every mint is refused.
 
-**The BYOK seam.** ``LocalModeGateway(catalog=...)`` takes the personal model
-connection catalog once that feature is integrated; without one, every model
-lookup raises :class:`ModelConnectionRequired`. Running a task end to end in
-local mode needs that separate personal-model-connection branch.
+**Models.** A local account runs only on its own model connections. A turn
+on one names its ``model_connection_id``, and every step of it (admission,
+follow-ups, the waiting queue, goal rounds, Fork, claims and residencies)
+resolves the model through that connection, never through a catalog here. So
+this object has no catalog at all: a Gateway model lookup, which is what a
+turn without a connection asks for, raises :class:`ModelConnectionRequired`.
+Feeding connection models in here would erase their source, and two
+connections, or a connection and the Gateway, may offer the same model id.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.domain.accounts import may_sign_in, permissions_for
@@ -49,7 +52,8 @@ class ModelConnectionRequired(GatewayError):
     def __init__(self) -> None:
         """A definitive refusal, so no caller retries it as an outage."""
         super().__init__(
-            "This account has no model connection. Add a personal model connection to run tasks.",
+            "This deployment has no shared models. Choose a model from one of your own "
+            "model connections, or add one in Settings.",
             status_code=409,
             error_type=MODEL_CONNECTION_REQUIRED,
         )
@@ -57,16 +61,6 @@ class ModelConnectionRequired(GatewayError):
 
 class LocalDirectoryUnavailable(GatewayError):
     """The local account store could not answer; no verdict on the owner."""
-
-
-class ModelCatalog(Protocol):
-    """What a personal model connection catalog supplies (the BYOK seam)."""
-
-    async def model_catalog_bundle(
-        self, user_id: str
-    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
-        """Models, aliases and effort domains the owner's connections offer."""
-        ...
 
 
 class LocalOwnerDirectory:
@@ -118,10 +112,9 @@ class LocalModeGateway:
     #: Callers that check whether a Gateway is reachable find one that answers.
     configured = True
 
-    def __init__(self, directory: LocalOwnerDirectory, catalog: ModelCatalog | None = None) -> None:
-        """Answer identity from ``directory`` and models from ``catalog``, if any."""
+    def __init__(self, directory: LocalOwnerDirectory) -> None:
+        """Answer identity from ``directory``."""
         self._directory = directory
-        self._catalog = catalog
 
     async def agent_access(self, user_id: str) -> AgentAccessDecision:
         """See :meth:`LocalOwnerDirectory.agent_access`."""
@@ -134,10 +127,8 @@ class LocalModeGateway:
     async def model_catalog_bundle(
         self, user_id: str
     ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
-        """Models from the personal connection catalog, or a typed refusal."""
-        if self._catalog is None:
-            raise ModelConnectionRequired
-        return await self._catalog.model_catalog_bundle(user_id)
+        """No Gateway catalog exists here: a typed refusal, without a network call."""
+        raise ModelConnectionRequired
 
     async def model_catalog(self, user_id: str) -> list[str]:
         """Model ids only."""
@@ -179,8 +170,9 @@ class LocalModeGrantClient:
     async def mint(self, **_kwargs: Any) -> dict[str, Any]:
         """Refuse definitively, as for a subject the Gateway cannot serve.
 
-        Unreachable while job creation refuses every model; the claim path then
-        ends the turn instead of returning it to the queue.
+        Unreachable for a turn on a model connection, which never asks for a
+        grant, and job creation refuses every other turn; should one get this
+        far, the claim path ends it instead of returning it to the queue.
         """
         raise GatewayError(
             "Gateway inference grants are not available to local accounts",
@@ -220,6 +212,5 @@ __all__ = [
     "LocalModeGateway",
     "LocalModeGrantClient",
     "LocalOwnerDirectory",
-    "ModelCatalog",
     "ModelConnectionRequired",
 ]

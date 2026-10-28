@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import HTTPException
 
+from cloud_agent.accounts.config import local_mode
 from cloud_agent.application.residency import _mint_residency_grant, close_released_residencies
 from cloud_agent.credential_cipher import (
     USER_CREDENTIAL_ENCRYPTION_KEY,
@@ -152,7 +153,13 @@ def model_connections_enabled() -> bool:
     Off until an operator turns it on after the whole control plane runs a
     release that knows connections (``AGENT_MODEL_CONNECTIONS_ENABLED``): an
     older replica would run a connection's turn as a Gateway turn.
+
+    Always on with local accounts (``AGENT_AUTH_MODE=local``). Their own
+    connections are the only inference they have, and no older replica can be
+    serving: one that predates connections cannot serve local accounts either.
     """
+    if local_mode():
+        return True
     raw = setting_env("AGENT_MODEL_CONNECTIONS_ENABLED", "") or ""
     return raw.strip().lower() in ("1", "true", "yes")
 

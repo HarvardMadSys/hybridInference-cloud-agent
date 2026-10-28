@@ -60,8 +60,17 @@ class AgentConfigResponse(BaseModel):
     model_connection_required: bool = Field(
         default=False,
         description=(
-            "True when this local account has no model connection, so no model can run "
-            "(AGENT_AUTH_MODE=local without personal model connections)."
+            "True for a local account (AGENT_AUTH_MODE=local) while none of its own enabled "
+            "model connections has a model verified for any Agent: nothing can run until one "
+            "is set up. Always false in Gateway mode."
+        ),
+    )
+    gateway_inference: bool = Field(
+        default=True,
+        description=(
+            "Whether this deployment offers Gateway models and the features that run on them "
+            "(the default-model pin, prompt rewrite, Gateway usage). False with local accounts, "
+            "whose only models are their own connections."
         ),
     )
     models: list[str] = Field(

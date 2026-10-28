@@ -4209,6 +4209,12 @@
             "title": "Environment Limits",
             "type": "object"
           },
+          "gateway_inference": {
+            "default": true,
+            "description": "Whether this deployment offers Gateway models and the features that run on them (the default-model pin, prompt rewrite, Gateway usage). False with local accounts, whose only models are their own connections.",
+            "title": "Gateway Inference",
+            "type": "boolean"
+          },
           "github_connected": {
             "default": false,
             "title": "Github Connected",
@@ -4255,7 +4261,7 @@
           },
           "model_connection_required": {
             "default": false,
-            "description": "True when this local account has no model connection, so no model can run (AGENT_AUTH_MODE=local without personal model connections).",
+            "description": "True for a local account (AGENT_AUTH_MODE=local) while none of its own enabled model connections has a model verified for any Agent: nothing can run until one is set up. Always false in Gateway mode.",
             "title": "Model Connection Required",
             "type": "boolean"
           },
