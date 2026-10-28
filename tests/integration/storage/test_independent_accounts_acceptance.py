@@ -57,6 +57,8 @@ async def acceptance(monkeypatch):
         "AGENT_WEB_BASE_URL": "https://agents.example",
         "AGENT_LOCAL_SIGNUP_ENABLED": "true",
         "ADMIN_TOKEN": _ADMIN,
+        # Local mode stores owners' model connection keys under it.
+        "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": "independent-test-connection-key",
     }.items():
         monkeypatch.setenv(key, value)
 
