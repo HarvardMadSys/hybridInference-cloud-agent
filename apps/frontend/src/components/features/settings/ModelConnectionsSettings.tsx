@@ -4,10 +4,9 @@ import { useEffect, useState } from 'react';
 import { useT } from '@/components/providers';
 import {
   listModelConnections,
-  withVerification,
+  MAX_MODELS,
   type ModelConnection,
   type ModelConnectionList,
-  type ModelVerification,
 } from '@/lib/api/modelConnections';
 import { ModelConnectionCard } from './ModelConnectionCard';
 import { ModelConnectionForm } from './ModelConnectionForm';
@@ -18,8 +17,6 @@ export function ModelConnectionsSettings() {
   const [failed, setFailed] = useState(false);
   const [reload, setReload] = useState(0);
   const [editing, setEditing] = useState<ModelConnection | 'new' | null>(null);
-  // The connection whose unverified models "Save and verify" asked to verify.
-  const [verifyRequest, setVerifyRequest] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -36,34 +33,25 @@ export function ModelConnectionsSettings() {
     };
   }, [reload]);
 
-  function saved(connection: ModelConnection, options?: { verify: boolean }) {
-    if (options?.verify) setVerifyRequest(connection.id);
+  /**
+   * A connection as the server answered it. Only a create adds a card: an
+   * edit's answer replaces the card it is for, and never brings back one
+   * deleted meanwhile.
+   */
+  function saved(connection: ModelConnection, { created = false } = {}) {
     setData((current) => {
       if (!current) return current;
       const exists = current.connections.some((item) => item.id === connection.id);
+      if (!exists && !created) return current;
       const connections = exists
         ? current.connections.map((item) => (item.id === connection.id ? connection : item))
         : [...current.connections, connection];
       return { ...current, connections };
     });
-    setEditing(null);
-  }
-
-  function verified(id: string, verification: ModelVerification, startedOn: string) {
-    setData((current) => {
-      if (!current) return current;
-      // Only into the version it was started on; after an edit, the server's
-      // record (re-read on the next load) is the truth.
-      const connections = current.connections.map((item) =>
-        item.id === id && item.updated_at === startedOn
-          ? withVerification(item, verification)
-          : item,
-      );
-      return { ...current, connections };
-    });
   }
 
   const available = Boolean(data?.configured && data.enabled);
+  const maxModels = data?.max_models ?? MAX_MODELS;
   return (
     <section
       aria-labelledby="settings-connections"
@@ -104,7 +92,12 @@ export function ModelConnectionsSettings() {
         <ModelConnectionForm
           key={editing === 'new' ? 'new' : editing.id}
           connection={editing === 'new' ? undefined : editing}
-          onSaved={saved}
+          maxModels={maxModels}
+          onSaved={(connection) => {
+            saved(connection, { created: editing === 'new' });
+            setEditing(null);
+          }}
+          onSettledAfterLeaving={() => setReload((value) => value + 1)}
           onCancel={() => setEditing(null)}
         />
       ) : null}
@@ -117,14 +110,9 @@ export function ModelConnectionsSettings() {
             key={`${connection.id}:${connection.updated_at}`}
             connection={connection}
             available={available && !editing}
-            autoVerify={verifyRequest === connection.id}
-            checksPerHour={data.checks_per_hour}
-            onAutoVerifyStarted={() => setVerifyRequest(null)}
+            maxModels={maxModels}
             onEdit={() => setEditing(connection)}
             onChange={(changed) => saved(changed)}
-            onVerified={(verification, startedOn) =>
-              verified(connection.id, verification, startedOn)
-            }
             onDelete={() => {
               setData((current) => {
                 if (!current) return current;

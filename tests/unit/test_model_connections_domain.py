@@ -29,8 +29,8 @@ from cloud_agent.domain.model_connections import (
     clean_base_url,
     clean_models,
     clean_name,
-    clean_protocols,
     require_usable,
+    verified_protocols,
 )
 
 _KEY = "sk-check-secret-9876543210"
@@ -69,35 +69,43 @@ def test_a_base_url_a_sandbox_could_not_reach_safely_is_refused(raw):
         clean_base_url(raw)
 
 
-def test_names_models_and_protocols_are_normalized_and_bounded():
+def test_names_and_models_are_normalized_and_bounded():
     assert clean_name("  My   OpenAI ") == "My OpenAI"
     assert clean_models([" gpt-4.1 ", "", "openai/gpt-4.1", "gpt-4.1"]) == [
         "gpt-4.1",
         "openai/gpt-4.1",
     ]
-    assert clean_protocols(["responses", "chat_completions"]) == ["chat_completions", "responses"]
-    assert clean_protocols(["anthropic_messages", "chat_completions", "anthropic_messages"]) == [
-        "chat_completions",
-        "anthropic_messages",
-    ]
-    for bad in ([], ["bad model"], ["x" * 201], [f"m{i}" for i in range(65)]):
+    assert len(clean_models([f"m{i}" for i in range(8)])) == 8
+    # Eight at most: a new key or Base URL re-verifies every model in one save.
+    for bad in ([], ["bad model"], ["x" * 201], [f"m{i}" for i in range(9)]):
         with pytest.raises(ModelConnectionInvalid):
             clean_models(bad)
-    # Empty is automatic detection; a declaration names known APIs only.
-    assert clean_protocols([]) == []
-    for bad in (["anthropic"], ["messages"], ["chat_completions", "gemini"]):
-        with pytest.raises(ModelConnectionInvalid):
-            clean_protocols(bad)
 
 
-def _row(**changes: Any) -> dict[str, Any]:
-    row = {
+def _facts(protocols: list[str]) -> dict[str, Any]:
+    """A verification that found exactly ``protocols`` working."""
+    return {
+        "checked_at": "2026-10-28T00:00:00+00:00",
+        "protocols": {
+            protocol: {"status": "supported", "category": "supported", "http_status": None}
+            for protocol in protocols
+        },
+    }
+
+
+def _row(protocols: tuple[str, ...] | list[str] = ("chat_completions",), **changes: Any):
+    """A saved connection whose every model was verified with ``protocols`` working."""
+    row: dict[str, Any] = {
         "enabled": True,
         "deleted_at": None,
-        "protocols": ["chat_completions"],
         "models": ["gpt-4.1"],
+        "config_revision": 1,
     }
     row.update(changes)
+    row.setdefault(
+        "model_checks",
+        {model: {**_facts(list(protocols)), "revision": 1} for model in row["models"]},
+    )
     return row
 
 
@@ -167,8 +175,8 @@ def test_codex_and_claude_code_run_on_a_chat_only_connection_through_the_helper(
     chat = _row()
     assert _plan(chat, "codex") == ("responses", "chat_completions", "translated")
     assert _plan(chat, "claude-code") == ("anthropic_messages", "chat_completions", "translated")
-    # The connection still declares only what its upstream offers.
-    assert chat["protocols"] == ["chat_completions"]
+    # The stored facts still say only what the upstream offers.
+    assert verified_protocols(chat, "gpt-4.1") == ["chat_completions"]
     # Effort stays Auto on a translated plan too.
     with pytest.raises(ModelConnectionUnusable) as refused:
         require_usable(chat, runtime="claude-code", model="gpt-4.1", reasoning_effort="high")
@@ -488,19 +496,13 @@ async def test_model_discovery_lists_ids_and_is_only_a_convenience():
         transport=anthropic.transport(),
     ) == ["c-1"]
 
-    # A declared OpenAI-only connection asks once; a rate limit is not retried
-    # on another API.
-    for protocols, answers in (
-        (["chat_completions"], [httpx.Response(404)]),
-        ([], [httpx.Response(429)]),
-    ):
-        once = _Upstream(*answers)
-        with pytest.raises(CheckStop):
-            await discover_models(
-                base_url=_BASE,
-                api_key=_KEY,
-                protocols=protocols,
-                resolve=_resolver("93.184.216.34"),
-                transport=once.transport(),
-            )
-        assert len(once.requests) == 1
+    # A rate limit is not retried on another API.
+    once = _Upstream(httpx.Response(429))
+    with pytest.raises(CheckStop):
+        await discover_models(
+            base_url=_BASE,
+            api_key=_KEY,
+            resolve=_resolver("93.184.216.34"),
+            transport=once.transport(),
+        )
+    assert len(once.requests) == 1

@@ -7,7 +7,7 @@ export function unverified(model: string) {
   return {
     model,
     status: 'unverified',
-    category: null,
+    category: null as string | null,
     message: '',
     runtimes: [] as string[],
     paths: [] as Record<string, string>[],
@@ -76,7 +76,25 @@ export function messagesOnly(model: string) {
 
 type Status = ReturnType<typeof unverified>;
 
-/** A connection view in automatic mode, with each model's status. */
+/** A model whose verification found no API an agent can use. */
+export function refusedStatus(model: string, message: string) {
+  return { ...unverified(model), status: 'unsupported', category: 'tool_call_missing', message };
+}
+
+/** The 422 a save answers when a model could not be verified: nothing was stored. */
+export function verificationRefusal(models: Status[]) {
+  return {
+    detail: {
+      error: {
+        type: 'model_connection_verification_failed',
+        message: 'A model could not be verified for any agent. Nothing was saved.',
+        models,
+      },
+    },
+  };
+}
+
+/** A saved connection, with each model's status. */
 export function connectionView(fields: {
   id: string;
   name: string;
@@ -85,8 +103,6 @@ export function connectionView(fields: {
   updated_at?: string;
 }) {
   return {
-    protocol_mode: 'auto',
-    manual_protocols: [],
     enabled: true,
     has_api_key: true,
     created_at: '2026-10-28',

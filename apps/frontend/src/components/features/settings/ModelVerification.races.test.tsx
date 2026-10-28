@@ -5,7 +5,11 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import * as api from '@/lib/api/modelConnections';
+import { APIError } from '@/lib/utils/errors';
 import { ModelConnectionsSettings } from './ModelConnectionsSettings';
+
+// Verification runs inside the save request, so every race here is a save
+// answered late: after Cancel, a delete, leaving the page, or a newer edit.
 
 vi.mock('@/lib/api/modelConnections', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/modelConnections')>()),
@@ -13,47 +17,42 @@ vi.mock('@/lib/api/modelConnections', async (importOriginal) => ({
   createModelConnection: vi.fn(),
   updateModelConnection: vi.fn(),
   deleteModelConnection: vi.fn(),
-  verifyModelConnection: vi.fn(),
   discoverConnectionModels: vi.fn(),
 }));
 
-const pending = (model: string): api.ModelStatus => ({
+const ready = (model: string): api.ModelStatus => ({
   model,
-  status: 'unverified',
+  status: 'ready',
   category: null,
   message: '',
-  runtimes: [],
+  runtimes: ['codex'],
   paths: [],
   protocols: {},
-  checked_at: null,
+  checked_at: '2026-10-28T00:00:00Z',
 });
 const connection: api.ModelConnection = {
   id: `mconn_${'e'.repeat(32)}`,
   name: 'My provider',
   base_url: 'https://old.example/v1',
-  protocol_mode: 'auto',
-  manual_protocols: [],
-  models: ['m1', 'm2'],
+  models: ['m1'],
   enabled: true,
   has_api_key: true,
-  runtimes: [],
-  model_status: [pending('m1'), pending('m2')],
+  runtimes: ['codex'],
+  model_status: [ready('m1')],
   created_at: '2026-10-28T00:00:00Z',
   updated_at: '2026-10-28T00:00:00Z',
 };
-function deferredVerification() {
-  let resolve!: (value: api.ModelVerification) => void;
-  const promise = new Promise<api.ModelVerification>((done) => {
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  vi.mocked(api.verifyModelConnection).mockReturnValue(promise);
-  return async () => {
-    await act(async () => {
-      resolve({ ...pending('m1'), status: 'ready', runtimes: ['codex'], recorded: true });
-      await promise;
-    });
-  };
+  return { promise, resolve, reject };
 }
+
 function mount() {
   return render(
     <LocaleProvider>
@@ -61,6 +60,13 @@ function mount() {
     </LocaleProvider>,
   );
 }
+
+function editBaseUrl(value: string) {
+  fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+  fireEvent.change(screen.getByLabelText('Base URL'), { target: { value } });
+  fireEvent.click(screen.getByRole('button', { name: 'Verify and save' }));
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
   localStorage.clear();
@@ -73,88 +79,127 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-it('a late recorded result cannot restore the endpoint that was edited while it was in flight', async () => {
-  const settle = deferredVerification();
-  vi.mocked(api.updateModelConnection).mockResolvedValue({
-    ...connection,
-    base_url: 'https://new.example/v1',
-    updated_at: '2026-10-28T01:00:00Z',
-  });
+it('a create answered after Cancel adds only what the server re-read says exists', async () => {
+  const save = deferred<api.ModelConnection>();
+  vi.mocked(api.createModelConnection).mockReturnValue(save.promise);
   mount();
-  fireEvent.click(await screen.findByRole('button', { name: 'Verify m1' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
+  fireEvent.change(screen.getByLabelText('Connection name'), { target: { value: 'Late' } });
   fireEvent.change(screen.getByLabelText('Base URL'), {
-    target: { value: 'https://new.example/v1' },
+    target: { value: 'https://late.example/v1' },
   });
-  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-  await screen.findByText('https://new.example/v1', { exact: true });
-  await settle();
-  expect(screen.getByText('https://new.example/v1', { exact: true })).toBeVisible();
-  expect(screen.queryByText('Ready', { exact: true })).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'fixture-key' } });
+  fireEvent.change(screen.getByLabelText('Model IDs'), { target: { value: 'm1' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Verify and save' }));
+  // Cancel stays usable while a slow provider is being verified.
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  expect(screen.queryByLabelText('API key')).not.toBeInTheDocument();
+  expect(api.listModelConnections).toHaveBeenCalledTimes(1);
+
+  // The server finished anyway; the page re-reads instead of trusting the late answer.
+  vi.mocked(api.listModelConnections).mockResolvedValue({
+    configured: true,
+    enabled: true,
+    connections: [connection],
+  });
+  await act(async () => {
+    save.resolve({ ...connection, id: `mconn_${'f'.repeat(32)}`, name: 'Late' });
+    await save.promise;
+  });
+  await waitFor(() => expect(api.listModelConnections).toHaveBeenCalledTimes(2));
+  expect(screen.queryByRole('article', { name: 'Late' })).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('API key')).not.toBeInTheDocument();
 });
 
-it('a verification completing while an edit is open keeps the editor and its unsaved input', async () => {
-  const settle = deferredVerification();
+it('a refused save answered after Cancel neither reopens the form nor shows its error', async () => {
+  const save = deferred<api.ModelConnection>();
+  vi.mocked(api.updateModelConnection).mockReturnValue(save.promise);
   mount();
-  fireEvent.click(await screen.findByRole('button', { name: 'Verify m1' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
-  fireEvent.change(screen.getByLabelText('Connection name'), { target: { value: 'Unsaved name' } });
-  await settle();
-  expect(screen.getByLabelText('Connection name')).toHaveValue('Unsaved name');
+  await screen.findByRole('article', { name: 'My provider' });
+  editBaseUrl('https://new.example/v1');
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  await act(async () => {
+    save.reject(new APIError(api.VERIFICATION_FAILED, 'no', 422, { models: [] }));
+    await save.promise.catch(() => undefined);
+  });
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument();
+  expect(screen.getByText('https://old.example/v1', { exact: true })).toBeVisible();
 });
 
-it('a late recorded result cannot resurrect a deleted connection', async () => {
-  const settle = deferredVerification();
+it('an edit answered after the connection was deleted cannot resurrect it', async () => {
+  const save = deferred<api.ModelConnection>();
+  vi.mocked(api.updateModelConnection).mockReturnValue(save.promise);
   vi.mocked(api.deleteModelConnection).mockResolvedValue();
   mount();
-  fireEvent.click(await screen.findByRole('button', { name: 'Verify m1' }));
+  await screen.findByRole('article', { name: 'My provider' });
+  editBaseUrl('https://new.example/v1');
   fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
   fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
   await waitFor(() =>
     expect(screen.queryByRole('article', { name: 'My provider' })).not.toBeInTheDocument(),
   );
-  await settle();
+  vi.mocked(api.listModelConnections).mockResolvedValue({
+    configured: true,
+    enabled: true,
+    connections: [],
+  });
+  await act(async () => {
+    save.resolve({ ...connection, base_url: 'https://new.example/v1', updated_at: 'later' });
+    await save.promise;
+  });
+  await waitFor(() => expect(api.listModelConnections).toHaveBeenCalledTimes(2));
   expect(screen.queryByRole('article', { name: 'My provider' })).not.toBeInTheDocument();
 });
 
-it('leaving the settings page stops the remaining verification batch requests', async () => {
-  const settle = deferredVerification();
+it('leaving the page while verifying applies nothing and sends nothing more', async () => {
+  const save = deferred<api.ModelConnection>();
+  vi.mocked(api.updateModelConnection).mockReturnValue(save.promise);
   const page = mount();
-  fireEvent.click(await screen.findByRole('button', { name: 'Verify unverified models (2)' }));
-  expect(api.verifyModelConnection).toHaveBeenCalledTimes(1);
+  await screen.findByRole('article', { name: 'My provider' });
+  editBaseUrl('https://new.example/v1');
   page.unmount();
-  await settle();
-  expect(api.verifyModelConnection).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    save.resolve({ ...connection, base_url: 'https://new.example/v1', updated_at: 'later' });
+    await save.promise;
+  });
+  expect(api.updateModelConnection).toHaveBeenCalledTimes(1);
+  expect(api.createModelConnection).not.toHaveBeenCalled();
 });
 
-it('a recorded result queued with a newer edit cannot mark the changed endpoint ready', async () => {
-  let finishVerification!: (value: api.ModelVerification) => void;
-  let finishEdit!: (value: api.ModelConnection) => void;
-  const verification = new Promise<api.ModelVerification>((done) => {
-    finishVerification = done;
-  });
-  const edit = new Promise<api.ModelConnection>((done) => {
-    finishEdit = done;
-  });
-  vi.mocked(api.verifyModelConnection).mockReturnValue(verification);
-  vi.mocked(api.updateModelConnection).mockReturnValue(edit);
+it('a refused edit keeps the old card, and any change clears the stale per-model results', async () => {
+  vi.mocked(api.updateModelConnection).mockRejectedValue(
+    new APIError(api.VERIFICATION_FAILED, 'no', 422, {
+      models: [{ ...ready('m1'), status: 'failed', runtimes: [], message: 'Key refused.' }],
+    }),
+  );
   mount();
-  fireEvent.click(await screen.findByRole('button', { name: 'Verify m1' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+  await screen.findByRole('article', { name: 'My provider' });
+  editBaseUrl('https://new.example/v1');
+  expect(await screen.findByText('Not usable: Key refused.')).toBeVisible();
+  expect(screen.getByText('https://old.example/v1', { exact: true })).toBeVisible();
+  // The results described the endpoint as it was typed; an edit makes them stale.
   fireEvent.change(screen.getByLabelText('Base URL'), {
-    target: { value: 'https://new.example/v1' },
+    target: { value: 'https://fixed.example/v1' },
   });
-  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  expect(screen.queryByText('Not usable: Key refused.')).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(screen.getByLabelText('Base URL')).toHaveValue('https://fixed.example/v1');
+});
+
+it('a verifying save cannot be submitted twice', async () => {
+  const save = deferred<api.ModelConnection>();
+  vi.mocked(api.updateModelConnection).mockReturnValue(save.promise);
+  mount();
+  await screen.findByRole('article', { name: 'My provider' });
+  editBaseUrl('https://new.example/v1');
+  const busy = screen.getByRole('button', { name: 'Verifying…' });
+  expect(busy).toBeDisabled();
+  fireEvent.click(busy);
+  expect(api.updateModelConnection).toHaveBeenCalledTimes(1);
   await act(async () => {
-    finishEdit({
-      ...connection,
-      base_url: 'https://new.example/v1',
-      updated_at: '2026-10-28T01:00:00Z',
-    });
-    await edit;
-    finishVerification({ ...pending('m1'), status: 'ready', runtimes: ['codex'], recorded: true });
-    await verification;
+    save.resolve({ ...connection, base_url: 'https://new.example/v1', updated_at: 'later' });
+    await save.promise;
   });
-  expect(screen.getByText('https://new.example/v1', { exact: true })).toBeVisible();
-  expect(screen.queryByText('Ready', { exact: true })).not.toBeInTheDocument();
+  expect(await screen.findByText('https://new.example/v1', { exact: true })).toBeVisible();
 });

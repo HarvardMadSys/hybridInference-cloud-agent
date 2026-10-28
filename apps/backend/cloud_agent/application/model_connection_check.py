@@ -95,6 +95,8 @@ logger = get_logger(__name__)
 
 #: How many checks one owner may run in an hour, across replicas.
 CHECKS_PER_HOUR = 20
+#: Models one save verifies side by side; each is three checks of two requests.
+VERIFY_CONCURRENCY = 4
 _CONNECT_TIMEOUT_S = 10.0
 _READ_TIMEOUT_S = 60.0
 _CHECK_TIMEOUT_S = 150.0
@@ -709,6 +711,36 @@ async def verify_model(
     }
 
 
+async def verify_models(
+    *,
+    base_url: str,
+    api_key: str,
+    models: list[str],
+    resolve: Callable[[str, int], Awaitable[Iterable[str]]] | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict[str, dict[str, Any]]:
+    """``verify_model`` for each of ``models``, at most ``VERIFY_CONCURRENCY`` at a time.
+
+    The caller bounds ``models`` (``MAX_MODELS``) and has reserved one hourly
+    check per model; with every check under its own timeout, a save takes at
+    most two waves of ``_CHECK_TIMEOUT_S``.
+    """
+    gate = asyncio.Semaphore(VERIFY_CONCURRENCY)
+
+    async def one(model: str) -> dict[str, Any]:
+        async with gate:
+            return await verify_model(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                resolve=resolve,
+                transport=transport,
+            )
+
+    results = await asyncio.gather(*(one(model) for model in models))
+    return dict(zip(models, results, strict=True))
+
+
 async def _bounded_get(
     *, client_transport: httpx.AsyncBaseTransport | None, url: str, headers: dict[str, str]
 ) -> bytes:
@@ -733,24 +765,16 @@ async def _bounded_get(
     return b"".join(chunks)
 
 
-def _models_requests(
-    base_url: str, api_key: str, protocols: Iterable[str]
-) -> list[tuple[str, dict[str, str]]]:
+def _models_requests(base_url: str, api_key: str) -> list[tuple[str, dict[str, str]]]:
     """Where to list models, and how to authenticate, in the order to try.
 
-    An OpenAI-style ``GET /models`` under the Base URL, then -- unless the
-    owner declared only OpenAI APIs -- the way the Anthropic CLI would ask,
-    ``GET /v1/models`` with ``x-api-key``. A declaration of Anthropic Messages
-    alone asks only the latter.
+    An OpenAI-style ``GET /models`` under the Base URL, then the way the
+    Anthropic CLI would ask, ``GET /v1/models`` with ``x-api-key``.
     """
-    declared = set(protocols)
-    openai = (base_url + "/models", _bearer(api_key))
-    anthropic = (models_url(base_url), anthropic_headers(api_key))
-    if declared and declared <= {ANTHROPIC_MESSAGES}:
-        return [anthropic]
-    if declared and ANTHROPIC_MESSAGES not in declared:
-        return [openai]
-    return [openai, anthropic]
+    return [
+        (base_url + "/models", _bearer(api_key)),
+        (models_url(base_url), anthropic_headers(api_key)),
+    ]
 
 
 #: A first listing that fails this way may be the wrong API's: the next is tried.
@@ -761,7 +785,6 @@ async def discover_models(
     *,
     base_url: str,
     api_key: str,
-    protocols: Iterable[str] = (),
     resolve: Callable[[str, int], Awaitable[Iterable[str]]] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> list[str]:
@@ -771,7 +794,7 @@ async def discover_models(
     nothing about whether a model can run an agent. At most two requests, the
     second only when the first API's listing is missing. Raises ``CheckStop``.
     """
-    attempts = _models_requests(base_url, api_key, protocols)
+    attempts = _models_requests(base_url, api_key)
     async with asyncio.timeout(_CONNECT_TIMEOUT_S + _READ_TIMEOUT_S):
         await guard_base_url(base_url, resolve=resolve)
         for position, (url, headers) in enumerate(attempts):
@@ -809,4 +832,5 @@ __all__ = [
     "discover_models",
     "guard_base_url",
     "verify_model",
+    "verify_models",
 ]

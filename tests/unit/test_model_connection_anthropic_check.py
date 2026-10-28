@@ -178,46 +178,6 @@ def _models(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json={"data": [{"id": "claude-sonnet-4-5"}, {"id": "bad id"}]})
 
 
-async def test_a_messages_only_connection_lists_models_the_way_the_cli_would():
-    seen: list[httpx.Request] = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return _models(request)
-
-    models = await discover_models(
-        base_url="https://gateway.example/anthropic/v1",
-        api_key=_KEY,
-        protocols=["anthropic_messages"],
-        resolve=_public,
-        transport=httpx.MockTransport(respond),
-    )
-    assert models == ["claude-sonnet-4-5"]
-    assert str(seen[0].url) == "https://gateway.example/anthropic/v1/models"
-    assert seen[0].headers["x-api-key"] == _KEY
-    assert seen[0].headers["anthropic-version"] == "2023-06-01"
-    assert "authorization" not in seen[0].headers
-
-
-async def test_a_mixed_connection_lists_models_with_the_openai_request():
-    seen: list[httpx.Request] = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return _models(request)
-
-    await discover_models(
-        base_url="https://api.example.com/v1",
-        api_key=_KEY,
-        protocols=["chat_completions", "anthropic_messages"],
-        resolve=_public,
-        transport=httpx.MockTransport(respond),
-    )
-    assert str(seen[0].url) == "https://api.example.com/v1/models"
-    assert seen[0].headers["authorization"] == f"Bearer {_KEY}"
-    assert "x-api-key" not in seen[0].headers
-
-
 async def test_an_automatic_chat_only_connection_lists_models_in_one_openai_request():
     seen: list[httpx.Request] = []
 
@@ -228,7 +188,6 @@ async def test_an_automatic_chat_only_connection_lists_models_in_one_openai_requ
     models = await discover_models(
         base_url="https://api.example.com/v1",
         api_key=_KEY,
-        protocols=[],
         resolve=_public,
         transport=httpx.MockTransport(respond),
     )
@@ -252,7 +211,6 @@ async def test_an_automatic_messages_only_connection_lists_models_on_its_second_
     models = await discover_models(
         base_url="https://gateway.example/anthropic/v1",
         api_key=_KEY,
-        protocols=[],
         resolve=_public,
         transport=httpx.MockTransport(respond),
     )
@@ -275,7 +233,6 @@ async def test_automatic_discovery_stops_at_a_failure_another_listing_cannot_fix
         await discover_models(
             base_url="https://api.example.com/v1",
             api_key=_KEY,
-            protocols=[],
             resolve=_public,
             transport=httpx.MockTransport(respond),
         )
@@ -291,7 +248,6 @@ async def test_a_messages_model_list_refusal_is_a_category_not_a_body():
         await discover_models(
             base_url="https://api.example.com",
             api_key=_KEY,
-            protocols=["anthropic_messages"],
             resolve=_public,
             transport=httpx.MockTransport(respond),
         )

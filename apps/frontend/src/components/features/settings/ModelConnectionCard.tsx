@@ -6,34 +6,26 @@ import {
   deleteModelConnection,
   updateModelConnection,
   type ModelConnection,
-  type ModelVerification,
 } from '@/lib/api/modelConnections';
 
 import { ModelConnectionTools } from './ModelConnectionTools';
-import { ModelVerificationPanel } from './ModelVerificationPanel';
+import { ModelStatusList } from './ModelStatusList';
 
 const buttonClass = 'ui-button ui-button-secondary min-h-11';
 
 export function ModelConnectionCard({
   connection,
   available,
-  autoVerify = false,
-  checksPerHour,
-  onAutoVerifyStarted = () => {},
+  maxModels,
   onEdit,
   onChange,
-  onVerified,
   onDelete,
 }: {
   connection: ModelConnection;
   available: boolean;
-  /** "Save and verify" was pressed: verify the unverified models now. */
-  autoVerify?: boolean;
-  checksPerHour?: number;
-  onAutoVerifyStarted?: () => void;
+  maxModels: number;
   onEdit: () => void;
   onChange: (connection: ModelConnection) => void;
-  onVerified: (verification: ModelVerification, startedOn: string) => void;
   onDelete: () => void;
 }) {
   const t = useT();
@@ -72,9 +64,6 @@ export function ModelConnectionCard({
           <p className="mt-1 break-all text-xs text-muted">{connection.base_url}</p>
           <p className="mt-1 text-xs text-muted">
             {t(connection.enabled ? 'connections.enabled' : 'connections.disabled')}
-            {connection.runtimes.length
-              ? ` · ${t('connections.agents', { agents: connection.runtimes.join(', ') })}`
-              : ''}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -110,14 +99,7 @@ export function ModelConnectionCard({
           </button>
         </div>
       </div>
-      <ModelVerificationPanel
-        connection={connection}
-        available={available}
-        autoVerify={autoVerify}
-        checksPerHour={checksPerHour}
-        onAutoVerifyStarted={onAutoVerifyStarted}
-        onVerified={onVerified}
-      />
+      <ModelStatusList statuses={connection.model_status} />
       {confirm ? (
         <div
           role="group"
@@ -152,6 +134,7 @@ export function ModelConnectionCard({
       <ModelConnectionTools
         connection={connection}
         available={available}
+        maxModels={maxModels}
         busy={busy}
         run={run}
         onChange={onChange}

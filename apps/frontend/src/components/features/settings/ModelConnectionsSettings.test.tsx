@@ -5,47 +5,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import * as api from '@/lib/api/modelConnections';
+import { APIError } from '@/lib/utils/errors';
 import { ModelConnectionsSettings } from './ModelConnectionsSettings';
 
-// The calls are mocked; the protocol vocabulary and status helpers are the real ones.
+// The calls are mocked; the error helpers and the vocabulary are the real ones.
 vi.mock('@/lib/api/modelConnections', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/modelConnections')>()),
   listModelConnections: vi.fn(),
   createModelConnection: vi.fn(),
   updateModelConnection: vi.fn(),
   deleteModelConnection: vi.fn(),
-  verifyModelConnection: vi.fn(),
   discoverConnectionModels: vi.fn(),
 }));
 
-function unverified(model: string): api.ModelStatus {
-  return {
-    model,
-    status: 'unverified',
-    category: null,
-    message: '',
-    runtimes: [],
-    paths: [],
-    protocols: {},
-    checked_at: null,
-  };
-}
+const EVERY = ['claude-code', 'codex', 'kilo', 'opencode', 'pi'];
 
-/** Chat Completions verified for `model`; Codex and Claude Code through translation. */
-function chatReady(model: string): api.ModelStatus {
+/** Chat Completions verified for `model`; Codex and Claude Code translated. */
+function ready(model: string, runtimes = EVERY): api.ModelStatus {
   return {
     model,
     status: 'ready',
     category: null,
     message: '',
-    runtimes: ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
+    runtimes,
     paths: [
-      {
-        runtime: 'claude-code',
-        mode: 'translated',
-        client_protocol: 'anthropic_messages',
-        upstream_protocol: 'chat_completions',
-      },
       {
         runtime: 'codex',
         mode: 'translated',
@@ -77,17 +60,30 @@ function chatReady(model: string): api.ModelStatus {
   };
 }
 
+function refused(model: string, message = 'The model did not call the tool.'): api.ModelStatus {
+  return {
+    ...ready(model),
+    status: 'unsupported',
+    category: 'tool_call_missing',
+    message,
+    runtimes: [],
+    paths: [],
+  };
+}
+
+function refusal(...models: api.ModelStatus[]) {
+  return new APIError(api.VERIFICATION_FAILED, 'Nothing was saved.', 422, { models });
+}
+
 const connection: api.ModelConnection = {
   id: 'mconn_01234567890123456789012345678901',
   name: 'My provider',
   base_url: 'https://api.example.com/custom/v1',
-  protocol_mode: 'auto',
-  manual_protocols: [],
   models: ['shared-model', 'another-model'],
   enabled: true,
   has_api_key: true,
-  runtimes: [],
-  model_status: [unverified('shared-model'), unverified('another-model')],
+  runtimes: EVERY,
+  model_status: [ready('shared-model'), ready('another-model')],
   created_at: '2026-10-27T00:00:00Z',
   updated_at: '2026-10-27T00:00:00Z',
 };
@@ -101,7 +97,11 @@ function renderSettings(locale: 'en' | 'zh-CN' = 'en') {
   );
 }
 
-function fillNew(models: string) {
+function region() {
+  return screen.getByRole('region', { name: /Personal model connections|个人模型连接/ });
+}
+
+function fillNew(models: string[]) {
   fireEvent.change(screen.getByLabelText('Connection name'), {
     target: { value: 'Second provider' },
   });
@@ -109,7 +109,12 @@ function fillNew(models: string) {
     target: { value: 'https://api.example.com/custom/v1' },
   });
   fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'private-provider-key' } });
-  fireEvent.change(screen.getByLabelText('Model IDs'), { target: { value: models } });
+  const input = screen.getByLabelText('Model IDs');
+  models.forEach((model, index) => {
+    fireEvent.change(input, { target: { value: model } });
+    // The last one stays typed: it counts when the form is saved.
+    if (index < models.length - 1) fireEvent.keyDown(input, { key: 'Enter' });
+  });
 }
 
 beforeEach(() => {
@@ -119,13 +124,14 @@ beforeEach(() => {
     configured: true,
     enabled: true,
     checks_per_hour: 20,
+    max_models: 8,
     connections: [connection],
   });
 });
 afterEach(cleanup);
 
 describe('adding a connection', () => {
-  it('asks only for a name, Base URL, key and models, and saving calls no provider', async () => {
+  it('asks for a name, Base URL, key and model IDs only, with one primary action', async () => {
     vi.mocked(api.createModelConnection).mockResolvedValue({
       ...connection,
       id: 'new',
@@ -133,106 +139,119 @@ describe('adding a connection', () => {
     });
     renderSettings();
     fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
-    // No protocol is asked for on the ordinary path: the override is collapsed.
-    for (const name of ['Chat Completions', 'Responses', 'Anthropic Messages']) {
-      expect(screen.queryByRole('checkbox', { name })).not.toBeInTheDocument();
-    }
-    expect(screen.getByText('Advanced', { selector: 'summary' })).toBeVisible();
-    expect(screen.queryByText(/OpenCode, Kilo, pi/)).not.toBeInTheDocument();
+    const form = region().querySelector('form')!;
+    // No protocol control, radio, checkbox or multi-line box anywhere.
+    expect(within(form).queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(within(form).queryByRole('radio')).not.toBeInTheDocument();
+    expect(form.querySelector('textarea, select, datalist')).toBeNull();
+    expect(form).not.toHaveTextContent(/Chat Completions|Responses|Anthropic Messages|Advanced/);
     expect(screen.getByLabelText('API key')).toHaveAttribute('type', 'password');
-    fillNew('shared-model\nshared-model\nanother-model');
-    expect(screen.getAllByText(/Your provider may bill them/)[0]).toBeVisible();
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    // The actions, in order: the primary one first, then Cancel.
+    expect(
+      within(form)
+        .getAllByRole('button')
+        .filter((button) => button.getAttribute('type') !== null)
+        .map((button) => button.textContent),
+    ).toEqual(['Add', 'Verify and save', 'Cancel']);
+    expect(within(form).getByText(/may bill/)).toBeVisible();
+
+    fillNew(['shared-model', 'shared-model', 'another-model']);
+    expect(within(form).getByRole('list', { name: 'Models to save' })).toHaveTextContent(
+      'shared-model',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Verify and save' }));
     await waitFor(() =>
       expect(api.createModelConnection).toHaveBeenCalledWith({
         name: 'Second provider',
         base_url: connection.base_url,
         api_key: 'private-provider-key',
-        models: connection.models,
+        models: ['shared-model', 'another-model'],
       }),
     );
     const card = await screen.findByRole('article', { name: 'Second provider' });
-    expect(within(card).getAllByText('Not verified')).toHaveLength(2);
+    expect(within(card).getAllByText(`Works with ${EVERY.join(', ')}`)).toHaveLength(2);
+    expect(screen.queryByLabelText('API key')).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue('private-provider-key')).not.toBeInTheDocument();
-    expect(api.verifyModelConnection).not.toHaveBeenCalled();
-    expect(api.discoverConnectionModels).not.toHaveBeenCalled();
   });
 
-  it('"Save and verify" verifies at most three models, one at a time, and says how many remain', async () => {
-    const models = ['m1', 'm2', 'm3', 'm4'];
-    vi.mocked(api.createModelConnection).mockResolvedValue({
-      ...connection,
-      id: 'new',
-      name: 'Second provider',
-      models,
-      model_status: models.map(unverified),
-    });
-    let inFlight = 0;
-    vi.mocked(api.verifyModelConnection).mockImplementation(async (_id, model) => {
-      inFlight += 1;
-      expect(inFlight).toBe(1);
-      await Promise.resolve();
-      inFlight -= 1;
-      return { ...chatReady(model), recorded: true };
-    });
-    renderSettings();
-    fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
-    fillNew(models.join('\n'));
-    fireEvent.click(screen.getByRole('button', { name: 'Save and verify' }));
-    const card = await screen.findByRole('article', { name: 'Second provider' });
-    await waitFor(() => expect(within(card).getAllByText('Ready')).toHaveLength(3));
-    expect(vi.mocked(api.verifyModelConnection).mock.calls).toEqual([
-      ['new', 'm1'],
-      ['new', 'm2'],
-      ['new', 'm3'],
-    ]);
-    expect(within(card).getByText('Models not verified yet: 1.')).toBeVisible();
-    expect(within(card).getByText('3 of 4 models ready')).toBeVisible();
-    // The agents are named; how each reaches the model is not on the normal path.
-    expect(
-      within(card).getAllByText('Works with claude-code, codex, kilo, opencode, pi')[0],
-    ).toBeVisible();
-    expect(within(card).queryByText(/via Chat Completions/)).not.toBeInTheDocument();
-    for (const path of within(card).getAllByText(
-      /codex: Responses, translated to Chat Completions/,
-    )) {
-      expect(path).not.toBeVisible();
-    }
-  });
-
-  it('declares APIs only through the advanced override, and never an empty declaration', async () => {
-    vi.mocked(api.createModelConnection).mockResolvedValue({
-      ...connection,
-      id: 'new',
-      name: 'Second provider',
-      protocol_mode: 'manual',
-      manual_protocols: ['anthropic_messages'],
-    });
-    renderSettings();
-    fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
-    fillNew('claude-sonnet-4-5');
-    fireEvent.click(screen.getByText('Advanced', { selector: 'summary' }));
-    expect(
-      screen.getByRole('radio', { name: 'Detect automatically when verifying (recommended)' }),
-    ).toBeChecked();
-    fireEvent.click(screen.getByRole('radio', { name: 'Declare the APIs this endpoint offers' }));
-    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Anthropic Messages' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() =>
-      expect(api.createModelConnection).toHaveBeenCalledWith({
-        name: 'Second provider',
-        base_url: connection.base_url,
-        api_key: 'private-provider-key',
-        models: ['claude-sonnet-4-5'],
-        protocols: ['anthropic_messages'],
-      }),
+  it('keeps every input after a refused verification, marks the model and adds no card', async () => {
+    vi.mocked(api.createModelConnection).mockRejectedValue(
+      refusal(ready('good-model'), refused('bad-model')),
     );
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
+    fillNew(['good-model', 'bad-model']);
+    fireEvent.click(screen.getByRole('button', { name: 'Verify and save' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Not saved/);
+    expect(screen.getByLabelText('Connection name')).toHaveValue('Second provider');
+    expect(screen.getByLabelText('Base URL')).toHaveValue('https://api.example.com/custom/v1');
+    expect(screen.getByLabelText('API key')).toHaveValue('private-provider-key');
+    const chips = screen.getByRole('list', { name: 'Models to save' });
+    expect(chips).toHaveTextContent('Not usable: The model did not call the tool.');
+    expect(chips).toHaveTextContent(`Works with ${EVERY.join(', ')}`);
+    expect(screen.queryByRole('article', { name: 'Second provider' })).not.toBeInTheDocument();
+
+    // Removing the refused model clears the stale results; retrying saves the rest.
+    vi.mocked(api.createModelConnection).mockResolvedValue({
+      ...connection,
+      id: 'new',
+      name: 'Second provider',
+      models: ['good-model'],
+      model_status: [ready('good-model')],
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Remove bad-model' }));
+    expect(chips).not.toHaveTextContent('Not usable');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Verify and save' }));
+    await waitFor(() =>
+      expect(api.createModelConnection).toHaveBeenLastCalledWith(
+        expect.objectContaining({ models: ['good-model'], api_key: 'private-provider-key' }),
+      ),
+    );
+    expect(await screen.findByRole('article', { name: 'Second provider' })).toBeVisible();
+  });
+
+  it.each([
+    ['model_connection_check_limit', 429, /Too many verifications/],
+    ['model_connection_name_taken', 409, /already have a connection/],
+  ])('says why %s refused it and keeps the form', async (code, status, message) => {
+    vi.mocked(api.createModelConnection).mockRejectedValue(
+      new APIError(code, 'upstream echoed private-provider-key', status),
+    );
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
+    fillNew(['m1']);
+    fireEvent.click(screen.getByRole('button', { name: 'Verify and save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(message);
+    expect(screen.queryByText(/upstream echoed/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('API key')).toHaveValue('private-provider-key');
+  });
+
+  it('adds model IDs from the keyboard and caps them at the server limit', async () => {
+    vi.mocked(api.listModelConnections).mockResolvedValue({
+      configured: true,
+      enabled: true,
+      max_models: 2,
+      connections: [],
+    });
+    renderSettings();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add connection' }));
+    const input = screen.getByLabelText('Model IDs');
+    const longId = `provider/${'very-long-model-name-'.repeat(8)}v1`;
+    fireEvent.change(input, { target: { value: longId } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.change(input, { target: { value: 'second' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(screen.getByRole('list', { name: 'Models to save' })).toHaveTextContent(longId);
+    expect(input).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: `Remove ${longId}` }));
+    expect(input).toBeEnabled();
   });
 });
 
 describe('editing a connection', () => {
-  it('sends only the name on a rename, so the key and verification stay', async () => {
+  it('saves a rename alone without verifying, so the key and processes stay', async () => {
     vi.mocked(api.updateModelConnection).mockResolvedValue({
       ...connection,
       name: 'Renamed',
@@ -247,6 +266,7 @@ describe('editing a connection', () => {
     fireEvent.change(screen.getByLabelText('Base URL'), {
       target: { value: `${connection.base_url}/` },
     });
+    expect(screen.queryByText(/may bill/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() =>
       expect(api.updateModelConnection).toHaveBeenCalledWith(connection.id, { name: 'Renamed' }),
@@ -254,204 +274,96 @@ describe('editing a connection', () => {
     expect(await screen.findByRole('article', { name: 'Renamed' })).toBeVisible();
   });
 
-  it('saves nothing when nothing changed', async () => {
+  it('saves nothing when nothing changed, and removing a model needs no verification', async () => {
     renderSettings();
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(screen.queryByLabelText('API key')).not.toBeInTheDocument());
     expect(api.updateModelConnection).not.toHaveBeenCalled();
+
+    vi.mocked(api.updateModelConnection).mockResolvedValue({
+      ...connection,
+      models: ['shared-model'],
+      model_status: [ready('shared-model')],
+      updated_at: 'later',
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove another-model' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(api.updateModelConnection).toHaveBeenCalledWith(connection.id, {
+        models: ['shared-model'],
+      }),
+    );
   });
 
-  it('sends an added model alone, and the new model stays unverified', async () => {
-    vi.mocked(api.listModelConnections).mockResolvedValue({
-      configured: true,
-      enabled: true,
-      connections: [
-        { ...connection, model_status: [chatReady('shared-model'), chatReady('another-model')] },
-      ],
-    });
+  it('verifies a new key before saving it, and a refusal keeps the old card as it was', async () => {
+    vi.mocked(api.updateModelConnection).mockRejectedValue(
+      refusal(refused('shared-model', 'The provider refused the key.'), ready('another-model')),
+    );
+    renderSettings();
+    const card = await screen.findByRole('article', { name: connection.name });
+    fireEvent.click(within(card).getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'replacement-key' } });
+    expect(screen.getByText(/may bill/)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Verify and save' }));
+
+    await waitFor(() =>
+      expect(api.updateModelConnection).toHaveBeenCalledWith(connection.id, {
+        api_key: 'replacement-key',
+      }),
+    );
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Not saved/);
+    expect(screen.getByLabelText('API key')).toHaveValue('replacement-key');
+    expect(screen.getByRole('list', { name: 'Models to save' })).toHaveTextContent(
+      'Not usable: The provider refused the key.',
+    );
+    // The saved connection is untouched until a save succeeds.
+    expect(within(card).getAllByText(`Works with ${EVERY.join(', ')}`)).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByLabelText('API key')).not.toBeInTheDocument();
+    expect(screen.getByRole('article', { name: connection.name })).toBeVisible();
+  });
+
+  it('adds a model through a verified save', async () => {
     vi.mocked(api.updateModelConnection).mockResolvedValue({
       ...connection,
       models: [...connection.models, 'third-model'],
-      model_status: [
-        chatReady('shared-model'),
-        chatReady('another-model'),
-        unverified('third-model'),
-      ],
+      model_status: [...connection.model_status, ready('third-model', ['codex'])],
       updated_at: 'later',
     });
     renderSettings();
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    fireEvent.change(screen.getByLabelText('Model IDs'), {
-      target: { value: 'shared-model\nanother-model\nthird-model' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.change(screen.getByLabelText('Model IDs'), { target: { value: 'third-model' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Verify and save' }));
     await waitFor(() =>
       expect(api.updateModelConnection).toHaveBeenCalledWith(connection.id, {
         models: ['shared-model', 'another-model', 'third-model'],
       }),
     );
     const card = await screen.findByRole('article', { name: connection.name });
-    expect(within(card).getAllByText('Ready')).toHaveLength(2);
-    expect(within(card).getByText('Not verified')).toBeVisible();
-    expect(within(card).getByText('Verify this model before tasks can use it.')).toBeVisible();
-    expect(api.verifyModelConnection).not.toHaveBeenCalled();
-  });
-
-  it('sends an explicitly entered replacement key and clears the form on success', async () => {
-    vi.mocked(api.updateModelConnection).mockResolvedValue({ ...connection, updated_at: 'later' });
-    renderSettings();
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'replacement-key' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() =>
-      expect(api.updateModelConnection).toHaveBeenCalledWith(connection.id, {
-        api_key: 'replacement-key',
-      }),
-    );
-    await waitFor(() => expect(screen.queryByLabelText('API key')).not.toBeInTheDocument());
-  });
-
-  it('keeps the form for correction but never renders the raw failure or key', async () => {
-    vi.mocked(api.updateModelConnection).mockRejectedValue(
-      new Error('upstream echoed replacement-key'),
-    );
-    renderSettings();
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'replacement-key' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('The request failed.');
-    expect(screen.queryByText(/upstream echoed/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText('API key')).toHaveAttribute('type', 'password');
+    expect(within(card).getByText('Works with codex')).toBeVisible();
   });
 });
 
-describe('verifying models', () => {
-  it('verifies only the chosen model and shows mixed native and translated agents', async () => {
-    vi.mocked(api.verifyModelConnection).mockResolvedValue({
-      ...chatReady('another-model'),
-      recorded: true,
-    });
+describe('a saved connection', () => {
+  it('shows each model and its agents, with protocols only in collapsed details', async () => {
     renderSettings();
     const card = await screen.findByRole('article', { name: connection.name });
-    // Opening the page spends no quota.
-    expect(api.verifyModelConnection).not.toHaveBeenCalled();
-    fireEvent.click(within(card).getByRole('button', { name: 'Verify another-model' }));
-    await waitFor(() =>
-      expect(api.verifyModelConnection).toHaveBeenCalledWith(connection.id, 'another-model'),
-    );
-    await within(card).findByText('Ready');
-    expect(within(card).getByText('1 of 2 models ready')).toBeVisible();
-    expect(within(card).getAllByText('Not verified')).toHaveLength(1);
-    expect(api.verifyModelConnection).toHaveBeenCalledTimes(1);
-    fireEvent.click(within(card).getByText('API details', { selector: 'summary' }));
-    expect(within(card).getByText('Chat Completions: works')).toBeVisible();
-    expect(within(card).getByText(/Responses: not available\./)).toBeVisible();
-    expect(within(card).getByText('opencode: Chat Completions')).toBeVisible();
-    expect(
-      within(card).getByText('claude-code: Anthropic Messages, translated to Chat Completions'),
-    ).toBeVisible();
-  });
-
-  it('keeps nothing from a verification the connection outran, and says so', async () => {
-    vi.mocked(api.verifyModelConnection).mockResolvedValue({
-      ...chatReady('shared-model'),
-      recorded: false,
-    });
-    renderSettings();
-    const card = await screen.findByRole('article', { name: connection.name });
-    fireEvent.click(within(card).getByRole('button', { name: 'Verify shared-model' }));
-    expect(await within(card).findByText(/changed while it was being verified/)).toBeVisible();
-    expect(within(card).getAllByText('Not verified')).toHaveLength(2);
-    expect(within(card).queryByText('Ready')).not.toBeInTheDocument();
-  });
-
-  it('tells a failed verification apart from a model no agent can use', async () => {
-    vi.mocked(api.listModelConnections).mockResolvedValue({
-      configured: true,
-      enabled: true,
-      connections: [
-        {
-          ...connection,
-          model_status: [
-            {
-              ...unverified('shared-model'),
-              status: 'failed',
-              category: 'rate_limited',
-              message: 'The provider rate limited the check. Try again later.',
-              protocols: {
-                chat_completions: {
-                  status: 'failed',
-                  category: 'rate_limited',
-                  message: 'The provider rate limited the check. Try again later.',
-                  http_status: 429,
-                },
-              },
-            },
-            {
-              ...unverified('another-model'),
-              status: 'unsupported',
-              category: 'tool_call_missing',
-              message: 'The model did not call the tool.',
-            },
-          ],
-        },
-      ],
-    });
-    renderSettings();
-    const card = await screen.findByRole('article', { name: connection.name });
-    expect(within(card).getByText('Couldn’t verify')).toBeVisible();
-    expect(within(card).getAllByText(/rate limited the check/)[0]).toBeVisible();
-    expect(within(card).getByText('Not usable for agents')).toBeVisible();
-    expect(within(card).getByText('The model did not call the tool.')).toBeVisible();
-    expect(within(card).getAllByRole('button', { name: /^Verify / })).toHaveLength(2);
-    expect(within(card).getAllByText('Verify again')).toHaveLength(2);
-  });
-
-  it('cannot verify a disabled connection', async () => {
-    vi.mocked(api.listModelConnections).mockResolvedValue({
-      configured: true,
-      enabled: true,
-      connections: [{ ...connection, enabled: false }],
-    });
-    renderSettings();
-    const card = await screen.findByRole('article', { name: connection.name });
-    for (const button of within(card).getAllByRole('button', { name: /^Verify / })) {
-      expect(button).toBeDisabled();
+    expect(within(card).queryByRole('button', { name: /^Verify/ })).not.toBeInTheDocument();
+    const details = within(card).getByText('Technical details', { selector: 'summary' });
+    for (const path of within(card).getAllByText('opencode: Chat Completions')) {
+      expect(path).not.toBeVisible();
     }
-  });
-
-  it('marks a manual declaration as declared rather than verified', async () => {
-    vi.mocked(api.listModelConnections).mockResolvedValue({
-      configured: true,
-      enabled: true,
-      connections: [
-        {
-          ...connection,
-          protocol_mode: 'manual',
-          manual_protocols: ['chat_completions'],
-          runtimes: ['opencode'],
-          model_status: connection.models.map((model) => ({
-            ...unverified(model),
-            status: 'declared' as const,
-            runtimes: ['opencode'],
-          })),
-        },
-      ],
-    });
-    renderSettings();
-    const card = await screen.findByRole('article', { name: connection.name });
-    expect(within(card).getByText('APIs declared manually')).toBeVisible();
-    expect(within(card).getAllByText('Declared')).toHaveLength(2);
-    fireEvent.click(within(card).getByRole('button', { name: 'Edit' }));
+    fireEvent.click(details);
+    expect(within(card).getAllByText('opencode: Chat Completions')[0]).toBeVisible();
     expect(
-      screen.getByRole('radio', { name: 'Declare the APIs this endpoint offers' }),
-    ).toBeChecked();
-    expect(screen.getByRole('checkbox', { name: 'Chat Completions' })).toBeChecked();
+      within(card).getAllByText('codex: Responses, translated to Chat Completions')[0],
+    ).toBeVisible();
+    expect(within(card).getAllByText('Chat Completions: works')[0]).toBeVisible();
   });
-});
 
-describe('connection lifecycle', () => {
   it('requires confirmation for disable and delete and does not claim provider revocation', async () => {
     vi.mocked(api.updateModelConnection).mockResolvedValue({
       ...connection,
@@ -475,30 +387,25 @@ describe('connection lifecycle', () => {
     expect(await screen.findByText('No personal connections yet.')).toBeVisible();
   });
 
-  it('adds only explicitly selected discovered IDs and does not verify them', async () => {
-    vi.mocked(api.discoverConnectionModels).mockResolvedValue([
-      'shared-model',
-      'third-model',
-      'fourth-model',
-    ]);
-    vi.mocked(api.updateModelConnection).mockResolvedValue({
-      ...connection,
-      models: [...connection.models, 'third-model'],
-      model_status: [...connection.model_status, unverified('third-model')],
-      updated_at: 'later',
-    });
+  it('adds discovered IDs through a verified save and reports a refused one', async () => {
+    vi.mocked(api.discoverConnectionModels).mockResolvedValue(['shared-model', 'third-model']);
+    vi.mocked(api.updateModelConnection).mockRejectedValue(
+      refusal(refused('third-model', 'The provider has no such model.')),
+    );
     renderSettings();
     await screen.findByRole('article', { name: connection.name });
     fireEvent.click(screen.getByText('Discover model IDs', { selector: 'summary' }));
     fireEvent.click(screen.getByRole('button', { name: 'Discover model IDs' }));
     fireEvent.click(await screen.findByRole('checkbox', { name: 'third-model' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Add selected IDs' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Verify and add selected' }));
     await waitFor(() =>
       expect(api.updateModelConnection).toHaveBeenCalledWith(connection.id, {
         models: [...connection.models, 'third-model'],
       }),
     );
-    expect(api.verifyModelConnection).not.toHaveBeenCalled();
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'third-model: The provider has no such model.',
+    );
   });
 
   it('allows cleanup while the deployment gate is off but prevents new use', async () => {
@@ -515,14 +422,15 @@ describe('connection lifecycle', () => {
     expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
   });
 
-  it('reads in Chinese without naming any API on the normal path', async () => {
+  it('reads in Chinese with one primary action and no API names', async () => {
     renderSettings('zh-CN');
     fireEvent.click(await screen.findByRole('button', { name: '添加连接' }));
     expect(screen.getByLabelText('模型 ID')).toBeVisible();
-    expect(screen.getByRole('button', { name: '保存并验证' })).toBeVisible();
-    expect(screen.queryByRole('checkbox', { name: 'Chat Completions' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '验证并保存' })).toBeVisible();
+    expect(screen.getByText(/服务商可能对此计费/)).toBeVisible();
+    const form = region().querySelector('form')!;
+    expect(form).not.toHaveTextContent(/Chat Completions|Responses|Anthropic Messages/);
     const card = screen.getByRole('article', { name: connection.name });
-    expect(within(card).getAllByText('未验证')).toHaveLength(2);
-    expect(within(card).getByText('2 个模型中有 0 个可用')).toBeVisible();
+    expect(within(card).getAllByText(`可用于 ${EVERY.join(', ')}`)).toHaveLength(2);
   });
 });

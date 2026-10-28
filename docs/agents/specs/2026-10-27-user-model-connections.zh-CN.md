@@ -23,20 +23,20 @@ OpenAI 或 Anthropic 接口的服务（OpenAI、Anthropic、OpenRouter、DeepSee
 
 **做了的：**
 
-1. 个人设置页「模型连接」：新增、编辑、轮换 key、停用/启用、删除、按模型验证、从 `/models` 读取模型列表。
-2. 每个连接：显示名、Base URL、API key、手填的模型 ID 列表（最多 64 个）。`/models` 只是辅助
-   填写，没有它也能手填。用户不需要知道服务商提供哪种 API：每个模型支持哪些 API 由「验证」自动
-   识别（见第十二节）；手动声明 API 只作为折叠在「高级」里的覆盖选项保留。
+1. 个人设置页「模型连接」：新增、编辑、轮换 key、停用/启用、删除、从 `/models` 读取模型列表；新增和改动端点或模型时先验证再保存。
+2. 每个连接：显示名、Base URL、API key、模型 ID（最多 8 个）。`/models` 只是辅助填写，没有它也能
+   手填。用户不需要知道服务商提供哪种 API，也不能手动声明：每个模型支持哪些 API 在保存前由验证
+   自动识别（见第十三节）。
 3. 新任务、后续消息、排队消息、目标（goal）自动轮次、原生 Fork 都能用连接上的模型，并且记住
    「是哪个来源的哪个模型」。
-4. 验证按钮对一个模型在三种 API 上各真跑一次流式推理加一次工具调用往返，每种 API 的结果分成
-   「支持 / 不支持 / 失败」三类，按模型保存。
+4. 「验证并保存」对每个要保存的模型在三种 API 上各真跑一次流式推理加一次工具调用往返，每种 API
+   的结果分成「支持 / 不支持 / 失败」三类，按模型保存；有模型没有任何 Agent 能用就什么都不保存。
 5. 停用、删除、轮换 key 会让旧进程退出，新回合不会再用旧 key。
 
 **没做的（有意不做）：**
 
-- 通用协议转换器、路由或计费网关、key 池，以及推理时的试错回退。平台只用某个模型验证可用（或
-  用户手动声明）的 API；除[协议兼容设计](2026-10-28-model-protocol-compatibility.zh-CN.md)里的两种
+- 通用协议转换器、路由或计费网关、key 池，以及推理时的试错回退。平台只用某个模型验证可用的
+  API；除[协议兼容设计](2026-10-28-model-protocol-compatibility.zh-CN.md)里的两种
   转换外，模型不提供某个 CLI 的协议，就不能给那个 CLI 用。不引入 HybridInference 的服务端路由模块。
 - 连接模型的推理强度（reasoning effort）。没有可靠的模型能力表，只允许 Auto；带强度会被拒绝，
   从 Gateway 模型切过来时也会自动清掉。
@@ -58,7 +58,7 @@ OpenAI 或 Anthropic 接口的服务（OpenAI、Anthropic、OpenRouter、DeepSee
 这张表放在共享词汇 `cloud_agent_shared/model_connections.py`（`RUNTIME_PROTOCOLS`），控制面和
 主机都从这里读。判断「这个回合能不能在这个连接上跑」只有一个函数：
 `domain/model_connections.require_usable`。它依次检查：连接存在且属于本人、未删除、已启用、
-运行时有对应协议、模型在列表里、该模型在当前密钥和 Base URL 下已验证（手动声明时跳过）、
+运行时有对应协议、模型在列表里、该模型在当前密钥和 Base URL 下有验证结果、
 验证结果给这个运行时找到了路径（原生优先，否则走转换）、没有设推理强度。每种拒绝都有固定的原因码和
 给用户看的句子，任何一种都不会退回 Gateway 或别的模型。
 
@@ -79,10 +79,11 @@ Anthropic Messages 的约定不同：Claude Code 的 SDK 会在 `ANTHROPIC_BASE_
 迁移 `0106_user_model_connections`：
 
 - `agent_model_connections`：`id`（`mconn_` + 32 位十六进制）、`user_id`、`name`、`base_url`、
-  `protocols`（空表示自动识别，非空是用户的手动声明）、`models`、`api_key_ciphertext`、
+  `models`（最多 8 个）、`api_key_ciphertext`、
   `credential_revision`、`config_revision`、`enabled`、`model_checks`（按模型 ID 保存的验证结果，见
   第十二节）、`deleted_at`。同一用户未删除的连接名字不能重复（不区分大小写）。
-- `agent_model_connection_checks`：验证和读取模型列表的次数，用于每小时限额。
+- `agent_model_connection_checks`：验证和读取模型列表的次数，按所有者计，用于每小时限额；连接
+  还不存在时（新建前的验证）也计入。
 - `agent_model_connection_scan_keys`：仅保存确实绑定到成员常驻进程的密钥版本，以沙箱组、连接和
   凭据版本为范围加密保留，用于该组后续快照与受信发布的秘密扫描。新建但未使用的连接不会写入。
 - `agent_jobs.model_connection_id`、`agent_pending_messages.model_connection_id`：NULL 表示
@@ -122,7 +123,7 @@ Anthropic Messages 的约定不同：Claude Code 的 SDK 会在 `ANTHROPIC_BASE_
   模型名本身，个人来源的键是 `["mconn_…", model]` 的 JSON，以 `[` 开头的 Gateway 名字也编码，
   两者不会相撞。旧草稿里的模型字符串一律按 Gateway 读，不当作编码键解析。
 - 一个模型只出现在它当前能运行的 Agent 下，依据是该模型自己的验证结果（`/config` 的
-  `model_runtimes`），与执行时的检查完全一致；未验证或验证结果已过期的模型不出现。标签只写模型和
+  `model_runtimes`），与执行时的检查完全一致；没有当前验证结果的模型（兜底，正常不会出现）不出现。标签只写模型和
   连接名，不写协议，也不写「经 Chat Completions」。
   个人来源的推理强度只有 Auto，请求里不带 `reasoning_effort`。
 - 草稿或「上次使用」指向的个人来源当前不能运行（换了 Agent、连接停用/删除、不再列出该模型）时，
@@ -156,9 +157,9 @@ Anthropic Messages 的约定不同：Claude Code 的 SDK 会在 `ANTHROPIC_BASE_
    不进共享工作区。进程启动参数里固定了来源 `连接@版本`，所以下一回合如果连接被轮换过，
    就不会复用旧进程，而是带着新 key 原生恢复（native resume）。从 Gateway 切到连接或反过来，
    同样会换进程。
-5. **失效。** 轮换 key、改 Base URL 或手动声明、停用、删除都会提升 `credential_revision`（删除还会
+5. **失效。** 经过验证的新 key 或新 Base URL、停用、删除都会提升 `credential_revision`（删除还会
    抹掉密文，只留墓碑）。是否「改了」由仓库在 `UPDATE` 里和库中已存值比较决定，提交的值与原值相同
-   不算改动；重新填入同一个 key 也会被接口识别并忽略。所以只改名称或模型列表不会提升版本、不会关闭
+   不算改动；重新填入同一个 key 也会被接口识别并忽略。所以重命名或移除模型不会提升版本、不会关闭
    进程，也不清掉其他模型的验证结果。提交后立即释放所有绑定在旧状态上的常驻，并通过主机关闭对应进程，走的是删除
    会话时同一条路径。正在跑的回合会因此中断；主机联系不上时，下一次常驻心跳会被拒绝，进程照样退出。
    因为绑定和失效在连接行上互斥，「先绑定后失效」会被找到并关闭，「先失效后绑定」会被拒绝。
@@ -187,7 +188,7 @@ Anthropic Messages 的约定不同：Claude Code 的 SDK 会在 `ANTHROPIC_BASE_
 
 ## 八、服务端验证的网络防护
 
-验证按钮会让控制面去拨用户填的地址，所以沿用 MCP 连接的防护：
+「验证并保存」会让控制面去拨用户填的地址，所以沿用 MCP 连接的防护：
 
 - 只接受 `https`、443 端口、主机名或 IPv4（不接受 IPv6 字面量），URL 里不能带用户名密码、
   查询串或片段；
@@ -197,8 +198,8 @@ Anthropic Messages 的约定不同：Claude Code 的 SDK 会在 `ANTHROPIC_BASE_
 - 实际连接被钉在刚检查过的 IPv4 地址上，防 DNS 重绑定；不跟随重定向，不读环境里的代理设置；
 - 上游返回的正文一律不回显，只保留 HTTP 状态码和从流里解析出的事实；读取有大小上限；
 - 每个用户每小时最多 20 次（验证一个模型算一次，读取模型列表也算一次），在数据库中原子预留次数
-  以覆盖多副本并发；预留之后才发起网络请求，同一用户的多次验证可以同时进行，限制的是次数而不是
-  并发。结果按模型单独合并，只有连接仍启用、密钥和 Base URL 未变、模型仍在列表里时才保存。
+  以覆盖多副本并发；一次保存需要的次数一次性全部预留，预留之后才发起网络请求，限制的是次数而不是
+  并发。调用期间不持有数据库事务。
 
 每种 API 的检查流程：先发一个带一个工具的流式请求，要求模型调用它；再把工具结果带回去发第二个流式请求，
 要求模型给出包含本次工具结果的最终回答。第一步必须恰好有一次调用、且调用的是提供的工具；第二步不能再请求任何工具。
@@ -271,8 +272,7 @@ Responses 第二步保留第一步输出上下文。Anthropic Messages 用原生
   与当前回合两条继承路径、继承来源不可用时禁止发送）、`SideChat.test.tsx`、
   `PendingMessageQueue.test.tsx`（只改正文保留来源）、`LedgerUsage.test.tsx`、`RunDetails.test.tsx`、
   管理员运行详情、`ModelSettings.test.tsx`。
-- 浏览器（Playwright）：`e2e/model-connections-anthropic.spec.ts`（1440px 与 390px 保存只声明
-  Anthropic Messages 的连接，Claude Code 选择并提交该来源，换成 Codex 后显示不可用）、
+- 浏览器（Playwright）：`e2e/model-connection-verification.spec.ts`（见第十三节）、
   `e2e/model-connections.spec.ts`（1440px 与 390px 设置流程）和
   `e2e/model-source-attribution.spec.ts`（个人来源在刷新后保留、切换到同名 Gateway 模型、变为不可用）。
 - 后端审查回归：`tests/servers/test_model_connection_usage_review.py`、
@@ -286,7 +286,9 @@ Responses 第二步保留第一步输出上下文。Anthropic Messages 用原生
 ## 十二、自动识别 API（2026-10-28 修订）
 
 用户看了预览后明确表示：不该让他们勾选「支持的 API」，也不该在主表单上把协议和 Agent 绑在一起；
-协议的选择和转换应由 Cloud Agent 在后台完成。本节记录修订后的设计，前文已按此改写。
+协议的选择和转换应由 Cloud Agent 在后台完成。本节记录这次修订。其中「保存后再逐个验证」「高级里的
+手动声明」和单独的 `/verify` 接口已被第十三节取代，按模型存储、失效规则、有界探测和三项评审修复仍然
+有效。
 
 **用户看到的。** 新增连接只填名称、Base URL、API key 和模型 ID。只有用户点「保存并验证」或某个
 模型上的「验证」时，平台才会调用服务商；打开页面、编辑字段、单纯保存都不会。按钮旁说明验证会发出
@@ -352,4 +354,63 @@ OpenAI 风格，缺失或被拒时再 Anthropic 风格，所以只提供 Message
 `ModelConnectionsSettings.test.tsx`、`modelSource.test.ts`、`TaskComposer.modelSource.test.tsx`、
 `PendingMessageQueue.test.tsx`、`JobDetail.enhancements.test.tsx`，以及浏览器用例
 `e2e/model-connection-verification.spec.ts`（中英文、桌面和手机宽度）。全部使用模拟服务商。
+
+## 十三、先验证再保存（2026-10-28 第二次修订）
+
+用户的新要求：彻底去掉手动声明 API；表单要紧凑，不用大段多行输入框；先验证再保存，验证失败不能
+留下连接或密钥。本节取代第十二节中与此冲突的部分，前文已按此改写。
+
+**用户看到的。** 表单只有名称、Base URL、只写的 API key 和模型 ID。模型 ID 在一行里输入，回车或
+「添加」把它变成可移除的小标签，长 ID 自动换行，全部可用键盘操作；最多 8 个。只有一个主按钮
+「验证并保存」，后面是「取消」；不需要调用服务商的编辑（重命名、移除模型、没有改动）按钮显示为
+「保存」。按钮下只有一句说明：验证会为每个模型向服务商发几个小请求，可能计费。验证失败时表单保持
+打开，所有输入（包括密钥）都在，每个模型标签上写着自己的结果，改完可以重试；不会出现新卡片。卡片
+只显示名称、Base URL、启用状态、每个模型及能用它的 Agent，协议和路径放在折叠的「技术详情」里，只读。
+任何地方都没有协议单选框、复选框或开关。
+
+**服务端：验证就在保存请求里。** 没有凭证（receipt），也没有草稿表。`POST` 和 `PATCH` 自己验证将要
+提交的配置，再提交它，所以客户端无法跳过验证、伪造能力或重放旧结果：结果来自同一个请求，针对它要
+提交的、已规范化的 Base URL、密钥和模型，属于已认证的所有者。
+
+1. 校验并规范化输入。`PATCH` 读出所有者的当前行，算出真正的变化；密钥解密后比较，重新填入同一个
+   key 不算变化。
+2. 决定要验证哪些模型：新建或改了 Base URL / 密钥时验证全部要保存的模型；否则只验证新加的模型；
+   重命名、移除模型、启用、停用、无变化时不验证，也不调用服务商。
+3. 需要验证时：要求部署开关已打开；在 `agent_model_connection_checks` 里按模型数一次性预留所有者
+   的每小时额度（每小时 20 次，按所有者的 advisory lock 原子计数，跨副本有效，连接不存在时也计入），
+   要么全部预留，要么一个不占并返回 429，且不调用服务商。
+4. 对每个模型调用 `verify_model`，最多同时四个模型；每个模型是三种原生检查、每种两次请求，沿用固定
+   解析地址的公网 IPv4 HTTPS 传输，不跟随重定向、不读代理、不回显上游正文，密钥不进日志、错误或参数。
+   调用期间不持有数据库事务。
+5. 成功条件：每个要保存的模型都至少有一个 Agent 能用（从其原生结果推导）。否则返回 422
+   `model_connection_verification_failed`，附上每个已验证模型的状态，什么都不写；失败的模型绝不会
+   被悄悄去掉，也不会换成别的模型或服务商。
+6. 提交：新建时一条 `INSERT` 写入行、密文和验证结果（版本 1），密文只在验证成功后才生成，所以失败的
+   新建不会存下密钥；名称冲突在插入时返回 409。编辑时一条带条件的 `UPDATE`：只有当前行仍是未删除、
+   `credential_revision`、`config_revision` 和模型列表都等于验证开始时读到的值才写入；期间发生的轮换、
+   改地址、停用、删除或模型编辑都会让它落空，返回 409 `model_connection_changed`，原连接、密钥、结果和
+   常驻进程都保持不变。期间的重命名不冲突，因为更新只写本请求改动的字段。新端点时两种版本号都加一，
+   新结果按新的 `config_revision` 写入；否则保留其余模型的当前结果并合并新结果。
+7. 不需要验证的编辑走原来的更新路径，并在 SQL 里限制为只能改名称、启用状态，以及把模型列表改成
+   原列表的子集；Base URL、密钥或新增模型在存储层也无法绕过验证。
+
+**限制与取舍。** 每个连接最多 8 个模型：换密钥或 Base URL 要重新验证全部模型，这个上限让一次保存最多
+48 次服务商请求、8 次额度、分两批进行。手动声明、`protocols` 列、单独的 `/verify` 接口和逐个记录结果
+的存储方法都已删除；请求里再带 `protocols` 会得到 422。模型列表发现只用于已保存的连接，选中的 ID
+通过编辑添加，同样先验证。
+
+**前端竞态。** 保存请求可能很慢，「取消」始终可用。取消、关闭表单或删除连接之后才返回的成功结果
+不直接套用，而是让页面重新读取列表，以服务端为准：既不会让已删除的连接复活，也不会凭空丢掉服务端
+已经保存的连接。取消后才返回的失败不会重新打开表单或显示错误；离开页面后不再发任何请求；失败后
+修改任何字段都会清掉过期的逐模型结果；验证中的保存不能重复提交。
+
+**验证范围。** 后端：`tests/servers/test_model_connections_api.py`（新建失败不留连接和密钥、编辑失败
+原样保留、部分模型失败、额度不足不调用服务商、重复名称和超过 8 个模型在验证前拒绝、手动声明被拒绝、
+并发轮换/改地址/停用/改模型/删除时的 409、期间重命名不冲突、重命名不扰动、最多四个模型并发），
+`tests/integration/storage/test_model_connection_store.py` 和
+`tests/integration/storage/test_model_connection_verified_save.py`（真实 PostgreSQL 上的同类场景、
+额度原子性、同一次读取的两次提交只能成功一个）。前端：`ModelConnectionsSettings.test.tsx`、
+`ModelVerification.races.test.tsx`，浏览器用例 `e2e/model-connection-verification.spec.ts`（中英文，
+1440px 浅色与 390px 深色）、`e2e/model-connections.spec.ts`、`e2e/dropdowns.spec.ts`。全部使用模拟
+服务商。
 

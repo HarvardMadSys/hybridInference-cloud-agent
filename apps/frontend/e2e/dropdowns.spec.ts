@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { chatOnly, connectionView, unverified } from './modelConnectionFixtures';
+import { chatOnly, connectionView } from './modelConnectionFixtures';
 
 const tableNames = [
   'agent_admin_audit_log',
@@ -253,7 +253,7 @@ for (const variant of [
   { name: 'desktop light', width: 1440, height: 900, theme: 'light' },
   { name: 'mobile dark', width: 390, height: 844, theme: 'dark' },
 ]) {
-  test(`model verification needs no protocol menu and fits the viewport (${variant.name})`, async ({
+  test(`verify and save needs no protocol menu and fits the viewport (${variant.name})`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width: variant.width, height: variant.height });
@@ -272,58 +272,68 @@ for (const variant of [
         },
       }),
     );
-    await page.route('**/api/v1/agent/model-connections', (route) =>
-      route.fulfill({
-        json: {
-          enabled: true,
-          configured: true,
-          connections: [
-            connectionView({
-              id: connectionId,
-              name: 'Fixture provider',
-              base_url: 'https://provider.example/v1',
-              model_status: [unverified('fixture-small'), unverified('fixture-large')],
-            }),
-          ],
-        },
-      }),
-    );
-    const checked: unknown[] = [];
+    const posted: unknown[] = [];
     let release!: () => void;
     const allowed = new Promise<void>((resolve) => {
       release = resolve;
     });
-    await page.route(`**/api/v1/agent/model-connections/${connectionId}/verify`, async (route) => {
-      checked.push(route.request().postDataJSON());
+    let saved: ReturnType<typeof connectionView> | null = null;
+    await page.route('**/api/v1/agent/model-connections', async (route) => {
+      if (route.request().method() === 'GET') {
+        return route.fulfill({
+          json: { enabled: true, configured: true, connections: saved ? [saved] : [] },
+        });
+      }
+      posted.push(route.request().postDataJSON());
+      // The server verifies before it answers; the form waits for it.
       await allowed;
-      return route.fulfill({ json: { ...chatOnly('fixture-large'), recorded: true } });
+      saved = connectionView({
+        id: connectionId,
+        name: 'Fixture provider',
+        base_url: 'https://provider.example/v1',
+        model_status: [chatOnly('fixture-small'), chatOnly('fixture-large')],
+      });
+      return route.fulfill({ status: 201, json: saved });
     });
     await page.goto('/settings/my-settings');
-    const card = page.getByRole('article', { name: 'Fixture provider' });
-    await expect(card.getByRole('combobox')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Add connection', exact: true }).click();
+    const form = page.getByRole('region', { name: 'Personal model connections' }).locator('form');
+    await expect(form.getByRole('combobox')).toHaveCount(0);
     await expect(page.locator('select:visible')).toHaveCount(0);
     await expect(page.locator('datalist')).toHaveCount(0);
-    expect(checked).toEqual([]);
-    await card.getByRole('button', { name: 'Verify fixture-large', exact: true }).click();
-    await expect.poll(() => checked.length).toBe(1);
-    await expect(
-      card.getByRole('button', { name: 'Verify fixture-small', exact: true }),
-    ).toBeDisabled();
-    await expect(
-      card.getByRole('button', { name: 'Verify fixture-large', exact: true }),
-    ).toBeDisabled();
-    expect(checked).toEqual([{ model: 'fixture-large' }]);
+    await page.getByLabel('Connection name', { exact: true }).fill('Fixture provider');
+    await page.getByLabel('Base URL', { exact: true }).fill('https://provider.example/v1');
+    await page.getByLabel('API key', { exact: true }).fill('fixture-key-not-a-credential');
+    const models = page.getByLabel('Model IDs', { exact: true });
+    await models.fill('fixture-small');
+    await models.press('Enter');
+    await models.fill('fixture-large');
+    expect(posted).toEqual([]);
+    await form.getByRole('button', { name: 'Verify and save', exact: true }).click();
+    await expect.poll(() => posted.length).toBe(1);
+    await expect(form.getByRole('button', { name: 'Verifying…', exact: true })).toBeDisabled();
+    // Cancel stays usable while a slow provider is verified.
+    await expect(form.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled();
+    expect(posted).toEqual([
+      {
+        name: 'Fixture provider',
+        base_url: 'https://provider.example/v1',
+        api_key: 'fixture-key-not-a-credential',
+        models: ['fixture-small', 'fixture-large'],
+      },
+    ]);
+    await form.screenshot({
+      path: testInfo.outputPath('verify-and-save-pending.png'),
+      animations: 'disabled',
+    });
     release();
-    await expect(card.getByText('Ready', { exact: true })).toHaveCount(1);
-    await expect(card.getByText('Not verified', { exact: true })).toHaveCount(1);
-    await expect(
-      card.getByRole('button', { name: 'Verify fixture-large', exact: true }),
-    ).toBeEnabled();
+    const card = page.getByRole('article', { name: 'Fixture provider' });
+    await expect(card.getByText(/^Works with/)).toHaveCount(2);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       variant.width,
     );
     await card.screenshot({
-      path: testInfo.outputPath('model-verification-no-protocol-menu.png'),
+      path: testInfo.outputPath('verified-connection.png'),
       animations: 'disabled',
     });
   });
