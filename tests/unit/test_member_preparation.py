@@ -310,8 +310,8 @@ def test_a_step_for_another_uid_is_refused():
 
 def _name(argv: list[str]) -> str:
     """Which member command ``argv`` is."""
-    script = argv[2] if len(argv) > 2 else ""
-    if argv[0] == MEMBER_REAPER_TARGET:
+    script = argv[argv.index("-c") + 1] if "-c" in argv else ""
+    if MEMBER_REAPER_TARGET in argv:
         return "reap"
     if script == TOOL_HOOKS_SCRIPT:
         return "hooks"
@@ -335,7 +335,7 @@ class _Guest:
         self.statuses = statuses or {}
 
     def exec_capture(self, _spec, argv, **kwargs):
-        if argv[:3] == ["python3", "-I", "-c"]:
+        if argv == ["python3", "-I", "-c", RUNNER]:
             steps = json.loads(kwargs["input_bytes"])
             names = [_name(step["argv"]) for step in steps]
             self.events.append(("runner", names, kwargs["user_uid"]))
@@ -536,7 +536,7 @@ def test_the_hooks_reach_the_members_own_settings_through_the_queue(driver):
     recorded = manager.exec_capture
 
     def capture(spec, argv, **kwargs):
-        if argv[:3] == ["python3", "-I", "-c"]:
+        if argv == ["python3", "-I", "-c", RUNNER]:
             captured.extend(json.loads(kwargs["input_bytes"]))
         return recorded(spec, argv, **kwargs)
 
@@ -545,7 +545,7 @@ def test_the_hooks_reach_the_members_own_settings_through_the_queue(driver):
     ResidentTransportFactory(manager).open(_SPEC, _launch("claude-code"))
 
     hooks = captured[-1]
-    assert hooks["argv"][3:] == [
+    assert hooks["argv"][4:] == [
         claude_member_config_dir(1, "athr_member"),
         "/agent-state/tool-marks.log",
     ]

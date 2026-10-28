@@ -1663,7 +1663,7 @@ class ChatSandboxManager:
         self.ensure_member_process_reaper(spec)
         result = self.exec_capture(
             spec,
-            [MEMBER_REAPER_TARGET, "capture", str(user_uid)],
+            ["python3", "-I", MEMBER_REAPER_TARGET, "capture", str(user_uid)],
             workdir="/",
             timeout_s=20,
             user_uid=user_uid,
@@ -2430,6 +2430,7 @@ class ChatSandboxManager:
                 spec,
                 [
                     "python3",
+                    "-I",
                     "-c",
                     "import json, os; "
                     "s=dict(line.split(':',1) for line in open('/proc/self/status') "
@@ -2469,7 +2470,7 @@ class ChatSandboxManager:
                 raise SandboxError("Kata member exec lacks non-root, seccomp or no-new-privileges")
             cleanup = self.exec_capture(
                 spec,
-                [MEMBER_REAPER_TARGET, "reap", str(MEMBER_UID_BASE)],
+                ["python3", "-I", MEMBER_REAPER_TARGET, "reap", str(MEMBER_UID_BASE)],
                 workdir="/",
                 input_bytes=b"",
                 user_uid=MEMBER_UID_BASE,
@@ -2633,6 +2634,7 @@ class ChatSandboxManager:
             spec,
             [
                 "python3",
+                "-I",
                 "-c",
                 WINDOW_DELTA_SCRIPT,
                 GUEST_OBSERVER_EVENTS,
@@ -2808,7 +2810,7 @@ class ChatSandboxManager:
             )
             result = self.exec_capture(
                 spec,
-                ["python3", "-c", script, path],
+                ["python3", "-I", "-c", script, path],
                 workdir="/",
                 timeout_s=5,
                 user_uid=self.backend.uid,
@@ -2832,7 +2834,7 @@ class ChatSandboxManager:
             )
             result = self.exec_capture(
                 spec,
-                ["python3", "-c", script, path, str(max(0, offset)), str(bounded)],
+                ["python3", "-I", "-c", script, path, str(max(0, offset)), str(bounded)],
                 workdir="/",
                 timeout_s=5,
                 user_uid=self.backend.uid,
@@ -2842,11 +2844,7 @@ class ChatSandboxManager:
                 raise SandboxError("tool-mark slice could not be read")
             return result.stdout
 
-        return ToolMarkReader(
-            None,
-            remote_size=remote_size,
-            remote_read=remote_read,
-        )
+        return ToolMarkReader(None, remote_size=remote_size, remote_read=remote_read)
 
     def install_tool_hooks(
         self,
@@ -2878,6 +2876,7 @@ class ChatSandboxManager:
         step = MemberStep(
             (
                 "python3",
+                "-I",
                 "-c",
                 TOOL_HOOKS_SCRIPT,
                 claude_member_config_dir(slot_id, thread_id),
@@ -4004,7 +4003,7 @@ def member_inference_env_path(slot_id: int) -> str:
 def _reap_step(user_uid: int, baseline: bytes) -> MemberStep:
     """Reap every process of ``user_uid`` that ``baseline`` does not name."""
     return MemberStep(
-        (MEMBER_REAPER_TARGET, "reap", str(user_uid)),
+        ("python3", "-I", MEMBER_REAPER_TARGET, "reap", str(user_uid)),
         timeout_s=30,
         failure=lambda stderr: SandboxError(
             "member activation process cleanup failed: " + stderr.decode("utf-8", "replace")[:300]
