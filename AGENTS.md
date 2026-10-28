@@ -341,8 +341,9 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   run on a model verified for Chat Completions, through a member-private
   translator: the CLI is exec'd behind a launcher that forks a
   loopback service as the same member UID, bound to that one upstream, key
-  and model, answering only a token derived from the key and the member's
-  thread id (masked by the runner like the key; a sibling's token is refused)
+  and model, answering only a platform-issued token scoped to the owner,
+  member, connection revision, client protocol and model (masked by the
+  runner like the key; a sibling's token is refused)
   and dying with the CLI. The CLI never holds the key on that path, and the
   service refuses, rather than drops, what Chat Completions cannot carry
   (an image a tool returned goes to the upstream as a following user image
@@ -355,8 +356,8 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   change to the manual declaration, disabling or deleting closes every process
   still running on the old state, while a rename or a model-list edit closes
   nothing and a newly listed model starts unverified. A verification is kept
-  only if the key, Base URL, enabled state and model list are still what it
-  tested, merged per model. The control plane's verification dials only public IPv4 HTTPS under
+  only if the key, Base URL and enabled state are still what it tested and
+  the model is still listed, merged per model. The control plane's verification dials only public IPv4 HTTPS under
   the MCP connection policy and the sandbox's protected ranges, pinned, with no
   redirects and no upstream body echoed. See the
   [model connection design](docs/agents/specs/2026-10-27-user-model-connections.zh-CN.md).
