@@ -108,6 +108,7 @@ from cloud_agent_host.chat_sandbox_network import (
     ChatSandboxNetwork,
     _GroupNetworkSnapshot,
 )
+from cloud_agent_host.docker_engine import run_docker
 from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
@@ -121,7 +122,9 @@ from cloud_agent_host.guest_observer import (
     GuestObserverSnapshot,
 )
 from cloud_agent_host.guest_observer_locks import GuestObserverLocks
+from cloud_agent_host.guest_observer_scripts import WINDOW_DELTA_SCRIPT
 from cloud_agent_host.install_locks import install_lock
+from cloud_agent_host.member_preparation import TOOL_HOOKS_SCRIPT, MemberStep, run_member_steps
 from cloud_agent_host.network_guard import GUARD_RECHECK_S
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
@@ -149,6 +152,8 @@ if TYPE_CHECKING:
     from typing import BinaryIO
 
     from _typeshed import SupportsWrite
+
+    from cloud_agent_host.member_preparation import MemberPreparation
 
 #: A probe older than this was abandoned; the next namespace probe removes it.
 PROBE_ABANDONED_AFTER_S = 3600
@@ -1487,7 +1492,14 @@ class ChatSandboxManager:
         return path
 
     def ensure_member_process_reaper(self, spec: ChatSandboxSpec) -> None:
-        """Install the immutable helper into retained pre-upgrade containers."""
+        """Install the immutable helper into retained pre-upgrade containers.
+
+        Found or installed once per proven container (``ProvenContainers.note_helper``),
+        then not probed again on each turn's census and reap.
+        """
+        proven = self._proven.get(spec)
+        if self._proven.holds_helper(proven, MEMBER_REAPER_TARGET):
+            return
         with install_lock(spec.container_name):
             probe = self.exec_capture(
                 spec,
@@ -1504,6 +1516,7 @@ class ChatSandboxManager:
                 user_gid=0,
             )
             if probe.returncode == 0:
+                self._proven.note_helper(proven, MEMBER_REAPER_TARGET)
                 return
             current = self._require(spec)
             if not current.running:
@@ -1558,6 +1571,7 @@ class ChatSandboxManager:
                     "member-process-reaper compatibility activation failed: "
                     + installed.stderr.decode("utf-8", "replace")[:300]
                 )
+            self._proven.note_helper(proven, MEMBER_REAPER_TARGET)
 
     def ensure_codex_mcp_policy(self, spec: ChatSandboxSpec, base_url: str) -> None:
         """Allow only this deployment's relay before starting a Codex member."""
@@ -1577,24 +1591,21 @@ class ChatSandboxManager:
 
     def ensure_kilo_mcp_runtime(self, spec: ChatSandboxSpec, version: str) -> None:
         """Bring retained Kilo members onto the deployment's isolated runtime."""
-        from cloud_agent_host.kilo_mcp import ensure_kilo_runtime
+        from cloud_agent_host.kilo_mcp import ensure_kilo_runtime_once
 
-        with install_lock(spec.container_name):
-            ensure_kilo_runtime(self, spec, version)
+        ensure_kilo_runtime_once(self, spec, version)
 
     def ensure_downloaded_runtime(self, spec: ChatSandboxSpec, runtime: str, version: str) -> None:
         """Copy a version downloaded after the image was built into this chat."""
-        from cloud_agent_host.runtime_install import ensure_downloaded_runtime
+        from cloud_agent_host.runtime_install import ensure_downloaded_runtime_once
 
-        with install_lock(spec.container_name):
-            ensure_downloaded_runtime(self, spec, runtime, version)
+        ensure_downloaded_runtime_once(self, spec, runtime, version)
 
     def ensure_mcp_helpers(self, spec: ChatSandboxSpec, runtime: str) -> None:
         """Keep existing conversations on the same adapters as new conversations."""
-        from cloud_agent_host.mcp_helpers import install_mcp_helpers
+        from cloud_agent_host.mcp_helpers import install_mcp_helpers_once
 
-        with install_lock(spec.container_name):
-            install_mcp_helpers(self, spec, runtime)
+        install_mcp_helpers_once(self, spec, runtime)
 
     def reap_member_processes(
         self,
@@ -1603,42 +1614,41 @@ class ChatSandboxManager:
         slot_id: int,
         user_uid: int,
         user_gid: int,
+        batch: MemberPreparation | None = None,
     ) -> None:
         """Kill unattached live CLI trees in exactly one private member slot.
 
         Every launch reaps its slot first, which also drops the owner inference
         credentials an earlier launch left for its bash: a launch with them
         writes them again, and one whose owner removed them must not find them.
+        The reap and the removal after it run in one exec, or are queued on
+        ``batch`` with the rest of the member's preparation.
         """
         if not 0 <= slot_id < spec.resident_slot_capacity:
             raise ValueError("resident slot is outside this shared sandbox")
         if user_uid != MEMBER_UID_BASE + slot_id:
             raise ValueError("resident slot does not match its member uid")
-        directory = f"{MEMBER_TMPFS_ROOT}/{slot_id}"
-        self.reap_member_processes_except(
-            spec,
-            slot_id=slot_id,
-            user_uid=user_uid,
-            user_gid=user_gid,
-            baseline=(),
-        )
-        result = self.exec_capture(
-            spec,
-            [
+        stale = MemberStep(
+            (
                 "/bin/sh",
                 "-c",
-                f"rm -f -- {directory}/resident-*.pid {member_inference_env_path(slot_id)}",
-            ],
-            workdir="/",
+                f"rm -f -- {MEMBER_TMPFS_ROOT}/{slot_id}/resident-*.pid "
+                f"{member_inference_env_path(slot_id)}",
+            ),
             timeout_s=20,
+            failure=lambda stderr: SandboxError(
+                "stale resident process cleanup failed: " + stderr.decode("utf-8", "replace")[:300]
+            ),
+        )
+        run_member_steps(
+            self,
+            spec,
+            _reap_step(user_uid, b""),
+            stale,
             user_uid=user_uid,
             user_gid=user_gid,
+            batch=batch,
         )
-        if result.returncode != 0:
-            raise SandboxError(
-                "stale resident process cleanup failed: "
-                + result.stderr.decode("utf-8", "replace")[:300]
-            )
 
     def capture_member_processes(
         self,
@@ -1682,22 +1692,8 @@ class ChatSandboxManager:
         escape merely by changing process groups or forking during cleanup.
         """
         self._validate_member_identity(spec, slot_id=slot_id, user_uid=user_uid)
-        self.ensure_member_process_reaper(spec)
-        payload = self._encode_member_processes(baseline)
-        result = self.exec_capture(
-            spec,
-            [MEMBER_REAPER_TARGET, "reap", str(user_uid)],
-            workdir="/",
-            timeout_s=30,
-            input_bytes=payload,
-            user_uid=user_uid,
-            user_gid=user_gid,
-        )
-        if result.returncode != 0:
-            raise SandboxError(
-                "member activation process cleanup failed: "
-                + result.stderr.decode("utf-8", "replace")[:300]
-            )
+        step = _reap_step(user_uid, self._encode_member_processes(baseline))
+        run_member_steps(self, spec, step, user_uid=user_uid, user_gid=user_gid)
 
     @staticmethod
     def _validate_member_identity(
@@ -2633,26 +2629,12 @@ class ChatSandboxManager:
         """
         if not cursor.available or not cursor.journal_ino:
             return b"", cursor.offset
-        reader = (
-            "import os, sys\n"
-            "filename, offset, expected_dev, expected_ino = sys.argv[1], int(sys.argv[2]), "
-            "int(sys.argv[3]), int(sys.argv[4])\n"
-            "with open(filename, 'rb', buffering=0) as handle:\n"
-            "    journal = os.fstat(handle.fileno())\n"
-            "    if (int(journal.st_dev) != expected_dev "
-            "            or int(journal.st_ino) != expected_ino):\n"
-            "        raise RuntimeError('observer journal changed before read')\n"
-            "    if int(journal.st_size) < offset:\n"
-            "        raise RuntimeError('observer journal is behind the read fence')\n"
-            "    handle.seek(offset)\n"
-            "    sys.stdout.buffer.write(handle.read(max(0, int(journal.st_size) - offset)))\n"
-        )
         result = self.exec_capture(
             spec,
             [
                 "python3",
                 "-c",
-                reader,
+                WINDOW_DELTA_SCRIPT,
                 GUEST_OBSERVER_EVENTS,
                 str(cursor.offset),
                 str(cursor.journal_dev),
@@ -2753,6 +2735,12 @@ class ChatSandboxManager:
             privileged=privileged,
             lock=lock,
         )
+
+    def warm_guest_observer(self, spec: ChatSandboxSpec, container_id: str) -> None:
+        """Start a just-proven Kata guest's observer before its first prompt needs it."""
+        from cloud_agent_host.guest_observer_warmup import warm_guest_observer
+
+        warm_guest_observer(self, spec, container_id)
 
     def begin_guest_observation(
         self,
@@ -2861,7 +2849,13 @@ class ChatSandboxManager:
         )
 
     def install_tool_hooks(
-        self, spec: ChatSandboxSpec, update: dict[str, Any], *, slot_id: int, thread_id: str
+        self,
+        spec: ChatSandboxSpec,
+        update: dict[str, Any],
+        *,
+        slot_id: int,
+        thread_id: str,
+        batch: MemberPreparation | None = None,
     ) -> None:
         """Atomically merge Claude hooks into this member's private settings.
 
@@ -2870,77 +2864,41 @@ class ChatSandboxManager:
         not the Agent CLI. Settings are never imported from the old shared
         Claude root. The group-writable marks file supports trusted non-Kata
         development; Kata accepts only its guest-root observer journal.
+
+        Behind steps already queued on ``batch``, the merge joins their exec,
+        and its failure is reported there instead of raised: the hooks are an
+        observability upgrade, never worth a user's launch.
         """
         uid = MEMBER_UID_BASE + slot_id
         self._validate_member_identity(spec, slot_id=slot_id, user_uid=uid)
         payload = json.dumps(update, separators=(",", ":")).encode()
         if len(payload) > 64 * 1024:
             raise SandboxError("tool hook settings exceed their trusted bound")
-        script = (
-            "import contextlib, fcntl, json, os, pathlib, stat, sys, tempfile\n"
-            "config = pathlib.Path(sys.argv[1])\n"
-            "marks = pathlib.Path(sys.argv[2])\n"
-            "raw = sys.stdin.buffer.read(65537)\n"
-            "if len(raw) > 65536:\n"
-            "    raise RuntimeError('tool hook settings are too large')\n"
-            "update = json.loads(raw)\n"
-            "if not isinstance(update, dict):\n"
-            "    raise RuntimeError('tool hook settings are not an object')\n"
-            "os.umask(0o077)\n"
-            "info = config.lstat()\n"
-            "if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():\n"
-            "    raise RuntimeError('Claude config is not member-owned')\n"
-            "config.chmod(0o700)\n"
-            "mark_fd = os.open(marks, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o660)\n"
-            "with contextlib.suppress(PermissionError):\n"
-            "    os.fchmod(mark_fd, 0o660)\n"
-            "os.close(mark_fd)\n"
-            "lock_path = config / '.freeinference-hooks.lock'\n"
-            "lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)\n"
-            "os.fchmod(lock_fd, 0o600)\n"
-            "with os.fdopen(lock_fd, 'r+') as lock:\n"
-            "    fcntl.flock(lock, fcntl.LOCK_EX)\n"
-            "    settings_path = config / 'settings.json'\n"
-            "    settings = {}\n"
-            "    try:\n"
-            "        fd = os.open(settings_path, os.O_RDONLY | os.O_NOFOLLOW)\n"
-            "        with os.fdopen(fd, 'r') as handle:\n"
-            "            candidate = json.load(handle)\n"
-            "        if isinstance(candidate, dict):\n"
-            "            settings = candidate\n"
-            "    except (OSError, ValueError, TypeError):\n"
-            "        pass\n"
-            "    settings.update(update)\n"
-            "    fd, filename = tempfile.mkstemp(prefix='.settings.', suffix='.tmp', dir=config)\n"
-            "    temporary = pathlib.Path(filename)\n"
-            "    try:\n"
-            "        with os.fdopen(fd, 'w') as handle:\n"
-            "            json.dump(settings, handle, indent=2)\n"
-            "        os.replace(temporary, settings_path)\n"
-            "    finally:\n"
-            "        with contextlib.suppress(FileNotFoundError):\n"
-            "            temporary.unlink()\n"
-        )
-        result = self.exec_capture(
-            spec,
-            [
+        queued = batch is not None and batch.pending
+        step = MemberStep(
+            (
                 "python3",
                 "-c",
-                script,
+                TOOL_HOOKS_SCRIPT,
                 claude_member_config_dir(slot_id, thread_id),
                 f"{CHAT_STATE_DIR}/{TOOL_MARK_FILE}",
-            ],
-            workdir="/",
+            ),
             timeout_s=10,
+            failure=lambda stderr: SandboxError(
+                "tool hooks could not be installed in retained state: "
+                + stderr.decode("utf-8", "replace")[-300:]
+            ),
             input_bytes=payload,
+            soft="tool hooks not installed" if queued else "",
+        )
+        run_member_steps(
+            self,
+            spec,
+            step,
             user_uid=uid,
             user_gid=self.backend.gid,
+            batch=batch if queued else None,
         )
-        if result.returncode != 0:
-            raise SandboxError(
-                "tool hooks could not be installed in retained state: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
 
     def read_initial_archive_marker(
         self,
@@ -3541,19 +3499,8 @@ class ChatSandboxManager:
         if not path.startswith("/") or "\x00" in path:
             raise ValueError("container archive path must be absolute")
 
-    @staticmethod
-    def _run(argv: builtins.list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
-        try:
-            return subprocess.run(
-                argv,
-                env={**os.environ},
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise SandboxError(f"Docker lifecycle command failed: {exc}") from exc
+    def _run(self, argv: builtins.list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+        return run_docker(argv, timeout=timeout, engine=getattr(self.backend, "engine", None))
 
     @staticmethod
     def _run_bytes(
@@ -4052,6 +3999,19 @@ class RetainedChatBackend(SandboxBackend):
 def member_inference_env_path(slot_id: int) -> str:
     """Where one member's owner inference credentials wait for its bash."""
     return f"{MEMBER_TMPFS_ROOT}/{slot_id}/inference-env.sh"
+
+
+def _reap_step(user_uid: int, baseline: bytes) -> MemberStep:
+    """Reap every process of ``user_uid`` that ``baseline`` does not name."""
+    return MemberStep(
+        (MEMBER_REAPER_TARGET, "reap", str(user_uid)),
+        timeout_s=30,
+        failure=lambda stderr: SandboxError(
+            "member activation process cleanup failed: " + stderr.decode("utf-8", "replace")[:300]
+        ),
+        input_bytes=baseline,
+        reaps=True,
+    )
 
 
 __all__ = [

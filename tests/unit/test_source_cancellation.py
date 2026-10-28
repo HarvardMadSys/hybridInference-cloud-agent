@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import pathlib
 import subprocess
 import sys
@@ -36,29 +37,28 @@ def test_archive_cancellation_stops_before_the_next_entry_or_chunk(tmp_path, mon
     if stage == "traversal":
 
         def entries(_root, **kwargs):
-            yield root / ".git"
+            yield str(root / ".git")
             stop.set()
-            yield root / "payload"
+            yield str(root / "payload")
             consumed.append("walked after cancellation")
 
         monkeypatch.setattr(source_archive, "_entries", entries)
     elif stage == "metadata":
-        lstat = pathlib.Path.lstat
+        lstat = source_archive.os.lstat
         entries = {root / ".git", root / "payload"}
 
-        # Cancelled at whichever entry is statted first: `os.scandir` order is
-        # the filesystem's, and assuming `.git` came first failed on ext4
-        # (reproduced on the unmodified base, 3f60b6a). Nothing may be statted
-        # after that, whichever order the walk takes.
+        # Cancelled at whichever entry is statted first: directory order is
+        # filesystem-dependent. The string-path builder now uses os.lstat;
+        # any further metadata read after cancellation is still a violation.
         def metadata(path, *args, **kwargs):
             result = lstat(path, *args, **kwargs)
-            if path in entries:
+            if pathlib.Path(os.fsdecode(path)) in entries:
                 if stop.is_set():
                     consumed.append("statted after cancellation")
                 stop.set()
             return result
 
-        monkeypatch.setattr(pathlib.Path, "lstat", metadata)
+        monkeypatch.setattr(source_archive.os, "lstat", metadata)
     else:
 
         class StopOnContent(io.BytesIO):
@@ -135,9 +135,9 @@ def test_cancellable_walk_streams_every_entry_and_never_follows_symlinks(tmp_pat
     (root / "directory-link").symlink_to(root / "z", target_is_directory=True)
     expected = set()
     for directory, directories, files in source_cancellation.os.walk(root, followlinks=False):
-        expected.update(pathlib.Path(directory) / name for name in directories)
-        expected.update(pathlib.Path(directory) / name for name in files)
-    assert set(source_archive._entries(root, stop=threading.Event())) == expected
+        expected.update(os.path.join(directory, name) for name in directories)
+        expected.update(os.path.join(directory, name) for name in files)
+    assert set(source_archive._entries(str(root), stop=threading.Event())) == expected
 
 
 @pytest.mark.parametrize("stage", ["clone", "branch", "lockfiles"])

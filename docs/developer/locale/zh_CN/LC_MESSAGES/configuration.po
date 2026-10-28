@@ -3549,8 +3549,16 @@ msgid "`AGENT_SANDBOX_DOCKER`"
 msgstr ""
 
 #: ../developer/configuration.md:1
-msgid "Docker executable used by the host backend, default `docker`."
-msgstr "主机后端使用的 Docker 可执行文件，默认 `docker`。"
+msgid ""
+"Docker executable used by the host backend, default `docker`. With the "
+"default, the runner and sandbox manager read container and network state "
+"from that daemon's Engine API, on the unix socket that `DOCKER_HOST` or "
+"the default context names, instead of starting the executable for every "
+"read. Any other executable keeps every Docker call on it."
+msgstr ""
+"主机后端使用的 Docker 可执行文件，默认 `docker`。使用默认值时，runner 和 sandbox manager "
+"通过该守护进程的 Engine API 读取容器和网络状态，走 `DOCKER_HOST` 或默认 context 指定的 unix "
+"socket，不再为每次读取都启动一次这个可执行文件。设为其他可执行文件时，所有 Docker 调用仍经由它执行。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_SANDBOX_HOME`"

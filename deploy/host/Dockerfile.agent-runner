@@ -46,6 +46,16 @@ RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.
 # sandbox rules, and with no capability at all for ip, to read the host's routes
 # (cloud_agent_host/network_guard.py). The runner itself holds no NET_ADMIN.
 
+# That helper runs Python with a read-only root filesystem, where it cannot
+# cache bytecode, and this base image ships the standard library without any:
+# every run compiled each module it imported again, about a third of a run
+# that sandbox starts, stops and the running-group sweep all wait for. Compiled
+# once here instead, against source hashes so a rewritten build timestamp
+# cannot invalidate them, leaving out what no process here imports.
+RUN python -m compileall -q -j 0 --invalidation-mode checked-hash \
+        -x '/(site-packages|idlelib|tkinter|turtledemo|lib2to3|pydoc_data|ensurepip)/' \
+        "$(python -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
+
 # The client only — no daemon. The runner talks to the host's daemon over the
 # bind-mounted socket; a second daemon in here would be both wrong and
 # considerably more privilege than this needs.
