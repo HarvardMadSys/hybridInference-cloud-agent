@@ -78,6 +78,7 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentJobUsage: vi.fn().mockResolvedValue(null),
   refreshAgentJobUsage: vi.fn().mockResolvedValue(null),
   getAgentThreadStats: vi.fn().mockResolvedValue(null),
+  getAgentThreadModelTtft: vi.fn().mockResolvedValue(null),
   listAgentTerminals: vi.fn().mockResolvedValue([]),
   getAgentJobFiles: vi.fn(),
   getAgentJobGit: vi.fn(),

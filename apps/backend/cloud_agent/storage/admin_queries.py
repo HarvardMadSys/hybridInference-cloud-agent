@@ -21,8 +21,7 @@ from cloud_agent.admin_observability import (
     encode_cursor,
 )
 from cloud_agent.schemas import AttemptResources, ProcessObservation, ToolCallResources
-from cloud_agent.storage._sql.attempts import NEXT_ATTEMPT_START_SQL
-from cloud_agent.storage._sql.ledger import LEDGER_WINDOW_UNTIL_SQL
+from cloud_agent.storage._sql.ledger import REQUEST_SOURCE_COLUMNS_SQL
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.thread_stats import TOKEN_KEY_GROUPS
 from cloud_agent_shared.turn_resources import summarize_run_resources
@@ -110,13 +109,7 @@ _MAX_PROCESSES = 2048
 # The effective window end is the ledger accounting definition, shared with the
 # summary query rather than re-derived here; ``window_open`` asks the same
 # definition a second question instead of duplicating its successor lookup.
-_SOURCE_COLUMNS = f"""
-    a.id AS attempt_id, a.attempt_no, a.status AS attempt_status,
-    a.started_at, a.finished_at, j.thread_id,
-    l.id AS ledger_id, l.grant_id, l.binding_id, l.residency_generation,
-    l.window_since, {LEDGER_WINDOW_UNTIL_SQL} AS window_until,
-    (a.finished_at IS NULL AND {NEXT_ATTEMPT_START_SQL} IS NULL) AS window_open
-"""
+_SOURCE_COLUMNS = REQUEST_SOURCE_COLUMNS_SQL
 
 
 def _fold_run_resource_summary(row: dict[str, Any]) -> dict[str, Any]:

@@ -24,9 +24,12 @@ the field. Callers render ``None`` as an em dash, not as a small number.
 receipt-time measurements, not gateway request latency or process execution
 time. Each execution contributes its first-to-last event span, minus the
 union of completed tool windows, as model/harness time. Retry idle time is
-excluded. TTFT averages attempt-start-to-first-output samples. TPS uses
-deduplicated runtime output counts and model time from the same measured
-executions only; it never divides gateway counts by unrelated event timing.
+excluded. First output averages attempt-start-to-first-output samples, which
+include sandbox, workspace and CLI startup and the wait for a whole message
+block, so it is never time to first token: model TTFT is read from the
+gateway's request log by :mod:`cloud_agent.model_ttft`. TPS uses deduplicated
+runtime output counts and model time from the same measured executions only;
+it never divides gateway counts by unrelated event timing.
 """
 
 from __future__ import annotations
@@ -53,8 +56,9 @@ _LIFECYCLE = "lifecycle"
 _ERROR = "error"
 
 #: Events that prove the model has started producing this turn's answer.
-#: Used for time-to-first-token; a ``lifecycle`` event does not qualify,
-#: because the harness emits those before the model has said anything.
+#: Used for first output; a ``lifecycle`` event does not qualify, because the
+#: harness emits those before the model has said anything. Each arrives once its
+#: whole block is complete, so its timestamp is not the model's first token.
 _FIRST_OUTPUT_KINDS = frozenset({_MESSAGE, _THINKING, _TOOL_USE})
 
 #: Token-count key spellings seen across runtimes. Claude reports the
@@ -109,9 +113,11 @@ class ThreadStats:
     #: ``wall_seconds`` minus ``tool_seconds`` — the harness and the model,
     #: which this level of measurement cannot separate from each other.
     model_seconds: float
-    #: Mean time from a turn's attempt starting to its first model output.
-    #: ``None`` when no turn has both timestamps.
-    ttft_seconds: float | None
+    #: Mean time from a turn's first attempt starting to its first completed
+    #: model output event. It includes sandbox, workspace and CLI startup and
+    #: the wait for a whole block, so it is not time to first token; see
+    #: :mod:`cloud_agent.model_ttft`. ``None`` when no turn has both timestamps.
+    first_output_seconds: float | None
     input_tokens: int | None
     output_tokens: int | None
     cache_read_tokens: int | None
@@ -142,7 +148,7 @@ ATTEMPT_ROLLUP_VERSION = 1
 class AttemptStatsRollup:
     """The additive and ordering facts one attempt contributes to a thread.
 
-    This is deliberately not the public summary. Cache-hit ratios, TTFT means,
+    This is deliberately not the public summary. Cache-hit ratios, first-output means,
     false zero suppression and token rates all need their numerators and
     denominators retained until every attempt in the thread is combined.
     """
@@ -341,7 +347,7 @@ def summarize_thread_rollups(
     tool_calls = failed_tool_calls = rate_tokens = 0
     wall_seconds = tool_seconds = rate_seconds = 0.0
     produced_text = False
-    ttft_samples: list[float] = []
+    first_output_samples: list[float] = []
 
     for job_id, job_rollups in by_job.items():
         ordered = sorted(job_rollups, key=lambda item: item.attempt_id)
@@ -364,7 +370,7 @@ def summarize_thread_rollups(
         if started_at is not None and first_output is not None:
             delta = (first_output - started_at).total_seconds()
             if delta >= 0:
-                ttft_samples.append(delta)
+                first_output_samples.append(delta)
 
     output_tokens = totals.output_tokens
     if output_tokens == 0 and produced_text:
@@ -377,7 +383,11 @@ def summarize_thread_rollups(
         wall_seconds=wall_seconds,
         tool_seconds=tool_seconds,
         model_seconds=model_seconds,
-        ttft_seconds=(sum(ttft_samples) / len(ttft_samples)) if ttft_samples else None,
+        first_output_seconds=(
+            (sum(first_output_samples) / len(first_output_samples))
+            if first_output_samples
+            else None
+        ),
         input_tokens=totals.input_tokens,
         output_tokens=output_tokens,
         cache_read_tokens=totals.cache_read_tokens,
@@ -452,8 +462,8 @@ def summarize_thread(
 
     :param job_ids: every job (turn) in the thread.
     :param attempts: attempt rows carrying ``job_id`` and ``started_at``;
-        used only for time-to-first-token, which needs the moment execution
-        began rather than the moment the job was queued.
+        used only for first output, which needs the moment execution began
+        rather than the moment the job was queued.
     :param events: the thread's event rows, each with ``job_id``,
         ``event_type``, ``payload`` and ``created_at``. Order does not
         matter; events are grouped and sorted here.
@@ -473,7 +483,7 @@ def summarize_thread(
     tool_seconds = 0.0
     rate_tokens = 0
     rate_seconds = 0.0
-    ttft_samples: list[float] = []
+    first_output_samples: list[float] = []
     totals = _TokenTotals()
     produced_text = False
 
@@ -512,9 +522,9 @@ def summarize_thread(
                 rate_tokens += output
                 rate_seconds += model
 
-        ttft = _time_to_first_output(ordered, first_attempt_start.get(job_id))
-        if ttft is not None:
-            ttft_samples.append(ttft)
+        first_output = _time_to_first_output(ordered, first_attempt_start.get(job_id))
+        if first_output is not None:
+            first_output_samples.append(first_output)
 
         produced_text = produced_text or _has_text(ordered)
 
@@ -538,7 +548,11 @@ def summarize_thread(
         wall_seconds=wall_seconds,
         tool_seconds=tool_seconds,
         model_seconds=model_seconds,
-        ttft_seconds=(sum(ttft_samples) / len(ttft_samples)) if ttft_samples else None,
+        first_output_seconds=(
+            (sum(first_output_samples) / len(first_output_samples))
+            if first_output_samples
+            else None
+        ),
         input_tokens=totals.input_tokens,
         output_tokens=output_tokens,
         cache_read_tokens=totals.cache_read_tokens,
@@ -677,9 +691,8 @@ def _earliest_attempt_start_per_job(
 ) -> dict[str, datetime]:
     """Map each job to when its first attempt began.
 
-    The *first* attempt, not the last: time-to-first-token should describe
-    what the user waited through, and a retried turn made them wait from the
-    beginning.
+    The *first* attempt, not the last: first output should describe what the
+    user waited through, and a retried turn made them wait from the beginning.
     """
     starts: dict[str, datetime] = {}
     for attempt in attempts:
@@ -903,7 +916,9 @@ class SessionStatistics(BaseModel):
 
     model_seconds: float | None = Field(None, ge=0)
     tool_seconds: float | None = Field(None, ge=0)
-    ttft_seconds: float | None = Field(None, ge=0)
+    #: Event-derived attempt start to first completed output, startup included;
+    #: not time to first token, which the run page reads from the gateway.
+    first_output_seconds: float | None = Field(None, ge=0)
     output_tokens_per_second: float | None = Field(None, ge=0)
     timing_source: Literal["message_events"] = "message_events"
 
@@ -918,8 +933,9 @@ def summarize_session_statistics(
 
     Total times require valid event spans and complete tool pairs in every
     execution. Missing timing is not zero, and an unfinished tool window is
-    not model time. TTFT and TPS retain only the executions with their required
-    measurements; their missing samples never enter a denominator as zero.
+    not model time. First output and TPS retain only the executions with their
+    required measurements; their missing samples never enter a denominator as
+    zero.
     """
     allowed_jobs = set(job_ids)
     by_attempt: dict[tuple[str, Any], list[Mapping[str, Any]]] = {}
@@ -945,7 +961,7 @@ def summarize_session_statistics(
     complete_timing = bool(by_attempt) and not missing_identity
     model_seconds = tool_seconds = rate_seconds = 0.0
     rate_tokens = 0
-    ttft_samples: list[float] = []
+    first_output_samples: list[float] = []
     for key, execution_events in by_attempt.items():
         ordered = sorted(execution_events, key=_event_sort_key)
         attempt = attempt_rows.get(key)
@@ -954,8 +970,8 @@ def summarize_session_statistics(
             attempts=[attempt] if attempt is not None else [],
             events=ordered,
         )
-        if stats.ttft_seconds is not None:
-            ttft_samples.append(stats.ttft_seconds)
+        if stats.first_output_seconds is not None:
+            first_output_samples.append(stats.first_output_seconds)
         if not _has_complete_timing(ordered):
             complete_timing = False
             continue
@@ -968,7 +984,9 @@ def summarize_session_statistics(
     return SessionStatistics(
         model_seconds=model_seconds if complete_timing else None,
         tool_seconds=tool_seconds if complete_timing else None,
-        ttft_seconds=sum(ttft_samples) / len(ttft_samples) if ttft_samples else None,
+        first_output_seconds=(
+            sum(first_output_samples) / len(first_output_samples) if first_output_samples else None
+        ),
         output_tokens_per_second=rate_tokens / rate_seconds if rate_seconds > 0 else None,
     )
 

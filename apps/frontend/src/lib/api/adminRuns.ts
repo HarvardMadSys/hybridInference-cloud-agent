@@ -4,6 +4,7 @@ import type {
   AgentAttemptTelemetryApi,
   AgentJobApiState,
   AgentJobUsageApi,
+  ModelTtftApi,
   RunResourceSummaryApi,
 } from './agents';
 import { fetchWithAuth, jsonOrThrow } from './client';
@@ -89,7 +90,8 @@ export interface AdminAttempt {
 export interface AdminSessionStatistics {
   model_seconds: number | null;
   tool_seconds: number | null;
-  ttft_seconds: number | null;
+  /** Turn start to first recorded output event, startup included; not TTFT. */
+  first_output_seconds: number | null;
   output_tokens_per_second: number | null;
   timing_source: 'message_events';
 }
@@ -250,6 +252,11 @@ export function getAdminLlmRequestSources(
   signal?: AbortSignal,
 ): Promise<AdminLlmRequestSourcesPage> {
   return read(`${runPath(jobId)}/llm-request-sources${query(filters)}`, signal);
+}
+
+/** This run's mean gateway time to first token, read through its stored references. */
+export function getAdminRunModelTtft(jobId: string, signal?: AbortSignal): Promise<ModelTtftApi> {
+  return read(`${runPath(jobId)}/model-ttft`, signal);
 }
 
 /** One page of gateway request rows for one stored reference. */

@@ -56,7 +56,11 @@ export interface AgentThreadStatsApi {
   wall_seconds: number;
   model_seconds: number;
   tool_seconds: number;
-  ttft_seconds: number | null;
+  /**
+   * Turn start to first completed output event, startup included. Not time to
+   * first token: that is `getAgentThreadModelTtft`, measured by the gateway.
+   */
+  first_output_seconds: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
   cache_read_tokens: number | null;

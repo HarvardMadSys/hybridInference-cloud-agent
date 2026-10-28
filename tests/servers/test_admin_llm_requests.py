@@ -648,3 +648,58 @@ async def test_a_continuation_too_large_to_resume_is_not_signed(setup):
     assert response.status_code == 502
     assert response.json()["detail"]["error"]["type"] == "request_page_too_large"
     assert "next_cursor" not in response.text
+
+
+MODEL_TTFT = PREFIX + "/model-ttft"
+
+
+async def test_run_model_ttft_reads_the_gateway_through_stored_references(setup):
+    app, queries, grants, _ = setup
+    grants.usage_requests.return_value = gateway_page(
+        [
+            request_row(request_id="req_a", ttft_ms=10_400),
+            request_row(
+                request_id="req_b",
+                request_started_at=(SINCE + timedelta(seconds=1)).isoformat(),
+                ttft_ms=None,
+            ),
+        ]
+    )
+    response = await _get(app, MODEL_TTFT)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mean_ttft_ms"] == 10_400
+    assert (body["samples"], body["requests_read"], body["complete"]) == (1, 2, True)
+    queries.llm_request_sources.assert_awaited_once_with(
+        "ajob_one", attempt_id=None, cursor=None, limit=admin_llm_requests.RUN_TTFT_SOURCES
+    )
+    assert grants.usage_requests.await_args.kwargs["external_job_id"] == JOB_KEY
+
+
+async def test_run_model_ttft_requires_a_current_admin(setup):
+    app, queries, grants, gateway = setup
+    gateway.permissions = ["agent.use"]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(MODEL_TTFT)
+    assert response.status_code == 401
+    queries.get_run.assert_not_awaited()
+    grants.usage_requests.assert_not_awaited()
+
+
+async def test_run_model_ttft_of_an_unknown_run_reads_nothing(setup):
+    app, queries, grants, _ = setup
+    queries.get_run.return_value = None
+    response = await _get(app, MODEL_TTFT)
+    assert response.status_code == 404
+    queries.llm_request_sources.assert_not_awaited()
+    grants.usage_requests.assert_not_awaited()
+
+
+async def test_run_model_ttft_marks_a_changed_binding_unavailable(setup):
+    app, queries, grants, _ = setup
+    queries.llm_request_sources.return_value = ([source_row(binding_id="gw_old")], False)
+    response = await _get(app, MODEL_TTFT)
+    assert response.status_code == 200
+    assert response.json()["mean_ttft_ms"] is None
+    assert response.json()["reason"] == "binding_changed"
+    grants.usage_requests.assert_not_awaited()

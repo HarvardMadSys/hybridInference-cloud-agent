@@ -287,7 +287,10 @@ class AgentThreadStatsResponse(BaseModel):
     wall_seconds: float
     model_seconds: float
     tool_seconds: float
-    ttft_seconds: float | None = None
+    #: Mean time from a turn's first attempt starting to its first completed
+    #: output event, sandbox and CLI startup included. Not time to first token:
+    #: that is the gateway-measured ``/thread/model-ttft``.
+    first_output_seconds: float | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
     cache_read_tokens: int | None = None
