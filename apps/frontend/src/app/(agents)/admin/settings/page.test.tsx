@@ -422,15 +422,9 @@ describe('admin Settings', () => {
     renderSettings();
     await screen.findByText('No application settings are available.');
     const tablist = screen.getByRole('tablist', { name: 'Settings sections' });
-    const names: SettingsTab[] = [
-      'Application',
-      'Agent versions',
-      'Sandbox',
-      'CloudLab',
-      'Deployment',
-    ];
-    expect(within(tablist).getAllByRole('tab')).toHaveLength(5);
-    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(5);
+    const names: SettingsTab[] = ['Application', 'Agent versions', 'Sandbox', 'CloudLab'];
+    expect(within(tablist).getAllByRole('tab')).toHaveLength(4);
+    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(4);
 
     for (const name of names) {
       selectSettingsTab(name);
@@ -463,9 +457,9 @@ describe('admin Settings', () => {
       expect(screen.getByRole('tabpanel', { name })).toBeVisible();
     };
     move('ArrowRight', 'Agent versions');
-    move('End', 'Deployment');
+    move('End', 'CloudLab');
     move('ArrowRight', 'Application');
-    move('ArrowLeft', 'Deployment');
+    move('ArrowLeft', 'CloudLab');
     move('Home', 'Application');
   });
 
@@ -773,7 +767,6 @@ describe('application category tabs', () => {
       'Agent versions',
       'Sandbox',
       'CloudLab',
-      'Deployment',
     ];
     expect(
       within(tablist)
@@ -832,9 +825,9 @@ describe('application category tabs', () => {
     move('ArrowRight', 'Identity & access');
     move('ArrowRight', 'Future / category ✓');
     move('ArrowRight', 'Agent versions');
-    move('End', 'Deployment');
+    move('End', 'CloudLab');
     move('ArrowRight', 'Appearance');
-    move('ArrowLeft', 'Deployment');
+    move('ArrowLeft', 'CloudLab');
     move('Home', 'Appearance');
   });
 
@@ -1808,7 +1801,7 @@ describe('settings search', () => {
     expect(screen.queryByRole('tab', { name: 'Sandbox archives' })).not.toBeInTheDocument();
   });
 
-  it('reveals and focuses deployment prerequisites from another settings section', async () => {
+  it('does not offer deployment notes as search results or a settings section', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(
       applicationSnapshot({
         bootstrap: [
@@ -1820,19 +1813,15 @@ describe('settings search', () => {
         ],
       }),
     );
-    renderSettings('Sandbox');
+    renderSettings();
     await screen.findByRole('tab', { name: 'Appearance' });
-    fireEvent.click(
-      within(searchFor('agent_database_url')).getByRole('button', {
-        name: 'Open Database connection in Deployment setup',
-      }),
+    const results = searchFor('agent_database_url');
+    await waitFor(() =>
+      expect(within(results).getByRole('status')).toHaveTextContent('No settings found.'),
     );
-
-    const target = document.getElementById('deployment-AGENT_DATABASE_URL')!;
-    await waitFor(() => expect(target).toHaveFocus());
-    expect(screen.getByRole('tabpanel', { name: 'Deployment' })).toBeVisible();
-    expect(target).toBeVisible();
-    expect(document.getElementById('application-bootstrap-AGENT_DATABASE_URL')).not.toBeNull();
+    expect(within(results).queryAllByRole('button')).toHaveLength(0);
+    expect(screen.queryByRole('tab', { name: 'Deployment' })).not.toBeInTheDocument();
+    expect(screen.queryByText('AGENT_DATABASE_URL')).not.toBeInTheDocument();
   });
 
   it('focuses the current value when an application result is read-only', async () => {

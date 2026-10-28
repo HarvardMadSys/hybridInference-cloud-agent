@@ -6,34 +6,6 @@ const SETTINGS = '/admin/agent/settings';
 
 export type AdminSettingValue = string | number | boolean;
 
-export type DeploymentManagement = 'settings' | 'specialized' | 'rotation' | 'deployment';
-export type DeploymentRequirement = 'required' | 'optional' | 'conditional';
-export type DeploymentState =
-  | 'configured'
-  | 'missing'
-  | 'weak'
-  | 'fallback'
-  | 'not_used'
-  | 'unknown';
-
-/** A fixed, application-owned destination; never a backend-provided URL. */
-export interface DeploymentSetupAction {
-  target: string;
-  label: string;
-}
-
-export interface DeploymentSetupDefinition {
-  /** Stable semantic ID. The legacy key remains the DOM anchor. */
-  id?: string;
-  key: string;
-  label: string;
-  description: string;
-  management?: DeploymentManagement;
-  requirement?: DeploymentRequirement;
-  state?: DeploymentState;
-  actions?: DeploymentSetupAction[];
-}
-
 export interface AdminSettingDefinition {
   key: string;
   label: string;
@@ -56,8 +28,11 @@ export interface AgentAdminSettings {
   definitions: AdminSettingDefinition[];
   values: Record<string, AdminSettingValue | null>;
   secret_configured: Record<string, boolean>;
-  /** Deployment configuration and its application-owned management entry points. */
-  bootstrap: DeploymentSetupDefinition[];
+  /**
+   * Deployment-managed configuration notes. The API still returns them, with
+   * optional metadata, but the settings pages do not render them.
+   */
+  bootstrap: { id?: string; key: string; label: string; description: string }[];
   setup?: {
     required: boolean;
     groups: {

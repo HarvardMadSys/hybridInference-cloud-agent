@@ -75,20 +75,16 @@ test.afterEach(async ({ request }) => {
 });
 
 for (const width of [1440, 390]) {
-  test(`deployment links, deep links and drafts work at ${width}px`, async ({ page }, testInfo) => {
+  test(`legacy links and drafts work without a deployment section at ${width}px`, async ({
+    page,
+  }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto('/admin/settings#application-bootstrap-AGENT_COMPUTE_CONFIG');
-    const panel = page.getByRole('tabpanel', { name: 'Deployment', exact: true });
+    const panel = page.getByRole('tabpanel', { name: 'Operations', exact: true });
     await expect(panel).toBeVisible();
-    await expect(page.locator('#deployment-compute_config_file')).toBeFocused();
-    await expect(page.getByRole('link', { name: 'Open Compute setup' })).toHaveAttribute(
-      'href',
-      '/admin/hosts#compute-setup',
-    );
-    await expect(page.getByRole('link', { name: 'Read key management notes' })).toHaveAttribute(
-      'target',
-      '_blank',
-    );
+    await expect(page.getByRole('tab', { name: 'Deployment', exact: true })).toHaveCount(0);
+    await expect(page.getByText('Deployment setup', { exact: true })).toHaveCount(0);
+    await expect(page).not.toHaveURL(/#application-bootstrap-/);
     const bounds = await panel.boundingBox();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
@@ -97,14 +93,14 @@ for (const width of [1440, 390]) {
     );
     await page.screenshot({ path: testInfo.outputPath('deployment-setup.png'), fullPage: true });
 
-    await page.getByRole('button', { name: 'Edit pgAdmin URL' }).click();
+    await page.goto('/admin/settings?tab=deployment#deployment-pgadmin_bootstrap');
     await expect(page.locator('#application-setting-pgadmin_url')).toBeFocused();
     await expect(page).toHaveURL(/#application-setting-pgadmin_url$/);
     await page.getByRole('button', { name: 'Edit Database tools settings', exact: true }).click();
     const field = page.getByRole('textbox', { name: 'pgAdmin URL', exact: true });
     await field.fill('https://pgadmin.example.test');
-    await page.getByRole('tab', { name: 'Deployment', exact: true }).click();
-    await expect(panel).toBeVisible();
+    await page.getByRole('tab', { name: 'Sandbox', exact: true }).click();
+    await expect(page.getByRole('tabpanel', { name: 'Sandbox', exact: true })).toBeVisible();
     await page.getByRole('tab', { name: 'Operations', exact: true }).click();
     await expect(field).toHaveValue('https://pgadmin.example.test');
     await page.reload();
@@ -132,8 +128,8 @@ for (const width of [1440, 390]) {
     const field = page.getByRole('textbox', { name: 'pgAdmin URL', exact: true });
     await field.fill('https://pgadmin.example.test');
 
-    await page.getByRole('tab', { name: 'Deployment', exact: true }).click();
-    await expect(page.getByRole('tabpanel', { name: 'Deployment', exact: true })).toBeVisible();
+    await page.getByRole('tab', { name: 'Sandbox', exact: true }).click();
+    await expect(page.getByRole('tabpanel', { name: 'Sandbox', exact: true })).toBeVisible();
     await page.getByRole('tab', { name: 'Operations', exact: true }).click();
     await expect(panel).toBeVisible();
     await expect(field).toHaveValue('https://pgadmin.example.test');

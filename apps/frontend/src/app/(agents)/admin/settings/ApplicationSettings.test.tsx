@@ -834,7 +834,7 @@ describe('application settings', () => {
     expect(screen.getByLabelText('Registration')).toHaveTextContent('Enabled');
     expect(screen.queryByRole('textbox', { name: 'Product name' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Product name')).not.toBeVisible();
-    expect(screen.getByText('Deployment setup')).toBeVisible();
+    expect(screen.queryByText('Deployment setup')).not.toBeInTheDocument();
   });
 
   it('derives categories from definitions and groups uncategorized settings under General', async () => {
@@ -891,7 +891,7 @@ describe('application settings', () => {
     expect(
       screen.queryByRole('navigation', { name: 'Application setting categories' }),
     ).not.toBeInTheDocument();
-    expect(screen.getByText('Deployment setup')).toBeVisible();
+    expect(screen.queryByText('Deployment setup')).not.toBeInTheDocument();
   });
 
   it('opens and focuses an initial deep link after the definitions load', async () => {
@@ -1110,8 +1110,8 @@ describe('application settings', () => {
     editField('Service token');
     expect(editField('Service token')).toHaveValue('');
     expect(screen.getByRole('button', { name: 'Review Connections changes' })).toBeDisabled();
-    expect(screen.getByText('Deployment setup')).toBeVisible();
-    expect(screen.getByText('DATABASE_URL')).toBeInTheDocument();
+    expect(screen.queryByText('Deployment setup')).not.toBeInTheDocument();
+    expect(screen.queryByText('DATABASE_URL')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Database connection')).not.toBeInTheDocument();
   });
 

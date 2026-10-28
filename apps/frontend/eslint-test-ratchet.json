@@ -26,11 +26,11 @@
     },
     {
       "files": ["src/app/(agents)/admin/settings/page.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 2295 }] }
+      "rules": { "max-lines": ["error", { "max": 2284 }] }
     },
     {
       "files": ["src/app/(agents)/admin/hosts/ComputeResources.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 2073 }] }
+      "rules": { "max-lines": ["error", { "max": 2069 }] }
     },
     {
       "files": ["src/app/(agents)/admin/hosts/page.test.tsx"],

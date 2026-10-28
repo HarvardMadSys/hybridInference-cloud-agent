@@ -12,7 +12,6 @@ import {
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import { ApplicationSettingGroup, SettingsIcon } from './ApplicationSettingGroup';
-import { DeploymentSetup } from './DeploymentSetup';
 import { applicationCategory, applicationSettingGroup } from './settingsOrganization';
 
 const BUTTON_CLASS = 'ui-button ui-button-secondary min-h-11';
@@ -405,19 +404,6 @@ export function ApplicationSettingsCategory({
   );
 }
 
-export function ApplicationDeploymentSetup({ settings }: { settings: ApplicationSettingsState }) {
-  const { snapshot, recoveryToken, revealSetting } = settings;
-  return (
-    <div className="mt-6 border-t border-border pt-4">
-      <DeploymentSetup
-        definitions={snapshot?.bootstrap ?? []}
-        recoveryToken={recoveryToken}
-        onRevealSetting={revealSetting}
-      />
-    </div>
-  );
-}
-
 export default function ApplicationSettings(options: ApplicationSettingsOptions) {
   const settings = useApplicationSettings(options);
   const { denied, snapshot, groups, currentCategory } = settings;
@@ -483,7 +469,6 @@ export default function ApplicationSettings(options: ApplicationSettingsOptions)
           No application settings are available.
         </p>
       )}
-      <ApplicationDeploymentSetup settings={settings} />
     </section>
   );
 }

@@ -164,16 +164,6 @@ export function buildSettingsSearchItems({
         keywords: [definition.key, definition.category, applicationSettingGroup(definition)],
       };
     }),
-    ...(snapshot?.bootstrap ?? []).map((definition) => ({
-      id: `bootstrap:${definition.key}`,
-      label: definition.label,
-      description: definition.description,
-      section: 'Deployment setup',
-      tab: 'deployment',
-      // Keep the legacy response key as the fallback row identity.
-      targetId: `deployment-${definition.id || definition.key}`,
-      keywords: [definition.key, definition.id ?? ''],
-    })),
     ...hostDefinitions.map((definition) => ({
       id: `host:${definition.key}`,
       label: definition.label,

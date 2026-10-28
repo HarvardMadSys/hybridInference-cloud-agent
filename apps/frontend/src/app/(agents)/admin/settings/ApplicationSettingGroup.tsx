@@ -24,6 +24,17 @@ type Review = { changes: Changes; reset?: AdminSettingDefinition; snapshot: Agen
 const INPUT_CLASS =
   'ui-input min-h-11 w-full disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-status-error';
 const BUTTON_CLASS = 'ui-button ui-button-secondary min-h-11';
+const GITHUB_APP_PRIVATE_KEY = 'github_app_private_key';
+
+/**
+ * Describe precedence from the saved snapshot without claiming every process
+ * has applied that snapshot or that a mounted file is readable.
+ */
+function keySourceNote(key: string, configured: boolean): string {
+  return key === GITHUB_APP_PRIVATE_KEY && configured
+    ? ' A saved key is configured and takes precedence over a mounted key when applied.'
+    : '';
+}
 
 export function SettingsIcon({
   kind,
@@ -448,6 +459,7 @@ export function ApplicationSettingGroup({
                 </label>
                 <p id={`${id}-help`} className="mt-1 break-words text-xs leading-5 text-muted">
                   {field.description}
+                  {keySourceNote(key, configured)}
                   {editable &&
                     key === ARCHIVE_BUCKET &&
                     ' Saving an S3 URI replaces the prefix; a bucket-root URI clears it.'}

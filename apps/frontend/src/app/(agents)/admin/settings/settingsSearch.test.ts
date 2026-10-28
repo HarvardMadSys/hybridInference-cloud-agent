@@ -112,15 +112,12 @@ describe('settings search', () => {
     ]);
   });
 
-  it('routes deployment, host, agent version, archive, and CloudLab metadata to their controls', () => {
+  it('routes host, agent version, archive, and CloudLab metadata to their controls', () => {
     const catalog = items();
-    expect(searchSettingsItems(catalog, 'agent_database_url')).toEqual([
-      expect.objectContaining({
-        tab: 'deployment',
-        section: 'Deployment setup',
-        targetId: 'deployment-AGENT_DATABASE_URL',
-      }),
-    ]);
+    // Deployment notes are not settings; they never become a search destination.
+    expect(searchSettingsItems(catalog, 'agent_database_url')).toEqual([]);
+    expect(searchSettingsItems(catalog, 'Database connection')).toEqual([]);
+    expect(catalog.some((item) => item.id.startsWith('bootstrap:'))).toBe(false);
     expect(searchSettingsItems(catalog, 'terminal_max_sessions')).toEqual([
       expect.objectContaining({ tab: 'sandbox', targetId: 'host-setting-terminal_max_sessions' }),
     ]);
