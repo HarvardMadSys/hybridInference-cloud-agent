@@ -82,6 +82,7 @@ export function menuRowClass({
   destructive = false,
   accent = false,
   align = 'center',
+  interactive = true,
 }: {
   selected?: boolean;
   active?: boolean;
@@ -91,6 +92,12 @@ export function menuRowClass({
   accent?: boolean;
   /** `start` for a two-line row whose checkmark belongs beside the title. */
   align?: 'center' | 'start';
+  /**
+   * Whether the row is focused or hovered as a control. A listbox option
+   * is neither: focus stays in its combobox and only `active` highlights
+   * it, so inheriting hover/focus would tint a second row.
+   */
+  interactive?: boolean;
 } = {}): string {
   // Literal utilities, so Tailwind's scanner emits both variants.
   const base = `flex min-h-9 w-full gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/40 [@media(pointer:coarse)]:min-h-11 ${
@@ -99,21 +106,31 @@ export function menuRowClass({
   if (disabled) return `${base} cursor-not-allowed text-muted opacity-50`;
   // Each state names its own hover/focus background, so the selected and
   // destructive treatments never fall back to the ordinary row tint.
-  if (destructive)
-    return `${base} cursor-pointer text-status-error hover:bg-status-error/10 focus:bg-status-error/10 ${SUPPRESS_HIGHLIGHT}`;
+  const hover = interactive
+    ? destructive
+      ? 'hover:bg-status-error/10 focus:bg-status-error/10 '
+      : selected
+        ? 'hover:bg-accent-subtle focus:bg-accent-subtle '
+        : 'hover:bg-surface-hover focus:bg-surface-hover '
+    : '';
+  if (destructive) return `${base} cursor-pointer text-status-error ${hover}${SUPPRESS_HIGHLIGHT}`;
   if (selected)
-    return `${base} cursor-pointer bg-accent-subtle font-medium text-accent hover:bg-accent-subtle focus:bg-accent-subtle ${
+    return `${base} cursor-pointer bg-accent-subtle font-medium text-accent ${hover}${
       active ? 'ring-1 ring-inset ring-accent/30' : ''
     } ${SUPPRESS_HIGHLIGHT}`;
   const tone = accent ? 'text-accent' : 'text-foreground';
-  return `${base} cursor-pointer ${tone} hover:bg-surface-hover focus:bg-surface-hover ${
+  return `${base} cursor-pointer ${tone} ${hover}${
     active ? 'bg-surface-hover' : ''
   } ${SUPPRESS_HIGHLIGHT}`;
 }
 
-/** An option row for a listbox, where selection and keyboard highlight differ. */
+/**
+ * An option row for a listbox. Selection is persistent and the active row
+ * follows the keyboard or the pointer, but the row is never a focus/hover
+ * control itself: only `active` paints the highlight.
+ */
 export function menuOptionClass(selected: boolean, active: boolean, disabled: boolean): string {
-  return menuRowClass({ selected, active, disabled });
+  return menuRowClass({ selected, active, disabled, interactive: false });
 }
 
 /** A destructive item in an action menu. */

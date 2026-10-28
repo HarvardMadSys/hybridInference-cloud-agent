@@ -12,6 +12,7 @@ import {
   MENU_ROW_DESTRUCTIVE,
   MENU_ROW_SELECTED,
   MENU_SURFACE,
+  menuOptionClass,
   menuRowClass,
 } from './menuStyles';
 import { usePopupMenu } from './usePopupMenu';
@@ -179,6 +180,19 @@ describe('shared menu rows', () => {
     expect(MENU_ROW_SELECTED).not.toContain('hover:bg-surface-hover');
     expect(MENU_ROW_DESTRUCTIVE).toContain('text-status-error');
     expect(MENU_ROW_DESTRUCTIVE).not.toContain('hover:bg-surface-hover');
+    expect(MENU_ROW_DESTRUCTIVE).toContain('hover:bg-status-error/10');
+  });
+
+  it('keeps listbox options state-driven without hover or focus tint', () => {
+    const active = menuOptionClass(false, true, false);
+    const idle = menuOptionClass(false, false, false);
+    expect(active).toContain('bg-surface-hover');
+    expect(active).not.toContain('hover:bg-surface-hover');
+    expect(active).not.toContain('focus:bg-surface-hover');
+    expect(idle).not.toContain('hover:bg-surface-hover');
+    // Selected options keep their accent, and destructive/plain actions keep theirs.
+    expect(menuOptionClass(true, true, false)).toContain('bg-accent-subtle');
+    expect(MENU_ROW).toContain('hover:bg-surface-hover');
     expect(MENU_ROW_DESTRUCTIVE).toContain('hover:bg-status-error/10');
   });
 

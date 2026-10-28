@@ -1,6 +1,6 @@
 'use client';
 
-import { useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
+import { useLayoutEffect, useState, type CSSProperties, type RefObject } from 'react';
 
 function sameStyle(a: CSSProperties, b: CSSProperties): boolean {
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<keyof CSSProperties>;
@@ -23,6 +23,23 @@ export interface AnchoredPopoverOptions {
   /** Fixed popup width; by default at least the trigger's, up to `maxWidth`. */
   width?: number;
   maxWidth?: number;
+}
+
+/** Write a placement to the live element before React's next commit. */
+function paint(
+  element: HTMLElement,
+  next: CSSProperties,
+  geometry: { minWidth: number; maxW: number; height: number; width?: number },
+) {
+  const { minWidth, maxW, height, width } = geometry;
+  element.style.position = 'fixed';
+  element.style.left = `${next.left as number}px`;
+  element.style.top = `${next.top as number}px`;
+  element.style.minWidth = `${minWidth}px`;
+  element.style.maxWidth = `${maxW}px`;
+  element.style.maxHeight = `${height}px`;
+  if (width !== undefined) element.style.width = `${minWidth}px`;
+  element.style.visibility = 'visible';
 }
 
 /**
@@ -48,37 +65,49 @@ export function useAnchoredPopover(
   }: AnchoredPopoverOptions = {},
 ): CSSProperties {
   const [style, setStyle] = useState<CSSProperties>(UNPLACED);
-  // A `position: fixed` box is placed against the viewport unless an ancestor
-  // has a transform, filter, perspective or `contain`. A dialog that animates
-  // in, or a panel with backdrop blur, becomes that containing block. Measure
-  // where the popup actually landed and carry the offset forward, so the
-  // intended viewport position is still the one it gets.
-  const correction = useRef({ x: 0, y: 0 });
 
   useLayoutEffect(() => {
     if (!open) {
-      correction.current = { x: 0, y: 0 };
       setStyle(UNPLACED);
       return;
     }
-    let frame = 0;
+
+    /**
+     * Find the popup's containing-block origin from what is actually in the
+     * DOM, never from a position a React update has not committed yet:
+     * `rect = origin + style coordinate` for a fixed box, so subtracting its
+     * current `left`/`top` gives the origin exactly. A scroll event can then
+     * re-place without mistaking its own uncommitted delta for an ancestor
+     * transform (which caused a full-delta overshoot on every wheel step).
+     */
+    const origin = () => {
+      const element = popoverRef.current;
+      if (!element) return { x: 0, y: 0 };
+      const landed = element.getBoundingClientRect();
+      return {
+        x: landed.left - (Number.parseFloat(element.style.left) || 0),
+        y: landed.top - (Number.parseFloat(element.style.top) || 0),
+      };
+    };
 
     const place = () => {
       const trigger = triggerRef.current;
-      if (!trigger) return;
+      const element = popoverRef.current;
+      if (!trigger || !element) return;
       const rect = trigger.getBoundingClientRect();
       const viewport = window.visualViewport;
       const left0 = viewport?.offsetLeft ?? 0;
       const top0 = viewport?.offsetTop ?? 0;
       const viewportWidth = viewport?.width ?? window.innerWidth;
       const viewportHeight = viewport?.height ?? window.innerHeight;
+      const base = origin();
 
       const widest = Math.max(0, viewportWidth - margin * 2);
       const minWidth = Math.min(width ?? Math.max(rect.width, 176), widest);
       const maxW = Math.min(width ?? Math.max(maxWidth, minWidth), widest);
       // The popup's own width once its content is laid out, to keep it on
       // screen; before the first layout, assume the widest it may be.
-      const measuredLength = popoverRef.current?.offsetWidth || maxW;
+      const measuredLength = element.offsetWidth || maxW;
       const actual = Math.min(Math.max(measuredLength, minWidth), maxW);
       const intendedLeft = Math.max(
         left0 + margin,
@@ -88,40 +117,32 @@ export function useAnchoredPopover(
       const below = Math.max(0, top0 + viewportHeight - rect.bottom - gap - margin);
       const above = Math.max(0, rect.top - top0 - gap - margin);
       const placeBelow = below >= preferredHeight || below >= above;
-      const available = placeBelow ? below : above;
-      const height = Math.min(maxHeight, available);
+      const height = Math.min(maxHeight, placeBelow ? below : above);
       // Measure the natural height against the available one. Always position
-      // by `top`: one coordinate makes the containing-block correction exact,
+      // by `top`: one coordinate makes the containing-block origin exact,
       // where a `bottom` would mix in a stale height.
-      const natural = popoverRef.current?.offsetHeight ?? height;
+      const natural = element.offsetHeight || height;
       const intendedTop = placeBelow
         ? rect.bottom + gap
         : rect.top - gap - Math.min(natural, height);
-      const intended = { left: intendedLeft, top: intendedTop };
+      // The first placement is made while the panel is still hidden, so the
+      // corrected position and visibility commit together before any paint.
       const next: CSSProperties = {
         position: 'fixed',
-        left: intended.left - correction.current.x,
-        top: intended.top - correction.current.y,
+        left: intendedLeft - base.x,
+        top: intendedTop - base.y,
         minWidth,
         maxWidth: maxW,
         ...(width !== undefined ? { width: minWidth } : {}),
         maxHeight: height,
+        visibility: 'visible',
       };
+      // Paint this frame. A scroll event fires before the frame's paint, but a
+      // React state update commits in a later task; writing the same values to
+      // the live element closes that one-frame follow lag without a loop. The
+      // state below keeps React's model identical, so later renders are no-ops.
+      paint(element, next, { minWidth, maxW, height, width });
       setStyle((current) => (sameStyle(current, next) ? current : next));
-
-      // Measure after the style lands, then correct once and re-place. Two
-      // frames converge: the first finds the containing block's origin, the
-      // second lands at the intended viewport position.
-      frame = window.requestAnimationFrame(() => {
-        const element = popoverRef.current;
-        if (!element) return;
-        const landed = element.getBoundingClientRect();
-        const dx = landed.left - intended.left;
-        const dy = landed.top - intended.top;
-        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
-        correction.current = { x: correction.current.x + dx, y: correction.current.y + dy };
-        place();
-      });
     };
     // The page or a container scrolling moves the trigger; the popup's own
     // list scrolling does not, and re-placing then would only churn.
@@ -141,7 +162,6 @@ export function useAnchoredPopover(
     window.visualViewport?.addEventListener('resize', place);
     window.visualViewport?.addEventListener('scroll', place);
     return () => {
-      window.cancelAnimationFrame(frame);
       observer?.disconnect();
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', onScroll, true);

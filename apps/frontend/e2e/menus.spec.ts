@@ -289,39 +289,145 @@ test('a long repository list scrolls inside its bounded panel above the footer',
   await expect(footer).toBeVisible();
 });
 
-test('a transformed ancestor does not displace a fixed picker', async ({ page, request }) => {
+test('a real containing block does not displace the task actions menu', async ({
+  page,
+  request,
+}) => {
   expect((await request.post('/__fixture/reset')).ok()).toBe(true);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.goto('/');
+  await page.goto('/source');
+  await expect(page.getByLabel('Add a follow-up', { exact: true })).toBeVisible();
   await settled(page);
-  // The composer's entrance wrapper is the real transformed ancestor a fixed
-  // popup can inherit. Hold a transform on it and verify the menu still lands
-  // directly below its trigger and inside the viewport.
-  await page
-    .locator('main section')
-    .first()
-    .evaluate((element) => {
-      (element as HTMLElement).style.transform = 'translateY(48px)';
-    });
-  const model = page.getByRole('button', { name: 'Model', exact: true });
-  const trigger = await model.boundingBox();
-  await model.click();
-  const panel = page.getByRole('dialog', { name: 'Model', exact: true });
-  await expect(panel).toBeVisible();
-  await expect
-    .poll(async () => {
-      const box = await panel.boundingBox();
-      return box && trigger ? Math.round(box.y - (trigger.y + trigger.height)) : null;
-    })
-    .toBe(6);
-  const box = await panel.boundingBox();
+  // `will-change: transform` makes the header a real containing block for its
+  // inline fixed-position menu without moving anything. The correction has to
+  // find that origin; a transform on an unrelated ancestor would prove nothing.
+  await page.locator('header.agent-conversation-header').evaluate((element) => {
+    (element as HTMLElement).style.willChange = 'transform';
+  });
+  const actions = page.getByRole('button', { name: 'Task actions', exact: true });
+  const trigger = await actions.boundingBox();
+  await actions.click();
+  const menu = page.getByRole('menu', { name: 'Task actions' });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole('menuitem').first()).toBeFocused();
+  // The first visible frame is already corrected: no flash at the header origin.
+  const firstFrameGap = await menu.evaluate((element, box) => {
+    const rect = element.getBoundingClientRect();
+    return box ? Math.round(rect.top - (box.y + box.height)) : null;
+  }, trigger);
+  expect(firstFrameGap).toBe(4);
+  const box = await menu.boundingBox();
   expect(box!.x).toBeGreaterThanOrEqual(0);
-  expect(box!.x + box!.width).toBeLessThanOrEqual(1440);
   expect(box!.y).toBeGreaterThanOrEqual(0);
   expect(box!.y + box!.height).toBeLessThanOrEqual(900);
 });
 
+test('scrolling keeps a fixed picker beside its trigger without overshoot', async ({
+  page,
+  request,
+}) => {
+  expect((await request.post('/__fixture/reset')).ok()).toBe(true);
+  await page.setViewportSize({ width: 1024, height: 560 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.route('**/api/v1/agent/config', (route) =>
+    route.fulfill({
+      json: {
+        repos: ['fixture/repository'],
+        runtimes: ['codex'],
+        models: ['model-a', 'model-b', 'model-c', 'model-d', 'model-e'],
+        default_model: 'model-a',
+        github_connected: true,
+        github_install_url: null,
+      },
+    }),
+  );
+  await page.goto('/');
+  await settled(page);
+  await page.getByRole('button', { name: 'Model', exact: true }).click();
+  const panel = page.getByRole('dialog', { name: 'Model', exact: true });
+  await expect(panel).toBeVisible();
+
+  // Sample every animation frame while the wheel scrolls the page underneath.
+  const samples = await page.evaluate(async () => {
+    const model = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.getAttribute('aria-label') === 'Model',
+    );
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Model"]');
+    const main = document.querySelector('main');
+    if (!model || !dialog || !main) throw new Error('Menu or trigger missing');
+    const gaps: number[] = [];
+    let stop = false;
+    // Positive gap means the panel sits that far outside its trigger's nearest
+    // edge; a value above its 6px gap is the overshoot this guards.
+    const sample = () => {
+      const trigger = model.getBoundingClientRect();
+      const box = dialog.getBoundingClientRect();
+      gaps.push(
+        Math.round(box.top >= trigger.bottom ? box.top - trigger.bottom : trigger.top - box.bottom),
+      );
+      if (!stop) requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+    for (let step = 0; step < 6; step += 1) {
+      main.scrollBy(0, 40);
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    stop = true;
+    return gaps;
+  });
+  // Every sampled frame keeps the ordinary 6px gap: placement is written to the
+  // live element before paint, so there is neither the old full-delta overshoot
+  // (46px here) nor a lagging frame.
+  expect(samples.at(-1)).toBe(6);
+  expect(Math.min(...samples)).toBeGreaterThanOrEqual(5);
+  expect(Math.max(...samples)).toBeLessThanOrEqual(7);
+});
+
+test('hovering one model and arrowing to another highlights only the active row', async ({
+  page,
+  request,
+}) => {
+  expect((await request.post('/__fixture/reset')).ok()).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.route('**/api/v1/agent/config', (route) =>
+    route.fulfill({
+      json: {
+        repos: ['fixture/repository'],
+        runtimes: ['codex'],
+        models: ['model-a', 'model-b', 'model-c', 'model-d'],
+        default_model: 'model-a',
+        github_connected: true,
+        github_install_url: null,
+      },
+    }),
+  );
+  await page.goto('/');
+  await settled(page);
+  await page.getByRole('button', { name: 'Model', exact: true }).click();
+  const panel = page.getByRole('dialog', { name: 'Model', exact: true });
+  const option = (name: string) => panel.getByRole('option', { name, exact: true });
+  await option('model-b').hover();
+  // Pointer movement makes b active; two ArrowDowns move the active row to d.
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  const backgrounds = await panel.locator('[role="option"]').evaluateAll((rows) =>
+    rows.map((row) => ({
+      name: row.getAttribute('aria-label') ?? row.textContent,
+      background: getComputedStyle(row).backgroundColor,
+      hover: row.matches(':hover'),
+    })),
+  );
+  const byName = Object.fromEntries(backgrounds.map((row) => [row.name, row]));
+  // The selected model keeps its accent; only the active row gets the hover tint.
+  expect(byName['model-a'].background).not.toBe('rgba(0, 0, 0, 0)');
+  expect(byName['model-d'].background).toBe('rgb(240, 240, 243)');
+  expect(byName['model-b'].background).toBe('rgba(0, 0, 0, 0)');
+  expect(byName['model-c'].background).toBe('rgba(0, 0, 0, 0)');
+  expect(backgrounds.filter((row) => row.hover).map((row) => row.name)).toEqual(['model-b']);
+});
 test('account navigation links and repository footer anchors highlight on hover', async ({
   page,
   request,
