@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.bounded_output import TextTail, protocol_lines, text_chunks
+from cloud_agent_host.docker_engine import DockerEngine, engine_from_env
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.runtime_images import DownloadedVersions
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
@@ -586,10 +587,15 @@ class ContainerBackend(SandboxBackend):
         uid: int = SANDBOX_UID,
         gid: int = SANDBOX_GID,
         home: str = SANDBOX_HOME,
+        engine: DockerEngine | None = None,
     ) -> None:
         self.image = image
         self.runtime = runtime
         self.docker_binary = docker_binary
+        # Answers the retained-chat manager's plain inspects from the daemon's
+        # socket (docker_engine). Only build_backend_from_env attaches one, and
+        # only where the CLI reaches that same socket; None runs the CLI.
+        self.engine = engine
         self.extra_args = extra_args or []
         # None only for a backend that never builds a group network: the
         # candidate check, and unit tests of unrelated behaviour.
@@ -1191,10 +1197,12 @@ def build_backend_from_env(
                 "runs inside."
             )
         namespace = source.get("AGENT_SANDBOX_NAMESPACE") or "default"
+        docker_binary = source.get("AGENT_SANDBOX_DOCKER") or "docker"
         return ContainerBackend(
             image=image,
             runtime=runtime,
-            docker_binary=source.get("AGENT_SANDBOX_DOCKER") or "docker",
+            docker_binary=docker_binary,
+            engine=engine_from_env(source, docker_binary),
             extra_args=shlex.split(source.get("AGENT_SANDBOX_EXTRA_ARGS") or ""),
             # No fallback: a missing namespace, pool, resolver or relay
             # network refuses here rather than building a group network, or

@@ -108,6 +108,7 @@ from cloud_agent_host.chat_sandbox_network import (
     ChatSandboxNetwork,
     _GroupNetworkSnapshot,
 )
+from cloud_agent_host.docker_engine import run_docker
 from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
@@ -3541,19 +3542,8 @@ class ChatSandboxManager:
         if not path.startswith("/") or "\x00" in path:
             raise ValueError("container archive path must be absolute")
 
-    @staticmethod
-    def _run(argv: builtins.list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
-        try:
-            return subprocess.run(
-                argv,
-                env={**os.environ},
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise SandboxError(f"Docker lifecycle command failed: {exc}") from exc
+    def _run(self, argv: builtins.list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+        return run_docker(argv, timeout=timeout, engine=getattr(self.backend, "engine", None))
 
     @staticmethod
     def _run_bytes(
