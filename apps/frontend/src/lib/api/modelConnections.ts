@@ -117,7 +117,10 @@ async function connectionJson<T>(resp: Response): Promise<T> {
   if (resp.ok) return resp.json() as Promise<T>;
   let error: ErrorBody | undefined;
   try {
-    const body = (await resp.clone().json()) as { error?: ErrorBody; detail?: { error?: ErrorBody } };
+    const body = (await resp.clone().json()) as {
+      error?: ErrorBody;
+      detail?: { error?: ErrorBody };
+    };
     error = body?.error ?? body?.detail?.error;
   } catch {
     // Not JSON: jsonOrThrow classifies it by status.
