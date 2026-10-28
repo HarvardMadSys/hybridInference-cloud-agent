@@ -105,6 +105,40 @@ with the guard's own imports fell from 391 to 264 ms. A cold start runs two
 helpers (four once the verification has lapsed), a stop one, and the
 running-group sweep one every five seconds.
 
+### A new group offered a snapshot no longer waits for its archive
+
+`cloud_agent_host/source_prefetch.py`. A new chat's source is cloned and
+archived on a thread of its own while its container starts. A group handed an
+installation snapshot chooses it by the checkout's dependency manifests before
+it is created, and that lookup waited for the whole prepared source, archive
+included, so for exactly those groups the archive was built before the
+snapshot load and the boot instead of beside them. The prefetch now publishes
+the manifests on an event of their own as soon as Git lists them. A
+preparation that fails before the listing answers no manifests, as before; one
+that fails after it fails the turn at its checkout, as every failure did; a
+discard still stops at the next entry or chunk and removes the checkout. Off
+the path before the acquire: 0.18 s of archive for this repository, 1.6 s for
+a 30,000-file tree.
+
+### The source archive builder walks strings and writes whole-second mtimes
+
+`cloud_agent_shared/git/source_archive.py`. The builder parsed a `pathlib`
+path per entry on both of its passes, and wrote each member's fractional stat
+mtime as a 1 KiB pax header: spooled, copied into the container and counted
+against the import limit. It now walks strings, and members carry whole-second
+mtimes, which the ustar header holds. Members still come from `tarfile`'s own
+`add`, so the hard-link, file-type and setuid/setgid handling is unchanged; the
+escape check splits the name on `/` and refuses exactly what `PurePosixPath`
+refused. Git in the container compares content after the copy whatever the
+mtime, because each file's inode, ctime and owner already differ from its
+index. With integer mtimes the output is byte for byte what the previous
+builder wrote. A 30,000-file tree: 4.1 → 1.3 s and 67.6 → 38.3 MiB.
+
+The archive's cancellation test depended on the order the filesystem lists
+`.git` and `payload`, and failed CI whenever `payload` came first. It now
+cancels after whichever is statted first and fails on any stat of the other,
+in either order.
+
 ## Recommended next, not changed here
 
 Ranked by time saved × how often the path runs. Each needs a design decision,
@@ -142,56 +176,53 @@ a security review or a Kata host this review did not have.
    inspects) even when there is no start script. Each script phase also spends
    three separate execs on preparation, and completion is polled every second.
    Saves 1–3 s per environment boot.
-7. **Snapshot-offered new groups** wait for the whole source archive before
-   creating the container, because `lockfiles()` waits on the archive's
-   completion event. Signalling when the lockfiles are read would overlap
-   0.9–6.5 s with the boot.
-8. **Source archive builder.** Fractional mtimes add a 1 KiB PAX header to
-   every member. Truncating them, plus string paths in the hot loop, took a
-   30,000-file tree from 6.5 to 2.1 s.
-9. **Initial archives** (when archives are enabled) gzip at level 6 on one
+7. **The clone's size watcher** walks the whole checkout again and again while
+   Git writes it, backing off to at most a fifth of the time. A 30,000-file
+   local clone took 7.7–9.7 s; how much of that the walks cost was not
+   measured.
+8. **Initial archives** (when archives are enabled) gzip at level 6 on one
    thread before a new chat's first prompt: 18 s for a 402 MB workspace. Level
    1 halves it, and parallel deflate keeping one gzip member does better. The
    previous release's marker rebuild must keep working. One capture slot per
    host also queues urgent work behind background archives, for up to 12
    minutes.
-10. **Kata boot configuration.** Apart from the kernel and guest seccomp,
-    everything is upstream default. Candidates:
-    - `static_sandbox_resource_mgmt = true`, which removes CPU and memory
-      hotplug;
-    - the uncompressed kernel of the same build;
-    - a smaller `default_memory`.
+9. **Kata boot configuration.** Apart from the kernel and guest seccomp,
+   everything is upstream default. Candidates:
+   - `static_sandbox_resource_mgmt = true`, which removes CPU and memory
+     hotplug;
+   - the uncompressed kernel of the same build;
+   - a smaller `default_memory`.
 
-    Each needs Kata qualification. VM templating shares kernel memory and
-    RNG/KASLR state across tenants and should stay off.
-11. **Archive start fences** re-inspect the container `start()` just
+   Each needs Kata qualification. VM templating shares kernel memory and
+   RNG/KASLR state across tenants and should stay off.
+10. **Archive start fences** re-inspect the container `start()` just
     verified: seven of their ten inspects, about 0.35 s per cold start on runc.
     Most of that cost goes away with the Engine API reads in this revision.
-12. **`HostNetworkGuard._lock` serializes relay updates across unrelated
+11. **`HostNetworkGuard._lock` serializes relay updates across unrelated
     bridges.** A third concurrent `new_group` waited 0.8 s. A per-bridge lock
     for relay and SSH updates, with installs still exclusive, would remove the
     wait.
-13. **A long-lived host-rule helper** (150–176 ms per exec against 409 ms per
+12. **A long-lived host-rule helper** (150–176 ms per exec against 409 ms per
     run) needs a security review: it is a standing `NET_ADMIN` container in the
     host's network namespace.
-14. **Kata guest network sync on every running-group acquire.** It could be
+13. **Kata guest network sync on every running-group acquire.** It could be
     skipped when the container, its start time, the bridge and the relay
     addresses are unchanged. Needs a security review, because Docker may
     rewrite the guest's hosts file.
-15. **Control-plane round trips before dispatch.** Suspend flushes an event it
+14. **Control-plane round trips before dispatch.** Suspend flushes an event it
     just queued, and suspend and resume each re-register the group with the
     sandbox manager. `report_continuity` is synchronous. The claim route also
     awaits the gateway grant and the GitHub token mints one after another.
     Together that is 50–400 ms across the tunnels.
-16. **Restore throughput.** One `get_object` stream goes to a temporary file,
+15. **Restore throughput.** One `get_object` stream goes to a temporary file,
     then a second rewrite, then `docker image load`. Parallel ranged GETs
     pinned to the object version would drop a copy and survive a broken
     stream. Estimated 1 GiB in 8–15 s instead of 20–40 s.
-17. **Sandbox image size (pulls only).**
+16. **Sandbox image size (pulls only).**
     - The Kilo build is copied in and deleted in a later layer, so it is
       stored twice (≈170 MB).
     - The Claude SDK's venv carries an unused 214 MB CLI.
-18. **Smaller items:**
+17. **Smaller items:**
     - Codex's npm shim adds a Node process and 44 ms per member start.
     - A downloaded runtime version's root marker is probed on every launch;
       the reaper cache above would serve it.
