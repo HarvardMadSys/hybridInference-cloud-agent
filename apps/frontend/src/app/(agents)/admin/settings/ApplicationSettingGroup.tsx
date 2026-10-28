@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 
 import { useModalDialog } from '@/components/ui/useModalDialog';
 import { Select } from '@/components/ui/Select';
+import { MENU_ROW_DESTRUCTIVE, MENU_SURFACE } from '@/components/ui/menuStyles';
 import { SuggestionInput } from '@/components/ui/SuggestionInput';
 import type {
   AdminSettingDefinition,
@@ -542,11 +543,11 @@ export function ApplicationSettingGroup({
                       >
                         ···
                       </summary>
-                      <div className="absolute right-0 z-20 mt-1 w-52 rounded-xl border border-border bg-surface-raised p-1 shadow-lg">
+                      <div className={`${MENU_SURFACE} absolute right-0 z-20 mt-1 w-52 p-1`}>
                         <button
                           type="button"
                           disabled={busy || (field.secret && !configured)}
-                          className="ui-button ui-button-ghost min-h-11 w-full justify-start text-status-error"
+                          className={`${MENU_ROW_DESTRUCTIVE} min-h-11`}
                           aria-label={`${field.secret ? 'Clear' : 'Restore default for'} ${field.label}`}
                           onClick={(event) => {
                             if (!snapshot) return;

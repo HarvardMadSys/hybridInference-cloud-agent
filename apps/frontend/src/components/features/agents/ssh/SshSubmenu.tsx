@@ -3,6 +3,14 @@
 import Link from 'next/link';
 import { useT } from '@/components/providers';
 import { SETTINGS_PATHS } from '@/components/features/settings/navigation';
+import {
+  MENU_DIVIDER,
+  MENU_EMPTY,
+  MENU_FOOTER_ACTION,
+  MENU_ROW,
+  MENU_SCROLL,
+  MENU_SURFACE,
+} from '@/components/ui/menuStyles';
 import { SkillSwitch } from '../skills/SkillDialog';
 import type { SshChoice } from './useComposerSsh';
 
@@ -13,7 +21,7 @@ function ServerMark() {
   return (
     <span
       aria-hidden="true"
-      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-300"
+      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-surface-muted text-muted"
     >
       <svg
         viewBox="0 0 24 24"
@@ -45,41 +53,37 @@ export function SshSubmenu({
 }) {
   const t = useT();
   return (
-    <div className="flex max-h-[320px] w-full flex-col overflow-hidden">
-      <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+    <div className={`flex max-h-[320px] w-full flex-col overflow-hidden ${MENU_SURFACE}`}>
+      <div className={MENU_SCROLL}>
         {loading ? (
-          <p role="status" className="px-2 py-3 text-[13px] text-gray-500 dark:text-gray-400">
+          <p role="status" className={MENU_EMPTY}>
             {t('common.loading')}
           </p>
         ) : error ? (
           <div className="px-2 py-3">
-            <p className="text-[13px] text-red-600 dark:text-red-400">{error}</p>
+            <p className="text-[13px] text-status-error">{error}</p>
             <button
               type="button"
               onClick={onRetry}
-              className="mt-1.5 text-[12.5px] text-gray-500 underline dark:text-gray-400"
+              className="mt-1.5 text-[12.5px] text-muted underline"
             >
               {t('attach.sshRetry')}
             </button>
           </div>
         ) : choices.length === 0 ? (
-          <p className="px-2 py-3 text-[13px] text-gray-500 dark:text-gray-400">
-            {t('attach.sshEmpty')}
-          </p>
+          <p className={MENU_EMPTY}>{t('attach.sshEmpty')}</p>
         ) : (
           <ul>
             {choices.map((choice) => (
-              <li key={choice.id} className="flex items-center gap-2.5 rounded-lg px-2 py-2">
+              <li key={choice.id} className={`${MENU_ROW} cursor-default`}>
                 <ServerMark />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13px] font-medium text-gray-900 dark:text-gray-100">
+                  <span className="block truncate text-[13px] font-medium text-foreground">
                     {choice.name}
                   </span>
                   <span
                     className={`block truncate text-[11.5px] ${
-                      choice.blocked
-                        ? 'text-amber-700 dark:text-amber-400'
-                        : 'text-gray-500 dark:text-gray-400'
+                      choice.blocked ? 'text-status-warning' : 'text-muted'
                     }`}
                   >
                     {choice.blocked ? t('attach.sshNotChecked') : choice.login}
@@ -98,11 +102,9 @@ export function SshSubmenu({
           </ul>
         )}
       </div>
-      <div className="border-t border-gray-100 p-1.5 dark:border-white/5">
-        <Link
-          href={SETTINGS_PATHS.ssh}
-          className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] text-gray-700 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-white/5"
-        >
+      <div className={`${MENU_DIVIDER} m-0`} role="presentation" />
+      <div className="p-1.5">
+        <Link href={SETTINGS_PATHS.ssh} className={MENU_FOOTER_ACTION}>
           <svg
             viewBox="0 0 24 24"
             fill="none"

@@ -12,7 +12,17 @@ import {
 } from 'react';
 import { useT } from '@/components/providers';
 import { TEMPORARY_WORKSPACE } from '@/lib/temporaryWorkspace';
-import { COMPOSER_MENU_ROW, COMPOSER_MENU_SURFACE } from './composerMenuStyles';
+import {
+  MENU_COMPOSER,
+  MENU_EMPTY,
+  MENU_FOOTER,
+  MENU_FOOTER_ACTION,
+  MENU_ROW,
+  MENU_SCROLL,
+  MENU_SEARCH,
+  MENU_SEARCH_INPUT,
+} from '@/components/ui/menuStyles';
+import { useTopLayerEscape } from '@/components/ui/useTopLayerEscape';
 import { useComposerMenuLayout } from './useComposerMenuLayout';
 
 // Which repository a new task works on — chosen, never assumed.
@@ -31,8 +41,7 @@ import { useComposerMenuLayout } from './useComposerMenuLayout';
 // The first row is not a repository: a temporary workspace starts empty and
 // publishes nothing, so it is always on offer, GitHub connected or not.
 
-const CONFIGURE_CLASS =
-  'flex min-w-0 flex-1 items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] text-gray-700 hover:bg-gray-100 focus:bg-gray-100 focus:outline-none dark:text-gray-200 dark:hover:bg-white/10 dark:focus:bg-white/10';
+const CONFIGURE_CLASS = MENU_FOOTER_ACTION;
 
 /** `owner/` and `name`, so the owner can be drawn quieter than the name. */
 function splitRepository(repo: string): [string, string] {
@@ -66,7 +75,7 @@ function Check() {
       fill="none"
       stroke="currentColor"
       strokeWidth={1.8}
-      className="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400"
+      className="h-4 w-4 shrink-0 text-accent"
     >
       <path strokeLinecap="round" strokeLinejoin="round" d="m5 10.5 3.2 3L15 6.5" />
     </svg>
@@ -126,6 +135,7 @@ export function RepositoryPicker({
   const search = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState('');
   const menuStyle = useComposerMenuLayout(open, panel);
+  useTopLayerEscape(open, () => close(), trigger);
   // Read through a ref so a caller's inline handler cannot re-run the effect
   // below on every render, which would refocus the search box mid-typing.
   const onOpenChangeRef = useRef(onOpenChange);
@@ -217,12 +227,12 @@ export function RepositoryPicker({
       aria-current={temporary ? 'true' : undefined}
       title={t('temporaryWorkspace.optionHint')}
       onClick={() => choose(TEMPORARY_WORKSPACE)}
-      className={COMPOSER_MENU_ROW}
+      className={MENU_ROW}
     >
-      <TemporaryMark className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500" />
+      <TemporaryMark className="h-3.5 w-3.5 shrink-0 text-muted" />
       <span className="min-w-0 flex-1">
         <span className="block truncate">{temporaryLabel}</span>
-        <span className="block truncate text-[11px] text-gray-500 dark:text-gray-400">
+        <span className="block truncate text-[11px] text-muted">
           {t('temporaryWorkspace.optionHint')}
         </span>
       </span>
@@ -300,7 +310,7 @@ export function RepositoryPicker({
           id={id}
           role="dialog"
           aria-label={t('composer.repository')}
-          className={`${COMPOSER_MENU_SURFACE} flex flex-col`}
+          className={MENU_COMPOSER}
           style={menuStyle}
           onBlur={(event) => {
             if (
@@ -324,22 +334,35 @@ export function RepositoryPicker({
             }
           }}
         >
-          <input
-            ref={search}
-            type="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
-              // Enter takes the first match, so typing part of a name is enough.
-              event.preventDefault();
-              if (first) choose(first);
-            }}
-            aria-label={t('composer.repositorySearch')}
-            placeholder={t('composer.repositorySearch')}
-            className="mb-1 w-full shrink-0 rounded-lg bg-transparent px-3 py-2 text-[13px] text-gray-900 placeholder:text-gray-400 focus:outline-none dark:text-gray-100 dark:placeholder:text-gray-500"
-          />
-          <div className="min-h-0 flex-1 overflow-y-auto border-t border-gray-100 pt-1 dark:border-white/5">
+          <div className={MENU_SEARCH}>
+            <svg
+              aria-hidden
+              viewBox="0 0 20 20"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.6}
+              className="h-3.5 w-3.5 shrink-0 text-muted"
+            >
+              <circle cx="8.5" cy="8.5" r="5.5" />
+              <path strokeLinecap="round" d="m13 13 4 4" />
+            </svg>
+            <input
+              ref={search}
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
+                // Enter takes the first match, so typing part of a name is enough.
+                event.preventDefault();
+                if (first) choose(first);
+              }}
+              aria-label={t('composer.repositorySearch')}
+              placeholder={t('composer.repositorySearch')}
+              className={MENU_SEARCH_INPUT}
+            />
+          </div>
+          <div className={`${MENU_SCROLL} border-t border-border pt-1`}>
             {needle ? null : temporaryRow}
             {matches.map((repo) => {
               const [repoOwner, repoName] = splitRepository(repo);
@@ -352,11 +375,11 @@ export function RepositoryPicker({
                   aria-current={repo === value ? 'true' : undefined}
                   title={repo}
                   onClick={() => choose(repo)}
-                  className={COMPOSER_MENU_ROW}
+                  className={MENU_ROW}
                 >
-                  <GitHubMark className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500" />
+                  <GitHubMark className="h-3.5 w-3.5 shrink-0 text-muted" />
                   <span className="min-w-0 flex-1 truncate">
-                    <span className="text-gray-500 dark:text-gray-400">{repoOwner}</span>
+                    <span className="text-muted">{repoOwner}</span>
                     {repoName}
                   </span>
                   {repo === value ? <Check /> : null}
@@ -365,7 +388,7 @@ export function RepositoryPicker({
             })}
             {needle ? temporaryRow : null}
             {nothingToChoose ? (
-              <p className="px-3 py-3 text-[13px] leading-relaxed text-gray-500 dark:text-gray-400">
+              <p className={`${MENU_EMPTY} !py-3 text-left leading-relaxed`}>
                 {needle
                   ? t('composer.repositoryNoMatch', { query: query.trim() })
                   : t('composer.repositoryEmpty')}
@@ -374,7 +397,7 @@ export function RepositoryPicker({
             ) : null}
           </div>
           {disconnected && onConnect ? (
-            <div className="mt-1 flex shrink-0 items-center gap-1 border-t border-gray-100 pt-1 dark:border-white/5">
+            <div className={MENU_FOOTER}>
               <button
                 type="button"
                 onClick={() => {
@@ -397,7 +420,7 @@ export function RepositoryPicker({
                 close();
                 onCreate();
               }}
-              className={`${COMPOSER_MENU_ROW} mt-1 shrink-0 border-t border-gray-100 pt-2 font-medium disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/5`}
+              className={`${MENU_ROW} shrink-0 border-t border-border font-medium`}
             >
               <span aria-hidden="true" className="w-4 text-center">
                 +
@@ -406,7 +429,7 @@ export function RepositoryPicker({
             </button>
           ) : null}
           {disconnected ? null : (
-            <div className="mt-1 flex shrink-0 items-center gap-1 border-t border-gray-100 pt-1 dark:border-white/5">
+            <div className={MENU_FOOTER}>
               <a
                 href="https://github.com/new"
                 target="_blank"
@@ -437,7 +460,7 @@ export function RepositoryPicker({
                   type="button"
                   onClick={onRefresh}
                   disabled={refreshing}
-                  className="shrink-0 rounded-lg px-3 py-2 text-[13px] text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus:bg-gray-100 focus:outline-none disabled:cursor-wait disabled:opacity-60 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 dark:focus:bg-white/10"
+                  className={`${MENU_FOOTER_ACTION} flex-none disabled:cursor-wait disabled:opacity-60`}
                 >
                   {refreshing
                     ? t('composer.repositoryRefreshing')

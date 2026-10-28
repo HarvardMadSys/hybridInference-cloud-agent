@@ -30,6 +30,7 @@ import {
   SunIcon,
 } from '@/components/features/settings/icons';
 import { isSettingsPath, SETTINGS_PATHS } from '@/components/features/settings/navigation';
+import { MENU_DIVIDER, MENU_ROW, MENU_SURFACE } from '@/components/ui/menuStyles';
 import { switchAccountUrl } from '@/lib/auth/signin';
 import { LOCALES, LOCALE_LABELS } from '@/lib/i18n/locales';
 import { THEME_PREFERENCES, type ThemePreference } from '@/lib/theme';
@@ -55,11 +56,9 @@ const SUBMENU_WIDTH = 216;
 const SUBMENU_MAX_WIDTH = 360;
 const EDGE = 8;
 
-const PANEL =
-  'fixed z-[70] rounded-xl border border-border bg-surface p-1.5 text-[13px] text-foreground shadow-xl';
-const ITEM =
-  'flex min-h-9 w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left outline-none transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover [@media(pointer:coarse)]:min-h-11';
-const SEPARATOR = 'my-1 h-px bg-border';
+const PANEL = `${MENU_SURFACE} fixed z-[70]`;
+const ITEM = MENU_ROW;
+const SEPARATOR = MENU_DIVIDER;
 
 /**
  * The signed-in account and everything about it: who you are, the website's

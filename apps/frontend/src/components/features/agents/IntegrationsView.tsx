@@ -2,6 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
+import { MENU_ROW, MENU_ROW_DESTRUCTIVE, MENU_SURFACE } from '@/components/ui/menuStyles';
 import { SettingsPage } from '@/components/features/settings/SettingsPage';
 import {
   disconnectAgentIntegration,
@@ -176,7 +177,9 @@ function ProviderActions({
             />
           </svg>
         </summary>
-        <div className="ui-card absolute left-0 z-10 mt-2 w-56 max-w-[calc(100vw-3rem)] bg-surface p-1.5 shadow-lg lg:left-auto lg:right-0">
+        <div
+          className={`${MENU_SURFACE} absolute left-0 z-10 mt-2 w-56 max-w-[calc(100vw-3rem)] p-1 lg:left-auto lg:right-0`}
+        >
           {/* GitHub has one way out and nothing else here. Reauthorizing only
               mattered for an installation made outside this page, which
               disconnecting and connecting again also picks up; removing one
@@ -184,10 +187,7 @@ function ProviderActions({
               the grants whatever GitHub reports. Which repositories the App
               may use is changed on GitHub, through Configure repositories. */}
           {integration.provider !== 'github' && integration.connect_url ? (
-            <a
-              href={integration.connect_url}
-              className="ui-focus-ring flex min-h-11 items-center rounded-lg px-3 py-2 text-sm text-foreground hover:bg-surface-hover"
-            >
+            <a href={integration.connect_url} className={MENU_ROW}>
               Reauthorize {copy.name}
             </a>
           ) : null}
@@ -197,7 +197,7 @@ function ProviderActions({
               type="button"
               disabled={disconnecting === account.id}
               onClick={() => onDisconnect(account.id, account.label)}
-              className="ui-focus-ring block min-h-11 w-full rounded-lg px-3 py-2 text-left text-sm text-status-error hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-red-500/10"
+              className={MENU_ROW_DESTRUCTIVE}
             >
               {disconnecting === account.id
                 ? `Disconnecting ${account.label}…`
@@ -209,7 +209,7 @@ function ProviderActions({
               type="button"
               disabled={disconnecting === GITHUB_ACCOUNT}
               onClick={onDisconnectAll}
-              className="ui-focus-ring block min-h-11 w-full rounded-lg px-3 py-2 text-left text-sm text-status-error hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-red-500/10"
+              className={MENU_ROW_DESTRUCTIVE}
             >
               {disconnecting === GITHUB_ACCOUNT ? 'Disconnecting GitHub…' : 'Disconnect GitHub'}
             </button>

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
+import { MENU_ROW, MENU_ROW_DESTRUCTIVE, MENU_SURFACE } from '@/components/ui/menuStyles';
 import {
   deleteSshServer,
   listSshServers,
@@ -13,8 +14,7 @@ import { SshCheckDialog } from './SshCheckDialog';
 import { SshServerDialog } from './SshServerDialog';
 
 const ACTION = 'ui-button ui-button-secondary min-h-11';
-const MENU_ITEM =
-  'ui-focus-ring block min-h-11 w-full rounded-lg px-3 py-2 text-left text-sm text-foreground hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-60';
+const MENU_ITEM = MENU_ROW;
 
 function ServerIcon() {
   return (
@@ -230,7 +230,7 @@ export function SshServersSection() {
                     <summary className="ui-button ui-button-secondary min-h-11 cursor-pointer list-none [&::-webkit-details-marker]:hidden">
                       {t('ssh.manage')}
                     </summary>
-                    <div className="ui-card absolute right-0 z-10 mt-2 w-48 bg-surface p-1.5 shadow-lg">
+                    <div className={`${MENU_SURFACE} absolute right-0 z-10 mt-2 w-48 p-1`}>
                       <button
                         type="button"
                         className={MENU_ITEM}
@@ -248,7 +248,7 @@ export function SshServersSection() {
                       </button>
                       <button
                         type="button"
-                        className={`${MENU_ITEM} text-status-error`}
+                        className={MENU_ROW_DESTRUCTIVE}
                         onClick={() => setConfirming(server.id)}
                       >
                         {t('ssh.delete')}

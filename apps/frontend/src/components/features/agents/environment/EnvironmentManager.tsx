@@ -3,6 +3,13 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import { Select } from '@/components/ui/Select';
+import {
+  MENU_POSITIONED,
+  MENU_ROW,
+  MENU_ROW_DESTRUCTIVE,
+  MENU_SURFACE,
+} from '@/components/ui/menuStyles';
+import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import { getAgentConfig } from '@/lib/api/agents';
 import {
   copyEnvironment,
@@ -48,19 +55,13 @@ function RowMenu({
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const id = useId();
-  useEffect(() => {
-    if (!open) return;
-    menu.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
-    const outside = (event: PointerEvent) => {
-      if (
-        !menu.current?.contains(event.target as Node) &&
-        !trigger.current?.contains(event.target as Node)
-      )
-        setOpen(false);
-    };
-    document.addEventListener('pointerdown', outside);
-    return () => document.removeEventListener('pointerdown', outside);
-  }, [open]);
+  const popup = usePopupMenu({
+    open,
+    onOpenChange: setOpen,
+    triggerRef: trigger,
+    menuRef: menu,
+    placement: { gap: 4, width: 176, maxWidth: 240, preferredHeight: 160, maxHeight: 320 },
+  });
   function close() {
     setOpen(false);
     trigger.current?.focus();
@@ -90,30 +91,9 @@ function RowMenu({
           ref={menu}
           role="menu"
           aria-label={label}
-          className="ui-popover absolute right-0 top-full z-20 mt-1 w-44 rounded-xl border border-border bg-surface-raised p-1.5 shadow-card"
-          onKeyDown={(event) => {
-            if (event.key === 'Escape') {
-              event.preventDefault();
-              event.stopPropagation();
-              close();
-            } else if (event.key === 'Tab') {
-              close();
-            } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
-              event.preventDefault();
-              const items = [
-                ...menu.current!.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
-              ];
-              const current = items.indexOf(document.activeElement as HTMLButtonElement);
-              const next =
-                event.key === 'Home'
-                  ? 0
-                  : event.key === 'End'
-                    ? items.length - 1
-                    : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) %
-                      items.length;
-              items[next]?.focus();
-            }
-          }}
+          style={popup.style}
+          className={`${MENU_SURFACE} ${MENU_POSITIONED} w-44`}
+          onKeyDown={popup.onKeyDown}
         >
           {actions.map(({ action, label: text }) => (
             <button
@@ -125,7 +105,7 @@ function RowMenu({
                 close();
                 onAction(action);
               }}
-              className={`block w-full rounded-md px-3 py-2 text-left text-sm hover:bg-surface-hover focus:bg-surface-hover focus:outline-none ${action === 'remove' ? 'text-status-error' : 'text-foreground'}`}
+              className={action === 'remove' ? MENU_ROW_DESTRUCTIVE : MENU_ROW}
             >
               {text}
             </button>
