@@ -8,7 +8,6 @@ import math
 import secrets
 import threading
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
@@ -53,10 +52,7 @@ from cloud_agent_host.guest_observer import (
 from cloud_agent_host.member_resources import (
     MEMBER_WINDOW_SAMPLE_INTERVAL_MS,
     RUNNING_CHECKPOINT_INTERVAL_S,
-    MemberWindowHandle,
-    MemberWindowSampler,
 )
-from cloud_agent_host.member_window_census import MemberWindow, window_boot_id
 from cloud_agent_host.parallel_window_census import take_censuses
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
@@ -75,6 +71,7 @@ from cloud_agent_host.session_lifecycle import (
     StaleStartFence,
 )
 from cloud_agent_host.shared_session_recovery import SharedSessionRecovery
+from cloud_agent_host.turn_arming import TurnFences, arm_turn
 from cloud_agent_host.upload_import import forget_deleted_container_uploads
 from cloud_agent_shared.environment_snapshots import SNAPSHOT_LABEL, EnvironmentSnapshotRef
 from cloud_agent_shared.errors import SandboxArchiveBlocked
@@ -85,11 +82,11 @@ from cloud_agent_shared.operation_profiling import (
     substage,
 )
 from cloud_agent_shared.shared_protocol import INPUT_TURN_ENDED
-from cloud_agent_shared.turn_resources import parse_cpu_capacity
 
 if TYPE_CHECKING:
     import builtins
 
+    from cloud_agent_host.member_window_census import MemberWindow
     from cloud_agent_host.parallel_window_census import DueCensus
     from cloud_agent_host.tool_windows import ToolMark, ToolMarkReader
     from cloud_agent_shared.sandbox_manager_wire import ContextStatus, ResidentState
@@ -2294,62 +2291,17 @@ class SharedChatSessionSupervisor:
             group.idle_deadline = None
         if not member.turn_lock.acquire(blocking=False):
             raise SessionBusy(f"chat {thread_id!r} already has a running turn")
-        observer_cursor: GuestObserverCursor | None = None
-        window: MemberWindowHandle | None = None
-        window_sampler: MemberWindowSampler | None = None
+        fences: TurnFences | None = None
         try:
-            activation_processes = self._manager.capture_member_processes(
+            # The census and every fence complete here, before admission is
+            # rechecked and so before the prompt is written (turn_arming).
+            fences = arm_turn(
+                self._manager,
                 group.spec,
                 slot_id=member.resident_slot_id,
-                user_uid=MEMBER_UID_BASE + member.resident_slot_id,
-                user_gid=self._manager.backend.gid,
+                runtime_id=transport.launch.runtime_id,
+                sample_interval_s=self._sample_interval_s,
             )
-            mark_reader_factory = getattr(self._manager, "tool_mark_reader", None)
-            tool_mark_reader = (
-                mark_reader_factory(group.spec)
-                if (
-                    mark_reader_factory is not None
-                    and transport.launch.runtime_id == "claude-code"
-                    and self._manager.backend.runtime != KATA_RUNTIME
-                )
-                else None
-            )
-            if self._manager.backend.runtime == KATA_RUNTIME:
-                begin_observation = getattr(self._manager, "begin_guest_observation", None)
-                if begin_observation is None:
-                    observer_cursor = GuestObserverCursor.unavailable(
-                        MEMBER_UID_BASE + member.resident_slot_id,
-                        "sandbox manager has no guest observer client",
-                    )
-                else:
-                    # The window opens on the same fence as the turn: the
-                    # measurement identifier travels with the cursor so the
-                    # observation's journal slice contains the opening census
-                    # as well as everything after it.
-                    measurement_id = uuid.uuid4().hex
-                    observer_cursor = begin_observation(
-                        group.spec,
-                        user_uid=MEMBER_UID_BASE + member.resident_slot_id,
-                        measurement_id=measurement_id,
-                    )
-                    if observer_cursor.available:
-                        window_sampler = MemberWindowSampler(
-                            run=lambda argv, timeout_s: self._manager.member_window_request(
-                                group.spec,
-                                argv,
-                                timeout_s=timeout_s,
-                            ),
-                            interval_s=self._sample_interval_s,
-                        )
-                        window = window_sampler.open(
-                            uid=MEMBER_UID_BASE + member.resident_slot_id,
-                            measurement_id=measurement_id,
-                            cursor=observer_cursor,
-                        )
-                        window = replace(
-                            window,
-                            cpu_capacity_cores=parse_cpu_capacity(group.spec.cpu_limit),
-                        )
             with self._lock:
                 self._wait_for_start_locked(group)
                 self._require_mutation_admission(group)
@@ -2372,7 +2324,8 @@ class SharedChatSessionSupervisor:
                 reasoning_effort=reasoning_effort,
             )
         except Exception:
-            self._close_unadmitted(group.spec, window, window_sampler, observer_cursor)
+            if fences is not None:
+                fences.close_unadmitted(self._manager, group.spec)
             member.turn_lock.release()
             raise
         admitted = False
@@ -2393,56 +2346,29 @@ class SharedChatSessionSupervisor:
             if admitted:
                 member.current_turn = turn
                 held_inputs = self._take_held_inputs(thread_id, member.lease_owner)
-                member.activation_processes = activation_processes
-                member.observer_cursor = observer_cursor
-                member.tool_mark_reader = tool_mark_reader
-                member.window = (
-                    MemberWindow.opened(
-                        window,
-                        window_sampler,
-                        cursor=observer_cursor,
-                        boot_id=window_boot_id(self._manager, group.spec, observer_cursor),
-                        checkpoint_interval_s=self._checkpoint_interval_s,
-                    )
-                    if window is not None and window_sampler is not None
-                    else None
+                member.activation_processes = fences.activation_processes
+                member.observer_cursor = fences.observer_cursor
+                member.tool_mark_reader = fences.tool_mark_reader
+                member.window = fences.member_window(
+                    self._manager, group.spec, checkpoint_interval_s=self._checkpoint_interval_s
                 )
         if not admitted:
             with contextlib.suppress(Exception):
                 turn.interrupt()
-            self._close_unadmitted(group.spec, window, window_sampler, observer_cursor)
+            fences.close_unadmitted(self._manager, group.spec)
             with contextlib.suppress(Exception):
                 self._manager.reap_member_processes_except(
                     group.spec,
                     slot_id=member.resident_slot_id,
                     user_uid=MEMBER_UID_BASE + member.resident_slot_id,
                     user_gid=self._manager.backend.gid,
-                    baseline=activation_processes,
+                    baseline=fences.activation_processes,
                 )
             member.turn_lock.release()
             raise SessionLeaseLost("shared sandbox lifecycle changed during turn admission")
         for pending in held_inputs:
             turn.inject(pending.text, message_id=pending.message_id)
         return turn
-
-    def _close_unadmitted(
-        self,
-        spec: ChatSandboxSpec,
-        window: MemberWindowHandle | None,
-        window_sampler: MemberWindowSampler | None,
-        observer_cursor: GuestObserverCursor | None,
-    ) -> None:
-        """Close what a turn opened before it was refused: its window, then its cursor.
-
-        The window is the cursor's counterpart, a registration the observer
-        still holds, and no turn is left to close either of them.
-        """
-        if window is not None and window_sampler is not None:
-            with contextlib.suppress(Exception):
-                window_sampler.close(window)
-        if observer_cursor is not None:
-            with contextlib.suppress(Exception):
-                self._manager.finish_guest_observation(spec, observer_cursor)
 
     def _take_held_inputs(self, thread_id: str, owner: str | None) -> list[PendingInput]:
         """Remove and return what was held for ``owner``'s turn; drop the rest."""
