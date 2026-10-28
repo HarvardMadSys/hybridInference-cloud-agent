@@ -1588,24 +1588,21 @@ class ChatSandboxManager:
 
     def ensure_kilo_mcp_runtime(self, spec: ChatSandboxSpec, version: str) -> None:
         """Bring retained Kilo members onto the deployment's isolated runtime."""
-        from cloud_agent_host.kilo_mcp import ensure_kilo_runtime
+        from cloud_agent_host.kilo_mcp import ensure_kilo_runtime_once
 
-        with install_lock(spec.container_name):
-            ensure_kilo_runtime(self, spec, version)
+        ensure_kilo_runtime_once(self, spec, version)
 
     def ensure_downloaded_runtime(self, spec: ChatSandboxSpec, runtime: str, version: str) -> None:
         """Copy a version downloaded after the image was built into this chat."""
-        from cloud_agent_host.runtime_install import ensure_downloaded_runtime
+        from cloud_agent_host.runtime_install import ensure_downloaded_runtime_once
 
-        with install_lock(spec.container_name):
-            ensure_downloaded_runtime(self, spec, runtime, version)
+        ensure_downloaded_runtime_once(self, spec, runtime, version)
 
     def ensure_mcp_helpers(self, spec: ChatSandboxSpec, runtime: str) -> None:
         """Keep existing conversations on the same adapters as new conversations."""
-        from cloud_agent_host.mcp_helpers import install_mcp_helpers
+        from cloud_agent_host.mcp_helpers import install_mcp_helpers_once
 
-        with install_lock(spec.container_name):
-            install_mcp_helpers(self, spec, runtime)
+        install_mcp_helpers_once(self, spec, runtime)
 
     def reap_member_processes(
         self,

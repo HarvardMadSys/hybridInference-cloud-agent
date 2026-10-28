@@ -17,10 +17,12 @@ import threading
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from cloud_agent_host.chat_sandbox_models import RetainedChatLost
+from cloud_agent_host.install_locks import install_lock
 from cloud_agent_host.sandbox import SandboxError
 
 if TYPE_CHECKING:
     import subprocess
+    from collections.abc import Callable
 
     from cloud_agent_host.chat_sandbox import ChatSandboxManager
     from cloud_agent_host.chat_sandbox_models import ChatSandboxInspection, ChatSandboxSpec
@@ -36,7 +38,9 @@ class ProvenContainers:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._proven: dict[str, tuple[ChatSandboxSpec, ChatSandboxInspection]] = {}
-        #: Root-owned helpers found in place, as (container id, path) pairs.
+        #: Root-owned helpers found in place, as (container id, key) pairs. A key
+        #: is the helper's path, followed by its content's digest when a host
+        #: could install other content there.
         self._helpers: set[tuple[str, str]] = set()
 
     def record(
@@ -81,6 +85,40 @@ class ProvenContainers:
         if proven is not None:
             with self._lock:
                 self._helpers.add((proven.container_id, path))
+
+    def forget_helpers(self, proven: ChatSandboxInspection | None, prefix: str) -> None:
+        """Forget every helper under ``prefix`` in ``proven``, which a root exec is replacing.
+
+        For a key that names a file's content as well as its path: once the
+        file is replaced, what was found there before no longer holds.
+        """
+        if proven is not None:
+            with self._lock:
+                self._helpers = {
+                    held
+                    for held in self._helpers
+                    if held[0] != proven.container_id or not held[1].startswith(prefix)
+                }
+
+
+def install_once(
+    manager: ChatSandboxManager, spec: ChatSandboxSpec, key: str, install: Callable[[], object]
+) -> None:
+    """Run ``install`` under the container's install lock, unless it already did for ``key``.
+
+    ``key`` names a root-owned file no member can change, and ``install``
+    finds it in place or puts it there, raising otherwise. Once it has, in
+    the container ``spec``'s last start or network proof verified, it is not
+    run there again (:meth:`ProvenContainers.note_helper`). The check comes
+    before the lock, so a launch whose file is known in place does not queue
+    behind a runtime or MCP install into the same container.
+    """
+    proven = manager._proven.get(spec)
+    if manager._proven.holds_helper(proven, key):
+        return
+    with install_lock(spec.container_name):
+        install()
+    manager._proven.note_helper(proven, key)
 
 
 def exec_target(
