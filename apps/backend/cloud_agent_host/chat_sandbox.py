@@ -122,6 +122,7 @@ from cloud_agent_host.guest_observer import (
     GuestObserverSnapshot,
 )
 from cloud_agent_host.guest_observer_locks import GuestObserverLocks
+from cloud_agent_host.guest_observer_scripts import WINDOW_DELTA_SCRIPT
 from cloud_agent_host.install_locks import install_lock
 from cloud_agent_host.network_guard import GUARD_RECHECK_S
 from cloud_agent_host.sandbox import (
@@ -2643,26 +2644,12 @@ class ChatSandboxManager:
         """
         if not cursor.available or not cursor.journal_ino:
             return b"", cursor.offset
-        reader = (
-            "import os, sys\n"
-            "filename, offset, expected_dev, expected_ino = sys.argv[1], int(sys.argv[2]), "
-            "int(sys.argv[3]), int(sys.argv[4])\n"
-            "with open(filename, 'rb', buffering=0) as handle:\n"
-            "    journal = os.fstat(handle.fileno())\n"
-            "    if (int(journal.st_dev) != expected_dev "
-            "            or int(journal.st_ino) != expected_ino):\n"
-            "        raise RuntimeError('observer journal changed before read')\n"
-            "    if int(journal.st_size) < offset:\n"
-            "        raise RuntimeError('observer journal is behind the read fence')\n"
-            "    handle.seek(offset)\n"
-            "    sys.stdout.buffer.write(handle.read(max(0, int(journal.st_size) - offset)))\n"
-        )
         result = self.exec_capture(
             spec,
             [
                 "python3",
                 "-c",
-                reader,
+                WINDOW_DELTA_SCRIPT,
                 GUEST_OBSERVER_EVENTS,
                 str(cursor.offset),
                 str(cursor.journal_dev),
@@ -2763,6 +2750,12 @@ class ChatSandboxManager:
             privileged=privileged,
             lock=lock,
         )
+
+    def warm_guest_observer(self, spec: ChatSandboxSpec, container_id: str) -> None:
+        """Start a just-proven Kata guest's observer before its first prompt needs it."""
+        from cloud_agent_host.guest_observer_warmup import warm_guest_observer
+
+        warm_guest_observer(self, spec, container_id)
 
     def begin_guest_observation(
         self,

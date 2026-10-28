@@ -2182,6 +2182,11 @@ class SharedChatSessionSupervisor:
             facts=facts,
             observer=recorder,
         )
+        warm_observer = getattr(self._manager, "warm_guest_observer", None)
+        if warm_observer is not None and facts.container_action in ("create", "start"):
+            # This activation booted the guest and proved it: its observer
+            # starts now, beside the member's preparation, not in the prompt.
+            warm_observer(group.spec, inspection.container_id)
         with self._lock:
             current_group = self._members.get(thread_id)
             current_member = (
