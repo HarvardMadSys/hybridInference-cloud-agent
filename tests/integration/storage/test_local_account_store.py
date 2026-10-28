@@ -358,8 +358,15 @@ async def test_a_revocation_opens_a_record_that_blocks_reapproval_until_closed(s
     ]
     with pytest.raises(AccountTransitionRefused):
         await act(storage, account_id, "approve")
-    await storage.local_accounts.record_termination_attempt(
-        account_id=account_id, generation=revoked.account.version, complete=True, outcome="t"
+    revision = await storage.local_accounts.termination_revision(
+        account_id=account_id, generation=revoked.account.version
+    )
+    assert await storage.local_accounts.record_termination_attempt(
+        account_id=account_id,
+        generation=revoked.account.version,
+        revision=revision,
+        complete=True,
+        outcome="t",
     )
     async with storage.local_accounts.termination_lock(account_id) as held:
         assert held
@@ -385,6 +392,50 @@ async def test_the_list_filters_by_admission_and_counts(storage):
         admission_status=None, limit=50, offset=0
     )
     assert total_all == 4 and len(everyone) == 4
+
+
+async def test_a_reopen_bumps_the_revision_and_a_stale_close_leaves_it_open(storage):
+    account_id = await make_account(storage, "revision@example.org", admission="approved")
+    revoked = await act(storage, account_id, "revoke")
+    generation = revoked.account.version
+    accounts = storage.local_accounts
+    observed = await accounts.termination_revision(account_id=account_id, generation=generation)
+    assert observed == 1
+    assert await accounts.reopen_termination(account_id)
+    assert await accounts.termination_revision(account_id=account_id, generation=generation) == 2
+    # A pass that read revision 1 cannot close revision 2.
+    assert not await accounts.record_termination_attempt(
+        account_id=account_id, generation=generation, revision=1, complete=True, outcome="x"
+    )
+    assert await accounts.open_terminations(limit=10) == [(account_id, generation)]
+    assert await accounts.record_termination_attempt(
+        account_id=account_id, generation=generation, revision=2, complete=True, outcome="x"
+    )
+    # Reopening a closed record opens it again, at a new revision.
+    assert await accounts.reopen_termination(account_id)
+    assert await accounts.termination_revision(account_id=account_id, generation=generation) == 3
+    assert await accounts.open_terminations(limit=10) == [(account_id, generation)]
+
+
+async def test_concurrent_reopens_and_a_stale_close_never_lose_an_intent(storage):
+    account_id = await make_account(storage, "concurrent@example.org", admission="approved")
+    revoked = await act(storage, account_id, "revoke")
+    generation = revoked.account.version
+    accounts = storage.local_accounts
+    observed = await accounts.termination_revision(account_id=account_id, generation=generation)
+    await asyncio.gather(
+        *(accounts.reopen_termination(account_id) for _ in range(5)),
+        accounts.record_termination_attempt(
+            account_id=account_id,
+            generation=generation,
+            revision=observed,
+            complete=True,
+            outcome="x",
+        ),
+    )
+    # Whatever the interleaving, at least one reopen is after the close's view.
+    assert await accounts.termination_revision(account_id=account_id, generation=generation) == 6
+    assert await accounts.open_terminations(limit=10) == [(account_id, generation)]
 
 
 # ── The termination lock ────────────────────────────────────────────────

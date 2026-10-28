@@ -26,11 +26,15 @@ touches work started under a newer approval. Restoring access replays
 nothing: cancelled turns stay cancelled, and paused goals and queues wait for
 their owner.
 
-**Stopping bound** (default settings). New requests, claims, rounds and
-residencies are refused at commit. Open owner streams end within 30 s plus one
-keepalive. A running turn stops at its next host heartbeat (30 s), or when its
-attempt lease lapses (120 s) if its host is silent. A failed step is retried
-within 30 s. See ``docs/developer/local-accounts.md``.
+**How it converges** (default settings). New requests, claims, rounds and
+residencies are refused at commit. Open owner streams re-check every 30 s. A
+running turn is asked to stop at once and stops at its host's next heartbeat,
+or when its attempt lease lapses if the host is silent. Open records are
+retried every :data:`ENFORCEMENT_INTERVAL_S`, at most :data:`ENFORCEMENT_BATCH`
+per pass, so a host that keeps failing, or a long backlog, delays completion:
+there is no fixed wall-clock deadline, only a check cadence and a record that
+stays open, blocking re-approval, until every step is acknowledged. See
+``docs/developer/local-accounts.md``.
 """
 
 from __future__ import annotations
@@ -105,6 +109,11 @@ async def terminate_owner_access(
     and stops nothing. A pass that finds the lock taken leaves the record for
     the pass holding it.
 
+    The record's revision is read under the lock before any work starts, and
+    the pass closes the record only at that revision. A late terminal that
+    reopens the record while the pass runs bumps the revision, so the record
+    stays open for the next pass, which then kills that terminal too.
+
     Args:
         storage: The assembled storage.
         grants: The grant client, for revoking released residency grants.
@@ -115,16 +124,25 @@ async def terminate_owner_access(
     async with storage.local_accounts.termination_lock(user_id) as held:
         if not held:
             return False
+        observed = None
+        if generation is not None:
+            observed = await storage.local_accounts.termination_revision(
+                account_id=user_id, generation=generation
+            )
+        record = (generation, observed)
         account = await storage.local_accounts.get_account(user_id)
         if account is not None and permissions_for(account):
             # Access was granted again: nothing here may touch what that
             # approval allows. (The record barrier makes this unreachable.)
-            await _record(storage, user_id, generation, complete=True, outcome="superseded")
+            await _record(storage, user_id, record, complete=True, outcome="superseded")
             return True
-        return await _stop_work(storage, grants, user_id, generation)
+        return await _stop_work(storage, grants, user_id, record)
 
 
-async def _stop_work(storage: Storage, grants: Any, user_id: str, generation: int | None) -> bool:
+async def _stop_work(
+    storage: Storage, grants: Any, user_id: str, record: tuple[int | None, int | None]
+) -> bool:
+    generation = record[0]
     result = await storage.owner_work.end_owner_work(user_id)
     await close_released_residencies(
         storage.host_pool, grants, result.get("released_residencies") or []
@@ -136,7 +154,9 @@ async def _stop_work(storage: Storage, grants: Any, user_id: str, generation: in
     running = int(result.get("running") or 0)
     complete = groups_done and running == 0
     outcome = "complete" if complete else ("turns_stopping" if groups_done else "terminals_pending")
-    await _record(storage, user_id, generation, complete=complete, outcome=outcome)
+    closed = await _record(storage, user_id, record, complete=complete, outcome=outcome)
+    if complete and not closed and generation is not None:
+        outcome = "reopened"
     logger.info(
         "agent_owner_access_terminated",
         extra={
@@ -150,16 +170,27 @@ async def _stop_work(storage: Storage, grants: Any, user_id: str, generation: in
             "outcome": outcome,
         },
     )
-    return complete
+    return complete if generation is None else closed
 
 
 async def _record(
-    storage: Storage, user_id: str, generation: int | None, *, complete: bool, outcome: str
-) -> None:
-    if generation is None:
-        return
-    await storage.local_accounts.record_termination_attempt(
-        account_id=user_id, generation=generation, complete=complete, outcome=outcome
+    storage: Storage,
+    user_id: str,
+    record: tuple[int | None, int | None],
+    *,
+    complete: bool,
+    outcome: str,
+) -> bool:
+    """Count the attempt; whether the record is now closed. Nothing without a record."""
+    generation, revision = record
+    if generation is None or revision is None:
+        return False
+    return await storage.local_accounts.record_termination_attempt(
+        account_id=user_id,
+        generation=generation,
+        revision=revision,
+        complete=complete,
+        outcome=outcome,
     )
 
 

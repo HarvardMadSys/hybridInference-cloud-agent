@@ -144,10 +144,14 @@ class LocalAccountRepository(Protocol):
         """Revocations whose cleanup is not yet acknowledged: ``(account, generation)``."""
         ...
 
+    async def termination_revision(self, *, account_id: str, generation: int) -> int | None:
+        """The record's current revision, read by a pass before it starts its cleanup."""
+        ...
+
     async def record_termination_attempt(
-        self, *, account_id: str, generation: int, complete: bool, outcome: str
-    ) -> None:
-        """Count one cleanup attempt, and close the record once it is complete."""
+        self, *, account_id: str, generation: int, revision: int, complete: bool, outcome: str
+    ) -> bool:
+        """Count one attempt; close the record only at ``revision``. Whether it closed."""
         ...
 
     async def accounts_with_ended_access(self, *, limit: int) -> list[str]:

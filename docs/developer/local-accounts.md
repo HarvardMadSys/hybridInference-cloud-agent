@@ -168,24 +168,34 @@ processes. In each sandbox group whose members all belong to the account, it
 freezes the group's terminals, kills them and lifts the freeze. Groups shared
 with another owner's chat are never touched. A terminal that a request
 admitted before the revocation opens afterwards is killed by that request
-itself.
+itself, after it has reopened the termination record, so the next pass kills
+the terminal if that request cannot.
 
 The record stays open until a pass finds the terminal cleanup acknowledged
-and none of the account's turns running. The background pass retries open
-records every 30 seconds. A per-account advisory lock serializes passes
-across processes. Approving the account or granting it administration needs
-that same lock and no open record (otherwise 409 `access_cleanup_pending`), so
-a delayed pass never stops work that a newer approval allows. Restoring access
+and none of the account's turns running. Each reopen increments the record's
+revision. A pass reads the revision before it starts and closes the record
+only at that revision, so a terminal reopened while a pass is running keeps
+the record open for the next pass. The background pass checks open records
+every 30 seconds, up to 50 accounts per pass. A per-account advisory lock
+serializes passes across processes. Approving the account or granting it
+administration needs that same lock and no open record, at any revision
+(otherwise 409 `access_cleanup_pending`), so a delayed pass never stops work
+that a newer approval allows. Restoring access
 replays nothing: cancelled turns stay cancelled, and paused goals and queues
 wait for their owner.
 
-| Work | Stops within (default settings) |
+No step has a fixed wall-clock deadline. A host that keeps failing, or a
+backlog of more than one batch of accounts, delays completion. What is fixed
+is when each kind of work is refused or checked, and that the record stays
+open, blocking re-approval, until every step is acknowledged.
+
+| Work | When it is refused or checked (default settings) |
 |---|---|
-| New requests, claims, goal rounds, waiting messages, residency establishment and heartbeats | At commit |
-| Open owner event, change and terminal streams | 30 s (`LOCAL_STREAM_RECHECK_S`) plus one keepalive |
-| A running turn | At its next host heartbeat, about 30 s, or when its 120 s attempt lease lapses if the host is silent |
-| Resident member processes | When the pass closes them, or at the host's next residency heartbeat |
-| Group terminals and environment actions | When the pass reaches the group; retried every 30 s until acknowledged |
+| New requests, claims, goal rounds, waiting messages, residency establishment and heartbeats | Refused from the commit |
+| Open owner event, change and terminal streams | Re-checked every 30 s (`LOCAL_STREAM_RECHECK_S`), between frames |
+| A running turn | Asked to stop by the first pass; it stops at its host's next heartbeat (every 30 s), or when its 120 s attempt lease lapses if the host is silent |
+| Resident member processes | Closed by a pass, or at the host's next residency heartbeat, which no longer extends them |
+| Group terminals and environment actions | Killed by a pass; retried at each check until the host acknowledges |
 
 ## Models
 

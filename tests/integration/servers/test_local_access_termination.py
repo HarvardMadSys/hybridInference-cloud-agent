@@ -11,11 +11,13 @@ without a later retry touching work the new approval allows.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
 import pytest_asyncio
 import tests.integration.servers.test_pending_message_queue as queue
+from fastapi import HTTPException
 from tests.integration.servers.test_pending_message_queue import (
     _claim_body,
     api as api,
@@ -29,6 +31,7 @@ from cloud_agent.accounts.directory import (
     LocalModeGrantClient,
     LocalOwnerDirectory,
 )
+from cloud_agent.api._local_auth import terminal_open_fence
 from cloud_agent.api.deps import get_gateway_client
 from cloud_agent.application.owner_termination import (
     enforce_ended_access,
@@ -49,6 +52,12 @@ class _Manager:
     def __init__(self, *, fail_suspend: bool = False) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.fail_suspend = fail_suspend
+        self.fail_delete = False
+        #: The terminals the host is running; a kill removes one.
+        self.terminals = ["term-1", "term-2"]
+        #: Set to hold a pass inside its first host call until released.
+        self.hold: asyncio.Event | None = None
+        self.entered = asyncio.Event()
 
     async def shared_residency_lost(self, thread_id: str, *, generation: int) -> None:
         self.calls.append(("residency_lost", thread_id))
@@ -57,14 +66,21 @@ class _Manager:
         if self.fail_suspend:
             raise ConnectionError("host away")
         self.calls.append(("suspend", workspace, job_id))
+        self.entered.set()
+        if self.hold is not None:
+            await self.hold.wait()
         return {"ok": True}
 
     async def list_terminals(self, workspace: str) -> dict[str, Any]:
         self.calls.append(("list", workspace))
-        return {"terminals": [{"id": "term-1"}, {"id": "term-2"}]}
+        return {"terminals": [{"id": terminal} for terminal in self.terminals]}
 
     async def delete_terminal(self, workspace: str, terminal_id: str) -> dict[str, Any]:
+        if self.fail_delete:
+            raise ConnectionError("host away")
         self.calls.append(("delete", terminal_id))
+        if terminal_id in self.terminals:
+            self.terminals.remove(terminal_id)
         return {"ok": True}
 
     async def resume_terminals(self, workspace: str, *, lease_generation: int, job_id: str):
@@ -238,18 +254,122 @@ async def test_an_unacknowledged_terminal_cleanup_keeps_the_record_open(api):
     assert await api.store.local_accounts.open_terminations(limit=10) == []
 
 
-async def test_a_delayed_pass_never_touches_work_a_new_approval_allows(api):
+async def _record_row(api) -> dict[str, Any]:
+    async with api.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT revision, completed_at, last_outcome FROM agent_local_access_terminations "
+            "WHERE account_id = $1",
+            OWNER,
+        )
+    return dict(row)
+
+
+async def test_a_terminal_reopened_while_a_pass_finishes_keeps_the_record_open(api, monkeypatch):
+    """Pass A cleans up, pauses before closing; a late terminal reopens; A must not close it."""
+    job = await api.create()
+    await api.run(job)
     revoked = await act(api.store, OWNER, "revoke")
     generation = revoked.account.version
-    assert await terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, generation)
-    # A second pass is still running somewhere: approval waits for its lock.
-    async with api.store.local_accounts.termination_lock(OWNER) as held:
-        assert held
-        assert not await terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, None)
-        with pytest.raises(AccountTransitionRefused):
-            await act(api.store, OWNER, "approve")
+
+    accounts = api.store.local_accounts
+    real_record = accounts.record_termination_attempt
+    reached, release = asyncio.Event(), asyncio.Event()
+
+    async def paused_record(**kwargs: Any) -> bool:
+        reached.set()
+        await release.wait()
+        return await real_record(**kwargs)
+
+    monkeypatch.setattr(accounts, "record_termination_attempt", paused_record)
+    pass_a = asyncio.create_task(
+        terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, generation)
+    )
+    await asyncio.wait_for(reached.wait(), 10)
+    # A has frozen, killed and released the group's terminals and found no turn.
+    assert api.manager.terminals == []
+    assert ("resume", job["thread_id"], terminal_freeze_token(OWNER, generation)) in (
+        api.manager.calls
+    )
+
+    # B: a request admitted before the revocation opens a terminal now, and
+    # its own kill fails.
+    api.manager.terminals.append("late")
+    api.manager.fail_delete = True
+    with pytest.raises(HTTPException) as refused:
+        async with terminal_open_fence(api.store, OWNER, api.manager, job["thread_id"]) as opened:
+            opened["terminal"] = {"id": "late"}
+    assert refused.value.status_code == 403
+    assert (await _record_row(api))["revision"] == 2
+
+    release.set()
+    assert await asyncio.wait_for(pass_a, 10) is False
+    row = await _record_row(api)
+    assert row["completed_at"] is None and row["last_outcome"] == "reopened"
+    with pytest.raises(AccountTransitionRefused) as blocked:
+        await act(api.store, OWNER, "approve")
+    assert blocked.value.code == "access_cleanup_pending"
+
+    # The next pass sees the open record, kills the late terminal and closes it.
+    monkeypatch.setattr(accounts, "record_termination_attempt", real_record)
+    api.manager.fail_delete = False
+    assert await enforce_ended_access(api.store, LocalModeGrantClient()) == 1
+    assert api.manager.terminals == []
+    assert ("delete", "late") in api.manager.calls
+    assert (await _record_row(api))["completed_at"] is not None
+    assert (await act(api.store, OWNER, "approve")).account.admission_status == "approved"
+
+
+async def test_a_pass_in_flight_excludes_other_passes_and_approval(api):
+    """Hold pass A inside a host call: nothing else may run, and approval cannot commit."""
+    first = await api.create()
+    await api.run(first)
+    revoked = await act(api.store, OWNER, "revoke")
+    generation = revoked.account.version
+    api.manager.hold = asyncio.Event()
+    pass_a = asyncio.create_task(
+        terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, generation)
+    )
+    await asyncio.wait_for(api.manager.entered.wait(), 10)
+    suspends = sum(call[0] == "suspend" for call in api.manager.calls)
+
+    # Another pass, from the record or from the sweep, finds the lock taken.
+    for other in (generation, None):
+        assert (
+            await asyncio.wait_for(
+                terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, other), 5
+            )
+            is False
+        )
+    assert sum(call[0] == "suspend" for call in api.manager.calls) == suspends
+    # Approval cannot commit while A is in flight, even once the record looks done.
+    with pytest.raises(AccountTransitionRefused) as refused:
+        await act(api.store, OWNER, "approve")
+    assert refused.value.code == "access_cleanup_pending"
+    async with api.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_local_access_terminations SET completed_at = NOW() WHERE account_id = $1",
+            OWNER,
+        )
+    with pytest.raises(AccountTransitionRefused) as refused:
+        await act(api.store, OWNER, "approve")
+    assert refused.value.code == "access_cleanup_pending"
+    async with api.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_local_access_terminations SET completed_at = NULL WHERE account_id = $1",
+            OWNER,
+        )
+
+    api.manager.hold.set()
+    assert await asyncio.wait_for(pass_a, 10) is True
+    assert api.manager.terminals == []
     await act(api.store, OWNER, "approve")
-    job = await api.create()
-    # The delayed pass runs only now, and finds access granted again.
+
+    # New work under the new approval: a running turn with its residency.
+    second = await api.create()
+    turn = await api.start(second)
+    suspends = sum(call[0] == "suspend" for call in api.manager.calls)
+    # The old generation's pass runs late and must touch none of it.
     assert await terminate_owner_access(api.store, LocalModeGrantClient(), OWNER, generation)
-    assert await _job(api, job["id"]) == {"state": "queued", "cancel_requested": False}
+    assert await _job(api, second["id"]) == {"state": "running", "cancel_requested": False}
+    assert await _residency(api, turn["thread_id"]) != "none"
+    assert sum(call[0] == "suspend" for call in api.manager.calls) == suspends

@@ -629,6 +629,8 @@ class PostgresLocalAccountRepository:
         For work that outlived a pass: a terminal opened by a request admitted
         before the revocation. The open record is what the enforcement pass
         retries, and what keeps re-approval waiting until it is cleaned up.
+        Each reopen bumps the record's revision, so a pass already under way,
+        which read the earlier revision, cannot close it.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             try:
@@ -642,7 +644,8 @@ class PostgresLocalAccountRepository:
                 INSERT INTO agent_local_access_terminations (account_id, generation, action)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (account_id, generation)
-                DO UPDATE SET completed_at = NULL, last_outcome = 'reopened'
+                DO UPDATE SET completed_at = NULL, last_outcome = 'reopened',
+                              revision = agent_local_access_terminations.revision + 1
                 """,
                 account_id,
                 record.version,
@@ -660,23 +663,51 @@ class PostgresLocalAccountRepository:
             )
         return [(row["account_id"], int(row["generation"])) for row in rows]
 
-    async def record_termination_attempt(
-        self, *, account_id: str, generation: int, complete: bool, outcome: str
-    ) -> None:
-        """Count one cleanup attempt, and close the record once it is complete."""
+    async def termination_revision(self, *, account_id: str, generation: int) -> int | None:
+        """The record's current revision, read by a pass before it starts its cleanup."""
         async with self._pool.acquire() as conn:
-            await conn.execute(
+            revision = await conn.fetchval(
+                "SELECT revision FROM agent_local_access_terminations "
+                "WHERE account_id = $1 AND generation = $2",
+                account_id,
+                generation,
+            )
+        return None if revision is None else int(revision)
+
+    async def record_termination_attempt(
+        self, *, account_id: str, generation: int, revision: int, complete: bool, outcome: str
+    ) -> bool:
+        """Count one cleanup attempt; close the record only at the revision the pass read.
+
+        The comparison is made under the row's lock in the UPDATE itself, so a
+        reopen that commits first is seen here and a later one reopens a
+        closed record. Returns whether the record is now closed.
+        """
+        async with self._pool.acquire() as conn:
+            closed = await conn.fetchval(
                 """
                 UPDATE agent_local_access_terminations
-                SET attempts = attempts + 1, last_attempt_at = NOW(), last_outcome = $3,
-                    completed_at = CASE WHEN $4 THEN NOW() ELSE NULL END
+                SET attempts = attempts + 1, last_attempt_at = NOW(),
+                    last_outcome = CASE WHEN $4 AND revision <> $5 THEN 'reopened' ELSE $3 END,
+                    completed_at = CASE WHEN $4 AND revision = $5 THEN NOW() ELSE NULL END
                 WHERE account_id = $1 AND generation = $2 AND completed_at IS NULL
+                RETURNING completed_at IS NOT NULL
                 """,
                 account_id,
                 generation,
                 outcome,
                 complete,
+                revision,
             )
+            if closed is None:
+                # Already closed, by an earlier pass at this revision.
+                closed = await conn.fetchval(
+                    "SELECT completed_at IS NOT NULL FROM agent_local_access_terminations "
+                    "WHERE account_id = $1 AND generation = $2",
+                    account_id,
+                    generation,
+                )
+        return bool(closed)
 
     async def accounts_with_ended_access(self, *, limit: int) -> list[str]:
         """Accounts without Agent use that still have queued, running or resident work."""

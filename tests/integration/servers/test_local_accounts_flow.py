@@ -305,9 +305,13 @@ async def test_a_stream_and_a_late_terminal_both_end_once_access_ends(env, monke
         account_id
     ]
     # So does an open whose outcome is unknown.
-    await storage.local_accounts.record_termination_attempt(
+    generation = (await storage.local_accounts.get_account(account_id)).version
+    assert await storage.local_accounts.record_termination_attempt(
         account_id=account_id,
-        generation=(await storage.local_accounts.get_account(account_id)).version,
+        generation=generation,
+        revision=await storage.local_accounts.termination_revision(
+            account_id=account_id, generation=generation
+        ),
         complete=True,
         outcome="test",
     )

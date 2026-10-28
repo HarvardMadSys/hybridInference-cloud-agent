@@ -116,7 +116,10 @@ _STATEMENTS: tuple[str, ...] = (
     # transaction at the account version it produced. It stays open until
     # every step of stopping the account's work has been acknowledged, and
     # while one is open the account cannot be approved or made an admin again,
-    # so a retry can never stop work started under a newer approval.
+    # so a retry can never stop work started under a newer approval. Reopening
+    # it (a terminal opened late) bumps its revision; a pass closes it only at
+    # the revision it read before it started, so a reopen during a pass stays
+    # open for the next one.
     """
     CREATE TABLE agent_local_access_terminations (
         account_id TEXT NOT NULL REFERENCES agent_local_accounts (id) ON DELETE CASCADE,
@@ -126,6 +129,7 @@ _STATEMENTS: tuple[str, ...] = (
         attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
         last_attempt_at TIMESTAMPTZ,
         last_outcome TEXT,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
         completed_at TIMESTAMPTZ,
         PRIMARY KEY (account_id, generation)
     )
