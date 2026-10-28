@@ -60,11 +60,13 @@ export const MENU_EMPTY = 'px-2.5 py-5 text-center text-[13px] text-muted';
 export const MENU_EMPTY_START = 'px-2.5 py-5 text-left text-[13px] text-muted';
 
 /** A footer action in a menu, such as Refresh or Configure. */
-export const MENU_FOOTER_ACTION =
-  'flex min-h-9 min-w-0 flex-1 items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-foreground transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover focus-visible:outline-none [@media(pointer:coarse)]:min-h-11';
+const MENU_FOOTER_ACTION_BASE =
+  'flex min-h-9 min-w-0 flex-1 items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover focus-visible:outline-none [@media(pointer:coarse)]:min-h-11';
+
+export const MENU_FOOTER_ACTION = `${MENU_FOOTER_ACTION_BASE} text-foreground`;
 
 /** An accented footer action, such as a link to manage what the menu lists. */
-export const MENU_FOOTER_ACTION_ACCENT = `${MENU_FOOTER_ACTION} text-accent`;
+export const MENU_FOOTER_ACTION_ACCENT = `${MENU_FOOTER_ACTION_BASE} text-accent`;
 
 /**
  * The states every menu row shares. `hover:`/`focus:` work for buttons,

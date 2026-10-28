@@ -94,7 +94,10 @@ export function ThreadActions({
 
   const popup = usePopupMenu({
     open,
-    onOpenChange: setOpen,
+    onOpenChange: (nextOpen) => {
+      if (nextOpen) setError(null);
+      setOpen(nextOpen);
+    },
     triggerRef: trigger,
     menuRef: menu,
     placement: { gap: 4, width: 192, maxWidth: 240, preferredHeight: 220, maxHeight: 400 },
