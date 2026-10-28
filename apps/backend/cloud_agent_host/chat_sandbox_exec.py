@@ -36,6 +36,8 @@ class ProvenContainers:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._proven: dict[str, tuple[ChatSandboxSpec, ChatSandboxInspection]] = {}
+        #: Root-owned helpers found in place, as (container id, path) pairs.
+        self._helpers: set[tuple[str, str]] = set()
 
     def record(
         self, spec: ChatSandboxSpec, inspection: ChatSandboxInspection
@@ -48,13 +50,37 @@ class ProvenContainers:
     def forget(self, spec: ChatSandboxSpec) -> None:
         """Drop the container held for ``spec``'s name, which is being created or removed."""
         with self._lock:
-            self._proven.pop(spec.container_name, None)
+            dropped = self._proven.pop(spec.container_name, None)
+            if dropped is not None and self._helpers:
+                gone = dropped[1].container_id
+                self._helpers = {held for held in self._helpers if held[0] != gone}
 
     def get(self, spec: ChatSandboxSpec) -> ChatSandboxInspection | None:
         """The container verified for exactly ``spec``, if any."""
         with self._lock:
             proven = self._proven.get(spec.container_name)
         return proven[1] if proven is not None and proven[0] == spec else None
+
+    def holds_helper(self, proven: ChatSandboxInspection | None, path: str) -> bool:
+        """Whether ``path`` was found installed in exactly the container ``proven``."""
+        if proven is None:
+            return False
+        with self._lock:
+            return (proven.container_id, path) in self._helpers
+
+    def note_helper(self, proven: ChatSandboxInspection | None, path: str) -> None:
+        """Remember a root-owned helper just found installed in the container ``proven``.
+
+        Only a platform exec as root can change it again: a member is never
+        root, and a container id is never reused. So it is not checked again
+        for that container, and a turn does not queue behind a long install
+        into it just to ask. ``proven`` is the container held before the check
+        ran; were it replaced meanwhile, the check ran in the replacement, and
+        what this records is an id nothing will look up again.
+        """
+        if proven is not None:
+            with self._lock:
+                self._helpers.add((proven.container_id, path))
 
 
 def exec_target(

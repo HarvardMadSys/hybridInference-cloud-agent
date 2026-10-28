@@ -1488,7 +1488,14 @@ class ChatSandboxManager:
         return path
 
     def ensure_member_process_reaper(self, spec: ChatSandboxSpec) -> None:
-        """Install the immutable helper into retained pre-upgrade containers."""
+        """Install the immutable helper into retained pre-upgrade containers.
+
+        Found or installed once per proven container (``ProvenContainers.note_helper``),
+        then not probed again on each turn's census and reap.
+        """
+        proven = self._proven.get(spec)
+        if self._proven.holds_helper(proven, MEMBER_REAPER_TARGET):
+            return
         with install_lock(spec.container_name):
             probe = self.exec_capture(
                 spec,
@@ -1505,6 +1512,7 @@ class ChatSandboxManager:
                 user_gid=0,
             )
             if probe.returncode == 0:
+                self._proven.note_helper(proven, MEMBER_REAPER_TARGET)
                 return
             current = self._require(spec)
             if not current.running:
@@ -1559,6 +1567,7 @@ class ChatSandboxManager:
                     "member-process-reaper compatibility activation failed: "
                     + installed.stderr.decode("utf-8", "replace")[:300]
                 )
+            self._proven.note_helper(proven, MEMBER_REAPER_TARGET)
 
     def ensure_codex_mcp_policy(self, spec: ChatSandboxSpec, base_url: str) -> None:
         """Allow only this deployment's relay before starting a Codex member."""

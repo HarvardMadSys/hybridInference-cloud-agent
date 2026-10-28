@@ -2698,7 +2698,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
             abandon_before_finish(lost=False, detail=failure_detail)
             finish_attempt("failed", failure_detail, base_sha=base_sha)
             return 1
-        if not retained.has_binary(runtime.binary):
+        if lease.get("resident_state") != "live" and not retained.has_binary(runtime.binary):
             failure_detail = f"runtime binary {runtime.binary!r} is not installed"
             abandon_before_finish(lost=False, detail=failure_detail)
             finish_attempt("failed", failure_detail, base_sha=base_sha)
