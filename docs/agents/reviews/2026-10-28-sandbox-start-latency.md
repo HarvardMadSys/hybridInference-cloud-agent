@@ -139,19 +139,47 @@ The archive's cancellation test depended on the order the filesystem lists
 cancels after whichever is statted first and fails on any stat of the other,
 in either order.
 
+### A spare turn child waits for the next claim
+
+`cloud_agent_host/turn_launch.py`. Every turn started a fresh interpreter only
+after its claim, and the host claimed nothing else while that child imported
+the runner and answered. The host now keeps one spare, `runner --turn
+--spare`, started after each handover: it imports everything, warms the HTTP
+transport stack with a throwaway client, and blocks reading its standard
+input, where the next claim writes the turn exactly as it would to a cold
+child. The turn and its credentials still travel only on standard input. A
+spare's command line holds only this host's configuration, so the per-turn
+worker id now travels in the turn, set by the host after the claim's own
+underscore keys are stripped. The preflight and the network check still run
+once the turn has arrived.
+
+A spare that has exited, or written to its answer descriptor before it was
+handed anything, is never given a turn; a cold child takes it. End-of-file
+retires a spare without running the probe, which stays the deployment
+canary's: a plain `--turn` on empty input still runs it. The host retires its
+spare when it stops and starts none while stopping, and a spare whose host
+dies reads end-of-file and exits. With a preflight that costs nothing, the
+child's answer came 237–267 ms after the handover from a cold child and
+0.6 ms from a spare; a runc preflight adds its own ~40 ms to either. The first
+turn after a host starts is still cold, an idle spare holds about 45 MiB, and
+the next spare's imports share the CPU with the turn that was just handed
+over.
+
+### One `docker version` per runc preflight
+
+A runc child ran `docker version` twice before answering its host: once to
+learn the daemon answers, and again for the versions the gateway-priority
+check reads. The second form cannot render without the daemon, so its exit
+status answers the first question; preflight now runs it once (CLI time
+44 → 21 ms). `check_network()`, which the host service and a Kata child
+holding its host's verdict call, still asks Docker itself every time.
+
 ## Recommended next, not changed here
 
 Ranked by time saved × how often the path runs. Each needs a design decision,
 a security review or a Kata host this review did not have.
 
-1. **A warm spare turn child.** Each turn starts a fresh interpreter that
-   imports the runner (≈330 ms) and builds two HTTP clients (≈80 ms) before it
-   can answer the handover, and the host claims nothing else meanwhile. One
-   pre-started child, blocked reading its payload, keeps the credential-on-stdin
-   handover as it is. The worker id would travel in the payload, and an unused
-   spare must be killed, not closed: empty input runs the deployment canary.
-   About 0.35–0.43 s on every turn.
-2. **Host-rule verification on idle hosts.** Nothing renews it while no
+1. **Host-rule verification on idle hosts.** Nothing renews it while no
    container runs (`guard_network` returns first; `renew_host_rules` requires a
    running container), so the first start after a minute's quiet installs and
    reads the rules back itself: +0.95 s on `resume_stopped`, +1.8 s on
@@ -160,33 +188,33 @@ a security review or a Kata host this review did not have.
    this deliberately, for no helper containers on an empty host. Renewing
    from the idle sweep costs two helpers per 45 s per idle host. On the
    runner side, the renewal could instead overlap the child's import.
-3. **Dispatch arming.** Before each prompt the supervisor runs the process
+2. **Dispatch arming.** Before each prompt the supervisor runs the process
    census and the observer or tool-mark fence one after another. The census
    could run beside them and join before admission. Under Kata the opening
    and bracketed snapshots could be one exec. Estimated 0.3–0.9 s per Kata
    turn.
-4. **Member preparation before a CLI spawn:** reap, stale-file removal, state
+3. **Member preparation before a CLI spawn:** reap, stale-file removal, state
    preparation, hook merge and `BASH_ENV` are 5–7 execs as the member's UID.
    They could be one reviewed script with its input on stdin. Saves 0.3–1.5 s
    per spawn.
-5. **Kata guest observer at first prompt after each boot.** It could start
+4. **Kata guest observer at first prompt after each boot.** It could start
    in the background once acquire has proved a started guest. Estimated
    0.8–3 s per boot.
-6. **Environment boots** freeze and thaw every writer UID (9 execs and 11
+5. **Environment boots** freeze and thaw every writer UID (9 execs and 11
    inspects) even when there is no start script. Each script phase also spends
    three separate execs on preparation, and completion is polled every second.
    Saves 1–3 s per environment boot.
-7. **The clone's size watcher** walks the whole checkout again and again while
+6. **The clone's size watcher** walks the whole checkout again and again while
    Git writes it, backing off to at most a fifth of the time. A 30,000-file
    local clone took 7.7–9.7 s; how much of that the walks cost was not
    measured.
-8. **Initial archives** (when archives are enabled) gzip at level 6 on one
+7. **Initial archives** (when archives are enabled) gzip at level 6 on one
    thread before a new chat's first prompt: 18 s for a 402 MB workspace. Level
    1 halves it, and parallel deflate keeping one gzip member does better. The
    previous release's marker rebuild must keep working. One capture slot per
    host also queues urgent work behind background archives, for up to 12
    minutes.
-9. **Kata boot configuration.** Apart from the kernel and guest seccomp,
+8. **Kata boot configuration.** Apart from the kernel and guest seccomp,
    everything is upstream default. Candidates:
    - `static_sandbox_resource_mgmt = true`, which removes CPU and memory
      hotplug;
@@ -195,38 +223,37 @@ a security review or a Kata host this review did not have.
 
    Each needs Kata qualification. VM templating shares kernel memory and
    RNG/KASLR state across tenants and should stay off.
-10. **Archive start fences** re-inspect the container `start()` just
-    verified: seven of their ten inspects, about 0.35 s per cold start on runc.
-    Most of that cost goes away with the Engine API reads in this revision.
-11. **`HostNetworkGuard._lock` serializes relay updates across unrelated
+9. **Archive start fences** re-inspect the container `start()` just
+   verified: seven of their ten inspects, about 0.35 s per cold start on runc.
+   Most of that cost goes away with the Engine API reads in this revision.
+10. **`HostNetworkGuard._lock` serializes relay updates across unrelated
     bridges.** A third concurrent `new_group` waited 0.8 s. A per-bridge lock
     for relay and SSH updates, with installs still exclusive, would remove the
     wait.
-12. **A long-lived host-rule helper** (150–176 ms per exec against 409 ms per
+11. **A long-lived host-rule helper** (150–176 ms per exec against 409 ms per
     run) needs a security review: it is a standing `NET_ADMIN` container in the
     host's network namespace.
-13. **Kata guest network sync on every running-group acquire.** It could be
+12. **Kata guest network sync on every running-group acquire.** It could be
     skipped when the container, its start time, the bridge and the relay
     addresses are unchanged. Needs a security review, because Docker may
     rewrite the guest's hosts file.
-14. **Control-plane round trips before dispatch.** Suspend flushes an event it
+13. **Control-plane round trips before dispatch.** Suspend flushes an event it
     just queued, and suspend and resume each re-register the group with the
     sandbox manager. `report_continuity` is synchronous. The claim route also
     awaits the gateway grant and the GitHub token mints one after another.
     Together that is 50–400 ms across the tunnels.
-15. **Restore throughput.** One `get_object` stream goes to a temporary file,
+14. **Restore throughput.** One `get_object` stream goes to a temporary file,
     then a second rewrite, then `docker image load`. Parallel ranged GETs
     pinned to the object version would drop a copy and survive a broken
     stream. Estimated 1 GiB in 8–15 s instead of 20–40 s.
-16. **Sandbox image size (pulls only).**
+15. **Sandbox image size (pulls only).**
     - The Kilo build is copied in and deleted in a later layer, so it is
       stored twice (≈170 MB).
     - The Claude SDK's venv carries an unused 214 MB CLI.
-17. **Smaller items:**
+16. **Smaller items:**
     - Codex's npm shim adds a Node process and 44 ms per member start.
     - A downloaded runtime version's root marker is probed on every launch;
       the reaper cache above would serve it.
-    - runc preflight runs `docker version` twice.
     - At capacity, the claim loop polls for a free slot every second.
 
 ## Checked, already fine
