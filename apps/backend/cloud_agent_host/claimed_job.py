@@ -188,13 +188,18 @@ def model_connection_launch(job: ClaimedJob) -> dict[str, str]:
 
 
 def require_residency_connection(job: ClaimedJob, residency: dict[str, Any]) -> None:
-    """Refuse a residency whose connection key is not the one this turn's claim named.
+    """Refuse a residency whose connection key or plan is not what this turn's claim named.
 
     The control plane hands a residency on an owner connection that
-    connection's key at its current revision; a different revision means the
-    owner changed it while this turn was starting, and the turn must not run on
-    either key without its claim saying so.
+    connection's key at its current revision, resolved to the plan the model's
+    current verification gives. A different revision means the owner changed
+    the connection while this turn was starting; a different plan means a
+    verification moved the model between a native and a translated path. The
+    turn must not run on either without its claim saying so: the launch, the
+    member's token and the host's capability were all settled for the claim's.
     """
-    expected = job.model_connection.revision if job.model_connection is not None else None
-    if residency.get("model_connection_revision") != expected:
+    access = job.model_connection
+    expected = (access.revision, access.plan.identity) if access is not None else (None, None)
+    held = (residency.get("model_connection_revision"), residency.get("model_connection_plan"))
+    if held != expected:
         raise ValueError("the model connection changed while this turn was starting")

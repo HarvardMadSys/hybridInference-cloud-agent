@@ -533,7 +533,9 @@ describe('Side Chat', () => {
     const withConnection = {
       ...config,
       runtimes: ['codex'],
-      model_connections: [{ id: source, name: 'Mine', models: ['model-a'], runtimes: ['codex'] }],
+      model_connections: [
+        { id: source, name: 'Mine', models: ['model-a'], model_runtimes: { 'model-a': ['codex'] } },
+      ],
     };
     render(
       <SideChat

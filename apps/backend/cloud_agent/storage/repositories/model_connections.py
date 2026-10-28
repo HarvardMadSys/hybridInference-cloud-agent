@@ -15,15 +15,15 @@ if TYPE_CHECKING:
 
 _COLUMNS = (
     "id, user_id, name, base_url, protocols, models, api_key_ciphertext, "
-    "credential_revision, config_revision, enabled, last_check, created_at, updated_at, "
+    "credential_revision, config_revision, enabled, model_checks, created_at, updated_at, "
     "deleted_at"
 )
 #: What :meth:`PostgresModelConnectionRepository.update_model_connection` may change.
 _UPDATABLE = frozenset({"name", "base_url", "protocols", "models", "api_key_ciphertext", "enabled"})
 #: Changes after which a process holding the old state must not serve a turn.
-_CREDENTIAL_COLUMNS = frozenset({"base_url", "protocols", "api_key_ciphertext"})
-#: Changes after which a check result no longer describes the connection.
-_CHECKED_COLUMNS = _CREDENTIAL_COLUMNS | {"models"}
+_CREDENTIAL_COLUMNS = ("base_url", "protocols", "api_key_ciphertext")
+#: Changes after which no model's verification describes the endpoint any more.
+_ENDPOINT_COLUMNS = ("base_url", "api_key_ciphertext")
 _ARRAY_COLUMNS = frozenset({"protocols", "models"})
 
 #: A connection a residency may still run on: the owner's, live, enabled, and
@@ -40,8 +40,62 @@ def _connection(row: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(row)
     result["protocols"] = list(result.get("protocols") or [])
     result["models"] = list(result.get("models") or [])
-    result["last_check"] = load_json(result.get("last_check"))
+    checks = load_json(result.get("model_checks"))
+    result["model_checks"] = checks if isinstance(checks, dict) else {}
     return result
+
+
+def _changed(column: str, placeholder: str) -> str:
+    """SQL true when ``column``'s new value differs from the stored one.
+
+    A key is a fresh ciphertext every time, so a key sent is a key changed;
+    the API drops one equal to the stored key before it gets here.
+    """
+    if column == "api_key_ciphertext":
+        return "TRUE"
+    return f"{column} IS DISTINCT FROM {placeholder}"
+
+
+def _update_assignments(changes: dict[str, Any], args: list[Any]) -> list[str]:
+    """The ``SET`` list for ``changes``, each revision raised only by a real change.
+
+    Judged inside the ``UPDATE`` against the row it updates, so a form that
+    sends every field -- a rename with the same Base URL, protocols and models
+    -- leaves the credential, the running processes and every verification as
+    they were.
+    """
+    placeholders: dict[str, str] = {}
+    assignments: list[str] = []
+    for column, value in changes.items():
+        args.append(value)
+        placeholders[column] = f"${len(args)}" + ("::text[]" if column in _ARRAY_COLUMNS else "")
+        assignments.append(f"{column} = {placeholders[column]}")
+    credential = [_changed(c, placeholders[c]) for c in _CREDENTIAL_COLUMNS if c in placeholders]
+    if "enabled" in placeholders:
+        credential.append(f"(enabled AND NOT {placeholders['enabled']})")
+    endpoint = [_changed(c, placeholders[c]) for c in _ENDPOINT_COLUMNS if c in placeholders]
+    if credential:
+        assignments.append(
+            "credential_revision = credential_revision + "
+            f"CASE WHEN {' OR '.join(credential)} THEN 1 ELSE 0 END"
+        )
+    # A verification describes one model at one endpoint: a new endpoint
+    # invalidates them all, and a model no longer listed takes its own along.
+    kept = (
+        "(SELECT COALESCE(jsonb_object_agg(key, value), '{}'::jsonb) "
+        f"FROM jsonb_each(model_checks) WHERE key = ANY({placeholders['models']}))"
+        if "models" in placeholders
+        else "model_checks"
+    )
+    if endpoint:
+        changed = " OR ".join(endpoint)
+        assignments.append(
+            f"config_revision = config_revision + CASE WHEN {changed} THEN 1 ELSE 0 END"
+        )
+        assignments.append(f"model_checks = CASE WHEN {changed} THEN '{{}}'::jsonb ELSE {kept} END")
+    elif "models" in placeholders:
+        assignments.append(f"model_checks = {kept}")
+    return assignments
 
 
 class PostgresModelConnectionRepository:
@@ -109,24 +163,14 @@ class PostgresModelConnectionRepository:
     async def update_model_connection(
         self, *, user_id: str, connection_id: str, changes: dict[str, Any]
     ) -> dict[str, Any] | None:
-        """Apply ``changes``, raising whichever revisions they invalidate."""
+        """Apply ``changes``, raising only the revisions an actual change invalidates."""
         unknown = set(changes) - _UPDATABLE
         if unknown:
             raise ValueError(f"model connection cannot change {sorted(unknown)}")
         if not changes:
             return await self.get_model_connection(user_id=user_id, connection_id=connection_id)
-        assignments: list[str] = []
         args: list[Any] = [connection_id, user_id]
-        for column, value in changes.items():
-            args.append(value)
-            cast = "::text[]" if column in _ARRAY_COLUMNS else ""
-            assignments.append(f"{column} = ${len(args)}{cast}")
-        if _CREDENTIAL_COLUMNS & set(changes) or changes.get("enabled") is False:
-            assignments.append("credential_revision = credential_revision + 1")
-        if _CHECKED_COLUMNS & set(changes):
-            # A result about the old endpoint, key or models says nothing about the new.
-            assignments.append("config_revision = config_revision + 1")
-            assignments.append("last_check = NULL")
+        assignments = _update_assignments(changes, args)
         async with self._pool.acquire() as conn:
             try:
                 row = await conn.fetchrow(
@@ -152,7 +196,7 @@ class PostgresModelConnectionRepository:
                 UPDATE agent_model_connections
                 SET deleted_at = NOW(), enabled = FALSE, api_key_ciphertext = NULL,
                     credential_revision = credential_revision + 1,
-                    config_revision = config_revision + 1, last_check = NULL,
+                    config_revision = config_revision + 1, model_checks = '{{}}'::jsonb,
                     updated_at = NOW()
                 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
                 RETURNING {_COLUMNS}
@@ -206,27 +250,41 @@ class PostgresModelConnectionRepository:
             )
         return {"connection": _connection(row)}
 
-    async def record_model_connection_check(
+    async def record_model_verification(
         self,
         *,
         user_id: str,
         connection_id: str,
         config_revision: int,
+        credential_revision: int,
+        model: str,
         result: dict[str, Any],
     ) -> bool:
-        """Keep a finished check's result, only if the connection is still what it tested."""
+        """Keep one model's verification, only if the connection is still what it tested.
+
+        Merged into ``model_checks`` under this model's key alone, in one
+        row-level update, so verifications of different models never overwrite
+        each other. Dropped when, since the verification read the row, the key
+        or Base URL changed, the connection was disabled (even if enabled
+        again since: ``credential_revision`` moved) or deleted, or the model
+        was removed. It never writes ``enabled`` or a revision.
+        """
         async with self._pool.acquire() as conn:
             stamped = await conn.fetchval(
                 """
-                UPDATE agent_model_connections SET last_check = $4::jsonb
-                WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-                  AND config_revision = $3
+                UPDATE agent_model_connections
+                SET model_checks = model_checks || jsonb_build_object($4::text, $5::jsonb)
+                WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL AND enabled
+                  AND config_revision = $3 AND credential_revision = $6
+                  AND $4 = ANY(models)
                 RETURNING id
                 """,
                 connection_id,
                 user_id,
                 config_revision,
-                json.dumps(result),
+                model,
+                json.dumps({**result, "revision": config_revision}),
+                credential_revision,
             )
         return stamped is not None
 

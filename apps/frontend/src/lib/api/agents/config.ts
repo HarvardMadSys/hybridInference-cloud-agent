@@ -9,14 +9,14 @@ const API_BASE = config.apiBase;
 export interface ModelConnectionOptionApi {
   id: string;
   name: string;
+  /** Every listed model, in the owner's order. */
   models: string[];
-  /** Every agent that can run on this connection, natively or translated. */
-  runtimes: string[];
   /**
-   * Those of `runtimes` that reach it through the compatibility helper (Codex
-   * or Claude Code on a Chat Completions connection). Absent before it existed.
+   * The listed models a task can run now, each with the agents that can run
+   * it: exactly what the server accepts. A model missing here is not
+   * verified, or no agent can use it.
    */
-  translated_runtimes?: string[];
+  model_runtimes: Record<string, string[]>;
 }
 
 export interface AgentConfigApi {

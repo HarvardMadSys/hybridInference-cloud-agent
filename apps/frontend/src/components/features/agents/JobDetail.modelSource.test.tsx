@@ -61,7 +61,12 @@ const CONFIG: AgentConfigApi = {
   runtime_reasoning_efforts: { codex: ['high'] },
   model_connections_enabled: true,
   model_connections: [
-    { id: CONNECTION, name: 'My provider', models: ['shared', 'mine'], runtimes: ['codex'] },
+    {
+      id: CONNECTION,
+      name: 'My provider',
+      models: ['shared', 'mine'],
+      model_runtimes: { shared: ['codex'], mine: ['codex'] },
+    },
   ],
   github_connected: true,
   github_install_url: null,

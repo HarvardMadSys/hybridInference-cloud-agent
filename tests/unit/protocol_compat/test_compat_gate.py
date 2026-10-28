@@ -307,3 +307,127 @@ def test_a_forced_namespaced_tool_choice_uses_the_flat_name_of_its_definition():
     chat = prepare("responses", request, "m").chat
     flat = chat["tools"][0]["function"]["name"]
     assert chat["tool_choice"] == {"type": "function", "function": {"name": flat}}
+
+
+# -- a tool's images (F2) -----------------------------------------------------------
+
+_PNG = "data:image/png;base64,iVBORw0KGgo="
+
+
+def _roles(chat: dict) -> list[tuple[str, str, object]]:
+    shown = []
+    for message in chat["messages"]:
+        content = message.get("content")
+        if isinstance(content, list):
+            content = [
+                part.get("text") if part["type"] == "text" else part["image_url"]["url"]
+                for part in content
+            ]
+        shown.append((message["role"], message.get("tool_call_id", ""), content))
+    return shown
+
+
+def test_messages_tool_result_images_follow_every_parallel_tool_result():
+    image = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="},
+    }
+    body = {
+        "model": "m",
+        "max_tokens": 64,
+        "messages": [
+            {"role": "user", "content": "look at both"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+                    {"type": "tool_use", "id": "t2", "name": "Read", "input": {}},
+                    {"type": "tool_use", "id": "t3", "name": "Bash", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [{"type": "text", "text": "a.png"}, image],
+                    },
+                    {"type": "tool_result", "tool_use_id": "t2", "content": [image, image]},
+                    {"type": "tool_result", "tool_use_id": "t3", "content": "exit 0"},
+                    {"type": "text", "text": "<system-reminder>r</system-reminder>"},
+                ],
+            },
+        ],
+        "tools": [
+            {"name": "Read", "input_schema": {"type": "object"}},
+            {"name": "Bash", "input_schema": {"type": "object"}},
+        ],
+    }
+    chat = prepare("anthropic_messages", body, "m").chat
+    assert _roles(chat)[2:] == [
+        ("tool", "t1", "a.png\n[The tool returned an image; attached in the next message.]"),
+        ("tool", "t2", "[The tool returned 2 images; attached in the next message.]"),
+        ("tool", "t3", "exit 0"),
+        # After the whole run of tool results, never between them.
+        (
+            "user",
+            "",
+            ["Image output of tool call t1:", _PNG, "Image output of tool call t2:", _PNG, _PNG],
+        ),
+        ("user", "", "<system-reminder>r</system-reminder>"),
+    ]
+    assert "[image]" not in str(chat)
+
+
+def test_responses_function_output_images_are_never_inside_a_tool_message():
+    body = {
+        "model": "m",
+        "input": [
+            {"type": "message", "role": "user", "content": "view them"},
+            {"type": "function_call", "call_id": "c1", "name": "view_image", "arguments": "{}"},
+            {"type": "function_call", "call_id": "c2", "name": "shell", "arguments": "{}"},
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": [
+                    {"type": "input_text", "text": "screenshot"},
+                    {"type": "input_image", "image_url": _PNG},
+                ],
+            },
+            {"type": "function_call_output", "call_id": "c2", "output": "done"},
+        ],
+        "tools": [
+            {"type": "function", "name": "view_image", "parameters": {"type": "object"}},
+            {"type": "function", "name": "shell", "parameters": {"type": "object"}},
+        ],
+    }
+    chat = prepare("responses", body, "m").chat
+    tools = [m for m in chat["messages"] if m["role"] == "tool"]
+    assert all(isinstance(m["content"], str) for m in tools)
+    assert _roles(chat)[2:] == [
+        ("tool", "c1", "screenshot\n[The tool returned an image; attached in the next message.]"),
+        ("tool", "c2", "done"),
+        ("user", "", ["Image output of tool call c1:", _PNG]),
+    ]
+
+
+def test_a_tool_result_image_without_a_usable_source_is_refused_not_dropped():
+    body = {
+        "model": "m",
+        "max_tokens": 8,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [{"type": "image", "source": {"type": "file", "file_id": "f"}}],
+                    }
+                ],
+            }
+        ],
+    }
+    with pytest.raises(CompatRejected):
+        prepare("anthropic_messages", body, "m")

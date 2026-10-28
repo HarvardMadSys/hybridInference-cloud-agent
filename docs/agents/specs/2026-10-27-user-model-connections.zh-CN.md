@@ -23,19 +23,21 @@ OpenAI 或 Anthropic 接口的服务（OpenAI、Anthropic、OpenRouter、DeepSee
 
 **做了的：**
 
-1. 个人设置页「模型连接」：新增、编辑、轮换 key、停用/启用、删除、测试、从 `/models` 读取模型列表。
-2. 每个连接：显示名、Base URL、API key、支持的协议（Chat Completions / Responses /
-   Anthropic Messages，可多选）、
-   手填的模型 ID 列表（最多 64 个）。`/models` 只是辅助填写，没有它也能手填。
+1. 个人设置页「模型连接」：新增、编辑、轮换 key、停用/启用、删除、按模型验证、从 `/models` 读取模型列表。
+2. 每个连接：显示名、Base URL、API key、手填的模型 ID 列表（最多 64 个）。`/models` 只是辅助
+   填写，没有它也能手填。用户不需要知道服务商提供哪种 API：每个模型支持哪些 API 由「验证」自动
+   识别（见第十二节）；手动声明 API 只作为折叠在「高级」里的覆盖选项保留。
 3. 新任务、后续消息、排队消息、目标（goal）自动轮次、原生 Fork 都能用连接上的模型，并且记住
    「是哪个来源的哪个模型」。
-4. 测试按钮真的跑一次流式推理加一次工具调用往返，结果分成「支持 / 不支持 / 失败」三类。
+4. 验证按钮对一个模型在三种 API 上各真跑一次流式推理加一次工具调用往返，每种 API 的结果分成
+   「支持 / 不支持 / 失败」三类，按模型保存。
 5. 停用、删除、轮换 key 会让旧进程退出，新回合不会再用旧 key。
 
 **没做的（有意不做）：**
 
-- 通用协议转换器、路由或计费网关、key 池。平台直接使用用户声明的协议：不同 CLI 说不同的协议，
-  连接不提供某个协议，就不能给那个 CLI 用。也不引入 HybridInference 的服务端模块。
+- 通用协议转换器、路由或计费网关、key 池，以及推理时的试错回退。平台只用某个模型验证可用（或
+  用户手动声明）的 API；除[协议兼容设计](2026-10-28-model-protocol-compatibility.zh-CN.md)里的两种
+  转换外，模型不提供某个 CLI 的协议，就不能给那个 CLI 用。不引入 HybridInference 的服务端路由模块。
 - 连接模型的推理强度（reasoning effort）。没有可靠的模型能力表，只允许 Auto；带强度会被拒绝，
   从 Gateway 模型切过来时也会自动清掉。
 - 在「我的设置」里把连接模型设为默认（pin）。pin 仍只针对 Gateway 模型；「沿用上次」会记住来源，
@@ -45,7 +47,7 @@ OpenAI 或 Anthropic 接口的服务（OpenAI、Anthropic、OpenRouter、DeepSee
 
 ## 三、协议矩阵
 
-| 运行时 | 适配器说的协议 | 连接需要声明 | 说明 |
+| 运行时 | 适配器说的协议 | 该模型需要可用的 API | 说明 |
 |---|---|---|---|
 | OpenCode | Chat Completions | `chat_completions` | 由镜像里的包装脚本写入 provider 配置 |
 | Kilo | Chat Completions | `chat_completions` | 同上 |
@@ -56,7 +58,8 @@ OpenAI 或 Anthropic 接口的服务（OpenAI、Anthropic、OpenRouter、DeepSee
 这张表放在共享词汇 `cloud_agent_shared/model_connections.py`（`RUNTIME_PROTOCOLS`），控制面和
 主机都从这里读。判断「这个回合能不能在这个连接上跑」只有一个函数：
 `domain/model_connections.require_usable`。它依次检查：连接存在且属于本人、未删除、已启用、
-运行时有对应协议、连接声明了这个协议、模型在列表里、没有设推理强度。每种拒绝都有固定的原因码和
+运行时有对应协议、模型在列表里、该模型在当前密钥和 Base URL 下已验证（手动声明时跳过）、
+验证结果给这个运行时找到了路径（原生优先，否则走转换）、没有设推理强度。每种拒绝都有固定的原因码和
 给用户看的句子，任何一种都不会退回 Gateway 或别的模型。
 
 Base URL 原样使用，不像 Gateway 中继地址那样补 `/v1`：有的服务商路径是 `/api/v1`、
@@ -68,17 +71,18 @@ Anthropic Messages 的约定不同：Claude Code 的 SDK 会在 `ANTHROPIC_BASE_
 真实模型推理或 Kata 端到端验收）。所以对这一协议只去掉 Base URL
 结尾的**一个** `/v1`，其他路径原样保留（`anthropic_base_url`）：`https://host`、`https://host/v1`、
 `https://host/anthropic`、`https://host/anthropic/v1` 都到 `…/v1/messages`；`/v1beta` 或中间的
-`/v1` 不动。这样一个以 `/v1` 结尾的 Base URL 可以同时服务三种协议。测试用同一个函数算 URL，
-保证测试和真实 CLI 打到同一个端点；不加中继，也不随意截取或重拼路径。
+`/v1` 不动。这样一个以 `/v1` 结尾的 Base URL 可以同时服务三种协议。验证用同一个函数算 URL，
+保证验证和真实 CLI 打到同一个端点；不加中继，也不随意截取或重拼路径。
 
 ## 四、数据和来源
 
 迁移 `0106_user_model_connections`：
 
 - `agent_model_connections`：`id`（`mconn_` + 32 位十六进制）、`user_id`、`name`、`base_url`、
-  `protocols`、`models`、`api_key_ciphertext`、`credential_revision`、`enabled`、`last_check`、
-  `deleted_at`。同一用户未删除的连接名字不能重复（不区分大小写）。
-- `agent_model_connection_checks`：测试和读取模型列表的次数，用于每小时限额。
+  `protocols`（空表示自动识别，非空是用户的手动声明）、`models`、`api_key_ciphertext`、
+  `credential_revision`、`config_revision`、`enabled`、`model_checks`（按模型 ID 保存的验证结果，见
+  第十二节）、`deleted_at`。同一用户未删除的连接名字不能重复（不区分大小写）。
+- `agent_model_connection_checks`：验证和读取模型列表的次数，用于每小时限额。
 - `agent_model_connection_scan_keys`：仅保存确实绑定到成员常驻进程的密钥版本，以沙箱组、连接和
   凭据版本为范围加密保留，用于该组后续快照与受信发布的秘密扫描。新建但未使用的连接不会写入。
 - `agent_jobs.model_connection_id`、`agent_pending_messages.model_connection_id`：NULL 表示
@@ -117,8 +121,9 @@ Anthropic Messages 的约定不同：Claude Code 的 SDK 会在 `ANTHROPIC_BASE_
   `model` 与 `model_connection_id`；只有选择器内部用编码后的键区分同名选项：Gateway 模型的键就是
   模型名本身，个人来源的键是 `["mconn_…", model]` 的 JSON，以 `[` 开头的 Gateway 名字也编码，
   两者不会相撞。旧草稿里的模型字符串一律按 Gateway 读，不当作编码键解析。
-- 连接只出现在其协议对应的 Agent 下（Chat Completions：OpenCode、Kilo、pi；Responses：Codex；
-  Anthropic Messages：Claude Code）。
+- 一个模型只出现在它当前能运行的 Agent 下，依据是该模型自己的验证结果（`/config` 的
+  `model_runtimes`），与执行时的检查完全一致；未验证或验证结果已过期的模型不出现。标签只写模型和
+  连接名，不写协议，也不写「经 Chat Completions」。
   个人来源的推理强度只有 Auto，请求里不带 `reasoning_effort`。
 - 草稿或「上次使用」指向的个人来源当前不能运行（换了 Agent、连接停用/删除、不再列出该模型）时，
   选择器仍显示它并标注「不可用」，运行按钮保持禁用并提示原因；不会退到默认模型或同名 Gateway 模型。
@@ -151,8 +156,10 @@ Anthropic Messages 的约定不同：Claude Code 的 SDK 会在 `ANTHROPIC_BASE_
    不进共享工作区。进程启动参数里固定了来源 `连接@版本`，所以下一回合如果连接被轮换过，
    就不会复用旧进程，而是带着新 key 原生恢复（native resume）。从 Gateway 切到连接或反过来，
    同样会换进程。
-5. **失效。** 轮换 key、改 Base URL 或协议、停用、删除都会提升 `credential_revision`（删除还会抹掉
-   密文，只留墓碑）。提交后立即释放所有绑定在旧状态上的常驻，并通过主机关闭对应进程，走的是删除
+5. **失效。** 轮换 key、改 Base URL 或手动声明、停用、删除都会提升 `credential_revision`（删除还会
+   抹掉密文，只留墓碑）。是否「改了」由仓库在 `UPDATE` 里和库中已存值比较决定，提交的值与原值相同
+   不算改动；重新填入同一个 key 也会被接口识别并忽略。所以只改名称或模型列表不会提升版本、不会关闭
+   进程，也不清掉其他模型的验证结果。提交后立即释放所有绑定在旧状态上的常驻，并通过主机关闭对应进程，走的是删除
    会话时同一条路径。正在跑的回合会因此中断；主机联系不上时，下一次常驻心跳会被拒绝，进程照样退出。
    因为绑定和失效在连接行上互斥，「先绑定后失效」会被找到并关闭，「先失效后绑定」会被拒绝。
 6. **账号切换。** 每个用户的会话、成员 UID、私有家目录和 tmpfs 本来就是分开的，连接查询全部按
@@ -178,9 +185,9 @@ Anthropic Messages 的约定不同：Claude Code 的 SDK 会在 `ANTHROPIC_BASE_
 - 网络边界不变：沙箱只能访问公网 IPv4 的 TCP 80/443，连接的 Base URL 必须是公网可达的
   HTTPS（443 端口）地址。没有新增私网例外，也没有代理。
 
-## 八、服务端测试的网络防护
+## 八、服务端验证的网络防护
 
-测试按钮会让控制面去拨用户填的地址，所以沿用 MCP 连接的防护：
+验证按钮会让控制面去拨用户填的地址，所以沿用 MCP 连接的防护：
 
 - 只接受 `https`、443 端口、主机名或 IPv4（不接受 IPv6 字面量），URL 里不能带用户名密码、
   查询串或片段；
@@ -189,21 +196,20 @@ Anthropic Messages 的约定不同：Claude Code 的 SDK 会在 `ANTHROPIC_BASE_
   IPv4；
 - 实际连接被钉在刚检查过的 IPv4 地址上，防 DNS 重绑定；不跟随重定向，不读环境里的代理设置；
 - 上游返回的正文一律不回显，只保留 HTTP 状态码和从流里解析出的事实；读取有大小上限；
-- 每个用户每小时最多 20 次（测试和读取模型列表合计），在数据库中原子预留次数以覆盖多副本并发；
-  预留之后才发起网络请求，同一用户的多次测试可以同时进行，限制的是次数而不是并发。
-  完成时校验被测配置版本，配置已变化则不覆盖当前测试记录。
+- 每个用户每小时最多 20 次（验证一个模型算一次，读取模型列表也算一次），在数据库中原子预留次数
+  以覆盖多副本并发；预留之后才发起网络请求，同一用户的多次验证可以同时进行，限制的是次数而不是
+  并发。结果按模型单独合并，只有连接仍启用、密钥和 Base URL 未变、模型仍在列表里时才保存。
 
-测试流程：先发一个带一个工具的流式请求，要求模型调用它；再把工具结果带回去发第二个流式请求，
+每种 API 的检查流程：先发一个带一个工具的流式请求，要求模型调用它；再把工具结果带回去发第二个流式请求，
 要求模型给出包含本次工具结果的最终回答。第一步必须恰好有一次调用、且调用的是提供的工具；第二步不能再请求任何工具。
 校验调用 ID、工具参数、预期结果和完整终止事件，
 Responses 第二步保留第一步输出上下文。Anthropic Messages 用原生格式：`x-api-key`、
 `anthropic-version`、`tool_use`/`tool_result` 内容块，第二步原样带回助手内容（含带签名的 thinking）；
 流必须依次有 `message_start`、每个内容块的开始/增量/结束、带正常停止原因的 `message_delta` 和
 `message_stop`，`error` 事件、块类型与增量不符、`message_delta` 之后还有内容、`max_tokens`/`refusal`
-等停止原因、未关闭的块都不算通过（`application/model_connection_anthropic.py`）。只声明
-Anthropic Messages 的连接读取模型列表时用 `GET …/v1/models` 和同样的认证头。
-两步都成功才是该模型、该协议的测试通过，不能代表整个
-连接上的所有模型均已兼容，也不等于真实 CLI 端到端验收。服务商能连上但做不到其中一步（404、400/422、
+等停止原因、未关闭的块都不算通过（`application/model_connection_anthropic.py`）。读取模型列表时
+先试 OpenAI 风格的 `GET /models`，该列表不存在或被拒绝时再用同样的认证头试 `GET …/v1/models`。
+两步都成功才是该模型在该 API 上「支持」，不代表同一连接上的其他模型，也不等于真实 CLI 端到端验收。服务商能连上但做不到其中一步（404、400/422、
 不是流、没调工具、没给最终回答）是「不支持」；连不上、证书错、重定向、401/403、429、5xx、
 回答过大是「失败」。单纯 `GET /models` 成功不会显示为通过。
 
@@ -259,7 +265,7 @@ Anthropic Messages 的连接读取模型列表时用 `GET …/v1/models` 和同�
   名字唯一、版本提升规则、墓碑不可复活、回合与后续消息的来源继承与切换、排队消息的来源、
   常驻绑定只认本人当前版本、新常驻代清空绑定、轮换/停用/删除后释放旧常驻且他人无法释放。
 - 前端（vitest）：`ModelConnectionsSettings.test.tsx`（设置页增删改测与错误显示）、
-  `modelSource.test.ts`（同名不同来源的身份、按协议过滤、旧草稿、不可用标注、来源切换的请求字段）、
+  `modelSource.test.ts`（同名不同来源的身份、按模型可用的 Agent 过滤、旧草稿、不可用标注、来源切换的请求字段）、
   `TaskComposer.modelSource.test.tsx`（提交来源、无推理强度、草稿与 GitHub 回执保留来源、不可用时
   禁止运行且不退回 Gateway、改写禁用）、`JobDetail.modelSource.test.tsx`（继承、同名换源、最新回合
   与当前回合两条继承路径、继承来源不可用时禁止发送）、`SideChat.test.tsx`、
@@ -276,3 +282,74 @@ Anthropic Messages 的连接读取模型列表时用 `GET …/v1/models` 和同�
 
 未覆盖：没有拿真实服务商做端到端验证；Kata 主机上的真实 CLI 走连接也没有在本分支跑过，
 需要在 staging 用测试 key 跑一次 OpenCode 和 Codex。
+
+## 十二、自动识别 API（2026-10-28 修订）
+
+用户看了预览后明确表示：不该让他们勾选「支持的 API」，也不该在主表单上把协议和 Agent 绑在一起；
+协议的选择和转换应由 Cloud Agent 在后台完成。本节记录修订后的设计，前文已按此改写。
+
+**用户看到的。** 新增连接只填名称、Base URL、API key 和模型 ID。只有用户点「保存并验证」或某个
+模型上的「验证」时，平台才会调用服务商；打开页面、编辑字段、单纯保存都不会。按钮旁说明验证会发出
+少量请求，服务商可能计费。每个模型显示「可用」（并列出能用它的 Agent）、「未验证」、「无法验证」
+（附原因，可重试）或「无法用于 Agent」（附原因）。每种 API 的原生结果和每个 Agent 走的路径放在
+折叠的「API 详情」里；手动声明 API 放在折叠的「高级」里，默认关闭。
+
+**存储。** `model_checks` 是一个 JSON 对象，键是模型 ID，值是该模型最近一次验证：
+`{"revision", "checked_at", "protocols": {<api>: {"status", "category", "http_status"}}}`。
+`status` 只有三种：`supported`（流式请求和工具往返都成功）、`unsupported`（服务商有应答但做不到）、
+`failed`（无法判断：连不上、密钥被拒、429、5xx、超时等）。没有出现在结果里的 API 视为未知。只保存
+上游的原生事实；能否经转换使用由 `domain.model_connections.model_paths` 从这些事实推导，不落库。
+失败既不当作支持，也不当作「该 API 不存在」。
+
+**按模型生效。** 结果只在 `revision == config_revision` 时有效。`require_usable` 只看这个模型自己的
+结果：未验证或已过期的模型拒绝为 `model_unverified`，验证过但没有给该 Agent 的路径拒绝为
+`protocol_unsupported`，提示里写 Agent 而不写协议。一个模型验证通过不会让同一连接的其他模型变得
+可用，新加入或改名的模型 ID 从未验证状态开始。准入、后续消息、排队消息、goal 轮次、认领、常驻和
+Fork 都调用这个函数，输入框的 `model_runtimes` 也来自同一个 `model_paths`，所以界面提供的和执行时
+接受的完全一致。模型 ID 原样保存，从不替换。
+
+**失效与竞态。**
+
+| 实际变化 | `credential_revision`（进程复用、释放常驻） | `config_revision` 与 `model_checks` |
+|---|---|---|
+| Base URL 或 key | +1 | +1，全部清空 |
+| 手动声明或模式 | +1 | 不变（上游事实没变） |
+| 停用 | +1 | 不变 |
+| 模型列表 | 不变 | 删掉的模型连同其结果一起去掉，新模型没有结果 |
+| 名称，或提交了相同的值 | 不变 | 不变 |
+
+记录结果用一条行级 `UPDATE`：`model_checks = model_checks || {model: result}`，条件是未删除、已启用、
+`config_revision` 和 `credential_revision` 仍等于预留时读到的值、模型仍在列表里；它从不写 `enabled`
+或任何版本号。于是密钥或 Base URL 变更前发出的探测会被丢弃（接口返回 `recorded: false`），验证期间
+被停用（即使又启用了）的连接也不会记录；不同模型的并发验证各自合并，互不覆盖。验证结果改变了某个
+模型的路径时不提升 `credential_revision`：计划和令牌本来就属于进程复用身份，下一回合会换进程；
+认领和常驻之间则由常驻响应里的 `model_connection_plan`（`client>upstream`）与认领比对，路径在这期间
+变了就让这次启动失败，不会只关闭同一连接上其他模型的进程。
+
+**有界的探测。** `POST /v1/agent/model-connections/{id}/verify {"model": id}` 每次只验证一个模型：
+占用一次每小时额度，三种 API 的原生检查同时进行，每种最多两次请求，所以一个模型最多六次服务商请求，
+每种检查受原有超时约束。全部沿用固定解析地址的公网 IPv4 HTTPS 传输：不跟随重定向，不用代理，不回显
+上游正文，key 不进日志、错误或参数。「保存并验证」和「验证未验证的模型」在前端每次最多依次验证三个
+模型，并提示剩余数量；64 个模型的列表不会一次性扇出，服务端额度兜底。读取模型列表最多两次请求：先
+OpenAI 风格，缺失或被拒时再 Anthropic 风格，所以只提供 Messages 的服务商在自动模式下也能列出模型。
+
+**一并修复的独立评审问题。**
+
+- F1（改名会轮换凭据）：仓库按实际值比较决定是否提升版本，接口忽略重新填入的同一个 key，表单只
+  提交改动过的字段。
+- F2（工具结果里的图片被换成 `[image]`）：图片不再被替换。工具消息保留文本并注明图片随后附上，
+  图片以 `image_url` 内容放进这组工具结果之后的一条用户消息；并行的多个工具结果保持相邻且完整，
+  Messages 的 `tool_result` 和 Responses 的 `function_call_output` 用同一映射
+  （`protocol_compat/tool_images.py`）。支持图片的上游能看到图片，不支持的会返回明确的服务商错误。
+- F3（「立即发送」忽略消息选的来源）：`begin_send_now` 在存储层比较消息与正在运行的回合；消息
+  明确选了不同的模型或来源（Gateway 与个人连接之间、两个连接之间即使模型 ID 相同）时返回
+  `model_mismatch`，消息留在队列里，接口返回 409。没有指定模型的消息继承当前回合，照常可以插入。
+  界面上，选了别的模型时不提供「立即插入」，提示消息会作为下一轮运行。
+
+**验证范围。** 后端：`tests/unit/test_model_connections_domain.py`、
+`tests/servers/test_model_connections_api.py`、`tests/integration/storage/test_model_connection_store.py`、
+`tests/integration/servers/test_pending_message_send_now.py`、`tests/unit/protocol_compat/`。前端：
+`ModelConnectionsSettings.test.tsx`、`modelSource.test.ts`、`TaskComposer.modelSource.test.tsx`、
+`PendingMessageQueue.test.tsx`、`JobDetail.enhancements.test.tsx`，以及浏览器用例
+`e2e/model-connection-verification.spec.ts`（中英文、桌面和手机宽度）。全部使用模拟服务商。
+

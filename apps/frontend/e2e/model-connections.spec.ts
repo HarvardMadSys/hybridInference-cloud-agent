@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
 
+import { connectionView, unverified } from './modelConnectionFixtures';
+
 test.beforeEach(async ({ page, request }) => {
   expect((await request.post('/__fixture/reset')).ok()).toBe(true);
   await page.route('**/api/v1/agent/model-preference', (route) =>
@@ -31,7 +33,7 @@ for (const viewport of [
       localStorage.setItem('agents.locale', 'en');
       localStorage.setItem('agents.theme', 'light');
     });
-    let saved: Record<string, unknown> | null = null;
+    let saved: ReturnType<typeof connectionView> | null = null;
     let submitted: Record<string, unknown> | null = null;
     await page.route('**/api/v1/agent/model-connections', async (route) => {
       if (route.request().method() === 'GET') {
@@ -41,22 +43,17 @@ for (const viewport of [
         return;
       }
       submitted = route.request().postDataJSON();
-      const { api_key: _key, ...fields } = submitted!;
-      saved = {
-        ...fields,
+      saved = connectionView({
         id: 'mconn_fixture',
-        enabled: true,
-        has_api_key: true,
-        runtimes: ['opencode', 'kilo', 'pi'],
-        last_check: null,
-        created_at: '2026-10-27',
-        updated_at: '2026-10-27',
-      };
+        name: String(submitted!.name),
+        base_url: String(submitted!.base_url),
+        model_status: (submitted!.models as string[]).map(unverified),
+      });
       await route.fulfill({ status: 201, json: saved });
     });
     await page.route('**/api/v1/agent/model-connections/mconn_fixture', async (route) => {
       submitted = route.request().postDataJSON();
-      saved = { ...saved, ...submitted, updated_at: '2026-10-28' };
+      saved = { ...saved!, ...submitted, updated_at: '2026-10-28' };
       await route.fulfill({ json: saved });
     });
     await page.goto('/settings/my-settings');
@@ -75,19 +72,21 @@ for (const viewport of [
       path: testInfo.outputPath('personal-connection-form.png'),
       animations: 'disabled',
     });
-    await page.getByRole('button', { name: 'Save connection', exact: true }).click();
+    await section.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByRole('article', { name: 'Personal inference' })).toBeVisible();
-    expect(submitted).toMatchObject({
+    expect(submitted).toEqual({
+      name: 'Personal inference',
+      base_url: 'https://api.example.com/custom/v1',
       api_key: 'browser-test-not-a-real-key',
-      protocols: ['chat_completions'],
       models: ['fixture-model'],
     });
     await page.getByRole('button', { name: 'Edit', exact: true }).click();
     await expect(page.getByLabel('API key', { exact: true })).toHaveValue('');
     await page.getByLabel('Connection name', { exact: true }).fill('Renamed connection');
-    await page.getByRole('button', { name: 'Save connection', exact: true }).click();
+    await section.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByRole('article', { name: 'Renamed connection' })).toBeVisible();
-    expect(submitted).not.toHaveProperty('api_key');
+    // A rename sends the name alone: the key, processes and verification stay.
+    expect(submitted).toEqual({ name: 'Renamed connection' });
     await section.screenshot({
       path: testInfo.outputPath('personal-connection-saved.png'),
       animations: 'disabled',

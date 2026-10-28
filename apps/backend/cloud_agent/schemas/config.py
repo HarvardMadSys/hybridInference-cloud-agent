@@ -21,18 +21,18 @@ from cloud_agent_shared.environment import environment_limits
 class ModelConnectionOption(BaseModel):
     """One of the owner's enabled model connections, as the composer offers it.
 
-    Everything needed to offer its models beside the Gateway's and to know
-    which agents can use it; nothing about its key.
+    Everything needed to offer its models beside the Gateway's, and which
+    agents can run each one now; nothing about its key or its APIs.
     """
 
     id: str
     name: str
+    #: Every listed model, in the owner's order.
     models: list[str]
-    #: Every agent that can run on this connection, natively or translated.
-    runtimes: list[str]
-    #: Those of ``runtimes`` that reach it through the compatibility helper
-    #: (Codex or Claude Code on a Chat Completions connection).
-    translated_runtimes: list[str] = Field(default_factory=list)
+    #: The listed models a task can run now, each with the agents that can run
+    #: it: exactly what the execution gates accept. A model missing here is not
+    #: verified, or no agent can use it.
+    model_runtimes: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class AgentConfigResponse(BaseModel):

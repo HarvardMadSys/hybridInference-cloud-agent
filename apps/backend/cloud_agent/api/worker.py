@@ -1679,7 +1679,7 @@ async def worker_establish_shared_sandbox_residency(
     if previous_grant and grants is not None:
         with contextlib.suppress(Exception):
             await grants.revoke(previous_grant)
-    credential, revision = await residency_credential(
+    credential, revision, plan = await residency_credential(
         job_store,
         grants,
         job=row,
@@ -1722,6 +1722,7 @@ async def worker_establish_shared_sandbox_residency(
         credential=credential,
         model=row.get("model"),
         model_connection_revision=revision,
+        model_connection_plan=plan,
         # The process this residency opens serves later turns too, which are
         # other jobs: a turn's own MCP token would die with this attempt and
         # force a restart at the next message. This one follows the residency.

@@ -19,6 +19,7 @@ from cloud_agent.api.deps import (
     get_github_app_state,
     get_storage,
 )
+from cloud_agent.application.model_connection_status import usable_runtimes
 from cloud_agent.application.model_connections import model_connections_enabled
 from cloud_agent.entitlement import repos_for_user
 from cloud_agent.gateway import GatewayError
@@ -33,7 +34,6 @@ from cloud_agent.model_preference import (
 from cloud_agent.schemas import AgentConfigResponse, McpConnectionSummary, ModelConnectionOption
 from cloud_agent.source_control import github_connect_configured
 from cloud_agent.source_control_runtime import GitHubAppState  # noqa: TC001 — FastAPI resolves it.
-from cloud_agent_shared.model_connections import runtime_plans
 from cloud_agent_shared.plugins import supported_plugin_runtimes
 from cloud_agent_shared.runtime_catalog import (
     registered_runtimes,
@@ -234,14 +234,12 @@ async def _model_preference_for_user(
 
 
 def _connection_option(row: dict[str, Any]) -> ModelConnectionOption:
-    """One enabled connection as the composer offers it, with every agent that can use it."""
-    plans = runtime_plans(list(row["protocols"]))
+    """One enabled connection as the composer offers it, with each model's usable agents."""
     return ModelConnectionOption(
         id=row["id"],
         name=row["name"],
         models=list(row["models"]),
-        runtimes=sorted(plans),
-        translated_runtimes=sorted(r for r, plan in plans.items() if plan.translated),
+        model_runtimes=usable_runtimes(row),
     )
 
 

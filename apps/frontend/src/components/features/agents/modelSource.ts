@@ -55,17 +55,18 @@ export function storedChoice(model: unknown, connectionId: unknown): ModelChoice
 }
 
 /**
- * What a runtime can run: the Gateway's models, then each enabled connection
- * that speaks the runtime's protocol. A connection that cannot serve this
- * runtime is left out rather than offered and refused on Run.
+ * What a runtime can run: the Gateway's models, then each enabled connection's
+ * models this runtime can run now. A model is offered only once its own
+ * verification found a way for this agent to use it — exactly what the server
+ * accepts — so nothing is offered and then refused on Run.
  */
 export function offeredChoices(config: AgentConfigApi | null, runtime: string): ModelChoice[] {
   const gateway = (config?.models ?? []).map((model) => ({ model, connectionId: null }));
-  const personal = (config?.model_connections ?? [])
-    .filter((connection) => connection.runtimes.includes(runtime))
-    .flatMap((connection) =>
-      connection.models.map((model) => ({ model, connectionId: connection.id })),
-    );
+  const personal = (config?.model_connections ?? []).flatMap((connection) =>
+    connection.models
+      .filter((model) => connection.model_runtimes?.[model]?.includes(runtime))
+      .map((model) => ({ model, connectionId: connection.id })),
+  );
   return [...gateway, ...personal];
 }
 
@@ -77,29 +78,26 @@ export function resolvedChoice(config: AgentConfigApi): ModelChoice {
 export interface LabelOptions {
   /** Not on offer here: marked, never swapped for another source. */
   unavailable?: boolean;
-  /** The agent it would run with, which decides whether it is translated. */
+  /** The agent it would run with. Kept for callers; which API it uses is never shown. */
   runtime?: string;
 }
 
 /**
  * A personal choice names its connection, so it never reads as the Gateway
- * model of the same name; one that cannot run here says so, and one this
- * agent reaches through the compatibility helper says that too.
+ * model of the same name; one that cannot run here says so. Which API the
+ * agent reaches it on is the platform's business and is not part of the label.
  */
 export function choiceLabel(
   config: AgentConfigApi | null,
   choice: ModelChoice,
   t: Translator,
-  { unavailable = false, runtime }: LabelOptions = {},
+  { unavailable = false }: LabelOptions = {},
 ): string {
   if (!choice.connectionId) return choice.model;
   const connection = config?.model_connections?.find((entry) => entry.id === choice.connectionId);
-  let label = connection
+  const label = connection
     ? t('modelSource.personal', { model: choice.model, name: connection.name })
     : t('modelSource.personalUnknown', { model: choice.model });
-  if (runtime && connection?.translated_runtimes?.includes(runtime)) {
-    label = t('modelSource.translated', { label });
-  }
   return unavailable ? t('modelSource.unavailable', { label }) : label;
 }
 

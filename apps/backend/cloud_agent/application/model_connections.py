@@ -451,8 +451,12 @@ async def residency_credential(
     row: dict[str, Any],
     host: str,
     fence: Mapping[str, Any],
-) -> tuple[str | None, int | None]:
-    """A new residency's credential and, on an owner connection, its revision.
+) -> tuple[str | None, int | None, str | None]:
+    """A new residency's credential and, on an owner connection, its revision and plan.
+
+    The host matches both to its claim: the key may have rotated, and a
+    model's verification may have moved it between a native and a translated
+    plan, while the turn was starting.
 
     A Gateway turn's residency gets its worker-fenced grant, as it always has.
     A turn on an owner connection gets that connection's key and no grant at
@@ -462,7 +466,7 @@ async def residency_credential(
     names its attempt -- ends with the reason, as it would have at its claim.
     """
     if not job.get("model_connection_id"):
-        return await _mint_residency_grant(store.grants, grants, row=row), None
+        return await _mint_residency_grant(store.grants, grants, row=row), None, None
     try:
         access = await connection_residency_credential(store, job, row=row)
     except (ModelConnectionUnusable, CredentialCipherError) as exc:
@@ -481,7 +485,7 @@ async def residency_credential(
             detail=str(exc),
         )
         raise unusable_error(exc, status=403) from None
-    return access.api_key, access.revision
+    return access.api_key, access.revision, access.plan.identity
 
 
 __all__ = [

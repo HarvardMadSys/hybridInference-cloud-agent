@@ -6,7 +6,7 @@ const personal = {
   id: connectionId,
   name: 'Personal inference',
   models: ['fixture-model'],
-  runtimes: ['codex'],
+  model_runtimes: { 'fixture-model': ['codex'] },
 };
 
 test.beforeEach(async ({ request, page }) => {

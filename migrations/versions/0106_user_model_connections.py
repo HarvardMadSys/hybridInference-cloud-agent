@@ -1,4 +1,4 @@
-"""Add owners' own OpenAI-compatible model connections.
+"""Add owners' own model connections.
 
 A connection is private to its owner: its key is stored encrypted and never
 read back. A turn names the connection it runs on beside its model, NULL being
@@ -31,8 +31,11 @@ def upgrade() -> None:
             base_url TEXT NOT NULL CHECK (
                 char_length(base_url) BETWEEN 9 AND 512 AND base_url LIKE 'https://%'
             ),
-            protocols TEXT[] NOT NULL CHECK (
-                cardinality(protocols) BETWEEN 1 AND 3
+            -- Empty: the APIs are detected per model by an explicit verification
+            -- (model_checks). Non-empty: the owner's manual declaration, which
+            -- every listed model runs on without verification.
+            protocols TEXT[] NOT NULL DEFAULT '{}' CHECK (
+                cardinality(protocols) <= 3
                 AND protocols <@ ARRAY[
                     'chat_completions', 'responses', 'anthropic_messages'
                 ]::text[]
@@ -40,12 +43,16 @@ def upgrade() -> None:
             models TEXT[] NOT NULL CHECK (cardinality(models) BETWEEN 1 AND 64),
             api_key_ciphertext TEXT,
             credential_revision BIGINT NOT NULL DEFAULT 1 CHECK (credential_revision >= 1),
-            -- Raised by every change a check result depends on: the key, the
-            -- Base URL, the protocols and the models. A result is stored only
-            -- against the revision it tested.
+            -- Raised when the endpoint a verification tested changes: its Base
+            -- URL or its key. A model's result counts only at the revision it
+            -- tested, and is recorded only if that is still the current one.
             config_revision BIGINT NOT NULL DEFAULT 1 CHECK (config_revision >= 1),
             enabled BOOLEAN NOT NULL DEFAULT TRUE,
-            last_check JSONB,
+            -- Each listed model's last verification, keyed by model id: the
+            -- native APIs that did, did not, or could not be shown to stream a
+            -- tool round trip. Upstream facts only; translated paths are derived.
+            model_checks JSONB NOT NULL DEFAULT '{}'::jsonb
+                CHECK (jsonb_typeof(model_checks) = 'object'),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             deleted_at TIMESTAMPTZ,

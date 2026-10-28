@@ -120,9 +120,14 @@ def test_the_claim_carries_the_connection_and_the_runner_masks_its_key():
 
 def test_a_residency_must_name_the_revision_the_claim_named():
     job = ClaimedJob.from_response(_claim_body(model_connection=_ACCESS.model_dump()))
-    require_residency_connection(job, {"model_connection_revision": 3})
+    direct = "chat_completions>chat_completions"
+    require_residency_connection(
+        job, {"model_connection_revision": 3, "model_connection_plan": direct}
+    )
     with pytest.raises(ValueError, match="changed"):
-        require_residency_connection(job, {"model_connection_revision": 4})
+        require_residency_connection(
+            job, {"model_connection_revision": 4, "model_connection_plan": direct}
+        )
     with pytest.raises(ValueError):
         require_residency_connection(job, {"model_connection_revision": None})
 
@@ -130,6 +135,37 @@ def test_a_residency_must_name_the_revision_the_claim_named():
     require_residency_connection(gateway, {})
     with pytest.raises(ValueError):
         require_residency_connection(gateway, {"model_connection_revision": 3})
+
+
+@pytest.mark.parametrize(
+    ("claimed", "resolved"),
+    [
+        # Claimed native on a host without the helper; re-verified to translated.
+        ({"protocol": "responses"}, "responses>chat_completions"),
+        # Claimed translated; re-verified to native.
+        (
+            {
+                "protocol": "chat_completions",
+                "client_protocol": "responses",
+                "local_token": "a" * 64,
+            },
+            "responses>responses",
+        ),
+        # A plan the residency never names is not assumed.
+        ({"protocol": "responses"}, None),
+    ],
+)
+def test_a_residency_must_name_the_plan_the_claim_named(claimed, resolved):
+    """Codex review 1: same revision, but a verification moved the model's path."""
+    access = ModelConnectionAccess(**{**_ACCESS.model_dump(), **claimed})
+    job = ClaimedJob.from_response(_claim_body(model_connection=access.model_dump()))
+    require_residency_connection(
+        job, {"model_connection_revision": 3, "model_connection_plan": access.plan.identity}
+    )
+    with pytest.raises(ValueError, match="changed"):
+        require_residency_connection(
+            job, {"model_connection_revision": 3, "model_connection_plan": resolved}
+        )
 
 
 def _launch(**changes: object) -> ResidentLaunch:

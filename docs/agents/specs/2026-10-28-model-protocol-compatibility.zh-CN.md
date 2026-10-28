@@ -12,7 +12,7 @@ Chat Completions，用户也希望用 Codex 和 Claude Code。
 
 本次在**成员自己的沙箱进程里**加一个私有的协议转换层，只做两条明确的路径：
 
-| 运行时 | 客户端协议 | 连接只声明 `chat_completions` 时 | 连接声明了原生协议时 |
+| 运行时 | 客户端协议 | 该模型只有 `chat_completions` 可用时 | 该模型的原生协议可用时 |
 |---|---|---|---|
 | OpenCode / Kilo / pi | Chat Completions | 原生直连 | 原生直连 |
 | Codex | Responses | **转换**：Responses → Chat Completions | `responses` 原生直连 |
@@ -25,21 +25,26 @@ Chat Completions，用户也希望用 Codex 和 Claude Code。
 ## 二、计划（plan）：一个函数决定怎么连
 
 `cloud_agent_shared/model_connections.protocol_plan(runtime, protocols)` 返回
-`ProtocolPlan(client_protocol, upstream_protocol)`，`translated` 表示是否经过转换：
+`ProtocolPlan(client_protocol, upstream_protocol)`，`translated` 表示是否经过转换。传入的
+`protocols` 是**这个模型**可用的原生协议：自动模式下取该模型在当前配置版本下验证为 `supported`
+的协议，手动模式下取用户的声明（`domain.model_connections.verified_protocols`）：
 
-1. 运行时的客户端协议在连接声明的协议里 → 直连（`client == upstream`）；
-2. 否则，客户端是 Responses 或 Anthropic Messages、且连接声明了 `chat_completions` → 转换；
-3. 否则不可用（`protocol_unsupported`）。
+1. 运行时的客户端协议在其中 → 直连（`client == upstream`）；
+2. 否则，客户端是 Responses 或 Anthropic Messages、且其中有 `chat_completions` → 转换；
+3. 否则不可用（`protocol_unsupported`；该模型还没验证或验证已过期则是 `model_unverified`）。
 
-**原生优先**：同时声明 `responses` 和 `chat_completions` 的连接，Codex 一定直连 Responses。
+**原生优先**：一个模型的 `responses` 和 `chat_completions` 都可用时，Codex 一定直连 Responses。
+同一连接上的不同模型可以分别直连或转换。
 
-连接保存的 `protocols` 始终描述**上游**真实提供的协议，转换不会改写它，也不会让原生测试冒充。
-准入、后续消息、排队消息、goal 轮次、领取、常驻凭据、原生 Fork、`/config` 和设置页、连接测试都
-经由 `domain.require_usable` → `protocol_plan` 得到同一个计划。计划随认领载荷交给主机
+保存下来的验证结果始终描述**上游**真实提供的协议，转换可用性由它推导，不单独保存，也不会让转换
+冒充原生。准入、后续消息、排队消息、goal 轮次、领取、常驻凭据、原生 Fork、`/config` 和设置页都
+经由 `domain.require_usable` → `model_paths` → `protocol_plan` 得到同一个计划。计划随认领载荷交给主机
 （`ModelConnectionAccess.client_protocol`，直连时不出现，直连的认领与以前完全相同），进入进程
 固定的启动字段 `inference_client_protocol` 和该成员的本地令牌 `inference_local_token`（见第五节），
-参与「能否复用进程」的判断：连接协议的改动改变计划，
-常驻进程随之重启；连接编辑提升 `credential_revision` 时旧进程照旧被关闭。同名模型在不同连接上
+参与「能否复用进程」的判断：验证结果或手动声明的变化改变计划，常驻进程随之重启；连接编辑提升
+`credential_revision` 时旧进程照旧被关闭。由于验证可以在不提升 `credential_revision` 的情况下改变
+计划，常驻响应还带回 `model_connection_plan`（`client>upstream`），主机要求它与认领时的计划一致，
+否则这次启动失败，不会用认领时的启动参数跑另一条路径。同名模型在不同连接上
 仍是不同来源；个人连接永远不使用 Gateway grant，也不回退。
 
 主机能力：新主机声明 `model-protocol-translation-v1`。转换计划的回合只交给声明了它的主机；只声明
@@ -87,7 +92,8 @@ Responses → Chat（Codex）：
   Chat 上游无法提供。子 Agent 等其他功能不关闭。
 
 Messages → Chat（Claude Code）：
-- 支持：`system`（文本块）、`text`/`image`/`tool_use`/`tool_result` 内容块；无类型（自定义）工具；
+- 支持：`system`（文本块）、`text`/`image`/`tool_use`/`tool_result` 内容块（`tool_result` 里的
+  图片见下）；无类型（自定义）工具；
   `tool_choice`（含 `none`）、`max_tokens`、`temperature`、`top_p`、`stop_sequences`、流式与非流式。
 - 拒绝：服务端工具（如 `web_search_20250305`）、`document`、`server_tool_use`、各类服务端工具结果、
   工具结果里的 `search_result` 等、`mcp_servers`、`container`。
@@ -96,6 +102,14 @@ Messages → Chat（Claude Code）：
   （含设备标识，不发给服务商）。上游的 `reasoning_content` 以无签名的 thinking 块返回给 CLI。
 - Claude Code 在转换模式下启动时加 `--disallowedTools WebSearch`（它依赖 Anthropic 服务端工具）。
 - `count_tokens`、`/v1/models`、`HEAD /api/hello` 返回 404，CLI 本来就允许它们缺失。
+
+工具返回的图片：Chat Completions 的 `role: "tool"` 消息只能放文本，但 Claude Code 读取截图、
+Codex 的 `view_image` 都会在工具结果里返回图片。图片不会被替换成 `[image]` 占位文字：工具消息保留
+文本，并注明图片附在下一条消息里；图片按原顺序、注明来自哪个调用，以 `image_url` 内容放进这组工具
+结果之后的**一条**用户消息。并行的多个工具结果仍然相邻、完整，用户消息只插在它们全部结束之后。
+Messages 的 `tool_result` 和 Responses 的 `function_call_output` 用同一映射
+（`protocol_compat/tool_images.py`）。支持图片的上游能看到图片；不支持的上游返回自己的错误，CLI 会
+如实报告，而不是在模型没看到图片的情况下继续。
 
 模型锁定：请求里的 `model` 必须等于启动时绑定的模型，否则 400；不会改写成别的模型。
 
@@ -157,15 +171,13 @@ setsid（已有包装） ──> python3 -I model-protocol-translator.pyz <CLI a
   连接工厂（`protocol_translator.UPSTREAM_CONNECTION`），没有可配置的环境变量或启动参数。
 - 上游错误只把状态码映射成客户端格式的错误，不回显上游正文；日志只写类别，不写正文、key 或令牌。
 
-## 六、测试按钮
+## 六、验证按钮
 
-测试按钮的「API」选项：连接声明的原生协议，加上可用的转换路径（「Responses via Chat
-Completions」「Anthropic Messages via Chat Completions」）。原生优先：连接声明了 Responses 时，
-Responses 测试走原生，不走转换。转换测试在控制面用**同一份** `protocol_compat` 代码（gate、
-namespaces、stream）把探测请求转换成 Chat Completions，发到 `/chat/completions`（Bearer 认证），
-再把上游流转换回客户端协议，用原有的 Responses/Messages 解析器做两步工具调用校验。结果记录
-`protocol`（客户端协议）、`upstream_protocol` 和 `mode`，只对该模型和该路径有效。只在用户点击时
-运行，保存或打开页面不会触发计费请求。
+设置页不再让用户选择要测试的 API，也不显示「via Chat Completions」。用户只在某个模型上点「验证」
+（或「保存并验证」），控制面就在三种 API 上各跑一次**原生**的两步工具调用检查，并按模型保存结果；
+哪些 Agent 经转换可用由这些事实推导。转换层本身不在验证时探测：它由第七节的单元测试和固定版本
+真实 CLI 的外部测试证明。只在用户点击时运行，保存或打开页面不会触发计费请求。每种 API 的结果和每个
+Agent 的路径（直连或转换）放在折叠的「API 详情」里，供排查使用。
 
 ## 七、验证
 
@@ -188,7 +200,10 @@ namespaces、stream）把探测请求转换成 Chat Completions，发到 `/chat/
   上游 key 本身都被拒绝；CLI 退出后服务消失。
   另一用例让模型调用扁平化的 `multi_agent_v1__close_agent`，Codex 按自己的 `close_agent` 处理
   （返回「invalid agent id」），证明命名空间还原有效。
-- 前端：设置页显示经转换的 Agent 和转换测试选项；输入框在 Chat-only 连接上为 Codex/Claude Code
-  显示「via Chat Completions」，多协议连接对原生 Agent 不显示；桌面与手机宽度浏览器测试。
+- `tests/unit/protocol_compat/test_compat_gate.py`：Messages 和 Responses 的工具结果图片、图文混合、
+  多个并行调用都按上述映射保留，不出现占位文字，用户图片消息不插在并行工具结果之间。
+- 前端：设置页按模型显示状态和可用的 Agent，协议只出现在折叠的诊断里；输入框只为每个模型提供它
+  验证后可用的 Agent，标签不写协议；中英文、桌面与手机宽度浏览器测试
+  （`e2e/model-connection-verification.spec.ts`）。
 
 不做：真实服务商、Kata 主机上的端到端验收（需要真实 key 和主机，交由后续验收记录）。

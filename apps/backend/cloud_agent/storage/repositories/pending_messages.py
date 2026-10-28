@@ -172,6 +172,21 @@ def _json_or_null(value: list[int] | None) -> str | None:
     return None if value is None else json.dumps(value)
 
 
+def _steerable_into(message: Any, live: Any) -> bool:
+    """Whether ``message`` may go into ``live``'s running turn.
+
+    A message with no model inherits the turn it follows, so it fits any live
+    turn. One that names a model fits only a turn on that model *from that
+    source*: the same id on the Gateway and on a connection, or on two
+    connections, are different choices billed to different accounts.
+    """
+    if not message["model"]:
+        return True
+    return message["model"] == live["model"] and (message["model_connection_id"] or None) == (
+        live["model_connection_id"] or None
+    )
+
+
 class PostgresPendingMessageRepository:
     """A thread's pending messages, and the settlement that sends them in order."""
 
@@ -588,7 +603,9 @@ class PostgresPendingMessageRepository:
 
         Other refusals read like an edit's — ``not_found``, and
         ``revision_conflict`` or ``not_editable`` with ``current`` — plus
-        ``has_attachments`` and ``session_archived``.
+        ``has_attachments``, ``session_archived``, and ``model_mismatch`` with
+        ``current`` when the message chose a model or source other than the
+        live turn's (it stays queued for its own turn).
         """
         async with self._pool.acquire() as conn, conn.transaction():
             locked = await self._lock_for_change(
@@ -614,7 +631,8 @@ class PostgresPendingMessageRepository:
             if archived is not None:
                 return {"error": "session_archived"}
             live = await conn.fetchrow(
-                f"SELECT id, state, cancel_requested, current_attempt_id FROM agent_jobs "
+                "SELECT id, state, cancel_requested, current_attempt_id, model, "
+                "model_connection_id FROM agent_jobs "
                 f"WHERE thread_id = $1 AND {LIVE_TURN_SQL} ORDER BY turn_no DESC LIMIT 1",
                 thread_id,
             )
@@ -625,6 +643,14 @@ class PostgresPendingMessageRepository:
                 return {"idle": True}
             if live["cancel_requested"]:
                 return {"error": "not_running"}
+            if not _steerable_into(locked, live):
+                # The live turn answers on its own model and source, so a
+                # message that chose another would be billed where its owner
+                # did not choose. It waits for its own turn instead.
+                return {
+                    "error": "model_mismatch",
+                    "current": await read_pending_message(conn, message_id),
+                }
             await conn.execute(
                 """
                 UPDATE agent_pending_messages

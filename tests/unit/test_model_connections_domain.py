@@ -83,7 +83,9 @@ def test_names_models_and_protocols_are_normalized_and_bounded():
     for bad in ([], ["bad model"], ["x" * 201], [f"m{i}" for i in range(65)]):
         with pytest.raises(ModelConnectionInvalid):
             clean_models(bad)
-    for bad in ([], ["anthropic"], ["messages"], ["chat_completions", "gemini"]):
+    # Empty is automatic detection; a declaration names known APIs only.
+    assert clean_protocols([]) == []
+    for bad in (["anthropic"], ["messages"], ["chat_completions", "gemini"]):
         with pytest.raises(ModelConnectionInvalid):
             clean_protocols(bad)
 
@@ -460,11 +462,45 @@ async def test_model_discovery_lists_ids_and_is_only_a_convenience():
     assert models == ["gpt-4.1"]
     assert str(upstream.requests[0].url) == f"{_BASE}/models"
 
+    # Automatic: an OpenAI listing that is missing is followed by the
+    # Anthropic one, and by nothing else.
+    missing = _Upstream(httpx.Response(404), httpx.Response(404))
     with pytest.raises(CheckStop) as stop:
         await discover_models(
             base_url=_BASE,
             api_key=_KEY,
             resolve=_resolver("93.184.216.34"),
-            transport=_Upstream(httpx.Response(404)).transport(),
+            transport=missing.transport(),
         )
     assert stop.value.category == "endpoint_missing"
+    assert [str(request.url) for request in missing.requests] == [
+        f"{_BASE}/models",
+        "https://models.example/v1/models",
+    ]
+    assert missing.requests[1].headers["x-api-key"] == _KEY
+    assert "authorization" not in missing.requests[1].headers
+
+    anthropic = _Upstream(httpx.Response(404), httpx.Response(200, json={"data": [{"id": "c-1"}]}))
+    assert await discover_models(
+        base_url=_BASE,
+        api_key=_KEY,
+        resolve=_resolver("93.184.216.34"),
+        transport=anthropic.transport(),
+    ) == ["c-1"]
+
+    # A declared OpenAI-only connection asks once; a rate limit is not retried
+    # on another API.
+    for protocols, answers in (
+        (["chat_completions"], [httpx.Response(404)]),
+        ([], [httpx.Response(429)]),
+    ):
+        once = _Upstream(*answers)
+        with pytest.raises(CheckStop):
+            await discover_models(
+                base_url=_BASE,
+                api_key=_KEY,
+                protocols=protocols,
+                resolve=_resolver("93.184.216.34"),
+                transport=once.transport(),
+            )
+        assert len(once.requests) == 1

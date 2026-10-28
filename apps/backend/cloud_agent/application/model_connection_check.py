@@ -3,18 +3,22 @@
 A ``GET /models`` that answers says the key opens *something*; it says nothing
 about whether the agent's CLI can stream a reply and call a tool through it,
 which is all the CLI does. So a check runs exactly that, for one model and
-one protocol the owner picks, in that protocol's own wire format and at the
-URL the CLI will call: a streaming request offering one tool, then a second
-streaming request carrying the tool's result back. Chat Completions and
-Responses are read here; Anthropic Messages in ``model_connection_anthropic``.
+one protocol, in that protocol's own wire format and at the URL the CLI will
+call: a streaming request offering one tool, then a second streaming request
+carrying the tool's result back. Verifying a model (``verify_model``) runs the
+native check of each protocol side by side and keeps only those facts; which
+agents reach the model through the compatibility helper is derived from them.
+Chat Completions and Responses are read here; Anthropic Messages in
+``model_connection_anthropic``.
 
-A *translated* plan -- Codex or Claude Code on a connection that offers only
-Chat Completions -- is checked through the compatibility layer the member
-will run (``cloud_agent_shared.protocol_compat``): the client's probe passes
-the same gate, goes to ``/chat/completions`` with the connection's bearer key,
-and the upstream's stream comes back through the same converter, to be read
-by the client protocol's own parser. A result says which plan it tested. Only both succeeding
-is ``supported``. A provider that answers but cannot do one of them is
+``check_connection`` can also check a *translated* plan -- Codex or Claude
+Code on Chat Completions -- through the compatibility layer the member will
+run (``cloud_agent_shared.protocol_compat``): the client's probe passes the
+same gate, goes to ``/chat/completions`` with the connection's bearer key, and
+the upstream's stream comes back through the same converter, to be read by
+the client protocol's own parser. Verification does not: it stores upstream
+facts only, and the translator is proven by its own tests. Only both steps
+succeeding is ``supported``. A provider that answers but cannot do one of them is
 ``unsupported``; one that cannot be reached, refuses the key or fails is
 ``failed``, with a category the owner can act on.
 
@@ -26,8 +30,8 @@ IPv6; no redirect followed; no proxy from the environment. Nothing the
 upstream sends is echoed back -- its bodies may repeat the key or carry
 anything else -- only the HTTP status and what was parsed out of the stream.
 
-A check spends the owner's own quota upstream, so it runs only when they press
-the button, within an hourly limit every replica reserves from atomically.
+A verification spends the owner's own quota upstream, so it runs only when they
+press the button, within an hourly limit every replica reserves from atomically.
 The reservation bounds how many checks run, not how many run at once.
 """
 
@@ -534,7 +538,15 @@ def _requests(
                 "parameters": _TOOL_PARAMETERS,
             },
         }
-        first = {"model": model, "stream": True, "messages": [{"role": "user", "content": ask}]}
+        # Usage is asked for as the member's helper and the Chat clients ask
+        # for it, so a provider refusing that is found here, not mid-task.
+        usage = {"include_usage": True}
+        first = {
+            "model": model,
+            "stream": True,
+            "stream_options": usage,
+            "messages": [{"role": "user", "content": ask}],
+        }
         first["tools"] = [tool]
 
         def second(turn: StreamedTurn, call: StreamedCall) -> dict[str, Any]:
@@ -542,6 +554,7 @@ def _requests(
             return {
                 "model": model,
                 "stream": True,
+                "stream_options": usage,
                 "tools": [tool],
                 "messages": [
                     {"role": "user", "content": ask},
@@ -651,6 +664,51 @@ async def check_connection(
     return result
 
 
+async def verify_model(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    resolve: Callable[[str, int], Awaitable[Iterable[str]]] | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict[str, Any]:
+    """Which native APIs ``model`` streams a tool round trip on, as stored per model.
+
+    One native check per API (``PROTOCOLS``), run side by side: at most three
+    checks of two requests each, every one under ``check_connection``'s own
+    timeout, address guard and pinned transport. Nothing is translated here;
+    which agents reach the model through the helper is derived from these
+    facts (``domain.model_connections.model_paths``). Each API's outcome is
+    ``supported``, ``unsupported`` (the provider answered and could not) or
+    ``failed`` (it could not be determined) -- a failure is never read as the
+    API existing, nor as it missing.
+    """
+    results = await asyncio.gather(
+        *(
+            check_connection(
+                base_url=base_url,
+                api_key=api_key,
+                protocol=protocol,
+                model=model,
+                resolve=resolve,
+                transport=transport,
+            )
+            for protocol in PROTOCOLS
+        )
+    )
+    return {
+        "checked_at": datetime.now(UTC).isoformat(),
+        "protocols": {
+            result.protocol: {
+                "status": result.status,
+                "category": result.category,
+                "http_status": result.http_status,
+            }
+            for result in results
+        },
+    }
+
+
 async def _bounded_get(
     *, client_transport: httpx.AsyncBaseTransport | None, url: str, headers: dict[str, str]
 ) -> bytes:
@@ -675,43 +733,67 @@ async def _bounded_get(
     return b"".join(chunks)
 
 
-def _models_request(
+def _models_requests(
     base_url: str, api_key: str, protocols: Iterable[str]
-) -> tuple[str, dict[str, str]]:
-    """Where to list models, and how to authenticate, for the protocols offered.
+) -> list[tuple[str, dict[str, str]]]:
+    """Where to list models, and how to authenticate, in the order to try.
 
-    An OpenAI-style ``GET /models`` under the Base URL whenever the connection
-    offers either OpenAI protocol; a Messages-only connection is asked the way
-    the CLI would ask it, ``GET /v1/models`` with ``x-api-key``.
+    An OpenAI-style ``GET /models`` under the Base URL, then -- unless the
+    owner declared only OpenAI APIs -- the way the Anthropic CLI would ask,
+    ``GET /v1/models`` with ``x-api-key``. A declaration of Anthropic Messages
+    alone asks only the latter.
     """
-    if set(protocols) <= {ANTHROPIC_MESSAGES}:
-        return models_url(base_url), anthropic_headers(api_key)
-    return base_url + "/models", _bearer(api_key)
+    declared = set(protocols)
+    openai = (base_url + "/models", _bearer(api_key))
+    anthropic = (models_url(base_url), anthropic_headers(api_key))
+    if declared and declared <= {ANTHROPIC_MESSAGES}:
+        return [anthropic]
+    if declared and ANTHROPIC_MESSAGES not in declared:
+        return [openai]
+    return [openai, anthropic]
+
+
+#: A first listing that fails this way may be the wrong API's: the next is tried.
+_TRY_NEXT_LISTING = frozenset({"endpoint_missing", "auth", "invalid_response"})
 
 
 async def discover_models(
     *,
     base_url: str,
     api_key: str,
-    protocols: Iterable[str] = (CHAT_COMPLETIONS,),
+    protocols: Iterable[str] = (),
     resolve: Callable[[str, int], Awaitable[Iterable[str]]] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> list[str]:
     """The model ids the provider lists, for the owner to pick from.
 
     A convenience only: many providers have no such endpoint, and a list says
-    nothing about whether a model can run an agent. Raises ``CheckStop``.
+    nothing about whether a model can run an agent. At most two requests, the
+    second only when the first API's listing is missing. Raises ``CheckStop``.
     """
-    url, headers = _models_request(base_url, api_key, protocols)
+    attempts = _models_requests(base_url, api_key, protocols)
     async with asyncio.timeout(_CONNECT_TIMEOUT_S + _READ_TIMEOUT_S):
         await guard_base_url(base_url, resolve=resolve)
-        body = await _bounded_get(client_transport=transport, url=url, headers=headers)
+        for position, (url, headers) in enumerate(attempts):
+            try:
+                return _listed_models(
+                    await _bounded_get(client_transport=transport, url=url, headers=headers)
+                )
+            except CheckStop as stop:
+                if position + 1 == len(attempts) or stop.category not in _TRY_NEXT_LISTING:
+                    raise
+    raise CheckStop("invalid_response")  # pragma: no cover - the loop always returns or raises
+
+
+def _listed_models(body: bytes) -> list[str]:
     try:
         listed = json.loads(body).get("data")
     except (ValueError, AttributeError):
         raise CheckStop("invalid_response", http_status=200) from None
+    if not isinstance(listed, list):
+        raise CheckStop("invalid_response", http_status=200)
     models: list[str] = []
-    for entry in listed if isinstance(listed, list) else []:
+    for entry in listed:
         model = entry.get("id") if isinstance(entry, dict) else None
         if isinstance(model, str) and MODEL_ID.fullmatch(model) and model not in models:
             models.append(model)
@@ -726,4 +808,5 @@ __all__ = [
     "check_connection",
     "discover_models",
     "guard_base_url",
+    "verify_model",
 ]

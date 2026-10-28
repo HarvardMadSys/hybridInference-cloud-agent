@@ -438,6 +438,10 @@ class HostResidencyEstablishResponse(BaseModel):
     #: ``credential`` (that connection's key) belongs to. The host refuses one
     #: that differs from its claim's: the key changed during the turn.
     model_connection_revision: int | None = None
+    #: For a residency on an owner model connection, the plan it was resolved
+    #: with (``ProtocolPlan.identity``). The host refuses one that differs from
+    #: its claim's: a verification changed the model's path during the turn.
+    model_connection_plan: str | None = None
     mcp_credential: str = Field(
         "",
         description=(

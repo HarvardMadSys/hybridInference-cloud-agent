@@ -720,6 +720,17 @@ def _send_now_refused(result: dict[str, Any]) -> HTTPException:
                 }
             },
         )
+    if error == "model_mismatch":
+        return HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "send_now_model_mismatch",
+                    "message": "This message chose a different model or source than the "
+                    "running turn; it stays in line and runs as its own turn on that choice.",
+                }
+            },
+        )
     if error == "has_attachments":
         return HTTPException(
             status_code=409,
