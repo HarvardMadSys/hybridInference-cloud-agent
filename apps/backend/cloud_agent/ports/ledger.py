@@ -20,6 +20,16 @@ class LedgerRepository(Protocol):
         """Read stored grant snapshots and retain attempts without attribution."""
         ...
 
+    async def thread_request_sources(
+        self, *, job_id: str, user_id: str, limit: int
+    ) -> tuple[list[dict[str, Any]], bool] | None:
+        """The newest started executions of an owner's thread, with their references.
+
+        ``None`` when the job is not this owner's or its conversation was
+        deleted; otherwise the page and whether older rows exist.
+        """
+        ...
+
     async def job_usage_reads(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         """Everything an owner's read of a job's usage is made of, from one snapshot.
 

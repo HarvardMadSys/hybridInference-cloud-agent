@@ -77,6 +77,17 @@ LEAST(
 )
 """
 
+#: One attempt ``a`` of job ``j`` with its stored gateway reference ``l``, as
+#: every read of the gateway's request rows needs it: the admin request pages
+#: and the model TTFT summaries select the same reference the same way.
+REQUEST_SOURCE_COLUMNS_SQL = f"""
+    a.id AS attempt_id, a.attempt_no, a.status AS attempt_status,
+    a.started_at, a.finished_at, j.thread_id,
+    l.id AS ledger_id, l.grant_id, l.binding_id, l.residency_generation,
+    l.window_since, {LEDGER_WINDOW_UNTIL_SQL} AS window_until,
+    (a.finished_at IS NULL AND {NEXT_ATTEMPT_START_SQL} IS NULL) AS window_open
+"""
+
 #: The two columns :func:`cloud_agent.ledger.summarize_ledger` needs to tell
 #: what an attempt ``a`` with no ledger reference ``l`` is: still starting,
 #: ended before its agent called a model, or unattributed. A read that hands the

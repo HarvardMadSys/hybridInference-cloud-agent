@@ -116,6 +116,39 @@ export async function getAgentMessageRequest(
   return jsonOrThrow<AgentMessageRequestApi>(resp);
 }
 
+/**
+ * Mean gateway time to first token over the requests that measured one.
+ *
+ * Read from the gateway's own request log, so sandbox, workspace and CLI
+ * startup are never in it. `mean_ttft_ms` is null whenever no request was
+ * measured; `complete` is false when only part of the scope could be read.
+ */
+export interface ModelTtftApi {
+  source: 'gateway_request_log';
+  status: 'available' | 'not_recorded' | 'unavailable';
+  mean_ttft_ms: number | null;
+  samples: number;
+  requests_read: number;
+  sources_read: number;
+  sources_total: number;
+  complete: boolean;
+  reason: string | null;
+}
+
+/** A thread's model TTFT; null for a thread this caller cannot read. */
+export async function getAgentThreadModelTtft(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<ModelTtftApi | null> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread/model-ttft`,
+    { signal },
+  );
+  if (resp.status === 404) return null;
+  return jsonOrThrow<ModelTtftApi>(resp);
+}
+
 /** Read cached snapshots; a pre-ledger control plane returns null, never zero usage. */
 export async function getAgentJobUsage(
   jobId: string,

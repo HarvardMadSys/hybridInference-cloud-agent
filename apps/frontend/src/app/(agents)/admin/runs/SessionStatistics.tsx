@@ -1,4 +1,6 @@
+import { modelTtftDisplay } from '@/components/features/agents/modelTtft';
 import { formatDuration } from '@/components/features/agents/TurnFooter';
+import type { ModelTtftApi } from '@/lib/api/agents';
 import type { AdminSessionStatistics } from '@/lib/api/adminRuns';
 
 import { CARD, number } from './shared';
@@ -8,8 +10,16 @@ function duration(seconds: number | null | undefined): string {
 }
 
 /** Turn-scoped presentation only: the totals cover every run of the turn. */
-export function SessionStatistics({ statistics }: { statistics?: AdminSessionStatistics | null }) {
+export function SessionStatistics({
+  statistics,
+  modelTtft,
+}: {
+  statistics?: AdminSessionStatistics | null;
+  /** The gateway's reading; absent while loading or when it could not be read. */
+  modelTtft?: ModelTtftApi | null;
+}) {
   const rate = statistics?.output_tokens_per_second;
+  const ttft = modelTtftDisplay(modelTtft);
   const rows = [
     {
       label: 'LLM time',
@@ -23,10 +33,17 @@ export function SessionStatistics({ statistics }: { statistics?: AdminSessionSta
         'Estimated from recorded tool calls and results. Overlapping intervals are counted once.',
     },
     {
-      label: 'Avg time to first token (TTFT)',
-      value: duration(statistics?.ttft_seconds),
+      label: 'Avg model time to first token (TTFT)',
+      value: ttft ? `${ttft.value}${ttft.complete ? '' : ' (partial)'}` : 'Unavailable',
       description:
-        'Time from the turn starting to its first recorded output event, including startup overhead; averaged over runs with a recorded sample when the turn restarted.',
+        ttft?.title ??
+        'Measured by the gateway for each streamed model request. Unavailable when no request recorded one; startup is never substituted.',
+    },
+    {
+      label: 'Avg time to first output',
+      value: duration(statistics?.first_output_seconds),
+      description:
+        'Time from the turn starting to its first recorded output event, including sandbox, workspace and agent startup and the wait for a whole message block; averaged over runs with a recorded sample when the turn restarted. Not time to first token.',
     },
     {
       label: 'Tokens per second (TPS)',
