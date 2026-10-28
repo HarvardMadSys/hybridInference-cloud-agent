@@ -856,18 +856,16 @@ class ContainerBackend(SandboxBackend):
             from cloud_agent_host.runtime_qualification import check_runtime_state
 
             check_runtime_state()
+        # One Docker process answers both questions preflight asks it: whether
+        # the daemon answers at all, and the versions the network check reads.
         try:
-            result = subprocess.run(
-                [self.docker_binary, "version", "--format", "{{.Server.Version}}"],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
+            versions = self._docker_versions()
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SandboxError(f"{self.docker_binary} is not usable: {exc}") from exc
-        if result.returncode != 0:
-            raise SandboxError(f"{self.docker_binary} is not usable: {result.stderr.strip()[:200]}")
+        if versions.returncode != 0:
+            raise SandboxError(
+                f"{self.docker_binary} is not usable: {versions.stderr.strip()[:200]}"
+            )
         if self.runtime == KATA_RUNTIME:
             # Import here: retained operations depend on these base primitives.
             from cloud_agent_host.chat_sandbox import ChatSandboxManager
@@ -881,7 +879,7 @@ class ContainerBackend(SandboxBackend):
         else:
             self._probe_kernel_boundary()
         if check_network:
-            self._check_sandbox_network()
+            self._check_sandbox_network(versions)
         if not self.is_vm_isolated:
             logger.warning(
                 "agent_sandbox_shared_kernel",
@@ -972,7 +970,9 @@ class ContainerBackend(SandboxBackend):
         """Revalidate mutable network state even when runtime evidence is inherited."""
         self._check_sandbox_network()
 
-    def _check_sandbox_network(self) -> None:
+    def _check_sandbox_network(
+        self, versions: subprocess.CompletedProcess[str] | None = None
+    ) -> None:
         """Refuse to accept work until this host enforces the sandbox network.
 
         Two things are checked. The relay discovery network must be
@@ -986,9 +986,12 @@ class ContainerBackend(SandboxBackend):
         activation would still trust it; if it lapsed during the checks
         above, the guard makes a new one here. A child handed one that had
         already lapsed holds none, and checks as every other caller does.
+
+        ``versions`` is the answer :meth:`preflight` has just had from
+        :meth:`_docker_versions`; without one, Docker is asked here.
         """
         network = self.require_sandbox_network()
-        self._require_gateway_priority()
+        self._require_gateway_priority(versions)
         probe = subprocess.run(
             [
                 self.docker_binary,
@@ -1018,9 +1021,13 @@ class ContainerBackend(SandboxBackend):
         else:
             self.network_guard().ensure(max_age_s=0)
 
-    def _require_gateway_priority(self) -> None:
-        """Refuse a Docker too old to keep group bridges off the relays' routes."""
-        probe = subprocess.run(
+    def _docker_versions(self) -> subprocess.CompletedProcess[str]:
+        """Ask Docker for its client's version and its daemon's API version.
+
+        A daemon that does not answer fails the process, since the second
+        field is the daemon's, so this also asks whether Docker is usable.
+        """
+        return subprocess.run(
             [
                 self.docker_binary,
                 "version",
@@ -1032,6 +1039,16 @@ class ContainerBackend(SandboxBackend):
             timeout=20,
             check=False,
         )
+
+    def _require_gateway_priority(
+        self, versions: subprocess.CompletedProcess[str] | None = None
+    ) -> None:
+        """Refuse a Docker too old to keep group bridges off the relays' routes.
+
+        ``versions`` is an answer :meth:`_docker_versions` has just given;
+        without one, Docker is asked here.
+        """
+        probe = versions if versions is not None else self._docker_versions()
         client, _, api = probe.stdout.strip().partition(" ")
         try:
             client_major = int(client.split(".")[0])
