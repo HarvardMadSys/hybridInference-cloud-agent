@@ -234,7 +234,7 @@ def test_a_child_slow_to_start_checks_the_rules_itself_rather_than_decline(
     Nothing is wrong with the rules, so the child neither declines on it nor
     trusts it. It makes the check every child made before the host handed its
     own over: the inspect that finds the helpers' image, then the install and
-    read-back and the route read, six Docker processes in all. The turn is
+    read-back and the route read, five Docker processes in all. The turn is
     accepted only if that check passes.
     """
     from tests.unit.test_network_guard import FakeNft
@@ -263,13 +263,12 @@ def test_a_child_slow_to_start_checks_the_rules_itself_rather_than_decline(
     assert [record.getMessage() for record in caplog.records].count(
         "network_guard_verification_aged_out"
     ) == 1
-    assert calls[:4] == [
-        ["docker", "version", "--format", "{{.Server.Version}}"],
+    assert calls[:3] == [
         ["docker", "version", "--format", "{{.Client.Version}} {{.Server.APIVersion}}"],
         ["docker", "network", "inspect", "agent-relays", "--format", "{{.Internal}}"],
         ["docker", "container", "inspect", "--format", "{{.Image}}", "runner-1"],
     ]
-    assert [argv[argv.index("--entrypoint") + 1] for argv in calls[4:]] == ["python3", "ip"]
+    assert [argv[argv.index("--entrypoint") + 1] for argv in calls[3:]] == ["python3", "ip"]
     if check == "passes":
         assert (code, ran) == (0, ["ajob_1"])
         assert answer.startswith("accepted ajob_1")
@@ -286,9 +285,10 @@ def test_a_child_with_a_recent_verification_accepts_without_a_helper_container(
     """The Docker version and the relay network are still the child's to check.
 
     The rules' install and read-back, two helper containers, and the inspect
-    that finds the helpers' image are its host's: a runc child runs three
-    Docker processes before it accepts, a Kata child holding the host's
-    runtime verdict two, where each used to run six and five.
+    that finds the helpers' image are its host's: a runc child, like a Kata
+    child holding the host's runtime verdict, runs two Docker processes
+    before it accepts, where they used to run six and five. A runc child's
+    preflight asks Docker once both whether it answers and its versions.
     """
     from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend
 
@@ -317,10 +317,7 @@ def test_a_child_with_a_recent_verification_accepts_without_a_helper_container(
     assert ran == [("ajob_1", backend)]
     version = ["docker", "version", "--format", "{{.Client.Version}} {{.Server.APIVersion}}"]
     relays = ["docker", "network", "inspect", "agent-relays", "--format", "{{.Internal}}"]
-    expected = [version, relays]
-    if runtime == "runc":
-        expected.insert(0, ["docker", "version", "--format", "{{.Server.Version}}"])
-    assert calls == expected
+    assert calls == [version, relays]
 
 
 def test_only_this_host_can_hand_a_child_a_runtime_verdict(monkeypatch):

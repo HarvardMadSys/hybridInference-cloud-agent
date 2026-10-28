@@ -1798,7 +1798,7 @@ def test_member_replacement_reaps_pidfile_group_and_every_same_uid_leftover(monk
 
     def fake_exec(_spec, argv, **kwargs):
         calls.append((list(argv), kwargs))
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        return SimpleNamespace(returncode=0, stdout=b'{"status":0,"stderr":""}\n' * 2, stderr=b"")
 
     monkeypatch.setattr(manager, "exec_capture", fake_exec)
 
@@ -1809,16 +1809,16 @@ def test_member_replacement_reaps_pidfile_group_and_every_same_uid_leftover(monk
         user_gid=manager.backend.gid,
     )
 
-    assert len(calls) == 3
+    # The reaper's root probe, then one exec as the member: the reap, then the removal.
+    assert len(calls) == 2
     assert "stat -c %u:%g:%a" in calls[0][0][2]
-    assert calls[1][0] == [
-        "/usr/local/bin/member-process-reaper",
-        "reap",
-        str(MEMBER_UID_BASE),
-    ]
-    assert calls[1][1]["input_bytes"] == b""
+    assert calls[1][0][:3] == ["python3", "-I", "-c"]
     assert calls[1][1]["user_uid"] == MEMBER_UID_BASE
-    assert "resident-*.pid" in calls[2][0][2]
+    reap, stale = json.loads(calls[1][1]["input_bytes"])
+    assert reap["argv"] == ["/usr/local/bin/member-process-reaper", "reap", str(MEMBER_UID_BASE)]
+    assert reap["input"] == "" and reap["reaps"], "only the runner itself joins the baseline"
+    assert "resident-*.pid" in stale["argv"][2]
+    assert stale["input"] is None
 
 
 def test_member_turn_census_is_pid_reuse_fenced_and_canonical(monkeypatch):

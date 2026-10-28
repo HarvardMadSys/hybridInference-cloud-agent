@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 from typing import TYPE_CHECKING
 
+from cloud_agent_host.chat_sandbox_exec import install_once
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.tree_copy import has_root_marker, staged_tree
 
@@ -58,6 +59,29 @@ os.replace(temporary, target + "/mcp-isolation-patch.sha256")
 """
 
 
+def _marker(version: str) -> str:
+    """The file that names the isolation patch a Kilo version's build carries."""
+    return f"/opt/runtimes/kilo/{version}/mcp-isolation-patch.sha256"
+
+
+def ensure_kilo_runtime_once(
+    manager: ChatSandboxManager, spec: ChatSandboxSpec, version: str
+) -> None:
+    """Run :func:`ensure_kilo_runtime` under the chat's install lock, once per container.
+
+    Once the marker holds the reviewed patch's digest, it does for the
+    container's life. The image put it there, or the activation wrote it
+    last, as root, mode 0644, having refused unless root owns ``/opt``, the
+    Kilo runtime directories and the stage and no one else can write them.
+    No member is ever root, so none can change the marker or the executables
+    it vouches for, and the activation runs only where the marker is wrong.
+    The digest is a constant of this host's code, so the path is the key.
+    """
+    install_once(
+        manager, spec, _marker(version), lambda: ensure_kilo_runtime(manager, spec, version)
+    )
+
+
 def ensure_kilo_runtime(manager: ChatSandboxManager, spec: ChatSandboxSpec, version: str) -> None:
     """Install the patched same-version binary without touching member sessions.
 
@@ -69,9 +93,7 @@ def ensure_kilo_runtime(manager: ChatSandboxManager, spec: ChatSandboxSpec, vers
     if version != KILO_MCP_VERSION:
         raise SandboxError("Kilo runtime version has no reviewed MCP isolation build")
     prefix = f"/opt/runtimes/kilo/{version}"
-    if has_root_marker(
-        manager, spec, f"{prefix}/mcp-isolation-patch.sha256", KILO_MCP_PATCH_SHA256
-    ):
+    if has_root_marker(manager, spec, _marker(version), KILO_MCP_PATCH_SHA256):
         return
     stage = f"/opt/runtimes/kilo/.mcp-install-{secrets.token_hex(8)}"
     with staged_tree(

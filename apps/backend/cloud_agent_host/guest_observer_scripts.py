@@ -65,6 +65,24 @@ SNAPSHOT_SCRIPT = STATUS_READER + (
     "print(json.dumps(snapshot, separators=(',', ':')))\n"
 )
 
+#: A member window's unread journal bytes: everything from the window's offset
+#: to the end, read only from a journal file whose own device and inode are
+#: still the cursor's, and never from behind that offset.
+WINDOW_DELTA_SCRIPT = (
+    "import os, sys\n"
+    "filename, offset, expected_dev, expected_ino = sys.argv[1], int(sys.argv[2]), "
+    "int(sys.argv[3]), int(sys.argv[4])\n"
+    "with open(filename, 'rb', buffering=0) as handle:\n"
+    "    journal = os.fstat(handle.fileno())\n"
+    "    if (int(journal.st_dev) != expected_dev "
+    "            or int(journal.st_ino) != expected_ino):\n"
+    "        raise RuntimeError('observer journal changed before read')\n"
+    "    if int(journal.st_size) < offset:\n"
+    "        raise RuntimeError('observer journal is behind the read fence')\n"
+    "    handle.seek(offset)\n"
+    "    sys.stdout.buffer.write(handle.read(max(0, int(journal.st_size) - offset)))\n"
+)
+
 #: A turn's whole close in one exec: the closing publication, a wait until the
 #: helper has published two polls after it, and the cursor's slice, read only
 #: from a journal file whose own device and inode are still the cursor's. It
@@ -94,4 +112,4 @@ DRAIN_SCRIPT = STATUS_READER + (
     "sys.stdout.buffer.write(header.encode() + b'\\n' + payload)\n"
 )
 
-__all__ = ["DRAIN_SCRIPT", "SNAPSHOT_SCRIPT", "STATUS_READER"]
+__all__ = ["DRAIN_SCRIPT", "SNAPSHOT_SCRIPT", "STATUS_READER", "WINDOW_DELTA_SCRIPT"]
