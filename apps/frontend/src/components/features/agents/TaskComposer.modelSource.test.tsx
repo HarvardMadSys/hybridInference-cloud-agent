@@ -334,4 +334,63 @@ describe('TaskComposer model sources', () => {
     );
     expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
   });
+
+  it('runs Codex and Claude Code on a Chat-only connection, saying it is translated', async () => {
+    const chat = 'mconn_0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f';
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({
+        model_connections: [
+          {
+            id: chat,
+            name: 'Chat provider',
+            models: ['chat-model'],
+            runtimes: ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
+            translated_runtimes: ['claude-code', 'codex'],
+          },
+        ],
+      }),
+    );
+    render(<TaskComposer />);
+    await chooseRepository();
+    choose('Agent', 'codex');
+    choose('Model', 'chat-model · Chat provider · via Chat Completions');
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Run Codex on Chat' } });
+    await runWhenReady();
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({
+      runtime: 'codex',
+      model: 'chat-model',
+      model_connection_id: chat,
+    });
+    // The stored source is the same pair; the plan is the server's to resolve.
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('labels a connection native for an agent whose own API it offers', async () => {
+    const both = 'mconn_1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e';
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({
+        model_connections: [
+          {
+            id: both,
+            name: 'Both APIs',
+            models: ['mine'],
+            runtimes: ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
+            translated_runtimes: ['claude-code'],
+          },
+        ],
+      }),
+    );
+    render(<TaskComposer />);
+    await chooseRepository();
+    choose('Agent', 'codex');
+    fireEvent.click(screen.getByLabelText('Model'));
+    expect(screen.getByRole('option', { name: 'mine · Both APIs' })).toBeInTheDocument();
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    choose('Agent', 'claude-code');
+    fireEvent.click(screen.getByLabelText('Model'));
+    expect(
+      screen.getByRole('option', { name: 'mine · Both APIs · via Chat Completions' }),
+    ).toBeInTheDocument();
+  });
 });

@@ -16,6 +16,26 @@ const PROTOCOL_NAMES: Record<ModelProtocol, string> = {
   anthropic_messages: 'Anthropic Messages',
 };
 
+/** Client protocols the helper can run on a Chat Completions connection. */
+const TRANSLATED_CLIENTS: readonly ModelProtocol[] = ['responses', 'anthropic_messages'];
+
+export interface CheckTarget {
+  protocol: ModelProtocol;
+  translated: boolean;
+}
+
+/**
+ * What a connection can be tested as: each protocol it declares, natively,
+ * then each client protocol it serves only through translation. Native first,
+ * as a task would run; the declared protocols are never rewritten.
+ */
+export function checkTargets(protocols: readonly ModelProtocol[]): CheckTarget[] {
+  const native = protocols.map((protocol) => ({ protocol, translated: false }));
+  if (!protocols.includes('chat_completions')) return native;
+  const translated = TRANSLATED_CLIENTS.filter((client) => !protocols.includes(client));
+  return [...native, ...translated.map((protocol) => ({ protocol, translated: true }))];
+}
+
 /** A protocol's proper name, the same in every language. */
 export function protocolName(protocol: ModelProtocol): string {
   return PROTOCOL_NAMES[protocol] ?? protocol;
@@ -25,7 +45,11 @@ export interface ModelConnectionCheck {
   status: string;
   category: string;
   message: string;
+  /** The client protocol tested: what the agent's CLI speaks. */
   protocol: ModelProtocol;
+  /** What the request went out as; differs from `protocol` when translated. */
+  upstream_protocol?: ModelProtocol;
+  mode?: 'direct' | 'translated';
   model: string;
   streaming: boolean;
   tool_call: boolean;
@@ -44,6 +68,8 @@ export interface ModelConnection {
   enabled: boolean;
   has_api_key: boolean;
   runtimes: string[];
+  /** Agents that reach this connection through the compatibility helper. */
+  translated_runtimes?: string[];
   last_check: ModelConnectionCheck | null;
   created_at: string;
   updated_at: string;

@@ -74,7 +74,7 @@ export function useComposerModel(drafted: DraftedPick | null, runtime: string) {
   // Named apart from the repository, so Run's title says which control to
   // look at, and a Run without one points at the empty control.
   const missingModel = !choice.model && (offered.length > 0 || unavailable !== null);
-  const picker = modelPicker(config, offered, unavailable ?? choice, choose, t);
+  const picker = modelPicker(config, offered, unavailable ?? choice, choose, t, { runtime });
   const modelControl = useMemo(
     () => ({
       attach: (element: HTMLButtonElement | null) => {

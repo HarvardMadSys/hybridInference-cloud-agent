@@ -328,10 +328,19 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   does not revoke it upstream. Other groups' keys never enter this scan;
   exceeding its bounded history fails closed. Such a turn needs no
   Gateway grant, catalog or quota, but login and Agent admission stay
-  Gateway-backed. Only runtimes whose own protocol the connection offers run
-  on it (Chat Completions: OpenCode, Kilo, pi; Responses: Codex; Anthropic
-  Messages: Claude Code). Nothing is translated between protocols, and
-  nothing falls back to the Gateway or another model.
+  Gateway-backed. A runtime runs on the connection's protocol when the
+  connection offers its own (Chat Completions: OpenCode, Kilo, pi;
+  Responses: Codex; Anthropic Messages: Claude Code). Otherwise only Codex
+  and Claude Code may run on a Chat Completions connection, through a
+  member-private translator: the CLI is exec'd behind a launcher that forks a
+  loopback service as the same member UID, bound to that one upstream, key
+  and model, answering only a token derived from the key and the member's
+  thread id (masked by the runner like the key; a sibling's token is refused)
+  and dying with the CLI. The CLI never holds the key on that path, and the
+  service refuses, rather than drops, what Chat Completions cannot carry. No
+  other pair is translated, and nothing falls back to the Gateway or another
+  model. See the
+  [protocol compatibility design](docs/agents/specs/2026-10-28-model-protocol-compatibility.zh-CN.md).
   Rotating, disabling or deleting it closes every process still running on
   the old state. The control plane's check dials only public IPv4 HTTPS under
   the MCP connection policy and the sandbox's protected ranges, pinned, with no

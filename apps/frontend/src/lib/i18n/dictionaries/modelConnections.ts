@@ -20,7 +20,7 @@ export const modelConnectionsEn = {
   'connections.responses': 'Responses · Codex',
   'connections.anthropic': 'Anthropic Messages · Claude Code',
   'connections.protocolHint':
-    'Choose the APIs your provider serves at this Base URL. Each agent runs only on the API it speaks; nothing is translated between them.',
+    'Choose only the APIs your provider serves at this Base URL. An agent uses its own API when the connection offers it; on a Chat Completions connection, Codex and Claude Code also run through a private translation inside your sandbox, which covers tools, text and images but not provider-hosted tools such as web search.',
   'connections.models': 'Model IDs',
   'connections.modelsHint':
     'One model ID per line, exactly as your provider names it. You can discover additional IDs after saving.',
@@ -61,6 +61,8 @@ export const modelConnectionsEn = {
     'Streaming: {streaming} · Tool call: {tool} · Final response: {final}',
   'connections.yes': 'Passed',
   'connections.no': 'Not verified',
+  'connections.runtimeTranslated': '{runtime} (via Chat Completions)',
+  'connections.checkTranslated': '{protocol} via Chat Completions',
 } as const;
 
 export const modelConnectionsZhCN: Record<keyof typeof modelConnectionsEn, string> = {
@@ -85,7 +87,7 @@ export const modelConnectionsZhCN: Record<keyof typeof modelConnectionsEn, strin
   'connections.responses': 'Responses · Codex',
   'connections.anthropic': 'Anthropic Messages · Claude Code',
   'connections.protocolHint':
-    '选择服务商在此 Base URL 上实际提供的 API。每个 Agent 只使用它自己的 API，平台不在协议之间转换。',
+    '只选择服务商在此 Base URL 上实际提供的 API。连接提供 Agent 自己的 API 时直接使用；在 Chat Completions 连接上，Codex 和 Claude Code 还可以通过你沙箱内的私有转换运行，支持工具、文本和图片，但不支持网页搜索等服务商托管工具。',
   'connections.models': '模型 ID',
   'connections.modelsHint': '每行一个，须与服务商的模型 ID 一致。保存后还可发现其他模型 ID。',
   'connections.edit': '编辑',
@@ -119,4 +121,6 @@ export const modelConnectionsZhCN: Record<keyof typeof modelConnectionsEn, strin
   'connections.checkDetails': '流式输出：{streaming} · 工具调用：{tool} · 最终回复：{final}',
   'connections.yes': '通过',
   'connections.no': '未验证',
+  'connections.runtimeTranslated': '{runtime}（经 Chat Completions 转换）',
+  'connections.checkTranslated': '{protocol}（经 Chat Completions 转换）',
 };

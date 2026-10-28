@@ -7,11 +7,15 @@ import json
 from cloud_agent_shared.runtime_catalog import CODEX
 
 from .base import (
+    COMPAT_ORIGIN,
     EMPTY_RUNTIME_MCP_CONFIG,
     MCP_TOKEN_ENV,
     AgentRuntime,
+    ResponsesViaChatUrl,
     RuntimeCapabilities,
     RuntimeMCPConfig,
+    compat_cli_credential,
+    compat_launch,
     openai_base_url,
 )
 
@@ -54,16 +58,20 @@ class CodexRuntime(AgentRuntime):
         managed MCP allowlist installed before launch remains the final policy
         layer for app-server (which has no ``--ignore-user-config`` flag).
         """
-        _ = (workdir, model, provides_isolation, resume_session_id, activation_dir)
+        _ = (workdir, provides_isolation, resume_session_id, activation_dir)
         # An owner connection's exact URL, or the Gateway's normalized one. The
         # provider id stays the one ``CodexAppServerSession`` names in its
         # thread RPC; only where it points changes. Both speak Responses,
-        # which is the only wire Codex has.
-        base_url = openai_base_url(gateway_base_url)
+        # which is the only wire Codex has -- on a Chat Completions connection
+        # through the member's compatibility helper, which this URL then names.
+        translated = isinstance(gateway_base_url, ResponsesViaChatUrl)
+        base_url = f"{COMPAT_ORIGIN}/v1" if translated else openai_base_url(gateway_base_url)
+        cli_credential = compat_cli_credential(credential) if translated else credential
         provider = "hybridinference"
         argv = [
             self.binary,
             *self.effort_args(reasoning_effort),
+            *(self.TRANSLATED_ARGS if translated else ()),
             *self._mcp_args(mcp_config, gateway_base_url=gateway_base_url),
             "-c",
             f'model_provider="{provider}"',
@@ -78,14 +86,23 @@ class CodexRuntime(AgentRuntime):
             "app-server",
         ]
         env = {
-            "CODEX_API_KEY": credential,
+            "CODEX_API_KEY": cli_credential,
             MCP_TOKEN_ENV: mcp_config.credential,
             "OPENAI_BASE_URL": base_url,
-            "OPENAI_API_KEY": credential,
+            "OPENAI_API_KEY": cli_credential,
         }
         if session_state_dir:
             env["CODEX_HOME"] = session_state_dir
+        if isinstance(gateway_base_url, ResponsesViaChatUrl):
+            return compat_launch(argv, env, gateway_base_url, credential, model=model)
         return argv, env
+
+    #: What a translated Codex leaves out of its requests: 0.145.0 otherwise
+    #: offers the hosted ``web_search`` tool, which only a Responses provider
+    #: runs; a Chat Completions upstream has no such tool, and the helper
+    #: refuses a request carrying one rather than dropping it. Every function
+    #: tool stays, namespaced ones (sub-agents, MCP) included.
+    TRANSLATED_ARGS = ("-c", 'web_search="disabled"')
 
     def _mcp_args(self, config: RuntimeMCPConfig, *, gateway_base_url: str) -> list[str]:
         """The authenticated relay entry, as a ``-c`` override; empty without servers."""

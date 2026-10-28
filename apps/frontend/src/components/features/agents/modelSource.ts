@@ -74,21 +74,32 @@ export function resolvedChoice(config: AgentConfigApi): ModelChoice {
   return storedChoice(config.default_model, config.default_model_connection_id);
 }
 
+export interface LabelOptions {
+  /** Not on offer here: marked, never swapped for another source. */
+  unavailable?: boolean;
+  /** The agent it would run with, which decides whether it is translated. */
+  runtime?: string;
+}
+
 /**
  * A personal choice names its connection, so it never reads as the Gateway
- * model of the same name; one that cannot run here says so.
+ * model of the same name; one that cannot run here says so, and one this
+ * agent reaches through the compatibility helper says that too.
  */
 export function choiceLabel(
   config: AgentConfigApi | null,
   choice: ModelChoice,
   t: Translator,
-  unavailable = false,
+  { unavailable = false, runtime }: LabelOptions = {},
 ): string {
   if (!choice.connectionId) return choice.model;
-  const name = config?.model_connections?.find((entry) => entry.id === choice.connectionId)?.name;
-  const label = name
-    ? t('modelSource.personal', { model: choice.model, name })
+  const connection = config?.model_connections?.find((entry) => entry.id === choice.connectionId);
+  let label = connection
+    ? t('modelSource.personal', { model: choice.model, name: connection.name })
     : t('modelSource.personalUnknown', { model: choice.model });
+  if (runtime && connection?.translated_runtimes?.includes(runtime)) {
+    label = t('modelSource.translated', { label });
+  }
   return unavailable ? t('modelSource.unavailable', { label }) : label;
 }
 
@@ -110,7 +121,7 @@ export function modelPicker(
   current: ModelChoice,
   onChange: (choice: ModelChoice) => void,
   t: Translator,
-  kept: ModelChoice = current,
+  { kept = current, runtime }: { kept?: ModelChoice; runtime?: string } = {},
 ): ModelPickerProps {
   const missing = kept.model && !offered.some((choice) => sameChoice(choice, kept));
   const choices = missing ? [kept, ...offered] : offered;
@@ -119,7 +130,10 @@ export function modelPicker(
   for (const choice of choices) {
     const key = choiceKey(choice);
     byKey.set(key, choice);
-    optionLabels[key] = choiceLabel(config, choice, t, missing === true && choice === kept);
+    optionLabels[key] = choiceLabel(config, choice, t, {
+      unavailable: missing === true && choice === kept,
+      runtime,
+    });
   }
   return {
     value: choiceKey(current),
@@ -155,7 +169,9 @@ export function turnModelPicker(
   inherited: ModelChoice,
 ): ModelPickerProps | null {
   const offered = offeredChoices(config, runtime);
-  return offered.length ? modelPicker(config, offered, current, onChange, t, inherited) : null;
+  return offered.length
+    ? modelPicker(config, offered, current, onChange, t, { kept: inherited, runtime })
+    : null;
 }
 
 /**

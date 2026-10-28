@@ -61,7 +61,13 @@ export function ModelConnectionCard({
           <p className="mt-1 break-all text-xs text-muted">{connection.base_url}</p>
           <p className="mt-1 text-xs text-muted">
             {t(connection.enabled ? 'connections.enabled' : 'connections.disabled')} ·{' '}
-            {connection.runtimes.join(', ')}
+            {connection.runtimes
+              .map((runtime) =>
+                connection.translated_runtimes?.includes(runtime)
+                  ? t('connections.runtimeTranslated', { runtime })
+                  : runtime,
+              )
+              .join(', ')}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">

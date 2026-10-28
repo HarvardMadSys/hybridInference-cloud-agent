@@ -27,6 +27,7 @@ from cloud_agent.application.model_connections import (
     new_connection_id,
 )
 from cloud_agent.domain.model_connections import ModelConnectionConflict
+from cloud_agent_shared.model_connections import ProtocolPlan
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -420,7 +421,14 @@ async def _bind(store, row: dict, job: dict, generation: int) -> bool:
     return await bind_residency_access(
         store.model_connections,
         user_id="user-1",
-        access=connection_access(current, "chat_completions", model_connection_cipher()),
+        access=connection_access(
+            current,
+            ProtocolPlan("chat_completions", "chat_completions"),
+            model_connection_cipher(),
+            user_id="user-1",
+            thread_id=job["thread_id"],
+            model=job["model"],
+        ),
         thread_id=job["thread_id"],
         generation=generation,
     )

@@ -6,7 +6,15 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from cloud_agent_shared.model_connections import ANTHROPIC_MESSAGES
+from cloud_agent_shared.model_connections import ANTHROPIC_MESSAGES, RESPONSES
+from cloud_agent_shared.protocol_compat import (
+    ENV_CLIENT,
+    ENV_MODEL,
+    ENV_UPSTREAM_KEY,
+    ENV_UPSTREAM_URL,
+    ORIGIN_PLACEHOLDER,
+    TOKEN_PLACEHOLDER,
+)
 
 from .events import RAW, NormalizedEvent
 
@@ -67,15 +75,87 @@ class MessagesBaseUrl(ExactBaseUrl):
     __slots__ = ()
 
 
+class TranslatedBaseUrl(ExactBaseUrl):
+    """A Chat Completions connection's URL, for a CLI that speaks another protocol.
+
+    The CLI is never pointed at it: the member's compatibility helper is
+    (``compat_launch``). Each subclass names the CLI's own protocol, so only
+    the adapter that speaks it accepts one.
+    """
+
+    __slots__ = ()
+    client_protocol = ""
+
+
+class ResponsesViaChatUrl(TranslatedBaseUrl):
+    """Codex's Responses, translated onto a Chat Completions connection."""
+
+    __slots__ = ()
+    client_protocol = RESPONSES
+
+
+class MessagesViaChatUrl(TranslatedBaseUrl):
+    """Claude Code's Anthropic Messages, translated onto a Chat Completions connection."""
+
+    __slots__ = ()
+    client_protocol = ANTHROPIC_MESSAGES
+
+
 class RuntimeConnectionUnsupportedError(RuntimeError):
     """Raised when a runtime is asked to run on an owner connection it cannot speak to."""
 
 
-def connection_base_url(base_url: str, protocol: str) -> ExactBaseUrl:
-    """The launch-context form of an owner connection's URL, typed by its protocol."""
+#: The image's interpreter running the helper the host installed (``compat_helper``).
+COMPAT_LAUNCHER = ("/usr/bin/python3", "-I", "/usr/local/libexec/model-protocol-translator.pyz")
+
+
+def connection_base_url(base_url: str, protocol: str, client_protocol: str = "") -> ExactBaseUrl:
+    """The launch-context form of an owner connection's URL, typed by its plan."""
+    if client_protocol and client_protocol != protocol:
+        translated = {RESPONSES: ResponsesViaChatUrl, ANTHROPIC_MESSAGES: MessagesViaChatUrl}
+        return translated[client_protocol](base_url)
     if protocol == ANTHROPIC_MESSAGES:
         return MessagesBaseUrl(base_url)
     return ExactBaseUrl(base_url)
+
+
+def compat_launch(
+    argv: list[str],
+    env: dict[str, str],
+    url: TranslatedBaseUrl,
+    credential: str,
+    *,
+    model: str,
+) -> tuple[list[str], dict[str, str]]:
+    """The CLI's launch behind the member's compatibility helper.
+
+    The argv gains the launcher in front; the upstream's URL and key travel in
+    the environment the launcher consumes and removes before it becomes the
+    CLI (``cloud_agent_host.protocol_translator``). ``model`` locks the helper to one model;
+    empty takes the CLI's own ``--model`` argument.
+    """
+    return [*COMPAT_LAUNCHER, *argv], {
+        **env,
+        ENV_CLIENT: url.client_protocol,
+        ENV_UPSTREAM_URL: str(url),
+        ENV_UPSTREAM_KEY: credential,
+        ENV_MODEL: model,
+    }
+
+
+def compat_cli_credential(credential: str) -> str:
+    """What a translated member's CLI authenticates to its helper with.
+
+    The launcher writes the member's token here (the claim's
+    ``local_token``); the CLI never holds the provider key.
+    """
+    del credential
+    return TOKEN_PLACEHOLDER
+
+
+#: Where a translated CLI is told its provider is: the helper's loopback origin,
+#: written in by the launcher once its port is known.
+COMPAT_ORIGIN = ORIGIN_PLACEHOLDER
 
 
 def openai_base_url(base_url: str) -> str:
@@ -90,6 +170,12 @@ def openai_base_url(base_url: str) -> str:
     if isinstance(base_url, MessagesBaseUrl):
         raise RuntimeConnectionUnsupportedError(
             "this agent speaks an OpenAI protocol, and the connection offers Anthropic Messages"
+        )
+    if isinstance(base_url, TranslatedBaseUrl):
+        # Only Codex and Claude Code are ever translated, and each handles it
+        # before asking for a URL; anything else here is a pairing gone wrong.
+        raise RuntimeConnectionUnsupportedError(
+            "this agent is not run through the protocol compatibility helper"
         )
     if isinstance(base_url, ExactBaseUrl):
         return str(base_url)

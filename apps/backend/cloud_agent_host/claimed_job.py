@@ -172,6 +172,7 @@ def claim_secret_values(job: ClaimedJob) -> dict[str, str]:
     if job.ssh_access is not None:
         values = {**values, **job.ssh_access.secrets()}
     if job.model_connection is not None:
+        # With the token this member's CLI holds on a translated plan.
         values = {**values, **job.model_connection.secrets()}
     return values
 

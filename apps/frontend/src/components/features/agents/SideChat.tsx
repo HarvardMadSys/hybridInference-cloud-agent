@@ -511,7 +511,7 @@ function SideChatContent({
                   </>
                 ) : (
                   <span className="min-w-0 flex-1 truncate text-xs text-gray-500 dark:text-gray-400">
-                    {choiceLabel(config, model, t)}
+                    {choiceLabel(config, model, t, { runtime })}
                   </span>
                 )}
                 {running ? (

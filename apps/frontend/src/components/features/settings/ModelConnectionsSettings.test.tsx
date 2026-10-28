@@ -325,3 +325,83 @@ describe('an Anthropic Messages connection', () => {
     expect(api.discoverConnectionModels).toHaveBeenCalledWith(messages.id);
   });
 });
+
+describe('a Chat Completions connection used through translation', () => {
+  const chat: api.ModelConnection = {
+    ...connection,
+    id: 'mconn_c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0',
+    name: 'Chat provider',
+    protocols: ['chat_completions'],
+    models: ['chat-model'],
+    runtimes: ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
+    translated_runtimes: ['claude-code', 'codex'],
+  };
+
+  it('names the translated agents and tests the translated path on request', async () => {
+    vi.mocked(api.listModelConnections).mockResolvedValue({
+      configured: true,
+      enabled: true,
+      connections: [chat],
+    });
+    vi.mocked(api.checkModelConnection).mockResolvedValue({
+      status: 'supported',
+      category: 'supported',
+      message: 'Streaming and a tool call round trip both worked.',
+      protocol: 'responses',
+      upstream_protocol: 'chat_completions',
+      mode: 'translated',
+      model: 'chat-model',
+      streaming: true,
+      tool_call: true,
+      final_answer: true,
+      http_status: 200,
+      checked_at: 'now',
+      recorded: true,
+    });
+    renderSettings();
+    const card = await screen.findByRole('article', { name: 'Chat provider' });
+    expect(card).toHaveTextContent('codex (via Chat Completions)');
+    expect(card).toHaveTextContent('claude-code (via Chat Completions)');
+    expect(card).not.toHaveTextContent('pi (via');
+    // Nothing is tested until asked: opening the page spends no quota.
+    expect(api.checkModelConnection).not.toHaveBeenCalled();
+    fireEvent.click(within(card).getByText('Test model', { selector: 'summary' }));
+    const protocol = within(card).getByLabelText('API to test');
+    expect(
+      within(protocol)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual([
+      'Chat Completions',
+      'Responses via Chat Completions',
+      'Anthropic Messages via Chat Completions',
+    ]);
+    fireEvent.change(protocol, { target: { value: 'responses' } });
+    fireEvent.click(within(card).getByRole('button', { name: 'Test model' }));
+    await waitFor(() =>
+      expect(api.checkModelConnection).toHaveBeenCalledWith(chat.id, 'chat-model', 'responses'),
+    );
+    expect(
+      await within(card).findByText(/chat-model · Responses via Chat Completions\./),
+    ).toBeVisible();
+  });
+
+  it('offers no translated test where the connection speaks the agent API itself', async () => {
+    vi.mocked(api.listModelConnections).mockResolvedValue({
+      configured: true,
+      enabled: true,
+      connections: [
+        { ...chat, protocols: ['chat_completions', 'responses', 'anthropic_messages'] },
+      ],
+    });
+    renderSettings();
+    const card = await screen.findByRole('article', { name: 'Chat provider' });
+    fireEvent.click(within(card).getByText('Test model', { selector: 'summary' }));
+    const protocol = within(card).getByLabelText('API to test');
+    expect(
+      within(protocol)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['Chat Completions', 'Responses', 'Anthropic Messages']);
+  });
+});

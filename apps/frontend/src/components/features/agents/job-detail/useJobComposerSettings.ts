@@ -119,7 +119,10 @@ export function useJobComposerSettings(job: AgentJob, inherited: InheritedModel)
   return {
     config,
     inherited,
-    inheritedLabel: choiceLabel(config, inheritedChoice, t, inheritedUnavailable),
+    inheritedLabel: choiceLabel(config, inheritedChoice, t, {
+      unavailable: inheritedUnavailable,
+      runtime: job.runtime,
+    }),
     // Holds Send while the turn would inherit a source that can no longer run.
     inheritedUnavailable: inheritedUnavailable && sameChoice(choice, inheritedChoice),
     choice,

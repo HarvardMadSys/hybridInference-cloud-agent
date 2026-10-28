@@ -189,7 +189,7 @@ from cloud_agent_shared.host_settings import (
     RUNNER_SETTING_KEYS,
     reported_values,
 )
-from cloud_agent_shared.model_connections import MODEL_CONNECTION_CAPABILITY
+from cloud_agent_shared.model_connections import HOST_MODEL_CONNECTION_CAPABILITIES
 from cloud_agent_shared.sandbox_manager_wire import member_manifest
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import (
@@ -1211,7 +1211,7 @@ def _environment_host_capabilities(backend: SandboxBackend, stamp: dict[str, Any
         ENVIRONMENT_INFERENCE_CAPABILITY,
         ENVIRONMENT_SNAPSHOT_CAPABILITY,
         SSH_ACCESS_CAPABILITY,
-        MODEL_CONNECTION_CAPABILITY,
+        *HOST_MODEL_CONNECTION_CAPABILITIES,
     ]
 
 

@@ -5,6 +5,7 @@ export const modelSourcesEn = {
   'modelSource.personal': '{model} · {name}',
   'modelSource.personalUnknown': '{model} · personal connection',
   'modelSource.unavailable': '{label} (unavailable)',
+  'modelSource.translated': '{label} · via Chat Completions',
   'modelSource.unavailableHint':
     '{label} cannot run with {runtime}, or its connection no longer offers it. Choose a model to continue.',
   'modelSource.inheritedUnavailable':
@@ -21,6 +22,7 @@ export const modelSourcesZhCN: Record<keyof typeof modelSourcesEn, string> = {
   'modelSource.personal': '{model} · {name}',
   'modelSource.personalUnknown': '{model} · 个人连接',
   'modelSource.unavailable': '{label}（不可用）',
+  'modelSource.translated': '{label} · 经 Chat Completions 转换',
   'modelSource.unavailableHint':
     '{label} 无法与 {runtime} 一起运行，或其连接已不再提供该模型。请选择模型后继续。',
   'modelSource.inheritedUnavailable': '此会话使用的 {label} 当前不可用，请为本轮选择模型。',

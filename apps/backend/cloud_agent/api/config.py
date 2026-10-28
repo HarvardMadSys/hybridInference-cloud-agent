@@ -33,7 +33,7 @@ from cloud_agent.model_preference import (
 from cloud_agent.schemas import AgentConfigResponse, McpConnectionSummary, ModelConnectionOption
 from cloud_agent.source_control import github_connect_configured
 from cloud_agent.source_control_runtime import GitHubAppState  # noqa: TC001 — FastAPI resolves it.
-from cloud_agent_shared.model_connections import RUNTIME_PROTOCOLS
+from cloud_agent_shared.model_connections import runtime_plans
 from cloud_agent_shared.plugins import supported_plugin_runtimes
 from cloud_agent_shared.runtime_catalog import (
     registered_runtimes,
@@ -171,18 +171,7 @@ async def get_agent_config(
         # The owner's own enabled connections, offered beside the Gateway's
         # models whether or not the Gateway catalog answered.
         model_connections=[
-            ModelConnectionOption(
-                id=row["id"],
-                name=row["name"],
-                models=list(row["models"]),
-                runtimes=sorted(
-                    runtime
-                    for runtime, protocol in RUNTIME_PROTOCOLS.items()
-                    if protocol in row["protocols"]
-                ),
-            )
-            for row in model_connections
-            if row.get("enabled")
+            _connection_option(row) for row in model_connections if row.get("enabled")
         ],
         mcp_runtimes=runtimes_supporting_mcp(),
         github_connected=github_connected,
@@ -242,6 +231,18 @@ async def _model_preference_for_user(
     if store is None:
         return ModelPreferenceView()
     return await store.model_preferences.get_model_preference(user_id)
+
+
+def _connection_option(row: dict[str, Any]) -> ModelConnectionOption:
+    """One enabled connection as the composer offers it, with every agent that can use it."""
+    plans = runtime_plans(list(row["protocols"]))
+    return ModelConnectionOption(
+        id=row["id"],
+        name=row["name"],
+        models=list(row["models"]),
+        runtimes=sorted(plans),
+        translated_runtimes=sorted(r for r, plan in plans.items() if plan.translated),
+    )
 
 
 async def _model_connections_for_user(

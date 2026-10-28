@@ -3,6 +3,7 @@ import type { AgentConfigApi } from '@/lib/api/agents';
 import { translate } from '@/lib/i18n/translate';
 import {
   choiceKey,
+  choiceLabel,
   modelOverride,
   modelPicker,
   offeredChoices,
@@ -95,5 +96,38 @@ describe('modelOverride', () => {
         { model: 'gpt-5', connectionId: A },
       ),
     ).toEqual({ model: 'gpt-5', model_connection_id: A });
+  });
+});
+
+describe('translated sources', () => {
+  const chatOnly = {
+    ...config,
+    models: [],
+    model_connections: [
+      {
+        id: A,
+        name: 'Chat only',
+        models: ['m'],
+        runtimes: ['claude-code', 'codex', 'kilo', 'opencode', 'pi'],
+        translated_runtimes: ['claude-code', 'codex'],
+      },
+    ],
+  } as AgentConfigApi;
+
+  it('says when an agent reaches a connection through the compatibility helper', () => {
+    const choice = { model: 'm', connectionId: A };
+    expect(choiceLabel(chatOnly, choice, t, { runtime: 'codex' })).toBe(
+      'm · Chat only · via Chat Completions',
+    );
+    expect(choiceLabel(chatOnly, choice, t, { runtime: 'opencode' })).toBe('m · Chat only');
+    expect(choiceLabel(chatOnly, choice, t, { runtime: 'codex', unavailable: true })).toBe(
+      'm · Chat only · via Chat Completions (unavailable)',
+    );
+  });
+
+  it('offers a chat-only connection to Codex and Claude Code as well', () => {
+    for (const runtime of ['codex', 'claude-code', 'pi']) {
+      expect(offeredChoices(chatOnly, runtime)).toEqual([{ model: 'm', connectionId: A }]);
+    }
   });
 });

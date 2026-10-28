@@ -56,6 +56,11 @@ class SharedResidentLaunchConfig(BaseModel):
     )
     inference_protocol: Literal["", "chat_completions", "responses", "anthropic_messages"] = ""
     inference_source: str = Field("", max_length=128, pattern=r"^(mconn_[0-9a-f]{32}@[0-9]+)?$")
+    # The CLI's own protocol on a translated plan (Codex or Claude Code on a
+    # Chat Completions connection); empty is direct.
+    inference_client_protocol: Literal["", "responses", "anthropic_messages"] = ""
+    # That member's own loopback token, issued by the control plane; a secret.
+    inference_local_token: str = Field("", pattern=r"^([0-9a-f]{64})?$", repr=False)
 
 
 def resident_launch(
@@ -100,4 +105,6 @@ def resident_launch(
         inference_base_url=body.inference_base_url,
         inference_protocol=body.inference_protocol,
         inference_source=body.inference_source,
+        inference_client_protocol=body.inference_client_protocol,
+        inference_local_token=body.inference_local_token,
     )

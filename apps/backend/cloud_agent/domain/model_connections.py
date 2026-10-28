@@ -17,6 +17,8 @@ from cloud_agent_shared.model_connections import (
     MAX_MODELS,
     MODEL_ID,
     PROTOCOLS,
+    ProtocolPlan,
+    protocol_plan,
     runtime_protocol,
 )
 
@@ -43,9 +45,9 @@ UNUSABLE_MESSAGES: dict[str, str] = {
     "model_not_listed": "That model is not listed on its connection. Add it, or choose another.",
     "runtime_unsupported": "This agent cannot run on a model connection.",
     "protocol_unsupported": (
-        "This connection does not offer the protocol this agent speaks: Claude Code needs "
-        "Anthropic Messages, Codex needs Responses, and OpenCode, Kilo and pi need Chat "
-        "Completions."
+        "This connection does not offer a protocol this agent can use: OpenCode, Kilo and pi "
+        "need Chat Completions; Codex needs Responses or Chat Completions; Claude Code needs "
+        "Anthropic Messages or Chat Completions."
     ),
     "effort_unsupported": (
         "Reasoning effort cannot be set for a model connection; leave it on Auto."
@@ -166,8 +168,12 @@ def require_usable(
     runtime: str,
     model: str,
     reasoning_effort: str | None = None,
-) -> str:
-    """The protocol ``runtime`` will speak to ``connection`` for ``model``, or refuse.
+) -> ProtocolPlan:
+    """The plan ``runtime`` will use on ``connection`` for ``model``, or refuse.
+
+    The plan is ``protocol_plan``'s: the runtime's own protocol when the
+    connection offers it, else one of the two translations onto Chat
+    Completions.
 
     The one predicate admission, follow-ups, waiting messages, goal rounds,
     claims, residencies and Fork all ask. ``connection`` is the owner's own
@@ -180,16 +186,16 @@ def require_usable(
         raise ModelConnectionUnusable("deleted")
     if not connection.get("enabled"):
         raise ModelConnectionUnusable("disabled")
-    protocol = runtime_protocol(runtime)
-    if protocol is None:
+    if runtime_protocol(runtime) is None:
         raise ModelConnectionUnusable("runtime_unsupported")
-    if protocol not in (connection.get("protocols") or []):
+    plan = protocol_plan(runtime, list(connection.get("protocols") or []))
+    if plan is None:
         raise ModelConnectionUnusable("protocol_unsupported")
     if model not in (connection.get("models") or []):
         raise ModelConnectionUnusable("model_not_listed")
     if reasoning_effort is not None:
         raise ModelConnectionUnusable("effort_unsupported")
-    return protocol
+    return plan
 
 
 __all__ = [

@@ -83,8 +83,10 @@ Anthropic Messages 的约定不同：Claude Code 的 SDK 会在 `ANTHROPIC_BASE_
   凭据版本为范围加密保留，用于该组后续快照与受信发布的秘密扫描。新建但未使用的连接不会写入。
 - `agent_jobs.model_connection_id`、`agent_pending_messages.model_connection_id`：NULL 表示
   Gateway。**不建外键**，删除连接不能把回合的来源改成 NULL，否则它就悄悄变成了 Gateway。
-- `agent_thread_sandbox_memberships.residency_model_connection_id/_revision`：当前常驻进程
-  是用哪个连接的哪个版本启动的。
+- `agent_model_connection_residencies(thread_id, residency_generation, connection_id,
+  credential_revision)`：当前常驻进程是用哪个连接的哪个版本启动的。单独成表而不是成员表的新列，
+  这样运行中的上一个版本对成员表的预编译 `SELECT m.*` 不会因列变化失效；关联时必须匹配当前的
+  常驻代，旧连接的轮换不会误关更新的 Gateway 常驻。
 
 来源规则：
 

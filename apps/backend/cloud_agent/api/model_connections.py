@@ -50,9 +50,10 @@ from cloud_agent.domain.model_connections import (
     is_connection_id,
 )
 from cloud_agent_shared.model_connections import (
+    COMPAT_UPSTREAMS,
     MAX_API_KEY_CHARS,
     PROTOCOLS,
-    RUNTIME_PROTOCOLS,
+    runtime_plans,
     valid_api_key,
 )
 
@@ -185,6 +186,9 @@ class ModelConnectionView(BaseModel):
     has_api_key: bool
     #: The agents that can run on this connection, from the protocols it offers.
     runtimes: list[str]
+    #: Those of ``runtimes`` that run through the compatibility helper; the
+    #: connection's own ``protocols`` stay what its upstream offers.
+    translated_runtimes: list[str] = Field(default_factory=list)
     last_check: dict[str, Any] | None = None
     created_at: str
     updated_at: str
@@ -206,7 +210,12 @@ class ModelConnectionCheckView(BaseModel):
     status: str
     category: str
     message: str
+    #: The client protocol tested: what the agent's CLI speaks.
     protocol: str
+    #: What the request went out as; differs on a translated check.
+    upstream_protocol: str = ""
+    #: ``direct`` or ``translated``.
+    mode: str = "direct"
     model: str
     streaming: bool
     tool_call: bool
@@ -226,6 +235,7 @@ class DiscoveredModels(BaseModel):
 
 def _view(row: dict[str, Any]) -> ModelConnectionView:
     protocols = list(row["protocols"])
+    plans = runtime_plans(protocols)
     return ModelConnectionView(
         id=row["id"],
         name=row["name"],
@@ -234,7 +244,8 @@ def _view(row: dict[str, Any]) -> ModelConnectionView:
         models=list(row["models"]),
         enabled=bool(row["enabled"]),
         has_api_key=row.get("api_key_ciphertext") is not None,
-        runtimes=sorted(r for r, p in RUNTIME_PROTOCOLS.items() if p in protocols),
+        runtimes=sorted(plans),
+        translated_runtimes=sorted(r for r, plan in plans.items() if plan.translated),
         last_check=row.get("last_check"),
         created_at=row["created_at"].isoformat(),
         updated_at=row["updated_at"].isoformat(),
@@ -408,6 +419,19 @@ async def _reserve(store: _Storage, user_id: str, connection_id: str) -> dict[st
     return connection
 
 
+def _check_upstream(client: str, protocols: list[str]) -> str | None:
+    """What a check of ``client`` goes out as on ``protocols``: native first, else translated.
+
+    The same rule as ``protocol_plan``: a protocol the connection declares is
+    tested directly, never through the helper; Responses or Anthropic Messages
+    on a Chat Completions connection is tested through it.
+    """
+    if client in protocols:
+        return client
+    upstream = COMPAT_UPSTREAMS.get(client)
+    return upstream if upstream is not None and upstream in protocols else None
+
+
 def _key(row: dict[str, Any]) -> str:
     try:
         return _cipher().decrypt(row["api_key_ciphertext"])
@@ -432,20 +456,22 @@ async def check(
     _require_enabled()
     store = require_store(store)
     row = await _live(store, user["user_id"], connection_id)
-    if body.protocol not in row["protocols"]:
+    if _check_upstream(body.protocol, row["protocols"]) is None:
         raise _refused(400, "invalid_request", "This connection does not offer that protocol.")
     if body.model not in row["models"]:
         raise _refused(400, "invalid_request", "That model is not listed on this connection.")
     # What is checked is the row the reservation read, and what it is
     # recorded against is that row's revision -- never whatever is there later.
     checked = await _reserve(store, user["user_id"], connection_id)
-    if body.protocol not in checked["protocols"] or body.model not in checked["models"]:
+    upstream = _check_upstream(body.protocol, checked["protocols"])
+    if upstream is None or body.model not in checked["models"]:
         raise _refused(409, "model_connection_changed", "The connection changed. Try again.")
     result = await check_connection(
         base_url=checked["base_url"],
         api_key=_key(checked),
         protocol=body.protocol,
         model=body.model,
+        upstream_protocol=upstream,
     )
     recorded = await store.model_connections.record_model_connection_check(
         user_id=user["user_id"],

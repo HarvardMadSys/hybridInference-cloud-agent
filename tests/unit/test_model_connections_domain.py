@@ -105,8 +105,16 @@ def _row(**changes: Any) -> dict[str, Any]:
         (None, "opencode", "gpt-4.1", None, "not_found"),
         (_row(deleted_at="now", enabled=False), "opencode", "gpt-4.1", None, "deleted"),
         (_row(enabled=False), "opencode", "gpt-4.1", None, "disabled"),
-        # Claude Code runs only on a connection that offers Anthropic Messages.
-        (_row(), "claude-code", "gpt-4.1", None, "protocol_unsupported"),
+        # Nothing is translated except onto Chat Completions: a Messages-only
+        # or Responses-only connection serves no Chat agent, and no other client.
+        (
+            _row(protocols=["responses"]),
+            "claude-code",
+            "gpt-4.1",
+            None,
+            "protocol_unsupported",
+        ),
+        (_row(protocols=["responses"]), "pi", "gpt-4.1", None, "protocol_unsupported"),
         (
             _row(protocols=["anthropic_messages"]),
             "opencode",
@@ -116,7 +124,7 @@ def _row(**changes: Any) -> dict[str, Any]:
         ),
         (_row(protocols=["anthropic_messages"]), "codex", "gpt-4.1", None, "protocol_unsupported"),
         (_row(), "claude-desktop", "gpt-4.1", None, "runtime_unsupported"),
-        (_row(), "codex", "gpt-4.1", None, "protocol_unsupported"),
+        (_row(), "codex", "gpt-4.1", "high", "effort_unsupported"),
         (_row(), "opencode", "gpt-4o", None, "model_not_listed"),
         (_row(), "opencode", "gpt-4.1", "high", "effort_unsupported"),
     ],
@@ -127,19 +135,41 @@ def test_every_unusable_pairing_is_refused_with_its_reason(row, runtime, model, 
     assert refused.value.reason == reason
 
 
-def test_a_usable_pairing_names_the_protocol_the_runtime_speaks():
+def _plan(row, runtime, model="gpt-4.1"):
+    plan = require_usable(row, runtime=runtime, model=model)
+    return (plan.client_protocol, plan.upstream_protocol, plan.mode)
+
+
+def test_a_usable_pairing_names_its_plan_native_first():
     both = _row(protocols=["chat_completions", "responses"])
-    assert require_usable(both, runtime="pi", model="gpt-4.1") == "chat_completions"
-    assert require_usable(both, runtime="codex", model="gpt-4.1") == "responses"
+    assert _plan(both, "pi") == ("chat_completions", "chat_completions", "direct")
+    # Responses is offered, so Codex never goes through the helper here.
+    assert _plan(both, "codex") == ("responses", "responses", "direct")
     messages = _row(protocols=["anthropic_messages"], models=["claude-sonnet-4-5"])
-    assert require_usable(messages, runtime="claude-code", model="claude-sonnet-4-5") == (
-        "anthropic_messages"
+    assert _plan(messages, "claude-code", "claude-sonnet-4-5") == (
+        "anthropic_messages",
+        "anthropic_messages",
+        "direct",
     )
+    every = _row(protocols=["chat_completions", "responses", "anthropic_messages"])
+    assert {_plan(every, r)[2] for r in ("pi", "codex", "claude-code")} == {"direct"}
     # Effort stays Auto on a connection, for Claude Code as for the others.
     with pytest.raises(ModelConnectionUnusable) as refused:
         require_usable(
             messages, runtime="claude-code", model="claude-sonnet-4-5", reasoning_effort="high"
         )
+    assert refused.value.reason == "effort_unsupported"
+
+
+def test_codex_and_claude_code_run_on_a_chat_only_connection_through_the_helper():
+    chat = _row()
+    assert _plan(chat, "codex") == ("responses", "chat_completions", "translated")
+    assert _plan(chat, "claude-code") == ("anthropic_messages", "chat_completions", "translated")
+    # The connection still declares only what its upstream offers.
+    assert chat["protocols"] == ["chat_completions"]
+    # Effort stays Auto on a translated plan too.
+    with pytest.raises(ModelConnectionUnusable) as refused:
+        require_usable(chat, runtime="claude-code", model="gpt-4.1", reasoning_effort="high")
     assert refused.value.reason == "effort_unsupported"
 
 

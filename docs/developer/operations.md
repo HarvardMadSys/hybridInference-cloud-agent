@@ -4200,8 +4200,11 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   authorized claim and residency responses do carry it: that is how the
   member's CLI gets it.
 - **Protocols.** OpenCode, Kilo and pi need Chat Completions; Codex needs
-  Responses; Claude Code needs Anthropic Messages. Nothing translates between
-  them. Reasoning effort is Auto only. A pairing a connection cannot serve is
+  Responses; Claude Code needs Anthropic Messages. A connection that offers
+  an agent's own protocol is always used directly. On a connection that
+  offers only Chat Completions, Codex and Claude Code also run, through the
+  member's translator (below); no other pair is translated. Reasoning effort
+  is Auto only. A pairing a connection cannot serve is
   refused when the task or message is submitted, and again at every claim;
   nothing falls back to the Gateway or another model.
 - **Where requests go.** The OpenAI CLIs append `/chat/completions` or
@@ -4215,9 +4218,11 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   the same way; one that also offers an OpenAI API is listed with that API's
   `GET /models`. The CLI may also call `count_tokens`, `/v1/models` and
   `HEAD /api/hello` on the same host; a provider that lacks them still works.
-- **Host rollout.** Runners advertise `model-connections-v1`. A claim for a
-  turn on a connection is released, without spending an attempt, to a runner
-  that does not attest it, so roll hosts out first. A disabled, deleted or no
+- **Host rollout.** Runners advertise `model-connections-v1`, and
+  `model-protocol-translation-v1` when they can run a translated member. A
+  claim for a turn on a connection, or for a translated one, is released,
+  without spending an attempt, to a runner that does not attest what it
+  needs, so roll hosts out first. A disabled, deleted or no
   longer suitable connection fails the turn at its claim with that reason.
 - **What a turn does.** The claim carries the connection's exact Base URL,
   protocol, credential revision and key; the runner masks the key. The
@@ -4236,6 +4241,26 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   real provider key, and deleting the connection here does not revoke it at
   the provider. A group whose history exceeds the scan bound fails the scan
   closed rather than skipping keys.
+- **Translated turns.** For Codex or Claude Code on a Chat Completions
+  connection, the host installs `/usr/local/libexec/model-protocol-translator.pyz`
+  (built from `cloud_agent_host/protocol_translator.py` and
+  `cloud_agent_shared/protocol_compat`, digest-checked, root-owned) into the
+  container before the member starts, so a retained container runs
+  this host's code. The member's command becomes
+  `python3 -I model-protocol-translator.pyz <CLI argv>`: it binds `127.0.0.1`
+  on a free port, forks the translator as the same member UID, and execs the
+  CLI, which keeps the PID the host recorded. The translator dies with the
+  CLI (parent-death signal and a parent check), and member reaping and
+  container stop remove it as they remove the CLI. It forwards only to the
+  connection's `/chat/completions` over HTTPS, answers only the member's own
+  token (issued with the claim and keyed by the platform, not by the provider
+  key, so a sibling on the same key cannot compute it), refuses requests it cannot carry (hosted tools such as web search,
+  files, stateful `previous_response_id`) and turns a provider stream that did
+  not finish into a failure, never a success. Codex starts with web search
+  disabled and Claude Code without its WebSearch tool on this path; their
+  other tools, Codex sub-agents and MCP tools included, work. Prior
+  reasoning or thinking is not sent to a Chat Completions provider. The
+  `AGENT_COMPAT_*` variables are the launcher's and never reach the CLI.
 - **Changes take effect at once.** Rotating the key, changing the Base URL or
   protocols, disabling or deleting a connection releases every residency
   started on the old state and closes its process, the same path a chat
@@ -4252,7 +4277,10 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   `AGENT_EGRESS_PROTECTED_CIDRS`), the connection is pinned to the checked
   addresses, redirects are not followed and no upstream body is echoed. Each
   owner may run 20 checks and model-list reads an hour, reserved atomically
-  across replicas; an owner's checks are not otherwise serialized.
+  across replicas; an owner's checks are not otherwise serialized. A
+  translated pair is checked through the same translator code the member
+  runs: the probe goes to `/chat/completions` with the bearer key, comes back
+  converted, and the result records that it was translated.
 - **Usage.** The owner's provider bills these turns and the Gateway ledger
   records none of them. A turn's usage shows runtime token counts and says the
   cost is the provider's; conversation totals mark themselves incomplete, and

@@ -28,8 +28,11 @@ class ModelConnectionOption(BaseModel):
     id: str
     name: str
     models: list[str]
-    #: The agents whose protocol this connection offers.
+    #: Every agent that can run on this connection, natively or translated.
     runtimes: list[str]
+    #: Those of ``runtimes`` that reach it through the compatibility helper
+    #: (Codex or Claude Code on a Chat Completions connection).
+    translated_runtimes: list[str] = Field(default_factory=list)
 
 
 class AgentConfigResponse(BaseModel):

@@ -9,14 +9,18 @@ from cloud_agent_shared.model_connections import anthropic_base_url
 from cloud_agent_shared.runtime_catalog import CLAUDE_CODE
 
 from .base import (
+    COMPAT_ORIGIN,
     EMPTY_RUNTIME_MCP_CONFIG,
     MCP_TOKEN_ENV,
     AgentRuntime,
     ExactBaseUrl,
     MessagesBaseUrl,
+    MessagesViaChatUrl,
     RuntimeCapabilities,
     RuntimeConnectionUnsupportedError,
     RuntimeMCPConfig,
+    compat_cli_credential,
+    compat_launch,
 )
 from .events import (
     ERROR,
@@ -100,6 +104,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         """
         del workdir, provides_isolation
         anthropic_url = self.inference_base_url(gateway_base_url)
+        translated = isinstance(gateway_base_url, MessagesViaChatUrl)
         argv = [
             self.binary,
             "-p",
@@ -160,12 +165,16 @@ class ClaudeCodeRuntime(AgentRuntime):
             # owner's choices.
             "--permission-prompt-tool",
             "stdio",
+            # Web search is an Anthropic server tool; a Chat Completions upstream
+            # behind the helper has none, and the helper refuses the request.
+            *(("--disallowedTools", "WebSearch") if translated else ()),
         ]
         env = {
             "ANTHROPIC_BASE_URL": anthropic_url,
             # The SDK sends this as ``x-api-key``, which is what the check
-            # authenticates with too; never ``ANTHROPIC_AUTH_TOKEN``.
-            "ANTHROPIC_API_KEY": credential,
+            # authenticates with too; never ``ANTHROPIC_AUTH_TOKEN``. Behind the
+            # helper it is the member's loopback token, not the provider key.
+            "ANTHROPIC_API_KEY": compat_cli_credential(credential) if translated else credential,
             "MCP_TOOL_TIMEOUT": "1560000",
             # Remote MCP has a separate five-minute idle timer. The relay can
             # wait ten minutes for owner approval without sending progress;
@@ -200,6 +209,9 @@ class ClaudeCodeRuntime(AgentRuntime):
             # Session files land in the retained container layer instead of a
             # process-private HOME, so docker stop/start can resume them.
             env["CLAUDE_CONFIG_DIR"] = config_dir
+        if isinstance(gateway_base_url, MessagesViaChatUrl):
+            # The model is pinned later through ``--model``; the helper locks to it.
+            return compat_launch(argv, env, gateway_base_url, credential, model=model)
         return argv, env
 
     @staticmethod
@@ -214,6 +226,9 @@ class ClaudeCodeRuntime(AgentRuntime):
         """
         if isinstance(gateway_base_url, MessagesBaseUrl):
             return anthropic_base_url(str(gateway_base_url))
+        if isinstance(gateway_base_url, MessagesViaChatUrl):
+            # The member's compatibility helper, at the origin its launcher binds.
+            return COMPAT_ORIGIN
         if isinstance(gateway_base_url, ExactBaseUrl):
             raise RuntimeConnectionUnsupportedError(
                 "Claude Code speaks Anthropic Messages, which this connection does not offer"

@@ -29,6 +29,7 @@ from cloud_agent_host.chat_sandbox import (
     member_inference_env_path,
 )
 from cloud_agent_host.codex_plugins import install_codex_plugins
+from cloud_agent_host.compat_helper import compat_token_env, install_compat_helper
 from cloud_agent_host.drivers import (
     DialectRuntime,
     DriverError,
@@ -194,12 +195,24 @@ class ResidentLaunch:
     inference_base_url: str = ""
     inference_protocol: str = ""
     inference_source: str = ""
+    # The CLI's own protocol when the member reaches the connection through
+    # its compatibility helper; empty is direct. Fixed at process start, like
+    # the source: a plan change restarts the member.
+    inference_client_protocol: str = ""
+    # Its loopback token on a translated plan (``ModelConnectionAccess.local_token``):
+    # fixed at process start and part of reuse identity, so a process never
+    # holds a token the turn's redactor does not mask.
+    inference_local_token: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
         if not self.thread_id or not self.runtime_id or not self.model:
             raise ValueError("resident launch identity, runtime, and model are required")
         if bool(self.inference_source) != bool(self.inference_base_url and self.inference_protocol):
             raise ValueError("a model connection launch needs its URL, protocol and source")
+        if self.inference_client_protocol and not self.inference_source:
+            raise ValueError("a translated launch needs its model connection")
+        if bool(self.inference_client_protocol) != bool(self.inference_local_token):
+            raise ValueError("a translated launch, and only one, carries its member's token")
         if not self.gateway_base_url:
             raise ValueError("resident launch gateway is required")
         if self.slot_id < 0:
@@ -362,6 +375,8 @@ class ResidentTransport(Generic[_RuntimeT_co]):
             and self.launch.inference_source == launch.inference_source
             and self.launch.inference_base_url == launch.inference_base_url
             and self.launch.inference_protocol == launch.inference_protocol
+            and self.launch.inference_client_protocol == launch.inference_client_protocol
+            and self.launch.inference_local_token == launch.inference_local_token
             and same_mcp
             and self.launch.github_token == launch.github_token
             and self.launch.github_repo == launch.github_repo
@@ -789,6 +804,7 @@ class ResidentTransportFactory:
                 "GIT_CONFIG_VALUE_0": CHAT_WORKDIR,
             }
         )
+        base_env.update(compat_token_env(launch.inference_local_token))
         # Only the claim's repository-scoped token may authenticate gh. Do not
         # fall back to a credential inherited from a custom host backend.
         base_env.pop("GH_TOKEN", None)
@@ -858,6 +874,9 @@ class ResidentTransportFactory:
                     )
                 if runtime_id == "codex" and launch.mcp_server_ids:
                     self._manager.ensure_codex_mcp_policy(spec, launch.mcp_base_url)
+                if launch.inference_client_protocol:
+                    # A retained container gets this host's helper, not its image's.
+                    install_compat_helper(self._manager, spec)
                 reaped = True
             pidfile = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/resident-{secrets.token_hex(16)}.pid"
             return self._manager.spawn(
@@ -878,7 +897,11 @@ class ResidentTransportFactory:
             # normalized like the Gateway relay's (``ExactBaseUrl``).
             # Typed by its protocol, so only the adapter that speaks it accepts it.
             gateway_base_url=(
-                connection_base_url(launch.inference_base_url, launch.inference_protocol)
+                connection_base_url(
+                    launch.inference_base_url,
+                    launch.inference_protocol,
+                    launch.inference_client_protocol,
+                )
                 if launch.inference_source
                 else launch.gateway_base_url
             ),

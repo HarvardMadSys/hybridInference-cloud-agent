@@ -100,4 +100,6 @@ def test_a_claim_attests_the_shared_live_capabilities(monkeypatch):
         "environment-snapshot-v1",
         "ssh-access-v1",
         "model-connections-v1",
+        # It also installs and runs the model protocol compatibility helper.
+        "model-protocol-translation-v1",
     ]

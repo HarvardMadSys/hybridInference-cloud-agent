@@ -6,7 +6,14 @@ which is all the CLI does. So a check runs exactly that, for one model and
 one protocol the owner picks, in that protocol's own wire format and at the
 URL the CLI will call: a streaming request offering one tool, then a second
 streaming request carrying the tool's result back. Chat Completions and
-Responses are read here; Anthropic Messages in ``model_connection_anthropic``. Only both succeeding
+Responses are read here; Anthropic Messages in ``model_connection_anthropic``.
+
+A *translated* plan -- Codex or Claude Code on a connection that offers only
+Chat Completions -- is checked through the compatibility layer the member
+will run (``cloud_agent_shared.protocol_compat``): the client's probe passes
+the same gate, goes to ``/chat/completions`` with the connection's bearer key,
+and the upstream's stream comes back through the same converter, to be read
+by the client protocol's own parser. A result says which plan it tested. Only both succeeding
 is ``supported``. A provider that answers but cannot do one of them is
 ``unsupported``; one that cannot be reached, refuses the key or fails is
 ``failed``, with a category the owner can act on.
@@ -67,10 +74,14 @@ from cloud_agent.mcp.transports import pinned_transport
 from cloud_agent_shared.model_connections import (
     ANTHROPIC_MESSAGES,
     CHAT_COMPLETIONS,
+    COMPAT_UPSTREAMS,
     MODEL_ID,
     PROTOCOLS,
     RESPONSES,
+    ProtocolPlan,
 )
+from cloud_agent_shared.protocol_compat.gate import CompatRejected, Prepared, prepare
+from cloud_agent_shared.protocol_compat.stream import ClientStream, parse_frames
 from cloud_agent_shared.ssh_access import SshAccessError, require_public_ipv4
 
 if TYPE_CHECKING:
@@ -147,14 +158,22 @@ _FAILED = frozenset(
 class CheckResult:
     """What a check found, as stored on the connection and shown to its owner."""
 
+    #: The client protocol tested: what the runtime's CLI speaks.
     protocol: str
     model: str
     category: str
+    #: What the request went out as; empty is ``protocol`` itself (direct).
+    upstream_protocol: str = ""
     streaming: bool = False
     tool_call: bool = False
     final_answer: bool = False
     http_status: int | None = None
     checked_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+    @property
+    def plan(self) -> ProtocolPlan:
+        """The plan this check tested."""
+        return ProtocolPlan(self.protocol, self.upstream_protocol or self.protocol)
 
     @property
     def status(self) -> str:
@@ -170,6 +189,8 @@ class CheckResult:
             "category": self.category,
             "message": CHECK_MESSAGES[self.category],
             "protocol": self.protocol,
+            "upstream_protocol": self.plan.upstream_protocol,
+            "mode": self.plan.mode,
             "model": self.model,
             "streaming": self.streaming,
             "tool_call": self.tool_call,
@@ -338,6 +359,8 @@ class _Dialect:
     new_turn: Callable[[], StreamedTurn]
     event: Callable[[StreamedTurn, dict[str, Any]], None]
     settle: Callable[[StreamedTurn], None]
+    #: The client protocol to translate from onto Chat Completions; empty is direct.
+    translate: str = ""
 
 
 def _bearer(api_key: str) -> dict[str, str]:
@@ -373,21 +396,81 @@ _DIALECTS: dict[str, _Dialect] = {
 }
 
 
+def _translated_dialect(client: str) -> _Dialect:
+    """``client``'s parser, reading a Chat Completions upstream through the converter."""
+    own = _DIALECTS[client]
+    return _Dialect(
+        url=lambda base: base + "/chat/completions",
+        headers=_bearer,
+        new_turn=own.new_turn,
+        event=own.event,
+        settle=own.settle,
+        translate=client,
+    )
+
+
+def _dialect(plan: ProtocolPlan) -> _Dialect:
+    return (
+        _translated_dialect(plan.client_protocol)
+        if plan.translated
+        else _DIALECTS[plan.client_protocol]
+    )
+
+
+def _wire_body(dialect: _Dialect, body: dict[str, Any], model: str) -> Prepared:
+    """What goes upstream: the probe itself, or its Chat Completions translation."""
+    if not dialect.translate:
+        return Prepared(chat=body)
+    try:
+        return prepare(dialect.translate, body, model)
+    except CompatRejected:
+        raise CheckStop("request_rejected") from None
+
+
+async def _read_events(
+    response: httpx.Response, turn: StreamedTurn, dialect: _Dialect, converter: ClientStream | None
+) -> None:
+    """Every event of the answer into ``turn``, converted first on a translated plan."""
+    async for payload in sse_events(response):
+        turn.events += 1
+        if converter is None:
+            if payload is not None:
+                dialect.event(turn, payload)
+            continue
+        if payload is None:
+            # ``[DONE]``: the member's helper stops reading here too.
+            break
+        for converted in parse_frames(converter.feed(payload)):
+            dialect.event(turn, converted)
+    if converter is not None:
+        for converted in parse_frames(converter.finish()):
+            dialect.event(turn, converted)
+
+
 async def _stream(
-    client: httpx.AsyncClient, url: str, api_key: str, body: dict[str, Any], dialect: _Dialect
+    client: httpx.AsyncClient,
+    url: str,
+    api_key: str,
+    body: dict[str, Any],
+    dialect: _Dialect,
+    *,
+    model: str = "",
 ) -> StreamedTurn:
     """One streamed answer, refused unless it ended successfully."""
     turn = dialect.new_turn()
     headers = {**dialect.headers(api_key), "accept": "text/event-stream"}
+    wire = _wire_body(dialect, body, model)
+    converter = (
+        ClientStream(dialect.translate, model=model, request_body=body, names=wire.names)
+        if dialect.translate
+        else None
+    )
     try:
-        async with client.stream("POST", url, json=body, headers=headers) as response:
+        async with client.stream("POST", url, json=wire.chat, headers=headers) as response:
             category = _status_category(response.status_code)
             if category is not None:
                 raise CheckStop(category, http_status=response.status_code)
-            async for payload in sse_events(response):
-                turn.events += 1
-                if payload is not None:
-                    dialect.event(turn, payload)
+            await _read_events(response, turn, dialect, converter)
     except httpx.ConnectError as exc:
         tls = "CERTIFICATE" in str(exc).upper() or "SSL" in str(exc).upper()
         raise CheckStop("tls" if tls else "unreachable") from None
@@ -515,14 +598,15 @@ async def _run(
 ) -> None:
     nonce = f"check-{secrets.token_hex(4)}"
     first, second = _requests(result.protocol, result.model, nonce)
-    dialect = _DIALECTS[result.protocol]
+    dialect = _dialect(result.plan)
     url = dialect.url(base_url)
+    model = result.model
     async with _client(transport) as client:
-        turn = await _stream(client, url, api_key, first, dialect)
+        turn = await _stream(client, url, api_key, first, dialect, model=model)
         result.streaming = True
         call = _the_call(turn, nonce)
         result.tool_call = True
-        final = await _stream(client, url, api_key, second(turn, call), dialect)
+        final = await _stream(client, url, api_key, second(turn, call), dialect, model=model)
         # An answer that asks for another tool has not answered yet.
         if final.calls or nonce not in final.text:
             raise CheckStop("no_final_answer")
@@ -535,13 +619,26 @@ async def check_connection(
     api_key: str,
     protocol: str,
     model: str,
+    upstream_protocol: str | None = None,
     resolve: Callable[[str, int], Awaitable[Iterable[str]]] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> CheckResult:
-    """Run one check and say what it found; never raises for an upstream's behaviour."""
+    """Run one check and say what it found; never raises for an upstream's behaviour.
+
+    ``protocol`` is the client protocol tested; ``upstream_protocol``, when it
+    differs, is the Chat Completions upstream of a translated plan.
+    """
+    upstream = upstream_protocol or protocol
     if protocol not in PROTOCOLS or not MODEL_ID.fullmatch(model):
         raise ValueError("unknown protocol or model id")
-    result = CheckResult(protocol=protocol, model=model, category="supported")
+    if upstream != protocol and COMPAT_UPSTREAMS.get(protocol) != upstream:
+        raise ValueError("no translated plan for that pair")
+    result = CheckResult(
+        protocol=protocol,
+        model=model,
+        category="supported",
+        upstream_protocol=upstream if upstream != protocol else "",
+    )
     try:
         async with asyncio.timeout(_CHECK_TIMEOUT_S):
             await guard_base_url(base_url, resolve=resolve)

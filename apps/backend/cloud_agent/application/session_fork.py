@@ -146,22 +146,22 @@ async def _fork_credentials(
     grants: Any,
     source_job: dict[str, Any],
     residencies: dict[str, Any],
-    launch: dict[str, Any],
-) -> tuple[str, str]:
-    """Both members' credentials; ``launch`` gains the connection they run on.
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Each member's own launch fields: its credential and, on a connection, where it runs.
 
-    A Gateway chat gets two worker-fenced grants and no launch fields. On an
-    owner connection each residency is bound to the connection's current
-    revision and handed its key, and the launch names the connection's exact
-    endpoint, protocol and revision, which the host never points at its relay.
-    There is no grant to mint.
+    A Gateway chat gets two worker-fenced grants and no other launch fields.
+    On an owner connection each residency is bound to the connection's current
+    revision and handed its key, and each launch names the connection's exact
+    endpoint, protocol and revision, which the host never points at its relay;
+    on a translated plan each member also gets its own loopback token. There
+    is no grant to mint.
     """
     if not source_job.get("model_connection_id"):
         source = await _mint_residency_grant(job_store.grants, grants, row=residencies["source"])
         target = await _mint_residency_grant(job_store.grants, grants, row=residencies["target"])
         if not source or not target:
             raise _NoForkCredential
-        return source, target
+        return {"credential": source}, {"credential": target}
     source_access = await connection_residency_credential(
         job_store, source_job, row=residencies["source"]
     )
@@ -170,8 +170,10 @@ async def _fork_credentials(
     )
     if source_access.revision != target_access.revision:
         raise ModelConnectionUnusable("changed")
-    launch.update(source_access.launch_fields())
-    return source_access.api_key, target_access.api_key
+    return (
+        {"credential": source_access.api_key, **source_access.launch_fields()},
+        {"credential": target_access.api_key, **target_access.launch_fields()},
+    )
 
 
 async def materialize_session_fork(
@@ -303,8 +305,8 @@ async def materialize_session_fork(
             with contextlib.suppress(Exception):
                 await grants.revoke(previous_grant)
     try:
-        source_credential, target_credential = await _fork_credentials(
-            job_store, grants, source_job, residencies, launch_common
+        source_fields, target_fields = await _fork_credentials(
+            job_store, grants, source_job, residencies
         )
     except (ModelConnectionUnusable, CredentialCipherError, _NoForkCredential) as exc:
         await release_failed_fork_residencies(residencies)
@@ -328,14 +330,14 @@ async def materialize_session_fork(
             source_launch={
                 **launch_common,
                 "native_session_id": str(operation["source_native_session_id"]),
-                "credential": source_credential,
+                **source_fields,
                 "slot_id": int(operation["resident_slot_id"]),
                 "residency_generation": int(residencies["source"]["generation"]),
             },
             target_launch={
                 **launch_common,
                 "native_session_id": None,
-                "credential": target_credential,
+                **target_fields,
                 "slot_id": int(operation["target_resident_slot_id"]),
                 "residency_generation": int(residencies["target"]["generation"]),
             },

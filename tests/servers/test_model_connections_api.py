@@ -32,12 +32,15 @@ from tests.servers.test_grant_at_claim import _app as _claim_app, _ClaimStore, _
 from cloud_agent.api import model_connections as api
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_gateway_client, get_grant_client, get_storage
+from cloud_agent.application import session_fork
 from cloud_agent.application.follow_ups import prepare_follow_up
 from cloud_agent.application.model_connection_check import CheckResult
 from cloud_agent.application.model_connections import (
+    access_for_job,
     invalidate_connection,
     model_connection_cipher,
     residency_credential,
+    translator_token,
 )
 from cloud_agent.application.pending_messages import prepare_message
 from cloud_agent.domain.model_connections import ModelConnectionConflict
@@ -213,7 +216,11 @@ async def test_a_new_connection_stores_only_ciphertext_and_never_answers_the_key
 
     assert view["base_url"] == "https://models.example/v1"
     assert view["models"] == ["gpt-4.1", "openai/gpt-4.1"]
-    assert view["runtimes"] == ["kilo", "opencode", "pi"]
+    # Chat Completions natively for three, translated for Codex and Claude Code;
+    # the connection's own protocols stay what the upstream offers.
+    assert view["runtimes"] == ["claude-code", "codex", "kilo", "opencode", "pi"]
+    assert view["translated_runtimes"] == ["claude-code", "codex"]
+    assert view["protocols"] == ["chat_completions"]
     assert view["has_api_key"] is True
     assert _KEY not in str(view)
     stored = store.model_connections.rows[view["id"]]
@@ -304,8 +311,9 @@ async def test_a_check_runs_only_for_a_listed_model_and_protocol_and_keeps_its_r
         unlisted = await client.post(
             f"{PATH}/{view['id']}/check", json={"model": "gpt-4o", "protocol": "chat_completions"}
         )
+        # No plan serves an unknown protocol on any connection.
         wrong = await client.post(
-            f"{PATH}/{view['id']}/check", json={"model": "gpt-4.1", "protocol": "responses"}
+            f"{PATH}/{view['id']}/check", json={"model": "gpt-4.1", "protocol": "messages"}
         )
         checked = await client.post(
             f"{PATH}/{view['id']}/check", json={"model": "gpt-4.1", "protocol": "chat_completions"}
@@ -316,6 +324,53 @@ async def test_a_check_runs_only_for_a_listed_model_and_protocol_and_keeps_its_r
     assert seen[0]["api_key"] == _KEY and seen[0]["base_url"] == "https://models.example/v1"
     assert store.model_connections.rows[view["id"]]["last_check"]["category"] == "auth"
     assert _KEY not in checked.text
+    assert seen[0]["upstream_protocol"] == "chat_completions"
+
+
+async def test_a_check_tests_the_same_plan_a_runtime_would_use(monkeypatch):
+    store = _Store()
+    chat_only = await _create(store)
+    both = await _create(store, name="Both", protocols=["chat_completions", "responses"])
+    seen: list[dict[str, Any]] = []
+
+    async def fake_check(**kwargs):
+        seen.append(kwargs)
+        return CheckResult(
+            protocol=kwargs["protocol"],
+            model=kwargs["model"],
+            category="supported",
+            upstream_protocol=kwargs["upstream_protocol"]
+            if kwargs["upstream_protocol"] != kwargs["protocol"]
+            else "",
+        )
+
+    monkeypatch.setattr(api, "check_connection", fake_check)
+    async with await _client(_settings_app(store)) as client:
+        translated = await client.post(
+            f"{PATH}/{chat_only['id']}/check", json={"model": "gpt-4.1", "protocol": "responses"}
+        )
+        claude = await client.post(
+            f"{PATH}/{chat_only['id']}/check",
+            json={"model": "gpt-4.1", "protocol": "anthropic_messages"},
+        )
+        native = await client.post(
+            f"{PATH}/{both['id']}/check", json={"model": "gpt-4.1", "protocol": "responses"}
+        )
+
+    assert [r.status_code for r in (translated, claude, native)] == [200, 200, 200]
+    assert [kw["upstream_protocol"] for kw in seen] == [
+        "chat_completions",
+        "chat_completions",
+        "responses",
+    ]
+    assert (translated.json()["mode"], translated.json()["upstream_protocol"]) == (
+        "translated",
+        "chat_completions",
+    )
+    # Native first: the connection that offers Responses is tested on Responses itself.
+    assert (native.json()["mode"], native.json()["upstream_protocol"]) == ("direct", "responses")
+    stored = store.model_connections.rows[chat_only["id"]]["last_check"]
+    assert stored["mode"] == "translated" and stored["protocol"] == "anthropic_messages"
 
 
 async def test_a_check_that_finishes_after_an_edit_does_not_vouch_for_the_new_config(
@@ -453,9 +508,9 @@ async def test_a_task_on_an_owner_connection_needs_neither_the_gateway_catalog_n
 @pytest.mark.parametrize(
     ("runtime", "body", "row", "reason"),
     [
-        # Claude Code needs Anthropic Messages; this connection offers Chat Completions.
-        ("claude-code", {}, {}, "protocol_unsupported"),
-        ("codex", {}, {}, "protocol_unsupported"),
+        # Only a Chat Completions upstream is translated onto; Responses serves Codex alone.
+        ("claude-code", {}, {"protocols": ["responses"]}, "protocol_unsupported"),
+        ("pi", {}, {"protocols": ["responses"]}, "protocol_unsupported"),
         ("opencode", {}, {"protocols": ["anthropic_messages"]}, "protocol_unsupported"),
         ("codex", {}, {"protocols": ["anthropic_messages"]}, "protocol_unsupported"),
         (
@@ -509,6 +564,23 @@ async def test_claude_code_runs_on_a_connection_that_offers_anthropic_messages()
         row["id"],
     )
     assert stored.get("reasoning_effort") is None
+
+
+@pytest.mark.parametrize("runtime", ["codex", "claude-code"])
+async def test_codex_and_claude_code_are_admitted_on_a_chat_only_connection(runtime):
+    store = _TurnStorage()
+    row = _connection_row()
+    store.connections.rows[row["id"]] = row
+    async with AsyncClient(transport=ASGITransport(app=_turn_app(store)), base_url="http://t") as c:
+        created = await _create_job(
+            c, runtime=runtime, model="gpt-4.1", model_connection_id=row["id"]
+        )
+
+    assert created.status_code == 201, created.text
+    stored = store.jobs[created.json()["id"]]
+    assert (stored["runtime"], stored["model_connection_id"]) == (runtime, row["id"])
+    # The stored declaration is the upstream's, untouched by the translated plan.
+    assert row["protocols"] == ["chat_completions"]
 
 
 async def test_a_connection_needs_a_model_and_a_well_formed_id():
@@ -604,8 +676,8 @@ async def test_a_claude_follow_up_inherits_its_messages_source_and_rechecks_the_
     inherited = await _follow_up(connections, parent)
     assert (inherited.model, inherited.model_connection_id) == (None, None)
 
-    # The owner later unticks Messages: the inherited source no longer serves Claude Code.
-    row["protocols"] = ["chat_completions"]
+    # The owner later replaces Messages with Responses: nothing serves Claude Code now.
+    row["protocols"] = ["responses"]
     with pytest.raises(HTTPException) as refused:
         await _follow_up(connections, parent)
     assert refused.value.detail["error"]["reason"] == "protocol_unsupported"
@@ -728,6 +800,52 @@ async def test_a_claude_claim_carries_the_messages_protocol_and_mints_no_gateway
     assert response.json()["sandbox_token"] == "" and grants.calls == []
 
 
+@pytest.mark.parametrize(
+    ("runtime", "client"), [("codex", "responses"), ("claude-code", "anthropic_messages")]
+)
+async def test_a_translated_claim_names_both_protocols_and_needs_the_compat_host(runtime, client):
+    store = _ConnectionClaimStore(_connection_row(), runtime=runtime)
+    grants = _Grants()
+    response = await _claim(
+        store, grants, ("model-connections-v1", "model-protocol-translation-v1")
+    )
+
+    assert response.status_code == 200, response.text
+    access = response.json()["model_connection"]
+    assert (access["protocol"], access["client_protocol"]) == ("chat_completions", client)
+    assert access["api_key"] == _KEY and grants.calls == []
+    # The member's loopback token: the platform's MAC over this member's
+    # process identity, never a function of the provider key it shares.
+    identity = {
+        "user_id": _OWNER,
+        "thread_id": response.json()["thread_id"],
+        "source": f"{store.row['id']}@1",
+        "client_protocol": client,
+        "model": "gpt-4.1",
+    }
+    assert access["local_token"] == translator_token(model_connection_cipher(), **identity)
+    assert access["local_token"] != translator_token(
+        model_connection_cipher("another-platform-secret-0123456789"), **identity
+    )
+    assert access["local_token"] != translator_token(
+        model_connection_cipher(), **{**identity, "thread_id": "athr_sibling"}
+    )
+    assert _KEY not in access["local_token"]
+
+    older = _ConnectionClaimStore(_connection_row(), runtime=runtime)
+    refused = await _claim(older, grants, ("model-connections-v1",))
+    assert refused.status_code == 503
+    assert older.released and older.failed == [] and grants.calls == []
+
+
+async def test_a_direct_claim_never_asks_for_the_compat_host():
+    store = _ConnectionClaimStore(_connection_row(), runtime="pi")
+    response = await _claim(store, _Grants(), ("model-connections-v1",))
+    assert response.status_code == 200, response.text
+    assert "client_protocol" not in response.json()["model_connection"]
+    assert "local_token" not in response.json()["model_connection"]
+
+
 async def test_a_host_that_cannot_launch_on_a_connection_gets_the_claim_back():
     store, grants = _ConnectionClaimStore(_connection_row()), _Grants()
     response = await _claim(store, grants, capabilities=())
@@ -796,6 +914,34 @@ async def test_a_residency_on_a_connection_gets_its_key_bound_to_the_current_rev
     assert connections.bound == [{"thread_id": "athr_1", "generation": 4}]
 
 
+async def test_a_translated_fork_gives_each_member_its_own_token():
+    """Source and target share the key; each launch holds only its own member's token."""
+    connections = FakeModelConnections()
+    row = _connection_row()
+    connections.rows[row["id"]] = row
+    source_job = {**_JOB, "thread_id": "athr_source", "model": "gpt-4.1"}
+    residencies = {
+        "source": {"thread_id": "athr_source", "generation": 3},
+        "target": {"thread_id": "athr_target", "generation": 1},
+    }
+    source, target = await session_fork._fork_credentials(
+        _ResidencyStore(connections), None, source_job, residencies
+    )
+    assert source["credential"] == target["credential"] == _KEY
+    assert source["inference_client_protocol"] == target["inference_client_protocol"] == "responses"
+    tokens = {}
+    for thread_id, fields in (("athr_source", source), ("athr_target", target)):
+        # What that member's own later claim carries, so its runner masks it.
+        claimed = await access_for_job(
+            connections, {**source_job, "thread_id": thread_id}, model_connection_cipher()
+        )
+        assert claimed is not None
+        assert fields["inference_local_token"] == claimed.local_token
+        tokens[thread_id] = claimed.local_token
+    assert tokens["athr_source"] != tokens["athr_target"]
+    assert [b["thread_id"] for b in connections.bound] == ["athr_source", "athr_target"]
+
+
 async def test_a_residency_whose_connection_changed_is_released_and_ends_the_turn():
     connections = FakeModelConnections()
     row = _connection_row(models=("gpt-5.1-codex",), protocols=("responses",))
@@ -860,7 +1006,9 @@ async def test_config_offers_the_owners_connections_and_their_last_use_without_t
             "id": row["id"],
             "name": "Mine",
             "models": ["gpt-4.1"],
-            "runtimes": ["codex", "kilo", "opencode", "pi"],
+            # Codex is native on Responses here; Claude Code goes through the helper.
+            "runtimes": ["claude-code", "codex", "kilo", "opencode", "pi"],
+            "translated_runtimes": ["claude-code"],
         }
     ]
     assert _KEY not in str(config)

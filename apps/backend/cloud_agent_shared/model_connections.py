@@ -30,8 +30,9 @@ See ``docs/agents/specs/2026-10-27-user-model-connections.zh-CN.md``.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 #: A host advertises this when its runner and sandbox manager can launch a
 #: member on an owner connection: the exact Base URL instead of the host-local
@@ -39,6 +40,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 #: A host without it must never claim such a turn, or it would run the turn's
 #: model id against the Gateway.
 MODEL_CONNECTION_CAPABILITY = "model-connections-v1"
+#: A host advertises this when it can also run a *translated* plan: install
+#: the protocol compatibility helper and launch the member's CLI behind it. A
+#: host with only ``model-connections-v1`` gets such a claim back.
+MODEL_PROTOCOL_COMPAT_CAPABILITY = "model-protocol-translation-v1"
+#: What a host running this release advertises for owner connections.
+HOST_MODEL_CONNECTION_CAPABILITIES = (MODEL_CONNECTION_CAPABILITY, MODEL_PROTOCOL_COMPAT_CAPABILITY)
 
 CHAT_COMPLETIONS = "chat_completions"
 RESPONSES = "responses"
@@ -57,7 +64,18 @@ RUNTIME_PROTOCOLS: dict[str, str] = {
     "claude-code": ANTHROPIC_MESSAGES,
 }
 
+#: The two translated plans: a client protocol, run on a connection that
+#: offers only the upstream protocol named here. No other pair is translated.
+COMPAT_UPSTREAMS: dict[str, str] = {
+    RESPONSES: CHAT_COMPLETIONS,
+    ANTHROPIC_MESSAGES: CHAT_COMPLETIONS,
+}
+DIRECT = "direct"
+TRANSLATED = "translated"
+
 CONNECTION_ID = re.compile(r"mconn_[0-9a-f]{32}")
+#: A translated member's loopback token: an HMAC-SHA256 digest, in hex.
+LOCAL_TOKEN = re.compile(r"[0-9a-f]{64}")
 #: A model id as the upstream spells it. Provider ids carry slashes, colons,
 #: dots and at-signs (``openai/gpt-4.1``, ``models/gemini-2.5-pro``,
 #: ``claude-sonnet@2025``); nothing that could leave a config value.
@@ -72,6 +90,58 @@ MAX_BASE_URL_CHARS = 512
 def runtime_protocol(runtime: str) -> str | None:
     """The protocol ``runtime`` speaks to a connection, or ``None`` for none."""
     return RUNTIME_PROTOCOLS.get(runtime)
+
+
+@dataclass(frozen=True)
+class ProtocolPlan:
+    """How one runtime reaches one connection.
+
+    ``client_protocol`` is what the runtime's CLI speaks; ``upstream_protocol``
+    is what the connection offers and the request finally goes out as. They
+    differ only on a translated plan. The connection's declared protocols are
+    the upstream's own and are never rewritten to match the client.
+    """
+
+    client_protocol: str
+    upstream_protocol: str
+
+    @property
+    def translated(self) -> bool:
+        """Whether the member's compatibility helper sits between the two."""
+        return self.client_protocol != self.upstream_protocol
+
+    @property
+    def mode(self) -> str:
+        """``direct`` or ``translated``."""
+        return TRANSLATED if self.translated else DIRECT
+
+
+def protocol_plan(runtime: str, protocols: list[str] | tuple[str, ...]) -> ProtocolPlan | None:
+    """The one plan for ``runtime`` on a connection offering ``protocols``, or ``None``.
+
+    Native first: a runtime whose own protocol the connection offers always
+    runs on it directly. Only then, and only for Responses (Codex) and
+    Anthropic Messages (Claude Code), a connection offering Chat Completions
+    is used through the compatibility helper. Every path that asks whether a
+    turn can run -- admission, follow-ups, waiting messages, goal rounds,
+    claims, residencies, Fork, the composer and the connection check -- asks
+    this, so they cannot disagree.
+    """
+    client = runtime_protocol(runtime)
+    if client is None:
+        return None
+    if client in protocols:
+        return ProtocolPlan(client, client)
+    upstream = COMPAT_UPSTREAMS.get(client)
+    if upstream is not None and upstream in protocols:
+        return ProtocolPlan(client, upstream)
+    return None
+
+
+def runtime_plans(protocols: list[str] | tuple[str, ...]) -> dict[str, ProtocolPlan]:
+    """Every runtime that can run on a connection offering ``protocols``, with its plan."""
+    plans = {runtime: protocol_plan(runtime, protocols) for runtime in sorted(RUNTIME_PROTOCOLS)}
+    return {runtime: plan for runtime, plan in plans.items() if plan is not None}
 
 
 def anthropic_base_url(base_url: str) -> str:
@@ -111,8 +181,18 @@ class ModelConnectionAccess(BaseModel):
     connection_id: str = Field(..., max_length=64)
     revision: int = Field(..., ge=1)
     base_url: str = Field(..., min_length=8, max_length=MAX_BASE_URL_CHARS)
+    #: What the connection's URL speaks: the upstream protocol of the plan.
     protocol: str
     api_key: str = Field(..., repr=False)
+    #: What the member's CLI speaks, when the plan translates; empty is direct,
+    #: and then left out, so a direct claim is what it was before translation.
+    client_protocol: str = Field("", exclude_if=lambda value: not value)
+    #: On a translated plan, the bearer this member's CLI presents to its own
+    #: loopback translator instead of the key. The control plane derives it
+    #: with its own platform key for this member, connection revision, plan
+    #: and model, so a sibling holding the same provider key cannot compute
+    #: it. A secret like the key: masked in output, never in a repr.
+    local_token: str = Field("", repr=False, exclude_if=lambda value: not value)
 
     @field_validator("connection_id")
     @classmethod
@@ -144,6 +224,20 @@ class ModelConnectionAccess(BaseModel):
             raise ValueError("a model connection's API key must be printable ASCII")
         return value
 
+    @model_validator(mode="after")
+    def _translated_pair(self) -> ModelConnectionAccess:
+        # Only the two pairs the helper implements; anything else is direct.
+        if self.client_protocol and COMPAT_UPSTREAMS.get(self.client_protocol) != self.protocol:
+            raise ValueError("unsupported translated model connection plan")
+        if bool(self.client_protocol) != bool(LOCAL_TOKEN.fullmatch(self.local_token)):
+            raise ValueError("a translated plan, and only one, carries its member's token")
+        return self
+
+    @property
+    def plan(self) -> ProtocolPlan:
+        """The plan this claim was resolved with."""
+        return ProtocolPlan(self.client_protocol or self.protocol, self.protocol)
+
     @property
     def source(self) -> str:
         """The process-fixed identity: which connection, at which credential revision."""
@@ -153,34 +247,52 @@ class ModelConnectionAccess(BaseModel):
         """The process-fixed launch fields a sandbox manager starts a member with.
 
         Everything but the key, which travels as the launch's own credential.
+        A translated plan adds the CLI's protocol and the member's token; a
+        direct one is unchanged.
         """
-        return {
+        fields = {
             "inference_base_url": self.base_url,
             "inference_protocol": self.protocol,
             "inference_source": self.source,
         }
+        if self.plan.translated:
+            fields["inference_client_protocol"] = self.client_protocol
+            fields["inference_local_token"] = self.local_token
+        return fields
 
     def secrets(self) -> dict[str, str]:
-        """The key by name, for the output redactor."""
-        return {f"model-connection:{self.connection_id}": self.api_key}
+        """The key, and on a translated plan the member's token, for the output redactor."""
+        values = {f"model-connection:{self.connection_id}": self.api_key}
+        if self.local_token:
+            values[f"model-connection-translator:{self.connection_id}"] = self.local_token
+        return values
 
 
 __all__ = [
     "ANTHROPIC_MESSAGES",
     "ANTHROPIC_VERSION",
     "CHAT_COMPLETIONS",
+    "COMPAT_UPSTREAMS",
     "CONNECTION_ID",
+    "DIRECT",
+    "HOST_MODEL_CONNECTION_CAPABILITIES",
+    "LOCAL_TOKEN",
     "MAX_API_KEY_CHARS",
     "MAX_BASE_URL_CHARS",
     "MAX_MODELS",
     "MODEL_CONNECTION_CAPABILITY",
     "MODEL_ID",
+    "MODEL_PROTOCOL_COMPAT_CAPABILITY",
     "PROTOCOLS",
     "RESPONSES",
     "RUNTIME_PROTOCOLS",
+    "TRANSLATED",
     "ModelConnectionAccess",
+    "ProtocolPlan",
     "anthropic_base_url",
     "anthropic_url",
+    "protocol_plan",
+    "runtime_plans",
     "runtime_protocol",
     "valid_api_key",
 ]

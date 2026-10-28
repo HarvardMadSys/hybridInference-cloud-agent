@@ -10,8 +10,13 @@ export interface ModelConnectionOptionApi {
   id: string;
   name: string;
   models: string[];
-  /** The agents whose protocol this connection offers. */
+  /** Every agent that can run on this connection, natively or translated. */
   runtimes: string[];
+  /**
+   * Those of `runtimes` that reach it through the compatibility helper (Codex
+   * or Claude Code on a Chat Completions connection). Absent before it existed.
+   */
+  translated_runtimes?: string[];
 }
 
 export interface AgentConfigApi {

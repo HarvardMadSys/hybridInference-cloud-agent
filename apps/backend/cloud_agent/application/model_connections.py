@@ -39,7 +39,9 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import setting_env
 from cloud_agent_shared.model_connections import (
     MODEL_CONNECTION_CAPABILITY,
+    MODEL_PROTOCOL_COMPAT_CAPABILITY,
     ModelConnectionAccess,
+    ProtocolPlan,
 )
 
 if TYPE_CHECKING:
@@ -64,6 +66,10 @@ MODEL_CONNECTION_SCAN_DOMAIN = b"hybridinference/model-connection-scan-key/v1"
 #: scanned for. A group handed more refuses to be scanned rather than
 #: scanning for some: see :class:`ScanMaterialOverflow`.
 MAX_SCAN_KEYS = 200
+#: What a translated member's loopback token is a MAC of, under the
+#: connection cipher's own platform-held MAC key, ahead of the member's
+#: identity. Not the provider key: every member on a connection holds that.
+TRANSLATOR_TOKEN_DOMAIN = b"cloud-agent/model-protocol-translation/token/v1"
 
 
 class ScanMaterialOverflow(ValueError):
@@ -164,8 +170,8 @@ async def resolve_turn_connection(
     runtime: str,
     model: str,
     reasoning_effort: str | None = None,
-) -> tuple[dict[str, Any], str]:
-    """The owner's connection for one turn and the protocol it will speak, or refuse.
+) -> tuple[dict[str, Any], ProtocolPlan]:
+    """The owner's connection for one turn and the plan it will run with, or refuse.
 
     Read scoped to ``user_id``: a connection id of somebody else's reads as
     missing, which is the only answer a forged or shared id ever gets.
@@ -173,25 +179,70 @@ async def resolve_turn_connection(
     if not is_connection_id(connection_id):
         raise ModelConnectionUnusable("not_found")
     row = await connections.get_model_connection(user_id=user_id, connection_id=connection_id)
-    protocol = require_usable(row, runtime=runtime, model=model, reasoning_effort=reasoning_effort)
+    plan = require_usable(row, runtime=runtime, model=model, reasoning_effort=reasoning_effort)
     assert row is not None
-    return row, protocol
+    return row, plan
+
+
+def translator_token(
+    cipher: CredentialCipher,
+    *,
+    user_id: str,
+    thread_id: str,
+    source: str,
+    client_protocol: str,
+    model: str,
+) -> str:
+    """The loopback token of one translated member, for one process identity.
+
+    A MAC under the platform's key over the owner, the member's thread, the
+    ``<connection>@<revision>`` source, the CLI's protocol and the model:
+    deterministic, so every claim and residency of that member's process
+    agrees and its runner masks the very token the CLI holds, and different
+    for a sibling, who cannot compute it from the provider key or any public
+    id. A changed input -- or a rotated platform key -- changes the token,
+    which is part of the process's reuse identity, so the process restarts.
+    """
+    fields = (user_id, thread_id, source, client_protocol, model)
+    if not all(fields) or any("\0" in value for value in fields):
+        raise ValueError("a translator token needs a complete member identity")
+    return cipher.mac(b"\0".join((TRANSLATOR_TOKEN_DOMAIN, *(f.encode() for f in fields))))
 
 
 def connection_access(
-    row: dict[str, Any], protocol: str, cipher: CredentialCipher
+    row: dict[str, Any],
+    plan: ProtocolPlan,
+    cipher: CredentialCipher,
+    *,
+    user_id: str,
+    thread_id: str,
+    model: str,
 ) -> ModelConnectionAccess:
-    """What a host needs to start a member on ``row``: the exact URL, protocol and key.
+    """What a host needs to start ``thread_id``'s member on ``row``: URL, plan and key.
 
+    A translated plan adds the member's loopback token (``translator_token``).
     Raises ``CredentialCipherError`` when the key cannot be decrypted, which is
     the deployment's problem rather than the owner's.
     """
+    connection_id, revision = str(row["id"]), int(row["credential_revision"])
+    token = ""
+    if plan.translated:
+        token = translator_token(
+            cipher,
+            user_id=user_id,
+            thread_id=thread_id,
+            source=f"{connection_id}@{revision}",
+            client_protocol=plan.client_protocol,
+            model=model,
+        )
     return ModelConnectionAccess(
-        connection_id=str(row["id"]),
-        revision=int(row["credential_revision"]),
+        connection_id=connection_id,
+        revision=revision,
         base_url=str(row["base_url"]),
-        protocol=protocol,
+        protocol=plan.upstream_protocol,
+        client_protocol=plan.client_protocol if plan.translated else "",
         api_key=cipher.decrypt(str(row["api_key_ciphertext"])),
+        local_token=token,
     )
 
 
@@ -199,16 +250,20 @@ async def access_for_job(
     connections: ModelConnectionRepository,
     job: Mapping[str, Any],
     cipher: CredentialCipher,
+    *,
+    member: str | None = None,
 ) -> ModelConnectionAccess | None:
     """The connection access a job's turn runs on, ``None`` for a Gateway turn.
 
     ``job`` is a job row: its owner, runtime, model, effort and connection id
-    are all re-read from it, never from a request.
+    are all re-read from it, never from a request. ``member`` is the thread
+    whose process will hold it, when that is not the job's own (a Fork's new
+    member runs the source's turn settings under its own token).
     """
     connection_id = job.get("model_connection_id")
     if not connection_id:
         return None
-    row, protocol = await resolve_turn_connection(
+    row, plan = await resolve_turn_connection(
         connections,
         user_id=str(job["user_id"]),
         connection_id=str(connection_id),
@@ -216,7 +271,14 @@ async def access_for_job(
         model=str(job["model"]),
         reasoning_effort=job.get("reasoning_effort"),
     )
-    return connection_access(row, protocol, cipher)
+    return connection_access(
+        row,
+        plan,
+        cipher,
+        user_id=str(job["user_id"]),
+        thread_id=member or str(job["thread_id"]),
+        model=str(job["model"]),
+    )
 
 
 async def bind_residency_access(
@@ -328,7 +390,14 @@ async def claim_model_connection(
         await store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
         raise waiting
     try:
-        return await access_for_job(store.model_connections, claim, model_connection_cipher())
+        access = await access_for_job(store.model_connections, claim, model_connection_cipher())
+        # A translated plan also needs a host that can run the helper; an
+        # older one gets the claim back rather than a turn it cannot launch.
+        needs_compat = access is not None and access.plan.translated
+        if needs_compat and MODEL_PROTOCOL_COMPAT_CAPABILITY not in capabilities:
+            await store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
+            raise waiting
+        return access
     except CredentialCipherError:
         await store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
         raise waiting from None
@@ -357,7 +426,9 @@ async def connection_residency_credential(
     stamped on the membership under the connection's lock: a change committed
     first refuses this, and one committed after finds and closes it.
     """
-    access = await access_for_job(store.model_connections, job, model_connection_cipher())
+    access = await access_for_job(
+        store.model_connections, job, model_connection_cipher(), member=str(row["thread_id"])
+    )
     if access is None:
         raise ModelConnectionUnusable("not_found")
     bound = await bind_residency_access(
@@ -417,6 +488,7 @@ __all__ = [
     "MAX_SCAN_KEYS",
     "MODEL_CONNECTION_KEY_DOMAIN",
     "MODEL_CONNECTION_SCAN_DOMAIN",
+    "TRANSLATOR_TOKEN_DOMAIN",
     "ModelConnectionStorage",
     "ScanMaterialOverflow",
     "access_for_job",
@@ -432,6 +504,7 @@ __all__ = [
     "new_connection_id",
     "residency_credential",
     "resolve_turn_connection",
+    "translator_token",
     "trusted_scan_secrets",
     "unusable_error",
 ]

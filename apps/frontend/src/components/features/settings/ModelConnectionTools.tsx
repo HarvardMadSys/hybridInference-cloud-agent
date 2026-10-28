@@ -4,6 +4,7 @@ import { useId, useState } from 'react';
 import { useT } from '@/components/providers';
 import {
   checkModelConnection,
+  checkTargets,
   discoverConnectionModels,
   updateModelConnection,
   type ModelConnection,
@@ -26,7 +27,10 @@ function CheckResult({ result }: { result: ModelConnectionCheck }) {
       <p className="break-words text-xs text-muted">
         {t('connections.checkScope', {
           model: result.model,
-          protocol: protocolName(result.protocol),
+          protocol:
+            result.mode === 'translated'
+              ? t('connections.checkTranslated', { protocol: protocolName(result.protocol) })
+              : protocolName(result.protocol),
         })}
       </p>
       <p className="text-xs text-muted">
@@ -98,9 +102,11 @@ export function ModelConnectionTools({
               onChange={(event) => setProtocol(event.target.value as ModelProtocol)}
               disabled={busy}
             >
-              {connection.protocols.map((value) => (
+              {checkTargets(connection.protocols).map(({ protocol: value, translated }) => (
                 <option key={value} value={value}>
-                  {protocolName(value)}
+                  {translated
+                    ? t('connections.checkTranslated', { protocol: protocolName(value) })
+                    : protocolName(value)}
                 </option>
               ))}
             </select>
