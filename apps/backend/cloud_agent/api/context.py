@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from cloud_agent.admin_observability import decode_cursor, encode_cursor
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
-from cloud_agent.api.owner_usage import resolve_period
+from cloud_agent.api.owner_usage import resolve_period, usage_unavailable
 from cloud_agent.context_insights import (
     DEFAULT_CONTEXT_PAGE,
     MAX_CONTEXT_PAGE,
@@ -294,15 +294,7 @@ async def read_context_insights(
             )
         except (UsageQueryTooLarge, UsageQueryUnavailable):
             logger.warning("agent_context_insights_usage_failed")
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error": {
-                        "type": "usage_unavailable",
-                        "message": "Usage could not be read right now. Please try again.",
-                    }
-                },
-            ) from None
+            raise usage_unavailable() from None
         for conversation in conversations:
             conversation.usage = usage.by_thread.get(conversation.thread_id)
     composition = {row["thread_id"]: row for row in result.get("composition") or []}

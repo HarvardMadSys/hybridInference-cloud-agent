@@ -57,7 +57,7 @@ function useHistory(range: UsageRangePreset, attempt: number) {
     const failed = (clear: () => void, report: (message: string) => void) => (cause: unknown) => {
       if (controller.signal.aborted) return;
       clear();
-      report(errorText(cause, t) ?? t('settings.usage.loadError'));
+      report(errorText(cause, t));
     };
     const reads = [
       getOwnerTokens(range, controller.signal).then(

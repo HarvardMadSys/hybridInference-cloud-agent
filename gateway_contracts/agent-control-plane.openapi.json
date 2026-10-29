@@ -43231,6 +43231,24 @@
             }
           },
           {
+            "description": "Same as `range=all`.",
+            "in": "query",
+            "name": "all",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Same as `range=all`.",
+              "title": "All"
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,
@@ -43322,6 +43340,24 @@
               ],
               "description": "today, 7d, 30d or all, in UTC days. `all` starts at the owner's earliest retained run or container and is never narrowed.",
               "title": "Range"
+            }
+          },
+          {
+            "description": "Same as `range=all`.",
+            "in": "query",
+            "name": "all",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Same as `range=all`.",
+              "title": "All"
             }
           },
           {

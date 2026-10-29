@@ -15,6 +15,7 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
+from cloud_agent.deployment_setup import BOOTSTRAP as BOOTSTRAP, bootstrap_snapshot
 from cloud_agent.domain_cipher import settings_root_key
 from cloud_agent.setting_definition import (
     MINIMUM_CREDENTIAL_BYTES as MINIMUM_CREDENTIAL_BYTES,
@@ -897,44 +898,6 @@ SETTINGS_BY_KEY = {setting.key: setting for setting in SETTINGS}
 SETTINGS_BY_STORAGE_KEY = {setting.storage_key: setting for setting in SETTINGS}
 _SETTINGS_BY_ENV = {setting.env: setting for setting in SETTINGS if setting.env}
 
-BOOTSTRAP = (
-    {
-        "key": "AGENT_DATABASE_URL",
-        "label": "Database connection",
-        "description": "Required before saved settings can be read.",
-    },
-    {
-        "key": "AGENT_SETTINGS_ENCRYPTION_KEY / AGENT_SESSION_SECRET",
-        "label": "Settings encryption key",
-        "description": "Use a stable encryption key of at least 32 bytes. Existing session secret is used if a dedicated key is absent. Rotate only with data re-encryption.",
-    },
-    {
-        "key": "ADMIN_TOKEN",
-        "label": "Administrator recovery access",
-        "description": "Use this deployment credential on the setup page when Gateway sign-in is not configured. It remains independent of saved settings.",
-    },
-    {
-        "key": "AGENT_GITHUB_APP_PRIVATE_KEY_PATH",
-        "label": "Mounted GitHub App key",
-        "description": "Deployment file path; an inline private key can be set above.",
-    },
-    {
-        "key": "AGENT_COMPUTE_CONFIG",
-        "label": "Compute deployment profiles",
-        "description": "Trusted deployment bundles and mounted secret file references remain operator configuration.",
-    },
-    {
-        "key": "AGENT_PGADMIN_BOOTSTRAP_URL / AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL / AGENT_PGADMIN_BOOTSTRAP_DIR",
-        "label": "pgAdmin first-time setup",
-        "description": "Deployment routing and the private setup volume let the first administrator choose the account in Admin → Database. Setup saves the connection; later changes use the Database tools settings.",
-    },
-    {
-        "key": "Host networking, isolation, listener and build configuration",
-        "label": "Deployment infrastructure",
-        "description": "Machine addresses, credentials, sandbox isolation, egress, proxy trust and build routing are configured when deploying.",
-    },
-)
-
 _lock = threading.RLock()
 _values: dict[str, SettingValue] | None = None
 _revision = -1
@@ -1201,7 +1164,7 @@ def settings_response(revision: int, encoded: Mapping[str, Any]) -> dict[str, An
         "secret_configured": {
             setting.key: bool(values[setting.key]) for setting in SETTINGS if setting.secret
         },
-        "bootstrap": list(BOOTSTRAP),
+        "bootstrap": bootstrap_snapshot(values),
         "setup": setup_status(values),
     }
 

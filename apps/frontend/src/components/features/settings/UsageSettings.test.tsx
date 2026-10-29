@@ -472,17 +472,30 @@ describe('UsageSettings', () => {
   it('shows a refusal in the reader’s words', async () => {
     const { APIError } = await import('@/lib/utils/errors');
     vi.mocked(getOwnerTokens).mockRejectedValue(
-      new APIError('usage_unavailable', 'Usage could not be read right now.', 503),
+      new APIError('usage_temporarily_unavailable', 'Usage could not be read right now.', 503),
     );
     window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
     section();
     expect(await screen.findByText('暂时无法读取用量，请重试。')).toBeInTheDocument();
   });
 
+  it.each([
+    ['usage_query_too_large', 422, 'This usage is too large to sum. Choose a shorter range.'],
+    ['usage_response_too_large', 422, 'This usage is too large to send. Choose a shorter range.'],
+    ['something_new', 503, 'Usage could not be read right now. Try again.'],
+    ['something_new', 400, 'Could not load usage.'],
+  ])('words a %s refusal itself, never the server’s prose', async (code, status, words) => {
+    const { APIError } = await import('@/lib/utils/errors');
+    vi.mocked(getOwnerTokens).mockRejectedValue(new APIError(code, 'Server prose.', status));
+    section();
+    expect(await screen.findByText(words)).toBeInTheDocument();
+    expect(screen.queryByText('Server prose.')).not.toBeInTheDocument();
+  });
+
   it('keeps container history when model usage cannot be read', async () => {
     vi.mocked(getOwnerTokens).mockRejectedValue(new Error('Too many runs to sum.'));
     section();
-    expect(await screen.findByText('Too many runs to sum.')).toBeInTheDocument();
+    expect(await screen.findByText('Could not load usage.')).toBeInTheDocument();
     expect(await screen.findByText('10 h')).toBeInTheDocument();
     vi.mocked(getOwnerTokens).mockResolvedValue(tokens());
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));

@@ -86,6 +86,8 @@ MAX_SUMMED_CONTAINERS = 1000
 MAX_SAMPLE_GAP_SECONDS = 120.0
 #: Days a history read may span: the admin Usage page's bound.
 MAX_HISTORY_DAYS = 90
+#: Days a history read covers when the client names no period.
+DEFAULT_HISTORY_DAYS = 7
 
 CONTAINER_CURSOR_SCOPE = cursor_scope(["owner-containers"])
 

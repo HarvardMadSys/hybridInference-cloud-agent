@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -163,14 +163,20 @@ async def test_tokens_select_only_the_owners_runs(app):
 
 
 @pytest.mark.parametrize(
-    ("failure", "status"), [(UsageQueryTooLarge(), 422), (UsageQueryUnavailable(), 503)]
+    ("failure", "status", "error_type"),
+    [
+        (UsageQueryTooLarge(), 422, "usage_query_too_large"),
+        (UsageQueryUnavailable(), 503, "usage_temporarily_unavailable"),
+    ],
 )
-async def test_tokens_refuse_rather_than_return_a_partial_sum(app, failure, status):
+async def test_tokens_refuse_rather_than_return_a_partial_sum(app, failure, status, error_type):
     app.state.usage.failure = failure
     response = await _get(app, "/v1/agent/usage/tokens")
     assert response.status_code == status
     assert "summary" not in response.text
-    assert response.json()["detail"]["error"]["type"] in {"usage_too_large", "usage_unavailable"}
+    # A typed reason the page translates, not prose it shows as sent.
+    error = response.json()["detail"]["error"]
+    assert (error["type"], error["code"]) == (error_type, status)
 
 
 @pytest.mark.parametrize(("preset", "count"), [("today", 1), ("7d", 7), ("30d", 30)])
@@ -220,9 +226,41 @@ async def test_all_without_any_record_is_today(app):
 
 
 @pytest.mark.parametrize("path", ["resources", "tokens"])
-async def test_range_and_days_together_are_refused(app, path):
-    response = await _get(app, f"/v1/agent/usage/{path}", range="7d", days=7)
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"range": "7d", "days": 7},
+        {"days": 7, "all": "true"},
+        {"days": 30, "all": "false"},
+        {"range": "30d", "all": "true"},
+    ],
+)
+async def test_range_days_and_all_are_one_choice(app, path, params):
+    response = await _get(app, f"/v1/agent/usage/{path}", **params)
     assert response.status_code == 422
+    assert response.json()["detail"]["error"]["type"] == "usage_period_conflict"
+    assert app.state.usage.calls == []
+    app.state.queries.resource_history.assert_not_awaited()
+
+
+async def test_all_true_is_the_whole_retained_history(app):
+    first = datetime(2024, 3, 9, 17, 30, tzinfo=UTC)
+    app.state.queries.first_record_at.return_value = first
+    by_flag = (await _get(app, "/v1/agent/usage/tokens", all="true")).json()["period"]
+    by_range = (await _get(app, "/v1/agent/usage/tokens", range="all")).json()["period"]
+    # Never narrowed to a year or a run budget: the first record's own day.
+    assert by_flag["preset"] == by_range["preset"] == "all"
+    assert by_flag["since"] == by_range["since"]
+    assert datetime.fromisoformat(by_flag["since"]) == datetime(2024, 3, 9, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("path", ["resources", "tokens"])
+async def test_no_period_reads_the_last_seven_utc_days(app, path):
+    period = (await _get(app, f"/v1/agent/usage/{path}")).json()["period"]
+    assert period["days"] == 7
+    span = datetime.fromisoformat(period["until"]) - datetime.fromisoformat(period["since"])
+    assert timedelta(days=6) <= span < timedelta(days=7)
+    app.state.queries.first_record_at.assert_not_awaited()
 
 
 @pytest.mark.parametrize("path", ["resources", "tokens"])

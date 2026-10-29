@@ -112,7 +112,7 @@ function Containers() {
         setError(null);
       } catch (cause) {
         if (request === latest.current && !quiet) {
-          setError(errorText(cause, t) ?? t('settings.usage.loadError'));
+          setError(errorText(cause, t));
         }
       }
     },
@@ -141,8 +141,7 @@ function Containers() {
       });
       setCursor(page.next_cursor);
     } catch (cause) {
-      if (request === latest.current)
-        setError(errorText(cause, t) ?? t('settings.usage.loadError'));
+      if (request === latest.current) setError(errorText(cause, t));
     } finally {
       setLoadingMore(false);
     }

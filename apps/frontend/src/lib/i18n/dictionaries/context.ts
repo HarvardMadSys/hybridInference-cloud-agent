@@ -27,6 +27,7 @@ export const contextEn = {
   'usage.chart.soFar': 'so far',
   'usage.error.tooLarge': 'This usage is too large to sum. Choose a shorter range.',
   'usage.error.unavailable': 'Usage could not be read right now. Try again.',
+  'usage.error.responseTooLarge': 'This usage is too large to send. Choose a shorter range.',
 
   'contextInsights.title': 'Context insights',
   'contextInsights.description':
@@ -172,6 +173,7 @@ export const contextZhCN: Record<keyof typeof contextEn, string> = {
   'usage.chart.soFar': '截至目前',
   'usage.error.tooLarge': '这段用量太大，无法汇总。请选择更短的范围。',
   'usage.error.unavailable': '暂时无法读取用量，请重试。',
+  'usage.error.responseTooLarge': '这段用量太大，无法返回。请选择更短的范围。',
 
   'contextInsights.title': '上下文洞察',
   'contextInsights.description':

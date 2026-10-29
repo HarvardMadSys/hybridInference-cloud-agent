@@ -24,13 +24,22 @@ const BUCKET_NOTE: Record<UsageRange['bucket'], TranslationKey> = {
   month: 'usage.range.bucket.month',
 };
 
-/** A failed read in the reader's language; the server's own words only as a last resort. */
-export function errorText(cause: unknown, t: (key: TranslationKey) => string): string | null {
-  if (cause instanceof APIError && cause.code === 'usage_too_large')
-    return t('usage.error.tooLarge');
-  if (cause instanceof APIError && cause.code === 'usage_unavailable')
-    return t('usage.error.unavailable');
-  return cause instanceof Error && cause.message ? cause.message : null;
+/** Refusals the server types, in the reader's words. */
+const ERROR_KEY: Partial<Record<string, TranslationKey>> = {
+  usage_query_too_large: 'usage.error.tooLarge',
+  usage_response_too_large: 'usage.error.responseTooLarge',
+  usage_temporarily_unavailable: 'usage.error.unavailable',
+};
+
+/**
+ * A failed read in the reader's language. The server's own message is
+ * English prose for logs and is never shown.
+ */
+export function errorText(cause: unknown, t: (key: TranslationKey) => string): string {
+  if (!(cause instanceof APIError)) return t('settings.usage.loadError');
+  const key = ERROR_KEY[cause.code];
+  if (key) return t(key);
+  return t(cause.statusCode === 503 ? 'usage.error.unavailable' : 'settings.usage.loadError');
 }
 
 export function Card({

@@ -56,10 +56,7 @@ function useInsights(range: UsageRangePreset, sort: ContextSort, filters: Contex
   const [loadingMore, setLoadingMore] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const latest = useRef(0);
-  const fail = useCallback(
-    (cause: unknown) => setError(errorText(cause, t) ?? t('settings.usage.loadError')),
-    [t],
-  );
+  const fail = useCallback((cause: unknown) => setError(errorText(cause, t)), [t]);
 
   useEffect(() => {
     const controller = new AbortController();
