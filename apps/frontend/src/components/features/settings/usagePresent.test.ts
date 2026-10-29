@@ -4,6 +4,7 @@ import type { AdminUsageAggregate, AdminUsageDay } from '@/lib/api/adminUsage';
 import type { OwnerResourceDay } from '@/lib/api/ownerUsage';
 
 import {
+  cachedShare,
   chartDays,
   compactCount,
   coreHours,
@@ -13,8 +14,11 @@ import {
   formatCost,
   formatDayValue,
   formatMemory,
+  formatShare,
   gibHours,
+  notFinal,
   partlyMeasured,
+  reasoningPartly,
   relativeTime,
   tickIndexes,
   tokenTotal,
@@ -143,6 +147,138 @@ describe('coverage', () => {
     const unknown = aggregate();
     unknown.totals = { ...unknown.totals!, tokens_out: null };
     expect(tokenTotal(unknown)).toBeNull();
+  });
+
+  it('leaves reasoning and cached input out of the token total', () => {
+    const usage = aggregate();
+    usage.totals = { ...usage.totals!, cache_read: 400, cache_write: 100, reasoning: 90 };
+    expect(tokenTotal(usage)).toBe(1250);
+  });
+});
+
+describe('cache hit rate', () => {
+  function withCache(
+    cacheRead: number | null,
+    tokensIn: number | null = 1000,
+    unknown: Partial<NonNullable<AdminUsageAggregate['unknown_rows']>> | null = null,
+  ): AdminUsageAggregate {
+    const usage = aggregate();
+    usage.totals = { ...usage.totals!, cache_read: cacheRead, tokens_in: tokensIn };
+    if (unknown) {
+      usage.unknown_rows = {
+        tokens_in: 0,
+        tokens_out: 0,
+        cache_read: 0,
+        cache_write: 0,
+        reasoning: 0,
+        spent_usd: 0,
+        ...unknown,
+      };
+    }
+    return usage;
+  }
+
+  it('reads the share of input taken from the cache', () => {
+    expect(cachedShare(withCache(250))).toBe(0.25);
+    expect(cachedShare(withCache(250, 1000, { tokens_out: 3, reasoning: 2 }))).toBe(0.25);
+  });
+
+  it('keeps a reported zero as zero', () => {
+    expect(cachedShare(withCache(0))).toBe(0);
+    expect(formatShare(cachedShare(withCache(0)))).toBe('0%');
+  });
+
+  it('shows no ratio for anything not fully reported', () => {
+    expect(cachedShare(aggregate({ totals: null }))).toBeNull();
+    expect(cachedShare(withCache(null))).toBeNull();
+    expect(cachedShare(withCache(250, null))).toBeNull();
+    expect(cachedShare(withCache(250, 1000, { cache_read: 1 }))).toBeNull();
+    expect(cachedShare(withCache(250, 1000, { tokens_in: 1 }))).toBeNull();
+  });
+
+  it('shows no ratio for no input, or a cache read larger than the input', () => {
+    expect(cachedShare(withCache(0, 0))).toBeNull();
+    expect(cachedShare(withCache(1200, 1000))).toBeNull();
+  });
+
+  it('reads an unknown share as a dash, never 0%', () => {
+    expect(formatShare(null)).toBe('—');
+    expect(formatShare(cachedShare(withCache(null)))).toBe('—');
+    expect(formatShare(0.4248)).toBe('42%');
+    expect(formatShare(0.004)).toBe('<1%');
+    expect(formatShare(1)).toBe('100%');
+  });
+});
+
+describe('reasoning', () => {
+  function withReasoning(reasoning: number | null, unreported: number | null): AdminUsageAggregate {
+    const usage = aggregate();
+    usage.totals = { ...usage.totals!, reasoning };
+    if (unreported !== null) {
+      usage.unknown_rows = {
+        tokens_in: 0,
+        tokens_out: 0,
+        cache_read: 0,
+        cache_write: 0,
+        reasoning: unreported,
+        spent_usd: 0,
+      };
+    }
+    return usage;
+  }
+
+  it('notes a known total that leaves out calls not reporting it', () => {
+    expect(reasoningPartly(withReasoning(90, 2))).toBe(true);
+  });
+
+  it('notes nothing for a fully reported or an unknown total', () => {
+    expect(reasoningPartly(withReasoning(90, null))).toBe(false);
+    expect(reasoningPartly(withReasoning(90, 0))).toBe(false);
+    expect(reasoningPartly(withReasoning(null, 2))).toBe(false);
+    expect(reasoningPartly(aggregate({ totals: null }))).toBe(false);
+  });
+});
+
+describe('not final', () => {
+  it('says nothing when every turn is counted and none is running', () => {
+    expect(notFinal(aggregate({ oldest_queried_at: '2026-10-15T09:00:00Z' }))).toBeNull();
+  });
+
+  it('counts running and not fully counted turns, and uncosted and estimated calls', () => {
+    const usage = aggregate({
+      run_count: 6,
+      active_runs: 1,
+      estimated_calls: 3,
+      oldest_queried_at: '2026-10-15T09:00:00Z',
+      status_counts: { available: 2, partial: 1, stale: 1, pending: 1, unavailable: 1 },
+      unknown_rows: {
+        tokens_in: 0,
+        tokens_out: 0,
+        cache_read: 0,
+        cache_write: 0,
+        reasoning: 0,
+        spent_usd: 2,
+      },
+    });
+    expect(notFinal(usage)).toEqual({
+      running: 1,
+      incomplete: 4,
+      uncosted: 2,
+      estimated: 3,
+      oldestRead: '2026-10-15T09:00:00Z',
+    });
+  });
+
+  it('names each reason on its own', () => {
+    expect(notFinal(aggregate({ active_runs: 1 }))?.running).toBe(1);
+    expect(notFinal(aggregate({ estimated_calls: 1 }))?.estimated).toBe(1);
+    const partial = notFinal(
+      aggregate({
+        status_counts: { available: 1, partial: 1, stale: 0, pending: 0, unavailable: 0 },
+      }),
+    );
+    expect(partial).toMatchObject({ running: 0, incomplete: 1, uncosted: 0, estimated: 0 });
+    expect(partial?.oldestRead).toBeNull();
   });
 });
 
