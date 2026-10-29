@@ -542,24 +542,49 @@ def main() -> int:
             str(source_follow_up["id"]),
             str(child_follow_up["id"]),
         )
-        source_live = wait_job(client, str(source_follow_up["id"]))
-        child_live = wait_job(client, str(child_follow_up["id"]))
+        source_restored = wait_job(client, str(source_follow_up["id"]))
+        child_restored = wait_job(client, str(child_follow_up["id"]))
         completed_probes = client.request("/health").get("completed_concurrency_probes") or []
         if concurrency_probe_key not in completed_probes:
             raise RuntimeError(
                 f"{runtime} turns were RUNNING but did not overlap at the inference barrier"
             )
-        for side, turn in (("source", source_live), ("child", child_live)):
-            if turn.get("context_status") != "live":
+        for side, turn in (("source", source_restored), ("child", child_restored)):
+            if turn.get("context_status") != "restored":
                 raise RuntimeError(
-                    f"{runtime} {side} post-fork turn was not LIVE: {turn.get('context_status')!r}"
+                    f"{runtime} {side} post-fork turn was not RESTORED: "
+                    f"{turn.get('context_status')!r}"
                 )
             if turn.get("sandbox_id") != sandbox_id or turn.get("workspace_shared") is not True:
                 raise RuntimeError(f"{runtime} {side} escaped the shared sandbox")
+
+        print(f"  {runtime}: restored source accepts another live turn", flush=True)
+        source_live_turn = send_message(
+            client,
+            source_restored,
+            f"Continue the restored source {runtime} session after its native fork.",
+        )
+        source_live = wait_job(client, str(source_live_turn["id"]))
+        if source_live.get("context_status") != "live":
+            raise RuntimeError(
+                f"{runtime} subsequent source turn was not LIVE: "
+                f"{source_live.get('context_status')!r}"
+            )
+        if (
+            source_live.get("sandbox_id") != sandbox_id
+            or source_live.get("workspace_shared") is not True
+        ):
+            raise RuntimeError(f"{runtime} subsequent source turn escaped the shared sandbox")
+        live_id, live_status, live_mounts = chat_container(sandbox_id)
+        if live_id != source_container_id or live_status != "running" or live_mounts != "[]":
+            raise RuntimeError(
+                f"{runtime} subsequent source turn replaced, stopped, or mounted the shared "
+                f"container: {live_id} {live_status} {live_mounts}"
+            )
         stopped_id = wait_stopped(sandbox_id)
         if stopped_id != source_container_id:
             raise RuntimeError(f"{runtime} fork group idle stop replaced the shared container")
-        forked_sessions[runtime] = (child_live, sandbox_id, source_container_id)
+        forked_sessions[runtime] = (child_restored, sandbox_id, source_container_id)
 
     print(
         "[7/7] Group idle stops once; waking either child restores that exact container", flush=True

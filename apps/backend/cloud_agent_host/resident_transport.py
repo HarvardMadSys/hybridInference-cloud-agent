@@ -78,6 +78,54 @@ _LEGACY_MEMBER_STATE_ROOTS = dict(
     zip(("codex", "opencode", "kilo"), LEGACY_MEMBER_HOME_COLLECTIONS, strict=True)
 )
 
+# Codex stores absolute rollout paths in its private SQLite index. A private
+# fork copies that database and rollout files into a different member home, so
+# its paths must be rebased before the child app-server can resume a thread.
+_CODEX_REBASE_ROLLOUT_PATHS = r"""
+from pathlib import Path
+import sqlite3
+import sys
+
+target = Path(sys.argv[1]).resolve(strict=True)
+source = str(Path(sys.argv[2]).resolve(strict=True))
+prefix = source + "/"
+database = target / "state_5.sqlite"
+if database.is_symlink() or not database.is_file():
+    raise SystemExit("Codex fork state has no regular state_5.sqlite")
+connection = sqlite3.connect(database)
+try:
+    rows = connection.execute("SELECT id, rollout_path FROM threads").fetchall()
+    changed = 0
+    for thread_id, rollout_path in rows:
+        if isinstance(rollout_path, str) and rollout_path.startswith(prefix):
+            suffix = rollout_path[len(source):]
+            relative = Path(rollout_path).relative_to(source)
+            if not relative.parts or ".." in relative.parts:
+                raise SystemExit("Codex fork rollout path escaped its private home")
+            rebased = str(target) + suffix
+            try:
+                Path(rebased).resolve(strict=False).relative_to(target)
+            except ValueError:
+                raise SystemExit("Codex fork rollout path escaped its private home") from None
+            connection.execute(
+                "UPDATE threads SET rollout_path = ? WHERE id = ?",
+                (rebased, thread_id),
+            )
+            changed += 1
+    remaining = connection.execute(
+        "SELECT COUNT(*) FROM threads WHERE substr(rollout_path, 1, ?) = ?",
+        (len(prefix), prefix),
+    ).fetchone()[0]
+    if changed == 0 or remaining:
+        raise SystemExit("Codex fork rollout path rebase was incomplete")
+    connection.commit()
+    check = connection.execute("PRAGMA integrity_check").fetchone()[0]
+    if check != "ok":
+        raise SystemExit("Codex fork index failed integrity check")
+finally:
+    connection.close()
+"""
+
 #: Exit status of a member script that found its collection untrusted. The
 #: caller secures the collections as the sandbox user and asks once more.
 _UNTRUSTED_COLLECTION_EXIT = 75
@@ -707,17 +755,21 @@ class ResidentTransportFactory:
             'exec tar --create --file=- --files-from=/dev/null "$@"'
         )
         unpack = (
-            'set -eu; target="$1"; runtime="$2"; trusted="$3"; '
+            'set -eu; target="$1"; source="$2"; runtime="$3"; trusted="$4"; '
             + _NEW_PRIVATE_MEMBER_HOME_PROLOGUE
             + 'find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; '
             'tar --extract --file=- --directory="$target" --no-same-owner '
             "--no-same-permissions; "
             'mkdir -p -- "$target/tmp" "$target/.tmp"; '
+            'if [ "$runtime" = codex ]; then '
+            'python3 - "$target" "$source" <<\'PY\'\n' + _CODEX_REBASE_ROLLOUT_PATHS + "\nPY\n"
+            "fi; "
             'case "$runtime" in '
             '  opencode|kilo) rm -rf -- "$target/$runtime/state/$runtime/locks";; '
             "esac; "
             ': > "$target/.freeinference-member-state-v1"'
         )
+
         # The source's open already secured the collections; this also covers
         # a fork recovered by a broker that has not opened the source yet.
         self._manager.ensure_private_member_collections(spec)
@@ -731,6 +783,7 @@ class ResidentTransportFactory:
                 unpack,
                 "sh",
                 target_dir,
+                source_dir,
                 runtime_id,
                 str(self._manager.backend.uid),
             ],
