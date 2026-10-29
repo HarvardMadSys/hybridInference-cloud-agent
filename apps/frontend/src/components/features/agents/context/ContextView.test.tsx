@@ -430,8 +430,8 @@ describe('ContextView', () => {
         /Starts after the compaction in turn 2\. The CLI can keep some recent messages/,
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText('6 items before the compaction')).toBeInTheDocument();
-    expect(screen.getByText('1 items in subagents’ own contexts')).toBeInTheDocument();
+    expect(screen.getByText('Before the compaction: 6')).toBeInTheDocument();
+    expect(screen.getByText('In subagents’ own contexts: 1')).toBeInTheDocument();
     expect(screen.getByText('clipped')).toBeInTheDocument();
   });
 

@@ -41,12 +41,12 @@ export const contextRequestEn = {
   'contextRequest.reconstructed.preserve':
     'The CLI can keep some recent messages through a compaction; they are counted as compacted here, so this can show less than the request carried.',
   'contextRequest.excluded': 'Not counted',
-  'contextRequest.excluded.compacted': '{count} items before the compaction',
-  'contextRequest.excluded.superseded_attempts': '{count} items from retried attempts',
-  'contextRequest.excluded.subagent': '{count} items in subagents’ own contexts',
-  'contextRequest.excluded.this_request_output': '{count} items of this request’s own reply',
+  'contextRequest.excluded.compacted': 'Before the compaction: {count}',
+  'contextRequest.excluded.superseded_attempts': 'From retried attempts: {count}',
+  'contextRequest.excluded.subagent': 'In subagents’ own contexts: {count}',
+  'contextRequest.excluded.this_request_output': 'This request’s own reply: {count}',
   'contextRequest.copied':
-    '{count} turns copied from the original conversation are carried by the CLI but stored with that conversation.',
+    'Turns copied from the original conversation: {count}. The CLI carries them; they are stored with that conversation.',
   'contextRequest.capped': 'Only the most recent stored items were read.',
   'contextRequest.filter': 'Show',
   'contextRequest.filter.all': 'All',
