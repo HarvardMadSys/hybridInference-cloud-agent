@@ -207,10 +207,14 @@ describe('ContextInsights', () => {
         }),
       )
       .mockResolvedValue(page());
+    const arm = vi.spyOn(window, 'setTimeout');
     show();
     expect(
       await screen.findByText(/Still reading 120 runs; numbers and order can change/),
     ).toBeInTheDocument();
+    // The retry is armed by an effect that runs after the page is shown, not
+    // with it; advancing the clock before then would skip the retry.
+    await waitFor(() => expect(arm).toHaveBeenCalledWith(expect.any(Function), PROFILING_RETRY_MS));
     await act(async () => {
       vi.advanceTimersByTime(PROFILING_RETRY_MS);
     });
