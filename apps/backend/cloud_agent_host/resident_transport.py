@@ -806,28 +806,15 @@ class ResidentTransportFactory:
             # A retained container gets this host's helper, not its image's.
             install_compat_helper(self._manager, spec)
 
-    def _launch_context(
-        self,
-        spec: ChatSandboxSpec,
-        launch: ResidentLaunch,
-        *,
-        credential: str,
-        state_dir: str | None = None,
-        member_processes_reaped: bool = False,
-        preparation: MemberPreparation | None = None,
-    ) -> LaunchContext:
-        """Build one member-isolated launch seam used by live and fork probes.
+    def _member_env(self, launch: ResidentLaunch) -> tuple[dict[str, str], str]:
+        """The environment one member's CLI starts with, and its inference script.
 
-        ``preparation`` holds what the member's UID still has to do before its
-        CLI starts; the first spawn adds its own steps and runs them all.
+        Exactly this member's own credentials: its private home and state, the
+        platform inference credential, an owner connection's token or an owner
+        environment's hand-off script, and the claim's repository-scoped GitHub
+        token. Nothing another member of the group could read.
         """
-        uid = MEMBER_UID_BASE + launch.slot_id
         runtime_id = launch.runtime_id
-        if preparation is None:
-            preparation = MemberPreparation(
-                self._manager, spec, user_uid=uid, user_gid=self._manager.backend.gid
-            )
-        activation_dir = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/{runtime_id}"
         home = f"/home/agent-member-{launch.slot_id}"
         base_env = dict(self._manager.backend.base_env())
         inference_script = ""
@@ -881,6 +868,31 @@ class ResidentTransportFactory:
             base_env["PATH"] = (
                 f"{runtime_bin_dir(runtime_id, launch.runtime_version)}:{base_env['PATH']}"
             )
+        return base_env, inference_script
+
+    def _launch_context(
+        self,
+        spec: ChatSandboxSpec,
+        launch: ResidentLaunch,
+        *,
+        credential: str,
+        state_dir: str | None = None,
+        member_processes_reaped: bool = False,
+        preparation: MemberPreparation | None = None,
+    ) -> LaunchContext:
+        """Build one member-isolated launch seam used by live and fork probes.
+
+        ``preparation`` holds what the member's UID still has to do before its
+        CLI starts; the first spawn adds its own steps and runs them all.
+        """
+        uid = MEMBER_UID_BASE + launch.slot_id
+        runtime_id = launch.runtime_id
+        if preparation is None:
+            preparation = MemberPreparation(
+                self._manager, spec, user_uid=uid, user_gid=self._manager.backend.gid
+            )
+        activation_dir = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/{runtime_id}"
+        base_env, inference_script = self._member_env(launch)
 
         reaped = False
 

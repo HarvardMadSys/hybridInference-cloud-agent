@@ -97,11 +97,15 @@ def _install(
     """Probe each helper as root, and install the ones that differ.
 
     ``found`` remembers, for that container, each helper in place afterwards.
+    The probe, staged copy and rename are ``install_trusted_file``'s, shared
+    with the other trusted files this host installs into a retained container.
     """
     for helper in helpers:
-        if found is not None:
-            found[0].forget_helpers(found[1], f"{helper.target}@")
         directory, name = helper.target.rsplit("/", 1)
+        if found is not None:
+            # A key names the file's content as well as its path: whatever this
+            # path held before this probe is about to be replaced or re-checked.
+            found[0].forget_helpers(found[1], f"{helper.target}@")
         install_trusted_file(
             manager,
             spec,
