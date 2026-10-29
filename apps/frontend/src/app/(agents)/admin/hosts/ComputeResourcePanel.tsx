@@ -331,9 +331,9 @@ export default function ComputeResourcePanel({
               needed. New work queues while running turns finish and the server moves.
             </p>
           )}
-          <details>
-            <summary className="cursor-pointer text-sm">Advanced timing</summary>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <fieldset className="space-y-3">
+            <legend className="text-sm font-medium">Expiry timing and provider parameter</legend>
+            <div className="grid gap-3 sm:grid-cols-2">
               <PolicyNumber
                 field="stop_new_groups_before_seconds"
                 label="Stop new sandboxes before expiry (minutes)"
@@ -375,11 +375,11 @@ export default function ComputeResourcePanel({
                 />
               </Field>
             </div>
-            <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+            <p className="text-xs text-gray-500 dark:text-gray-400">
               Renewal starts before sandbox admission closes. The extension horizon must exceed the
               renewal lead time.
             </p>
-          </details>
+          </fieldset>
           {allocation.policy.enabled && !policy.enabled && (
             <p className="text-xs text-amber-800 dark:text-amber-300">
               Requests already submitted will still complete.
