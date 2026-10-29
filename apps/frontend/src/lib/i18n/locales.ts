@@ -8,6 +8,10 @@
 export const LOCALE_STORAGE_KEY = 'agents.locale';
 /** When this browser's language was chosen (ISO time), for an account to compare. */
 export const LOCALE_CHOSEN_AT_KEY = 'agents.locale.chosen_at';
+/** Whose choice it is: the account it was made in, or empty when made signed out. */
+export const LOCALE_OWNER_KEY = 'agents.locale.owner';
+/** `true` once the choice is an account's stored one, applied here or saved from here. */
+export const LOCALE_STORED_KEY = 'agents.locale.stored';
 
 export const LOCALES = ['en', 'zh-CN'] as const;
 export type Locale = (typeof LOCALES)[number];
@@ -72,6 +76,9 @@ export function writeStoredLocale(
     const store = storage ?? window.localStorage;
     store.setItem(LOCALE_STORAGE_KEY, locale);
     store.setItem(LOCALE_CHOSEN_AT_KEY, chosenAt);
+    // A fresh choice on this browser, nobody's yet: the account sync claims it.
+    store.setItem(LOCALE_OWNER_KEY, '');
+    store.setItem(LOCALE_STORED_KEY, 'false');
   } catch {
     // Not persisting the choice still leaves it applied to this tab.
   }
@@ -87,11 +94,44 @@ export function readLocaleChosenAt(storage?: Pick<Storage, 'getItem'>): string |
   }
 }
 
-/** Record that the stored language is the one chosen at `chosenAt` (an account's). */
-export function writeLocaleChosenAt(chosenAt: string, storage?: Pick<Storage, 'setItem'>): void {
+/**
+ * The browser's language choice as an account sync sees it, after
+ * HybridInference's `LocaleChoice`: when it was made, in which account (empty
+ * when signed out), and whether it is already an account's stored choice.
+ * Only a choice not yet stored, made signed out or in the same account, may be
+ * carried into an account: one account's language never spreads to another
+ * account signed in on the same browser.
+ */
+export interface LocaleChoice {
+  chosenAt: string | null;
+  owner: string;
+  stored: boolean;
+}
+
+export function readLocaleChoice(storage?: Pick<Storage, 'getItem'>): LocaleChoice {
   try {
-    (storage ?? window.localStorage).setItem(LOCALE_CHOSEN_AT_KEY, chosenAt);
+    const store = storage ?? window.localStorage;
+    return {
+      chosenAt: readLocaleChosenAt(store),
+      owner: store.getItem(LOCALE_OWNER_KEY) ?? '',
+      stored: store.getItem(LOCALE_STORED_KEY) === 'true',
+    };
   } catch {
-    // Without it the next sign-in compares nothing and takes the account's.
+    return { chosenAt: null, owner: '', stored: false };
+  }
+}
+
+/** Record whose the browser's choice is now, and when it was made if that changed. */
+export function markLocaleChoice(
+  choice: { chosenAt?: string | null; owner: string; stored: boolean },
+  storage?: Pick<Storage, 'setItem'>,
+): void {
+  try {
+    const store = storage ?? window.localStorage;
+    if (choice.chosenAt) store.setItem(LOCALE_CHOSEN_AT_KEY, choice.chosenAt);
+    store.setItem(LOCALE_OWNER_KEY, choice.owner);
+    store.setItem(LOCALE_STORED_KEY, choice.stored ? 'true' : 'false');
+  } catch {
+    // Without it the next sign-in treats the choice as nobody's stored one.
   }
 }

@@ -285,7 +285,9 @@ an account without one a code sent to its own verified phone.
   cannot delete itself. The account is soft-deleted (below).
 - **Language**: kept with the account; the most recent choice wins, including
   one made on this browser while signed out, which is carried into the
-  account with its time at the next sign-in.
+  account with its time at the next sign-in. The browser records whose its
+  choice is, so one account's language never moves into another account
+  signed in on the same browser.
 
 ## Deleting and erasing
 

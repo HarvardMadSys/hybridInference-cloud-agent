@@ -198,7 +198,7 @@
 |---|---|---|---|---|---|---|
 | U1 | 账号信息 | `get_current_user_info` | `/v1/session/me` 的 `identity` 字段；`GET /v1/auth/account` | 设置 → 账号 | F | ✅ |
 | U2 | 昵称、头像 | `update_profile` | Agent 已有 Profile 功能；注册时的 `user_name` 存在账号上 | — | 既有测试 | ✅（形状不同） |
-| U3 | 界面语言随账号保存（G7），以最新选择为准，未登录时的选择带上 `chosen_at` | `PUT /user/preferences/locale` | `PUT /v1/auth/account/locale`，返回 `locale_chosen_at` | `AccountLocaleSync` | F language；web:LS 4 项 | ✅ |
+| U3 | 界面语言随账号保存（G7），以最新选择为准，未登录时的选择带上 `chosen_at` | `PUT /user/preferences/locale`；`LocaleChoice {owner, stored}` | `PUT /v1/auth/account/locale`，返回 `locale_chosen_at`；浏览器记录选择的归属与是否已存储，只把未登录或同一账号的选择带入账号 | `AccountLocaleSync` | F language；web:LS 4 项；`AccountLocaleSharedBrowser.test.tsx` 4 项（同一浏览器多账号互不覆盖，L1） | ✅ |
 
 ### 3.12 设置与供应商（G5、G6）
 
