@@ -33,6 +33,8 @@ from .events import (
     NormalizedEvent,
     _harness_inventory,
     _payload_text,
+    reported_compaction,
+    reported_context_windows,
 )
 from .preview import ReplyPreview
 
@@ -309,6 +311,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             }
             if harness is not None:
                 payload["harness"] = harness
+            payload.update(_compaction_fields(subtype, event))
             return NormalizedEvent(LIFECYCLE, payload)
         if kind == "stream_event":
             return self._from_stream(event)
@@ -480,6 +483,7 @@ class ClaudeCodeRuntime(AgentRuntime):
                     "api_error_status": event.get("api_error_status"),
                     "text": text[:2000],
                     **usage_fields,
+                    **_context_window_fields(event),
                 },
             )
         return NormalizedEvent(
@@ -493,6 +497,7 @@ class ClaudeCodeRuntime(AgentRuntime):
                 # api_logs.agent_job_id — the platform never trusts a number
                 # the agent computed about itself.
                 "reported_cost_usd": event.get("total_cost_usd"),
+                **_context_window_fields(event),
             },
         )
 
@@ -518,3 +523,30 @@ class ClaudeCodeRuntime(AgentRuntime):
     def capabilities(self) -> RuntimeCapabilities:
         """Claude Code takes the platform's MCP relay and an effort level."""
         return RuntimeCapabilities(mcp=CLAUDE_CODE.mcp, reasoning_efforts=self.EFFORT_LEVELS)
+
+
+def _compaction_fields(subtype: str, event: dict[str, Any]) -> dict[str, Any]:
+    """A ``compact_boundary``'s own account of the compaction.
+
+    Pinned 2.1.220 sends ``compact_metadata`` with the trigger (``auto`` or
+    ``manual``), the tokens before, and from later releases the tokens after.
+    Stored so a reader can show what the CLI said it reclaimed rather than
+    guess it from the next request's size.
+    """
+    if subtype != "compact_boundary":
+        return {}
+    metadata = event.get("compact_metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    report = reported_compaction(
+        trigger=metadata.get("trigger"),
+        pre_tokens=metadata.get("pre_tokens"),
+        post_tokens=metadata.get("post_tokens"),
+    )
+    return {"compaction": report} if report else {}
+
+
+def _context_window_fields(event: dict[str, Any]) -> dict[str, Any]:
+    """The context window each model of this query ran under, when reported."""
+    windows = reported_context_windows(event.get("modelUsage"))
+    return {"context_windows": windows} if windows else {}

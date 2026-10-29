@@ -420,3 +420,63 @@ def days_breakdown(
         )
         for start, end in buckets
     ]
+
+
+def merge_aggregates(parts: list[AdminUsageAggregate]) -> AdminUsageAggregate:
+    """Combine aggregates of disjoint cohorts into the aggregate of their union.
+
+    Exactly what aggregating the union's jobs at once returns: counts and
+    statuses add, known amounts add as exact decimals while an unknown metric
+    stays unknown, and the oldest report is the oldest of all. A batched read
+    uses this to sum a history no single bounded selection can hold.
+    """
+    merged = AdminUsageAggregate(run_count=0, attempt_count=0)
+    totals: list[GrantUsageDerivedTotals] = []
+    unknown: list[GrantUsageUnknownRows] = []
+    for part in parts:
+        merged.run_count += part.run_count
+        merged.attempt_count += part.attempt_count
+        merged.estimated_calls += part.estimated_calls
+        merged.runs_with_snapshot += part.runs_with_snapshot
+        merged.missing_attempts += part.missing_attempts
+        merged.active_runs += part.active_runs
+        merged.refreshing_runs += part.refreshing_runs
+        for status, count in part.status_counts.items():
+            merged.status_counts[status] = merged.status_counts.get(status, 0) + count
+        if part.oldest_queried_at is not None:
+            oldest = merged.oldest_queried_at
+            merged.oldest_queried_at = (
+                part.oldest_queried_at if oldest is None else min(oldest, part.oldest_queried_at)
+            )
+        if part.totals is not None:
+            totals.append(part.totals)
+        if part.unknown_rows is not None:
+            unknown.append(part.unknown_rows)
+    merged.totals = _sum_totals(totals)
+    merged.unknown_rows = _unknown_rows(unknown)
+    return merged
+
+
+def ranked_breakdown(
+    groups: dict[str | None, AdminUsageAggregate], *, top: int = BREAKDOWN_TOP_GROUPS
+) -> AdminUsageBreakdown:
+    """Rank already-aggregated groups the way :func:`breakdown` ranks jobs."""
+    ranked = _ranked(groups)
+    rest = ranked[top:]
+    return AdminUsageBreakdown(
+        group_count=len(groups),
+        groups=ranked[:top],
+        other=(
+            AdminUsageGroup(key=None, usage=merge_aggregates([group.usage for group in rest]))
+            if rest
+            else None
+        ),
+    )
+
+
+def grouped_aggregates(prepared: list[Prepared], key: Any) -> dict[Any, AdminUsageAggregate]:
+    """Aggregate prepared jobs per ``key(row)``."""
+    cohorts: dict[Any, list[Prepared]] = {}
+    for entry in prepared:
+        cohorts.setdefault(key(entry[0]), []).append(entry)
+    return {name: _aggregate(group) for name, group in cohorts.items()}

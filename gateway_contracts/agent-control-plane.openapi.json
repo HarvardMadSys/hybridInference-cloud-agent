@@ -10307,6 +10307,926 @@
         "title": "ConnectionsResponse",
         "type": "object"
       },
+      "ContextChange": {
+        "additionalProperties": false,
+        "description": "One of the largest request-to-request changes.",
+        "properties": {
+          "compaction_between": {
+            "title": "Compaction Between",
+            "type": "boolean"
+          },
+          "delta_tokens": {
+            "title": "Delta Tokens",
+            "type": "integer"
+          },
+          "direction": {
+            "enum": [
+              "growth",
+              "drop"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "from_index": {
+            "minimum": 0.0,
+            "title": "From Index",
+            "type": "integer"
+          },
+          "to_index": {
+            "minimum": 0.0,
+            "title": "To Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "direction",
+          "delta_tokens",
+          "from_index",
+          "to_index",
+          "compaction_between"
+        ],
+        "title": "ContextChange",
+        "type": "object"
+      },
+      "ContextCompaction": {
+        "additionalProperties": false,
+        "description": "A compaction the CLI reported, with the requests observed around it.",
+        "properties": {
+          "at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "attempt_id": {
+            "title": "Attempt Id",
+            "type": "integer"
+          },
+          "completed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "observed_after": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed After"
+          },
+          "observed_before": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Before"
+          },
+          "post_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Post Tokens"
+          },
+          "pre_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pre Tokens"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "turn_no",
+          "attempt_id",
+          "seq",
+          "source"
+        ],
+        "title": "ContextCompaction",
+        "type": "object"
+      },
+      "ContextComposition": {
+        "additionalProperties": false,
+        "description": "Stored content priced at four characters per token.\n\nAn estimate of what the conversation's own text weighs, never a reading of\nwhat the CLI put in its window: system prompts, tool schemas and anything\nthe CLI did not stream are invisible here, and clipped previews undercount.",
+        "properties": {
+          "basis": {
+            "enum": [
+              "since_last_compaction",
+              "whole_conversation"
+            ],
+            "title": "Basis",
+            "type": "string"
+          },
+          "categories": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Categories",
+            "type": "object"
+          },
+          "chars_per_token": {
+            "default": 4,
+            "title": "Chars Per Token",
+            "type": "integer"
+          },
+          "estimated_tokens": {
+            "minimum": 0.0,
+            "title": "Estimated Tokens",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "unattributed_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unattributed Tokens"
+          }
+        },
+        "required": [
+          "basis",
+          "categories",
+          "estimated_tokens",
+          "truncated"
+        ],
+        "title": "ContextComposition",
+        "type": "object"
+      },
+      "ContextCoverage": {
+        "additionalProperties": false,
+        "description": "How much of the conversation the numbers above stand on.",
+        "properties": {
+          "attempts": {
+            "minimum": 0.0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "attempts_observed": {
+            "minimum": 0.0,
+            "title": "Attempts Observed",
+            "type": "integer"
+          },
+          "compactions": {
+            "minimum": 0.0,
+            "title": "Compactions",
+            "type": "integer"
+          },
+          "compactions_unknown_outcome": {
+            "minimum": 0.0,
+            "title": "Compactions Unknown Outcome",
+            "type": "integer"
+          },
+          "main_requests": {
+            "minimum": 0.0,
+            "title": "Main Requests",
+            "type": "integer"
+          },
+          "points_omitted": {
+            "minimum": 0.0,
+            "title": "Points Omitted",
+            "type": "integer"
+          },
+          "subagent_requests": {
+            "minimum": 0.0,
+            "title": "Subagent Requests",
+            "type": "integer"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          },
+          "unparsed_raw": {
+            "minimum": 0.0,
+            "title": "Unparsed Raw",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "turns",
+          "attempts",
+          "attempts_observed",
+          "main_requests",
+          "subagent_requests",
+          "compactions",
+          "compactions_unknown_outcome",
+          "points_omitted",
+          "unparsed_raw"
+        ],
+        "title": "ContextCoverage",
+        "type": "object"
+      },
+      "ContextInsightsPage": {
+        "additionalProperties": false,
+        "description": "A page of the owner's conversations, ranked by one context measure.",
+        "properties": {
+          "conversations": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationContext"
+            },
+            "title": "Conversations",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "period": {
+            "$ref": "#/components/schemas/UsageRange"
+          },
+          "profiling": {
+            "$ref": "#/components/schemas/ContextProfiling"
+          },
+          "sort": {
+            "enum": [
+              "recent",
+              "peak",
+              "compactions",
+              "requests"
+            ],
+            "title": "Sort",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/ContextInsightsSummary"
+          },
+          "time_basis": {
+            "const": "job_created_at",
+            "default": "job_created_at",
+            "title": "Time Basis",
+            "type": "string"
+          }
+        },
+        "required": [
+          "period",
+          "sort",
+          "generated_at",
+          "summary",
+          "profiling",
+          "conversations"
+        ],
+        "title": "ContextInsightsPage",
+        "type": "object"
+      },
+      "ContextInsightsSummary": {
+        "additionalProperties": false,
+        "description": "Totals over every conversation in the range, not only this page.",
+        "properties": {
+          "compactions": {
+            "minimum": 0.0,
+            "title": "Compactions",
+            "type": "integer"
+          },
+          "conversations": {
+            "minimum": 0.0,
+            "title": "Conversations",
+            "type": "integer"
+          },
+          "conversations_observed": {
+            "minimum": 0.0,
+            "title": "Conversations Observed",
+            "type": "integer"
+          },
+          "deleted_conversation_runs": {
+            "minimum": 0.0,
+            "title": "Deleted Conversation Runs",
+            "type": "integer"
+          },
+          "main_requests": {
+            "minimum": 0.0,
+            "title": "Main Requests",
+            "type": "integer"
+          },
+          "peak_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Prompt Tokens"
+          },
+          "peak_thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Thread Id"
+          },
+          "subagent_requests": {
+            "minimum": 0.0,
+            "title": "Subagent Requests",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "conversations",
+          "conversations_observed",
+          "main_requests",
+          "subagent_requests",
+          "compactions",
+          "deleted_conversation_runs"
+        ],
+        "title": "ContextInsightsSummary",
+        "type": "object"
+      },
+      "ContextPoint": {
+        "additionalProperties": false,
+        "description": "One model request of the conversation's own agent.",
+        "properties": {
+          "after_compaction": {
+            "default": false,
+            "title": "After Compaction",
+            "type": "boolean"
+          },
+          "at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "attempt_id": {
+            "title": "Attempt Id",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
+          },
+          "context_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window"
+          },
+          "delta_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta Tokens"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "index": {
+            "minimum": 0.0,
+            "title": "Index",
+            "type": "integer"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "prompt_tokens": {
+            "minimum": 0.0,
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          },
+          "uncached_input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uncached Input Tokens"
+          }
+        },
+        "required": [
+          "index",
+          "job_id",
+          "turn_no",
+          "attempt_id",
+          "seq",
+          "prompt_tokens"
+        ],
+        "title": "ContextPoint",
+        "type": "object"
+      },
+      "ContextProfiling": {
+        "additionalProperties": false,
+        "description": "How complete the profiles behind this page are.",
+        "properties": {
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "pending_attempts": {
+            "minimum": 0.0,
+            "title": "Pending Attempts",
+            "type": "integer"
+          },
+          "pending_capped": {
+            "default": false,
+            "title": "Pending Capped",
+            "type": "boolean"
+          },
+          "refreshed": {
+            "minimum": 0.0,
+            "title": "Refreshed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pending_attempts",
+          "refreshed",
+          "complete"
+        ],
+        "title": "ContextProfiling",
+        "type": "object"
+      },
+      "ContextTurn": {
+        "additionalProperties": false,
+        "description": "One turn: the requests its attempts made and how the context moved.",
+        "properties": {
+          "attempts": {
+            "minimum": 0.0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "change_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Tokens"
+          },
+          "compactions": {
+            "minimum": 0.0,
+            "title": "Compactions",
+            "type": "integer"
+          },
+          "context_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window"
+          },
+          "copied": {
+            "default": false,
+            "title": "Copied",
+            "type": "boolean"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "first_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Index"
+          },
+          "first_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Prompt Tokens"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "last_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Prompt Tokens"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "peak_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Prompt Tokens"
+          },
+          "requests": {
+            "minimum": 0.0,
+            "title": "Requests",
+            "type": "integer"
+          },
+          "runtime": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtime"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "subagent_requests": {
+            "minimum": 0.0,
+            "title": "Subagent Requests",
+            "type": "integer"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "turn_no",
+          "attempts",
+          "requests",
+          "subagent_requests",
+          "compactions"
+        ],
+        "title": "ContextTurn",
+        "type": "object"
+      },
+      "ConversationContext": {
+        "additionalProperties": false,
+        "description": "One conversation's context profile over its runs in the range.",
+        "properties": {
+          "archived": {
+            "default": false,
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "attempts": {
+            "minimum": 0.0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "attempts_profiled": {
+            "minimum": 0.0,
+            "title": "Attempts Profiled",
+            "type": "integer"
+          },
+          "compactions": {
+            "minimum": 0.0,
+            "title": "Compactions",
+            "type": "integer"
+          },
+          "context_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window"
+          },
+          "first_turn_at": {
+            "format": "date-time",
+            "title": "First Turn At",
+            "type": "string"
+          },
+          "last_turn_at": {
+            "format": "date-time",
+            "title": "Last Turn At",
+            "type": "string"
+          },
+          "latest_job_id": {
+            "title": "Latest Job Id",
+            "type": "string"
+          },
+          "latest_observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Observed At"
+          },
+          "latest_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Prompt Tokens"
+          },
+          "main_requests": {
+            "minimum": 0.0,
+            "title": "Main Requests",
+            "type": "integer"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "peak_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Prompt Tokens"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          },
+          "runtimes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Runtimes",
+            "type": "array"
+          },
+          "subagent_requests": {
+            "minimum": 0.0,
+            "title": "Subagent Requests",
+            "type": "integer"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdminUsageAggregate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "thread_id",
+          "latest_job_id",
+          "turns",
+          "first_turn_at",
+          "last_turn_at",
+          "runtimes",
+          "models",
+          "attempts",
+          "attempts_profiled",
+          "main_requests",
+          "subagent_requests",
+          "compactions"
+        ],
+        "title": "ConversationContext",
+        "type": "object"
+      },
       "ConversationUsage": {
         "description": "Cached usage for the owned conversation, without per-attempt diagnostics.",
         "properties": {
@@ -13856,6 +14776,41 @@
         "title": "JoinRequestResponse",
         "type": "object"
       },
+      "LatestContext": {
+        "additionalProperties": false,
+        "description": "The latest observed request, and what is known about it.",
+        "properties": {
+          "compacted_after": {
+            "title": "Compacted After",
+            "type": "boolean"
+          },
+          "point": {
+            "$ref": "#/components/schemas/ContextPoint"
+          },
+          "turn_active": {
+            "title": "Turn Active",
+            "type": "boolean"
+          },
+          "window_share": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Share"
+          }
+        },
+        "required": [
+          "point",
+          "compacted_after",
+          "turn_active"
+        ],
+        "title": "LatestContext",
+        "type": "object"
+      },
       "ListAgentRunnerHostsResponse": {
         "description": "Runner pool, new-chat placement, and selected CLI versions.",
         "properties": {
@@ -15270,7 +16225,7 @@
       },
       "OwnerResourceHistory": {
         "additionalProperties": false,
-        "description": "The owner's container use per UTC day, summed over every container.",
+        "description": "The owner's container use per UTC bucket, summed over every container.\n\n``days`` keeps its name for older clients; with a long range each entry is\na week or a month, which ``period.bucket`` names.",
         "properties": {
           "day_timezone": {
             "const": "UTC",
@@ -15289,6 +16244,16 @@
             "format": "date-time",
             "title": "Generated At",
             "type": "string"
+          },
+          "period": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "since": {
             "format": "date-time",
@@ -15352,6 +16317,12 @@
         "additionalProperties": false,
         "description": "The owner's model usage for runs created in the window.\n\nEvery number is the admin Usage page's for the same runs: a run counts on\nthe UTC day it was created, in full, and an unknown amount stays unknown.",
         "properties": {
+          "batches": {
+            "default": 1,
+            "minimum": 0.0,
+            "title": "Batches",
+            "type": "integer"
+          },
           "by_model": {
             "$ref": "#/components/schemas/AdminUsageBreakdown"
           },
@@ -15372,6 +16343,16 @@
             "format": "date-time",
             "title": "Generated At",
             "type": "string"
+          },
+          "period": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "since": {
             "format": "date-time",
@@ -16415,6 +17396,89 @@
           "storage_io"
         ],
         "title": "RunResourceSummary",
+        "type": "object"
+      },
+      "RuntimeContextCapability": {
+        "additionalProperties": false,
+        "description": "What one runtime's stored events can say about context, and how often they did.",
+        "properties": {
+          "compaction_events": {
+            "enum": [
+              "reported",
+              "partly_reported",
+              "not_reported"
+            ],
+            "title": "Compaction Events",
+            "type": "string"
+          },
+          "compaction_sizes": {
+            "enum": [
+              "reported",
+              "partly_reported",
+              "not_reported"
+            ],
+            "title": "Compaction Sizes",
+            "type": "string"
+          },
+          "context_window": {
+            "enum": [
+              "reported",
+              "partly_reported",
+              "not_reported"
+            ],
+            "title": "Context Window",
+            "type": "string"
+          },
+          "live_occupancy": {
+            "const": "not_collected",
+            "default": "not_collected",
+            "title": "Live Occupancy",
+            "type": "string"
+          },
+          "request_usage": {
+            "enum": [
+              "reported",
+              "partly_reported",
+              "not_reported"
+            ],
+            "title": "Request Usage",
+            "type": "string"
+          },
+          "runtime": {
+            "title": "Runtime",
+            "type": "string"
+          },
+          "subagent_split": {
+            "enum": [
+              "reported",
+              "not_applicable",
+              "not_reported"
+            ],
+            "title": "Subagent Split",
+            "type": "string"
+          },
+          "turns": {
+            "minimum": 0.0,
+            "title": "Turns",
+            "type": "integer"
+          },
+          "window_reported_turns": {
+            "minimum": 0.0,
+            "title": "Window Reported Turns",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "runtime",
+          "turns",
+          "request_usage",
+          "subagent_split",
+          "compaction_events",
+          "compaction_sizes",
+          "context_window",
+          "window_reported_turns"
+        ],
+        "title": "RuntimeContextCapability",
         "type": "object"
       },
       "RuntimeRefreshInput": {
@@ -19306,6 +20370,101 @@
         "title": "TestUpdate",
         "type": "object"
       },
+      "ThreadContextView": {
+        "additionalProperties": false,
+        "description": "The Context view of one conversation.",
+        "properties": {
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/RuntimeContextCapability"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "compactions": {
+            "items": {
+              "$ref": "#/components/schemas/ContextCompaction"
+            },
+            "title": "Compactions",
+            "type": "array"
+          },
+          "composition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContextComposition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/ContextCoverage"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "largest_changes": {
+            "items": {
+              "$ref": "#/components/schemas/ContextChange"
+            },
+            "title": "Largest Changes",
+            "type": "array"
+          },
+          "latest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LatestContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "peak": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContextPoint"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/ContextPoint"
+            },
+            "title": "Requests",
+            "type": "array"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "turns": {
+            "items": {
+              "$ref": "#/components/schemas/ContextTurn"
+            },
+            "title": "Turns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "thread_id",
+          "generated_at",
+          "capabilities",
+          "turns",
+          "requests",
+          "compactions",
+          "largest_changes",
+          "coverage"
+        ],
+        "title": "ThreadContextView",
+        "type": "object"
+      },
       "ToolCallResources": {
         "description": "Timing and attributable process resources for one tool call.\n\nCurrent shared turns leave whole-container sample fields empty because\nsibling members can execute concurrently. Kata may still attach exact\nexit-time accounting for child processes attributed to this call. Older\nrows can contain periodic sample windows; both shapes remain readable.\n\nA call that ran alongside others could not have its readings separated\nfrom theirs, so its numbers arrive in the ``shared`` fields with\n``overlap_n`` above one. Those are upper bounds and must be presented as\nsuch; a reader that only understands the exclusive fields correctly shows\nnothing for them.",
         "properties": {
@@ -20195,6 +21354,84 @@
           "revision"
         ],
         "title": "UpdateSkill",
+        "type": "object"
+      },
+      "UsageRange": {
+        "additionalProperties": false,
+        "description": "The interval one read covers, stated so a reader can label it.",
+        "properties": {
+          "bucket": {
+            "enum": [
+              "day",
+              "week",
+              "month"
+            ],
+            "title": "Bucket",
+            "type": "string"
+          },
+          "day_timezone": {
+            "const": "UTC",
+            "default": "UTC",
+            "title": "Day Timezone",
+            "type": "string"
+          },
+          "days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days"
+          },
+          "first_record_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Record At"
+          },
+          "preset": {
+            "anyOf": [
+              {
+                "enum": [
+                  "today",
+                  "7d",
+                  "30d",
+                  "all"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "since",
+          "until",
+          "bucket"
+        ],
+        "title": "UsageRange",
         "type": "object"
       },
       "UserAvatar": {
@@ -33341,6 +34578,65 @@
         "summary": "Get Agent Thread"
       }
     },
+    "/v1/agent/jobs/{job_id}/thread/context": {
+      "get": {
+        "description": "The Context view of the caller's conversation holding ``job_id``.",
+        "operationId": "get_thread_context_v1_agent_jobs__job_id__thread_context_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadContextView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Thread Context",
+        "tags": [
+          "context"
+        ]
+      }
+    },
     "/v1/agent/jobs/{job_id}/thread/environment": {
       "get": {
         "description": "Show the workspace's fixed versions and preparation history.",
@@ -40534,21 +41830,166 @@
         ]
       }
     },
+    "/v1/agent/usage/context": {
+      "get": {
+        "description": "A ranked page of the owner's conversations with runs in the range.\n\nRaises:\n    HTTPException: 422 for a cursor from another list, 503 when the page's\n        usage cannot be summed in time; never a partial sum.",
+        "operationId": "read_context_insights_v1_agent_usage_context_get",
+        "parameters": [
+          {
+            "description": "today, 7d, 30d or all, in UTC days; the usage history's own range.",
+            "in": "query",
+            "name": "range",
+            "required": false,
+            "schema": {
+              "default": "7d",
+              "description": "today, 7d, 30d or all, in UTC days; the usage history's own range.",
+              "enum": [
+                "today",
+                "7d",
+                "30d",
+                "all"
+              ],
+              "title": "Range",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "recent",
+              "enum": [
+                "recent",
+                "peak",
+                "compactions",
+                "requests"
+              ],
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContextInsightsPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Context Insights",
+        "tags": [
+          "context"
+        ]
+      }
+    },
     "/v1/agent/usage/resources": {
       "get": {
-        "description": "Running time and measured CPU and memory for each of the last ``days`` UTC days.",
+        "description": "Running time and measured CPU and memory per UTC bucket of the range.",
         "operationId": "read_owner_resources_v1_agent_usage_resources_get",
         "parameters": [
           {
+            "description": "The last N UTC days, today included. Prefer `range`.",
             "in": "query",
             "name": "days",
             "required": false,
             "schema": {
-              "default": 7,
-              "maximum": 90,
-              "minimum": 1,
-              "title": "Days",
-              "type": "integer"
+              "anyOf": [
+                {
+                  "maximum": 90,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The last N UTC days, today included. Prefer `range`.",
+              "title": "Days"
+            }
+          },
+          {
+            "description": "today, 7d, 30d or all, in UTC days. `all` starts at the owner's earliest retained run or container and is never narrowed.",
+            "in": "query",
+            "name": "range",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "today",
+                    "7d",
+                    "30d",
+                    "all"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "today, 7d, 30d or all, in UTC days. `all` starts at the owner's earliest retained run or container and is never narrowed.",
+              "title": "Range"
             }
           },
           {
@@ -40598,19 +42039,51 @@
     },
     "/v1/agent/usage/tokens": {
       "get": {
-        "description": "Model usage and cost of the owner's runs created in the last ``days`` UTC days.\n\nRaises:\n    HTTPException: 422 when the selection exceeds the aggregation's bounds,\n        503 when it cannot be read inside them. Neither returns a partial sum.",
+        "description": "Model usage and cost of the owner's runs created in the range.\n\nA range larger than one bounded selection is summed in bounded batches\n(:mod:`cloud_agent.usage_batches`), never narrowed.\n\nRaises:\n    HTTPException: 422 when even a minimal batch exceeds the aggregation's\n        bounds or the response would, 503 when it cannot be read in time.\n        Neither returns a partial sum.",
         "operationId": "read_owner_tokens_v1_agent_usage_tokens_get",
         "parameters": [
           {
+            "description": "The last N UTC days, today included. Prefer `range`.",
             "in": "query",
             "name": "days",
             "required": false,
             "schema": {
-              "default": 7,
-              "maximum": 90,
-              "minimum": 1,
-              "title": "Days",
-              "type": "integer"
+              "anyOf": [
+                {
+                  "maximum": 90,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The last N UTC days, today included. Prefer `range`.",
+              "title": "Days"
+            }
+          },
+          {
+            "description": "today, 7d, 30d or all, in UTC days. `all` starts at the owner's earliest retained run or container and is never narrowed.",
+            "in": "query",
+            "name": "range",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "today",
+                    "7d",
+                    "30d",
+                    "all"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "today, 7d, 30d or all, in UTC days. `all` starts at the owner's earliest retained run or container and is never narrowed.",
+              "title": "Range"
             }
           },
           {

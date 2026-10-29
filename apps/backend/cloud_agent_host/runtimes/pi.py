@@ -26,6 +26,7 @@ from .events import (
     NormalizedEvent,
     _payload_text,
     _truncate,
+    reported_compaction,
 )
 from .preview import ReplyPreview
 
@@ -264,6 +265,8 @@ class PiRuntime(AgentRuntime):
             )
         if kind in self._SILENT_KINDS:
             return None
+        if kind in {"compaction_start", "compaction_end"}:
+            return _compaction_event(event)
         return self._raw(line, f"unknown type {kind!r}")
 
     def _from_agent_end(self, event: dict[str, Any]) -> list[NormalizedEvent]:
@@ -490,3 +493,29 @@ class PiRuntime(AgentRuntime):
             mcp=PI.mcp,
             reasoning_efforts=self.EFFORT_LEVELS,
         )
+
+
+def _compaction_event(event: dict[str, Any]) -> NormalizedEvent:
+    """pi's own report of a compaction starting or ending (pinned 0.73.1).
+
+    ``compaction_end`` carries the trigger (``manual``, ``threshold`` or
+    ``overflow``), the tokens before, and whether it was aborted or will be
+    retried. Only an end that was neither is a compaction that happened; the
+    summary text itself stays out of the stream.
+    """
+    result = event.get("result")
+    result = result if isinstance(result, dict) else {}
+    report = reported_compaction(trigger=event.get("reason"), pre_tokens=result.get("tokensBefore"))
+    if event.get("type") == "compaction_start":
+        return NormalizedEvent(LIFECYCLE, {"phase": "compaction_start", "compaction": report})
+    payload: dict[str, Any] = {
+        "phase": "compaction",
+        "compaction": report,
+        "completed": bool(result) and event.get("aborted") is not True,
+        "aborted": event.get("aborted") is True,
+        "will_retry": event.get("willRetry") is True,
+    }
+    error = event.get("errorMessage")
+    if isinstance(error, str) and error:
+        payload["text"] = _truncate(error, 500)
+    return NormalizedEvent(LIFECYCLE, payload)

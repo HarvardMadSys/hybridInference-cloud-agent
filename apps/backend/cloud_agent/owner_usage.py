@@ -32,6 +32,7 @@ from cloud_agent.admin_usage import (  # noqa: TC001
     AdminUsageBreakdown,
     AdminUsageDay,
 )
+from cloud_agent.usage_range import UsageRange  # noqa: TC001
 
 ContainerState = Literal[
     "starting", "running", "stopping", "stopped", "stored", "deleting", "unavailable"
@@ -279,7 +280,11 @@ class OwnerResourceDay(OwnerResourceTotals):
 
 
 class OwnerResourceHistory(BaseModel):
-    """The owner's container use per UTC day, summed over every container."""
+    """The owner's container use per UTC bucket, summed over every container.
+
+    ``days`` keeps its name for older clients; with a long range each entry is
+    a week or a month, which ``period.bucket`` names.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -289,6 +294,7 @@ class OwnerResourceHistory(BaseModel):
     generated_at: datetime
     totals: OwnerResourceTotals
     days: list[OwnerResourceDay]
+    period: UsageRange | None = None
 
 
 class OwnerTokenUsage(BaseModel):
@@ -306,5 +312,9 @@ class OwnerTokenUsage(BaseModel):
     time_basis: Literal["job_created_at"] = "job_created_at"
     generated_at: datetime
     summary: AdminUsageAggregate
+    #: One entry per bucket of ``period`` (a day, week or month).
     days: list[AdminUsageDay]
     by_model: AdminUsageBreakdown
+    period: UsageRange | None = None
+    #: Bounded batches the sum was read in; more than one for a long history.
+    batches: int = Field(default=1, ge=0)

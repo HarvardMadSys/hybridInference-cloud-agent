@@ -13,6 +13,7 @@ measurement script exercises exactly what the route runs.
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
 #: also produce a filter link the database cannot match. Rows are only as wide
 #: as the stored identity, and the response budget bounds the total.
 _JOB_COLUMNS = """
-    j.id, j.user_id, j.model, j.runtime, t.repo, j.state, j.created_at
+    j.id, j.user_id, j.thread_id, j.model, j.runtime, t.repo, j.state, j.created_at
 """
 
 #: The protocol keys of a stored report. A key outside this list is never read,
@@ -111,6 +112,29 @@ _COHORT_SQL = f"""
     LIMIT $7
 """
 
+#: The same cohort, read in ``(created_at, id)`` order after a keyset and
+#: optionally narrowed to some of the owner's conversations. A batched read
+#: walks a history too large for one selection with it, every batch under the
+#: same predicate as the single read, so the two cannot select different runs.
+_COHORT_BATCH_SQL = f"""
+    SELECT {_JOB_COLUMNS}
+    FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id
+    WHERE j.created_at >= $1 AND j.created_at < $2
+      AND j.fork_source_job_id IS NULL
+    {_FILTERS_SQL}
+      AND ($8::text[] IS NULL OR j.thread_id = ANY($8::text[]))
+      AND ($9::timestamptz IS NULL OR (j.created_at, j.id) > ($9::timestamptz, $10::text))
+    ORDER BY j.created_at, j.id
+    LIMIT $7
+"""
+
+#: The earliest run the cohort predicate selects for one owner.
+_FIRST_RUN_SQL = """
+    SELECT MIN(j.created_at)
+    FROM agent_jobs j
+    WHERE j.user_id = $1 AND j.fork_source_job_id IS NULL
+"""
+
 #: What the selection would cost, measured in Postgres so an oversized one is
 #: refused before a single payload crosses the wire.
 _BUDGET_SQL = """
@@ -153,6 +177,11 @@ class UsageQueryTooLarge(Exception):
 
 class UsageQueryUnavailable(Exception):
     """The selection could not be read within its bounds."""
+
+
+#: The smallest batch a batched read shrinks to before refusing: a hundred
+#: runs over the row or snapshot budget is a pathological history, not a large one.
+MIN_BATCH_RUNS = 100
 
 
 class AdminUsageQueries:
@@ -297,3 +326,85 @@ class AdminUsageQueries:
         ):
             raise UsageQueryTooLarge
         return list(await conn.fetch(_PROJECTION_SQL, job_ids, since, until))
+
+    async def first_run_at(self, user_id: str) -> datetime | None:
+        """When the owner's first run the cohort can select was created."""
+        try:
+            async with self._read() as conn:
+                return await conn.fetchval(_FIRST_RUN_SQL, user_id)
+        except Exception as error:
+            raise UsageQueryUnavailable from error
+
+    async def batched_selection(
+        self,
+        *,
+        since: datetime,
+        until: datetime,
+        user_id: str,
+        thread_ids: list[str] | None,
+        max_runs: int,
+        max_rows: int,
+        max_snapshot_bytes: int,
+        deadline: float,
+    ) -> AsyncIterator[tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
+        """Yield one owner's selection as consecutive bounded batches.
+
+        Every batch is read in the same read-only repeatable-read transaction,
+        so the batches together describe one instant exactly as a single
+        selection would. A batch holds at most ``max_runs`` runs and stays
+        within the row and snapshot budgets; one that would not is retried
+        at half the size, down to :data:`MIN_BATCH_RUNS`. Nothing is skipped:
+        the batches partition every run the predicate selects.
+
+        Raises:
+            UsageQueryTooLarge: If even the smallest batch exceeds a budget.
+            UsageQueryUnavailable: If a statement fails, times out, or the
+                whole read passes ``deadline`` (a ``time.monotonic`` instant).
+        """
+        try:
+            async with self._read() as conn:
+                after: tuple[datetime, str] | None = None
+                size = max_runs
+                while True:
+                    if time.monotonic() > deadline:
+                        raise UsageQueryUnavailable
+                    cohort = [
+                        dict(row)
+                        for row in await conn.fetch(
+                            _COHORT_BATCH_SQL,
+                            since,
+                            until,
+                            user_id,
+                            None,
+                            None,
+                            None,
+                            size,
+                            thread_ids,
+                            after[0] if after else None,
+                            after[1] if after else None,
+                        )
+                    ]
+                    if not cohort:
+                        return
+                    try:
+                        rows = await self._reports(
+                            conn,
+                            cohort=cohort,
+                            since=since,
+                            until=until,
+                            max_rows=max_rows,
+                            max_snapshot_bytes=max_snapshot_bytes,
+                        )
+                    except UsageQueryTooLarge:
+                        if size <= MIN_BATCH_RUNS:
+                            raise
+                        size = max(MIN_BATCH_RUNS, size // 2)
+                        continue
+                    yield cohort, await asyncio.to_thread(_decoded_reports, rows)
+                    if len(cohort) < size:
+                        return
+                    after = (cohort[-1]["created_at"], cohort[-1]["id"])
+        except (UsageQueryTooLarge, UsageQueryUnavailable):
+            raise
+        except Exception as error:
+            raise UsageQueryUnavailable from error

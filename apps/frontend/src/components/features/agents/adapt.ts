@@ -546,6 +546,9 @@ const LIFECYCLE_LABELS: Record<string, string> = {
   workspace_ready: 'Workspace ready',
   workspace_finalizing: 'Saving workspace changes',
   compact_boundary: 'Context compacted to keep going',
+  // pi's own compaction report (pinned 0.73.1), stored since context insights.
+  compaction_start: 'Compacting context',
+  compaction: 'Context compacted to keep going',
   result: 'Agent finished',
   publishing: 'Opening draft pull request',
   published: 'Draft pull request ready',
