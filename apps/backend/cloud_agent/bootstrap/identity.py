@@ -106,9 +106,15 @@ def attach_local_identity(app: FastAPI, storage: Storage, *, local: bool) -> Non
 
 
 def local_identity_tasks(
-    storage: Storage, grants: Any, *, local: bool
+    storage: Storage, grants: Any, *, local: bool, mailer: Any = None
 ) -> list[tuple[str, Coroutine[Any, Any, None]]]:
-    """The background loops local mode adds: keeping ended access ended, and account mail."""
+    """The background loops local mode adds: keeping ended access ended, and account mail.
+
+    Administrator mail goes through ``mailer``, the application's account
+    mailer (``app.state.account_mailer``) when one is installed, so it leaves
+    by the same transport as every other account message; otherwise the
+    transport the settings select.
+    """
     if not local:
         return []
     from cloud_agent.accounts.delivery import DeliveryMailer
@@ -117,7 +123,7 @@ def local_identity_tasks(
 
     return [
         ("account_access_task", run_account_access_enforcement(storage, grants)),
-        ("account_broadcast_task", run_account_broadcasts(storage, DeliveryMailer())),
+        ("account_broadcast_task", run_account_broadcasts(storage, mailer or DeliveryMailer())),
     ]
 
 

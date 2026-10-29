@@ -579,7 +579,12 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             # heartbeat or the reaper.
             _spawn(app, "capacity_task", prune_host_capacity_history(storage.host_capacity))
             _spawn(app, "agent_memory_task", maintain_agent_memories(storage.agent_memory))
-            for name, work in local_identity_tasks(storage, app.state.grants, local=local):
+            for name, work in local_identity_tasks(
+                storage,
+                app.state.grants,
+                local=local,
+                mailer=getattr(app.state, "account_mailer", None),
+            ):
                 _spawn(app, name, work)
             # The profiling policy loop runs only here, in the one main process
             # that owns the reaper: file and terminal requests are rooted in this
