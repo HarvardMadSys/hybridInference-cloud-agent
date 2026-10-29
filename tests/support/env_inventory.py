@@ -574,8 +574,8 @@ FAMILIES: tuple[Family, ...] = (
     # -- retired ----------------------------------------------------------
     Family(
         "retired",
-        "Former Workspace Broker names (LEGACY_ENV_NAMES), still accepted until "
-        "COMPAT(remove-after=2026-12-31) by manager_env and the Compose fallbacks.",
+        "Former Workspace Broker names (LEGACY_ENV_NAMES), still accepted by manager_env "
+        "and the Compose fallbacks until the COMPAT marker on LEGACY_ENV_NAMES expires.",
         names=(
             "AGENT_WORKSPACE_BROKER_TOKEN",
             "AGENT_WORKSPACE_BROKER_URL",
