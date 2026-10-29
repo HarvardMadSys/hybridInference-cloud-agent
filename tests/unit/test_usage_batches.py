@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 
 import pytest
 from tests.unit.test_ledger_snapshots import ledger_row, report_payload
@@ -150,7 +151,7 @@ def test_presets_and_buckets():
     assert every.since == datetime(2019, 2, 3, tzinfo=UTC) and every.bucket == "month"
     spans = buckets(every.since, every.until, every.bucket)
     assert spans[0][0] == every.since and spans[-1][1] == now
-    assert all(a[1] == b[0] for a, b in zip(spans, spans[1:], strict=False))
+    assert all(a[1] == b[0] for a, b in pairwise(spans))
     assert bucket_size(now - timedelta(days=91), now) == "day"
     assert bucket_size(now - timedelta(days=200), now) == "week"
     # A future first record (clock skew) never starts the range after today.
