@@ -13,6 +13,7 @@ import pytest
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 from cloud_agent_host.chat_sandbox import (
+    MEMBER_REAPER_TARGET,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
     ChatSandboxManager,
@@ -235,15 +236,21 @@ def test_a_launch_without_them_leaves_no_earlier_credentials_in_the_slot(tmp_pat
     """
     root = tmp_path / "members"
     (root / "1").mkdir(parents=True)
+    reaper = tmp_path / "reaper.py"
+    reaper.write_text("")
 
     def exec_capture(spec, argv, *, input_bytes=None, **kwargs):
         # The member tmpfs, here a directory: run the container command locally.
+        # A member's preparation reaches its one exec as input, and the reap
+        # itself is the reaper's own tests' to exercise.
         local = [part.replace(MEMBER_TMPFS_ROOT, str(root)) for part in argv]
-        return subprocess.run(local, input=input_bytes or b"", capture_output=True, check=False)
+        stdin = (input_bytes or b"").replace(MEMBER_TMPFS_ROOT.encode(), str(root).encode())
+        stdin = stdin.replace(MEMBER_REAPER_TARGET.encode(), str(reaper).encode())
+        return subprocess.run(local, input=stdin, capture_output=True, check=False)
 
     manager = SimpleNamespace(
         exec_capture=exec_capture,
-        reap_member_processes_except=lambda spec, **kwargs: None,
+        ensure_member_process_reaper=lambda spec: None,
         backend=SimpleNamespace(gid=10001, base_env=lambda: {}),
         spawn=lambda spec, argv, **kwargs: object(),
     )

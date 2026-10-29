@@ -76,7 +76,7 @@ for name in os.listdir('/proc'):
  except FileNotFoundError: pass
 print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or 31000<=uid<31064))
 """
-    result = manager.exec_capture(spec, ["python3", "-c", script], workdir="/", timeout_s=10)
+    result = manager.exec_capture(spec, ["python3", "-I", "-c", script], workdir="/", timeout_s=10)
     if result.returncode:
         raise SandboxError("Environment writer census could not be verified")
     try:

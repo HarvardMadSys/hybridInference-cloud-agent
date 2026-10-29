@@ -67,9 +67,11 @@ def test_shared_claude_turn_fences_and_returns_exact_tool_marks():
         ToolMark(10.0, "pre", "toolu_1"),
         ToolMark(10.1, "post", "toolu_1"),
     )
-    assert manager.events[-5:] == [
-        ("census", 0),
-        ("marks-begin",),
+    # The census and the tool-mark fence are armed side by side, so either may
+    # be recorded first; both come before the marks are read back and before
+    # the turn's new processes are reaped.
+    assert sorted(manager.events[-5:-3]) == [("census", 0), ("marks-begin",)]
+    assert manager.events[-3:] == [
         ("marks-finish",),
         ("reap-except", 0, ((41, 400),)),
         ("normalize", 0),

@@ -46,6 +46,7 @@ from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_MCP, mint_worker_token, parse_worker_token
 from cloud_agent_host.chat_sandbox import ChatSandboxManager
 from cloud_agent_host.codex_mcp import INSTALL_POLICY
+from cloud_agent_host.docker_engine import run_docker
 from cloud_agent_host.drivers import LaunchContext, TurnInput, get_driver
 from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION, ensure_kilo_runtime
 from cloud_agent_host.mcp_helpers import install_mcp_helpers
@@ -698,7 +699,7 @@ async def test_resident_mcp_call_followup_resume_and_fork(
                 docker_binary="docker", image=image, sandbox_namespace="resident-mcp-parity"
             ),
             exec_capture=capture,
-            _run=ChatSandboxManager._run,
+            _run=run_docker,
             _run_bytes=ChatSandboxManager._run_bytes,
         )
         await asyncio.to_thread(install_mcp_helpers, manager, None, runtime)

@@ -1,4 +1,4 @@
-#!/opt/claude-agent-sdk/bin/python
+#!/opt/claude-agent-sdk/bin/python -I
 """Prompt-free native Claude session fork using the pinned Agent SDK."""
 
 from __future__ import annotations

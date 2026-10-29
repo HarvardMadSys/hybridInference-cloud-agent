@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import pathlib
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from cloud_agent_shared.errors import SandboxError
@@ -46,8 +45,13 @@ def checked_entries(entries: Iterable[_T], stop: StopSignal | None) -> Iterator[
         yield entry
 
 
-def source_entries(root: pathlib.Path, stop: StopSignal | None) -> Iterator[pathlib.Path]:
-    """Stream a tree without following symlinks or retaining directory listings."""
+def source_entries(root: str, stop: StopSignal | None) -> Iterator[str]:
+    """Stream a tree's paths without following symlinks or retaining directory listings.
+
+    Each path is ``root`` joined with the entry's name below it. They stay
+    strings: on a large tree, a ``pathlib`` path per entry cost the archive
+    builder more than all of its system calls.
+    """
     pending = [os.scandir(root)]
     try:
         while pending:
@@ -58,11 +62,10 @@ def source_entries(root: pathlib.Path, stop: StopSignal | None) -> Iterator[path
                 pending.pop().close()
                 continue
             check_source_stop(stop)
-            path = pathlib.Path(entry.path)
-            yield path
+            yield entry.path
             check_source_stop(stop)
             if entry.is_dir(follow_symlinks=False):
-                pending.append(os.scandir(path))
+                pending.append(os.scandir(entry.path))
     finally:
         for directory in pending:
             directory.close()

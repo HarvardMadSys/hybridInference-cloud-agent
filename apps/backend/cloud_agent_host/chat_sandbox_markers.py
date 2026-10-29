@@ -329,6 +329,7 @@ def _run(
     """Run one marker program as guest root in the exact container."""
     argv = [
         "python3",
+        "-I",
         "-c",
         program,
         INITIAL_ARCHIVE_MARKER_ROOT,

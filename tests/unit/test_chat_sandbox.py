@@ -32,6 +32,7 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_THREAD_LABEL,
     CHAT_WORKDIR,
+    MEMBER_REAPER_TARGET,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
     TURN_NETWORK_PROOF_S,
@@ -639,9 +640,9 @@ def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary():
     cleanup_argv, cleanup_detached = calls[0]
     assert cleanup_detached is False
     assert cleanup_argv[-1] == GUEST_OBSERVER_BINARY
-    compile(cleanup_argv[2], "<guest-observer-cleanup>", "exec")
-    assert "os.path.samefile" in cleanup_argv[2]
-    assert "stale guest observer did not exit" in cleanup_argv[2]
+    compile(cleanup_argv[3], "<guest-observer-cleanup>", "exec")
+    assert "os.path.samefile" in cleanup_argv[3]
+    assert "stale guest observer did not exit" in cleanup_argv[3]
     assert calls[1] == ([GUEST_OBSERVER_BINARY], True)
 
 
@@ -677,9 +678,9 @@ def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
 
     assert snapshot.status.poll_seq == 22
     command = calls[0]
-    compile(command[2], "<guest-observer-snapshot>", "exec")
+    compile(command[3], "<guest-observer-snapshot>", "exec")
     assert command[-3:] == [GUEST_OBSERVER_BINARY, "21", "3.0"]
-    assert "os.path.samefile" in command[2]
+    assert "os.path.samefile" in command[3]
 
 
 def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
@@ -764,12 +765,12 @@ def test_retained_tool_hooks_are_installed_inside_docker_owned_state(monkeypatch
 
     argv = captured["argv"]
     assert isinstance(argv, list)
-    compile(argv[2], "<retained-tool-hooks>", "exec")
+    compile(argv[3], "<retained-tool-hooks>", "exec")
     assert argv[-2:] == [claude_member_config_dir(0, "athr_01"), "/agent-state/tool-marks.log"]
     assert json.loads(captured["input"]) == update
     assert captured["uid"] == MEMBER_UID_BASE
-    assert "fcntl.flock" in argv[2]
-    assert "os.O_APPEND" in argv[2]
+    assert "fcntl.flock" in argv[3]
+    assert "os.O_APPEND" in argv[3]
 
     config = tmp_path / "member-home" / ".claude"
     config.mkdir(parents=True)
@@ -777,7 +778,7 @@ def test_retained_tool_hooks_are_installed_inside_docker_owned_state(monkeypatch
     marks = tmp_path / "agent-state" / "tool-marks.log"
     marks.parent.mkdir()
     subprocess.run(
-        ["python3", "-c", argv[2], str(config), str(marks)],
+        ["python3", "-I", "-c", argv[3], str(config), str(marks)],
         input=captured["input"],
         check=True,
     )
@@ -1798,7 +1799,7 @@ def test_member_replacement_reaps_pidfile_group_and_every_same_uid_leftover(monk
 
     def fake_exec(_spec, argv, **kwargs):
         calls.append((list(argv), kwargs))
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        return SimpleNamespace(returncode=0, stdout=b'{"status":0,"stderr":""}\n' * 2, stderr=b"")
 
     monkeypatch.setattr(manager, "exec_capture", fake_exec)
 
@@ -1809,16 +1810,16 @@ def test_member_replacement_reaps_pidfile_group_and_every_same_uid_leftover(monk
         user_gid=manager.backend.gid,
     )
 
-    assert len(calls) == 3
+    # The reaper's root probe, then one exec as the member: the reap, then the removal.
+    assert len(calls) == 2
     assert "stat -c %u:%g:%a" in calls[0][0][2]
-    assert calls[1][0] == [
-        "/usr/local/bin/member-process-reaper",
-        "reap",
-        str(MEMBER_UID_BASE),
-    ]
-    assert calls[1][1]["input_bytes"] == b""
+    assert calls[1][0][:3] == ["python3", "-I", "-c"]
     assert calls[1][1]["user_uid"] == MEMBER_UID_BASE
-    assert "resident-*.pid" in calls[2][0][2]
+    reap, stale = json.loads(calls[1][1]["input_bytes"])
+    assert reap["argv"] == ["python3", "-I", MEMBER_REAPER_TARGET, "reap", str(MEMBER_UID_BASE)]
+    assert reap["input"] == "" and reap["reaps"], "only the runner itself joins the baseline"
+    assert "resident-*.pid" in stale["argv"][2]
+    assert stale["input"] is None
 
 
 def test_member_turn_census_is_pid_reuse_fenced_and_canonical(monkeypatch):
@@ -1857,16 +1858,8 @@ def test_member_turn_census_is_pid_reuse_fenced_and_canonical(monkeypatch):
 
     assert baseline == ((41, 400), (42, 500))
     assert calls[3][1]["input_bytes"] == b"41 400\n42 500\n"
-    assert calls[1][0] == [
-        "/usr/local/bin/member-process-reaper",
-        "capture",
-        str(MEMBER_UID_BASE),
-    ]
-    assert calls[3][0] == [
-        "/usr/local/bin/member-process-reaper",
-        "reap",
-        str(MEMBER_UID_BASE),
-    ]
+    assert calls[1][0] == ["python3", "-I", MEMBER_REAPER_TARGET, "capture", str(MEMBER_UID_BASE)]
+    assert calls[3][0] == ["python3", "-I", MEMBER_REAPER_TARGET, "reap", str(MEMBER_UID_BASE)]
 
     with pytest.raises(SandboxError, match="malformed"):
         manager._parse_member_processes(b"41 nope\n")
