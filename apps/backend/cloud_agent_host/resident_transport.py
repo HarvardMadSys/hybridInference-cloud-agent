@@ -259,6 +259,10 @@ class ResidentTurn(Generic[_RuntimeT_co]):
         """Return native questions still waiting on this exact activation."""
         return self._turn.pending_questions()
 
+    def take_question_change(self) -> bool:
+        """Consume the turn's coalesced pending-question notification."""
+        return self._turn.take_question_change()
+
     def answer_question(
         self, request_id: str, answers: dict[str, list[str]], *, reject: bool = False
     ) -> InputOutcome:

@@ -226,6 +226,12 @@ class AttemptCommands(Protocol):
         """
         ...
 
+    async def notify_question_change(
+        self, *, job_id: str, attempt_id: int, lease_generation: int
+    ) -> bool:
+        """Publish an owner-scoped question hint for this live attempt only."""
+        ...
+
     async def record_continuity_mode(
         self,
         *,

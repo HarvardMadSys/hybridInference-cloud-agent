@@ -16,6 +16,7 @@ from cloud_agent_host.resident_transport import (
 def test_resident_turn_forwards_native_question_reads_and_replies():
     questions = [{"request_id": "request-one", "questions": []}]
     replies = []
+    changes = iter([True, False])
 
     def answer(request_id, answers, *, reject=False):
         replies.append((request_id, answers, reject))
@@ -24,10 +25,13 @@ def test_resident_turn_forwards_native_question_reads_and_replies():
     turn = ResidentTurn(
         SimpleNamespace(
             pending_questions=lambda: questions,
+            take_question_change=lambda: next(changes),
             answer_question=answer,
         )
     )
     assert turn.pending_questions() is questions
+    assert turn.take_question_change() is True
+    assert turn.take_question_change() is False
     answers = {"question": ["Selected option"]}
     assert turn.answer_question("request-one", answers) == InputOutcome(True)
     assert turn.answer_question("request-two", {}, reject=True) == InputOutcome(True)

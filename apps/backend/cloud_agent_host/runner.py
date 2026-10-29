@@ -43,6 +43,7 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, BinaryIO
 
+from cloud_agent_host import question_change_signals
 from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER, manager_env
 
 if TYPE_CHECKING:
@@ -75,11 +76,7 @@ from cloud_agent_host.control_plane_client import (
     ControlPlane as ControlPlane,
     _log_control_failure,
 )
-from cloud_agent_host.drivers import (
-    LINE,
-    DriverError,
-    driver_for,
-)
+from cloud_agent_host.drivers import LINE, DriverError, driver_for
 from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
 from cloud_agent_host.host_capacity import (
     HostCapacityCollector,
@@ -1882,7 +1879,9 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
                 raise SessionSupervisorError(502, str(exc)[:1000]) from exc
             if frame is None:
                 break
-            kind = frame.get("kind")
+            kind = question_change_signals.question_change_frame_kind(frame, control, job)
+            if kind is None:
+                continue
             if kind == "event":
                 raw_line = frame.get("raw_line")
                 if isinstance(raw_line, str):

@@ -184,15 +184,17 @@ async def test_usage_arrives_with_its_value_and_the_rest_as_hints(monkeypatch):
     _notify(signal, "mcp", "ajob_1")
     _notify(signal, "queue", "athr_1")
     _notify(signal, "publication", "athr_1")
+    _notify(signal, "question", "athr_2")
     _notify(signal, "something-new", "x")
 
-    frames = [_parse(await asyncio.wait_for(anext(stream), AT_ONCE_S)) for _ in range(5)]
+    frames = [_parse(await asyncio.wait_for(anext(stream), AT_ONCE_S)) for _ in range(6)]
     assert frames == [
         ("usage", {"id": "ajob_1", "usage": usage}),
         ("usage", {"id": "ajob_gone"}),
         ("queue", {"id": "athr_1"}),
         ("mcp", {"id": "ajob_1"}),
         ("publication", {"id": "athr_1"}),
+        ("question", {"id": "athr_2"}),
     ]
     # Read as this owner, so another owner's job reads as nothing.
     assert [call.kwargs for call in read_usage.await_args_list] == [

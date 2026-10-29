@@ -79,6 +79,7 @@ describe('pushed records', () => {
     receiveHint('mcp', 'ajob_1');
     receiveHint('queue', 'athr_1');
     receiveHint('publication', 'athr_1');
+    receiveHint('question', 'athr_1');
     vi.advanceTimersByTime(PUSH_BATCH_MS);
 
     expect(seen).toHaveLength(1);
@@ -87,6 +88,7 @@ describe('pushed records', () => {
       mcp: ['ajob_1'],
       queues: ['athr_1'],
       publications: ['athr_1'],
+      questionThreads: ['athr_1'],
       resync: false,
     });
   });

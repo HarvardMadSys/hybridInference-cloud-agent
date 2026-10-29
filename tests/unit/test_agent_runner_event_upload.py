@@ -26,7 +26,16 @@ from tests.unit.test_agent_runner import (  # noqa: F401 - the autouse pytest fi
 )
 
 from cloud_agent_host import control_plane_client, runner as runner_mod
-from cloud_agent_host.runner import LeaseLost
+from cloud_agent_host.runner import LeaseLost, SessionSupervisorError
+
+
+class _QuestionControl(_Control):
+    def __init__(self):
+        super().__init__()
+        self.question_hints = []
+
+    def report_question_change(self, job_id):
+        self.question_hints.append(job_id)
 
 
 def test_a_lease_an_event_upload_lost_ends_the_turn_at_once():
@@ -61,6 +70,44 @@ def test_a_lease_an_event_upload_lost_ends_the_turn_at_once():
         ("lifecycle", {"phase": "turn_started"}),
         ("assistant", {"text": "one"}),
     ]
+
+
+def test_question_change_frame_notifies_the_attempt_control_plane():
+    supervisor = _Supervisor(
+        [
+            {"kind": "question_changed"},
+            {"kind": "result", "status": "completed", "exit_code": 0},
+        ]
+    )
+    control = _QuestionControl()
+
+    code, _tail, errors, result, _reported = runner_mod._stream_shared_agent_turn(
+        supervisor=supervisor,
+        job=_JOB,
+        control=control,
+        heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+        lease_token="lease",
+        timeout_s=30,
+    )
+
+    assert code == 0 and not errors and result["status"] == "completed"
+    assert control.question_hints == [_JOB.job_id]
+    assert control.events == [("lifecycle", {"phase": "turn_started"})]
+
+
+@pytest.mark.parametrize("frame", [{}, {"kind": None}, {"kind": 7}, {"kind": "future"}])
+def test_unknown_question_change_frame_shape_fails_the_shared_turn(frame):
+    supervisor = _Supervisor([frame, {"kind": "result", "status": "completed", "exit_code": 0}])
+
+    with pytest.raises(SessionSupervisorError, match="unknown frame"):
+        runner_mod._stream_shared_agent_turn(
+            supervisor=supervisor,
+            job=_JOB,
+            control=_QuestionControl(),
+            heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+            lease_token="lease",
+            timeout_s=30,
+        )
 
 
 def _uploaded_events(request: httpx.Request) -> list[dict[str, Any]]:

@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 
 # Heartbeats must answer before ordinary lifecycle requests consume the lease.
 _HEARTBEAT_TIMEOUT_S = 10.0
+# A question notification is a wake-up; owner views still poll every 2 s while
+# active and every 12 s in the background if a hint is missed.
+_QUESTION_HINT_TIMEOUT_S = 2.0
 # Attachments may need longer than the client's default deadline for transfer.
 _ATTACHMENT_TIMEOUT_S = 120.0
 #: How long one event upload keeps retrying an unreachable control plane, and
@@ -326,6 +329,19 @@ class ControlPlane:
             if context_status is not None:
                 body["context_status"] = context_status
             self._post(f"/v1/agent/worker/jobs/{self.job_id}/continuity", body)
+        except LeaseLost:
+            raise
+        except Exception:
+            pass
+
+    def report_question_change(self, job_id: str) -> None:
+        """Wake the owner's question reader; polling recovers a dropped hint."""
+        try:
+            self._post(
+                f"/v1/agent/worker/jobs/{job_id}/questions:changed",
+                {},
+                timeout=_QUESTION_HINT_TIMEOUT_S,
+            )
         except LeaseLost:
             raise
         except Exception:

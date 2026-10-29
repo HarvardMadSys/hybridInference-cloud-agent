@@ -19,13 +19,38 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     _configured_identity_issuer,
     _create_job,
     client,
-    store,
 )
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
 
 pytestmark = pytest.mark.asyncio
+
+
+class _QuestionStorage(FakeStorage):
+    def __init__(self):
+        super().__init__()
+        self.question_hints = []
+
+    async def notify_question_change(
+        self, *, job_id: str, attempt_id: int, lease_generation: int
+    ) -> bool:
+        if not self._fenced(attempt_id, lease_generation):
+            return False
+        job = self.jobs.get(job_id)
+        if (
+            job is None
+            or job.get("current_attempt_id") != attempt_id
+            or job.get("state") != "running"
+        ):
+            return False
+        self.question_hints.append((str(job["user_id"]), str(job["thread_id"])))
+        return True
+
+
+@pytest.fixture
+def store() -> FakeStorage:
+    return _QuestionStorage()
 
 
 async def _worker_auth(client: AsyncClient) -> tuple[str, dict[str, str]]:
@@ -59,6 +84,23 @@ async def test_worker_batch_stores_events_in_order_and_answers_a_replay_with_the
     ]
     assistant = [message["content"] for message in store.messages if message["role"] == "assistant"]
     assert assistant == ["done"]
+
+
+async def test_worker_question_hint_is_thread_scoped_and_fenced(
+    client: AsyncClient, store: FakeStorage
+):
+    job_id, auth = await _worker_auth(client)
+
+    response = await client.post(f"/v1/agent/worker/jobs/{job_id}/questions:changed", headers=auth)
+
+    assert response.status_code == 204
+    expected = (store.jobs[job_id]["user_id"], store.jobs[job_id]["thread_id"])
+    assert store.question_hints == [expected]
+
+    store.live_fence = (101, 2)
+    stale = await client.post(f"/v1/agent/worker/jobs/{job_id}/questions:changed", headers=auth)
+    assert stale.status_code == 409
+    assert store.question_hints == [expected]
 
 
 async def test_worker_batch_is_refused_whole_once_the_lease_is_lost(
