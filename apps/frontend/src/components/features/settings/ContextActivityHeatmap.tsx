@@ -52,11 +52,11 @@ export function ContextActivityHeatmap({
         <WeekdayLabels />
         {view.weeks.map((week, index) => (
           <div key={week.start} className="flex shrink-0 flex-col gap-1">
-            <span
-              aria-hidden="true"
-              className="h-3 whitespace-nowrap text-[10px] leading-3 text-muted"
-            >
-              {monthLabel(week, view.weeks[index - 1], locale)}
+            {/* As wide as a cell: a month's name runs over the next columns. */}
+            <span aria-hidden="true" className="relative h-3 w-3.5">
+              <span className="absolute left-0 top-0 whitespace-nowrap text-[10px] leading-3 text-muted">
+                {monthLabel(week, view.weeks[index - 1], locale)}
+              </span>
             </span>
             {week.cells.map((cell) => (
               <Cell

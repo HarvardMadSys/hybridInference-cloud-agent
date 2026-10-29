@@ -137,7 +137,8 @@ it('marks estimates, retried attempts, and changes, and opens the step or turn',
   // An injection whose size the platform cannot see is not given one.
   expect(retried).toHaveTextContent('Its size is not visible to the platform');
   expect(modelSwitch).toHaveTextContent('m1 → m2');
-  expect(mode).toHaveTextContent('Now Entered plan mode');
+  expect(mode).toHaveTextContent('Entered plan mode');
+  expect(mode).not.toHaveTextContent('Now');
 
   // What the platform added at claim is no trajectory step: it opens the turn.
   fireEvent.click(within(injection).getByRole('button', { name: 'Open turn' }));

@@ -295,6 +295,8 @@ async def test_repeated_reads_stay_planned_for_their_filters(db, store):
             )
             assert len(result["composition"]) == 12_000
             assert sum(row["assistant"] for row in result["composition"]) == 5 * profiled
+            # Runs that stored no events have nothing to read: they count as read.
+            assert compose(result["composition"]).recorded.turns_profiled == 12_000
         # Nothing is left on the pooled connection for the next caller.
         assert await conn.fetchval("SHOW plan_cache_mode") == "auto"
         assert await conn.fetchval("SHOW statement_timeout") == "0"

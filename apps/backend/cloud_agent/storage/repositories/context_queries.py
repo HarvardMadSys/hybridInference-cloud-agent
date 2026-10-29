@@ -334,7 +334,13 @@ _COMPOSITION_SQL = f"""
     recorded AS (
         SELECT r.thread_id,
                COUNT(*) AS turns,
-               COUNT(*) FILTER (WHERE p.attempt_id IS NOT NULL) AS turns_profiled,
+               -- A turn whose kept attempt stored no event has nothing to
+               -- read: it is as read as one whose profile is stored.
+               COUNT(*) FILTER (
+                   WHERE p.attempt_id IS NOT NULL
+                      OR NOT EXISTS (SELECT 1 FROM agent_job_events e
+                                     WHERE e.attempt_id = k.attempt_id)
+               ) AS turns_profiled,
                COUNT(*) FILTER (WHERE (p.profile->'content'->>'truncated')::boolean)
                    AS turns_truncated,
                COALESCE(SUM(prompt.tokens), 0) AS prompt_tokens,

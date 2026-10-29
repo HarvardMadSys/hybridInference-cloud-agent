@@ -136,7 +136,8 @@ class RecordedComposition(BaseModel):
     categories: list[RecordedShare]
     total_tokens: int = Field(ge=0)
     turns: int = Field(ge=0)
-    #: Turns whose kept attempt has a current profile; the rest are not counted yet.
+    #: Turns whose kept attempt has a current profile, or stored nothing to read;
+    #: the rest are not counted yet.
     turns_profiled: int = Field(ge=0)
     #: Turns with at least one stored item clipped when recorded (undercounted).
     turns_truncated: int = Field(ge=0)

@@ -227,6 +227,10 @@ function compactionDetail(event: ContextEventApi, t: Translator): string[] {
 }
 
 function changeDetail(event: ContextEventApi, t: Translator): string {
+  // A plan-mode tool call is its own sentence: "Entered plan mode".
+  if (!event.from_value && event.to_value && MODE_LABEL[event.to_value]) {
+    return modeLabel(event.to_value, t);
+  }
   const to = event.to_value ? modeLabel(event.to_value, t) : '—';
   return event.from_value
     ? t('context.events.change', { from: modeLabel(event.from_value, t), to })
