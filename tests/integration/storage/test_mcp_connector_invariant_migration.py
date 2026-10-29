@@ -97,7 +97,10 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert script.get_revision("0088_sandbox_retry_budget").down_revision == (
         "0087_sandbox_deletion_attempts"
     )
-    assert script.get_revision(_HEAD).down_revision == "0105_job_event_usage_summary"
+    assert script.get_revision(_HEAD).down_revision == "0106_user_model_connections"
+    assert script.get_revision("0106_user_model_connections").down_revision == (
+        "0105_job_event_usage_summary"
+    )
     assert script.get_revision("0105_job_event_usage_summary").down_revision == (
         "0104_notification_change_keyset"
     )
