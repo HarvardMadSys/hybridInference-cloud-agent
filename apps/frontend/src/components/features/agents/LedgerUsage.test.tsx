@@ -789,3 +789,51 @@ describe('LedgerUsage with the owner change stream', () => {
     expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('LedgerUsage on an owner connection', () => {
+  /** A turn its owner's provider billed: no Gateway snapshot will ever arrive. */
+  function external(): AgentJobUsageApi {
+    const data = unavailable();
+    data.ledger.status = 'pending';
+    data.ledger.attempts[0] = { ...data.ledger.attempts[0], status: 'pending', reason: 'pending' };
+    data.external_provider = true;
+    return data;
+  }
+
+  it('shows the agent-reported tokens and that the provider bills it, never a cost', async () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(external());
+    await mount();
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent(
+      '1.2k input tokens · 80 output tokens',
+    );
+    expect(screen.getByText(/your provider bills it/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Usage')).not.toHaveTextContent('$');
+    expect(screen.queryByText('Usage temporarily unavailable.')).not.toBeInTheDocument();
+    // A finished turn has nothing more to wait for from the Gateway.
+    await advance(120_000);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+  });
+
+  it('says who bills it even before the agent reports any tokens', async () => {
+    const data = external();
+    data.runtime = {
+      source: 'runtime',
+      input_tokens: null,
+      output_tokens: null,
+      cache_read_tokens: null,
+    };
+    vi.mocked(getAgentJobUsage).mockResolvedValue(data);
+    await mount();
+    expect(screen.queryByLabelText('Run usage')).not.toBeInTheDocument();
+    expect(screen.getByText(/your provider bills it/)).toBeInTheDocument();
+  });
+
+  it('reads the runtime counters while running without asking the Gateway to refresh', async () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(external());
+    await mount({ ...job, state: 'running' });
+    await advance(60_000);
+    expect(vi.mocked(getAgentJobUsage).mock.calls.length).toBeGreaterThan(1);
+    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+  });
+});

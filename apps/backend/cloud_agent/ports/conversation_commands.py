@@ -32,6 +32,7 @@ class ConversationCommands(Protocol):
         task_prompt: str,
         runtime: str,
         model: str,
+        model_connection_id: str | None = None,
         execution_profile: str | None = None,
         reasoning_effort: str | None = None,
         base_sha: str | None = None,

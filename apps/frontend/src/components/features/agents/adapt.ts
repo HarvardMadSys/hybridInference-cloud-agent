@@ -1464,14 +1464,14 @@ function adaptJob(
       (job.repo === null ? '' : `agent/${job.thread_id ?? options.thread?.thread_id ?? job.id}`),
     runtime: job.runtime,
     model: job.model,
+    ...(job.model_connection_id ? { modelConnectionId: job.model_connection_id } : {}),
     reasoningEffort: job.reasoning_effort ?? undefined,
     skills: job.skills ?? [],
     // The conversation's goal, and this turn's relationship to it. Assigned
     // after the literal rather than spread inside it: a ternary returning an
     // object, spread into another object, is indented differently by Prettier
-    // and ESLint and the two refuse to agree. Both fields are optional — a
-    // conversation without a goal carries neither, and a deployment older than
-    // this feature carries no fields at all.
+    // and ESLint and the two refuse to agree. Both fields are optional; a
+    // goalless conversation, or an older deployment, carries neither.
     ...(job.goal ? { goal: toDisplayGoal(job.goal) } : {}),
     // Through the same helper the stored turns use, not a second copy of it:
     // written out inline, every job got a `goalTurn` — including the ones whose

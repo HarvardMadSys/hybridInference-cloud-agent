@@ -22,6 +22,7 @@ from fastapi import HTTPException
 
 from cloud_agent.application.job_admission import (
     model_catalog_unavailable,
+    require_connection_source,
     require_offered_effort,
     require_registered_runtime,
     require_resolvable_model,
@@ -35,6 +36,7 @@ from cloud_agent.visible_models import ModelCatalogUnavailable, agent_model_cata
 if TYPE_CHECKING:
     from cloud_agent.ports import (
         AttachmentRepository,
+        ModelConnectionRepository,
         SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
@@ -46,6 +48,7 @@ class _FollowUpStorage(Protocol):
     attachments: AttachmentRepository
     skills: SkillRepository
     source_control: SourceControlPort
+    model_connections: ModelConnectionRepository
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,9 @@ class PreparedFollowUp:
     """A follow-up's per-turn choices, resolved and checked.
 
     ``model`` is the canonical id, or ``None`` to inherit the parent's.
+    ``model_connection_id`` is its source when ``model`` is set -- the owner's
+    connection, or ``None`` for the Gateway -- and means nothing otherwise: an
+    inherited model keeps the parent's source.
     ``reasoning_effort`` is the validated level, or ``None`` to inherit;
     ``reset_reasoning_effort`` is the one way to clear an inherited level back
     to Auto. ``skills`` is ``None`` to inherit the previous turn's snapshots.
@@ -64,6 +70,7 @@ class PreparedFollowUp:
     reset_reasoning_effort: bool
     skills: list[dict[str, Any]] | None
     attachments: list[dict[str, Any]] | None
+    model_connection_id: str | None = None
 
 
 def sandbox_context_lost_error() -> HTTPException:
@@ -95,6 +102,70 @@ def session_archived_error() -> HTTPException:
     )
 
 
+async def _prepare_model(
+    parent: dict[str, Any],
+    *,
+    user: dict[str, Any],
+    model: str | None,
+    model_connection_id: str | None,
+    reasoning_effort: str | None,
+    store: _FollowUpStorage,
+    gateway: Any,
+) -> tuple[str | None, str | None, bool]:
+    """The canonical model, the validated effort and whether it resets, for one turn.
+
+    A model is named with its source. On an owner connection, the connection is
+    asked and the Gateway is not: neither its catalog nor its grants decide
+    whether a turn the owner's provider serves may run. An inherited model
+    keeps its source, and an inherited connection is checked again now, so a
+    message is refused while its author is looking rather than failing later.
+    """
+    reset_effort = reasoning_effort == RESET_REASONING_EFFORT
+    requested_effort = None if reset_effort else reasoning_effort
+    connection_id = model_connection_id if model else parent.get("model_connection_id")
+    if connection_id:
+        await require_connection_source(
+            store.model_connections,
+            user_id=user["user_id"],
+            connection_id=str(connection_id),
+            runtime=parent["runtime"],
+            model=model or parent["model"],
+            reasoning_effort=requested_effort,
+        )
+        return model, None, reset_effort
+    # A follow-up may switch models; the switched-to model gets the same
+    # fail-fast as a fresh job. An omitted model inherits the parent's, which
+    # was validated when it was chosen. One catalog read serves both the
+    # model resolution and the effort check when both are needed (issue #781);
+    # the read happens lazily so an inherit-both follow-up pays none.
+    canonical = None
+    catalog: tuple[list[str], dict[str, str], dict[str, list[str]]] | None = None
+    if model:
+        try:
+            catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
+        except ModelCatalogUnavailable:
+            raise model_catalog_unavailable() from None
+        canonical = await require_resolvable_model(
+            model, gateway=gateway, user=user, catalog=catalog
+        )
+    # Effort is per turn, like the model, and inherits when omitted. Unlike the
+    # model it needs a way *back*: null already means "no override, inherit", so
+    # clearing an inherited effort takes the explicit reset sentinel. Validated
+    # against the model this turn will run — which may be the switched-to one,
+    # and a pair that was offered last turn need not be offered this one.
+    effort: str | None = None
+    if requested_effort is not None:
+        effort = await require_offered_effort(
+            requested_effort,
+            runtime=parent["runtime"],
+            model=canonical or parent["model"],
+            gateway=gateway,
+            user=user,
+            efforts=catalog[2] if catalog is not None else None,
+        )
+    return canonical, effort, reset_effort
+
+
 async def prepare_follow_up(
     parent: dict[str, Any],
     *,
@@ -107,6 +178,7 @@ async def prepare_follow_up(
     store: _FollowUpStorage,
     app_credentials: Any | None,
     gateway: Any,
+    model_connection_id: str | None = None,
 ) -> PreparedFollowUp:
     """Check a follow-up against the turn it would follow, and resolve it.
 
@@ -144,37 +216,15 @@ async def prepare_follow_up(
                     }
                 },
             )
-    # A follow-up may switch models; the switched-to model gets the same
-    # fail-fast as a fresh job. An omitted model inherits the parent's, which
-    # was validated when it was chosen. One catalog read serves both the
-    # model resolution and the effort check when both are needed (issue #781);
-    # the read happens lazily so an inherit-both follow-up pays none.
-    canonical = None
-    catalog: tuple[list[str], dict[str, str], dict[str, list[str]]] | None = None
-    if model:
-        try:
-            catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
-        except ModelCatalogUnavailable:
-            raise model_catalog_unavailable() from None
-        canonical = await require_resolvable_model(
-            model, gateway=gateway, user=user, catalog=catalog
-        )
-    # Effort is per turn, like the model, and inherits when omitted. Unlike the
-    # model it needs a way *back*: null already means "no override, inherit", so
-    # clearing an inherited effort takes the explicit reset sentinel. Validated
-    # against the model this turn will run — which may be the switched-to one,
-    # and a pair that was offered last turn need not be offered this one.
-    effort: str | None = None
-    reset_effort = reasoning_effort == RESET_REASONING_EFFORT
-    if reasoning_effort is not None and not reset_effort:
-        effort = await require_offered_effort(
-            reasoning_effort,
-            runtime=parent["runtime"],
-            model=canonical or parent["model"],
-            gateway=gateway,
-            user=user,
-            efforts=catalog[2] if catalog is not None else None,
-        )
+    canonical, effort, reset_effort = await _prepare_model(
+        parent,
+        user=user,
+        model=model,
+        model_connection_id=model_connection_id,
+        reasoning_effort=reasoning_effort,
+        store=store,
+        gateway=gateway,
+    )
     try:
         # A temporary workspace has no repository to lose access to.
         if parent["repo"] is not None:
@@ -204,6 +254,7 @@ async def prepare_follow_up(
         # Canonical, or the parent's when omitted — never the alias the caller
         # typed, which the gateway's grant would not match.
         model=canonical if model else None,
+        model_connection_id=model_connection_id if model else None,
         reasoning_effort=effort,
         reset_reasoning_effort=reset_effort,
         skills=skills,

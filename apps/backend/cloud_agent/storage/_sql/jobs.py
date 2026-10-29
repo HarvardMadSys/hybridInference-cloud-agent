@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 # thread's values under the job's keys.
 JOB_OWN_COLUMNS = (
     "id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, base_sha, task_prompt, "
-    "runtime, model, reasoning_effort, state, "
+    "runtime, model, model_connection_id, reasoning_effort, state, "
     "cancel_requested, terminal_resume_pending, current_attempt_id, "
     "published_pr_url, published_commit_sha, detail, "
     "metadata, skills, attachments, fork_source_job_id, "

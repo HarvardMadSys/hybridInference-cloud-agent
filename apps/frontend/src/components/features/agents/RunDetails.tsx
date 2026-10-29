@@ -131,7 +131,8 @@ function ledgerNextRead(
   usage: AgentJobUsageApi | null | undefined,
   now: number,
 ): LedgerRead | null {
-  if (!usage) return null;
+  // A provider the owner pays directly reports nothing to the Gateway ledger.
+  if (!usage || usage.external_provider) return null;
   if (usage.ledger.refreshing || usage.ledger.status === 'pending') {
     return { delayMs: LEDGER_POLL_MS, retry: true };
   }
@@ -284,7 +285,16 @@ function elapsedLabel(started: string | null, finished: string | null): string {
 }
 
 function UsageTotals({ usage }: { usage: AgentJobUsageApi }) {
+  const t = useT();
   const totals = usage.ledger.totals;
+  // Not "not recorded" and not $0: this turn's cost is the provider's to report.
+  if (usage.external_provider) {
+    return (
+      <DetailRows>
+        <DetailRow label="Cost">{t('modelSource.usageExternal')}</DetailRow>
+      </DetailRows>
+    );
+  }
   return (
     <>
       <DetailRows>

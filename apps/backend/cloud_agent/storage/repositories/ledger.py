@@ -93,7 +93,7 @@ class PostgresLedgerRepository:
         ):
             job = await conn.fetchrow(
                 """
-                SELECT j.id, j.user_id, j.state, j.runtime
+                SELECT j.id, j.user_id, j.state, j.runtime, j.model_connection_id
                 FROM agent_jobs j
                 LEFT JOIN agent_threads t ON t.id = j.thread_id
                 WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL

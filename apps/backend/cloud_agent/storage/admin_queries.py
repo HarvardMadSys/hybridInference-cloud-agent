@@ -41,6 +41,7 @@ _RUN_COLUMNS = """
     LEFT(j.user_id, 256) AS user_id, LEFT(t.repo, 256) AS repo,
     LEFT(j.runtime, 128) AS runtime, LEFT(j.model, 256) AS model,
     LEFT(j.reasoning_effort, 64) AS reasoning_effort,
+    j.model_connection_id,
     t.execution_profile, j.state, j.created_at, j.updated_at,
     ARRAY(SELECT DISTINCT LEFT(a.host_id, 256) FROM agent_attempts a
           WHERE a.job_id = j.id AND a.host_id IS NOT NULL

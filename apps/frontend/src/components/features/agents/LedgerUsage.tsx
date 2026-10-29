@@ -9,6 +9,7 @@ import {
   type AgentLedgerTotalsApi,
 } from '@/lib/api/agents';
 
+import { useT } from '@/components/providers';
 import type { AgentJob } from './types';
 import {
   isOlderUsage,
@@ -62,11 +63,19 @@ function retryInterval(failures: number): number {
   return Math.min(POLL_INTERVAL_MS * 2 ** Math.max(0, failures - 1), MAX_RETRY_INTERVAL_MS);
 }
 
+// A turn on the owner's own connection has no Gateway snapshot to wait for or
+// refresh: its provider bills it, and only the runtime's counters are here.
 function canRefresh(data: AgentJobUsageApi): boolean {
+  if (data.external_provider) return false;
   return data.ledger.attempts.some((attempt) => !PERMANENT_REASONS.has(attempt.reason ?? ''));
 }
 
+function ledgerWaiting(data: AgentJobUsageApi): boolean {
+  return !data.external_provider && (data.ledger.status === 'pending' || !!data.ledger.refreshing);
+}
+
 function hasRefreshError(data: AgentJobUsageApi): boolean {
+  if (data.external_provider) return false;
   return (
     data.ledger.status === 'stale' ||
     data.ledger.attempts.some((attempt) => attempt.reason && attempt.reason !== 'pending')
@@ -183,11 +192,8 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
     function nextPollDelay(data: AgentJobUsageApi): number {
       // A turn that just ended can be waiting for its closing snapshot. Keep
       // that wait short even if the stream misses the accounting update.
-      let delay =
-        !active && (data.ledger.status === 'pending' || data.ledger.refreshing)
-          ? POLL_INTERVAL_MS
-          : pollMs;
-      if (!active && data.ledger.next_refresh_at) {
+      let delay = !active && ledgerWaiting(data) ? POLL_INTERVAL_MS : pollMs;
+      if (!active && !data.external_provider && data.ledger.next_refresh_at) {
         const due = Date.parse(data.ledger.next_refresh_at);
         if (Number.isFinite(due)) {
           // A late worker gets the normal terminal backstop, rather than a
@@ -232,10 +238,10 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
 
         sourceHasFailed = hasTransientError(data);
         if (!sourceHasFailed) sourceFailures = 0;
-        const scheduled = Boolean(data.ledger.refreshing || data.ledger.next_refresh_at);
+        const scheduled =
+          !data.external_provider && Boolean(data.ledger.refreshing || data.ledger.next_refresh_at);
         const eligible = canRefresh(data);
-        const needsSourceRefresh =
-          !pushLive && (active || sourceHasFailed || data.ledger.status === 'pending');
+        const needsSourceRefresh = !pushLive && (active || sourceHasFailed || ledgerWaiting(data));
 
         // Always read before requesting fresh accounting. This shares existing
         // work and leaves the server's delayed terminal checks at their due time.
@@ -253,7 +259,7 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
           refresh ||
           active ||
           scheduled ||
-          data.ledger.status === 'pending' ||
+          ledgerWaiting(data) ||
           (eligible && needsSourceRefresh)
         ) {
           const remainingBackoff = retryInterval(sourceFailures) - (Date.now() - lastRefreshAt);
@@ -320,9 +326,8 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
       if (!sourceHasFailed) sourceFailures = 0;
       if (
         active ||
-        shown.ledger.status === 'pending' ||
-        shown.ledger.refreshing ||
-        shown.ledger.next_refresh_at
+        ledgerWaiting(shown) ||
+        (!shown.external_provider && shown.ledger.next_refresh_at)
       )
         schedule(nextPollDelay(shown));
       else clearTimeout(timer);
@@ -351,6 +356,14 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
 /** Only the current run's model calls and tokens; diagnostics stay in the API. */
 export function LedgerUsage({ job, usage }: { job: AgentJob; usage: LoadedUsage | null }) {
   const result = usage?.jobId === job.id ? usage : null;
+  return result?.data?.external_provider ? (
+    <ExternalProviderUsage runtime={result.data.runtime} />
+  ) : (
+    <GatewayUsage job={job} result={result} />
+  );
+}
+
+function GatewayUsage({ job, result }: { job: AgentJob; result: LoadedUsage | null }) {
   const data = result?.data;
   const ledger = data?.ledger;
   const loading = !result || result.loading;
@@ -419,6 +432,30 @@ export function LedgerUsage({ job, usage }: { job: AgentJob; usage: LoadedUsage 
       ) : (
         <span role="status">Usage temporarily unavailable.</span>
       )}
+    </section>
+  );
+}
+
+/**
+ * A turn on the owner's own connection: the runtime's counters, and that its
+ * provider bills it. Never a Gateway cost, a zero, or a wait for one.
+ */
+function ExternalProviderUsage({ runtime }: { runtime: AgentJobUsageApi['runtime'] }) {
+  const t = useT();
+  const totals = runtimeTotals(runtime);
+  const hasValues = totals && (known(totals.tokens_in) || known(totals.tokens_out));
+  return (
+    <section
+      aria-label="Usage"
+      className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs leading-5 text-gray-500 dark:text-gray-400"
+    >
+      {totals && hasValues ? (
+        <>
+          <UsageSummary totals={totals} label="Run usage" />
+          <span>Reported by agent.</span>
+        </>
+      ) : null}
+      <span>{t('modelSource.usageExternal')}</span>
     </section>
   );
 }

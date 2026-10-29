@@ -53,12 +53,14 @@ async def test_an_interrupted_concurrent_build_is_replaced_by_a_valid_index(stor
     """
     config = _db_config()
     try:
+        # Seed while the current store matches the current schema. The rows
+        # survive the downgrade; newer source columns deliberately do not.
+        await _create_job(store)
+        await _create_job(store)
         downgrade_to(config, _BEFORE)
         assert await _index(pool) is None
         # Two turns of one owner fail a unique build part-way, which is how an
         # interrupted ``CONCURRENTLY`` build leaves its index behind.
-        await _create_job(store)
-        await _create_job(store)
         async with pool.acquire() as conn:
             with pytest.raises(asyncpg.UniqueViolationError):
                 await conn.execute(

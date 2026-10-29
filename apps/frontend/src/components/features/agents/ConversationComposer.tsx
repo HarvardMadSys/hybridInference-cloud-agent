@@ -3,19 +3,23 @@ import type { Ref, TextareaHTMLAttributes } from 'react';
 import { useApplePlatform } from '@/components/features/settings/keyboardShortcutPreferences';
 import { chordAriaLabel } from '@/lib/keyboardShortcuts';
 import { isComposerSubmit } from './composerKeys';
-import type { AgentJob } from './types';
+import { modelOverride, type ModelChoice } from './modelSource';
 
-export function composerModels(models: string[], currentModel: string) {
-  return models.length && !models.includes(currentModel) ? [currentModel, ...models] : models;
+/** The model, source and effort a follow-up inherits; a null or absent source is the Gateway. */
+export interface InheritedModel {
+  model: string;
+  modelConnectionId?: string | null;
+  reasoningEffort?: string;
 }
-/** What differs from `parent`, the turn the message inherits from when a field is omitted. */
-export function composerOverrides(
-  parent: Pick<AgentJob, 'model' | 'reasoningEffort'>,
-  model: string,
-  effort: string,
-) {
+
+/**
+ * What differs from `parent`, the turn the message inherits from when a field
+ * is omitted. The model is compared with its source: the same model name on
+ * another source is a change, and is sent as one (see `modelOverride`).
+ */
+export function composerOverrides(parent: InheritedModel, choice: ModelChoice, effort: string) {
   return {
-    ...(model && model !== parent.model ? { model } : {}),
+    ...modelOverride(parent, choice),
     ...(effort && effort !== parent.reasoningEffort ? { reasoning_effort: effort } : {}),
   };
 }
