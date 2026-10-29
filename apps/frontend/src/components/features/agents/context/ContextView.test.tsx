@@ -69,7 +69,7 @@ function view(overrides: Partial<ThreadContextApi> = {}): ThreadContextApi {
         compaction_sizes: 'partly_reported',
         context_window: 'partly_reported',
         window_reported_turns: 0,
-        native_composition: 'partly_reported',
+        native_composition: 'names_only',
         snapshot_turns: 1,
         live_occupancy: 'not_collected',
       },
@@ -199,22 +199,30 @@ function composition(
     runtime: 'claude-code',
     native: {
       v: 1,
-      source: 'claude_get_context_usage',
+      source: 'claude_init',
       status: 'ok',
-      token_basis: 'cli_meter',
-      total_tokens: 30_328,
-      context_window: 200_000,
+      token_basis: 'names_only',
+      total_tokens: null,
+      context_window: null,
       categories: [
-        { key: 'system_prompt', tokens: 7284, exposed: true },
-        { key: 'tool_definitions', tokens: 20_151, exposed: true },
-        { key: 'tool_results', tokens: 28, exposed: true },
+        { key: 'tool_definitions', tokens: null, entries: 2, exposed: true },
+        { key: 'mcp_tools', tokens: null, entries: 1, exposed: true },
+        { key: 'system_prompt', tokens: null, exposed: false },
       ],
       entries: [
-        { category: 'instructions', label: '/state/claude/CLAUDE.md', tokens: 120, source: 'User' },
+        { category: 'tool_definitions', label: 'Bash', tokens: null, token_basis: 'names_only' },
+        {
+          category: 'mcp_tools',
+          label: 'mcp__github__search_code',
+          source: 'github',
+          tokens: null,
+          token_basis: 'names_only',
+        },
       ],
       entries_omitted: 0,
+      mcp_servers: [{ name: 'github', status: 'connected' }],
     },
-    native_relation: { event_id: 900, requests_after: 0 },
+    native_relation: { event_id: 900, requests_before: 1, compacted_since: true },
     native_status: 'ok',
     reconstructed: {
       basis: 'stored_events_transcript_order',
@@ -361,6 +369,10 @@ describe('ContextView', () => {
       'Reported from this release on',
     );
     expect(within(table).getByText('Window reported for 0 of 2 turns')).toBeInTheDocument();
+    // Claude is never asked for sizes: its own account is the names it starts with.
+    const account = within(table).getByText('CLI’s own account of a request').closest('tr');
+    expect(account).toHaveTextContent('Tool and MCP names, no sizes');
+    expect(account).toHaveTextContent('Read for 1 of 2 turns');
     expect(within(table).getByText('Live occupancy').closest('tr')).toHaveTextContent(
       'Not collected',
     );
@@ -417,13 +429,17 @@ describe('ContextView', () => {
     show();
     expect(await screen.findByText(/Reported input: 2,010/)).toBeInTheDocument();
     expect(screen.getByText(/not more content/)).toBeInTheDocument();
+    // Claude's start-up names: counted as names, never sized, never live.
     expect(
-      screen.getByText(/right after this request and its reply\. Counted by the CLI\./),
+      screen.getByText(
+        /^Named by Claude Code when turn \d+ started\..*the platform does not ask\.$/,
+      ),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText('30.3K in context, per the CLI · of a 200K window'),
-    ).toBeInTheDocument();
+    expect(screen.getByText('MCP servers: github (connected)')).toBeInTheDocument();
+    expect(screen.getByText('2 named')).toBeInTheDocument();
     expect(screen.getByText('System prompt')).toBeInTheDocument();
+    expect(screen.getByText('Not exposed by this CLI')).toBeInTheDocument();
+    expect(screen.queryByText(/in context, per the CLI/)).not.toBeInTheDocument();
     expect(screen.getByText(/It is not the assembled request/)).toBeInTheDocument();
     expect(
       screen.getByText(
@@ -465,12 +481,11 @@ describe('ContextView', () => {
     );
     show();
     expect(
-      await screen.findByText(/Usually it ran before snapshots were collected/),
+      await screen.findByText(/the read did not finish while the turn ran/),
     ).toBeInTheDocument();
     for (const [status, text] of [
-      ['not_settled', /this attempt was retried, failed or was cancelled/],
-      ['pending', /The CLI is asked when this turn settles/],
-      ['unsupported', /bridge predates snapshot support/],
+      ['not_settled', /retried, failed or was cancelled before the read arrived/],
+      ['pending', /read as the turn starts; the read has not arrived yet/],
     ] as const) {
       vi.mocked(getRequestComposition).mockImplementation(async (_job, eventId) =>
         composition(eventId, { native: null, native_relation: null, native_status: status }),
@@ -492,27 +507,58 @@ describe('ContextView', () => {
     expect(
       await screen.findByText(/codex offers no supported way to read its context/),
     ).toBeInTheDocument();
-  });
-
-  it('marks what a CLI does not expose instead of a zero', async () => {
     vi.mocked(getRequestComposition).mockImplementation(async (_job, eventId) =>
       composition(eventId, {
         runtime: 'pi',
-        native: {
-          v: 1,
-          source: 'pi_rpc',
-          status: 'partial',
-          token_basis: 'chars_cjk_v1',
-          total_tokens: 250_000,
-          categories: [{ key: 'system_prompt', tokens: null, exposed: false }],
-          entries: [],
-        },
+        native: null,
+        native_relation: null,
+        native_status: 'not_offered',
       }),
     );
+    cleanup();
     show();
-    expect(await screen.findByText('Not exposed by this CLI')).toBeInTheDocument();
-    expect(screen.getByText(/messages were too large to read safely/)).toBeInTheDocument();
-    expect(screen.getByText(/Sizes estimated from the text the CLI listed/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/so the platform does not ask and a turn never waits for it/),
+    ).toBeInTheDocument();
+  });
+
+  it('says when a read at the turn start came before this request', async () => {
+    const read = (relation: RequestCompositionApi['native_relation']) =>
+      vi.mocked(getRequestComposition).mockImplementation(async (_job, eventId) =>
+        composition(eventId, {
+          runtime: 'opencode',
+          native: {
+            v: 2,
+            source: 'opencode_session_messages',
+            status: 'ok',
+            token_basis: 'chars_cjk_v1',
+            observed: 'turn_start',
+            total_tokens: null,
+            categories: [
+              { key: 'user_messages', tokens: 13, entries: 1, exposed: true },
+              { key: 'system_prompt', tokens: null, exposed: false },
+            ],
+            entries: [],
+          },
+          native_relation: relation,
+        }),
+      );
+    read({ event_id: 901, requests_before: 0, compacted_since: false });
+    show();
+    expect(
+      await screen.findByText(
+        /^Read when turn \d+ started: what this request was sent with, as the CLI’s server listed it\. Sizes estimated from the text the CLI listed\.$/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Not exposed by this CLI')).toBeInTheDocument();
+    read({ event_id: 901, requests_before: 2, compacted_since: true });
+    cleanup();
+    show();
+    expect(
+      await screen.findByText(
+        /before this request\. Requests of this turn since then: 2; what they added is not in it\. A compaction later in this turn replaced part of what is listed here\./,
+      ),
+    ).toBeInTheDocument();
   });
 
   it('filters the reconstruction by category', async () => {

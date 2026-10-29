@@ -106,6 +106,13 @@ _CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-
 _ASCII = re.compile(r"[\x00-\x7f]")
 #: What the servers put in place of a tool output they pruned from context.
 PRUNED_OUTPUT = "[Old tool result content cleared]"
+#: Bounds of the turn-start context read. It runs beside the turn, never in
+#: its way: a read that is slow, large or late is dropped, not waited for.
+CONTEXT_READ_MAX_BYTES = 8 * 1024 * 1024
+CONTEXT_READ_TIMEOUT_S = 5.0
+#: The server may list the turn's prompt a moment after accepting it.
+CONTEXT_PROMPT_POLLS = 10
+CONTEXT_PROMPT_POLL_S = 0.2
 
 
 def carried_messages(messages: Any) -> list[dict[str, Any]]:
@@ -243,17 +250,30 @@ def _tool_entries(tools: Any) -> list[dict[str, Any]]:
     return entries
 
 
-def latest_model(messages: Any) -> tuple[str, str]:
-    """The provider and model of the newest assistant message."""
-    for msg in reversed(messages if isinstance(messages, list) else []):
-        info = msg.get("info") if isinstance(msg, dict) else None
-        if isinstance(info, dict) and info.get("role") == "assistant" and info.get("providerID") and info.get("modelID"):
-            return str(info["providerID"]), str(info["modelID"])
-    return "", ""
+def request_messages(messages: Any, prompt: str, *, since_ms: float) -> list[dict[str, Any]] | None:
+    """The listed messages up to and including this turn's prompt; ``None`` until it is listed.
+
+    The prompt is the newest user message with a text part equal to it,
+    created no earlier than its admission. Whatever follows it is the turn's
+    own output, which its first request does not carry.
+    """
+    listed = [m for m in messages if isinstance(m, dict)] if isinstance(messages, list) else []
+    for index in range(len(listed) - 1, -1, -1):
+        info = listed[index].get("info")
+        if not isinstance(info, dict) or info.get("role") != "user":
+            continue
+        created = (info.get("time") or {}).get("created") if isinstance(info.get("time"), dict) else None
+        texts = [
+            p.get("text") for p in listed[index].get("parts") or [] if isinstance(p, dict) and p.get("type") == "text"
+        ]
+        if prompt in texts and isinstance(created, (int, float)) and created >= since_ms:
+            return listed[: index + 1]
+        return None
+    return None
 
 
 def context_summary(messages: Any, tools: Any, *, provider: str = "") -> dict[str, Any]:
-    """What the session's next request would carry, as bounded entries.
+    """What a request carries, from the messages it is sent with, as bounded entries.
 
     Messages are filtered as the server filters compacted history; a tool
     output the server pruned is listed as pruned, with the placeholder the
@@ -282,7 +302,18 @@ def context_summary(messages: Any, tools: Any, *, provider: str = "") -> dict[st
     }
 
 
+class ContextTooLarge(Exception):
+    """The server's answer is over the context read's size bound."""
+
+
+class ContextUnavailable(Exception):
+    """The context read found nothing it may report."""
+
+
 class Bridge:
+    #: The turn-start context read in flight, if any (see ``_start_context_read``).
+    _context_reader: threading.Thread | None = None
+
     def __init__(self, runtime: str) -> None:
         if runtime not in _RUNTIMES:
             raise BridgeError(f"unsupported live HTTP runtime: {runtime!r}")
@@ -724,6 +755,76 @@ class Bridge:
         self.emit({"bridge": "event", "turn_id": active, "event": event})
         return event_type
 
+    def _start_context_read(self, turn_id: str, prompt: str, admitted_ms: float) -> None:
+        """Read what this turn's first request carries, beside the turn (caller holds the turn lock).
+
+        Nothing waits for the read and nothing it does can fail the turn. One
+        runs at a time; a turn that starts while an earlier read is still
+        running is simply not read.
+        """
+        try:
+            reader = self._context_reader
+            if reader is not None and reader.is_alive():
+                return
+            reader = threading.Thread(
+                target=self._read_context, args=(turn_id, prompt, admitted_ms), daemon=True
+            )
+            self._context_reader = reader
+            reader.start()
+        except Exception:  # an observation never fails a turn
+            return
+
+    def _get_bounded(self, path: str) -> Any:
+        """A GET for the context read: bounded in time and size, never retried."""
+        request = urllib.request.Request(self.base_url + path, headers=self._headers(), method="GET")
+        with urllib.request.urlopen(request, timeout=CONTEXT_READ_TIMEOUT_S) as response:
+            content = response.read(CONTEXT_READ_MAX_BYTES + 1)
+        if len(content) > CONTEXT_READ_MAX_BYTES:
+            raise ContextTooLarge(f"over {CONTEXT_READ_MAX_BYTES} bytes")
+        return json.loads(content) if content else None
+
+    def _read_context(self, turn_id: str, prompt: str, admitted_ms: float) -> None:
+        """Report the read only while its turn is active; otherwise drop it.
+
+        A read that fails, is too large, or finds the turn over is dropped with
+        a stderr diagnostic: stdout carries only what a turn can use.
+        """
+        try:
+            session = urllib.parse.quote(str(self.session_id), safe="")
+            carried = None
+            for _ in range(CONTEXT_PROMPT_POLLS):
+                if self._stopping.is_set() or self._turn_id != turn_id:
+                    return
+                carried = request_messages(
+                    self._get_bounded(f"/session/{session}/message"), prompt, since_ms=admitted_ms
+                )
+                if carried is not None:
+                    break
+                time.sleep(CONTEXT_PROMPT_POLL_S)
+            if carried is None:
+                raise ContextUnavailable("the prompt was not listed in time")
+            tools = None
+            with contextlib.suppress(Exception):
+                tools = self._get_bounded(
+                    "/experimental/tool?"
+                    + urllib.parse.urlencode({"provider": "freeinference", "model": self.model})
+                )
+            report = {
+                "bridge": "context",
+                "turn_id": turn_id,
+                "context": context_summary(carried, tools, provider="freeinference"),
+            }
+            with self._turn_lock:
+                # Settlement and failure are emitted under this same lock, so a
+                # read can never follow its turn's end.
+                if self._turn_id == turn_id and not self._stopping.is_set():
+                    self.emit(report)
+                    return
+            raise ContextUnavailable("the turn ended first")
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                print(f"context read skipped: {type(exc).__name__}: {exc}"[:300], file=sys.stderr)
+
     def _settle_locked(self, turn_id: str) -> None:
         # The server emits busy/status before its matching idle. Ignore a
         # subscription's stale initial idle so it cannot settle a new prompt.
@@ -756,6 +857,7 @@ class Bridge:
                 self._permission_sessions = {str(self.session_id)}
                 self._turn_saw_busy = False
                 self._turn_failed = False
+                admitted_ms = time.time() * 1000 - 1
                 try:
                     # Hold the ownership lock through admission. A concurrent
                     # stream loss clears readiness first, then waits here and
@@ -778,6 +880,7 @@ class Bridge:
                     self._questions.clear()
                     raise
                 self.emit({"bridge": "turn_accepted", "turn_id": command_id})
+                self._start_context_read(command_id, prompt, admitted_ms)
             return
         if kind == "interrupt":
             with self._turn_lock:
@@ -848,32 +951,6 @@ class Bridge:
             return
         if kind == "ping":
             self.emit({"bridge": "pong", "id": command_id, "session_id": self.session_id})
-            return
-        if kind == "context":
-            # Read-only and between turns only: what the next request carries.
-            with self._turn_lock:
-                if self._turn_id is not None:
-                    raise BridgeError("context is read between turns")
-            messages = self.request(
-                "GET",
-                f"/session/{urllib.parse.quote(str(self.session_id), safe='')}/message",
-            )
-            provider, model = latest_model(messages)
-            tools = None
-            if provider and model:
-                with contextlib.suppress(Exception):
-                    tools = self.request(
-                        "GET",
-                        "/experimental/tool?"
-                        + urllib.parse.urlencode({"provider": provider, "model": model}),
-                    )
-            self.emit(
-                {
-                    "bridge": "context_result",
-                    "id": command_id,
-                    "context": context_summary(messages, tools, provider=provider),
-                }
-            )
             return
         raise BridgeError(f"unknown command type: {kind!r}")
 

@@ -28,9 +28,10 @@ const TRIGGER: Record<string, TranslationKey> = {
   overflow: 'context.trigger.overflow',
 };
 
-const SUPPORT: Record<ContextSupport | 'not_collected', TranslationKey> = {
+const SUPPORT: Record<ContextSupport | 'names_only' | 'not_collected', TranslationKey> = {
   reported: 'context.support.reported',
   partly_reported: 'context.support.partly_reported',
+  names_only: 'context.support.names_only',
   not_reported: 'context.support.not_reported',
   not_collected: 'context.support.not_collected',
 };
@@ -378,7 +379,10 @@ export function Turns({ turns, onOpenTurn }: { turns: ContextTurnApi[]; onOpenTu
 }
 
 const CAPABILITY_ROWS: Array<
-  [TranslationKey, (cap: RuntimeContextCapabilityApi) => ContextSupport | 'not_collected']
+  [
+    TranslationKey,
+    (cap: RuntimeContextCapabilityApi) => ContextSupport | 'names_only' | 'not_collected',
+  ]
 > = [
   ['context.cap.requestUsage', (cap) => cap.request_usage],
   ['context.cap.compactionEvents', (cap) => cap.compaction_events],

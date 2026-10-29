@@ -126,7 +126,7 @@ dsh-context 运行在 DeepSeek Harness 里面，能读到 Harness 自己组装�
 - 不改 Gateway，不读 Gateway 密钥；没有 Gateway 合同缺口（用量与费用已经由现有合同提供）。
 - 不做 Fleet / 多 Agent 编排页面，不编辑系统提示词，不做新插件平台。
 - 不采集 Claude `get_context_usage` 和 pi `get_session_stats`：两者都需要在常驻会话里插入额外的控制请求并处理其回复，
-  牵涉常驻流的回合结算，需要真实 Docker 下的验证，单独做。
+  会占用对话自己的通道、拖住回合结算（Claude 还会调用 `count_tokens`），所以不询问，见 6.1。
 
 ## 六、续：单次请求的上下文构成（2026-10-29 第二部分）
 
@@ -134,9 +134,11 @@ dsh-context 运行在 DeepSeek Harness 里面，能读到 Harness 自己组装�
 的差额暗示系统提示词和工具定义占了多少。第二部分改成**按请求**展示，三种来源分开标注：
 
 1. **服务商报告的输入**：这次请求的输入 token（精确值）；缓存读取/写入只是同一份输入的计费拆分，不另加。
-2. **CLI 自己的统计（快照）**：轮次结束后向 CLI 询问它的上下文由什么组成，作为 `context_snapshot` 生命周期事件存下
-   （类别、来源名、大小、短预览；不存整段内容）。它描述的是"本轮最后一次请求及其回复之后"的上下文，
-   所以较早的请求会注明"之后本轮还有 N 次请求"。
+2. **CLI 自己的统计**：只用不占用对话的读取，从不在轮次结算路径上询问 CLI。OpenCode/Kilo 由沙箱里的 bridge
+   在轮次开始时（`prompt_async` 被接受后），用自己的线程通过服务端回环 HTTP 读取这一轮**第一次请求**发送的内容，
+   作为 `context_snapshot` 生命周期事件存下（类别、来源名、大小估算、短预览；不存整段内容）；Claude Code 只用它
+   每轮启动行（`init`）里已经报告、已经存储的工具菜单和 MCP 服务名，没有大小。同一轮后面的请求会注明
+   "读取早于这次请求，此后本轮已有 N 次请求"，本轮在读取之后发生压缩也会注明；这些都不是实时占用。
 3. **根据存储内容重建**：按记录顺序挑出这次请求之前的存储内容——各轮提问、回答、推理、工具调用与结果、压缩摘要；
    去掉压缩之前的内容、被重试替换的尝试、子 Agent 自己上下文里的内容、这次请求自己的输出（Claude/pi 按 `usage_id`，
    Codex/OpenCode 按"上一次用量报告之后的助手内容"）。这是重建，不是实际组装的请求：CLI 自己加入的系统提示词、
@@ -147,32 +149,37 @@ dsh-context 运行在 DeepSeek Harness 里面，能读到 Harness 自己组装�
 
 ### 6.1 各 CLI 的接口核对（固定版本）
 
+上下文统计不能影响对话：最终输出、轮次结算、后续轮次的接纳与执行、取消、resume 与 fork 都不等待它，不增加推理请求，
+也不在每轮强制向服务商发起计算 token 的请求。第一版曾在轮次结算后通过对话自己的 stdin/stdout 询问 Claude
+（`get_context_usage`）、pi（`get_session_stats`/`get_messages`）和 bridge（`context` 命令）；结算因此要等待回答
+（Claude 最多 20 秒、并约 18 次 `/v1/messages/count_tokens`；pi 与 bridge 的读取没有超时），bridge 的 stdin 循环
+在读取期间也会把下一轮或中断排在后面。这些询问已全部移除。
+
 | 运行时 | 核对的接口 | 结论 | 实现 |
 |---|---|---|---|
-| Claude Code 2.1.220 | stream-json 控制请求 `get_context_usage`（agent-sdk 类型 `SDKControlGetContextUsageResponse`）；用真实 2.1.220 二进制对本机假 Messages API 实测 | 回答系统提示词、内置工具、MCP 工具（含服务名）、记忆文件（路径）、技能、Agent、按种类和按工具拆分的消息、附件种类、`apiUsage`；不需要模型推理；会调用约 18 次 `/v1/messages/count_tokens`，端点不支持时 CLI 改用本地估算（已实测） | 轮次结算后发送；只读自己 `request_id` 的回复，其他行按原顺序放回；20 秒超时后记下请求 id，迟到的回复到达时直接丢弃，不会被后续读取者看到；出错结果、取消、API 重试后不询问 |
-| Claude Code 2.1.220 | `compact_boundary` 之后的合成 user 消息（`isSynthetic`，uuid 等于 `preserved_segment.anchor_uuid`） | 就是压缩摘要正文；以前被存成没有内容的原始行 | 存为 `compaction_summary` 生命周期事件（最多 4000 字符，记录原长度） |
-| pi 0.73.1 | RPC `get_session_stats`（`contextUsage`：估算 token 与窗口）、`get_messages`（上下文消息，含压缩摘要）；`get_state` 不含系统提示词，RPC 也不提供工具定义 | 消息和 pi 自己的估算可得；系统提示词、工具定义不可得 | 先读统计；pi 估算不超过 10 万 token 时才读消息——`get_messages` 是单行 JSON，含 base64 图片，超过主机 8 MB 协议行上限会终止进程；超过时记为 `partial` 并说明原因。完成的压缩记录 `summary_text`（4000 字符上限） |
-| OpenCode 1.18.9 / Kilo 7.4.17 | `GET /session/{id}/message`（全部消息与 part）、`GET /experimental/tool?provider&model`（工具 ID、描述、JSON schema）；系统提示词没有接口 | 按服务端 `filterCompacted` 规则得到下一次请求携带的消息；被修剪的工具输出标为已清除 | bridge 新增只读 `context` 命令（仅在两个轮次之间应答），在沙箱内汇总为最多 300 项、每项 160 字符预览；helper pin 升到 `5`。旧 bridge 回复 `command_error`，记为不支持 |
-| Codex 0.145.0 | app-server v2：`thread/read` 只返回界面条目（已存储）；模型可见的 ResponseItem 只能通过 `thread/start.experimentalRawEvents` 获得，需要在 `initialize` 中开启 `experimentalApi`，协议注明"仅供内部使用（如 Codex Cloud）" | 没有受支持的接口 | 不启用实验接口；Codex 只显示服务商输入与重建结果，界面说明原因 |
+| Claude Code 2.1.220 | stream-json 控制请求 `get_context_usage`（真实 2.1.220 二进制对本机假 Messages API 实测） | 能回答系统提示词、工具、MCP、记忆文件、技能和消息拆分，但只能在对话自己的通道上询问，且回答时 CLI 会调用约 18 次 `count_tokens`（端点不支持时本地估算） | **不询问**。改用每轮 `init` 行里已存储的工具名与 MCP 服务名（`harness`），标为"只有名称，没有大小"；系统提示词、指令、技能标为不提供 |
+| Claude Code 2.1.220 | `compact_boundary` 之后的合成 user 消息 | 就是压缩摘要正文 | 照旧存为 `compaction_summary` 生命周期事件（最多 4000 字符） |
+| pi 0.73.1 | RPC `get_session_stats`、`get_messages` | 只能在对话自己的 RPC 通道上询问；`get_messages` 是单行 JSON | **不询问**，能力表为"不报告"；完成的压缩照旧记录 `summary_text` |
+| OpenCode 1.18.9 / Kilo 7.4.17 | `GET /session/{id}/message`、`GET /experimental/tool?provider&model`（服务端回环 HTTP，只读，不调用模型） | 按 `filterCompacted` 得到请求携带的消息与工具定义；系统提示词没有接口 | bridge（helper pin `5`）在轮次开始时用独立线程读取：截到本轮提示（按文本与创建时间匹配，最多轮询 10 次、每次 0.2 秒），每次 GET 5 秒超时、8 MiB 上限，最多 300 项、每项 160 字符预览；只在该轮仍在进行时、在与 `settled` 相同的锁下写出，否则丢弃并只写 stderr 诊断；同一时间只有一个读取。主机不发送任何命令，也不等待 |
+| Codex 0.145.0 | app-server v2：`thread/read` 只返回界面条目；模型可见内容只能通过内部实验接口获得 | 没有受支持的接口 | 不启用实验接口 |
 
 ### 6.2 token 估算
 
 项目依赖里没有各服务商的分词器。估算规则（`cloud_agent_shared.text_tokens`，Postgres 中按同一规则计数）：
 ASCII 每 4 字符 1 token，CJK（中日韩字符、全角）每字符 1 token，其他非 ASCII 每 2 字符 1 token。
-代码按 ASCII 计，标点密集的代码会偏少；截短的预览会偏少。Claude 的快照用 CLI 自己的计数（`cli_meter`）。
+代码按 ASCII 计，标点密集的代码会偏少；截短的预览会偏少。Claude 的名称没有大小，界面不显示数字。
 
 ### 6.3 历史与覆盖
 
-快照只对本版本之后的运行存在，而且只在一轮正常结束、进程仍在时才询问 CLI。没有快照时说明原因，不混为一谈：
+OpenCode/Kilo 的读取只对使用新 bridge 的运行存在；读取被丢弃（慢、太大、轮次已结束）时不写任何内容。没有统计时说明原因：
 
-- `not_offered`：这个运行时没有受支持的接口（Codex）。
-- `pending`：这一轮还在运行，结束后才询问。
-- `not_settled`：这次尝试被重试，或这一轮失败、被取消，CLI 没有被询问。
-- `unsupported`：沙箱里的 bridge 早于版本 5，不认识 `context` 命令。
-- `not_collected`：正常结束的一轮却没有快照，通常是它早于快照采集。
+- `not_offered`：这个运行时没有不占用对话的读取（pi、Codex）。
+- `pending`：这一轮还在运行，读取结果还没到。
+- `not_settled`：这次尝试在读取到达之前被重试、失败或被取消。
+- `not_collected`：已结束的一轮没有读取结果：早于采集，或读取被丢弃。
 
-重建结果在这些情况下照常可用。压缩边界之前的内容一律算作"已压缩"，但各 CLI 都可能把最近的一部分带过压缩
-（Claude 的 `preserved_segment`、pi 保留的最近消息、OpenCode/Kilo 的 `tail_start_id`、Codex 保留的最近用户消息），
-存储的转录说不清是哪些，所以界面注明重建结果可能比实际请求少。能力表新增
-"CLI 上下文快照"一行，并给出"N 轮中有 M 轮有快照"。属主校验：组成与原文读取都要求会话属于调用者且未删除，
-原文只返回平台存储时已经脱敏的文本。
+Claude 的名称来自启动行，早于本功能的运行也有。重建结果在所有情况下照常可用。压缩边界之前的内容一律算作"已压缩"，但各 CLI
+都可能把最近的一部分带过压缩（Claude 的 `preserved_segment`、pi 保留的最近消息、OpenCode/Kilo 的 `tail_start_id`、Codex
+保留的最近用户消息），存储的转录说不清是哪些，所以界面注明重建结果可能比实际请求少。能力表"CLI 自己对请求的统计"一行：
+OpenCode/Kilo 为"从这个版本起有报告"，Claude 为"只有工具和 MCP 名称，没有大小"，pi 与 Codex 为"不报告"，并给出
+"N 轮中有 M 轮读到"。属主校验：组成与原文读取都要求会话属于调用者且未删除，原文只返回平台存储时已经脱敏的文本。

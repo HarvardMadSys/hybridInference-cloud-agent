@@ -51,11 +51,11 @@ class RuntimeContextCapability(BaseModel):
     context_window: Support
     #: Turns whose stored events reported a context window for the main model.
     window_reported_turns: int = Field(ge=0)
-    #: The CLI's own account of its context after a turn, with categories and
-    #: sources (system prompt, tools, instructions, messages): collected from
-    #: this release on where the runtime offers one.
-    native_composition: Support
-    #: Turns with such a snapshot.
+    #: The CLI's own account of what a request carries, read without holding
+    #: the conversation: OpenCode's and Kilo's server listing at a turn's start
+    #: (from this release on), Claude Code's tool and MCP names, nothing else.
+    native_composition: Literal["reported", "partly_reported", "names_only", "not_reported"]
+    #: Turns with such an account.
     snapshot_turns: int = Field(default=0, ge=0)
     #: No pinned CLI streams its live window occupancy.
     live_occupancy: Literal["not_collected"] = "not_collected"
@@ -209,7 +209,9 @@ _RUNTIME_SUPPORT: dict[str, dict[str, str]] = {
         "compaction_events": "reported",
         "compaction_sizes": "partly_reported",
         "context_window": "partly_reported",
-        "native_composition": "partly_reported",
+        # Its start-up line names the tools and MCP servers; sizes need a
+        # question answered with token-counting calls, which is not asked.
+        "native_composition": "names_only",
     },
     "codex": {
         "request_usage": "reported",
@@ -225,7 +227,8 @@ _RUNTIME_SUPPORT: dict[str, dict[str, str]] = {
         "compaction_events": "reported",
         "compaction_sizes": "partly_reported",
         "context_window": "partly_reported",
-        "native_composition": "partly_reported",
+        # Answered only over the conversation's own RPC channel: not asked.
+        "native_composition": "not_reported",
     },
     "opencode": {
         "request_usage": "reported",
@@ -420,7 +423,7 @@ def _has_snapshot(attempt: Mapping[str, Any]) -> bool:
     if not isinstance(profile, Mapping) or not profile_is_current(profile):
         return False
     return any(
-        isinstance(snapshot, Mapping) and snapshot.get("status") in {"ok", "partial"}
+        isinstance(snapshot, Mapping) and snapshot.get("status") == "ok"
         for snapshot in profile.get("snapshots") or []
     )
 

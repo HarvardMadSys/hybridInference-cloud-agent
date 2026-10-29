@@ -11,27 +11,29 @@ export const contextRequestEn = {
   'contextRequest.providerDetail':
     '{read} read from cache · {write} written to cache · {uncached} uncached. The cache split is how this input was billed, not more content.',
   'contextRequest.native': 'The CLI’s own account',
-  'contextRequest.native.after':
-    'Taken when turn {turn} settled, right after this request and its reply.',
-  'contextRequest.native.later':
-    'Taken when turn {turn} settled, after {count} later requests of the turn, so it includes what they added.',
-  'contextRequest.native.cli_meter': 'Counted by the CLI.',
+  'contextRequest.native.turnStart':
+    'Read when turn {turn} started: what this request was sent with, as the CLI’s server listed it.',
+  'contextRequest.native.turnStartLater':
+    'Read when turn {turn} started, before this request. Requests of this turn since then: {count}; what they added is not in it.',
+  'contextRequest.native.turnStartCompacted':
+    'A compaction later in this turn replaced part of what is listed here.',
   'contextRequest.native.estimate': 'Sizes estimated from the text the CLI listed.',
-  'contextRequest.native.total': '{tokens} in context, per the CLI',
-  'contextRequest.native.window': 'of a {window} window',
+  'contextRequest.native.namesOnly':
+    'Named by Claude Code when turn {turn} started. It reports sizes only when asked, and answering costs token-counting calls to the model provider while the conversation waits, so the platform does not ask.',
+  'contextRequest.native.named': '{count} named',
+  'contextRequest.native.mcpServers': 'MCP servers: {servers}',
   'contextRequest.native.notExposed': 'Not exposed by this CLI',
-  'contextRequest.native.partial':
-    'Only the CLI’s total: its messages were too large to read safely.',
   'contextRequest.native.not_collected':
-    'No CLI snapshot for this turn. Usually it ran before snapshots were collected.',
+    'No CLI account for this turn: it ran before collection began, or the read did not finish while the turn ran.',
   'contextRequest.native.not_settled':
-    'No CLI snapshot: this attempt was retried, failed or was cancelled, so the CLI was not asked.',
-  'contextRequest.native.pending': 'The CLI is asked when this turn settles.',
-  'contextRequest.native.unsupported':
-    'No CLI snapshot: the sandbox’s bridge predates snapshot support. Newer sandboxes report it.',
+    'No CLI account: this attempt was retried, failed or was cancelled before the read arrived.',
+  'contextRequest.native.pending':
+    'The CLI’s server is read as the turn starts; the read has not arrived yet.',
   'contextRequest.native.not_offered':
     '{runtime} offers no supported way to read its context, so only the reconstruction below is available.',
-  'contextRequest.native.failed': 'The CLI did not answer the snapshot request ({status}).',
+  'contextRequest.native.not_offered.pi':
+    'pi answers questions about its context only over this conversation’s own channel, so the platform does not ask and a turn never waits for it. Only the reconstruction below is available.',
+  'contextRequest.native.failed': 'The CLI’s account could not be read ({status}).',
   'contextRequest.native.omitted': '{count} smaller items are not listed; the totals include them.',
   'contextRequest.reconstructed': 'Reconstructed from the stored conversation',
   'contextRequest.reconstructed.note':
@@ -85,24 +87,27 @@ export const contextRequestZhCN: Record<keyof typeof contextRequestEn, string> =
   'contextRequest.providerDetail':
     '其中缓存读取 {read}，写入缓存 {write}，未缓存 {uncached}。这只是这部分输入的计费拆分，不是额外的内容。',
   'contextRequest.native': 'CLI 自己的统计',
-  'contextRequest.native.after': '在第 {turn} 轮结束时取得，紧接在这次请求和它的回复之后。',
-  'contextRequest.native.later':
-    '在第 {turn} 轮结束时取得，这一轮在这次请求之后又有 {count} 次请求，所以也包含它们新增的内容。',
-  'contextRequest.native.cli_meter': '由 CLI 自己统计。',
+  'contextRequest.native.turnStart':
+    '在第 {turn} 轮开始时读取：CLI 的服务端列出的、这次请求发送的内容。',
+  'contextRequest.native.turnStartLater':
+    '在第 {turn} 轮开始时读取，早于这次请求。此后本轮的请求数：{count}；它们新增的内容不在其中。',
+  'contextRequest.native.turnStartCompacted': '本轮稍后发生了压缩，这里列出的部分内容已被替换。',
   'contextRequest.native.estimate': '大小按 CLI 列出的文本估算。',
-  'contextRequest.native.total': 'CLI 统计上下文共 {tokens}',
-  'contextRequest.native.window': '窗口 {window}',
+  'contextRequest.native.namesOnly':
+    '第 {turn} 轮开始时 Claude Code 列出的名称。它只在被询问时才报告大小，而回答会在对话等待期间向模型服务商发起计算 token 的请求，所以平台不询问。',
+  'contextRequest.native.named': '{count} 个名称',
+  'contextRequest.native.mcpServers': 'MCP 服务：{servers}',
   'contextRequest.native.notExposed': '这个 CLI 不提供',
-  'contextRequest.native.partial': '只有 CLI 的总数：消息太大，没有安全读取。',
-  'contextRequest.native.not_collected': '这一轮没有 CLI 快照，通常是因为它早于快照采集。',
+  'contextRequest.native.not_collected':
+    '这一轮没有 CLI 统计：它早于采集开始，或者读取没有在这一轮运行期间完成。',
   'contextRequest.native.not_settled':
-    '没有 CLI 快照：这次尝试被重试、失败或被取消，所以没有询问 CLI。',
-  'contextRequest.native.pending': '这一轮结束后才会询问 CLI。',
-  'contextRequest.native.unsupported':
-    '没有 CLI 快照：这个沙箱的 bridge 早于快照支持，新的沙箱会提供。',
+    '没有 CLI 统计：这次尝试在读取完成之前被重试、失败或被取消。',
+  'contextRequest.native.pending': 'CLI 的服务端在轮次开始时读取，结果还没有到达。',
   'contextRequest.native.not_offered':
     '{runtime} 没有受支持的方式读取它的上下文，所以只有下面的重建结果。',
-  'contextRequest.native.failed': 'CLI 没有回应快照请求（{status}）。',
+  'contextRequest.native.not_offered.pi':
+    'pi 只能通过这个对话自己的通道回答上下文问题，所以平台不询问，轮次也从不为此等待。只有下面的重建结果。',
+  'contextRequest.native.failed': '无法读取 CLI 的统计（{status}）。',
   'contextRequest.native.omitted': '另有 {count} 个较小的项目没有列出，合计已包含它们。',
   'contextRequest.reconstructed': '根据已存储的对话重建',
   'contextRequest.reconstructed.note':

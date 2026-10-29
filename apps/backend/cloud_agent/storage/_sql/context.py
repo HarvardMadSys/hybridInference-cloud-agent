@@ -77,7 +77,12 @@ jsonb_strip_nulls(jsonb_build_object(
                          'source', e.payload->'snapshot'->'source',
                          'status', e.payload->'snapshot'->'status',
                          'total_tokens', e.payload->'snapshot'->'total_tokens',
-                         'context_window', e.payload->'snapshot'->'context_window') END,
+                         'context_window', e.payload->'snapshot'->'context_window')
+                     -- Claude's own start-up report: names of the tools and
+                     -- MCP servers it offers, no sizes (context_request).
+                     WHEN e.event_type = 'lifecycle' AND e.payload->>'phase' = 'init'
+                          AND jsonb_typeof(e.payload->'harness') = 'object'
+                     THEN jsonb_build_object('source', 'claude_init', 'status', 'ok') END,
     'completed', CASE WHEN e.event_type = 'lifecycle' THEN e.payload->'completed' END,
     'context_windows', e.payload->'context_windows',
     'input_tokens', CASE WHEN e.event_type = 'usage' THEN e.payload->'input_tokens' END,

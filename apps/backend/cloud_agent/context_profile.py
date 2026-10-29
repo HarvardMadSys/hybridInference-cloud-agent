@@ -49,14 +49,14 @@ from typing import Any, Literal
 
 #: Rollups name their reducer; a semantic change bumps it so every stored
 #: profile is rebuilt from the ledger instead of being served stale.
-CONTEXT_PROFILE_VERSION = 2
+CONTEXT_PROFILE_VERSION = 3
 #: Request points one attempt keeps. Past it, the first and last halves are
 #: kept and the number left out is recorded; peaks and counts still see every
 #: request.
 MAX_ATTEMPT_POINTS = 2_000
 #: Compactions one attempt keeps in detail. Counted beyond that.
 MAX_ATTEMPT_COMPACTIONS = 200
-#: CLI context snapshots one attempt notes (one per settled turn is usual).
+#: Turn-start context reads one attempt notes (one per turn is usual).
 MAX_ATTEMPT_SNAPSHOTS = 20
 #: The reference plugin's density, and the harness token meter it mirrors.
 CHARS_PER_TOKEN = 4
@@ -443,6 +443,8 @@ class ContextProfileAccumulator:
             model = payload.get("model")
             if isinstance(model, str) and model and self.main_model is None:
                 self.main_model = model[:256]
+            # Claude's start-up inventory (tool and MCP server names).
+            self._snapshot(payload.get("snapshot"), meta)
         elif phase == "result":
             self._windows(payload.get("context_windows"))
         elif phase == "context_snapshot":

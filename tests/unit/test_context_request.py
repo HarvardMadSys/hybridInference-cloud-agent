@@ -115,6 +115,12 @@ def _claude_conversation():
         3,
         "j2",
         [
+            # The turn's start-up line: the tool menu Claude offers, no sizes.
+            (
+                29,
+                "lifecycle",
+                {"phase": "init", "snapshot": {"source": "claude_init", "status": "ok"}},
+            ),
             (
                 30,
                 "lifecycle",
@@ -133,18 +139,6 @@ def _claude_conversation():
             ),
             (35, "tool_result", {"tool_use_id": "toolu_2"}),
             (36, "message", {**_usage("m4", 1200), "text": "final"}),
-            (
-                37,
-                "lifecycle",
-                {
-                    "phase": "context_snapshot",
-                    "snapshot": {
-                        "source": "claude_get_context_usage",
-                        "status": "ok",
-                        "total_tokens": 1300,
-                    },
-                },
-            ),
         ],
     )
     jobs = [_job("j1", 1), _job("j2", 2)]
@@ -204,9 +198,11 @@ def test_a_request_after_a_compaction_carries_only_what_followed_it():
     assert ("tool_results", "Bash") in labels and ("tool_calls", "Bash") in labels
     chinese = next(e for e in rebuilt.entries if e.category == "tool_results")
     assert chinese.tokens == estimate_text_tokens("ls output 中文")
-    # The snapshot exists (event 37) but was not read into this call.
+    # The turn's start-up read (event 29) came before this request, before
+    # the turn's earlier request on event 32 and before its compaction.
     assert composition.native_status == "ok"
-    assert located.snapshot_event_id == 37 and located.requests_after == 0
+    assert located.snapshot_event_id == 29 and located.requests_before == 1
+    assert located.compacted_since is True
 
 
 def test_an_earlier_request_carries_the_retried_turn_once_and_says_snapshot_came_later():
@@ -243,7 +239,7 @@ def test_a_missing_snapshot_says_why_the_cli_was_not_asked():
         assert composition.native_status == expected
 
 
-def test_a_middle_request_points_at_the_later_snapshot():
+def test_claude_offers_names_from_its_start_up_line_and_no_sizes():
     jobs, attempts, events, prompts = _claude_conversation()
     _located, composition = _compose(
         jobs,
@@ -252,11 +248,79 @@ def test_a_middle_request_points_at_the_later_snapshot():
         events=[e for e in events if not (e["attempt_id"] == 3 and e["seq"] >= 3)],
         prompts=prompts,
         usage_id="m3",
-        snapshot={"v": 1, "source": "claude_get_context_usage", "status": "ok", "categories": []},
+        snapshot={
+            "source": "claude_init",
+            "harness": {
+                "tools": ["Bash", "Read", "mcp__github__search_code"],
+                "mcp_servers": [{"name": "github", "status": "connected"}],
+                "permission_mode": "bypassPermissions",
+            },
+        },
     )
-    assert composition.native is not None and composition.native_status == "ok"
-    assert composition.native_relation is not None
-    assert composition.native_relation.requests_after == 1  # the request on event 36
+    native = composition.native
+    assert native is not None and composition.native_status == "ok"
+    assert native["token_basis"] == "names_only" and native["total_tokens"] is None
+    categories = {c["key"]: c for c in native["categories"]}
+    assert categories["tool_definitions"] == {
+        "key": "tool_definitions",
+        "tokens": None,
+        "entries": 2,
+        "exposed": True,
+    }
+    assert categories["mcp_tools"]["entries"] == 1
+    # Never a zero: what the line does not report is not exposed.
+    assert categories["system_prompt"]["exposed"] is False
+    mcp = next(e for e in native["entries"] if e["category"] == "mcp_tools")
+    assert mcp == {
+        "category": "mcp_tools",
+        "label": "mcp__github__search_code",
+        "tokens": None,
+        "token_basis": "names_only",
+        "source": "github",
+    }
+    assert native["mcp_servers"] == [{"name": "github", "status": "connected"}]
+    relation = composition.native_relation
+    assert relation is not None
+    assert (relation.event_id, relation.requests_before, relation.compacted_since) == (29, 0, True)
+
+
+def test_no_read_is_made_of_pi_and_a_bridge_read_belongs_to_the_turns_first_request():
+    jobs, attempts, events, prompts = _claude_conversation()
+    pi_jobs = [_job("j1", 1, runtime="pi"), _job("j2", 2, runtime="pi")]
+    _located, composition = _compose(pi_jobs, attempts, 20, events=events, prompts=prompts)
+    assert composition.native_status == "not_offered"
+
+    profile = _profile(
+        1,
+        "j1",
+        [
+            (
+                9,
+                "lifecycle",
+                {
+                    "phase": "context_snapshot",
+                    "snapshot": {"source": "opencode_session_messages", "status": "ok"},
+                },
+            ),
+            (10, "message", {**_usage("s1", 400), "text": "a"}),
+            (11, "message", {**_usage("s2", 600), "text": "b"}),
+        ],
+    )
+    jobs = [_job("j1", 1, runtime="opencode")]
+    attempts = [{"attempt_id": 1, "job_id": "j1", "profile": profile}]
+    first, _composition = _compose(jobs, attempts, 10, events=[], prompts=[])
+    later, _composition = _compose(jobs, attempts, 11, events=[], prompts=[])
+    assert (first.snapshot_event_id, first.requests_before) == (9, 0)
+    assert (later.snapshot_event_id, later.requests_before) == (9, 1)
+    assert first.compacted_since is later.compacted_since is False
+    # Without a read, a running turn's is still to come; an ended one has none.
+    bare = _profile(1, "j1", [(10, "message", {**_usage("s1", 400), "text": "a"})])
+    attempts = [{"attempt_id": 1, "job_id": "j1", "profile": bare}]
+    for state, expected in (("running", "pending"), ("succeeded", "not_collected")):
+        _located, composition = _compose(
+            [_job("j1", 1, runtime="opencode", state=state)], attempts, 10, events=[], prompts=[]
+        )
+        assert composition.native_status == expected
 
 
 def test_pi_request_drops_its_own_reply_matched_by_response_id():

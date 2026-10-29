@@ -153,11 +153,13 @@ function NativeSection({ composition }: { composition: RequestCompositionApi }) 
   let body: React.ReactNode;
   if (state.kind === 'not_collected' || state.kind === 'not_settled' || state.kind === 'pending')
     body = <Note>{t(`contextRequest.native.${state.kind}`)}</Note>;
-  else if (state.kind === 'unsupported')
-    body = <Note>{t('contextRequest.native.unsupported')}</Note>;
   else if (state.kind === 'not_offered')
     body = (
-      <Note>{t('contextRequest.native.not_offered', { runtime: composition.runtime ?? '—' })}</Note>
+      <Note>
+        {composition.runtime === 'pi'
+          ? t('contextRequest.native.not_offered.pi')
+          : t('contextRequest.native.not_offered', { runtime: composition.runtime ?? '—' })}
+      </Note>
     );
   else if (state.kind === 'failed')
     body = <Note>{t('contextRequest.native.failed', { status: state.status })}</Note>;
@@ -165,9 +167,8 @@ function NativeSection({ composition }: { composition: RequestCompositionApi }) 
     body = (
       <NativeSnapshot
         snapshot={state.snapshot}
-        partial={state.partial}
         turn={composition.request.turn_no}
-        requestsAfter={composition.native_relation?.requests_after ?? 0}
+        relation={composition.native_relation}
       />
     );
   return (
@@ -178,43 +179,58 @@ function NativeSection({ composition }: { composition: RequestCompositionApi }) 
   );
 }
 
+/** When the read was made relative to this request; it is never live occupancy. */
+function readNote(
+  t: ReturnType<typeof useLocale>['t'],
+  turn: number,
+  relation: RequestCompositionApi['native_relation'],
+): string {
+  const before = relation?.requests_before ?? 0;
+  const read =
+    before > 0
+      ? t('contextRequest.native.turnStartLater', { turn, count: before })
+      : t('contextRequest.native.turnStart', { turn });
+  const compacted = relation?.compacted_since
+    ? ` ${t('contextRequest.native.turnStartCompacted')}`
+    : '';
+  return `${read}${compacted} ${t('contextRequest.native.estimate')}`;
+}
+
 function NativeSnapshot({
   snapshot,
-  partial,
   turn,
-  requestsAfter,
+  relation,
 }: {
   snapshot: NativeSnapshotApi;
-  partial: boolean;
   turn: number;
-  requestsAfter: number;
+  relation: RequestCompositionApi['native_relation'];
 }) {
   const { t } = useLocale();
   const { sized, hidden } = nativeCategories(snapshot);
-  const meter = snapshot.token_basis === 'cli_meter';
-  const relation =
-    requestsAfter > 0
-      ? t('contextRequest.native.later', { turn, count: requestsAfter })
-      : t('contextRequest.native.after', { turn });
-  const total = snapshot.total_tokens;
+  const namesOnly = snapshot.token_basis === 'names_only';
+  const servers = (snapshot.mcp_servers ?? [])
+    .map((server) => (server.status ? `${server.name} (${server.status})` : server.name))
+    .join(', ');
   return (
     <>
       <Note>
-        {relation} {t(meter ? 'contextRequest.native.cli_meter' : 'contextRequest.native.estimate')}
+        {namesOnly ? t('contextRequest.native.namesOnly', { turn }) : readNote(t, turn, relation)}
       </Note>
-      {typeof total === 'number' ? (
-        <p className="mt-1 text-xs tabular-nums text-foreground">
-          {t('contextRequest.native.total', { tokens: compactCount(total) })}
-          {snapshot.context_window
-            ? ` · ${t('contextRequest.native.window', { window: compactCount(snapshot.context_window) })}`
-            : ''}
-        </p>
+      {namesOnly && servers ? (
+        <Note>{t('contextRequest.native.mcpServers', { servers })}</Note>
       ) : null}
-      {partial ? <Note>{t('contextRequest.native.partial')}</Note> : null}
-      <Bar segments={barSegments(sized)} label={t('contextRequest.native')} />
+      {namesOnly ? null : <Bar segments={barSegments(sized)} label={t('contextRequest.native')} />}
       <ul className="mt-2 grid grid-cols-1 gap-x-4 gap-y-1 text-xs sm:grid-cols-2">
         {sized.map((category) => (
-          <CategoryRow key={category.key} name={category.key} tokens={category.tokens} />
+          <CategoryRow
+            key={category.key}
+            name={category.key}
+            value={
+              namesOnly
+                ? t('contextRequest.native.named', { count: category.entries ?? 0 })
+                : compactCount(category.tokens)
+            }
+          />
         ))}
         {hidden.map((key) => (
           <li key={key} className="flex justify-between gap-2 text-muted">
@@ -228,7 +244,7 @@ function NativeSnapshot({
   );
 }
 
-function CategoryRow({ name, tokens }: { name: string; tokens: number | null }) {
+function CategoryRow({ name, value }: { name: string; value: string }) {
   const { t } = useLocale();
   return (
     <li className="flex items-center justify-between gap-2">
@@ -239,7 +255,7 @@ function CategoryRow({ name, tokens }: { name: string; tokens: number | null }) 
         />
         {t(categoryLabel(name))}
       </span>
-      <span className="tabular-nums text-foreground">{compactCount(tokens)}</span>
+      <span className="tabular-nums text-foreground">{value}</span>
     </li>
   );
 }
@@ -263,7 +279,9 @@ function NativeEntries({ snapshot }: { snapshot: NativeSnapshotApi }) {
                 {entry.label}
                 {entry.source ? <span className="text-muted"> · {entry.source}</span> : null}
               </span>
-              <span className="shrink-0 tabular-nums">{compactCount(entry.tokens)}</span>
+              {entry.tokens === null ? null : (
+                <span className="shrink-0 tabular-nums">{compactCount(entry.tokens)}</span>
+              )}
             </div>
             {entry.preview ? <p className="truncate text-muted">{entry.preview}</p> : null}
           </li>

@@ -11,7 +11,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import logging
 import secrets
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
@@ -64,8 +63,6 @@ _RuntimeT_co = TypeVar("_RuntimeT_co", bound=DialectRuntime, covariant=True)
 #: The session contract itself is stated invariantly: a session hands back the
 #: turn type of exactly the runtime it was opened for.
 _SessionRuntimeT = TypeVar("_SessionRuntimeT", bound=DialectRuntime)
-
-logger = logging.getLogger(__name__)
 
 
 # Provider homes contain files on which the owning CLI performs owner-only
@@ -245,14 +242,6 @@ class ResidentTurn(Generic[_RuntimeT_co]):
             # driver had gathered from it, ahead of the failure.
             yield from self._turn.flush_events()
             raise
-        # The turn has settled. Asking the CLI what its context now holds is
-        # an observation of a finished turn and must never fail it.
-        try:
-            after = self._turn.after_settle_events()
-        except Exception as exc:
-            logger.warning("context snapshot skipped: %s", type(exc).__name__)
-            after = []
-        yield from after
 
     def wait(self) -> TurnResult:
         """Return the settled result while leaving a healthy transport alive."""
@@ -981,7 +970,6 @@ class ResidentTransportFactory:
                 if runtime_id == "claude-code"
                 else None
             ),
-            context_snapshots=True,
         )
 
     def fork_native(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771

@@ -93,25 +93,21 @@ export function nativeCategories(snapshot: NativeSnapshotApi): {
 }
 
 export type NativeState =
-  | { kind: 'snapshot'; snapshot: NativeSnapshotApi; partial: boolean }
+  | { kind: 'snapshot'; snapshot: NativeSnapshotApi }
   | { kind: 'not_collected' }
   | { kind: 'not_offered' }
   | { kind: 'not_settled' }
   | { kind: 'pending' }
-  | { kind: 'unsupported' }
   | { kind: 'failed'; status: string };
 
 /** What the composition can say about the CLI's own account. */
 export function nativeState(composition: RequestCompositionApi): NativeState {
   const snapshot = composition.native;
-  if (snapshot && (snapshot.status === 'ok' || snapshot.status === 'partial')) {
-    return { kind: 'snapshot', snapshot, partial: snapshot.status === 'partial' };
-  }
+  if (snapshot && snapshot.status === 'ok') return { kind: 'snapshot', snapshot };
   if (composition.native_status === 'not_collected') return { kind: 'not_collected' };
   if (composition.native_status === 'not_offered') return { kind: 'not_offered' };
   if (composition.native_status === 'not_settled') return { kind: 'not_settled' };
   if (composition.native_status === 'pending') return { kind: 'pending' };
-  if (composition.native_status === 'unsupported') return { kind: 'unsupported' };
   return { kind: 'failed', status: snapshot?.status ?? composition.native_status };
 }
 

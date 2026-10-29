@@ -17762,6 +17762,7 @@
             "enum": [
               "reported",
               "partly_reported",
+              "names_only",
               "not_reported"
             ],
             "title": "Native Composition",
@@ -19465,8 +19466,13 @@
       },
       "SnapshotRelation": {
         "additionalProperties": false,
-        "description": "How the CLI's snapshot relates to this request.",
+        "description": "How the CLI's account relates to this request: read when its turn started.",
         "properties": {
+          "compacted_since": {
+            "default": false,
+            "title": "Compacted Since",
+            "type": "boolean"
+          },
           "event_id": {
             "anyOf": [
               {
@@ -19478,14 +19484,14 @@
             ],
             "title": "Event Id"
           },
-          "requests_after": {
+          "requests_before": {
             "minimum": 0.0,
-            "title": "Requests After",
+            "title": "Requests Before",
             "type": "integer"
           }
         },
         "required": [
-          "requests_after"
+          "requests_before"
         ],
         "title": "SnapshotRelation",
         "type": "object"

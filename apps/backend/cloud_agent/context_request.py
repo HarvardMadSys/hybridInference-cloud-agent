@@ -5,11 +5,15 @@ each labelled for what it is:
 
 - **Provider input**: the request's own reported input, with cache reads and
   writes as an accounting split of that same input, never added to it.
-- **CLI snapshot**: what the CLI itself said its context held once the turn
-  settled (:mod:`cloud_agent_host.runtimes.context_snapshot`), when the
-  runtime offers it and the run was collected with it. It describes the
-  context after the turn's last request and its reply, so a request earlier
-  in the turn says how many requests came after it.
+- **CLI's own account**, read without ever holding the conversation, and only
+  where that is possible: OpenCode and Kilo list, through the platform's
+  bridge, what a turn's first request is sent with -- read as the turn starts
+  (:mod:`cloud_agent_host.runtimes.context_snapshot`); Claude Code names the
+  tools and MCP servers it offers in its start-up line, without sizes. A
+  request later in the turn, or after a compaction in it, says the read came
+  before it. Claude Code's size breakdown and pi's context are answered only
+  over the conversation's own channel (and Claude's with token-counting calls
+  to the model provider), so neither is asked.
 - **Reconstructed**: the conversation content the platform stored, in the
   order it was stored, selected for this request: the turns up to it, after
   the last compaction the CLI reported before it, from the attempt that
@@ -25,6 +29,7 @@ difference.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -34,7 +39,7 @@ from cloud_agent.context_view import ContextPoint  # noqa: TC001 — Pydantic re
 from cloud_agent_shared.text_tokens import ESTIMATE_BASIS, estimate_from_counts
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
 #: Entries one reconstruction lists; the largest are kept, all are counted.
 MAX_REQUEST_ENTRIES = 300
@@ -145,13 +150,16 @@ class ReconstructedComposition(BaseModel):
 
 
 class SnapshotRelation(BaseModel):
-    """How the CLI's snapshot relates to this request."""
+    """How the CLI's account relates to this request: read when its turn started."""
 
     model_config = ConfigDict(extra="forbid")
 
     event_id: int | None = None
-    #: Requests of the same turn made after this one and before the snapshot.
-    requests_after: int = Field(ge=0)
+    #: Requests of the same turn made after the read and before this one; what
+    #: they and their results added is not in it.
+    requests_before: int = Field(ge=0)
+    #: A compaction of the same turn came between the read and this request.
+    compacted_since: bool = False
 
 
 class RequestComposition(BaseModel):
@@ -162,14 +170,16 @@ class RequestComposition(BaseModel):
     thread_id: str
     request: ContextPoint
     runtime: str | None = None
-    #: The CLI's own snapshot, as stored; None when there is none.
+    #: The CLI's own account, as stored; None when there is none.
     native: dict[str, Any] | None = None
     native_relation: SnapshotRelation | None = None
-    #: Why there is no usable snapshot: ``not_offered`` (runtime has none),
-    #: ``pending`` (the turn has not settled yet), ``not_settled`` (the attempt
-    #: was retried, failed or was cancelled, so the CLI was not asked),
-    #: ``not_collected`` (a settled turn without one: it predates collection),
-    #: or the snapshot's own status.
+    #: Why there is no usable account: ``not_offered`` (the runtime has no
+    #: read that leaves the conversation alone), ``pending`` (the turn is
+    #: running and its read has not arrived), ``not_settled`` (the attempt was
+    #: retried, failed or was cancelled before a read arrived),
+    #: ``not_collected`` (an ended turn without one: it predates collection,
+    #: or the read was dropped because it was slow, large or late), or the
+    #: account's own status.
     native_status: str
     reconstructed: ReconstructedComposition
 
@@ -352,8 +362,8 @@ def report_after_response(sources: Sequence[str]) -> bool:
     return bool(_REPORT_AFTER_RESPONSE.intersection(sources))
 
 
-#: Runtimes that can answer a context snapshot (see the design record).
-SNAPSHOT_RUNTIMES = frozenset({"claude-code", "pi", "opencode", "kilo"})
+#: Runtimes with a read that leaves the conversation alone (see the design record).
+SNAPSHOT_RUNTIMES = frozenset({"claude-code", "opencode", "kilo"})
 
 
 @dataclass(frozen=True)
@@ -373,7 +383,8 @@ class LocatedRequest:
     report_after_response: bool
     snapshot_event_id: int | None
     snapshot_status: str | None
-    requests_after: int
+    requests_before: int
+    compacted_since: bool
     #: The request's attempt was followed by another of the same turn.
     retried: bool = False
     job_state: str | None = None
@@ -455,16 +466,25 @@ def locate_request(
     boundary, boundary_key = _boundary(carried, profiles, before)
     profile = profiles.get(point.attempt_id) or {}
     reports = [raw[0] for raw in profile.get("requests") or [] if raw and raw[0] < point.seq]
+    # The latest read before this request's report: reads happen as a turn
+    # starts, so it is this turn's, made before its first request was sent.
     snapshot = next(
-        (snap for snap in profile.get("snapshots") or [] if int(snap.get("seq") or 0) > point.seq),
+        (
+            snap
+            for snap in reversed(profile.get("snapshots") or [])
+            if int(snap.get("seq") or 0) < point.seq
+        ),
         None,
     )
-    after = 0
+    before_it = 0
+    compacted_since = False
     if snapshot is not None:
-        after = sum(
-            1
-            for raw in profile.get("requests") or []
-            if raw and point.seq < raw[0] < int(snapshot["seq"])
+        read_at = int(snapshot["seq"])
+        before_it = sum(1 for seq in reports if seq > read_at)
+        compacted_since = any(
+            read_at < int(compaction.get("seq") or 0) < point.seq
+            and compaction.get("completed") is not False
+            for compaction in profile.get("compactions") or []
         )
     job = next((j for j in jobs if str(j["job_id"]) == point.job_id), {})
     return LocatedRequest(
@@ -487,7 +507,8 @@ def locate_request(
         report_after_response=report_after_response(profile.get("sources") or []),
         snapshot_event_id=snapshot.get("event_id") if snapshot else None,
         snapshot_status=str(snapshot.get("status")) if snapshot else None,
-        requests_after=after,
+        requests_before=before_it,
+        compacted_since=compacted_since,
         retried=retried,
         job_state=job.get("state"),
     )
@@ -500,7 +521,7 @@ _UNSETTLED_JOB_STATES = frozenset({"failed", "cancelled"})
 
 
 def _missing_snapshot(located: LocatedRequest) -> str:
-    """Why a request has no snapshot after it in its attempt."""
+    """Why a request has no read before it in its attempt."""
     if located.runtime not in SNAPSHOT_RUNTIMES:
         return "not_offered"
     if located.retried or located.job_state in _UNSETTLED_JOB_STATES:
@@ -508,6 +529,60 @@ def _missing_snapshot(located: LocatedRequest) -> str:
     if located.job_state in _PENDING_JOB_STATES:
         return "pending"
     return "not_collected"
+
+
+#: Categories Claude Code's start-up line says nothing about.
+_INVENTORY_NOT_EXPOSED = ("system_prompt", "instructions", "skills")
+
+
+def inventory_snapshot(harness: Any) -> dict[str, Any]:
+    """Claude Code's start-up report as an account: names offered, no sizes.
+
+    The ``init`` line names the tools on the menu (``mcp__<server>__<tool>``
+    for an MCP server's) and the MCP servers it reached. It gives no sizes and
+    no system prompt, so every count here is absent rather than zero.
+    """
+    harness = harness if isinstance(harness, Mapping) else {}
+    tools = [name for name in harness.get("tools") or [] if isinstance(name, str)]
+    entries: list[dict[str, Any]] = []
+    for name in tools[:MAX_REQUEST_ENTRIES]:
+        server = name.split("__")[1] if name.startswith("mcp__") and name.count("__") >= 2 else None
+        entry: dict[str, Any] = {
+            "category": "mcp_tools" if server else "tool_definitions",
+            "label": name[:200],
+            "tokens": None,
+            "token_basis": "names_only",
+        }
+        if server:
+            entry["source"] = server[:200]
+        entries.append(entry)
+    counts: dict[str, int] = {}
+    for entry in entries:
+        counts[entry["category"]] = counts.get(entry["category"], 0) + 1
+    categories = [
+        {"key": key, "tokens": None, "entries": counts[key], "exposed": True}
+        for key in ("tool_definitions", "mcp_tools")
+        if key in counts
+    ] + [{"key": key, "tokens": None, "exposed": False} for key in _INVENTORY_NOT_EXPOSED]
+    servers = [
+        {"name": str(item.get("name") or "")[:200], "status": item.get("status")}
+        for item in harness.get("mcp_servers") or []
+        if isinstance(item, Mapping)
+    ]
+    return {
+        "v": 1,
+        "source": "claude_init",
+        "status": "ok",
+        "token_basis": "names_only",
+        "total_tokens": None,
+        "context_window": None,
+        "categories": categories,
+        "entries": entries,
+        "entries_total": len(tools),
+        "entries_omitted": max(0, len(tools) - len(entries)),
+        "tools_truncated": harness.get("tools_truncated") is True,
+        "mcp_servers": servers[:MAX_REQUEST_ENTRIES],
+    }
 
 
 def assemble_request(
@@ -547,6 +622,8 @@ def assemble_request(
     walk = walk_composition(
         scope=scope, turns=prompts, events=ranked, superseded=superseded, tool_names=tool_names
     )
+    if snapshot is not None and snapshot.get("source") == "claude_init":
+        snapshot = inventory_snapshot(snapshot.get("harness"))
     if snapshot is not None:
         native_status = str(snapshot.get("status") or "unknown")
     elif located.snapshot_status is not None:
@@ -560,7 +637,9 @@ def assemble_request(
         native=dict(snapshot) if snapshot is not None else None,
         native_relation=(
             SnapshotRelation(
-                event_id=located.snapshot_event_id, requests_after=located.requests_after
+                event_id=located.snapshot_event_id,
+                requests_before=located.requests_before,
+                compacted_since=located.compacted_since,
             )
             if located.snapshot_event_id is not None
             else None

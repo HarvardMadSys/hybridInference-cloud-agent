@@ -426,13 +426,28 @@ async def _event_id(db, job_id: str, seq: int) -> int:
         )
 
 
-async def test_request_composition_reads_carried_content_and_the_snapshot(db, store):
+async def test_request_composition_reads_carried_content_and_the_cli_account(db, store):
     [first, second] = await _thread(db, store, "athr_req", turns=2)
     big = "def f():\n    return '中文'\n" * 400
     await _events(
         db,
         first,
         [
+            # A bridge's turn-start read, as OpenCode and Kilo send it.
+            (
+                "lifecycle",
+                {
+                    "phase": "context_snapshot",
+                    "snapshot": {
+                        "v": 2,
+                        "source": "opencode_session_messages",
+                        "status": "ok",
+                        "observed": "turn_start",
+                        "categories": [{"key": "system_prompt", "tokens": None, "exposed": False}],
+                        "entries": [{"category": "user_messages", "label": "user", "tokens": 3}],
+                    },
+                },
+            ),
             _claude("msg_1", 1000),
             ("tool_use", {"name": "Read", "id": "toolu_1", "input": {"file_path": "a.py"}}),
             ("tool_result", {"tool_use_id": "toolu_1", "content": big}),
@@ -443,33 +458,29 @@ async def test_request_composition_reads_carried_content_and_the_snapshot(db, st
         db,
         second,
         [
+            # Claude's start-up line: its tool menu and MCP servers, no sizes.
+            (
+                "lifecycle",
+                {
+                    "phase": "init",
+                    "model": "claude-sonnet-4-5",
+                    "harness": {
+                        "tools": ["Bash", "mcp__github__search_code"],
+                        "mcp_servers": [{"name": "github", "status": "connected"}],
+                    },
+                },
+            ),
             ("lifecycle", {"phase": "compact_boundary", "compaction": {"trigger": "auto"}}),
             ("lifecycle", {"phase": "compaction_summary", "text": "摘要 summary", "chars": 10}),
             _claude("msg_2", 5000),
             ("message", {"text": "helper", "parent_tool_use_id": "toolu_x"}),
             _claude("msg_3", 6000),
-            (
-                "lifecycle",
-                {
-                    "phase": "context_snapshot",
-                    "snapshot": {
-                        "v": 1,
-                        "source": "claude_get_context_usage",
-                        "status": "ok",
-                        "total_tokens": 6100,
-                        "categories": [{"key": "system_prompt", "tokens": 4000, "exposed": True}],
-                        "entries": [
-                            {"category": "instructions", "label": "/state/CLAUDE.md", "tokens": 30}
-                        ],
-                    },
-                },
-            ),
         ],
     )
     [stranger] = await _thread(db, store, "athr_req_x", user_id=OTHER)
     await _events(db, stranger, [_claude("msg_x", 1)])
 
-    request_event = await _event_id(db, second, 5)
+    request_event = await _event_id(db, second, 6)
     composition = await store.context_queries.request_composition(
         job_id=first, user_id=OWNER, event_id=request_event
     )
@@ -480,29 +491,37 @@ async def test_request_composition_reads_carried_content_and_the_snapshot(db, st
     assert rebuilt.excluded["compacted"].entries == 6
     assert categories["compaction_summary"].tokens == 2 + 2  # 摘要 + " summary"
     assert rebuilt.excluded["subagent"].entries == 1
-    # The request's own block (seq 5) is not its input; the earlier reply is.
+    # The request's own block (seq 6) is not its input; the earlier reply is.
     assert categories["assistant"].entries == 1
-    assert composition.native is not None
-    assert composition.native["entries"][0]["label"] == "/state/CLAUDE.md"
-    assert (
-        composition.native_relation is not None and composition.native_relation.requests_after == 0
-    )
+    # Claude's start-up names, read at the turn's start: no sizes, and the
+    # turn's earlier request and compaction came after it.
+    native = composition.native
+    assert native is not None and native["source"] == "claude_init"
+    assert native["token_basis"] == "names_only" and native["total_tokens"] is None
+    assert {(e["category"], e["label"]) for e in native["entries"]} == {
+        ("tool_definitions", "Bash"),
+        ("mcp_tools", "mcp__github__search_code"),
+    }
+    relation = composition.native_relation
+    assert relation is not None and relation.requests_before == 1 and relation.compacted_since
 
     earlier = await store.context_queries.request_composition(
-        job_id=first, user_id=OWNER, event_id=await _event_id(db, first, 1)
+        job_id=first, user_id=OWNER, event_id=await _event_id(db, first, 2)
     )
-    assert earlier is not None
-    assert earlier.native is None and earlier.native_status == "not_collected"
+    assert earlier is not None and earlier.native is not None
+    assert earlier.native["observed"] == "turn_start"
+    assert earlier.native["entries"][0]["label"] == "user"
+    assert earlier.native_relation is not None and earlier.native_relation.requests_before == 0
     assert [e.label for e in earlier.reconstructed.entries] == ["prompt"]
 
     # The CJK-aware estimate is computed from Postgres's own counts.
     middle = await store.context_queries.request_composition(
-        job_id=first, user_id=OWNER, event_id=await _event_id(db, second, 3)
+        job_id=first, user_id=OWNER, event_id=await _event_id(db, second, 4)
     )
     assert middle is not None and middle.native_relation is not None
-    assert middle.native_relation.requests_after == 1
+    assert middle.native_relation.requests_before == 0
     whole = await store.context_queries.request_composition(
-        job_id=first, user_id=OWNER, event_id=await _event_id(db, first, 4)
+        job_id=first, user_id=OWNER, event_id=await _event_id(db, first, 5)
     )
     assert whole is not None
     big_entry = next(e for e in whole.reconstructed.entries if e.category == "tool_results")

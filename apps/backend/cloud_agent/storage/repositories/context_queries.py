@@ -307,9 +307,12 @@ _REQUEST_EVENT_SQL = """
 """
 
 _SNAPSHOT_SQL = """
-    SELECT e.payload->'snapshot' AS snapshot
+    SELECT CASE WHEN e.payload->>'phase' = 'init'
+                THEN jsonb_build_object('source', 'claude_init', 'harness', e.payload->'harness')
+                ELSE e.payload->'snapshot' END AS snapshot
     FROM agent_job_events e
-    WHERE e.id = $1 AND e.attempt_id = $2 AND e.payload->>'phase' = 'context_snapshot'
+    WHERE e.id = $1 AND e.attempt_id = $2 AND e.event_type = 'lifecycle'
+      AND e.payload->>'phase' IN ('context_snapshot', 'init')
 """
 
 #: One stored event's text, only when it belongs to the caller's undeleted

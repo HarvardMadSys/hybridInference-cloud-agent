@@ -37,16 +37,6 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
 from cloud_agent_host.bounded_output import OutputPump
-from cloud_agent_host.context_reads import (
-    CLAUDE_CONTEXT_USAGE_S,
-    error_snapshot,
-    is_late_answer,
-    read_bridge_context,
-    read_claude_context,
-    read_pi_context,
-    should_ask,
-    snapshot_payload,
-)
 from cloud_agent_host.runtimes import (
     DIFF,
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -67,10 +57,10 @@ from cloud_agent_host.runtimes import (
     get_runtime,
     merged_mcp_server,
 )
+from cloud_agent_host.runtimes.context_snapshot import bridge_report
 from cloud_agent_host.sandbox import STATE_MOUNT_TARGET
 from cloud_agent_host.stream_deltas import DeltaBatcher, StreamDelta
 from cloud_agent_host.tool_windows import TOOL_MARK_FILE, hook_settings
-from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.event_payloads import subagent_owned
 from cloud_agent_shared.shared_protocol import (
     INPUT_PROCESS_GONE,
@@ -444,8 +434,6 @@ class LaunchContext:
     #: Claude launch settings and its process registry are member-private;
     #: only native project history is linked to the group's shared store.
     claude_config_dir: str | None = None
-    #: Ask the CLI what its context holds after each settled turn (context_reads).
-    context_snapshots: bool = False
 
 
 class HarnessTurn(Generic[_RuntimeT]):
@@ -564,10 +552,6 @@ class HarnessTurn(Generic[_RuntimeT]):
 
     def flush_events(self) -> list[HarnessEvent]:
         """Rows still gathered from earlier lines; none unless a driver batches."""
-        return []
-
-    def after_settle_events(self) -> list[HarnessEvent]:
-        """Events read once the turn's stream ended (``context_reads``); none by default."""
         return []
 
     def event_for_line(self, line: str) -> HarnessEvent:
@@ -866,19 +850,6 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
                 self._process.poll()
                 return
 
-    def after_settle_events(self) -> list[HarnessEvent]:
-        """Ask the session what its context holds once this turn settled cleanly."""
-        session = self._session
-        if not should_ask(
-            enabled=session._context.context_snapshots,
-            settled=self._saw_result,
-            failed=self._protocol_failed,
-            cancelled=self._cancelled,
-            alive=session.process_alive(),
-        ):
-            return []
-        return session.context_snapshot_events()
-
     def iter_events(self) -> Iterator[HarnessEvent]:
         yield HarnessEvent(TURN_STARTED)
         try:
@@ -1065,10 +1036,6 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
     ) -> InputOutcome:
         """Hand ``pending`` to ``turn`` mid-turn; a protocol without a seam declines."""
         return InputOutcome(False, INPUT_UNSUPPORTED)
-
-    def context_snapshot_events(self) -> list[HarnessEvent]:
-        """What the CLI says its context holds; none for a protocol without a read."""
-        return []
 
     def _next_line(self) -> str:
         if self._lines is None:
@@ -1802,22 +1769,6 @@ class PiRpcSession(_JsonResidentSession[PiRuntime]):
             for event in events
         ]
 
-    def context_snapshot_events(self) -> list[HarnessEvent]:
-        """Pi's own context estimate and, when small enough, its messages."""
-
-        def request(kind: str) -> dict[str, Any]:
-            request_id = self._request_id(f"context-{kind}")
-            self._write_json({"id": request_id, "type": kind})
-            return self._read_until(
-                lambda value: value.get("type") == "response" and value.get("id") == request_id
-            )
-
-        try:
-            snapshot = read_pi_context(request)
-        except (DriverError, SandboxError) as exc:
-            snapshot = error_snapshot("pi_rpc", exc)
-        return [HarnessEvent(LIFECYCLE, snapshot_payload(snapshot))]
-
     def interrupt_turn(self, turn: _JsonResidentTurn[PiRuntime]) -> None:
         """Abort the active Pi RPC turn without closing its session process."""
         self._write_json({"id": self._request_id("abort"), "type": "abort"})
@@ -2132,6 +2083,12 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
         if bridge == "settled":
             # Reported by events_for_protocol_line, one message per part.
             return HarnessEvent(LIFECYCLE, {"phase": "result"}, raw_line=line)
+        if bridge == "context":
+            # The bridge's own read of what this turn's first request carries,
+            # sent only while the turn is active; nothing waits for it.
+            if value.get("turn_id") != turn.protocol_turn_id:
+                return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+            return HarnessEvent(LIFECYCLE, bridge_report(value, runtime=self.runtime.name))
         if bridge in {"fatal", "command_error"}:
             return HarnessEvent(
                 ERROR, {"text": str(value.get("detail") or "")[:2000]}, raw_line=line
@@ -2204,22 +2161,6 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
             if text.strip() and turn.message_roles.get(message_id) == "assistant"
         ]
         return answer or [self.event_for_protocol_line(line, turn)]
-
-    def context_snapshot_events(self) -> list[HarnessEvent]:
-        """The server's carried messages and tool definitions, through the bridge."""
-        command_id = self._request_id("context")
-        try:
-            self._write_json({"id": command_id, "type": "context"})
-            answer = self._read_until(
-                lambda value: (
-                    value.get("bridge") in {"context_result", "command_error", "fatal"}
-                    and value.get("id") in {None, "", command_id}
-                )
-            )
-            snapshot = read_bridge_context(answer, runtime=self.runtime.name)
-        except (DriverError, SandboxError) as exc:
-            snapshot = error_snapshot(f"{self.runtime.name}_session_messages", exc)
-        return [HarnessEvent(LIFECYCLE, snapshot_payload(snapshot))]
 
     def interrupt_turn(self, turn: _JsonResidentTurn[ResidentLiveRuntime]) -> None:
         """Interrupt only the active bridge turn on the resident session."""
@@ -2472,29 +2413,6 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
             self._clear_questions()
             self._session.turn_finished()
         return self._result
-
-    def after_settle_events(self) -> list[HarnessEvent]:
-        """Claude's context meter once this turn settled cleanly (not after a retry)."""
-        session = self._session
-        if not should_ask(
-            enabled=session._context.context_snapshots,
-            settled=self._saw_result and not self._saw_api_retry,
-            failed=self._error_result,
-            cancelled=self._cancelled,
-            alive=session.process_alive(),
-        ):
-            return []
-        try:
-            snapshot = read_claude_context(
-                write_line=session._write_line,
-                next_line=session.next_line,
-                put_back=lambda lines: session._pushed_back.extendleft(reversed(lines)),
-                stale=session._stale_controls,
-                timeout=CLAUDE_CONTEXT_USAGE_S,
-            )
-        except (DriverError, SandboxError, OSError) as exc:
-            snapshot = error_snapshot("claude_get_context_usage", exc)
-        return [HarnessEvent(LIFECYCLE, snapshot_payload(snapshot))]
 
     def cancel(self) -> None:
         """Send Claude's control ``interrupt`` without killing the session."""
@@ -2773,9 +2691,6 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         self._stdout: OutputPump[str] | None = None
         self._stdout_ended = False
         self._pushed_back: deque[str] = deque()
-        #: Context requests that timed out. A late answer to one is dropped as
-        #: it arrives, so no later reader ever sees a reply it did not ask for.
-        self._stale_controls: set[str] = set()
         self._model: str | None = None
         #: Pinned by the first turn alongside the model, and compared against
         #: every later one. ``None`` is a real value here (Auto), so this is
@@ -2802,12 +2717,6 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
 
     def next_line(self, timeout: float | None) -> str | None:
         """The next stdout line, ``None`` at its end; ``queue.Empty`` on timeout."""
-        while True:
-            line = self._read_line(timeout)
-            if line is None or not is_late_answer(line, self._stale_controls):
-                return line
-
-    def _read_line(self, timeout: float | None) -> str | None:
         if self._pushed_back:
             return self._pushed_back.popleft()
         assert self._lines is not None

@@ -21,8 +21,8 @@ export interface RuntimeContextCapabilityApi {
   compaction_sizes: ContextSupport;
   context_window: ContextSupport;
   window_reported_turns: number;
-  /** The CLI's own account of its context after a turn, from this release on. */
-  native_composition: ContextSupport;
+  /** The CLI's own account of a request, read without holding the conversation. */
+  native_composition: ContextSupport | 'names_only';
   snapshot_turns: number;
   live_occupancy: 'not_collected';
 }
@@ -169,9 +169,10 @@ export interface NativeSnapshotApi {
   source: string;
   status: string;
   detail?: string;
-  /** `cli_meter`: the CLI counted; otherwise an estimate from text. */
+  /** `names_only`: named, never sized; otherwise an estimate from text. */
   token_basis?: string;
-  total_basis?: string;
+  /** `turn_start`: read as the turn started, for its first request. */
+  observed?: string;
   total_tokens?: number | null;
   context_window?: number | null;
   categories?: NativeSnapshotCategoryApi[];
@@ -179,6 +180,7 @@ export interface NativeSnapshotApi {
   entries_total?: number;
   entries_omitted?: number;
   excluded?: Record<string, number>;
+  mcp_servers?: { name: string; status: string | null }[];
 }
 
 export interface CompositionEntryApi {
@@ -227,7 +229,12 @@ export interface RequestCompositionApi {
   request: ContextPointApi;
   runtime: string | null;
   native: NativeSnapshotApi | null;
-  native_relation: { event_id: number | null; requests_after: number } | null;
+  /** The read came as the turn started: requests and a compaction since then are not in it. */
+  native_relation: {
+    event_id: number | null;
+    requests_before: number;
+    compacted_since: boolean;
+  } | null;
   native_status: string;
   reconstructed: ReconstructedCompositionApi;
 }
