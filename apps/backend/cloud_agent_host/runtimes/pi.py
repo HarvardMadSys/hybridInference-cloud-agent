@@ -496,7 +496,7 @@ class PiRuntime(AgentRuntime):
 
 
 def _compaction_event(event: dict[str, Any]) -> NormalizedEvent:
-    """pi's own report of a compaction starting or ending (pinned 0.73.1).
+    """Map pi's own report of a compaction starting or ending (pinned 0.73.1).
 
     ``compaction_end`` carries the trigger (``manual``, ``threshold`` or
     ``overflow``), the tokens before, and whether it was aborted or will be
