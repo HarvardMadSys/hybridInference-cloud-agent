@@ -2396,12 +2396,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
                     "container_id": lease["container_id"],
                     "activation_generation": activation_generation,
                     **retained.sandbox_metadata(),
-                    # What the platform wrapped the prompt in, by size only.
-                    **(
-                        {"context_injections": list(job.context_injections)}
-                        if job.context_injections
-                        else {}
-                    ),
+                    **job.started_context_fields(),
                 },
             )
         )

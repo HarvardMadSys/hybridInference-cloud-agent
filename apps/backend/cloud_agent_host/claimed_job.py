@@ -168,6 +168,12 @@ class ClaimedJob:
             context_injections=_context_injections(body.get("context_injections")),
         )
 
+    def started_context_fields(self) -> dict[str, Any]:
+        """What ``started`` records of the platform's prompt wrapping: sizes, never text."""
+        return (
+            {"context_injections": list(self.context_injections)} if self.context_injections else {}
+        )
+
 
 #: Platform injection records one claim carries, and the fields each may hold.
 _MAX_INJECTIONS = 10
