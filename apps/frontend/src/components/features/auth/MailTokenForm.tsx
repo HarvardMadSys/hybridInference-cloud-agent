@@ -18,6 +18,7 @@ export function MailTokenForm({ purpose }: { purpose: 'reset' | 'verify' }) {
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [reclaimed, setReclaimed] = useState(false);
   const submitting = useRef(false);
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -35,7 +36,8 @@ export function MailTokenForm({ purpose }: { purpose: 'reset' | 'verify' }) {
     setError(null);
     try {
       if (purpose === 'reset') {
-        await resetPassword(token, password);
+        const answer = await resetPassword(token, password);
+        setReclaimed(answer.reclaimed === true);
         announceSession(null);
       } else await verifyAccountEmail(token);
       setPassword('');
@@ -53,9 +55,12 @@ export function MailTokenForm({ purpose }: { purpose: 'reset' | 'verify' }) {
       title={purpose === 'reset' ? t('account.resetPassword') : t('account.verifyEmail')}
     >
       {done ? (
-        <AccountNotice>
-          {purpose === 'reset' ? t('account.resetDone') : t('account.verifyDone')}
-        </AccountNotice>
+        <>
+          <AccountNotice>
+            {purpose === 'reset' ? t('account.resetDone') : t('account.verifyDone')}
+          </AccountNotice>
+          {reclaimed && <AccountNotice>{t('account.resetReclaimed')}</AccountNotice>}
+        </>
       ) : (
         <>
           {token === null ? (

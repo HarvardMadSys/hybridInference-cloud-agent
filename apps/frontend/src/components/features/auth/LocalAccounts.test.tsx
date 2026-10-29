@@ -109,6 +109,16 @@ describe('independent account forms', () => {
     expect(window.location.href).not.toContain('reset-secret');
     expect(JSON.stringify({ ...localStorage, ...sessionStorage })).not.toContain('reset-secret');
   });
+  it('tells the holder what a reclaiming reset cleared and to apply again (review T2)', async () => {
+    vi.mocked(api.resetPassword).mockResolvedValue({ ok: true, reclaimed: true });
+    window.history.replaceState(null, '', '/reset-password#token=reclaim-secret');
+    render(<MailTokenForm purpose="reset" />);
+    fill('Password', 'Goodpass123');
+    fill('Confirm password', 'Goodpass123');
+    fireEvent.submit(screen.getByRole('button', { name: 'Reset password' }).closest('form')!);
+    await screen.findByText(/Password updated/);
+    expect(screen.getByText(/apply again from the waiting list/)).toBeInTheDocument();
+  });
   it('recovery gives the same generic response without enumerating accounts', async () => {
     vi.mocked(api.forgotPassword).mockResolvedValue({ ok: true });
     render(<EmailRequestForm purpose="reset" />);

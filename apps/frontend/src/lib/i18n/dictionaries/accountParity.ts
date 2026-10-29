@@ -46,6 +46,8 @@ export const accountParityEn = {
   'terms.readAt': 'Read the Terms of Service',
   'terms.none': 'This deployment has not published its terms here. Ask its operator.',
 
+  'account.resetReclaimed':
+    'This address joined while email verification was off, so anyone could have signed it up. What was entered at sign-up (name, Terms acceptance, language and application) was cleared. If you want Agent access, apply again from the waiting list; if the account holds work that is not yours, contact the administrator.',
   'setup.title': 'Create the first administrator',
   'setup.description':
     'Use the one-time setup code from the control plane’s startup log. The administrator signs in with a username, no email needed.',
@@ -136,6 +138,8 @@ export const accountParityZh: Record<keyof typeof accountParityEn, string> = {
   'terms.readAt': '阅读服务条款',
   'terms.none': '本部署尚未在此发布条款，请联系运营方。',
 
+  'account.resetReclaimed':
+    '该地址是在关闭邮箱验证期间注册的，任何人都可能用它注册过。注册时填写的内容（姓名、服务条款确认、语言和申请）已被清除。如需 Agent 使用权限，请在等候名单中重新申请；如果账号中有不属于你的工作，请联系管理员。',
   'setup.title': '创建第一个管理员',
   'setup.description': '使用控制平面启动日志中的一次性设置码。管理员使用用户名登录，无需邮箱。',
   'setup.code': '设置码',

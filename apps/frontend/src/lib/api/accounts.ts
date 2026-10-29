@@ -195,8 +195,9 @@ export const resendVerification = (email: string) =>
   authPost<{ ok: boolean }>('resend-verification', { email });
 export const forgotPassword = (email: string) =>
   authPost<{ ok: boolean }>('forgot-password', { email });
+/** `reclaimed` when the reset took back an address accepted unproven at sign-up. */
 export const resetPassword = (token: string, password: string) =>
-  authPost<{ ok: boolean }>('reset-password', { token, password });
+  authPost<{ ok: boolean; reclaimed?: boolean }>('reset-password', { token, password });
 
 export async function getWaitlist(signal?: AbortSignal): Promise<WaitlistEntry> {
   return jsonOrThrow(
