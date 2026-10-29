@@ -85,6 +85,18 @@ MAX_SUMMED_CONTAINERS = 1000
 MAX_SAMPLE_GAP_SECONDS = 120.0
 #: Days a history read may span: the admin Usage page's bound.
 MAX_HISTORY_DAYS = 90
+#: Days a history read covers when the client names no period.
+DEFAULT_HISTORY_DAYS = 7
+#: Days an all-time read may span, today included: one year, so a year-old
+#: first run still reads in full and the same date last year is the first bar.
+#: The run budget, not this bound, is what limits the aggregation's cost: a
+#: selection holds at most ``MAX_USAGE_RUNS`` runs however many days they span.
+#: Days only add buckets. A day bucket with a run in it serializes to about
+#: 0.8 KiB with realistic counters and an empty one to 0.4 KiB, so 366 of them
+#: stay near 300 KiB, inside ``MAX_USAGE_RESPONSE_BYTES``, and the container
+#: history reads 366 day buckets where the 90-day bound read 90. Owner history
+#: began with the 2026-08-07 cutover, so no owner reaches this bound yet.
+MAX_ALL_TIME_DAYS = 366
 
 CONTAINER_CURSOR_SCOPE = cursor_scope(["owner-containers"])
 
@@ -167,13 +179,84 @@ def utc_day_shares(*, ended_at: datetime, seconds: float) -> list[tuple[date, fl
     return shares[::-1]
 
 
+def _midnight(value: datetime) -> datetime:
+    """The UTC midnight that starts ``value``'s day."""
+    return value.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def history_window(days: int, *, now: datetime | None = None) -> tuple[datetime, datetime]:
     """The last ``days`` UTC calendar days, today included, up to now."""
     if not 1 <= days <= MAX_HISTORY_DAYS:
         raise ValueError(f"Choose between 1 and {MAX_HISTORY_DAYS} days.")
     until = (now or datetime.now(UTC)).astimezone(UTC)
-    today = until.replace(hour=0, minute=0, second=0, microsecond=0)
-    return today - timedelta(days=days - 1), until
+    return _midnight(until) - timedelta(days=days - 1), until
+
+
+HistoryKind = Literal["days", "all"]
+#: Why an all-time period starts after the owner's first run: the runs since
+#: then are more than one read sums, or they span more than ``MAX_ALL_TIME_DAYS``.
+HistoryLimit = Literal["runs", "days"]
+
+
+class OwnerHistoryPeriod(BaseModel):
+    """The period a history read covers, and for all time, why it starts where it does.
+
+    An all-time period is not always all time. It starts at the latest of the
+    owner's first run's day, the earliest day whose runs one read can sum, and
+    the earliest day ``MAX_ALL_TIME_DAYS`` allows; ``limited_by`` names which
+    of the last two moved it. The client says so rather than calling it "all".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: HistoryKind
+    since: datetime
+    until: datetime
+    #: When the owner's first counted run was created; read for ``all`` only.
+    first_activity_at: datetime | None = None
+    limited_by: HistoryLimit | None = None
+
+
+def days_period(days: int, *, now: datetime | None = None) -> OwnerHistoryPeriod:
+    """The last ``days`` UTC calendar days as a period."""
+    since, until = history_window(days, now=now)
+    return OwnerHistoryPeriod(kind="days", since=since, until=until)
+
+
+def all_time_window(
+    *, earliest: datetime | None, overflow: datetime | None, now: datetime | None = None
+) -> OwnerHistoryPeriod:
+    """Every whole UTC day since the owner's first run that one read can sum.
+
+    Args:
+        earliest: When the owner's first counted run was created, or None when
+            they have none, in which case the period is today.
+        overflow: When the newest run that no longer fits the run budget was
+            created, or None when every run fits. Every run created after its
+            day fits, and its own day is left out whole, so the first bar of
+            the chart is a complete day rather than the part of one that fit.
+        now: The single clock reading the period ends at.
+    """
+    until = (now or datetime.now(UTC)).astimezone(UTC)
+    today = _midnight(until)
+    since = today if earliest is None else _midnight(earliest)
+    limited_by: HistoryLimit | None = None
+    oldest = today - timedelta(days=MAX_ALL_TIME_DAYS - 1)
+    if since < oldest:
+        since, limited_by = oldest, "days"
+    if overflow is not None:
+        # More runs than the budget on today alone cannot be narrowed to a
+        # whole day; the read is then refused rather than the period emptied.
+        fits = min(_midnight(overflow) + timedelta(days=1), today)
+        if fits > since:
+            since, limited_by = fits, "runs"
+    return OwnerHistoryPeriod(
+        kind="all",
+        since=since,
+        until=until,
+        first_activity_at=earliest,
+        limited_by=limited_by,
+    )
 
 
 class OwnerContainerChat(BaseModel):
@@ -289,6 +372,9 @@ class OwnerResourceHistory(BaseModel):
     generated_at: datetime
     totals: OwnerResourceTotals
     days: list[OwnerResourceDay]
+    #: The period the client asked for, as read. The store reads day buckets
+    #: and leaves it unset; the route names it.
+    period: OwnerHistoryPeriod | None = None
 
 
 class OwnerTokenUsage(BaseModel):
@@ -305,6 +391,7 @@ class OwnerTokenUsage(BaseModel):
     day_timezone: Literal["UTC"] = "UTC"
     time_basis: Literal["job_created_at"] = "job_created_at"
     generated_at: datetime
+    period: OwnerHistoryPeriod
     summary: AdminUsageAggregate
     days: list[AdminUsageDay]
     by_model: AdminUsageBreakdown

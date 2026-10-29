@@ -6,6 +6,7 @@
 // a preview belongs to the exact message and audience it showed: any change
 // asks for a new one, and sending is confirmed with the recipient count.
 import { useState } from 'react';
+import { Select } from '@/components/ui/Select';
 import { AccountNotice } from '@/components/features/auth/AccountFrame';
 import { useT } from '@/components/providers/LocaleProvider';
 import type { WaitlistStatus } from '@/lib/api/accounts';
@@ -73,21 +74,21 @@ function MessageFields({
       <label className="block text-sm" htmlFor="mail-template">
         {t('adminAccounts.mail.message')}
       </label>
-      <select
+      <Select
         id="mail-template"
-        className="ui-input"
         value={template ?? ''}
-        onChange={(e) =>
+        onValueChange={(value) =>
           onMessage({
-            template_key: (e.target.value || null) as MailMessage['template_key'],
+            template_key: (value || null) as MailMessage['template_key'],
             template_vars: {},
           })
         }
-      >
-        <option value="">{t('adminAccounts.mail.custom')}</option>
-        <option value="maintenance">{t('adminAccounts.mail.maintenance')}</option>
-        <option value="announcement">{t('adminAccounts.mail.announcement')}</option>
-      </select>
+        options={[
+          { value: '', label: t('adminAccounts.mail.custom') },
+          { value: 'maintenance', label: t('adminAccounts.mail.maintenance') },
+          { value: 'announcement', label: t('adminAccounts.mail.announcement') },
+        ]}
+      />
       {template ? (
         TEMPLATE_FIELDS[template].map((field) => (
           <input

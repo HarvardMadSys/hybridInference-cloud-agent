@@ -1,7 +1,14 @@
 'use client';
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import type { SkillSummaryApi } from '@/lib/api/skills';
+import {
+  MENU_POSITIONED,
+  MENU_ROW,
+  MENU_ROW_DESTRUCTIVE,
+  MENU_ACTIONS,
+} from '@/components/ui/menuStyles';
+import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import { SkillIcon, SkillSwitch } from './SkillDialog';
 
 export const SOURCE_LABELS = {
@@ -37,20 +44,13 @@ export function SkillRow({
   const menu = useRef<HTMLDivElement>(null);
   const id = useId();
   const added = addedLabel(skill.created_at);
-
-  useEffect(() => {
-    if (!open) return;
-    menu.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
-    const outside = (event: PointerEvent) => {
-      if (
-        !menu.current?.contains(event.target as Node) &&
-        !trigger.current?.contains(event.target as Node)
-      )
-        setOpen(false);
-    };
-    document.addEventListener('pointerdown', outside);
-    return () => document.removeEventListener('pointerdown', outside);
-  }, [open]);
+  const popup = usePopupMenu({
+    open,
+    onOpenChange: setOpen,
+    triggerRef: trigger,
+    menuRef: menu,
+    placement: { gap: 4, width: 176, maxWidth: 240, preferredHeight: 180, maxHeight: 320 },
+  });
 
   function close() {
     setOpen(false);
@@ -118,7 +118,8 @@ export function SkillRow({
           aria-expanded={open}
           aria-controls={open ? id : undefined}
           onClick={() => setOpen(!open)}
-          className="flex h-8 w-8 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 dark:text-gray-400 dark:hover:bg-white/5"
+          onKeyDown={popup.triggerKeyDown}
+          className="ui-focus-ring flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-surface-hover hover:text-foreground"
         >
           <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
             <circle cx="12" cy="5" r="1.75" />
@@ -132,30 +133,9 @@ export function SkillRow({
             ref={menu}
             role="menu"
             aria-label={`Manage ${skill.name}`}
-            className="absolute right-0 top-full z-20 mt-1 w-44 rounded-xl border border-gray-200 bg-white p-1.5 shadow-lg dark:border-white/10 dark:bg-gray-800"
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') {
-                event.preventDefault();
-                event.stopPropagation();
-                close();
-              } else if (event.key === 'Tab') {
-                close();
-              } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
-                event.preventDefault();
-                const items = [
-                  ...menu.current!.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
-                ];
-                const current = items.indexOf(document.activeElement as HTMLButtonElement);
-                const next =
-                  event.key === 'Home'
-                    ? 0
-                    : event.key === 'End'
-                      ? items.length - 1
-                      : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) %
-                        items.length;
-                items[next]?.focus();
-              }
-            }}
+            style={popup.style}
+            className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-44`}
+            onKeyDown={popup.onKeyDown}
           >
             {actions.map(({ action, label }) => (
               <button
@@ -167,7 +147,7 @@ export function SkillRow({
                   close();
                   onAction(action);
                 }}
-                className={`block w-full rounded-md px-3 py-2 text-left text-sm hover:bg-gray-100 focus:bg-gray-100 focus:outline-none dark:hover:bg-white/10 dark:focus:bg-white/10 ${action === 'remove' ? 'text-red-600 dark:text-red-400' : 'text-gray-700 dark:text-gray-200'}`}
+                className={action === 'remove' ? MENU_ROW_DESTRUCTIVE : MENU_ROW}
               >
                 {label}
               </button>

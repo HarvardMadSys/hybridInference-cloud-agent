@@ -16655,6 +16655,64 @@
         "title": "OwnerCurrentUse",
         "type": "object"
       },
+      "OwnerHistoryPeriod": {
+        "additionalProperties": false,
+        "description": "The period a history read covers, and for all time, why it starts where it does.\n\nAn all-time period is not always all time. It starts at the latest of the\nowner's first run's day, the earliest day whose runs one read can sum, and\nthe earliest day ``MAX_ALL_TIME_DAYS`` allows; ``limited_by`` names which\nof the last two moved it. The client says so rather than calling it \"all\".",
+        "properties": {
+          "first_activity_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Activity At"
+          },
+          "kind": {
+            "enum": [
+              "days",
+              "all"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "limited_by": {
+            "anyOf": [
+              {
+                "enum": [
+                  "runs",
+                  "days"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limited By"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "since",
+          "until"
+        ],
+        "title": "OwnerHistoryPeriod",
+        "type": "object"
+      },
       "OwnerResourceDay": {
         "additionalProperties": false,
         "description": "One UTC day of the window; the last one ends now.",
@@ -16727,6 +16785,16 @@
             "format": "date-time",
             "title": "Generated At",
             "type": "string"
+          },
+          "period": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OwnerHistoryPeriod"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "since": {
             "format": "date-time",
@@ -16811,6 +16879,9 @@
             "title": "Generated At",
             "type": "string"
           },
+          "period": {
+            "$ref": "#/components/schemas/OwnerHistoryPeriod"
+          },
           "since": {
             "format": "date-time",
             "title": "Since",
@@ -16835,6 +16906,7 @@
           "since",
           "until",
           "generated_at",
+          "period",
           "summary",
           "days",
           "by_model"
@@ -43817,7 +43889,7 @@
     },
     "/v1/agent/usage/resources": {
       "get": {
-        "description": "Running time and measured CPU and memory for each of the last ``days`` UTC days.",
+        "description": "Running time and measured CPU and memory for each UTC day of the period.",
         "operationId": "read_owner_resources_v1_agent_usage_resources_get",
         "parameters": [
           {
@@ -43825,11 +43897,33 @@
             "name": "days",
             "required": false,
             "schema": {
-              "default": 7,
-              "maximum": 90,
-              "minimum": 1,
-              "title": "Days",
-              "type": "integer"
+              "anyOf": [
+                {
+                  "maximum": 90,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Days"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "All"
             }
           },
           {
@@ -43879,7 +43973,7 @@
     },
     "/v1/agent/usage/tokens": {
       "get": {
-        "description": "Model usage and cost of the owner's runs created in the last ``days`` UTC days.\n\nRaises:\n    HTTPException: 422 when the selection exceeds the aggregation's bounds,\n        503 when it cannot be read inside them. Neither returns a partial sum.",
+        "description": "Model usage and cost of the owner's runs created in the period.\n\nRaises:\n    HTTPException: 422 when the selection or its response exceeds the\n        aggregation's bounds, 503 when it cannot be read inside them.\n        Neither returns a partial sum.",
         "operationId": "read_owner_tokens_v1_agent_usage_tokens_get",
         "parameters": [
           {
@@ -43887,11 +43981,33 @@
             "name": "days",
             "required": false,
             "schema": {
-              "default": 7,
-              "maximum": 90,
-              "minimum": 1,
-              "title": "Days",
-              "type": "integer"
+              "anyOf": [
+                {
+                  "maximum": 90,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Days"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "All"
             }
           },
           {

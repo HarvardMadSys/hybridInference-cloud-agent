@@ -5,6 +5,13 @@ import { createPortal } from 'react-dom';
 
 import { useModalDialog } from '@/components/ui/useModalDialog';
 import { Select } from '@/components/ui/Select';
+import {
+  MENU_ACTIONS,
+  MENU_POSITIONED,
+  MENU_ROW_DESTRUCTIVE,
+  menuRowClass,
+} from '@/components/ui/menuStyles';
+import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import { SuggestionInput } from '@/components/ui/SuggestionInput';
 import type {
   AdminSettingDefinition,
@@ -231,6 +238,79 @@ function ReviewChanges({
       </div>
     </div>,
     document.body,
+  );
+}
+
+/** The per-field overflow action; a real menu with shared dismissal and keys. */
+export function FieldActionsMenu({
+  label,
+  actionLabel,
+  actionText,
+  disabled,
+  onAction,
+}: {
+  label: string;
+  actionLabel: string;
+  actionText: string;
+  disabled: boolean;
+  onAction: (trigger: HTMLButtonElement) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const popup = usePopupMenu({
+    open,
+    onOpenChange: setOpen,
+    triggerRef: trigger,
+    menuRef: menu,
+    placement: { gap: 4, width: 208, maxWidth: 260, preferredHeight: 80, maxHeight: 240 },
+  });
+  return (
+    <div className="relative shrink-0">
+      <button
+        ref={trigger}
+        type="button"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={popup.triggerKeyDown}
+        className="ui-button ui-button-ghost flex h-11 w-11 items-center justify-center text-lg"
+      >
+        ···
+      </button>
+      {open ? (
+        <div
+          ref={menu}
+          id={id}
+          role="menu"
+          aria-label={label}
+          style={popup.style}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-52`}
+          onKeyDown={popup.onKeyDown}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            disabled={disabled}
+            className={disabled ? menuRowClass({ disabled: true }) : MENU_ROW_DESTRUCTIVE}
+            aria-label={actionLabel}
+            onClick={() => {
+              if (!trigger.current) return;
+              setOpen(false);
+              onAction(trigger.current);
+              trigger.current.focus();
+            }}
+          >
+            {actionText}
+          </button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -544,34 +624,17 @@ export function ApplicationSettingGroup({
                     )}
                   </div>
                   {editable && (
-                    <details className="relative shrink-0">
-                      <summary
-                        aria-label={`More actions for ${field.label}`}
-                        className="ui-button ui-button-ghost flex h-11 w-11 cursor-pointer list-none items-center justify-center text-lg [&::-webkit-details-marker]:hidden"
-                        onClick={(event) => {
-                          if (busy) event.preventDefault();
-                        }}
-                      >
-                        ···
-                      </summary>
-                      <div className="absolute right-0 z-20 mt-1 w-52 rounded-xl border border-border bg-surface-raised p-1 shadow-lg">
-                        <button
-                          type="button"
-                          disabled={busy || (field.secret && !configured)}
-                          className="ui-button ui-button-ghost min-h-11 w-full justify-start text-status-error"
-                          aria-label={`${field.secret ? 'Clear' : 'Restore default for'} ${field.label}`}
-                          onClick={(event) => {
-                            if (!snapshot) return;
-                            const details = event.currentTarget.closest('details');
-                            returnFocus.current = details?.querySelector('summary') ?? null;
-                            if (details) details.open = false;
-                            setReview({ changes: { [key]: null }, reset: field, snapshot });
-                          }}
-                        >
-                          {field.secret ? 'Clear secret…' : 'Restore default…'}
-                        </button>
-                      </div>
-                    </details>
+                    <FieldActionsMenu
+                      label={`More actions for ${field.label}`}
+                      actionLabel={`${field.secret ? 'Clear' : 'Restore default for'} ${field.label}`}
+                      actionText={field.secret ? 'Clear secret…' : 'Restore default…'}
+                      disabled={busy || (field.secret && !configured)}
+                      onAction={(trigger) => {
+                        if (!snapshot) return;
+                        returnFocus.current = trigger;
+                        setReview({ changes: { [key]: null }, reset: field, snapshot });
+                      }}
+                    />
                   )}
                 </div>
                 {editable && field.secret && !replacing[key] && (

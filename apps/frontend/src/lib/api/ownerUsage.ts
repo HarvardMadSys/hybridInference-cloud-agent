@@ -71,6 +71,23 @@ export interface OwnerResourceDay extends OwnerResourceTotals {
   until: string;
 }
 
+/** A history's period: the last `days`, or all time as far as one read can sum. */
+export type HistoryQuery = { days: number } | { all: true };
+
+/**
+ * The period a history read covers. An all-time period starts at the owner's
+ * first run's UTC day unless `limited_by` names what moved it later: more runs
+ * than one read sums, or more days than an all-time read spans.
+ */
+export interface OwnerHistoryPeriod {
+  kind: 'days' | 'all';
+  since: string;
+  until: string;
+  /** Read for an all-time period only; null when the owner has no runs. */
+  first_activity_at: string | null;
+  limited_by: 'runs' | 'days' | null;
+}
+
 export interface OwnerResourceHistory {
   since: string;
   until: string;
@@ -78,6 +95,7 @@ export interface OwnerResourceHistory {
   generated_at: string;
   totals: OwnerResourceTotals;
   days: OwnerResourceDay[];
+  period: OwnerHistoryPeriod | null;
 }
 
 /** The admin Usage page's accounting, selected for the owner's own runs. */
@@ -87,6 +105,7 @@ export interface OwnerTokenUsage {
   day_timezone: 'UTC';
   time_basis: 'job_created_at';
   generated_at: string;
+  period: OwnerHistoryPeriod;
   summary: AdminUsageAggregate;
   days: AdminUsageDay[];
   by_model: AdminUsageBreakdown;
@@ -107,19 +126,27 @@ export async function getOwnerContainers(
   return jsonOrThrow<OwnerContainerList>(response);
 }
 
+function historyParams(query: HistoryQuery): string {
+  return 'all' in query ? 'all=true' : `days=${query.days}`;
+}
+
 export async function getOwnerResources(
-  days: number,
+  query: HistoryQuery,
   signal?: AbortSignal,
 ): Promise<OwnerResourceHistory> {
-  const response = await fetchWithAuth(config.apiBase, `${USAGE}/resources?days=${days}`, {
-    signal,
-    cache: 'no-store',
-  });
+  const response = await fetchWithAuth(
+    config.apiBase,
+    `${USAGE}/resources?${historyParams(query)}`,
+    { signal, cache: 'no-store' },
+  );
   return jsonOrThrow<OwnerResourceHistory>(response);
 }
 
-export async function getOwnerTokens(days: number, signal?: AbortSignal): Promise<OwnerTokenUsage> {
-  const response = await fetchWithAuth(config.apiBase, `${USAGE}/tokens?days=${days}`, {
+export async function getOwnerTokens(
+  query: HistoryQuery,
+  signal?: AbortSignal,
+): Promise<OwnerTokenUsage> {
+  const response = await fetchWithAuth(config.apiBase, `${USAGE}/tokens?${historyParams(query)}`, {
     signal,
     cache: 'no-store',
   });

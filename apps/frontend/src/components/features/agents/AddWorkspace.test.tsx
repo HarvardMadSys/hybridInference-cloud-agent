@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { useRef, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { useTopLayerEscape } from '@/components/ui/useTopLayerEscape';
 import {
   createGitHubRepository,
   getAgentConfig,
@@ -9,6 +11,21 @@ import {
   type AgentConfigApi,
 } from '@/lib/api/agents';
 import { AddWorkspace } from './AddWorkspace';
+
+/** Another popup that opens while the workspace panel is still open. */
+function OtherPopup() {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  useTopLayerEscape(open, () => setOpen(false), trigger);
+  return (
+    <>
+      <button ref={trigger} type="button" onClick={() => setOpen(true)}>
+        Other
+      </button>
+      {open ? <div role="menu" aria-label="Other menu" /> : null}
+    </>
+  );
+}
 vi.mock('@/lib/api/agents', () => ({
   createGitHubRepository: vi.fn(),
   getAgentConfig: vi.fn(),
@@ -100,6 +117,31 @@ describe('add workspace picker', () => {
     await screen.findByTitle('owner/repo');
     fireEvent.pointerDown(document.body);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('leaves Escape to a popup opened above it, then closes on the next Escape', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    render(
+      <>
+        <AddWorkspace userId="alice" existing={[]} onSelect={vi.fn()} />
+        <OtherPopup />
+      </>,
+    );
+    const trigger = screen.getByRole('button', { name: 'Add workspace' });
+    fireEvent.click(trigger);
+    await screen.findByTitle('owner/repo');
+    // A click event alone sends no pointerdown, like reaching the other
+    // trigger by keyboard, so the workspace panel stays open beneath it.
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }));
+    expect(screen.getByRole('menu', { name: 'Other menu' })).toBeInTheDocument();
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    expect(screen.queryByRole('menu', { name: 'Other menu' })).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Add workspace' })).toBeInTheDocument();
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
   });
   it('retries errors and directs disconnected accounts to repository integrations', async () => {
     vi.mocked(getAgentConfig)

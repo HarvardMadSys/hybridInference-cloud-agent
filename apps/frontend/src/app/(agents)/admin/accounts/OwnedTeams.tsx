@@ -5,6 +5,7 @@
 // A team the account owns alone is deleted with it.
 import { useCallback, useEffect, useState } from 'react';
 import { AccountNotice } from '@/components/features/auth/AccountFrame';
+import { Select } from '@/components/ui/Select';
 import { useT } from '@/components/providers/LocaleProvider';
 import { listOwnedTeams, transferOwnedTeam, type OwnedTeam } from '@/lib/api/accountAdmin';
 import { getErrorMessage } from '@/lib/utils/errors';
@@ -45,21 +46,19 @@ function TeamRow({
           <label className="text-sm" htmlFor={`team-owner-${team.id}`}>
             {t('adminAccounts.teams.newOwner')}
           </label>
-          <select
+          <Select
             id={`team-owner-${team.id}`}
-            className="ui-input"
             value={member}
             disabled={busy}
-            onChange={(e) => setMember(e.target.value)}
-          >
-            {team.members.map((m) => (
-              <option key={m.user_id} value={m.user_id}>
-                {m.role === 'admin'
+            onValueChange={setMember}
+            options={team.members.map((m) => ({
+              value: m.user_id,
+              label:
+                m.role === 'admin'
                   ? t('adminAccounts.teams.teamAdmin', { label: m.label ?? m.user_id })
-                  : (m.label ?? m.user_id)}
-              </option>
-            ))}
-          </select>
+                  : (m.label ?? m.user_id),
+            }))}
+          />
           <button
             className="ui-button ui-button-secondary"
             disabled={busy || !member}

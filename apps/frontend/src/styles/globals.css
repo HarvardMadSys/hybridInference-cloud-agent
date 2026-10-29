@@ -210,10 +210,6 @@
     animation: ui-fade-in var(--ui-duration-enter) ease-out;
   }
 
-  .ui-popover {
-    animation: ui-fade-in var(--ui-duration-fast) ease-out;
-  }
-
   .ui-welcome-enter {
     animation: ui-welcome-in 360ms var(--ui-ease);
   }

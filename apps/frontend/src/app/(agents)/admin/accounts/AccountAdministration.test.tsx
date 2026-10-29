@@ -124,7 +124,9 @@ describe('account decisions', () => {
       <ActionEditor account={{ ...base, status: 'deleted' }} onDone={vi.fn()} onCancel={vi.fn()} />,
     );
     expect(await screen.findByText('Teams it owns')).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'member@example.edu (team admin)' })).toBeVisible();
+    expect(screen.getByRole('combobox', { name: 'New owner' })).toHaveTextContent(
+      'member@example.edu (team admin)',
+    );
     fireEvent.change(screen.getByLabelText('Type the account id to confirm'), {
       target: { value: base.id },
     });
