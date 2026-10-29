@@ -1065,7 +1065,7 @@ describe('application category tabs', () => {
     editField('Registration enabled');
     fireEvent.click(screen.getByLabelText('More actions for Registration enabled'));
     fireEvent.click(
-      screen.getByRole('button', { name: 'Restore default for Registration enabled' }),
+      screen.getByRole('menuitem', { name: 'Restore default for Registration enabled' }),
     );
     fireEvent.click(screen.getByRole('button', { name: 'Restore default' }));
     await waitFor(() =>
@@ -1110,12 +1110,9 @@ describe('application category tabs', () => {
     expect(
       screen.getByRole('button', { name: 'Review Identity & access changes', hidden: true }),
     ).toBeDisabled();
-    expect(
-      screen.getByRole('button', {
-        name: 'Restore default for Registration enabled',
-        hidden: true,
-      }),
-    ).toBeDisabled();
+    // The action menu is closed and its trigger is the locked control.
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('More actions for Registration enabled')).toBeDisabled();
     submit(screen.getByLabelText('Registration enabled'));
     expect(setAgentAdminSettings).toHaveBeenCalledTimes(1);
     const current = applicationSnapshot();

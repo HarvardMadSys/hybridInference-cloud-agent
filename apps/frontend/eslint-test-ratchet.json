@@ -26,7 +26,7 @@
     },
     {
       "files": ["src/app/(agents)/admin/settings/page.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 2284 }] }
+      "rules": { "max-lines": ["error", { "max": 2281 }] }
     },
     {
       "files": ["src/app/(agents)/admin/hosts/ComputeResources.test.tsx"],
