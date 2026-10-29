@@ -20,6 +20,13 @@ from cloud_agent.accounts.config import derived_key
 SESSION_PREFIX = "cals1."
 _SESSION_SHAPE = re.compile(r"cals1\.[A-Za-z0-9_-]{43}")
 
+#: A browser's cookie value names the browser session holding its signed-in
+#: accounts. It has the local session's shape: the cookie keeps its name, its
+#: attributes and its value's form, and a value is looked up as a browser
+#: first and as a single account's session (a bearer, or a cookie from before
+#: browsers) second. The two are hashed under different keys.
+BROWSER_PREFIX = SESSION_PREFIX
+
 #: An emailed token: 256 random bits, URL-safe, no prefix.
 _EMAIL_TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]{43}")
 
@@ -34,6 +41,37 @@ def new_session_token() -> str:
 def looks_like_session_token(value: str | None) -> bool:
     """Whether a presented value has the local session's shape."""
     return bool(value) and _SESSION_SHAPE.fullmatch(value or "") is not None
+
+
+def new_browser_token() -> str:
+    """Return a fresh browser cookie value."""
+    return BROWSER_PREFIX + secrets.token_urlsafe(32)
+
+
+def looks_like_browser_token(value: str | None) -> bool:
+    """Whether a presented value may name a browser: the local session's shape."""
+    return looks_like_session_token(value)
+
+
+def browser_hash(token: str) -> bytes:
+    """Hash a browser cookie value for lookup."""
+    return keyed_hash("browser", token)
+
+
+def phone_hash(phone: str) -> bytes:
+    """Hash a canonical phone number: codes are keyed by it, never by the number."""
+    return keyed_hash("phone", phone)
+
+
+def phone_code_hash(phone: str, purpose: str, account_id: str | None, code: str) -> bytes:
+    """Bind a six-digit code to its number, purpose and account, under a key of its own.
+
+    Domain separation keeps a code for one purpose or account from verifying
+    another, and the key keeps a leaked table from enumerating the codes.
+    """
+    return keyed_hash(
+        "phone-code", "\x00".join(("phone-otp-v1", phone, purpose, account_id or "", code))
+    )
 
 
 def new_email_token() -> str:
@@ -82,15 +120,21 @@ def new_session_id() -> str:
 
 
 __all__ = [
+    "BROWSER_PREFIX",
     "SESSION_PREFIX",
+    "browser_hash",
     "email_token_hash",
     "keyed_hash",
+    "looks_like_browser_token",
     "looks_like_email_token",
     "looks_like_session_token",
     "new_account_id",
+    "new_browser_token",
     "new_email_token",
     "new_session_id",
     "new_session_token",
+    "phone_code_hash",
+    "phone_hash",
     "rate_limit_key",
     "session_hash",
 ]

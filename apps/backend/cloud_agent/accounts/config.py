@@ -28,8 +28,8 @@ ENV_AUTH_MODE = "AGENT_AUTH_MODE"
 #: session key, so neither mode's material can stand in for the other's.
 ENV_LOCAL_SESSION_SECRET = "AGENT_LOCAL_SESSION_SECRET"
 
-#: Public sign-up. On by default in local mode; signing up never grants Agent
-#: use, which only an administrator's approval does.
+#: Public sign-up's initial value (now the ``accounts.signup_enabled`` admin
+#: setting). On by default in local mode; signing up never grants Agent use.
 ENV_SIGNUP_ENABLED = "AGENT_LOCAL_SIGNUP_ENABLED"
 
 #: The web app's public origin and base path. Mail links are built from this
@@ -121,9 +121,10 @@ def check_local_configuration() -> None:
 
 
 def signup_flag_enabled() -> bool:
-    """Whether the operator left public sign-up on."""
-    raw = (os.environ.get(ENV_SIGNUP_ENABLED) or "true").strip().lower()
-    return raw not in ("0", "false", "no", "off")
+    """Whether an administrator left public sign-up on (``accounts.signup_enabled``)."""
+    from cloud_agent.settings import boolean_setting
+
+    return boolean_setting("accounts.signup_enabled")
 
 
 def mail_web_base_url(*, allow_http: bool) -> str:

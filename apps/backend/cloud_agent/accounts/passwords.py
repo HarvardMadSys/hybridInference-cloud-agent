@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import re
 import secrets
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import TYPE_CHECKING, TypeVar
@@ -48,21 +49,41 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=HASH_CONCURRENCY, thread_name_prefix=
 #: once, so a burst queues no unbounded number of plaintext passwords.
 MAX_PENDING_HASHES = 64
 _pending = 0
+_pending_lock = threading.Lock()
 
 
 class HasherBusy(RuntimeError):
     """Too many password checks are already waiting in this process."""
 
 
-async def _run(function: Callable[..., T], *args: str) -> T:
+def _release_slot(_future: object = None) -> None:
     global _pending
-    if _pending >= MAX_PENDING_HASHES:
-        raise HasherBusy
-    _pending += 1
-    try:
-        return await asyncio.get_running_loop().run_in_executor(_EXECUTOR, function, *args)
-    finally:
+    with _pending_lock:
         _pending -= 1
+
+
+async def _run(function: Callable[..., T], *args: str) -> T:
+    """Run one hash on the pool; its slot is held until the hash itself ends.
+
+    The slot is released by the pool future's completion, not by this
+    coroutine: a caller cancelled while its hash is already running (a client
+    that disconnected, a timeout) leaves that hash running, holding its
+    memory and its plaintext, so it must keep counting against
+    :data:`MAX_PENDING_HASHES`. A hash still waiting in the queue is
+    cancelled with its caller and frees its slot at once.
+    """
+    global _pending
+    with _pending_lock:
+        if _pending >= MAX_PENDING_HASHES:
+            raise HasherBusy
+        _pending += 1
+    try:
+        future = _EXECUTOR.submit(function, *args)
+    except BaseException:
+        _release_slot()
+        raise
+    future.add_done_callback(_release_slot)
+    return await asyncio.wrap_future(future)
 
 
 MIN_PASSWORD_CHARS = 8

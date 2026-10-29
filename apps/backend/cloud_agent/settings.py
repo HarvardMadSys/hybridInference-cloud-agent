@@ -14,6 +14,7 @@ import os
 import threading
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.accounts.settings_registry import ACCOUNT_SETTINGS
 from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
 from cloud_agent.deployment_setup import BOOTSTRAP as BOOTSTRAP, bootstrap_snapshot
 from cloud_agent.domain_cipher import settings_root_key
@@ -893,6 +894,9 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         ),
     ),
 )
+# Imported from the environment on first sight in an existing deployment, as
+# the settings above were: an upgraded deployment keeps its AGENT_SMTP_* mail.
+MIGRATED_SETTINGS += ACCOUNT_SETTINGS
 SETTINGS += MIGRATED_SETTINGS
 SETTINGS_BY_KEY = {setting.key: setting for setting in SETTINGS}
 SETTINGS_BY_STORAGE_KEY = {setting.storage_key: setting for setting in SETTINGS}
