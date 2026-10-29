@@ -57,8 +57,8 @@ export function SshSubmenu({
   const t = useT();
   return (
     <div
-      className={`flex max-h-[320px] w-full flex-col overflow-hidden ${
-        embedded ? '' : `w-[280px] ${MENU_SURFACE}`
+      className={`flex max-h-[320px] flex-col overflow-hidden ${
+        embedded ? 'w-full' : `w-[280px] ${MENU_SURFACE}`
       }`}
     >
       <div className={MENU_SCROLL}>

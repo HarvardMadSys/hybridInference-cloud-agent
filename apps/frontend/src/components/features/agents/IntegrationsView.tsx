@@ -232,6 +232,7 @@ function ProviderActions({
           {integration.provider !== 'github' && integration.connect_url ? (
             <a
               role="menuitem"
+              tabIndex={-1}
               href={integration.connect_url}
               className={MENU_ROW}
               onClick={() => setOpen(false)}

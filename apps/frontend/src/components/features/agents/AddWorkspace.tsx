@@ -83,18 +83,10 @@ export function AddWorkspace({
       )
         setOpenFor(null);
     };
-    const escape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.isComposing || event.keyCode === 229) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      close();
-    };
+    // Escape is `useTopLayerEscape`'s, so a menu opened above this panel
+    // closes first instead of this panel taking the key.
     document.addEventListener('pointerdown', outside);
-    window.addEventListener('keydown', escape, true);
-    return () => {
-      document.removeEventListener('pointerdown', outside);
-      window.removeEventListener('keydown', escape, true);
-    };
+    return () => document.removeEventListener('pointerdown', outside);
   }, [open]);
   const matches = [...new Set(config?.repos ?? [])].filter((repo) =>
     repo.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
