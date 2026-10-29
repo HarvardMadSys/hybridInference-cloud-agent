@@ -23,7 +23,6 @@ import {
   formatShare,
   gibHours,
   historyErrorKey,
-  notFinal,
   partlyMeasured,
   periodQuery,
   rangeNote,
@@ -32,7 +31,6 @@ import {
   shortDay,
   tickIndexes,
   tokenTotal,
-  unrecordedTurns,
   utcMidnightLocal,
 } from './usagePresent';
 
@@ -130,28 +128,6 @@ describe('coverage', () => {
     expect(partlyMeasured({ ...base, running_seconds: 30, measured_seconds: 0 })).toBe(false);
   });
 
-  it('counts turns the Gateway has not reported', () => {
-    const usage = aggregate({
-      run_count: 5,
-      runs_with_snapshot: 3,
-      status_counts: { available: 3, partial: 0, stale: 0, pending: 1, unavailable: 1 },
-    });
-    expect(unrecordedTurns(usage)).toBe(2);
-    expect(unrecordedTurns(aggregate())).toBe(0);
-  });
-
-  it('leaves out a turn that never called a model, and one refreshing its report', () => {
-    // One turn has a report and is reading it again, one ended before its
-    // agent called a model, and one is waiting for its first report.
-    const usage = aggregate({
-      run_count: 3,
-      runs_with_snapshot: 1,
-      status_counts: { available: 2, partial: 0, stale: 0, pending: 1, unavailable: 0 },
-      refreshing_runs: 2,
-    });
-    expect(unrecordedTurns(usage)).toBe(1);
-  });
-
   it('adds input and output tokens only when both are known', () => {
     expect(tokenTotal(aggregate())).toBe(1250);
     const unknown = aggregate();
@@ -159,7 +135,7 @@ describe('coverage', () => {
     expect(tokenTotal(unknown)).toBeNull();
   });
 
-  it('leaves reasoning and cached input out of the token total', () => {
+  it('never adds reasoning or cached input again: output and input hold them', () => {
     const usage = aggregate();
     usage.totals = { ...usage.totals!, cache_read: 400, cache_write: 100, reasoning: 90 };
     expect(tokenTotal(usage)).toBe(1250);
@@ -246,49 +222,6 @@ describe('reasoning', () => {
     expect(reasoningPartly(withReasoning(90, 0))).toBe(false);
     expect(reasoningPartly(withReasoning(null, 2))).toBe(false);
     expect(reasoningPartly(aggregate({ totals: null }))).toBe(false);
-  });
-});
-
-describe('not final', () => {
-  it('says nothing when every turn is counted and none is running', () => {
-    expect(notFinal(aggregate({ oldest_queried_at: '2026-10-15T09:00:00Z' }))).toBeNull();
-  });
-
-  it('counts running and not fully counted turns, and uncosted and estimated calls', () => {
-    const usage = aggregate({
-      run_count: 6,
-      active_runs: 1,
-      estimated_calls: 3,
-      oldest_queried_at: '2026-10-15T09:00:00Z',
-      status_counts: { available: 2, partial: 1, stale: 1, pending: 1, unavailable: 1 },
-      unknown_rows: {
-        tokens_in: 0,
-        tokens_out: 0,
-        cache_read: 0,
-        cache_write: 0,
-        reasoning: 0,
-        spent_usd: 2,
-      },
-    });
-    expect(notFinal(usage)).toEqual({
-      running: 1,
-      incomplete: 4,
-      uncosted: 2,
-      estimated: 3,
-      oldestRead: '2026-10-15T09:00:00Z',
-    });
-  });
-
-  it('names each reason on its own', () => {
-    expect(notFinal(aggregate({ active_runs: 1 }))?.running).toBe(1);
-    expect(notFinal(aggregate({ estimated_calls: 1 }))?.estimated).toBe(1);
-    const partial = notFinal(
-      aggregate({
-        status_counts: { available: 1, partial: 1, stale: 0, pending: 0, unavailable: 0 },
-      }),
-    );
-    expect(partial).toMatchObject({ running: 0, incomplete: 1, uncosted: 0, estimated: 0 });
-    expect(partial?.oldestRead).toBeNull();
   });
 });
 

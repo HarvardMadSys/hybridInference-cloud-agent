@@ -31,16 +31,13 @@ import {
   formatShare,
   gibHours,
   historyErrorKey,
-  notFinal,
   partlyMeasured,
   periodQuery,
   rangeNote,
   reasoningPartly,
   relativeTime,
   tokenTotal,
-  unrecordedTurns,
   utcMidnightLocal,
-  type NotFinal,
   type UsagePeriod,
 } from './usagePresent';
 
@@ -463,7 +460,6 @@ function HistoryTotals({
     return t(DURATION_UNIT[unit], { value });
   };
   const summary = tokens?.summary;
-  const unrecorded = summary ? unrecordedTurns(summary) : 0;
   let tokenDetail: string | undefined;
   if (summary?.totals) {
     tokenDetail = t('settings.usage.tokensInOut', {
@@ -512,12 +508,6 @@ function HistoryTotals({
           })}
         </p>
       ) : null}
-      {unrecorded > 0 ? (
-        <p className="mt-2 text-xs text-muted">
-          {t('settings.usage.unrecorded', { count: unrecorded })}
-        </p>
-      ) : null}
-      <NotFinalNote usage={tokens} />
     </>
   );
 }
@@ -538,7 +528,10 @@ function CacheTile({ usage }: { usage: AdminUsageAggregate | undefined }) {
   );
 }
 
-/** Reasoning tokens on their own: they are not added to the token total. */
+/**
+ * Reasoning tokens. They are a part of output tokens, so the token total holds
+ * them already; they are shown on their own and never added to it again.
+ */
 function ReasoningTile({ usage }: { usage: AdminUsageAggregate | undefined }) {
   const { t } = useLocale();
   const partly = usage ? reasoningPartly(usage) : false;
@@ -546,46 +539,8 @@ function ReasoningTile({ usage }: { usage: AdminUsageAggregate | undefined }) {
     <Tile
       label={t('settings.usage.reasoning')}
       value={compactCount(usage?.totals?.reasoning)}
-      detail={t(partly ? 'settings.usage.reasoningPartly' : 'settings.usage.reasoningApart')}
+      detail={t(partly ? 'settings.usage.reasoningPartly' : 'settings.usage.reasoningInOutput')}
     />
-  );
-}
-
-const NOT_FINAL: Array<[Exclude<keyof NotFinal, 'oldestRead'>, TranslationKey]> = [
-  ['running', 'settings.usage.notFinal.running'],
-  ['incomplete', 'settings.usage.notFinal.incomplete'],
-  ['uncosted', 'settings.usage.notFinal.uncosted'],
-  ['estimated', 'settings.usage.notFinal.estimated'],
-];
-
-/** What keeps the period's model usage from being final; nothing when it is or has not loaded. */
-function NotFinalNote({ usage }: { usage: OwnerTokenUsage | null }) {
-  const { t, locale } = useLocale();
-  const reasons = usage ? notFinal(usage.summary) : null;
-  if (!usage || !reasons) return null;
-  const items = NOT_FINAL.filter(([reason]) => reasons[reason] > 0);
-  return (
-    <div
-      role="note"
-      aria-labelledby="settings-usage-not-final"
-      className="mt-2 rounded-lg border border-border px-3 py-2 text-xs text-muted"
-    >
-      <p id="settings-usage-not-final" className="font-medium text-foreground">
-        {t('settings.usage.notFinal')}
-      </p>
-      <ul className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 tabular-nums">
-        {items.map(([reason, key]) => (
-          <li key={reason}>{t(key, { count: reasons[reason].toLocaleString(locale) })}</li>
-        ))}
-      </ul>
-      {reasons.oldestRead ? (
-        <p className="mt-1">
-          {t('settings.usage.notFinal.oldestRead', {
-            when: relativeTime(reasons.oldestRead, Date.parse(usage.generated_at), locale),
-          })}
-        </p>
-      ) : null}
-    </div>
   );
 }
 
