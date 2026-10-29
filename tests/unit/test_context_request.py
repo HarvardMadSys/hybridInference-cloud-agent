@@ -229,6 +229,20 @@ def test_an_earlier_request_carries_the_retried_turn_once_and_says_snapshot_came
     assert composition.native_status == "not_collected"
 
 
+def test_a_missing_snapshot_says_why_the_cli_was_not_asked():
+    jobs, attempts, events, prompts = _claude_conversation()
+    # Event 10 is the retried attempt's own request: it never settled.
+    located, composition = _compose(jobs, attempts, 10, events=events, prompts=prompts)
+    assert located.retried is True
+    assert located.carried_attempts == {1: ("j1", 1, 0)}
+    assert composition.native_status == "not_settled"
+    # A running turn has not been asked yet; a failed one never will be.
+    for state, expected in (("running", "pending"), ("failed", "not_settled")):
+        changed = [_job("j1", 1, state=state), jobs[1]]
+        _located, composition = _compose(changed, attempts, 20, events=events, prompts=prompts)
+        assert composition.native_status == expected
+
+
 def test_a_middle_request_points_at_the_later_snapshot():
     jobs, attempts, events, prompts = _claude_conversation()
     _located, composition = _compose(

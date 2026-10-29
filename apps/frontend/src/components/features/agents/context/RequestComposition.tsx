@@ -151,8 +151,10 @@ function NativeSection({ composition }: { composition: RequestCompositionApi }) 
   const { t } = useLocale();
   const state = nativeState(composition);
   let body: React.ReactNode;
-  if (state.kind === 'not_collected')
-    body = <Note>{t('contextRequest.native.not_collected')}</Note>;
+  if (state.kind === 'not_collected' || state.kind === 'not_settled' || state.kind === 'pending')
+    body = <Note>{t(`contextRequest.native.${state.kind}`)}</Note>;
+  else if (state.kind === 'unsupported')
+    body = <Note>{t('contextRequest.native.unsupported')}</Note>;
   else if (state.kind === 'not_offered')
     body = (
       <Note>{t('contextRequest.native.not_offered', { runtime: composition.runtime ?? '—' })}</Note>

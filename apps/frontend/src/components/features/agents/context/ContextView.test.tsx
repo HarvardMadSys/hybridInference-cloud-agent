@@ -426,7 +426,9 @@ describe('ContextView', () => {
     expect(screen.getByText('System prompt')).toBeInTheDocument();
     expect(screen.getByText(/It is not the assembled request/)).toBeInTheDocument();
     expect(
-      screen.getByText(/Starts after the compaction in turn 2\. Claude can keep/),
+      screen.getByText(
+        /Starts after the compaction in turn 2\. The CLI can keep some recent messages/,
+      ),
     ).toBeInTheDocument();
     expect(screen.getByText('6 items before the compaction')).toBeInTheDocument();
     expect(screen.getByText('1 items in subagents’ own contexts')).toBeInTheDocument();
@@ -463,8 +465,20 @@ describe('ContextView', () => {
     );
     show();
     expect(
-      await screen.findByText(/this run was recorded before snapshots were collected/),
+      await screen.findByText(/Usually it ran before snapshots were collected/),
     ).toBeInTheDocument();
+    for (const [status, text] of [
+      ['not_settled', /this attempt was retried, failed or was cancelled/],
+      ['pending', /The CLI is asked when this turn settles/],
+      ['unsupported', /bridge predates snapshot support/],
+    ] as const) {
+      vi.mocked(getRequestComposition).mockImplementation(async (_job, eventId) =>
+        composition(eventId, { native: null, native_relation: null, native_status: status }),
+      );
+      cleanup();
+      show();
+      expect(await screen.findByText(text)).toBeInTheDocument();
+    }
     vi.mocked(getRequestComposition).mockImplementation(async (_job, eventId) =>
       composition(eventId, {
         runtime: 'codex',

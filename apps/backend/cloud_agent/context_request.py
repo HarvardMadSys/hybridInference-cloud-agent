@@ -118,8 +118,8 @@ class CompositionBoundary(BaseModel):
     seq: int
     event_id: int | None = None
     source: str
-    #: Claude may keep a recent segment through a compaction; the transcript
-    #: cannot say which messages, so they are counted as compacted here.
+    #: The CLI may keep recent messages through a compaction; the transcript
+    #: cannot say which, so they are counted as compacted here.
     may_preserve_recent: bool = False
 
 
@@ -166,7 +166,10 @@ class RequestComposition(BaseModel):
     native: dict[str, Any] | None = None
     native_relation: SnapshotRelation | None = None
     #: Why there is no usable snapshot: ``not_offered`` (runtime has none),
-    #: ``not_collected`` (run predates collection), or the snapshot's status.
+    #: ``pending`` (the turn has not settled yet), ``not_settled`` (the attempt
+    #: was retried, failed or was cancelled, so the CLI was not asked),
+    #: ``not_collected`` (a settled turn without one: it predates collection),
+    #: or the snapshot's own status.
     native_status: str
     reconstructed: ReconstructedComposition
 
@@ -371,6 +374,9 @@ class LocatedRequest:
     snapshot_event_id: int | None
     snapshot_status: str | None
     requests_after: int
+    #: The request's attempt was followed by another of the same turn.
+    retried: bool = False
+    job_state: str | None = None
 
 
 def _attempt_ranks(
@@ -405,7 +411,10 @@ def _boundary(
                     seq=key[2],
                     event_id=compaction.get("event_id"),
                     source=source,
-                    may_preserve_recent=source == "cli_compact_boundary",
+                    # Every pinned CLI can carry recent material past it:
+                    # Claude's preserved segment, pi's kept tail, OpenCode's
+                    # and Kilo's tail_start_id, Codex's recent user messages.
+                    may_preserve_recent=True,
                 ),
             )
     return (best[1], best[0]) if best else (None, None)
@@ -427,6 +436,7 @@ def locate_request(
     carried: dict[int, tuple[str, int, int]] = {}
     superseded: list[int] = []
     rank_a = 0
+    retried = False
     for job in jobs:
         job_id = str(job["job_id"])
         turn_no = turn_of[job_id]
@@ -440,6 +450,7 @@ def locate_request(
         superseded.extend(i for i in ids[:rank])
         if job_id == point.job_id:
             rank_a = rank
+            retried = rank < len(ids) - 1
     before = (point.turn_no, rank_a, point.seq)
     boundary, boundary_key = _boundary(carried, profiles, before)
     profile = profiles.get(point.attempt_id) or {}
@@ -477,7 +488,26 @@ def locate_request(
         snapshot_event_id=snapshot.get("event_id") if snapshot else None,
         snapshot_status=str(snapshot.get("status")) if snapshot else None,
         requests_after=after,
+        retried=retried,
+        job_state=job.get("state"),
     )
+
+
+#: Job states of a turn that has not settled yet.
+_PENDING_JOB_STATES = frozenset({"queued", "waiting", "running"})
+#: Job states of a turn that ended without settling cleanly.
+_UNSETTLED_JOB_STATES = frozenset({"failed", "cancelled"})
+
+
+def _missing_snapshot(located: LocatedRequest) -> str:
+    """Why a request has no snapshot after it in its attempt."""
+    if located.runtime not in SNAPSHOT_RUNTIMES:
+        return "not_offered"
+    if located.retried or located.job_state in _UNSETTLED_JOB_STATES:
+        return "not_settled"
+    if located.job_state in _PENDING_JOB_STATES:
+        return "pending"
+    return "not_collected"
 
 
 def assemble_request(
@@ -521,10 +551,8 @@ def assemble_request(
         native_status = str(snapshot.get("status") or "unknown")
     elif located.snapshot_status is not None:
         native_status = located.snapshot_status
-    elif located.runtime in SNAPSHOT_RUNTIMES:
-        native_status = "not_collected"
     else:
-        native_status = "not_offered"
+        native_status = _missing_snapshot(located)
     return RequestComposition(
         thread_id=thread_id,
         request=located.point,

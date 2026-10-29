@@ -23,7 +23,12 @@ export const contextRequestEn = {
   'contextRequest.native.partial':
     'Only the CLI’s total: its messages were too large to read safely.',
   'contextRequest.native.not_collected':
-    'No CLI snapshot: this run was recorded before snapshots were collected.',
+    'No CLI snapshot for this turn. Usually it ran before snapshots were collected.',
+  'contextRequest.native.not_settled':
+    'No CLI snapshot: this attempt was retried, failed or was cancelled, so the CLI was not asked.',
+  'contextRequest.native.pending': 'The CLI is asked when this turn settles.',
+  'contextRequest.native.unsupported':
+    'No CLI snapshot: the sandbox’s bridge predates snapshot support. Newer sandboxes report it.',
   'contextRequest.native.not_offered':
     '{runtime} offers no supported way to read its context, so only the reconstruction below is available.',
   'contextRequest.native.failed': 'The CLI did not answer the snapshot request ({status}).',
@@ -34,7 +39,7 @@ export const contextRequestEn = {
   'contextRequest.reconstructed.total': '≈{tokens} estimated from stored text',
   'contextRequest.reconstructed.boundary': 'Starts after the compaction in turn {turn}.',
   'contextRequest.reconstructed.preserve':
-    'Claude can keep some recent messages through a compaction; they are counted as compacted here.',
+    'The CLI can keep some recent messages through a compaction; they are counted as compacted here, so this can show less than the request carried.',
   'contextRequest.excluded': 'Not counted',
   'contextRequest.excluded.compacted': '{count} items before the compaction',
   'contextRequest.excluded.superseded_attempts': '{count} items from retried attempts',
@@ -89,7 +94,12 @@ export const contextRequestZhCN: Record<keyof typeof contextRequestEn, string> =
   'contextRequest.native.window': '窗口 {window}',
   'contextRequest.native.notExposed': '这个 CLI 不提供',
   'contextRequest.native.partial': '只有 CLI 的总数：消息太大，没有安全读取。',
-  'contextRequest.native.not_collected': '没有 CLI 快照：这次运行早于快照采集。',
+  'contextRequest.native.not_collected': '这一轮没有 CLI 快照，通常是因为它早于快照采集。',
+  'contextRequest.native.not_settled':
+    '没有 CLI 快照：这次尝试被重试、失败或被取消，所以没有询问 CLI。',
+  'contextRequest.native.pending': '这一轮结束后才会询问 CLI。',
+  'contextRequest.native.unsupported':
+    '没有 CLI 快照：这个沙箱的 bridge 早于快照支持，新的沙箱会提供。',
   'contextRequest.native.not_offered':
     '{runtime} 没有受支持的方式读取它的上下文，所以只有下面的重建结果。',
   'contextRequest.native.failed': 'CLI 没有回应快照请求（{status}）。',
@@ -100,7 +110,7 @@ export const contextRequestZhCN: Record<keyof typeof contextRequestEn, string> =
   'contextRequest.reconstructed.total': '按存储文本估算约 {tokens}',
   'contextRequest.reconstructed.boundary': '从第 {turn} 轮的压缩之后开始。',
   'contextRequest.reconstructed.preserve':
-    'Claude 压缩时可能保留最近的一些消息；这里把它们算作已压缩。',
+    'CLI 压缩时可能保留最近的一些消息；这里把它们算作已压缩，所以显示的内容可能比请求实际带的少。',
   'contextRequest.excluded': '没有计入',
   'contextRequest.excluded.compacted': '压缩之前的 {count} 项',
   'contextRequest.excluded.superseded_attempts': '被重试替换的尝试中的 {count} 项',
