@@ -170,3 +170,38 @@ async def test_a_refusal_waits_for_the_window_that_refused(counters):
     with pytest.raises(HTTPException) as refused:
         await auth.enforce_login_limits(_request(counters, "198.51.100.12"), _OWNER)
     assert refused.value.headers["Retry-After"] == str(15 * 60)
+
+
+# ── Sign-ups whose client address cannot be told (scope review G11) ──────
+
+
+def _unresolved_request(counters: _Counters) -> Request:
+    app = SimpleNamespace(state=SimpleNamespace(storage=SimpleNamespace(local_accounts=counters)))
+    return Request({"type": "http", "headers": [], "client": None, "app": app})
+
+
+async def test_sign_ups_without_an_address_share_one_budget(counters, monkeypatch):
+    """As HybridInference: no per-proxy bucket, one coarse budget for all of them."""
+    monkeypatch.setenv("AGENT_LOCAL_UNRESOLVED_SIGNUP_RATE_LIMIT_PER_HOUR", "2")
+    request = _unresolved_request(counters)
+    rules = auth.signup_rules(request)
+    assert [rule[0] for rule in rules] == ["signup_unresolved", "signup_unresolved_day"]
+    assert rules[0][3] == 2
+    for _ in range(2):
+        await auth.enforce_rate_limits(_unresolved_request(counters), rules)
+    with pytest.raises(HTTPException) as refused:
+        await auth.enforce_rate_limits(_unresolved_request(counters), rules)
+    assert refused.value.status_code == 429
+    # An address that can be told keeps its own windows.
+    assert [rule[0] for rule in auth.signup_rules(_request(counters, "198.51.100.7"))] == [
+        "signup_ip",
+        "signup_ip_day",
+    ]
+
+
+async def test_a_deployment_may_refuse_sign_ups_without_an_address(counters, monkeypatch):
+    monkeypatch.setenv("AGENT_LOCAL_SIGNUP_REQUIRE_RESOLVED_CLIENT_IP", "true")
+    with pytest.raises(HTTPException) as refused:
+        auth.signup_rules(_unresolved_request(counters))
+    assert refused.value.status_code == 503
+    assert counters.calls == []
