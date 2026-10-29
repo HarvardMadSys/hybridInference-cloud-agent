@@ -553,6 +553,15 @@ async def refresh_profiles(
     return refreshed
 
 
+#: Every insights statement takes optional filters (``$n IS NULL OR …``). After
+#: five runs on one connection Postgres may switch a prepared statement to a
+#: generic plan that cannot use the filters' values; for the composition that
+#: plan ran past the timeout on a 12,000-run history. Planning each read for
+#: its own values costs milliseconds. Session state is never left on a pooled
+#: connection (``bootstrap/lifespan._release_as_is``): reset, or ``LOCAL``.
+_CUSTOM_PLANS_SQL = "SET {scope}plan_cache_mode = force_custom_plan"
+
+
 class PostgresContextQueries:
     """The context reads behind the Context view and the Usage page's insights."""
 
@@ -613,6 +622,7 @@ class PostgresContextQueries:
         runs = chosen.params()
         async with self._pool.acquire() as conn:
             await conn.execute("SET statement_timeout = '5s'")
+            await conn.execute(_CUSTOM_PLANS_SQL.format(scope=""))
             try:
                 stale = [
                     dict(row)
@@ -628,9 +638,10 @@ class PostgresContextQueries:
                 ]
                 refreshed = await refresh_profiles(conn, stale, event_budget=refresh_events)
             finally:
-                await conn.execute("RESET statement_timeout")
+                await conn.execute("RESET statement_timeout; RESET plan_cache_mode")
             async with conn.transaction(isolation="repeatable_read", readonly=True):
                 await conn.execute("SET LOCAL statement_timeout = '5s'")
+                await conn.execute(_CUSTOM_PLANS_SQL.format(scope="LOCAL "))
                 page = [
                     dict(row)
                     for row in await conn.fetch(

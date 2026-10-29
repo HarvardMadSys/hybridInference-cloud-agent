@@ -18,8 +18,9 @@ What only the database can settle:
 
 from __future__ import annotations
 
+import contextlib
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from tests.integration.storage.test_attempt_ledger import db as db
@@ -27,6 +28,7 @@ from tests.integration.storage.test_context_queries import (
     BASE,
     OTHER,
     OWNER,
+    _bulk_history,
     _claude,
     _events,
     _thread,
@@ -39,6 +41,8 @@ from cloud_agent.context_insights import (
     compose,
     context_cursor_scope,
 )
+from cloud_agent.context_profile import CONTEXT_PROFILE_VERSION
+from cloud_agent.storage.repositories.context_queries import PostgresContextQueries
 from cloud_agent_shared.text_tokens import estimate_text_tokens
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -234,3 +238,63 @@ async def test_composition_counts_each_item_once_and_every_request(db, store):
     total = compose(result["composition"])
     assert total.recorded.turns == 4
     assert total.provider.prompt_tokens == 5_010 + 9_010 + 2_010 + 1_010 + 3_010
+
+
+class _OneConnection:
+    """A pool of one connection, so every read reuses its prepared statements."""
+
+    def __init__(self, conn) -> None:
+        self.conn = conn
+
+    @contextlib.asynccontextmanager
+    async def acquire(self):
+        yield self.conn
+
+
+async def test_repeated_reads_stay_planned_for_their_filters(db, store):
+    await _bulk_history(db, store, user_id=OWNER, runs=12_000, span_days=900)
+    async with db.acquire() as conn:
+        # Some of the runs were profiled, as a long history is part way through.
+        await conn.execute(
+            """
+            INSERT INTO agent_attempt_context_profiles (attempt_id, event_seq, reducer_version,
+                main_requests, subagent_requests, peak_prompt_tokens, latest_prompt_tokens,
+                latest_observed_at, context_window, compactions, profile)
+            SELECT a.id, 1, $2::int, 1, 0, 1000, 1000, a.started_at, NULL, 0, jsonb_build_object(
+                'v', $2::int, 'events', '[]'::jsonb,
+                'content', jsonb_build_object('categories', jsonb_build_object(
+                    'assistant', jsonb_build_object('tokens', 5, 'chars', 20, 'items', 1))),
+                'totals', jsonb_build_object('main', jsonb_build_object(
+                    'requests', 1, 'prompt_tokens', 1000)))
+            FROM agent_attempts a JOIN agent_jobs j ON j.id = a.job_id
+            WHERE j.user_id = $1 AND a.id % 33 = 0
+            """,
+            OWNER,
+            CONTEXT_PROFILE_VERSION,
+        )
+        await conn.execute("ANALYZE")
+        profiled = await conn.fetchval("SELECT COUNT(*) FROM agent_attempt_context_profiles")
+    first = await store.owner_usage.first_record_at(OWNER)
+    since = first.replace(hour=0, minute=0, second=0, microsecond=0)
+    async with db.acquire() as conn:
+        queries = PostgresContextQueries(_OneConnection(conn))
+        # Postgres may switch a prepared statement to a generic plan after
+        # five runs; the sixth and seventh are the reads that timed out.
+        for _ in range(7):
+            result = await queries.insights_page(
+                user_id=OWNER,
+                since=since,
+                until=datetime.now(UTC),
+                sort="recent",
+                cursor=None,
+                limit=25,
+                refresh_attempts=40,
+                refresh_events=40_000,
+                pending_cap=10_000,
+                filters=InsightsFilters(),
+            )
+            assert len(result["composition"]) == 12_000
+            assert sum(row["assistant"] for row in result["composition"]) == 5 * profiled
+        # Nothing is left on the pooled connection for the next caller.
+        assert await conn.fetchval("SHOW plan_cache_mode") == "auto"
+        assert await conn.fetchval("SHOW statement_timeout") == "0"
