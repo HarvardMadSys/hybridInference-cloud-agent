@@ -26,6 +26,8 @@ export const CATEGORY_KEYS = [
   'agents',
   'injected',
   'compaction_summary',
+  'turn_prompts',
+  'platform_context',
   'user_messages',
   'assistant',
   'reasoning',
@@ -44,6 +46,8 @@ export const CATEGORY_COLOR: Record<string, string> = {
   agents: 'bg-lime-600/70',
   injected: 'bg-yellow-500/70',
   compaction_summary: 'bg-rose-400/70',
+  turn_prompts: 'bg-sky-700/70',
+  platform_context: 'bg-yellow-700/60',
   user_messages: 'bg-sky-500/70',
   assistant: 'bg-emerald-500/70',
   reasoning: 'bg-violet-500/70',
@@ -111,13 +115,28 @@ export function nativeState(composition: RequestCompositionApi): NativeState {
   return { kind: 'failed', status: snapshot?.status ?? composition.native_status };
 }
 
-/** Entries of one category, or all; largest first, as the server sent them. */
+/** Entries of one category (or all) whose label or preview holds `query`. */
 export function filterEntries(
   entries: CompositionEntryApi[],
   category: string | null,
+  query = '',
+  order: EntryOrder = 'largest',
 ): CompositionEntryApi[] {
-  return category ? entries.filter((entry) => entry.category === category) : entries;
+  const needle = query.trim().toLowerCase();
+  const kept = entries.filter(
+    (entry) =>
+      (!category || entry.category === category) &&
+      (!needle ||
+        entry.label.toLowerCase().includes(needle) ||
+        entry.preview.toLowerCase().includes(needle)),
+  );
+  if (order === 'largest') return kept;
+  // Transcript order: the turn, then the stored event; a turn's prompt leads it.
+  return [...kept].sort((a, b) => a.turn_no - b.turn_no || (a.event_id ?? -1) - (b.event_id ?? -1));
 }
+
+/** How the browser lists entries: largest first (as sent) or as the transcript ran. */
+export type EntryOrder = 'largest' | 'transcript';
 
 /** Excluded-content reasons with something in them, in a fixed order. */
 export const EXCLUDED_REASONS = [

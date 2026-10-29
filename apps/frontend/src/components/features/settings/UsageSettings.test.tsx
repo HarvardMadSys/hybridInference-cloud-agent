@@ -49,6 +49,7 @@ function insights(overrides: Partial<ContextInsightsPage> = {}): ContextInsights
     summary: {
       conversations: 0,
       conversations_observed: 0,
+      turns: 0,
       main_requests: 0,
       subagent_requests: 0,
       compactions: 0,
@@ -59,6 +60,10 @@ function insights(overrides: Partial<ContextInsightsPage> = {}): ContextInsights
     profiling: { pending_attempts: 0, pending_capped: false, refreshed: 0, complete: true },
     conversations: [],
     next_cursor: null,
+    filters: { q: '', repo: null, temporary: false, day: null },
+    activity: null,
+    projects: null,
+    composition: null,
     ...overrides,
   };
 }

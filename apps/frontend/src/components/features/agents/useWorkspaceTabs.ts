@@ -10,6 +10,7 @@ export type WorkspaceTab =
   | 'terminal'
   | 'files'
   | 'environment'
+  | 'context'
   | 'side-chat'
   | `side-chat-${string}`;
 export interface SideChatTab {
@@ -62,7 +63,7 @@ function read(key: string): TabsState {
     )
       return initial;
     if (
-      !['git', 'terminal', 'files', 'environment'].includes(value.selected) &&
+      !['git', 'terminal', 'files', 'environment', 'context'].includes(value.selected) &&
       !value.chats.some((chat) => chat.id === value.selected)
     )
       value.selected = 'git';

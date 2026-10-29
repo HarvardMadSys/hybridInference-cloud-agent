@@ -1,7 +1,10 @@
 'use client';
 
 // Every conversation with turns in the selected range, compared by its context
-// profile, each one opening its own Context view.
+// profile, each one opening its own Context view. A search, a project (or the
+// conversations without one) and a day from the heatmap narrow the whole
+// range on the server; the heatmap, the project groups and the composition
+// are the first page's, and cover every matching conversation.
 //
 // The numbers are the server's. Sizes are single requests' input tokens as the
 // agent CLIs reported them; cost and cache hit are the Gateway's records summed
@@ -16,6 +19,7 @@ import { Select } from '@/components/ui/Select';
 import {
   CONTEXT_SORTS,
   getContextInsights,
+  type ContextInsightsFilters,
   type ContextInsightsPage,
   type ContextSort,
   type ConversationContext,
@@ -23,6 +27,10 @@ import {
 } from '@/lib/api/ownerUsage';
 import type { TranslationKey } from '@/lib/i18n/translate';
 import { contextHref, contextBar } from '../agents/context/contextPresent';
+import { ContextActivityHeatmap } from './ContextActivityHeatmap';
+import { Bar, ContextCompositionChart } from './ContextCompositionChart';
+import { ContextInsightsFilterBar, ContextProjectGroups } from './ContextInsightsFilters';
+import { NO_FILTERS, hasFilters, recordedSlices } from './contextInsightsPresent';
 import { Card, LoadError, RangeNote, RangeSelect, Tile, errorText } from './UsageParts';
 import { cachedShare, compactCount, formatCost, formatShare, relativeTime } from './usagePresent';
 
@@ -37,8 +45,8 @@ const SORT_LABEL: Record<ContextSort, TranslationKey> = {
   requests: 'contextInsights.sort.requests',
 };
 
-/** The first page for a range and sort, later pages on request, and a retry. */
-function useInsights(range: UsageRangePreset, sort: ContextSort) {
+/** The first page for a range, sort and filters, later pages on request, and a retry. */
+function useInsights(range: UsageRangePreset, sort: ContextSort, filters: ContextInsightsFilters) {
   const { t } = useLocale();
   const [page, setPage] = useState<ContextInsightsPage | null>(null);
   const [rows, setRows] = useState<ConversationContext[]>([]);
@@ -57,7 +65,7 @@ function useInsights(range: UsageRangePreset, sort: ContextSort) {
     const controller = new AbortController();
     const request = ++latest.current;
     setLoading(true);
-    getContextInsights({ range, sort, limit: PAGE, signal: controller.signal })
+    getContextInsights({ range, sort, filters, limit: PAGE, signal: controller.signal })
       .then(
         (first) => {
           if (request !== latest.current) return;
@@ -74,7 +82,7 @@ function useInsights(range: UsageRangePreset, sort: ContextSort) {
         if (request === latest.current) setLoading(false);
       });
     return () => controller.abort();
-  }, [range, sort, attempt, fail]);
+  }, [range, sort, filters, attempt, fail]);
 
   // Ask again while the ranking is incomplete; a later read profiles more runs.
   const incomplete = page !== null && !page.profiling.complete && !error;
@@ -91,7 +99,7 @@ function useInsights(range: UsageRangePreset, sort: ContextSort) {
     setLoadingMore(true);
     const request = latest.current;
     try {
-      const next = await getContextInsights({ range, sort, cursor, limit: PAGE });
+      const next = await getContextInsights({ range, sort, filters, cursor, limit: PAGE });
       if (request !== latest.current) return;
       setRows((current) => [...current, ...next.conversations]);
       setCursor(next.next_cursor);
@@ -114,10 +122,21 @@ export function ContextInsights({
 }) {
   const { t } = useLocale();
   const [sort, setSort] = useState<ContextSort>('recent');
+  const [filters, setFilters] = useState<ContextInsightsFilters>(NO_FILTERS);
+  const [grouped, setGrouped] = useState(false);
+  // A day belongs to the range it was picked from.
+  useEffect(
+    () => setFilters((current) => (current.day ? { ...current, day: null } : current)),
+    [range],
+  );
   const { page, rows, cursor, error, loading, loadingMore, showMore, retry } = useInsights(
     range,
     sort,
+    filters,
   );
+  const changeFilters = useCallback((next: ContextInsightsFilters) => setFilters(next), []);
+  // Only the first page is kept as `page`; later pages add rows, not charts.
+  const projects = page?.projects ?? [];
   const nowMs = page ? Date.parse(page.generated_at) : 0;
   const widest = Math.max(0, ...rows.map((row) => row.peak_prompt_tokens ?? 0));
   const controls = (
@@ -138,9 +157,40 @@ export function ContextInsights({
       <p className="mt-1 text-sm text-muted">{t('contextInsights.description')}</p>
       <RangeNote period={page?.period} />
       {error ? <LoadError message={error} onRetry={retry} /> : null}
+      <ContextInsightsFilterBar
+        filters={filters}
+        projects={projects}
+        grouped={grouped}
+        matching={page && hasFilters(filters) ? page.summary.conversations : null}
+        onChange={changeFilters}
+        onGroupedChange={setGrouped}
+      />
       <InsightsTiles page={page} loading={loading} />
+      {page?.activity ? (
+        <ContextActivityHeatmap
+          key={`${page.period.since}:${page.period.until}`}
+          since={page.period.since}
+          until={page.period.until}
+          activity={page.activity}
+          selected={filters.day}
+          onSelect={(day) => setFilters((current) => ({ ...current, day }))}
+        />
+      ) : null}
+      {page?.composition ? <ContextCompositionChart composition={page.composition} /> : null}
       <InsightsNotes page={page} empty={rows.length === 0 && !loading} />
-      {rows.length > 0 ? (
+      {grouped ? (
+        <ContextProjectGroups
+          projects={projects}
+          onOpen={(project) => {
+            setGrouped(false);
+            setFilters((current) => ({
+              ...current,
+              repo: project.repo,
+              temporary: project.repo === null,
+            }));
+          }}
+        />
+      ) : rows.length > 0 ? (
         <ul className="mt-3 divide-y divide-border rounded-lg border border-border">
           <ColumnHeads />
           {rows.map((row) => (
@@ -148,7 +198,7 @@ export function ContextInsights({
           ))}
         </ul>
       ) : null}
-      {cursor ? (
+      {cursor && !grouped ? (
         <button
           type="button"
           onClick={() => void showMore()}
@@ -279,6 +329,7 @@ function ConversationRow({
           {t('contextInsights.turns', { count: row.turns.toLocaleString(locale) })} ·{' '}
           {t('contextInsights.lastTurn', { when: relativeTime(row.last_turn_at, nowMs, locale) })}
         </p>
+        <RowComposition row={row} />
       </div>
       <div className="min-w-0">
         {row.peak_prompt_tokens === null ? (
@@ -333,6 +384,24 @@ function ConversationRow({
         value={formatShare(usage ? cachedShare(usage) : null)}
       />
     </li>
+  );
+}
+
+/** The conversation's recorded content by category, as the chart above draws it. */
+function RowComposition({ row }: { row: ConversationContext }) {
+  const { t } = useLocale();
+  const composition = row.composition;
+  if (!composition || composition.recorded.total_tokens === 0) return null;
+  const label = t('contextInsights.row.recorded', {
+    tokens: compactCount(composition.recorded.total_tokens),
+  });
+  return (
+    <div className="mt-1 flex items-center gap-2" title={label}>
+      <div className="w-24 shrink-0">
+        <Bar parts={recordedSlices(composition)} label={label} />
+      </div>
+      <span className="mt-2 text-[11px] tabular-nums text-muted">{label}</span>
+    </div>
   );
 }
 

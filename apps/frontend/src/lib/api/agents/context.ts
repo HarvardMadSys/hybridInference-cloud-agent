@@ -109,6 +109,52 @@ export interface ContextCoverageApi {
   unparsed_raw: number;
 }
 
+export type ContextEventKind = 'injection' | 'compaction' | 'prune' | 'model_switch' | 'mode';
+export const CONTEXT_EVENT_KINDS: readonly ContextEventKind[] = [
+  'injection',
+  'compaction',
+  'prune',
+  'model_switch',
+  'mode',
+];
+
+/**
+ * One context event, with only the sizes its record carries: a compaction's
+ * sizes as the CLI reported them (`tokens_basis` `cli`), an injection's as an
+ * estimate from its characters (`estimate`), nothing otherwise.
+ */
+export interface ContextEventApi {
+  kind: ContextEventKind;
+  source: string;
+  label: string | null;
+  names: string[];
+  items: number | null;
+  job_id: string;
+  turn_no: number;
+  attempt_id: number | null;
+  seq: number | null;
+  event_id: number | null;
+  at: string | null;
+  chars: number | null;
+  tokens: number | null;
+  tokens_basis: 'cli' | 'estimate' | null;
+  before_tokens: number | null;
+  after_tokens: number | null;
+  from_value: string | null;
+  to_value: string | null;
+  /** From an attempt a retry replaced: listed, not counted. */
+  superseded: boolean;
+  /** From a Fork's copy of its source's turn. */
+  copied: boolean;
+}
+
+export interface EventCapabilityApi {
+  runtime: string;
+  kind: ContextEventKind;
+  support: ContextSupport;
+  reason: string | null;
+}
+
 export interface ThreadContextApi {
   thread_id: string;
   generated_at: string;
@@ -120,6 +166,10 @@ export interface ThreadContextApi {
   compactions: ContextCompactionApi[];
   largest_changes: ContextChangeApi[];
   coverage: ContextCoverageApi;
+  events: ContextEventApi[];
+  event_counts: Partial<Record<ContextEventKind, number>>;
+  events_omitted: number;
+  event_capabilities: EventCapabilityApi[];
 }
 
 /** The Context view of the caller's conversation holding ``jobId``; null when absent. */

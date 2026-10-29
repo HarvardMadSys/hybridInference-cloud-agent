@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import toast from 'react-hot-toast';
 import { JobComposer } from './job-detail/JobComposer';
 import { JobDetailHeader } from './job-detail/JobDetailHeader';
+import { JobDetailProviders } from './job-detail/JobDetailProviders';
 import { JobDetailSidePanels } from './job-detail/JobDetailSidePanels';
 import { JobTranscript } from './job-detail/JobTranscript';
 import { hasPublishableWorkspaceChanges } from './job-detail/RunOutcome';
@@ -14,7 +15,6 @@ import { useJobConversation } from './job-detail/useJobConversation';
 import { useJobDetailPanels, type SubagentTarget } from './job-detail/useJobDetailPanels';
 import { useJobRunActions } from './job-detail/useJobRunActions';
 import { useT } from '@/components/providers';
-import { WorkspaceLinkProvider } from '@/components/ui/Markdown';
 import { basePath } from '@/config/env';
 import { publishAgentThread } from '@/lib/api/agents';
 import { submitThreadMessage, type ThreadMessageResultApi } from '@/lib/api/pendingMessages';
@@ -114,7 +114,6 @@ export function JobDetail({
     setTrajectoryQuery,
     trajectorySteps,
     layoutContainerRef,
-    openWorkspaceFile,
     selectStep,
     openRun,
   } = panels;
@@ -928,5 +927,5 @@ export function JobDetail({
       </div>
     </section>
   );
-  return <WorkspaceLinkProvider onOpenFile={openWorkspaceFile}>{content}</WorkspaceLinkProvider>;
+  return <JobDetailProviders panels={panels}>{content}</JobDetailProviders>;
 }

@@ -1,0 +1,230 @@
+// @vitest-environment jsdom
+import '@testing-library/jest-dom/vitest';
+
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+
+import { createAgentJob, getAgentThreadContext, type ThreadContextApi } from '@/lib/api/agents';
+import { submitThreadMessage } from '@/lib/api/pendingMessages';
+import { JobDetail } from './JobDetail';
+import type { AgentJob } from './types';
+
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn() }),
+  usePathname: () => '/job-a',
+}));
+
+vi.mock('@/lib/api/agents', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/agents')>()),
+  cancelAgentJob: vi.fn(),
+  createAgentJob: vi.fn(),
+  getAgentConfig: vi.fn().mockResolvedValue({
+    repos: ['owner/repository'],
+    runtimes: ['claude-code'],
+    models: ['qwen-test'],
+    github_connected: true,
+  }),
+  getAgentJobUsage: vi.fn().mockResolvedValue(null),
+  refreshAgentJobUsage: vi.fn().mockResolvedValue(null),
+  getAgentThreadStats: vi.fn().mockResolvedValue(null),
+  getAgentThreadModelTtft: vi.fn().mockResolvedValue(null),
+  getAgentThreadContext: vi.fn(),
+  getRequestComposition: vi.fn().mockResolvedValue(null),
+}));
+
+vi.mock('@/lib/api/mcp', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/mcp')>()),
+  listMcpInvocations: vi.fn().mockResolvedValue({ invocations: [] }),
+  getMcpThreadBindings: vi.fn().mockResolvedValue({ bindings: [] }),
+  listMcpConnections: vi.fn().mockResolvedValue({ connections: [] }),
+}));
+
+vi.mock('@/lib/api/questions', () => ({
+  listThreadQuestions: vi.fn().mockResolvedValue({ questions: [], attempt_id: 1 }),
+  answerThreadQuestion: vi.fn(),
+}));
+
+vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn().mockResolvedValue([]) }));
+
+vi.mock('@/lib/api/pendingMessages', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/pendingMessages')>()),
+  submitThreadMessage: vi.fn(),
+  getThreadQueue: vi.fn().mockResolvedValue({
+    thread_id: 'thread-a',
+    pending_messages: [],
+    queue_paused_reason: null,
+    latest_job_id: 'job-a',
+    latest_turn_no: 1,
+    latest_job_state: 'succeeded',
+    mid_turn_input_supported: true,
+  }),
+}));
+
+function job(id: string, threadId: string): AgentJob {
+  return {
+    id,
+    threadId,
+    title: `Task ${threadId}`,
+    prompt: 'Fix the issue',
+    state: 'succeeded',
+    repo: 'owner/repository',
+    baseRef: 'dev',
+    baseSha: 'abcdef1',
+    branch: 'agent/task',
+    runtime: 'claude-code',
+    model: 'qwen-test',
+    spentUsd: 0,
+    hasLedger: false,
+    timeoutLabel: '',
+    sandbox: 'container',
+    attempts: [{ no: 1, status: 'done' }],
+    currentAttemptNo: 1,
+    events: [],
+    diffFiles: [],
+    diffStat: { add: 0, del: 0 },
+    gates: [],
+    usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 1 },
+  } as unknown as AgentJob;
+}
+
+/** A conversation's view whose largest request names the conversation. */
+function contextOf(threadId: string, peak: number): ThreadContextApi {
+  const point = {
+    index: 0,
+    job_id: `job-${threadId}`,
+    turn_no: 1,
+    attempt_id: 1,
+    seq: 1,
+    event_id: 9,
+    at: '2026-10-29T10:00:00Z',
+    prompt_tokens: peak,
+    cache_read_tokens: null,
+    cache_write_tokens: null,
+    uncached_input_tokens: null,
+    output_tokens: 5,
+    context_window: null,
+    model: null,
+    delta_tokens: null,
+    after_compaction: false,
+  };
+  return {
+    thread_id: threadId,
+    generated_at: '2026-10-29T12:00:00Z',
+    capabilities: [],
+    latest: { point, window_share: null, compacted_after: false, turn_active: false },
+    peak: point,
+    turns: [],
+    requests: [point],
+    compactions: [],
+    largest_changes: [],
+    coverage: {
+      turns: 1,
+      attempts: 1,
+      attempts_observed: 1,
+      main_requests: 1,
+      subagent_requests: 0,
+      compactions: 0,
+      compactions_unknown_outcome: 0,
+      points_omitted: 0,
+      unparsed_raw: 0,
+    },
+    events: [],
+    event_counts: {},
+    events_omitted: 0,
+    event_capabilities: [],
+  };
+}
+
+beforeEach(() => {
+  vi.mocked(getAgentThreadContext).mockImplementation(async (jobId: string) =>
+    jobId === 'job-b' ? contextOf('thread-b', 8_765) : contextOf('thread-a', 4_321),
+  );
+});
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+  sessionStorage.clear();
+});
+
+function contextPanel(): HTMLElement {
+  return document.getElementById('workspace-panel-context')!;
+}
+
+it('/context opens the Context panel beside the chat and sends nothing', async () => {
+  render(<JobDetail job={job('job-a', 'thread-a')} />);
+  const box = await screen.findByLabelText('Add a follow-up');
+  fireEvent.change(box, { target: { value: '/context' } });
+  // The menu offers it with the other commands.
+  expect(screen.getByRole('option', { name: /Context/ })).toBeInTheDocument();
+  fireEvent.keyDown(box, { key: 'Enter' });
+
+  const workspace = screen.getByRole('region', { name: 'Job workspace' });
+  expect(workspace).not.toHaveAttribute('hidden');
+  expect(within(workspace).getByRole('tab', { name: 'Context' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  expect(await within(contextPanel()).findAllByText('4,321')).not.toHaveLength(0);
+  // An app command: no message, no new turn, and the token is gone.
+  expect(submitThreadMessage).not.toHaveBeenCalled();
+  expect(createAgentJob).not.toHaveBeenCalled();
+  expect(box).toHaveValue('');
+  // The chat stays: the composer can still be used beside the panel.
+  expect(screen.getByLabelText('Add a follow-up')).toBeInTheDocument();
+});
+
+it('keeps the draft that followed the command', async () => {
+  render(<JobDetail job={job('job-a', 'thread-a')} />);
+  const box = await screen.findByLabelText('Add a follow-up');
+  fireEvent.change(box, { target: { value: '/context then fix the login test' } });
+  fireEvent.keyDown(box, { key: 'Enter' });
+  await waitFor(() => expect(box).toHaveValue('then fix the login test'));
+  expect(submitThreadMessage).not.toHaveBeenCalled();
+  expect(contextPanel()).not.toHaveAttribute('hidden');
+});
+
+it('choosing the menu row by keyboard opens it, and Escape only closes the menu', async () => {
+  render(<JobDetail job={job('job-a', 'thread-a')} />);
+  const box = await screen.findByLabelText('Add a follow-up');
+  fireEvent.change(box, { target: { value: '/' } });
+  fireEvent.keyDown(box, { key: 'Escape' });
+  expect(screen.queryByRole('option', { name: /Context/ })).not.toBeInTheDocument();
+  fireEvent.change(box, { target: { value: '/c' } });
+  fireEvent.keyDown(box, { key: 'Enter' });
+  expect(contextPanel()).not.toHaveAttribute('hidden');
+  expect(box).toHaveValue('');
+});
+
+it('the panel and the Context tab share one read, and the panel steps aside for the tab', async () => {
+  render(<JobDetail job={job('job-a', 'thread-a')} />);
+  const box = await screen.findByLabelText('Add a follow-up');
+  fireEvent.change(box, { target: { value: '/context' } });
+  fireEvent.keyDown(box, { key: 'Enter' });
+  await within(contextPanel()).findAllByText('4,321');
+
+  fireEvent.click(
+    within(contextPanel()).getByRole('button', { name: 'Open the full Context view' }),
+  );
+  expect(document.getElementById('job-workspace-pane')).toHaveAttribute('hidden');
+  expect(screen.getByRole('button', { name: 'context' })).toHaveAttribute('aria-current', 'page');
+  expect(await screen.findAllByText('4,321')).not.toHaveLength(0);
+  // The full tab drew the data already read; it did not read it again.
+  expect(getAgentThreadContext).toHaveBeenCalledTimes(1);
+});
+
+it('another conversation never shows the previous one’s context', async () => {
+  const { rerender } = render(<JobDetail job={job('job-a', 'thread-a')} />);
+  const box = await screen.findByLabelText('Add a follow-up');
+  fireEvent.change(box, { target: { value: '/context' } });
+  fireEvent.keyDown(box, { key: 'Enter' });
+  await within(contextPanel()).findAllByText('4,321');
+
+  rerender(<JobDetail job={job('job-b', 'thread-b')} />);
+  // A new conversation starts with its workspace closed; open its Context tab.
+  fireEvent.click(screen.getByRole('button', { name: 'context' }));
+  expect(screen.queryAllByText('4,321')).toHaveLength(0);
+  expect(await screen.findAllByText('8,765')).not.toHaveLength(0);
+  expect(screen.queryAllByText('4,321')).toHaveLength(0);
+  expect(getAgentThreadContext).toHaveBeenLastCalledWith('job-b', expect.anything());
+});

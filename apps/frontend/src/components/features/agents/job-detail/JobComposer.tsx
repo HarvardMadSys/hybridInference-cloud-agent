@@ -24,6 +24,7 @@ import { hasLostContext } from '../conversationJob';
 import { modelOverride } from '../modelSource';
 import { GoalBar } from '../goal/GoalBar';
 import { hasLiveWork } from '../goal/liveWork';
+import { useOpenThreadContext } from '../context/threadContextData';
 import { useGoalCommand, type GoalCommandControls } from '../goal/useGoalCommand';
 import { McpSessionPanel } from '../mcp/McpSessionPanel';
 import type { useThreadComposerMcp } from '../mcp/useThreadComposerMcp';
@@ -156,6 +157,7 @@ export function JobComposer({
   const canSteer = queue.canSendNow && !otherModel;
   const followUp = useComposerDraftValue(draft);
   const { setValue: setFollowUp } = draft;
+  const openContext = useOpenThreadContext();
   const goalCommand = useGoalCommand({
     value: followUp,
     setValue: setFollowUp,
@@ -163,6 +165,8 @@ export function JobComposer({
     onNeedsObjective: () => setGoalHint(t('goal.needsObjective')),
     onApply: applyGoalObjective,
     onError: setActionError,
+    // `/context` opens the page's context beside the chat; nothing is sent.
+    onContext: openContext,
   });
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [dropping, setDropping] = useState(false);

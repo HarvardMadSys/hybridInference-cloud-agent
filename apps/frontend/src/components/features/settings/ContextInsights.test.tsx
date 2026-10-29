@@ -75,6 +75,7 @@ function row(id: string, overrides: Partial<ConversationContext> = {}): Conversa
     context_window: 272_000,
     compactions: 2,
     usage: usage('1.50', 80_000),
+    composition: null,
     ...overrides,
   };
 }
@@ -88,6 +89,7 @@ function page(overrides: Partial<ContextInsightsPage> = {}): ContextInsightsPage
     summary: {
       conversations: 3,
       conversations_observed: 2,
+      turns: 9,
       main_requests: 60,
       subagent_requests: 7,
       compactions: 2,
@@ -107,6 +109,10 @@ function page(overrides: Partial<ContextInsightsPage> = {}): ContextInsightsPage
       }),
     ],
     next_cursor: 'next-1',
+    filters: { q: '', repo: null, temporary: false, day: null },
+    activity: null,
+    projects: null,
+    composition: null,
     ...overrides,
   };
 }

@@ -26,6 +26,7 @@ import {
   barSegments,
   categoryLabel,
   filterEntries,
+  type EntryOrder,
   nativeCategories,
   nativeState,
   type BarSegment,
@@ -307,7 +308,9 @@ function Reconstructed({
 }) {
   const { t, locale } = useLocale();
   const [category, setCategory] = useState<string | null>(null);
-  const entries = filterEntries(rebuilt.entries, category);
+  const [query, setQuery] = useState('');
+  const [order, setOrder] = useState<EntryOrder>('largest');
+  const entries = filterEntries(rebuilt.entries, category, query, order);
   return (
     <div className="mt-4">
       <h4 className="text-xs font-semibold text-foreground">{t('contextRequest.reconstructed')}</h4>
@@ -337,6 +340,7 @@ function Reconstructed({
           </FilterChip>
         ))}
       </div>
+      <EntryControls query={query} onQuery={setQuery} order={order} onOrder={setOrder} />
       <ul className="mt-2 divide-y divide-border rounded-lg border border-border text-xs">
         {entries.map((entry) => (
           <EntryRow
@@ -352,6 +356,44 @@ function Reconstructed({
         <Note>{t('contextRequest.native.omitted', { count: rebuilt.entries_omitted })}</Note>
       ) : null}
       <Excluded rebuilt={rebuilt} />
+    </div>
+  );
+}
+
+/** Search the listed entries' names and previews, and choose their order. */
+function EntryControls({
+  query,
+  onQuery,
+  order,
+  onOrder,
+}: {
+  query: string;
+  onQuery: (query: string) => void;
+  order: EntryOrder;
+  onOrder: (order: EntryOrder) => void;
+}) {
+  const { t } = useLocale();
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+      <input
+        type="search"
+        value={query}
+        onChange={(event) => onQuery(event.target.value)}
+        aria-label={t('contextRequest.search')}
+        placeholder={t('contextRequest.searchPlaceholder')}
+        className="ui-input min-h-8 w-full text-xs sm:w-56 [@media(pointer:coarse)]:min-h-11"
+      />
+      <div role="group" aria-label={t('contextRequest.order')} className="flex gap-1">
+        {(['largest', 'transcript'] as const).map((value) => (
+          <FilterChip key={value} active={order === value} onClick={() => onOrder(value)}>
+            {t(
+              value === 'largest'
+                ? 'contextRequest.order.largest'
+                : 'contextRequest.order.transcript',
+            )}
+          </FilterChip>
+        ))}
+      </div>
     </div>
   );
 }

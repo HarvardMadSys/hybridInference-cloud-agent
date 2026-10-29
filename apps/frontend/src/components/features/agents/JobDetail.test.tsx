@@ -1642,9 +1642,9 @@ describe('JobDetail', () => {
       within(within(workspace).getByRole('tablist', { name: 'Workspace views' }))
         .getAllByRole('tab')
         .map((tab) => tab.textContent?.replace(/\d+$/, '').trim());
-    expect(names()).toEqual(['Git', 'Terminal', 'Files', 'Environment']);
+    expect(names()).toEqual(['Git', 'Terminal', 'Files', 'Environment', 'Context']);
     addSideChat();
-    expect(names()).toEqual(['Git', 'Terminal', 'Files', 'Environment', 'Side Chat']);
+    expect(names()).toEqual(['Git', 'Terminal', 'Files', 'Environment', 'Context', 'Side Chat']);
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toBeVisible();
     fireEvent.keyDown(screen.getByRole('region', { name: 'Side chat messages' }), {
       key: 'Escape',

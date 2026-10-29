@@ -44,3 +44,8 @@ export const SideChat = dynamic(() => import('../SideChat').then((module) => mod
 export const SkillSelectionDialog = lazy(() =>
   import('../skills/SkillPicker').then((module) => ({ default: module.SkillSelectionDialog })),
 );
+export const PluginSelectionDialog = lazy(() =>
+  import('../plugins/PluginSelectionDialog').then((module) => ({
+    default: module.PluginSelectionDialog,
+  })),
+);

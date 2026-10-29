@@ -119,6 +119,75 @@ export interface OwnerTokenUsage {
 export type ContextSort = 'recent' | 'peak' | 'compactions' | 'requests';
 export const CONTEXT_SORTS: readonly ContextSort[] = ['recent', 'peak', 'compactions', 'requests'];
 
+/** Recorded-content categories, in the order a chart stacks them. */
+export type RecordedCategory =
+  | 'turn_prompts'
+  | 'platform_context'
+  | 'user_messages'
+  | 'assistant'
+  | 'reasoning'
+  | 'tool_calls'
+  | 'tool_results'
+  | 'compaction_summary'
+  | 'injected';
+
+/**
+ * Recorded content beside the provider's reported request sizes. The first is
+ * an estimate of stored text, each item counted once; the second is exact as
+ * the CLI relayed it, summed over every request, so retained text counts once
+ * per request that carried it. Neither is derived from the other.
+ */
+export interface ContextComposition {
+  recorded: {
+    basis: string;
+    categories: { key: RecordedCategory; tokens: number }[];
+    total_tokens: number;
+    turns: number;
+    turns_profiled: number;
+    turns_truncated: number;
+  };
+  provider: {
+    requests: number;
+    prompt_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    output_tokens: number;
+    output_unreported: number;
+    subagent_requests: number;
+    subagent_prompt_tokens: number;
+    subagent_output_tokens: number;
+  };
+}
+
+/** One UTC day of the range with matching runs. */
+export interface ContextActivityDay {
+  day: string;
+  turns: number;
+  conversations: number;
+  main_requests: number;
+  compactions: number;
+  peak_prompt_tokens: number | null;
+}
+
+/** One project of the matching runs; `repo` null is the temporary workspaces. */
+export interface ContextProject {
+  repo: string | null;
+  conversations: number;
+  turns: number;
+  main_requests: number;
+  compactions: number;
+  peak_prompt_tokens: number | null;
+  last_turn_at: string;
+}
+
+/** What narrows the list: all of it is applied by the server, over the whole range. */
+export interface ContextInsightsFilters {
+  q: string;
+  repo: string | null;
+  temporary: boolean;
+  day: string | null;
+}
+
 /** One conversation's context profile over its runs in the range. */
 export interface ConversationContext {
   thread_id: string;
@@ -142,6 +211,7 @@ export interface ConversationContext {
   compactions: number;
   /** Server-summed Gateway usage of these runs; null when none was recorded. */
   usage: AdminUsageAggregate | null;
+  composition: ContextComposition | null;
 }
 
 export interface ContextInsightsPage {
@@ -152,6 +222,7 @@ export interface ContextInsightsPage {
   summary: {
     conversations: number;
     conversations_observed: number;
+    turns: number;
     main_requests: number;
     subagent_requests: number;
     compactions: number;
@@ -167,6 +238,13 @@ export interface ContextInsightsPage {
   };
   conversations: ConversationContext[];
   next_cursor: string | null;
+  filters: ContextInsightsFilters;
+  /** First page only: every UTC day of the range with matching runs, day filter aside. */
+  activity: ContextActivityDay[] | null;
+  /** First page only: every project of the matching runs, project filter aside. */
+  projects: ContextProject[] | null;
+  /** First page only: every matching conversation's composition, summed. */
+  composition: ContextComposition | null;
 }
 
 export async function getOwnerContainers(
@@ -211,9 +289,15 @@ export async function getContextInsights(options: {
   sort: ContextSort;
   cursor?: string | null;
   limit?: number;
+  filters?: Partial<ContextInsightsFilters>;
   signal?: AbortSignal;
 }): Promise<ContextInsightsPage> {
   const params = new URLSearchParams({ range: options.range, sort: options.sort });
+  const filters = options.filters ?? {};
+  if (filters.q?.trim()) params.set('q', filters.q.trim());
+  if (filters.repo) params.set('repo', filters.repo);
+  else if (filters.temporary) params.set('temporary', 'true');
+  if (filters.day) params.set('day', filters.day);
   if (options.cursor) params.set('cursor', options.cursor);
   if (options.limit) params.set('limit', String(options.limit));
   const response = await fetchWithAuth(config.apiBase, `${USAGE}/context?${params}`, {

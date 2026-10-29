@@ -168,6 +168,10 @@ function view(overrides: Partial<ThreadContextApi> = {}): ThreadContextApi {
       points_omitted: 0,
       unparsed_raw: 0,
     },
+    events: [],
+    event_counts: {},
+    events_omitted: 0,
+    event_capabilities: [],
     ...overrides,
   };
 }

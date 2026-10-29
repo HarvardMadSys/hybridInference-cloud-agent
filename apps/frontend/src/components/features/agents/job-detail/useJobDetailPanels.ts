@@ -351,6 +351,15 @@ export function useJobDetailPanels({
     [getTrajectorySteps, openRun, selectStep],
   );
 
+  // `/context` and the panel's own tab open the context beside the chat, so
+  // the conversation can still be read and answered. From the panel, the
+  // full view takes the main area, and the panel steps aside for it.
+  const openContextPanel = useCallback(() => openWorkspace('context'), [openWorkspace]);
+  const openContextTab = useCallback(() => {
+    setTab('context');
+    setWorkspaceOpen(false);
+  }, [setWorkspaceOpen]);
+
   // The trajectory's subagent filter, as its menu value: `[jobId, key]` or empty.
   const setSubagentFilter = useCallback((value: string) => {
     if (!value) {
@@ -414,6 +423,8 @@ export function useJobDetailPanels({
   }, [toggleWorkspace, shortcuts.workspace]);
 
   return {
+    /** The turn the panels were opened for. */
+    job,
     workspaceShortcut: shortcuts.workspace,
     workspaceScope,
     tab,
@@ -457,6 +468,8 @@ export function useJobDetailPanels({
     closeInspector,
     selectStep,
     openContextPoint,
+    openContextPanel,
+    openContextTab,
     inspectTranscriptEvent,
     openRun,
     selectInspectorTab,
