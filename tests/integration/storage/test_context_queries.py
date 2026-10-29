@@ -210,8 +210,10 @@ async def test_thread_context_is_the_owners_and_reads_real_payloads(db, store):
     [p1, p2] = [attempt["profile"] for attempt in result["attempts"]]
     assert [point[3] for point in p1["requests"]] == [1010, 30_010]
     assert p1["summary"]["context_window"] == 200_000
-    # The 100,000-character result moved as its length.
-    assert p1["content"]["total"]["tool_results"] == 100_000
+    # The 100,000-character result moved as its length and character counts.
+    results = p1["content"]["categories"]["tool_results"]
+    assert (results["chars"], results["items"]) == (100_000, 1)
+    assert results["tokens"] == 25_000
     assert p2["compactions"][0]["pre_tokens"] == 30_020
     assert [job["prompt_chars"] for job in result["jobs"]] == [400, 400]
 

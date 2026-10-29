@@ -15,14 +15,19 @@ ranking is never presented as complete while it is not.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime  # noqa: TC003 — Pydantic resolves the model annotations.
-from typing import Any, Literal
+from datetime import date, datetime  # noqa: TC003 — Pydantic resolves the model annotations.
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.admin_observability import cursor_scope
 from cloud_agent.admin_usage import AdminUsageAggregate  # noqa: TC001
+from cloud_agent.context_profile import CONTENT_CATEGORIES, TOTAL_FIELDS
 from cloud_agent.usage_range import UsageRange  # noqa: TC001
+from cloud_agent_shared.text_tokens import ESTIMATE_BASIS
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
 
 ContextSort = Literal["recent", "peak", "compactions", "requests"]
 CONTEXT_SORTS: tuple[ContextSort, ...] = ("recent", "peak", "compactions", "requests")
@@ -80,6 +85,165 @@ def context_cursor_scope(
     return cursor_scope(["owner-context-insights", sort, preset, *filters.scope()])
 
 
+#: Recorded-content categories, in the order a chart stacks them: the turns'
+#: own prompts, what the platform wrapped them in, then the stored content.
+RecordedCategory = Literal[
+    "turn_prompts",
+    "platform_context",
+    "user_messages",
+    "assistant",
+    "reasoning",
+    "tool_calls",
+    "tool_results",
+    "compaction_summary",
+    "injected",
+]
+RECORDED_CATEGORIES: tuple[RecordedCategory, ...] = (
+    "turn_prompts",
+    "platform_context",
+    *CONTENT_CATEGORIES,
+)
+#: Where each category's per-conversation sum sits in a composition row.
+_ROW_COLUMN: dict[str, str] = {
+    "turn_prompts": "prompt_tokens",
+    "platform_context": "platform_tokens",
+}
+
+
+class RecordedShare(BaseModel):
+    """One category's recorded content, estimated in tokens."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: RecordedCategory
+    tokens: int = Field(ge=0)
+
+
+class RecordedComposition(BaseModel):
+    """What the turns recorded, each stored item counted once, by category.
+
+    An estimate from characters (``basis``), never a billed or reported
+    count. A turn counts its kept attempt only (a retried one was replaced),
+    a delegated agent's own context is left out, and a Fork's copied turns
+    belong to the conversation they were copied from. CLI system prompts and
+    tool definitions were never stored, so they are not a category: nothing
+    is derived by subtracting this from a reported total.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    basis: str = ESTIMATE_BASIS
+    categories: list[RecordedShare]
+    total_tokens: int = Field(ge=0)
+    turns: int = Field(ge=0)
+    #: Turns whose kept attempt has a current profile; the rest are not counted yet.
+    turns_profiled: int = Field(ge=0)
+    #: Turns with at least one stored item clipped when recorded (undercounted).
+    turns_truncated: int = Field(ge=0)
+
+
+class ProviderTotals(BaseModel):
+    """Every request's size as the provider reported it (via the CLI), summed.
+
+    Each request resends what the conversation kept, so this is per-request
+    exposure: retained text counts once for every request that carried it.
+    Cache reads and writes are parts of ``prompt_tokens``, not additions.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    requests: int = Field(ge=0)
+    prompt_tokens: int = Field(ge=0)
+    cache_read_tokens: int = Field(ge=0)
+    cache_write_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    #: Requests whose output the CLI did not report; their output is not summed.
+    output_unreported: int = Field(ge=0)
+    subagent_requests: int = Field(ge=0)
+    subagent_prompt_tokens: int = Field(ge=0)
+    subagent_output_tokens: int = Field(ge=0)
+
+
+class ContextComposition(BaseModel):
+    """Recorded content (estimated, once) beside reported request sizes (exact, per request)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recorded: RecordedComposition
+    provider: ProviderTotals
+
+
+def _int(row: Mapping[str, Any], key: str) -> int:
+    value = row.get(key)
+    return int(value) if value is not None else 0
+
+
+def compose(rows: Iterable[Mapping[str, Any]]) -> ContextComposition:
+    """Sum per-conversation composition rows; every number is the rows' own."""
+    rows = list(rows)
+    shares = {
+        key: sum(_int(row, _ROW_COLUMN.get(key, key)) for row in rows)
+        for key in RECORDED_CATEGORIES
+    }
+    provider = {field: sum(_int(row, f"main_{field}") for row in rows) for field in TOTAL_FIELDS}
+    return ContextComposition(
+        recorded=RecordedComposition(
+            categories=[
+                RecordedShare(key=key, tokens=tokens) for key, tokens in shares.items() if tokens
+            ],
+            total_tokens=sum(shares.values()),
+            turns=sum(_int(row, "turns") for row in rows),
+            turns_profiled=sum(_int(row, "turns_profiled") for row in rows),
+            turns_truncated=sum(_int(row, "turns_truncated") for row in rows),
+        ),
+        provider=ProviderTotals(
+            **provider,
+            subagent_requests=sum(_int(row, "subagent_requests") for row in rows),
+            subagent_prompt_tokens=sum(_int(row, "subagent_prompt_tokens") for row in rows),
+            subagent_output_tokens=sum(_int(row, "subagent_output_tokens") for row in rows),
+        ),
+    )
+
+
+class ContextActivityDay(BaseModel):
+    """One UTC day's activity among the matching runs (the heatmap's cell)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    day: date
+    turns: int = Field(ge=0)
+    conversations: int = Field(ge=0)
+    main_requests: int = Field(ge=0)
+    compactions: int = Field(ge=0)
+    peak_prompt_tokens: int | None = None
+
+
+class ContextProject(BaseModel):
+    """One project of the matching runs: a repository, or none (temporary workspaces)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: The conversation's repository; None groups the temporary workspaces.
+    repo: str | None = None
+    conversations: int = Field(ge=0)
+    turns: int = Field(ge=0)
+    main_requests: int = Field(ge=0)
+    compactions: int = Field(ge=0)
+    peak_prompt_tokens: int | None = None
+    last_turn_at: datetime
+
+
+class InsightsFilterEcho(BaseModel):
+    """The filters this page applied, as the server understood them."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    q: str = ""
+    repo: str | None = None
+    temporary: bool = False
+    day: date | None = None
+
+
 class ConversationContext(BaseModel):
     """One conversation's context profile over its runs in the range."""
 
@@ -109,6 +273,8 @@ class ConversationContext(BaseModel):
     compactions: int = Field(ge=0)
     #: Gateway-recorded usage and cost of these runs, summed by the server.
     usage: AdminUsageAggregate | None = None
+    #: Recorded content and reported request sizes of these runs.
+    composition: ContextComposition | None = None
 
 
 class ContextInsightsSummary(BaseModel):
@@ -118,6 +284,7 @@ class ContextInsightsSummary(BaseModel):
 
     conversations: int = Field(ge=0)
     conversations_observed: int = Field(ge=0)
+    turns: int = Field(default=0, ge=0)
     main_requests: int = Field(ge=0)
     subagent_requests: int = Field(ge=0)
     compactions: int = Field(ge=0)
@@ -155,6 +322,15 @@ class ContextInsightsPage(BaseModel):
     profiling: ContextProfiling
     conversations: list[ConversationContext]
     next_cursor: str | None = None
+    filters: InsightsFilterEcho = Field(default_factory=InsightsFilterEcho)
+    #: The first page only (a later page continues its list, not its charts).
+    #: Every UTC day of the range with any matching run, oldest first: the
+    #: whole range, the day filter aside, never a window of it.
+    activity: list[ContextActivityDay] | None = None
+    #: Every project of the matching runs, the project filter aside.
+    projects: list[ContextProject] | None = None
+    #: Every matching conversation's composition summed.
+    composition: ContextComposition | None = None
 
 
 class ContextInsightsCursor(BaseModel):

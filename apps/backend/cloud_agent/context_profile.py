@@ -263,6 +263,8 @@ class ContextProfileAccumulator:
         self.windows: dict[str, int] = {}
         self.subagent_requests = 0
         self.subagent_peak: int | None = None
+        #: Delegated agents' requests, kept only for their summed sizes.
+        self._subagent_list: list[_Request] = []
         self.unparsed_raw = 0
         self._requests: list[_Request] = []
         self._by_usage_id: dict[str, _Request] = {}
@@ -327,6 +329,7 @@ class ContextProfileAccumulator:
             self.subagent_requests += 1
             peak = self.subagent_peak
             self.subagent_peak = request.prompt if peak is None else max(peak, request.prompt)
+            self._subagent_list.append(request)
             return
         self._requests.append(request)
 
@@ -790,6 +793,13 @@ class ContextProfileAccumulator:
                 "compactions": len(completed),
                 "compacted_after_latest": compacted_after,
             },
+            # What the provider reported for every request, summed: each
+            # request resends what the conversation kept, so this measures
+            # per-request exposure, never the conversation's size.
+            "totals": {
+                "main": _totals(requests),
+                "subagent": _totals(self._subagent_list),
+            },
         }
 
     def _main_window(self) -> int | None:
@@ -800,6 +810,29 @@ class ContextProfileAccumulator:
             return next(iter(self.windows.values()))
         # A CLI snapshot's window (pi reports its model's) when nothing else did.
         return self._snapshot_window if not self.windows else None
+
+
+#: The summed request sizes a profile's ``totals`` holds.
+TOTAL_FIELDS = (
+    "requests",
+    "prompt_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "output_tokens",
+    "output_unreported",
+)
+
+
+def _totals(requests: list[_Request]) -> dict[str, int]:
+    """Every request's reported sizes summed; an unreported output is counted apart."""
+    return {
+        "requests": len(requests),
+        "prompt_tokens": sum(r.prompt for r in requests),
+        "cache_read_tokens": sum(r.cache_read or 0 for r in requests),
+        "cache_write_tokens": sum(r.cache_write or 0 for r in requests),
+        "output_tokens": sum(r.output or 0 for r in requests),
+        "output_unreported": sum(1 for r in requests if r.output is None),
+    }
 
 
 def _bounded(requests: list[_Request]) -> tuple[list[_Request], int]:

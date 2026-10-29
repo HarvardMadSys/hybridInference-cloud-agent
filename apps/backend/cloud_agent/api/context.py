@@ -8,7 +8,7 @@ any credential, or the content of an event: profiles hold sizes and counts.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
@@ -21,15 +21,21 @@ from cloud_agent.api.owner_usage import resolve_period
 from cloud_agent.context_insights import (
     DEFAULT_CONTEXT_PAGE,
     MAX_CONTEXT_PAGE,
+    MAX_SEARCH_CHARS,
     PENDING_COUNT_CAP,
     REFRESH_ATTEMPTS_PER_READ,
     REFRESH_EVENTS_PER_READ,
+    ContextActivityDay,
     ContextInsightsCursor,
     ContextInsightsPage,
     ContextInsightsSummary,
     ContextProfiling,
+    ContextProject,
     ContextSort,
     ConversationContext,
+    InsightsFilterEcho,
+    InsightsFilters,
+    compose,
     context_cursor_scope,
 )
 from cloud_agent.context_request import RequestComposition
@@ -190,6 +196,28 @@ def _conversation(row: dict[str, Any]) -> ConversationContext:
     )
 
 
+def _invalid(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=422, detail={"error": {"type": "invalid_filter", "message": message}}
+    )
+
+
+def _filters(q: str | None, repo: str | None, temporary: bool, day: date | None) -> InsightsFilters:
+    """The list's filters; a day is bound to the range once it is resolved."""
+    if repo is not None and temporary:
+        raise _invalid("Choose one repository or the temporary workspaces, not both.")
+    if repo is not None and not repo.strip():
+        raise _invalid("A repository filter needs a repository.")
+    since = datetime.combine(day, time(), tzinfo=UTC) if day is not None else None
+    return InsightsFilters(
+        q=(q or "").strip(),
+        repo=repo,
+        temporary=temporary,
+        day_since=since,
+        day_until=since + timedelta(days=1) if since is not None else None,
+    )
+
+
 @router.get("/usage/context", response_model=ContextInsightsPage)
 async def read_context_insights(
     period: RangePreset = Query(
@@ -200,17 +228,30 @@ async def read_context_insights(
     sort: ContextSort = Query("recent"),
     cursor: str | None = Query(None, max_length=2048),
     limit: int = Query(DEFAULT_CONTEXT_PAGE, ge=1, le=MAX_CONTEXT_PAGE),
+    q: str | None = Query(
+        None,
+        max_length=MAX_SEARCH_CHARS,
+        description="Title or repository, case-insensitive, over the whole range.",
+    ),
+    repo: str | None = Query(None, max_length=512, description="One repository's conversations."),
+    temporary: bool = Query(False, description="Only conversations without a repository."),
+    day: date | None = Query(None, description="One UTC day of the range."),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _ContextStorage | None = Depends(get_storage),
 ) -> ContextInsightsPage:
     """A ranked page of the owner's conversations with runs in the range.
 
+    Search, project and day narrow the whole range on the server, before it
+    is ranked and paged; a cursor is bound to all of them.
+
     Raises:
-        HTTPException: 422 for a cursor from another list, 503 when the page's
-            usage cannot be summed in time; never a partial sum.
+        HTTPException: 422 for a cursor from another list or a day outside the
+            range, 503 when the page's usage cannot be summed in time; never a
+            partial sum.
     """
     context_store: _ContextStorage = require_store(store)
-    scope = context_cursor_scope(sort, period)
+    filters = _filters(q, repo, temporary, day)
+    scope = context_cursor_scope(sort, period, filters)
     try:
         after = decode_cursor(cursor, ContextInsightsCursor, scope)
     except ValueError as exc:
@@ -222,6 +263,9 @@ async def read_context_insights(
         )
     else:
         resolved = await resolve_period(context_store, user["user_id"], period, None)
+    if filters.day_since is not None and not (resolved.since <= filters.day_since < resolved.until):
+        # Every preset starts at a UTC midnight, so each of its days is whole.
+        raise _invalid("The day is outside the selected range.")
     result = await context_store.context_queries.insights_page(
         user_id=user["user_id"],
         since=resolved.since,
@@ -232,6 +276,7 @@ async def read_context_insights(
         refresh_attempts=REFRESH_ATTEMPTS_PER_READ,
         refresh_events=REFRESH_EVENTS_PER_READ,
         pending_cap=PENDING_COUNT_CAP,
+        filters=filters,
     )
     rows = result["page"]
     more = len(rows) > limit
@@ -260,6 +305,10 @@ async def read_context_insights(
             ) from None
         for conversation in conversations:
             conversation.usage = usage.by_thread.get(conversation.thread_id)
+    composition = {row["thread_id"]: row for row in result.get("composition") or []}
+    for conversation in conversations:
+        found = composition.get(conversation.thread_id)
+        conversation.composition = compose([found]) if found is not None else None
     next_cursor = None
     if more and rows:
         last = rows[-1]
@@ -287,4 +336,21 @@ async def read_context_insights(
         ),
         conversations=conversations,
         next_cursor=next_cursor,
+        filters=InsightsFilterEcho(
+            q=filters.q,
+            repo=filters.repo,
+            temporary=filters.temporary,
+            day=day,
+        ),
+        activity=(
+            [ContextActivityDay(**row) for row in result["activity"]]
+            if after is None and "activity" in result
+            else None
+        ),
+        projects=(
+            [ContextProject(**row) for row in result["projects"]]
+            if after is None and "projects" in result
+            else None
+        ),
+        composition=compose(composition.values()) if after is None else None,
     )

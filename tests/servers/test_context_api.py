@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -236,3 +236,105 @@ async def test_content_is_read_in_windows_for_its_owner(app):
     }
     assert response.json()["next_offset"] == 40_000
     assert response.headers["cache-control"] == "no-store"
+
+
+async def test_filters_reach_the_query_and_bind_the_cursor(app):
+    today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    app.state.queries.insights_page.return_value = {
+        **app.state.queries.insights_page.return_value,
+        "activity": [
+            {
+                "day": datetime(2026, 10, 14, tzinfo=UTC).date(),
+                "turns": 3,
+                "conversations": 2,
+                "main_requests": 9,
+                "compactions": 1,
+                "peak_prompt_tokens": 1000,
+            }
+        ],
+        "projects": [
+            {
+                "repo": None,
+                "conversations": 1,
+                "turns": 1,
+                "main_requests": 2,
+                "compactions": 0,
+                "peak_prompt_tokens": None,
+                "last_turn_at": NOW,
+            }
+        ],
+        "composition": [
+            {
+                "thread_id": "athr_1",
+                "turns": 1,
+                "turns_profiled": 1,
+                "turns_truncated": 0,
+                "prompt_tokens": 12,
+                "tool_results": 300,
+                "main_requests": 2,
+                "main_prompt_tokens": 2_000,
+            },
+            {"thread_id": "athr_9", "turns": 4, "turns_profiled": 4, "prompt_tokens": 8},
+        ],
+    }
+    response = await _get(
+        app,
+        "/v1/agent/usage/context",
+        range="7d",
+        q="  Login ",
+        temporary="true",
+        day=today.date().isoformat(),
+        limit=1,
+    )
+    assert response.status_code == 200
+    filters = app.state.queries.insights_page.await_args.kwargs["filters"]
+    assert (filters.q, filters.repo, filters.temporary) == ("Login", None, True)
+    assert filters.day_since == today
+    assert filters.day_until == today + timedelta(days=1)
+    body = response.json()
+    assert body["filters"] == {
+        "q": "Login",
+        "repo": None,
+        "temporary": True,
+        "day": today.date().isoformat(),
+    }
+    assert body["activity"][0]["day"] == "2026-10-14"
+    assert body["projects"][0]["repo"] is None
+    # The chart sums every matching conversation; each row carries its own.
+    assert body["composition"]["recorded"]["total_tokens"] == 12 + 300 + 8
+    assert body["composition"]["provider"]["prompt_tokens"] == 2_000
+    first = body["conversations"][0]["composition"]
+    assert first["recorded"]["total_tokens"] == 312
+    # The cursor belongs to this search, project and day, and no other.
+    cursor = body["next_cursor"]
+    assert cursor
+    again = await _get(
+        app,
+        "/v1/agent/usage/context",
+        range="7d",
+        q="Login",
+        temporary="true",
+        day=today.date().isoformat(),
+        limit=1,
+        cursor=cursor,
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["activity"] is None and again.json()["composition"] is None
+    other = await _get(app, "/v1/agent/usage/context", range="7d", q="Login", cursor=cursor)
+    assert other.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"repo": "acme/web", "temporary": "true"},
+        {"repo": " "},
+        {"day": "2020-01-01"},
+        {"day": "yesterday"},
+        {"q": "x" * 201},
+    ],
+)
+async def test_a_bad_filter_is_refused_before_the_list_is_read(app, params):
+    response = await _get(app, "/v1/agent/usage/context", range="7d", **params)
+    assert response.status_code == 422
+    app.state.queries.insights_page.assert_not_awaited()

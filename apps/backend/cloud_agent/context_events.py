@@ -8,7 +8,8 @@ Five kinds, each only where a record says so (design record, section 7.2):
   user lines, pi's extension messages, a server's synthetic message parts);
 - **compaction**: the CLI's compaction reports, with the CLI's own sizes when
   it gave them;
-- **prune**: OpenCode and Kilo marking an earlier tool output as cleared;
+- **prune**: Kilo marking an earlier tool output as cleared before a request
+  that would be too large (OpenCode's prune is off in the platform's config);
 - **model_switch**: a turn run on another model than the turn before it, or
   a request reporting another model than the one before it in its turn;
 - **mode**: Claude Code entering or leaving plan mode, or starting a turn in
@@ -91,9 +92,11 @@ _SUPPORT: dict[str, dict[EventKind, tuple[EventSupport, str | None]]] = {
     "claude-code": {
         "injection": ("partly_reported", "since_this_release"),
         "compaction": ("reported", None),
-        "prune": ("not_reported", "claude_no_prune_record"),
+        "prune": ("not_reported", "claude_microcompact_unrecorded"),
         "model_switch": ("reported", "turn_settings"),
-        "mode": ("partly_reported", "since_this_release"),
+        # The start-up permission mode and the plan-mode tool calls were
+        # always stored; a mode the owner toggles inside the CLI is not.
+        "mode": ("partly_reported", "claude_plan_tools"),
     },
     "codex": {
         "injection": ("partly_reported", "platform_only"),
@@ -112,12 +115,19 @@ _SUPPORT: dict[str, dict[EventKind, tuple[EventSupport, str | None]]] = {
     "opencode": {
         "injection": ("partly_reported", "since_this_release"),
         "compaction": ("reported", None),
-        "prune": ("partly_reported", "since_this_release"),
+        # 1.18.9 prunes only with ``compaction.prune`` set, which defaults to
+        # false and which the platform's config does not set: none happen.
+        "prune": ("not_reported", "opencode_prune_off"),
         "model_switch": ("reported", "turn_settings"),
         "mode": ("not_reported", "platform_fixed_mode"),
     },
 }
-_SUPPORT["kilo"] = _SUPPORT["opencode"]
+_SUPPORT["kilo"] = {
+    **_SUPPORT["opencode"],
+    # 7.4.17 prunes before a request whose payload is too large (seen, mid
+    # turn); its end-of-turn prune also needs ``compaction.prune`` set.
+    "prune": ("partly_reported", "kilo_payload_limit_only"),
+}
 _UNKNOWN: dict[EventKind, tuple[EventSupport, str | None]] = dict.fromkeys(
     EVENT_KINDS, ("not_reported", "unknown_runtime")
 )

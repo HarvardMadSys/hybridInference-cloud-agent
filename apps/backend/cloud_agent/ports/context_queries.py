@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from cloud_agent.context_insights import ContextInsightsCursor, ContextSort
+    from cloud_agent.context_insights import ContextInsightsCursor, ContextSort, InsightsFilters
     from cloud_agent.context_request import RequestComposition
 
 
@@ -30,6 +30,7 @@ class ContextQueries(Protocol):
         refresh_attempts: int,
         refresh_events: int,
         pending_cap: int,
+        filters: InsightsFilters | None = None,
     ) -> dict[str, Any]:
         """One ranked page of the owner's conversations with runs in the range."""
         ...
