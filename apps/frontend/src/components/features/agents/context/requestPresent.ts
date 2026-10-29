@@ -47,7 +47,7 @@ export const CATEGORY_COLOR: Record<string, string> = {
   injected: 'bg-yellow-500/70',
   compaction_summary: 'bg-rose-400/70',
   turn_prompts: 'bg-sky-700/70',
-  platform_context: 'bg-yellow-700/60',
+  platform_context: 'bg-stone-500/70',
   user_messages: 'bg-sky-500/70',
   assistant: 'bg-emerald-500/70',
   reasoning: 'bg-violet-500/70',

@@ -24,7 +24,7 @@ const PROVIDER_LABEL: Record<string, TranslationKey> = {
 
 const PROVIDER_COLOR: Record<string, string> = {
   uncached: 'bg-sky-600/70',
-  cache_read: 'bg-emerald-600/60',
+  cache_read: 'bg-emerald-500/60',
   cache_write: 'bg-amber-500/70',
 };
 
