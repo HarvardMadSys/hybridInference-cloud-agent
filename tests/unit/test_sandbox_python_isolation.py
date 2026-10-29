@@ -40,12 +40,29 @@ SANDBOX = REPO / "deploy/sandbox"
 REAPER = SANDBOX / "member-process-reaper"
 PI_WRAPPER = SANDBOX / "pi-freeinference"
 
-#: A ``python3`` in snippet text that runs something without ``-I``: an option
-#: other than ``-I`` (``-c``, ``-u``, or the bare ``-`` that reads a heredoc),
-#: a script path, or an absolute interpreter invocation. ``command -v python3``
-#: and ``python3 -I ...`` are not matches, so the guard reads the form rather
-#: than a list of the spellings someone remembered to forbid.
-_UNISOLATED_INTERPRETER = re.compile(r"""python3\s+(?:-(?!I\b)|["']?[^\s"']*\.py\b|/)""")
+#: Every ``python3`` in snippet text that is not positively followed by an
+#: isolated interpreter flag. Written as "must look like this", not "must not
+#: look like that": the spellings that run Python are open-ended (``-c``, a
+#: heredoc's ``-``, ``-u``, ``-m``, a script path, a pipe, a redirect, a
+#: different minor version, a quoted name, a variable holding the flags), and a
+#: guard that enumerates the bad ones is always one spelling behind. A false
+#: positive here costs a comment rewording; a false negative costs the rule.
+_UNISOLATED_INTERPRETER = re.compile(
+    r"""(?:(?<![\w./-])python3(?:\.\d+)?|["']python3(?:\.\d+)?["'])(?!\s+-I)"""
+)
+
+#: A probe runs a bare ``python3`` only to ask whether it is there, never to
+#: hand it a script: ``command -v python3``, ``which python3``. It matches the
+#: text that *ends* just before the word, so it exempts the probe and nothing
+#: else in the same snippet.
+_EXISTENCE_PROBE = re.compile(r"(?:command\s+-v|which)\s+$")
+
+#: Two strings name an interpreter without running one, and the argv test above
+#: already checks how it is invoked: a literal that *is* the token (an element
+#: of a command list), and prose that happens to mention it ("neither curl nor
+#: python3, so ..."). Neither is a snippet, so neither is this test's subject.
+_INTERPRETER_TOKEN = re.compile(r"""^["']?python3(?:\.\d+)?["']?$""")
+_PROSE_AFTER = re.compile(r"[,.;:)]")
 
 
 def _interpreter_argv() -> list[tuple[str, list[object]]]:
@@ -97,7 +114,7 @@ def test_no_shell_snippet_starts_python_unisolated():
     This is a search over snippet text, not a lookup of known spellings: a
     snippet that runs Python from a heredoc (``python3 - "$x"``) is exactly as
     unisolated as one that runs ``-c``, and a guard that lists the spellings it
-    knows lets that regression through.
+    knows lets the next one through.
     """
     strings = [
         (path.relative_to(REPO).as_posix(), node.lineno, node.value)
@@ -107,12 +124,18 @@ def test_no_shell_snippet_starts_python_unisolated():
     ]
     assert any("python3 -I -c" in value for _where, _line, value in strings)
 
-    unisolated = [
-        f"{where}:{line}: {match.group(0)!r} in {value[:60]!r}"
-        for where, line, value in strings
-        for match in [_UNISOLATED_INTERPRETER.search(value)]
-        if match is not None
-    ]
+    unisolated = []
+    for where, line, value in strings:
+        if _INTERPRETER_TOKEN.match(value):
+            continue
+        for match in _UNISOLATED_INTERPRETER.finditer(value):
+            # A probe is not a run, and prose is not a snippet; anything else
+            # that runs Python must isolate it.
+            if _EXISTENCE_PROBE.search(value[: match.start()]):
+                continue
+            if _PROSE_AFTER.match(value[match.end() :]):
+                continue
+            unisolated.append(f"{where}:{line}: {match.group(0)!r} in {value[:60]!r}")
     assert unisolated == []
 
 

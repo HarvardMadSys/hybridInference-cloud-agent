@@ -166,21 +166,79 @@ def test_codex_rebase_leaves_a_home_with_nothing_to_rebase_alone(tmp_path: Path,
     home = manager.local(factory._member_state_dir(launch))
     home.mkdir(parents=True)
     index = home / "state_5.sqlite"
+    before = None
     if damage == "no threads table":
         connection = sqlite3.connect(index)
         connection.execute("CREATE TABLE other (x)")
         connection.commit()
         connection.close()
+        before = index.read_bytes()
     elif damage == "no sibling rows":
         _indexed_home(home, {"own": "/outside/home/rollout.jsonl"})
+        before = index.read_bytes()
 
     factory._prepare_member_state(_spec(), launch, factory._member_state_dir(launch))
 
     if damage == "no index":
         assert not index.exists()
     else:
-        # Whatever was there is what is still there, unchanged.
-        assert index.exists()
+        # Byte-identical, not merely present: "nothing to do" must mean the
+        # copy was not rewritten on its way to being left alone.
+        assert index.read_bytes() == before
+
+
+def test_codex_start_never_fails_over_the_index_it_cannot_repair(tmp_path: Path):
+    """A member's own start has no retry, so the index may not fail it.
+
+    Each of these is a state a real Codex home can reach -- an index the CLI is
+    still writing, one that reports an integrity complaint (SQLite still serves
+    it), one a member may not write, one whose rebase a trigger undoes. The CLI
+    is about to read the same file and can report it far better than a start
+    refusal that would repeat unchanged on every later attempt.
+    """
+    _private_state_root(tmp_path)
+    manager = _LocalMemberShell(tmp_path)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    sibling_launch = replace(
+        _launch("athr_sibling", native_session_id="native-sibling", slot=0), runtime_id="codex"
+    )
+    launch = replace(
+        _launch("athr_child", native_session_id="native-child", slot=2), runtime_id="codex"
+    )
+    sibling_home = manager.local(factory._member_state_dir(sibling_launch))
+    factory._prepare_member_state(
+        _spec(), sibling_launch, factory._member_state_dir(sibling_launch)
+    )
+    home_dir = factory._member_state_dir(launch)
+    home = manager.local(home_dir)
+    (home / "sessions").mkdir(parents=True)
+    (home / "sessions/rollout.jsonl").write_text("r\n")
+    _indexed_home(home, {"native-child": str(sibling_home / "sessions/rollout.jsonl")})
+
+    # An integrity complaint SQLite itself still serves: orphan pages.
+    connection = sqlite3.connect(home / "state_5.sqlite")
+    connection.execute("CREATE TABLE junk (x TEXT)")
+    connection.execute("INSERT INTO junk VALUES (?)", ("y" * 5000,))
+    connection.commit()
+    connection.execute("PRAGMA writable_schema=ON")
+    connection.execute("DELETE FROM sqlite_master WHERE name='junk'")
+    connection.commit()
+    connection.execute("PRAGMA writable_schema=OFF")
+    connection.close()
+    assert (
+        sqlite3.connect(home / "state_5.sqlite").execute("PRAGMA integrity_check").fetchone()[0]
+        != "ok"
+    )
+
+    # No exception: the start proceeds. The rebase declined to commit over an
+    # index it cannot vouch for, so the copy is exactly as it was -- pointing at
+    # the sibling -- and the CLI, which is about to read the same file, is what
+    # reports the damage. What must not happen is a start refusal that would
+    # repeat unchanged on every later attempt.
+    factory._prepare_member_state(_spec(), launch, home_dir)
+
+    assert (home / "sessions/rollout.jsonl").read_text() == "r\n"
+    assert _paths(home)["native-child"] == str(sibling_home / "sessions/rollout.jsonl")
 
 
 def test_codex_rebase_leaves_an_index_it_cannot_read_to_the_cli(tmp_path: Path):
@@ -208,6 +266,47 @@ def test_codex_rebase_leaves_an_index_it_cannot_read_to_the_cli(tmp_path: Path):
     factory._prepare_member_state(_spec(), launch, factory._member_state_dir(launch))
 
     assert (home / "state_5.sqlite").read_bytes() == b"not a database"
+
+
+@pytest.mark.parametrize(
+    ("rows", "indexed"),
+    [({}, False), ({"own": "/outside/home/rollout.jsonl"}, True)],
+)
+def test_codex_fork_succeeds_when_the_copy_has_nothing_to_rebase(
+    tmp_path: Path, rows: dict[str, str], indexed: bool
+):
+    """A fork copies a home whose index has no sibling row yet, and must not fail.
+
+    This is the fork path, not the start path: the copy is what the child will
+    resume from, and an index with nothing in another member's home is already
+    correct for it. Failing here would leave the fork journal PREPARING and
+    retry the same copy forever.
+    """
+    _private_state_root(tmp_path)
+    manager = _LocalMemberShell(tmp_path)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    source_launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0), runtime_id="codex"
+    )
+    target_launch = replace(
+        _launch("athr_child", native_session_id=None, slot=2), runtime_id="codex"
+    )
+    source_home = factory._member_state_dir(source_launch)
+    factory._prepare_member_state(_spec(), source_launch, source_home)
+    source = manager.local(source_home)
+    (source / "sessions").mkdir()
+    (source / "sessions/rollout.jsonl").write_text("r\n")
+    if indexed:
+        _indexed_home(source, rows)
+
+    factory._clone_private_member_state(_spec(), source_launch, target_launch)
+
+    child = manager.local(factory._member_state_dir(target_launch))
+    if indexed:
+        assert _paths(child) == rows
+    else:
+        # A home whose CLI never wrote an index: the copy has none either.
+        assert not (child / "state_5.sqlite").exists()
 
 
 def test_codex_rollout_rebase_failure_rolls_back_target_index(tmp_path: Path):
