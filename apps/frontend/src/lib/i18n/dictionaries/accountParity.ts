@@ -21,6 +21,7 @@ export const accountParityEn = {
   'login.withPhone': 'Phone code',
   'login.usernameHint': 'An account created without an email signs in with its username.',
   'login.setupRequired': 'This deployment has no administrator yet.',
+  'login.chooseAccount': 'Use an account already signed in here ({count})',
 
   'phone.number': 'Phone number',
   'phone.code': 'Verification code',
@@ -111,6 +112,7 @@ export const accountParityZh: Record<keyof typeof accountParityEn, string> = {
   'login.withPhone': '手机验证码',
   'login.usernameHint': '没有邮箱的账号请使用用户名登录。',
   'login.setupRequired': '本部署还没有管理员。',
+  'login.chooseAccount': '使用本浏览器上已登录的账号（{count}）',
 
   'phone.number': '手机号',
   'phone.code': '验证码',

@@ -2,11 +2,16 @@
 // Email/password flow adapted from HybridInference 321e9a6c4 app/login/page.tsx;
 // login names, phone codes and first-run setup from 8b49872d.
 // Sessions remain HttpOnly cookies; there is no browser token storage.
-import { useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useT } from '@/components/providers/LocaleProvider';
-import { loginAccount, loginPhone, type SessionUserApiLike } from '@/lib/api/accounts';
+import {
+  listBrowserAccounts,
+  loginAccount,
+  loginPhone,
+  type SessionUserApiLike,
+} from '@/lib/api/accounts';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 import { safeReturnTo } from '@/lib/auth/signin';
 import { announceSession } from '@/lib/auth/sessionSync';
@@ -139,6 +144,22 @@ function PasswordLogin() {
   );
 }
 
+/** How many accounts this browser already holds, for the chooser link. */
+function useBrowserAccountCount(): number {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    void Promise.resolve()
+      .then(() => listBrowserAccounts(controller.signal))
+      .then((value) => {
+        if (!controller.signal.aborted) setCount(value?.accounts?.length ?? 0);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, []);
+  return count;
+}
+
 export function LocalLogin({ signupEnabled }: { signupEnabled: boolean }) {
   const t = useT();
   const params = useSearchParams();
@@ -146,6 +167,7 @@ export function LocalLogin({ signupEnabled }: { signupEnabled: boolean }) {
   const [method, setMethod] = useState<'password' | 'phone'>('password');
   const phone = options?.phone.enabled === true;
   const adding = params?.get('add') === '1';
+  const others = useBrowserAccountCount();
   return (
     <AccountFrame
       title={adding ? t('login.addAccount') : t('account.login')}
@@ -158,6 +180,11 @@ export function LocalLogin({ signupEnabled }: { signupEnabled: boolean }) {
             {t('setup.title')}
           </Link>
         </AccountNotice>
+      )}
+      {others > 0 && (
+        <Link className="block text-sm text-accent underline" href="/accounts">
+          {t('login.chooseAccount', { count: others })}
+        </Link>
       )}
       {phone && (
         <div role="tablist" aria-label={t('login.method')} className="flex gap-2">
