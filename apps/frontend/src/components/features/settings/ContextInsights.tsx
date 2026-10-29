@@ -142,6 +142,7 @@ export function ContextInsights({
       <InsightsNotes page={page} empty={rows.length === 0 && !loading} />
       {rows.length > 0 ? (
         <ul className="mt-3 divide-y divide-border rounded-lg border border-border">
+          <ColumnHeads />
           {rows.map((row) => (
             <ConversationRow key={row.thread_id} row={row} widest={widest} nowMs={nowMs} />
           ))}
@@ -252,12 +253,15 @@ function ConversationRow({
   );
   const usage = row.usage;
   const title = row.title || t('settings.usage.untitled');
+  // Nothing recorded is not zero requests: without an observation, both counts are unknown.
+  const observed = row.peak_prompt_tokens !== null || row.compactions > 0 || row.main_requests > 0;
   return (
-    <li className="grid gap-2 px-3 py-2.5 text-sm sm:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_repeat(4,minmax(0,1fr))] sm:items-center sm:gap-3">
+    <li className={`grid gap-2 px-3 py-2.5 text-sm ${ROW_GRID}`}>
       <div className="min-w-0">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           <Link
             href={contextHref(row.latest_job_id)}
+            title={title}
             className="ui-focus-ring min-w-0 truncate rounded font-medium text-foreground hover:underline"
           >
             {title}
@@ -317,17 +321,42 @@ function ConversationRow({
       </div>
       <Stat
         label={t('contextInsights.col.compactions')}
-        value={row.compactions.toLocaleString(locale)}
+        value={observed ? row.compactions.toLocaleString(locale) : '—'}
       />
       <Stat
         label={t('contextInsights.col.requests')}
-        value={row.main_requests.toLocaleString(locale)}
+        value={observed ? row.main_requests.toLocaleString(locale) : '—'}
       />
       <Stat label={t('contextInsights.col.cost')} value={formatCost(usage?.totals?.spent_usd)} />
       <Stat
         label={t('contextInsights.col.cache')}
         value={formatShare(usage ? cachedShare(usage) : null)}
       />
+    </li>
+  );
+}
+
+const ROW_GRID =
+  'sm:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_repeat(4,minmax(0,1fr))] sm:items-center sm:gap-3';
+
+/** The list's column names, on screens wide enough to lay it out as columns. */
+function ColumnHeads() {
+  const { t } = useLocale();
+  const heads: TranslationKey[] = [
+    'contextInsights.col.conversation',
+    'contextInsights.col.context',
+    'contextInsights.col.compactions',
+    'contextInsights.col.requests',
+    'contextInsights.col.cost',
+    'contextInsights.col.cache',
+  ];
+  return (
+    <li aria-hidden="true" className={`hidden px-3 py-1.5 text-xs text-muted sm:grid ${ROW_GRID}`}>
+      {heads.map((key, index) => (
+        <span key={key} className={index > 1 ? 'text-right' : ''}>
+          {t(key)}
+        </span>
+      ))}
     </li>
   );
 }

@@ -147,7 +147,12 @@ _PER_THREAD_SQL = f"""
                ARRAY_AGG(DISTINCT r.runtime) AS runtimes,
                ARRAY_AGG(DISTINCT r.model) AS models,
                COUNT(a.id) AS attempts,
-               COUNT(p.attempt_id) AS attempts_profiled,
+               -- An attempt without events has nothing to read: it is as read
+               -- as one whose profile is stored.
+               COUNT(a.id) FILTER (
+                   WHERE p.attempt_id IS NOT NULL
+                      OR NOT EXISTS (SELECT 1 FROM agent_job_events e WHERE e.attempt_id = a.id)
+               ) AS attempts_profiled,
                COALESCE(SUM(p.main_requests), 0) AS main_requests,
                COALESCE(SUM(p.subagent_requests), 0) AS subagent_requests,
                MAX(p.peak_prompt_tokens) AS peak_prompt_tokens,

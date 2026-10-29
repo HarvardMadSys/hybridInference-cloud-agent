@@ -459,7 +459,7 @@ describe('UsageSettings', () => {
     section();
     expect(
       await screen.findByText(
-        'Everything since Mar 9, 2024, the first day with a run or container (UTC) Bars are weeks, Monday to Sunday, UTC.',
+        'Everything since Mar 9, 2024, the first UTC day with a run or container. One bar per week, Monday to Sunday.',
       ),
     ).toBeInTheDocument();
   });

@@ -409,5 +409,7 @@ async def test_all_sums_every_run_beyond_one_selections_bound(db, store, monkeyp
     for conversation in insights["conversations"]:
         assert conversation["usage"]["run_count"] == 1
         assert Decimal(conversation["usage"]["totals"]["spent_usd"]) == Decimal("0.00000123")
-    # No events: every attempt profiles empty, and none is presented as zero.
+    # No events: nothing to read, nothing presented as zero.
     assert all(c["peak_prompt_tokens"] is None for c in insights["conversations"])
+    assert all(c["attempts_profiled"] == c["attempts"] == 1 for c in insights["conversations"])
+    assert insights["profiling"]["complete"] is True

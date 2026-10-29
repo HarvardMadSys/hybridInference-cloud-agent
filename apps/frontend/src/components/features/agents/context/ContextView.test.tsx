@@ -299,6 +299,7 @@ describe('ContextView', () => {
         largest_changes: [],
         compactions: [],
         composition: null,
+        coverage: { ...view().coverage, attempts_observed: 0, main_requests: 0, compactions: 0 },
       }),
     );
     show();
@@ -306,6 +307,9 @@ describe('ContextView', () => {
       await screen.findByText('No model request sizes are recorded for this conversation.'),
     ).toBeInTheDocument();
     expect(within(await fact('Latest observed context')).getByText('—')).toBeInTheDocument();
+    // Nothing observed: the counts are unknown, not zero.
+    expect(within(await fact('Model requests')).getByText('—')).toBeInTheDocument();
+    expect(within(await fact('Compactions')).getByText('—')).toBeInTheDocument();
   });
 
   it('says so when the conversation is not the reader’s', async () => {

@@ -156,10 +156,31 @@ describe('ContextInsights', () => {
     expect(within(item).queryByText('0%')).not.toBeInTheDocument();
   });
 
+  it('shows no counts for a conversation whose requests were not recorded', async () => {
+    vi.mocked(getContextInsights).mockResolvedValue(
+      page({
+        conversations: [
+          row('k', {
+            peak_prompt_tokens: null,
+            latest_prompt_tokens: null,
+            context_window: null,
+            main_requests: 0,
+            compactions: 0,
+          }),
+        ],
+      }),
+    );
+    show();
+    const item = (await screen.findByRole('link', { name: 'Conversation k' })).closest('li')!;
+    expect(within(item).getByText('No request sizes recorded')).toBeInTheDocument();
+    expect(within(item).getAllByText('—')).toHaveLength(2);
+    expect(within(item).queryByText('0')).not.toBeInTheDocument();
+  });
+
   it('states the range-wide totals and what is not listed', async () => {
     show();
     expect(await screen.findByText('2 with request sizes recorded')).toBeInTheDocument();
-    expect(screen.getByText('7 more by subagents, in their own contexts')).toBeInTheDocument();
+    expect(screen.getByText('+7 by subagents')).toBeInTheDocument();
     expect(
       screen.getByText(
         '4 turns in deleted conversations count in the usage above but are not listed.',
@@ -167,7 +188,7 @@ describe('ContextInsights', () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        /^Everything since Jan 2, 2023, the first day with a run or container \(UTC\)/,
+        /^Everything since Jan 2, 2023, the first UTC day with a run or container\./,
       ),
     ).toBeInTheDocument();
   });

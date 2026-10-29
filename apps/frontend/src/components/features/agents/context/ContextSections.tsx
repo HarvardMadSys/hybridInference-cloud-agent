@@ -71,6 +71,9 @@ export function ContextSummary({ view, nowMs }: { view: ThreadContextApi; nowMs:
   const point = latest?.point;
   const window = point?.context_window ?? null;
   const subagent = view.coverage.subagent_requests;
+  // With nothing observed, a count of requests or compactions is unknown, not 0.
+  const observed = view.coverage.attempts_observed > 0;
+  const count = (value: number) => (observed ? value.toLocaleString(locale) : '—');
   let latestDetail: string | undefined;
   if (point) {
     const when = point.at ? relativeTime(point.at, nowMs, locale) : '—';
@@ -106,7 +109,7 @@ export function ContextSummary({ view, nowMs }: { view: ThreadContextApi; nowMs:
         />
         <Fact
           label={t('context.requests')}
-          value={view.coverage.main_requests.toLocaleString(locale)}
+          value={count(view.coverage.main_requests)}
           detail={
             subagent > 0
               ? t('context.requestsDetail', { count: subagent.toLocaleString(locale) })
@@ -115,7 +118,7 @@ export function ContextSummary({ view, nowMs }: { view: ThreadContextApi; nowMs:
         />
         <Fact
           label={t('context.compactions')}
-          value={view.coverage.compactions.toLocaleString(locale)}
+          value={count(view.coverage.compactions)}
           detail={t('context.compactionsDetail')}
         />
       </dl>
@@ -373,6 +376,11 @@ export function LargestChanges({
   );
 }
 
+/** A turn's count, or a dash for a turn whose events recorded neither requests nor compactions. */
+function turnCount(turn: ContextTurnApi, value: number): string {
+  return turn.requests > 0 || turn.compactions > 0 ? String(value) : '—';
+}
+
 export function Turns({ turns, onOpenTurn }: { turns: ContextTurnApi[]; onOpenTurn: OpenTurn }) {
   const { t } = useLocale();
   if (turns.length === 0) return null;
@@ -409,7 +417,7 @@ export function Turns({ turns, onOpenTurn }: { turns: ContextTurnApi[]; onOpenTu
                 <td className="max-w-[10rem] truncate py-1.5 pr-3 text-muted">
                   {turn.model ?? '—'}
                 </td>
-                <td className="py-1.5 pr-3">{turn.requests}</td>
+                <td className="py-1.5 pr-3">{turnCount(turn, turn.requests)}</td>
                 <td className="py-1.5 pr-3">
                   {turn.requests > 0
                     ? `${compactCount(turn.first_prompt_tokens)} → ${compactCount(turn.last_prompt_tokens)}`
@@ -417,7 +425,7 @@ export function Turns({ turns, onOpenTurn }: { turns: ContextTurnApi[]; onOpenTu
                 </td>
                 <td className="py-1.5 pr-3">{compactCount(turn.peak_prompt_tokens)}</td>
                 <td className="py-1.5 pr-3">{signedTokens(turn.change_tokens, compactCount)}</td>
-                <td className="py-1.5">{turn.compactions}</td>
+                <td className="py-1.5">{turnCount(turn, turn.compactions)}</td>
               </tr>
             ))}
           </tbody>

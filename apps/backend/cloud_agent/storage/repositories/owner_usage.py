@@ -182,7 +182,11 @@ _RUNNING_TIME_SQL = """
         FROM ordered
     )
     SELECT b.n,
-           COALESCE(SUM(EXTRACT(EPOCH FROM LEAST(s.ended, b.until) - GREATEST(s.started, b.since))),
+           -- A bucket no running span overlaps joins to NULLs, and LEAST and
+           -- GREATEST skip NULLs: unfiltered, that bucket counted as running
+           -- from its start to its end.
+           COALESCE(SUM(EXTRACT(EPOCH FROM LEAST(s.ended, b.until) - GREATEST(s.started, b.since)))
+                        FILTER (WHERE s.started IS NOT NULL),
                     0)::double precision AS running_seconds
     FROM unnest($4::timestamptz[], $5::timestamptz[]) WITH ORDINALITY AS b(since, until, n)
     LEFT JOIN spans s
