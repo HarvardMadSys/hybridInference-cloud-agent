@@ -49,12 +49,32 @@ export interface ErasureResult {
   account: AccountEntry;
   deleted: Record<string, number>;
   retained_archives: string[];
+  /** Teams it owned alone, deleted with it. */
+  deleted_teams?: string[];
+  /** Team environments it made, kept for their team under the team's owner. */
+  handed_environments?: string[];
 }
 export const eraseAccount = (accountId: string, confirm: string) =>
   admin<ErasureResult>(`/v1/admin/accounts/${encodeURIComponent(accountId)}/erase`, {
     method: 'POST',
     body: JSON.stringify({ confirm }),
   });
+
+export interface OwnedTeam {
+  id: string;
+  name: string;
+  revision: number;
+  members: { user_id: string; role: string; label: string | null }[];
+}
+export const listOwnedTeams = (accountId: string, signal?: AbortSignal) =>
+  admin<{ teams: OwnedTeam[] }>(`/v1/admin/accounts/${encodeURIComponent(accountId)}/teams`, {
+    signal,
+  });
+export const transferOwnedTeam = (accountId: string, teamId: string, userId: string) =>
+  admin<{ teams: OwnedTeam[] }>(
+    `/v1/admin/accounts/${encodeURIComponent(accountId)}/teams/${encodeURIComponent(teamId)}/transfer`,
+    { method: 'POST', body: JSON.stringify({ user_id: userId }) },
+  );
 
 export interface SignupDomain {
   domain: string;
@@ -92,6 +112,8 @@ export interface MailPreview {
   subject: string;
   html: string;
   text: string;
+  /** Why the selected mail transport would refuse it; sending is refused too. */
+  delivery_problem?: string | null;
 }
 export interface MailEntry {
   id: string;

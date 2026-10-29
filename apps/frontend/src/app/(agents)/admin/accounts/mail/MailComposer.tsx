@@ -16,7 +16,8 @@ import {
 } from '@/lib/api/accountAdmin';
 import { getErrorMessage } from '@/lib/utils/errors';
 
-const STATUSES: AccountStatus[] = ['active', 'suspended', 'deleted'];
+// A deleted account is never mailed, so it is no audience.
+const STATUSES: AccountStatus[] = ['active', 'suspended'];
 const ADMISSIONS: WaitlistStatus[] = ['approved', 'pending', 'not_applied', 'rejected', 'revoked'];
 const TEMPLATE_FIELDS: Record<'maintenance' | 'announcement', string[]> = {
   maintenance: ['date', 'duration'],
@@ -88,6 +89,7 @@ export function MailComposer({ onSent }: { onSent: () => void }) {
     }
   }
   const ready = statuses.length > 0 && admissions.length > 0;
+  const undeliverable = preview?.delivery_problem ?? null;
   return (
     <section className="space-y-3 rounded-xl border border-border bg-surface p-4">
       <h2 className="text-base font-semibold">New message</h2>
@@ -185,7 +187,7 @@ export function MailComposer({ onSent }: { onSent: () => void }) {
         </button>
         <button
           className="ui-button ui-button-primary"
-          disabled={busy || !ready || !preview}
+          disabled={busy || !ready || !preview || Boolean(undeliverable)}
           onClick={() =>
             void run(async () => {
               const created = await createMail(message, when ? new Date(when).toISOString() : null);
@@ -202,6 +204,7 @@ export function MailComposer({ onSent }: { onSent: () => void }) {
           <p className="text-sm">
             {preview.recipient_count} recipients (verified addresses only) · {preview.subject}
           </p>
+          {undeliverable && <AccountNotice error>{undeliverable}</AccountNotice>}
           <iframe
             title="Message preview"
             sandbox=""

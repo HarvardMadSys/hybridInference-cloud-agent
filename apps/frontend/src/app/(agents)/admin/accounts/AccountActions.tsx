@@ -8,6 +8,7 @@ import { AccountNotice } from '@/components/features/auth/AccountFrame';
 import { updateAccount, type AccountAction, type AccountEntry } from '@/lib/api/accounts';
 import { eraseAccount } from '@/lib/api/accountAdmin';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
+import { OwnedTeams } from './OwnedTeams';
 
 export const LABELS: Record<AccountAction, string> = {
   approve: 'Approve access',
@@ -21,11 +22,20 @@ export const LABELS: Record<AccountAction, string> = {
   resume: 'Resume deleted account',
 };
 
+// Administrator email addresses (Admin → Settings → Accounts) make a listed,
+// proven address administrator again at sign-in, so the service refuses to
+// withdraw what the list would hand back; the address leaves the list first.
+const LISTED =
+  ' If its email is in Administrator email addresses (Admin → Settings → Accounts), this is refused: remove the address there first, or suspend the account.';
+
 const EXPLANATIONS: Partial<Record<AccountAction, string>> = {
   suspend:
     'Signs this account out, withdraws Agent access, and stops its work. Restoring the account will not restore access automatically.',
-  revoke:
-    'Stops this account’s Agent work. The user can still sign in to view the decision and reapply.',
+  revoke: `Stops this account’s Agent work. The user can still sign in to view the decision and reapply.${
+    LISTED
+  }`,
+  reject: `Declines the application; the user can reapply.${LISTED}`,
+  revoke_admin: `Removes platform administration; Agent access stays.${LISTED}`,
   grant_admin:
     'Grants platform administration, including account approvals and infrastructure management.',
   delete:
@@ -154,6 +164,7 @@ function ErasePanel({ account, onDone }: { account: AccountEntry; onDone: () => 
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [reload, setReload] = useState(0);
   async function erase() {
     setBusy(true);
     setError(null);
@@ -161,13 +172,22 @@ function ErasePanel({ account, onDone }: { account: AccountEntry; onDone: () => 
       const erased = await eraseAccount(account.id, confirm.trim());
       const rows = Object.values(erased.deleted).reduce((sum, count) => sum + count, 0);
       const archives = erased.retained_archives.length;
-      const kept = archives
-        ? ` ${archives} sandbox archive(s) remain in object storage under its retention policy.`
-        : '';
-      setResult(`Erased ${rows} rows of Agent data.${kept}`);
+      const teams = erased.deleted_teams ?? [];
+      const environments = erased.handed_environments ?? [];
+      const kept = [
+        archives
+          ? `${archives} sandbox archive(s) remain in object storage under its retention policy.`
+          : '',
+        teams.length ? `${teams.length} team(s) it owned alone were deleted.` : '',
+        environments.length
+          ? `${environments.length} team environment(s) it made stay with their teams.`
+          : '',
+      ].filter(Boolean);
+      setResult([`Erased ${rows} rows of Agent data.`, ...kept].join(' '));
       onDone();
     } catch (cause) {
       setError(getErrorMessage(cause));
+      setReload((value) => value + 1);
     } finally {
       setBusy(false);
     }
@@ -176,9 +196,11 @@ function ErasePanel({ account, onDone }: { account: AccountEntry; onDone: () => 
     <div className="space-y-2 border-t border-border pt-3">
       <p className="text-sm font-medium">Erase permanently</p>
       <p className="text-xs text-muted">
-        Removes the account’s identity and all its Agent data. Only once its work has stopped and
-        its sandboxes are deleted. This cannot be undone, and it cannot be resumed after.
+        Removes the account’s identity and all its Agent data. Only once its work has stopped, its
+        sandboxes are deleted, every host has cleaned up its environment runs, and each team other
+        members use has a new owner. This cannot be undone, and it cannot be resumed after.
       </p>
+      <OwnedTeams accountId={account.id} reload={reload} />
       <label className="block text-sm" htmlFor="erase-confirm">
         Type the account id to confirm
       </label>

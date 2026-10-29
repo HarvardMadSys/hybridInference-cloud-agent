@@ -30,6 +30,8 @@ vi.mock('@/lib/api/accountAdmin', () => ({
   previewMail: vi.fn(),
   testMail: vi.fn(),
   createMail: vi.fn(),
+  listOwnedTeams: vi.fn(),
+  transferOwnedTeam: vi.fn(),
 }));
 
 const base: AccountEntry = {
@@ -48,7 +50,10 @@ const base: AccountEntry = {
   },
   created_at: '2026-10-29T00:00:00Z',
 };
-beforeEach(() => vi.resetAllMocks());
+beforeEach(() => {
+  vi.resetAllMocks();
+  vi.mocked(admin.listOwnedTeams).mockResolvedValue({ teams: [] });
+});
 afterEach(cleanup);
 
 describe('account decisions', () => {
@@ -98,6 +103,61 @@ describe('account decisions', () => {
     expect(await screen.findByText(/Erased 4 rows/)).toHaveTextContent('1 sandbox archive');
     expect(admin.eraseAccount).toHaveBeenCalledWith(base.id, base.id);
     expect(done).toHaveBeenCalled();
+  });
+  it('hands a shared team to a member, and lists the obstruction erasure reports', async () => {
+    const team = {
+      id: 'team-lab',
+      name: 'Lab',
+      revision: 2,
+      members: [{ user_id: 'member-1', role: 'admin', label: 'member@example.edu' }],
+    };
+    vi.mocked(admin.listOwnedTeams).mockResolvedValue({ teams: [team] });
+    vi.mocked(admin.transferOwnedTeam).mockResolvedValue({ teams: [] });
+    vi.mocked(admin.eraseAccount).mockRejectedValue(
+      new Error('The account owns teams other members still use: Lab (team-lab).'),
+    );
+    render(
+      <ActionEditor account={{ ...base, status: 'deleted' }} onDone={vi.fn()} onCancel={vi.fn()} />,
+    );
+    expect(await screen.findByText('Teams it owns')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'member@example.edu (team admin)' })).toBeVisible();
+    fireEvent.change(screen.getByLabelText('Type the account id to confirm'), {
+      target: { value: base.id },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Erase account' }));
+    expect(await screen.findByText(/other members still use: Lab/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Hand over' }));
+    await waitFor(() =>
+      expect(admin.transferOwnedTeam).toHaveBeenCalledWith(base.id, 'team-lab', 'member-1'),
+    );
+    await waitFor(() => expect(screen.queryByText('Teams it owns')).not.toBeInTheDocument());
+  });
+  it('reports teams deleted and environments kept by an erasure', async () => {
+    vi.mocked(admin.eraseAccount).mockResolvedValue({
+      account: { ...base, status: 'deleted', erased_at: 'now' },
+      deleted: { agent_jobs: 1 },
+      retained_archives: [],
+      deleted_teams: ['team-alone'],
+      handed_environments: ['env-1', 'env-2'],
+    });
+    render(
+      <ActionEditor account={{ ...base, status: 'deleted' }} onDone={vi.fn()} onCancel={vi.fn()} />,
+    );
+    fireEvent.change(screen.getByLabelText('Type the account id to confirm'), {
+      target: { value: base.id },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Erase account' }));
+    const result = await screen.findByText(/Erased 1 rows/);
+    expect(result).toHaveTextContent('1 team(s) it owned alone were deleted.');
+    expect(result).toHaveTextContent('2 team environment(s) it made stay with their teams.');
+  });
+  it('explains that the administrator list undoes withdrawing a listed account', () => {
+    render(
+      <ActionEditor account={{ ...base, is_admin: true }} onDone={vi.fn()} onCancel={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole('combobox', { name: 'Action' }));
+    fireEvent.click(screen.getByRole('option', { name: 'Remove administrator' }));
+    expect(screen.getByText(/Administrator email addresses .* this is refused/)).toBeVisible();
   });
   it('deletes at the version the administrator read', async () => {
     vi.mocked(accounts.updateAccount).mockResolvedValue(base);
@@ -202,5 +262,26 @@ describe('mail to accounts', () => {
     );
     expect(await screen.findByText('Queued for 4 accounts.')).toBeInTheDocument();
     expect(sent).toHaveBeenCalled();
+  });
+  it('shows why the mail transport would refuse a message and does not send it', async () => {
+    vi.mocked(admin.previewMail).mockResolvedValue({
+      recipient_count: 4,
+      subject: 'Long',
+      html: '<p>Hi</p>',
+      text: 'Hi',
+      delivery_problem: 'Tencent SES … limited to 800 bytes; this one needs 1210.',
+    });
+    render(<MailComposer onSent={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Long' } });
+    fireEvent.change(screen.getByLabelText('Body (Markdown)'), { target: { value: 'x' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    expect(await screen.findByText(/limited to 800 bytes/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(admin.createMail).not.toHaveBeenCalled();
+  });
+  it('offers no deleted accounts as an audience', () => {
+    render(<MailComposer onSent={vi.fn()} />);
+    expect(screen.getByRole('checkbox', { name: 'active' })).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'deleted' })).not.toBeInTheDocument();
   });
 });
