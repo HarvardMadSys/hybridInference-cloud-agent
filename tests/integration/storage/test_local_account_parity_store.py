@@ -1082,3 +1082,85 @@ async def test_the_operator_creates_a_verified_administrator_without_mail(storag
         await create_account(
             storage.local_accounts, email=None, login_name="weak", password="short", admin=True
         )
+
+
+async def test_erasing_removes_the_provider_key_and_later_writes_are_fenced(
+    storage, pool, monkeypatch
+):
+    """B2: the encrypted provider key is gone, and the erased owner can write nothing again."""
+    from tests.support.model_connections import use_test_cipher, verified_connection
+
+    from cloud_agent.domain.model_connections import ModelConnectionAccessEnded
+
+    use_test_cipher(monkeypatch)
+    account_id, _job = await _finished_owner(storage, pool, "keyholder@example.edu")
+    connection = await verified_connection(storage, account_id)
+    async with pool.acquire() as conn:
+        assert await conn.fetchval(
+            "SELECT api_key_ciphertext IS NOT NULL FROM agent_model_connections WHERE id = $1",
+            connection["id"],
+        )
+    await act(storage, account_id, "delete")
+    await _stopped(storage, account_id)
+    result = await storage.local_accounts.erase_account(
+        account_id=account_id, actor_id="admin-token", actor_account_id=None, admin_ip="t"
+    )
+    assert result.deleted.get("agent_model_connections") == 1
+    async with pool.acquire() as conn:
+        assert not await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM agent_model_connections WHERE id = $1)",
+            connection["id"],
+        )
+        # The tombstone is what fences: every owner gate reads no Agent use.
+        assert await conn.fetchval(f"SELECT {local_access_ended('$1')}", account_id)
+    with pytest.raises(ModelConnectionAccessEnded):
+        await verified_connection(storage, account_id, name="Late write")
+
+
+async def test_a_sign_in_racing_a_deletion_never_deadlocks(storage):
+    """B11: attach takes the account before the browser, as a deletion does."""
+    for index in range(10):
+        account_id = await make_account(storage, f"racer{index}@example.edu")
+        token = tokens.new_browser_token()
+        browser_id = f"race-{index}"
+        await storage.local_accounts.create_browser(
+            browser_id=browser_id, token_hash=tokens.browser_hash(token), ttl_s=600
+        )
+        _t, first, _ = await _session(
+            storage, account_id, password_hash=await _hash(storage, account_id)
+        )
+        await storage.local_accounts.attach_browser_account(
+            browser_id=browser_id,
+            account_id=account_id,
+            session_id=first,
+            max_accounts=5,
+            new_token_hash=tokens.browser_hash(token),
+            ttl_s=600,
+        )
+        _t, second, _ = await _session(
+            storage, account_id, password_hash=await _hash(storage, account_id)
+        )
+        record = await storage.local_accounts.get_account(account_id)
+        assert record is not None
+        outcomes = await asyncio.gather(
+            storage.local_accounts.attach_browser_account(
+                browser_id=browser_id,
+                account_id=account_id,
+                session_id=second,
+                max_accounts=5,
+                new_token_hash=tokens.browser_hash(token),
+                ttl_s=600,
+            ),
+            storage.local_accounts.delete_own_account(
+                account_id=account_id, expected_version=record.version, admin_ip="t"
+            ),
+            return_exceptions=True,
+        )
+        assert not any(isinstance(o, asyncpg.DeadlockDetectedError) for o in outcomes), outcomes
+        assert not any(isinstance(o, Exception) for o in outcomes), outcomes
+        state = await storage.local_accounts.browser_state(tokens.browser_hash(token))
+        # Whichever ran first, the deleted account is on no browser afterwards,
+        # or its session there is dead.
+        assert state is None or all(
+            not m.session_live or m.account.status != "deleted" for m in state.accounts
+        )
