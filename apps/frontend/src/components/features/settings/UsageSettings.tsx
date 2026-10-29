@@ -15,10 +15,12 @@ import {
   type OwnerResourceHistory,
   type OwnerTokenUsage,
 } from '@/lib/api/ownerUsage';
+import type { AdminUsageAggregate } from '@/lib/api/adminUsage';
 import {
   CHART_METRICS,
   STATE_ORDER,
   USAGE_PERIODS,
+  cachedShare,
   chartDays,
   compactCount,
   coreHours,
@@ -28,8 +30,11 @@ import {
   formatCost,
   formatDayValue,
   formatMemory,
+  formatShare,
   gibHours,
+  notFinal,
   partlyMeasured,
+  reasoningPartly,
   relativeTime,
   shortDay,
   tickIndexes,
@@ -38,6 +43,7 @@ import {
   utcMidnightLocal,
   type ChartDay,
   type ChartMetric,
+  type NotFinal,
   type UsagePeriod,
 } from './usagePresent';
 
@@ -445,7 +451,7 @@ function History() {
       ) : null}
       <dl
         aria-busy={loading}
-        className={`mt-3 grid grid-cols-2 gap-2 lg:grid-cols-5 ${loading ? 'opacity-60' : ''}`}
+        className={`mt-3 grid grid-cols-2 gap-2 lg:grid-cols-4 ${loading ? 'opacity-60' : ''}`}
       >
         <Tile
           label={t('settings.usage.cost')}
@@ -457,6 +463,8 @@ function History() {
           value={summary ? compactCount(tokenTotal(summary)) : '—'}
           detail={tokenDetail}
         />
+        <CacheTile usage={summary} />
+        <ReasoningTile usage={summary} />
         <Tile
           label={t('settings.usage.runningTime')}
           value={totals ? hours(totals.running_seconds) : '—'}
@@ -485,6 +493,7 @@ function History() {
           {t('settings.usage.unrecorded', { count: unrecorded })}
         </p>
       ) : null}
+      <NotFinalNote usage={tokens} />
       {tokens || resources ? (
         <DailyChart days={chartDays(tokens?.days, resources?.days)} locale={locale} />
       ) : null}
@@ -506,6 +515,73 @@ function History() {
         ) : null}
       </p>
     </Card>
+  );
+}
+
+/** How much of the input was read from the cache; a dash unless both sides are fully known. */
+function CacheTile({ usage }: { usage: AdminUsageAggregate | undefined }) {
+  const { t } = useLocale();
+  const share = usage ? cachedShare(usage) : null;
+  let detail: string | undefined;
+  if (share !== null && usage?.totals) {
+    detail = t('settings.usage.cacheReadOf', {
+      read: compactCount(usage.totals.cache_read),
+      in: compactCount(usage.totals.tokens_in),
+    });
+  }
+  return (
+    <Tile label={t('settings.usage.cacheHitRate')} value={formatShare(share)} detail={detail} />
+  );
+}
+
+/** Reasoning tokens on their own: they are not added to the token total. */
+function ReasoningTile({ usage }: { usage: AdminUsageAggregate | undefined }) {
+  const { t } = useLocale();
+  const partly = usage ? reasoningPartly(usage) : false;
+  return (
+    <Tile
+      label={t('settings.usage.reasoning')}
+      value={compactCount(usage?.totals?.reasoning)}
+      detail={t(partly ? 'settings.usage.reasoningPartly' : 'settings.usage.reasoningApart')}
+    />
+  );
+}
+
+const NOT_FINAL: Array<[Exclude<keyof NotFinal, 'oldestRead'>, TranslationKey]> = [
+  ['running', 'settings.usage.notFinal.running'],
+  ['incomplete', 'settings.usage.notFinal.incomplete'],
+  ['uncosted', 'settings.usage.notFinal.uncosted'],
+  ['estimated', 'settings.usage.notFinal.estimated'],
+];
+
+/** What keeps the period's model usage from being final; nothing when it is or has not loaded. */
+function NotFinalNote({ usage }: { usage: OwnerTokenUsage | null }) {
+  const { t, locale } = useLocale();
+  const reasons = usage ? notFinal(usage.summary) : null;
+  if (!usage || !reasons) return null;
+  const items = NOT_FINAL.filter(([reason]) => reasons[reason] > 0);
+  return (
+    <div
+      role="note"
+      aria-labelledby="settings-usage-not-final"
+      className="mt-2 rounded-lg border border-border px-3 py-2 text-xs text-muted"
+    >
+      <p id="settings-usage-not-final" className="font-medium text-foreground">
+        {t('settings.usage.notFinal')}
+      </p>
+      <ul className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 tabular-nums">
+        {items.map(([reason, key]) => (
+          <li key={reason}>{t(key, { count: reasons[reason].toLocaleString(locale) })}</li>
+        ))}
+      </ul>
+      {reasons.oldestRead ? (
+        <p className="mt-1">
+          {t('settings.usage.notFinal.oldestRead', {
+            when: relativeTime(reasons.oldestRead, Date.parse(usage.generated_at), locale),
+          })}
+        </p>
+      ) : null}
+    </div>
   );
 }
 

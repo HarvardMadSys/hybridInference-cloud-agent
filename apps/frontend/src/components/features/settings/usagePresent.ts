@@ -105,6 +105,70 @@ export function unrecordedTurns(usage: AdminUsageAggregate): number {
   return (usage.status_counts.pending ?? 0) + (usage.status_counts.unavailable ?? 0);
 }
 
+/**
+ * The share of input tokens read from the cache, as the Admin Usage page's
+ * `cachedShare` reads it.
+ *
+ * Only a ratio both sides fully report is shown: a call that did not report
+ * one of the two would make it a guess, and a cache read larger than the input
+ * means the two were not counted the same way. Input already includes cached
+ * input, so the cache read is a part of it and is never added to it.
+ */
+export function cachedShare(usage: AdminUsageAggregate): number | null {
+  const totals = usage.totals;
+  const unknown = usage.unknown_rows;
+  if (!totals || totals.tokens_in == null || totals.cache_read == null) return null;
+  if (unknown && (unknown.tokens_in > 0 || unknown.cache_read > 0)) return null;
+  if (totals.tokens_in <= 0 || totals.cache_read > totals.tokens_in) return null;
+  return totals.cache_read / totals.tokens_in;
+}
+
+/** `42%`; a share above zero that rounds to none reads `<1%`, and an unknown one a dash. */
+export function formatShare(share: number | null): string {
+  if (share === null || !Number.isFinite(share)) return '—';
+  const percent = Math.round(share * 100);
+  return share > 0 && percent === 0 ? '<1%' : `${percent}%`;
+}
+
+/**
+ * Whether a known reasoning total leaves out calls that did not report one.
+ * An unknown total already reads as a dash and needs no such note.
+ */
+export function reasoningPartly(usage: AdminUsageAggregate): boolean {
+  return usage.totals?.reasoning != null && (usage.unknown_rows?.reasoning ?? 0) > 0;
+}
+
+export interface NotFinal {
+  /** Turns still running, which may not be counted yet. */
+  running: number;
+  /** Turns whose usage is not fully counted: every status but available. */
+  incomplete: number;
+  /** Model calls the cost total is missing. */
+  uncosted: number;
+  /** Model calls whose tokens the Gateway estimated. */
+  estimated: number;
+  /** The oldest known read of the cached usage, not when the data became complete. */
+  oldestRead: string | null;
+}
+
+/**
+ * What keeps these numbers from being final, as the Admin Usage page's
+ * `notFinal` reads it; null when nothing does.
+ *
+ * The oldest cache read alone is no reason: it qualifies numbers that are not
+ * final and is kept for when they are not.
+ */
+export function notFinal(usage: AdminUsageAggregate): NotFinal | null {
+  const reasons = {
+    running: usage.active_runs,
+    incomplete: Math.max(0, usage.run_count - (usage.status_counts.available ?? 0)),
+    uncosted: usage.unknown_rows?.spent_usd ?? 0,
+    estimated: usage.estimated_calls,
+  };
+  if (Object.values(reasons).every((count) => !(count > 0))) return null;
+  return { ...reasons, oldestRead: usage.oldest_queried_at };
+}
+
 export interface ChartDay {
   date: string;
   /** False for today, which has not ended. */
