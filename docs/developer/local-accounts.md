@@ -183,7 +183,13 @@ address list and the signup domain list require. A password reset that
 proves a `policy` email is its holder taking the account back: whatever the
 first claimant wrote (display name, language, Terms acceptance, application
 text) is cleared, a pending application returns to not applied, and the
-reclaim is audited; administrators' decisions and the sign-in history stay. One database view, `agent_local_account_access`, answers whether an
+reclaim is audited. The service cannot tell a claimant from a person who
+signed up with their own address, so the reset page and an
+`account_reclaimed` mail tell the holder what was cleared and to apply again.
+Administrators' decisions, the sign-in history and any Agent data already in
+the account (conversations, sandboxes, connections) stay; a holder who finds
+work that is not theirs can delete the account or ask an administrator to
+erase it. One database view, `agent_local_account_access`, answers whether an
 account's identity is verified, whether it may sign in and whether it may use
 Agent; every SQL gate reads it, and it is built so that an account missing a
 row has no access.

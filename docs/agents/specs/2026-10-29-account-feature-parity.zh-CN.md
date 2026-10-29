@@ -1,7 +1,7 @@
 # 本地账号与 HybridInference 账号功能对齐（feature parity）
 
 - **日期**：2026-10-29。
-- **状态**：**定稿**。下表每一行都标出了实现位置、前端入口和测试；状态是本分支最终提交时的状态。
+- **状态**：**定稿**，对应交付提交（见任务交付文档 `delivery.md` 中的最终 SHA）。下表每一行都标出了实现位置、前端入口和测试，状态以该提交为准；最终门禁与真实浏览器 smoke 的结果也记录在交付文档中。
 - **比较源**：HybridInference `origin/dev` `8b49872d1dcbed5c4bc8132b026b6740c3437aa7`，只读。原始 copy 来源是 `321e9a6c`。
 - **Cloud Agent 起点**：PR #1030 head `506f33fe` 合入 dev `4b7b826d`。
 
@@ -38,7 +38,7 @@
    - `0108_local_account_parity` 把旧表拆成 `agent_local_login_identities`（email、login_name、phone 各一行）和可选的 `agent_local_password_credentials`，数据全部保留。
    - 视图 `agent_local_account_access` 用 `LEFT JOIN` 加 `coalesce` 构造，缺任何一行即无权。所有 SQL 闸门都读它。
    - 每个身份记录 `verified_by`，取值为 `link`、`code`、`operator` 或 `policy`。只有 `link` 和 `operator` 算作**已证明**邮箱。管理员邮箱名单提权和注册域名自动批准都要求已证明（N1）。
-3. **注册与账号配置是管理员设置。** 设置位于 `Admin → Settings → Accounts`，保存在数据库，首次从环境变量导入；密钥只写。共 52 项，见 `accounts/settings_registry.py`，并有测试保证每项都在设置页的分组里。
+3. **注册与账号配置是管理员设置。** 设置位于 `Admin → Settings → Accounts`，保存在数据库，首次从环境变量导入；密钥只写。共 55 项，见 `accounts/settings_registry.py`，并有测试保证每项都在设置页的分组里。
 4. **删号是软删加终止栅栏。**
    - 新增 `deleted` 状态。删除时在同一事务内撤销会话、移出所有浏览器、作废令牌和手机验证码、撤销准入、写审计和终止记录。
    - 彻底擦除还需满足三个前置：工作已停、主机已清理、共享团队已移交。擦除后保留墓碑。
@@ -132,7 +132,7 @@
 
 | # | 上游能力 | 上游来源 | Agent 实现 | 前端入口 | 测试 | 状态 |
 |---|---|---|---|---|---|---|
-| P1 | 忘记密码与重置 | `auth_routes.py` | 已有；只在重置首次让身份变为已验证时通知管理员（N4）；重置证明了 `policy` 邮箱时即为收回账号（R3） | `/forgot-password`、`/reset-password` | `test_local_session_reset_race.py`；RV | ✅ |
+| P1 | 忘记密码与重置 | `auth_routes.py` | 已有；只在重置首次让身份变为已验证时通知管理员（N4）；重置证明了 `policy` 邮箱时即为收回账号（R3），重置页面和邮件 `account_reclaimed` 会告知清除了什么、需重新申请（T2） | `/forgot-password`、`/reset-password` | `test_local_session_reset_race.py`；RV | ✅ |
 | P2 | 已登录时修改密码 | `change_password` | `POST /v1/auth/account/password` | 设置 → 账号 | F `test_changing_the_password…`；web:AP | ✅ |
 | P3 | 无密码账号凭验证码设置首个密码 | `reauth.py` | 同上，用途为 `set_password` | 设置 → 账号 | S；web:AC | ✅ |
 | P4 | 密码已更改通知 | `send_password_changed_email` | 邮件类型 `password_changed` | — | U render | ✅ |
@@ -204,7 +204,7 @@
 
 | # | 上游能力 | Agent 实现 | 测试 | 状态 |
 |---|---|---|---|---|
-| C1 | 登录限流 3 项、注册限流 2 项、未解析来源 3 项、短信 13 项、Turnstile、SMTP 6 项加 `email_provider`、通知收件人 | 全部放进 Accounts 设置（52 项），只写密钥加密保存 | `test_account_settings_groups.py`；U | ✅ |
+| C1 | 登录限流 3 项、注册限流 2 项、未解析来源 3 项、短信 13 项、Turnstile、SMTP 6 项加 `email_provider`、通知收件人 | 全部放进 Accounts 设置（55 项），只写密钥加密保存 | `test_account_settings_groups.py`；U | ✅ |
 | C2 | cookie 的 `samesite`、`secure`、`domain` | 固定使用 `__Host-`（见 §二第 9 条） | U device | ➖（有意固定） |
 | C3 | 可插拔邮件供应商，包括腾讯云 SES 模板发送 | `accounts/delivery.py`、`ses_tencent.py`、`register_email_provider` | MD（mock 传输） | ✅ |
 
@@ -240,7 +240,7 @@
 | 限流计数器持久化在 Postgres，令牌放在 URL fragment | 多副本共享计数；令牌不进入访问日志 |
 | 首次设置等到管理员出现为止，不关闭注册 | 由已存在的管理员关闭首次设置 |
 | `require_email_verification=false` 时，旧的未验证账号仍需验证 | fail-closed |
-| 关闭验证期间接受的邮箱不被管理员名单和域名名单信任，直到证明为止；重置密码即收回账号 | 上游在此存在提权漏洞（N1），不照搬 |
+| 关闭验证期间接受的邮箱不被管理员名单和域名名单信任，直到证明为止；重置密码即收回账号 | 上游在此存在提权漏洞（N1），不照搬。收回时无法区分抢注者和真正自己注册的人，因此清除注册资料、撤回待审申请，并在重置页和邮件中明确告知；已作出的审批决定和账号中已有的 Agent 数据保留（T2） |
 | 管理员名单优先，拒绝它会撤回的撤销操作 | 不报告实际不会持久的撤销（N10） |
 | 擦除保留墓碑；共享团队先移交；保留的 id 列见开发文档 | 不误删其他成员的数据（N3） |
 | 群发只发给已验证地址；Markdown 不渲染原始 HTML；SES 发不出的邮件预先拒绝 | 安全，且失败不再静默（N8） |
