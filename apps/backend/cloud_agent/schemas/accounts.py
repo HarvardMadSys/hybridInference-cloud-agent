@@ -192,6 +192,8 @@ class AccountIdentity(BaseModel):
     """How an account signs in. ``label`` is its email, else login name, else phone."""
 
     locale: str | None = None
+    #: When ``locale`` was chosen, so a browser's newer choice can be carried in.
+    locale_chosen_at: datetime | None = None
     email: str | None
     email_verified: bool
     login_name: str | None

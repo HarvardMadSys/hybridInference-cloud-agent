@@ -222,6 +222,18 @@
             ],
             "title": "Locale"
           },
+          "locale_chosen_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale Chosen At"
+          },
           "login_name": {
             "anyOf": [
               {

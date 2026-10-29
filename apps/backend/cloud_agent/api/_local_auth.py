@@ -448,6 +448,7 @@ def account_identity(record: AccountRecord) -> AccountIdentity:
     """How an account signs in, as its owner and administrators read it."""
     return AccountIdentity(
         locale=record.locale,
+        locale_chosen_at=record.locale_chosen_at,
         email=record.email,
         email_verified=record.email_verified,
         login_name=record.login_name,
