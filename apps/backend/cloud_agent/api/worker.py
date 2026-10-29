@@ -29,7 +29,6 @@ from fastapi.routing import APIRoute
 from cloud_agent import memory_tool, web_search
 from cloud_agent.agent_memory import (
     claim_agent_memories as _claim_agent_memories,
-    prompt_with_agent_memories,
 )
 from cloud_agent.api._body_limits import (
     HostBodyLimitRoute,
@@ -55,13 +54,11 @@ from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.application.residency import residency_ttl_s
 from cloud_agent.application.ssh_servers import (
     build_ssh_access,
-    prompt_with_ssh_servers,
     push_ssh_access,
     servers_for_thread,
     ssh_key_cipher,
 )
 from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
-from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATES
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
@@ -70,7 +67,6 @@ from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.gateway import GatewayError
 from cloud_agent.github_app import AppNotInstalled
 from cloud_agent.goals.controller import continue_after_finish
-from cloud_agent.goals.prompts import prompt_with_goal
 from cloud_agent.goals.report import (
     GoalReportEnvelope,
     parse_goal_report,
@@ -88,6 +84,7 @@ from cloud_agent.owner_access import (
     AgentAccessUnavailable,
     owner_may_use_agent,
 )
+from cloud_agent.prompt_injections import claim_prompt
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager_routing import (
     ENV_SANDBOX_MANAGER_TOKEN,
@@ -124,7 +121,6 @@ from cloud_agent.schemas import (
     WorkerWaitRequest,
     WorkerWaitResponse,
 )
-from cloud_agent.skills.selection import prompt_with_skills
 from cloud_agent.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
@@ -1186,6 +1182,22 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         if claim["runtime"] in runtimes_supporting_mcp()
         else None
     )
+    # Attachments are named inside the user task, then the skill selection
+    # wraps the whole thing: the files are context for the task, and the
+    # skills are guidance about how to approach it. The goal goes outermost
+    # of all, and reaches human and automatic turns alike — the turn that set
+    # the objective is the first one that should be working toward it. The
+    # goal preamble is the same for every runtime and every turn. What each
+    # wrapper added is recorded by size for the Context view (never its text).
+    task_prompt, context_injections = claim_prompt(
+        claim["task_prompt"],
+        attachments=claim.get("attachments"),
+        memories=durable_memories,
+        skills=claim.get("skills"),
+        ssh_servers=servers_for_thread(ssh_state, str(claim["thread_id"])),
+        goal=claim.get("goal"),
+        plugins=claim.get("plugins") or [],
+    )
     response = WorkerClaimResponse(
         thread_attachment_count=thread_attachment_count,
         turn_attachment_count=len(claim.get("attachments") or []),
@@ -1197,28 +1209,8 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         attempt_no=claim["attempt_no"],
         repo=claim["repo"],
         base_sha=claim["base_sha"],
-        # Attachments are named inside the user task, then the skill selection
-        # wraps the whole thing: the files are context for the task, and the
-        # skills are guidance about how to approach it. The goal goes outermost
-        # of all, and reaches human and automatic turns alike — the turn that
-        # set the objective is the first one that should be working toward it.
-        task_prompt=prompt_with_goal(
-            prompt_with_ssh_servers(
-                prompt_with_skills(
-                    prompt_with_agent_memories(
-                        prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
-                        durable_memories,
-                    ),
-                    claim.get("skills"),
-                ),
-                servers_for_thread(ssh_state, str(claim["thread_id"])),
-            ),
-            # The goal preamble is the same for every runtime and every turn.
-            # It used to branch on whether this turn's sandbox could reach a
-            # goal tool, which meant the turns that could not reach it were
-            # never told to report at all — and those were the ordinary turns.
-            claim.get("goal"),
-        ),
+        task_prompt=task_prompt,
+        context_injections=context_injections,
         setup_script=claim.get("setup_script"),
         environment=(
             environment_payload(environment, capabilities) if environment is not None else None

@@ -464,6 +464,25 @@ class ClaudeCodeRuntime(AgentRuntime):
                         **result_fields,
                     },
                 )
+        injected = _record_content_text(blocks)
+        if injected.strip():
+            # Not the owner's message (those come back as replays) and not a
+            # tool result: text the CLI itself added to the conversation, such
+            # as a skill's body or an interrupt marker. Kept, bounded, as an
+            # injection the Context view lists.
+            flags = [name for name in ("isSynthetic", "isMeta") if event.get(name)]
+            return NormalizedEvent(
+                LIFECYCLE,
+                {
+                    "phase": "context_injection",
+                    "source": "claude_user_line",
+                    "label": ",".join(flags) or "user_line",
+                    "text": injected[:SUMMARY_TEXT_CHARS],
+                    "chars": len(injected),
+                    **({"truncated": True} if len(injected) > SUMMARY_TEXT_CHARS else {}),
+                    **parent_fields,
+                },
+            )
         return NormalizedEvent(RAW, {"text": "user turn without a tool result"})
 
     def _compaction_summary(self, event: dict[str, Any]) -> NormalizedEvent | None:

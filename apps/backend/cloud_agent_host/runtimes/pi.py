@@ -449,6 +449,21 @@ class PiRuntime(AgentRuntime):
         # it changes: the deployment's instructions, not the conversation.
         if role in {"user", "system"}:
             return None
+        if role == "custom":
+            # An extension's message, put into the context the model reads:
+            # an injection the Context view lists, bounded like a summary.
+            text = _custom_text(message.get("content"))
+            return NormalizedEvent(
+                LIFECYCLE,
+                {
+                    "phase": "context_injection",
+                    "source": "pi_custom_message",
+                    "label": str(message.get("customType") or "custom")[:120],
+                    "text": text[:SUMMARY_TEXT_CHARS],
+                    "chars": len(text),
+                    **({"truncated": True} if len(text) > SUMMARY_TEXT_CHARS else {}),
+                },
+            )
         return self._raw(line, f"message_end with unknown role {role!r}")
 
     #: pi's own flag vocabulary, minus the two that do not survive the trip.
@@ -531,3 +546,16 @@ def _compaction_event(event: dict[str, Any]) -> NormalizedEvent:
 
 #: Characters of a compaction summary kept on its event.
 SUMMARY_TEXT_CHARS = 4000
+
+
+def _custom_text(content: Any) -> str:
+    """An extension message's text, whether pi sent a string or content blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return ""

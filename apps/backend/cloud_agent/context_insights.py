@@ -14,8 +14,9 @@ ranking is never presented as complete while it is not.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime  # noqa: TC003 — Pydantic resolves the model annotations.
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,9 +38,46 @@ REFRESH_EVENTS_PER_READ = 40_000
 PENDING_COUNT_CAP = 10_000
 
 
-def context_cursor_scope(sort: ContextSort, preset: str | None) -> str:
-    """Bind a cursor to the list it continues."""
-    return cursor_scope(["owner-context-insights", sort, preset])
+#: Characters a search may hold, as on the conversation list.
+MAX_SEARCH_CHARS = 200
+
+
+@dataclass(frozen=True)
+class InsightsFilters:
+    """What narrows the list: a search, one project, one UTC day of the range.
+
+    The search matches a conversation's title or repository, case-insensitive,
+    as the conversation list searches. ``repo`` is one repository and
+    ``temporary`` the conversations without one; they are never both set.
+    """
+
+    q: str = ""
+    repo: str | None = None
+    temporary: bool = False
+    day_since: datetime | None = None
+    day_until: datetime | None = None
+
+    def params(self, *, day: bool = True, project: bool = True) -> list[Any]:
+        """The statement parameters, in the order the runs selection reads them."""
+        values: list[Any] = [
+            self.q,
+            self.repo if project else None,
+            self.temporary if project else False,
+        ]
+        return [*values, self.day_since, self.day_until] if day else values
+
+    def scope(self) -> list[Any]:
+        """What a cursor is bound to, beyond the sort and range."""
+        return [self.q, self.repo, self.temporary, self.day_since and self.day_since.isoformat()]
+
+
+def context_cursor_scope(
+    sort: ContextSort, preset: str | None, filters: InsightsFilters | None = None
+) -> str:
+    """Bind a cursor to the list it continues: its sort, range and filters."""
+    if filters is None or filters == InsightsFilters():
+        return cursor_scope(["owner-context-insights", sort, preset])
+    return cursor_scope(["owner-context-insights", sort, preset, *filters.scope()])
 
 
 class ConversationContext(BaseModel):

@@ -56,9 +56,11 @@ Category = Literal[
     "tool_calls",
     "tool_results",
     "compaction_summary",
+    "injected",
 ]
 CATEGORY_ORDER: tuple[Category, ...] = (
     "compaction_summary",
+    "injected",
     "user_messages",
     "assistant",
     "reasoning",
@@ -240,6 +242,9 @@ def _event_category(row: Mapping[str, Any]) -> str | None:
             return "compaction_summary"
         if phase == "compact_boundary" and row.get("chars"):
             return "compaction_summary"
+        if phase == "context_injection":
+            # Text the CLI itself added to the conversation (context_events).
+            return "injected"
         return None
     return _EVENT_CATEGORY.get(kind)
 

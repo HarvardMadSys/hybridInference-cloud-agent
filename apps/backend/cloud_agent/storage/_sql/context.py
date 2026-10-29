@@ -51,14 +51,40 @@ CASE e.event_type
     WHEN 'tool_use' THEN COALESCE(length(e.payload->>'name'), 0)
                          + COALESCE(length((e.payload->'input')::text), 0)
     WHEN 'tool_result' THEN length(e.payload->>'content')
+    WHEN 'user_message' THEN length(e.payload->>'text')
 END
 """
 
 #: A platform bound or an adapter clipped this event's content.
 _TRUNCATED_SQL = """
-CASE WHEN e.event_type IN ('message', 'thinking', 'tool_use', 'tool_result')
+CASE WHEN (e.event_type IN ('message', 'thinking', 'tool_use', 'tool_result')
+           OR e.event_type = 'lifecycle'
+              AND e.payload->>'phase' IN ('compaction_summary', 'context_injection'))
       AND (e.payload->>'truncated' = 'true' OR e.payload ? 'original_payload_bytes')
      THEN TRUE
+END
+"""
+
+#: CJK and ASCII character classes, for the token estimate's counts
+#: (:mod:`cloud_agent_shared.text_tokens`): what remains after removing every
+#: character outside the class is the class's count.
+CJK_CLASS = r"[^぀-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]"
+ASCII_CLASS = r"[^\x01-\x7f]"
+
+#: The stored text whose size a profile counts: conversation content, and the
+#: compaction summaries and injected messages the CLI carries forward.
+_COUNTED_TEXT_SQL = """
+CASE e.event_type
+    WHEN 'message' THEN e.payload->>'text'
+    WHEN 'thinking' THEN e.payload->>'text'
+    WHEN 'tool_use' THEN COALESCE(e.payload->>'name', '') || COALESCE((e.payload->'input')::text, '')
+    WHEN 'tool_result' THEN e.payload->>'content'
+    WHEN 'user_message' THEN e.payload->>'text'
+    WHEN 'lifecycle' THEN CASE
+        WHEN e.payload->>'phase' IN ('compaction_summary', 'context_injection')
+            THEN e.payload->>'text'
+        WHEN e.payload->>'phase' = 'compact_boundary' THEN e.payload->>'summary_text'
+    END
 END
 """
 
@@ -96,6 +122,28 @@ jsonb_strip_nulls(jsonb_build_object(
                       AND {_RAW_TEXT_MARKERS_SQL.strip()}
                      THEN to_jsonb(left(e.payload->>'text', 4000)) END,
     'chars', {_CHARS_SQL.strip()},
-    'truncated', {_TRUNCATED_SQL.strip()}
+    'cjk', length(regexp_replace({_COUNTED_TEXT_SQL.strip()}, '{CJK_CLASS}', '', 'g')),
+    'ascii', length(regexp_replace({_COUNTED_TEXT_SQL.strip()}, '{ASCII_CLASS}', '', 'g')),
+    'text_chars', CASE WHEN e.event_type = 'lifecycle'
+                       THEN length({_COUNTED_TEXT_SQL.strip()}) END,
+    'truncated', {_TRUNCATED_SQL.strip()},
+    -- Context events (cloud_agent.context_events): what the platform wrapped
+    -- the prompt in at claim, what the CLI injected or pruned, the mode it
+    -- started in, and the plan-mode tools. Sizes and names, never content.
+    'context_injections', CASE WHEN e.event_type = 'lifecycle' AND e.payload->>'phase' = 'started'
+                               THEN e.payload->'context_injections' END,
+    'injection', CASE WHEN e.event_type = 'lifecycle' AND e.payload->>'phase' = 'context_injection'
+                      THEN jsonb_build_object(
+                          'source', e.payload->'source', 'label', e.payload->'label',
+                          'chars', e.payload->'chars') END,
+    'prune', CASE WHEN e.event_type = 'lifecycle' AND e.payload->>'phase' = 'context_prune'
+                  THEN jsonb_build_object(
+                      'source', e.payload->'source', 'tool', e.payload->'tool',
+                      'call_id', e.payload->'call_id', 'chars', e.payload->'chars') END,
+    'permission_mode', CASE WHEN e.event_type = 'lifecycle' AND e.payload->>'phase' = 'init'
+                            THEN e.payload->'harness'->'permission_mode' END,
+    'tool_name', CASE WHEN e.event_type = 'tool_use'
+                           AND e.payload->>'name' IN ('EnterPlanMode', 'ExitPlanMode')
+                      THEN e.payload->'name' END
 ))
 """

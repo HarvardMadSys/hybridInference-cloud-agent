@@ -47,9 +47,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+from cloud_agent_shared.text_tokens import ESTIMATE_BASIS, estimate_from_counts
+
 #: Rollups name their reducer; a semantic change bumps it so every stored
 #: profile is rebuilt from the ledger instead of being served stale.
-CONTEXT_PROFILE_VERSION = 3
+CONTEXT_PROFILE_VERSION = 4
 #: Request points one attempt keeps. Past it, the first and last halves are
 #: kept and the number left out is recorded; peaks and counts still see every
 #: request.
@@ -58,21 +60,46 @@ MAX_ATTEMPT_POINTS = 2_000
 MAX_ATTEMPT_COMPACTIONS = 200
 #: Turn-start context reads one attempt notes (one per turn is usual).
 MAX_ATTEMPT_SNAPSHOTS = 20
+#: Context events one attempt keeps (injections, prunes, modes); counted beyond.
+MAX_ATTEMPT_EVENTS = 200
+#: Names one platform injection lists (skills, attachments); counted beyond.
+MAX_INJECTION_NAMES = 20
 #: The reference plugin's density, and the harness token meter it mirrors.
 CHARS_PER_TOKEN = 4
 
-ContentCategory = Literal["assistant", "reasoning", "tool_calls", "tool_results"]
-CONTENT_CATEGORIES: tuple[ContentCategory, ...] = (
+ContentCategory = Literal[
+    "user_messages",
     "assistant",
     "reasoning",
     "tool_calls",
     "tool_results",
+    "compaction_summary",
+    "injected",
+]
+CONTENT_CATEGORIES: tuple[ContentCategory, ...] = (
+    "user_messages",
+    "assistant",
+    "reasoning",
+    "tool_calls",
+    "tool_results",
+    "compaction_summary",
+    "injected",
 )
+#: Lifecycle phases whose stored text the conversation carries forward.
+_CARRIED_PHASES: dict[str, ContentCategory] = {
+    "compaction_summary": "compaction_summary",
+    "context_injection": "injected",
+}
+#: Claude Code's plan-mode tools: entering and leaving it are context events.
+_PLAN_TOOLS = {"EnterPlanMode": "plan_entered", "ExitPlanMode": "plan_exit_requested"}
 _CONTENT_EVENT: dict[str, ContentCategory] = {
     "message": "assistant",
     "thinking": "reasoning",
     "tool_use": "tool_calls",
     "tool_result": "tool_results",
+    # Messages the owner sent while the turn ran; the turn's own prompt is
+    # the job's, counted from ``task_prompt``.
+    "user_message": "user_messages",
 }
 #: Where each runtime's evidence came from, as a profile names it.
 RequestSource = Literal["claude_usage", "codex_token_usage", "pi_usage", "opencode_step"]
@@ -101,6 +128,11 @@ def _count(value: Any) -> int | None:
     if value != value or value < 0 or value != int(value):
         return None
     return int(value)
+
+
+def _label(value: Any, limit: int) -> str:
+    """A short identifier from a stored payload: text only, bounded."""
+    return value.strip()[:limit] if isinstance(value, str) else ""
 
 
 def _iso(value: datetime | str | None) -> str | None:
@@ -240,9 +272,12 @@ class ContextProfileAccumulator:
         self._compaction_items: set[str] = set()
         self._codex_compacted_turns: set[str] = set()
         self._opencode_trigger: str | None = None
-        self._content = dict.fromkeys(CONTENT_CATEGORIES, 0)
-        self._after = dict.fromkeys(CONTENT_CATEGORIES, 0)
+        #: Recorded content per category: chars, its ASCII and CJK counts, items.
+        self._content = {category: [0, 0, 0, 0] for category in CONTENT_CATEGORIES}
         self.truncated = False
+        #: Context events found so far (see ``cloud_agent.context_events``).
+        self._events: list[dict[str, Any]] = []
+        self._events_seen = 0
         #: The CLI's own context snapshots of this attempt, without entries.
         self._snapshots: list[dict[str, Any]] = []
         self._snapshot_window: int | None = None
@@ -262,7 +297,15 @@ class ContextProfileAccumulator:
         meta = (int(event.get("seq") or 0), _count(event.get("id")), _iso(event.get("created_at")))
         subagent = bool(payload.get("parent_tool_use_id") or payload.get("agent_thread_id"))
         if event_type == "lifecycle":
-            self._lifecycle(payload, meta)
+            if not (subagent and payload.get("phase") in {"context_injection", "context_prune"}):
+                # A delegated agent's own context is not the conversation's.
+                self._lifecycle(payload, meta)
+            carried = _CARRIED_PHASES.get(str(payload.get("phase") or ""))
+            if carried is None and payload.get("phase") == "compact_boundary":
+                # pi's completed compaction carries its summary on the event.
+                carried = "compaction_summary" if payload.get("text_chars") else None
+            if carried is not None and not subagent:
+                self._add_content(carried, payload, chars_key="text_chars")
         elif event_type == "error":
             self._windows(payload.get("context_windows"))
         elif event_type == "usage":
@@ -273,6 +316,9 @@ class ContextProfileAccumulator:
             self._claude_usage(payload, meta, subagent=subagent)
             if not subagent:
                 self._add_content(_CONTENT_EVENT[event_type], payload)
+        tool = payload.get("tool_name")
+        if event_type == "tool_use" and tool in _PLAN_TOOLS and not subagent:
+            self._event(meta, kind="mode", source="claude_plan_tool", mode=_PLAN_TOOLS[tool])
 
     # -- requests ----------------------------------------------------------
 
@@ -422,10 +468,6 @@ class ContextProfileAccumulator:
 
     def _compacted(self, compaction: _Compaction) -> None:
         self._compactions.append(compaction)
-        if compaction.completed is not False:
-            # Content written before a compaction is no longer in the window
-            # the way it was stored; the estimate after it starts over.
-            self._after = dict.fromkeys(CONTENT_CATEGORIES, 0)
 
     def _windows(self, value: Any) -> None:
         if not isinstance(value, Mapping):
@@ -439,10 +481,37 @@ class ContextProfileAccumulator:
         self, payload: Mapping[str, Any], meta: tuple[int, int | None, str | None]
     ) -> None:
         phase = payload.get("phase")
+        if phase == "started":
+            self._platform_injections(payload.get("context_injections"), meta)
+        elif phase == "context_injection":
+            injection = payload.get("injection")
+            injection = injection if isinstance(injection, Mapping) else {}
+            self._event(
+                meta,
+                kind="injection",
+                source=_label(injection.get("source"), 64) or "cli",
+                label=_label(injection.get("label"), 200) or None,
+                chars=_count(injection.get("chars")),
+                tokens=self._estimate(payload),
+            )
+        elif phase == "context_prune":
+            prune = payload.get("prune")
+            prune = prune if isinstance(prune, Mapping) else {}
+            self._event(
+                meta,
+                kind="prune",
+                source=_label(prune.get("source"), 64) or "cli",
+                label=_label(prune.get("tool"), 200) or None,
+                call_id=_label(prune.get("call_id"), 256) or None,
+                chars=_count(prune.get("chars")),
+            )
         if phase == "init":
             model = payload.get("model")
             if isinstance(model, str) and model and self.main_model is None:
                 self.main_model = model[:256]
+            mode = payload.get("permission_mode")
+            if isinstance(mode, str) and mode:
+                self._event(meta, kind="mode", source="claude_init", mode=mode[:64])
             # Claude's start-up inventory (tool and MCP server names).
             self._snapshot(payload.get("snapshot"), meta)
         elif phase == "result":
@@ -608,13 +677,64 @@ class ContextProfileAccumulator:
             )
             self._opencode_trigger = None
 
+    # -- events --------------------------------------------------------------
+
+    def _event(self, meta: tuple[int, int | None, str | None], **fields: Any) -> None:
+        """Note one context event, bounded; the rest are counted."""
+        self._events_seen += 1
+        if len(self._events) < MAX_ATTEMPT_EVENTS:
+            self._events.append(
+                {
+                    "seq": meta[0],
+                    "event_id": meta[1],
+                    "at": meta[2],
+                    **{key: value for key, value in fields.items() if value is not None},
+                }
+            )
+
+    def _platform_injections(self, value: Any, meta: tuple[int, int | None, str | None]) -> None:
+        """What the platform wrapped this attempt's prompt in at claim (``started``)."""
+        for item in value if isinstance(value, list) else []:
+            if not isinstance(item, Mapping):
+                continue
+            names = [str(n)[:120] for n in item.get("names") or [] if isinstance(n, str)]
+            counts = [_count(item.get(key)) or 0 for key in ("ascii", "cjk")]
+            chars = _count(item.get("chars"))
+            self._event(
+                meta,
+                kind="injection",
+                source="platform_" + _label(item.get("producer"), 32),
+                items=_count(item.get("items")),
+                names=names[:MAX_INJECTION_NAMES] or None,
+                chars=chars,
+                tokens=(
+                    estimate_from_counts(counts[0], counts[1], (chars or 0) - sum(counts))
+                    if chars is not None
+                    else None
+                ),
+            )
+
+    @staticmethod
+    def _estimate(payload: Mapping[str, Any]) -> int | None:
+        """The estimate for a lifecycle event's stored text, when it has one."""
+        chars = _count(payload.get("text_chars"))
+        if chars is None:
+            return None
+        ascii_chars, cjk = _count(payload.get("ascii")) or 0, _count(payload.get("cjk")) or 0
+        return estimate_from_counts(ascii_chars, cjk, chars - ascii_chars - cjk)
+
     # -- content -------------------------------------------------------------
 
-    def _add_content(self, category: ContentCategory, payload: Mapping[str, Any]) -> None:
-        chars = _count(payload.get("chars"))
+    def _add_content(
+        self, category: ContentCategory, payload: Mapping[str, Any], *, chars_key: str = "chars"
+    ) -> None:
+        chars = _count(payload.get(chars_key))
         if chars:
-            self._content[category] += chars
-            self._after[category] += chars
+            known = self._content[category]
+            known[0] += chars
+            known[1] += _count(payload.get("ascii")) or 0
+            known[2] += _count(payload.get("cjk")) or 0
+            known[3] += 1
         if payload.get("truncated") is True:
             self.truncated = True
 
@@ -644,10 +764,20 @@ class ContextProfileAccumulator:
             "compactions": [c.record() for c in self._compactions[:MAX_ATTEMPT_COMPACTIONS]],
             "compactions_omitted": max(0, len(self._compactions) - MAX_ATTEMPT_COMPACTIONS),
             "content": {
-                "total": dict(self._content),
-                "after_compaction": dict(self._after) if self._compactions else None,
+                "basis": ESTIMATE_BASIS,
+                "categories": {
+                    category: {
+                        "chars": chars,
+                        "tokens": estimate_from_counts(ascii_chars, cjk, chars - ascii_chars - cjk),
+                        "items": items,
+                    }
+                    for category, (chars, ascii_chars, cjk, items) in self._content.items()
+                    if items
+                },
                 "truncated": self.truncated,
             },
+            "events": self._events,
+            "events_omitted": max(0, self._events_seen - len(self._events)),
             "unparsed_raw": self.unparsed_raw,
             "snapshots": self._snapshots,
             "summary": {

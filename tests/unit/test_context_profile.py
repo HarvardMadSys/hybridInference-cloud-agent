@@ -80,14 +80,15 @@ def test_claude_blocks_of_one_response_are_one_request():
     assert profile["requests"][0][7] == 30  # output grew across the blocks
     # The init model picks its own window out of the two reported.
     assert summary["context_window"] == 200_000
-    assert profile["content"]["total"] == {
+    categories = profile["content"]["categories"]
+    assert {key: value["chars"] for key, value in categories.items()} == {
         "assistant": 400,
         "reasoning": 40,
         "tool_calls": 80,
         "tool_results": 4000,
     }
+    assert profile["content"]["basis"] == "chars_cjk_v1"
     assert profile["content"]["truncated"] is True
-    assert profile["content"]["after_compaction"] is None
 
 
 def test_claude_subagent_requests_are_counted_apart_from_the_main_context():
@@ -142,8 +143,9 @@ def test_claude_compaction_with_and_without_the_clis_sizes():
     assert second["post_tokens"] is None
     assert profile["summary"]["compactions"] == 2
     assert profile["summary"]["compacted_after_latest"] is False
-    # Content counted again from the last compaction only.
-    assert profile["content"]["after_compaction"]["assistant"] == 12
+    # Each stored item is counted once, whether or not a compaction followed it.
+    assistant = profile["content"]["categories"]["assistant"]
+    assert (assistant["chars"], assistant["items"]) == (4012, 2)
 
 
 def _codex(method: str, params: dict[str, Any], **owner: str) -> dict[str, Any]:

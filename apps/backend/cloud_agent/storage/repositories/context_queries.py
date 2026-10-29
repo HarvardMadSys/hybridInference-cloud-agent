@@ -15,7 +15,12 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.context_profile import CONTEXT_PROFILE_VERSION, ContextProfileAccumulator
+from cloud_agent.context_insights import InsightsFilters
+from cloud_agent.context_profile import (
+    CONTENT_CATEGORIES,
+    CONTEXT_PROFILE_VERSION,
+    ContextProfileAccumulator,
+)
 from cloud_agent.context_request import (
     LocatedRequest,
     RequestComposition,
@@ -23,13 +28,14 @@ from cloud_agent.context_request import (
     locate_request,
 )
 from cloud_agent.context_view import assemble_thread_context
-from cloud_agent.storage._sql.context import CONTEXT_EVENT_PAYLOAD_SQL
+from cloud_agent.storage._sql.context import ASCII_CLASS, CJK_CLASS, CONTEXT_EVENT_PAYLOAD_SQL
 from cloud_agent.storage._sql.rows import load_json
 
 if TYPE_CHECKING:
     import asyncpg
 
     from cloud_agent.context_insights import ContextInsightsCursor, ContextSort
+
 
 #: Events one page of a profile refresh reads.
 CONTEXT_EVENT_PAGE_SIZE = 1_000
@@ -112,20 +118,41 @@ _STORE_SQL = """
     WHERE agent_attempt_context_profiles.event_seq <= EXCLUDED.event_seq
 """
 
-#: The owner's runs in a range, as the usage history selects them, on
-#: conversations they can still open.
-_RANGE_RUNS_SQL = """
-    SELECT j.id, j.thread_id, j.created_at, j.runtime, j.model
+
+def _range_runs_sql(f: int, *, day: bool = True) -> str:
+    """The owner's runs in a range, as the usage history selects them, filtered.
+
+    Only conversations the owner can still open; Fork copies are left out.
+    ``$f`` is the search (title or repository, case-insensitive, as the
+    conversation list searches), ``$f+1`` one repository, ``$f+2`` only the
+    temporary workspaces (no repository), and with ``day`` ``$f+3``/``$f+4``
+    one UTC day inside the range.
+    """
+    q, repo, temporary = f"${f}", f"${f + 1}", f"${f + 2}"
+    day_sql = (
+        f"AND (${f + 3}::timestamptz IS NULL"
+        f" OR (j.created_at >= ${f + 3} AND j.created_at < ${f + 4}::timestamptz))"
+        if day
+        else ""
+    )
+    return f"""
+    SELECT j.id, j.thread_id, j.created_at, j.runtime, j.model, t.repo
     FROM agent_jobs j
     JOIN agent_threads t ON t.id = j.thread_id
     WHERE j.user_id = $1 AND j.created_at >= $2 AND j.created_at < $3
       AND j.fork_source_job_id IS NULL AND t.deleted_at IS NULL
-"""
+      AND ({q}::text = '' OR POSITION(LOWER({q}) IN LOWER(COALESCE(t.title, ''))) > 0
+           OR POSITION(LOWER({q}) IN LOWER(COALESCE(t.repo, ''))) > 0)
+      AND ({repo}::text IS NULL OR t.repo = {repo})
+      AND (NOT {temporary}::boolean OR t.repo IS NULL)
+      {day_sql}
+    """
+
 
 #: Attempts in the range whose profile is missing or stale, newest first.
 _STALE_SQL = f"""
     /* context_insights_stale */
-    WITH runs AS ({_RANGE_RUNS_SQL})
+    WITH runs AS ({_range_runs_sql(6)})
     SELECT a.id AS attempt_id, a.job_id, latest.event_seq
     FROM runs r
     JOIN agent_attempts a ON a.job_id = r.id
@@ -143,8 +170,11 @@ _STALE_SQL = f"""
     LIMIT $5
 """
 
-_PER_THREAD_SQL = f"""
-    WITH runs AS ({_RANGE_RUNS_SQL}),
+
+def _per_thread_sql(f: int) -> str:
+    """Each matching conversation's runs summarized, and its sort number (``$5``)."""
+    return f"""
+    WITH runs AS ({_range_runs_sql(f)}),
     per_thread AS (
         SELECT r.thread_id,
                COUNT(DISTINCT r.id) AS turns,
@@ -184,11 +214,12 @@ _PER_THREAD_SQL = f"""
                END AS sort_number
         FROM per_thread pt
     )
-"""
+    """
+
 
 _PAGE_SQL = f"""
     /* context_insights_page */
-    {_PER_THREAD_SQL}
+    {_per_thread_sql(10)}
     SELECT ranked.*, t.title, t.repo, (t.archived_at IS NOT NULL) AS archived,
            (SELECT j.id FROM agent_jobs j
             WHERE j.thread_id = ranked.thread_id ORDER BY j.turn_no DESC LIMIT 1)
@@ -204,10 +235,11 @@ _PAGE_SQL = f"""
 
 _SUMMARY_SQL = f"""
     /* context_insights_summary */
-    {_PER_THREAD_SQL}
+    {_per_thread_sql(6)}
     SELECT COUNT(*) AS conversations,
            COUNT(*) FILTER (WHERE peak_prompt_tokens IS NOT NULL OR compactions > 0)
                AS conversations_observed,
+           COALESCE(SUM(turns), 0) AS turns,
            COALESCE(SUM(main_requests), 0) AS main_requests,
            COALESCE(SUM(subagent_requests), 0) AS subagent_requests,
            COALESCE(SUM(compactions), 0) AS compactions,
@@ -226,10 +258,89 @@ _PENDING_SQL = f"""
     SELECT COUNT(*) FROM ({_STALE_SQL}) pending
 """
 
+#: Activity per UTC day of the filtered runs, every day in the range that has
+#: any (the heatmap); the day filter itself is not applied, it is chosen here.
+_ACTIVITY_SQL = f"""
+    /* context_insights_activity */
+    WITH runs AS ({_range_runs_sql(5, day=False)})
+    SELECT (r.created_at AT TIME ZONE 'UTC')::date AS day,
+           COUNT(DISTINCT r.id) AS turns,
+           COUNT(DISTINCT r.thread_id) AS conversations,
+           COALESCE(SUM(p.main_requests), 0) AS main_requests,
+           COALESCE(SUM(p.compactions), 0) AS compactions,
+           MAX(p.peak_prompt_tokens) AS peak_prompt_tokens
+    FROM runs r
+    LEFT JOIN agent_attempts a ON a.job_id = r.id
+    LEFT JOIN agent_attempt_context_profiles p
+        ON p.attempt_id = a.id AND p.reducer_version = $4
+    GROUP BY 1
+    ORDER BY 1
+"""
 
-#: CJK and ASCII character classes, for the token estimate's three counts.
-_CJK_CLASS = r"[^぀-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]"
-_ASCII_CLASS = r"[^\x01-\x7f]"
+#: The repositories (and the temporary workspaces, ``repo`` null) of the runs
+#: the search and day select, ignoring the project filter: what it can pick.
+_PROJECTS_SQL = f"""
+    /* context_insights_projects */
+    WITH runs AS ({_range_runs_sql(4)})
+    SELECT r.repo, COUNT(DISTINCT r.thread_id) AS conversations, COUNT(*) AS turns
+    FROM runs r
+    GROUP BY r.repo
+    ORDER BY conversations DESC, turns DESC, r.repo NULLS LAST
+"""
+
+#: One summed column per recorded-content category of a profile.
+_CATEGORY_SUMS_SQL = ",\n           ".join(
+    f"COALESCE(SUM((p.profile->'content'->'categories'->'{category}'->>'tokens')::bigint), 0)"
+    f" AS {category}"
+    for category in CONTENT_CATEGORIES
+)
+
+#: Recorded content per matching conversation, each stored item counted once:
+#: the attempt each turn kept (its latest), the turn's own prompt, and what
+#: the platform wrapped it in at claim. Estimates (``chars_cjk_v1``), never
+#: billed tokens.
+_COMPOSITION_SQL = f"""
+    /* context_insights_composition */
+    WITH runs AS ({_range_runs_sql(5)}),
+    kept AS (
+        SELECT DISTINCT ON (a.job_id) a.job_id, a.id AS attempt_id
+        FROM agent_attempts a
+        WHERE a.job_id IN (SELECT id FROM runs)
+        ORDER BY a.job_id, a.attempt_no DESC
+    )
+    SELECT r.thread_id,
+           COUNT(*) AS turns,
+           COUNT(*) FILTER (WHERE p.attempt_id IS NOT NULL) AS turns_profiled,
+           COUNT(*) FILTER (WHERE (p.profile->'content'->>'truncated')::boolean)
+               AS turns_truncated,
+           COALESCE(SUM(prompt.tokens), 0) AS prompt_tokens,
+           COALESCE(SUM(platform.tokens), 0) AS platform_tokens,
+           {_CATEGORY_SUMS_SQL}
+    FROM runs r
+    JOIN agent_jobs j ON j.id = r.id
+    LEFT JOIN kept k ON k.job_id = r.id
+    LEFT JOIN agent_attempt_context_profiles p
+        ON p.attempt_id = k.attempt_id AND p.reducer_version = $4
+    CROSS JOIN LATERAL (
+        SELECT CEIL(GREATEST(ascii, 0) / 4.0) + cjk + CEIL(GREATEST(chars - ascii - cjk, 0) / 2.0)
+                   AS tokens
+        FROM (SELECT length(COALESCE(j.task_prompt, '')) AS chars,
+                     length(regexp_replace(COALESCE(j.task_prompt, ''), '{CJK_CLASS}', '', 'g'))
+                         AS cjk,
+                     length(regexp_replace(COALESCE(j.task_prompt, ''), '{ASCII_CLASS}', '', 'g'))
+                         AS ascii) counts
+    ) prompt
+    CROSS JOIN LATERAL (
+        SELECT SUM((ev->>'tokens')::bigint) AS tokens
+        FROM jsonb_array_elements(COALESCE(p.profile->'events', '[]'::jsonb)) ev
+        WHERE ev->>'kind' = 'injection' AND left(ev->>'source', 9) = 'platform_'
+          AND ev->>'tokens' ~ '^[0-9]{{1,12}}$'
+    ) platform
+    WHERE $10::text[] IS NULL OR r.thread_id = ANY($10::text[])
+    GROUP BY r.thread_id
+"""
+
+_CJK_CLASS, _ASCII_CLASS = CJK_CLASS, ASCII_CLASS
 
 #: The text of a stored content event: what its preview, length and estimate read.
 _BODY_SQL = """
@@ -247,7 +358,8 @@ CROSS JOIN LATERAL (
 _CONTENT_EVENTS_SQL = """
     (e.event_type IN ('message', 'thinking', 'tool_use', 'tool_result', 'user_message')
      OR (e.event_type = 'lifecycle'
-         AND e.payload->>'phase' IN ('compaction_summary', 'compact_boundary')))
+         AND e.payload->>'phase' IN ('compaction_summary', 'compact_boundary',
+                                     'context_injection')))
 """
 
 _COUNTS_SQL = f"""
@@ -451,19 +563,31 @@ class PostgresContextQueries:
         refresh_attempts: int,
         refresh_events: int,
         pending_cap: int,
+        filters: InsightsFilters | None = None,
     ) -> dict[str, Any]:
         """Profile a bounded number of stale attempts, then read one ranked page.
 
         The page, the totals and the remaining count come from one read-only
-        snapshot taken after the refresh, so they agree with each other.
+        snapshot taken after the refresh, so they agree with each other. The
+        first page (no ``cursor``) also reads the range's daily activity, the
+        projects it can be filtered to, and every matching conversation's
+        recorded composition; a later page reads only its own conversations'.
         """
+        chosen = filters or InsightsFilters()
+        runs = chosen.params()
         async with self._pool.acquire() as conn:
             await conn.execute("SET statement_timeout = '5s'")
             try:
                 stale = [
                     dict(row)
                     for row in await conn.fetch(
-                        _STALE_SQL, user_id, since, until, CONTEXT_PROFILE_VERSION, refresh_attempts
+                        _STALE_SQL,
+                        user_id,
+                        since,
+                        until,
+                        CONTEXT_PROFILE_VERSION,
+                        refresh_attempts,
+                        *runs,
                     )
                 ]
                 refreshed = await refresh_profiles(conn, stale, event_budget=refresh_events)
@@ -484,11 +608,12 @@ class PostgresContextQueries:
                         cursor.at if cursor else None,
                         cursor.thread_id if cursor else None,
                         limit + 1,
+                        *runs,
                     )
                 ]
                 summary = dict(
                     await conn.fetchrow(
-                        _SUMMARY_SQL, user_id, since, until, CONTEXT_PROFILE_VERSION, sort
+                        _SUMMARY_SQL, user_id, since, until, CONTEXT_PROFILE_VERSION, sort, *runs
                     )
                 )
                 pending = int(
@@ -499,13 +624,47 @@ class PostgresContextQueries:
                         until,
                         CONTEXT_PROFILE_VERSION,
                         pending_cap + 1,
+                        *runs,
                     )
                 )
+                details: dict[str, Any] = {}
+                if cursor is None:
+                    details["activity"] = [
+                        dict(row)
+                        for row in await conn.fetch(
+                            _ACTIVITY_SQL,
+                            user_id,
+                            since,
+                            until,
+                            CONTEXT_PROFILE_VERSION,
+                            *chosen.params(day=False),
+                        )
+                    ]
+                    details["projects"] = [
+                        dict(row)
+                        for row in await conn.fetch(
+                            _PROJECTS_SQL, user_id, since, until, *chosen.params(project=False)
+                        )
+                    ]
+                composition = [
+                    dict(row)
+                    for row in await conn.fetch(
+                        _COMPOSITION_SQL,
+                        user_id,
+                        since,
+                        until,
+                        CONTEXT_PROFILE_VERSION,
+                        *runs,
+                        None if cursor is None else [row["thread_id"] for row in page],
+                    )
+                ]
         return {
             "page": page,
             "summary": summary,
             "pending": pending,
             "refreshed": len(refreshed),
+            "composition": composition,
+            **details,
         }
 
     async def request_composition(

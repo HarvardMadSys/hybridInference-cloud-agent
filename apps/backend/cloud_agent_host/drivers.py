@@ -1855,6 +1855,11 @@ class HttpAgentLiveTurn(_JsonResidentTurn[ResidentLiveRuntime]):
         #: The call of a tool part that ended without running, reported just
         #: ahead of the result the same update carries.
         self.unopened_call: HarnessEvent | None = None
+        #: Text parts the server marked ``synthetic``, and whether each was
+        #: already reported as an injection (see ``_synthetic_injection``).
+        self.synthetic_parts: dict[str, bool] = {}
+        #: Tool calls whose output the server pruned from context this turn.
+        self.pruned_calls: set[str] = set()
 
 
 class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
@@ -2019,6 +2024,11 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                 # cannot turn the user's input into an assistant reply.
                 message_id = str(part.get("messageID") or "")
                 turn.text_parts[part_id] = (message_id, str(part.get("text") or ""))
+                if part.get("synthetic") is True:
+                    turn.synthetic_parts.setdefault(part_id, False)
+                    injected = self._synthetic_injection(turn, part_id)
+                    if injected is not None:
+                        return injected
                 timing = part.get("time")
                 ended = isinstance(timing, dict) and bool(timing.get("end"))
                 return self._answer_preview(turn, part_id, ended=ended, line=line)
@@ -2045,6 +2055,25 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                 state = state if isinstance(state, dict) else {}
                 call_id = str(part.get("callID") or part_id)
                 status = state.get("status")
+                timing = state.get("time")
+                if status == "completed" and isinstance(timing, dict) and timing.get("compacted"):
+                    # The server pruned an earlier call's output from context:
+                    # it re-sends the part marked compacted. That is not a new
+                    # result (nor a call to open), it is a prune.
+                    if call_id in turn.pruned_calls:
+                        return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+                    turn.pruned_calls.add(call_id)
+                    return HarnessEvent(
+                        LIFECYCLE,
+                        {
+                            "phase": "context_prune",
+                            "source": f"{self.runtime.name}_prune",
+                            "tool": str(part.get("tool") or "")[:120],
+                            "call_id": call_id[:256],
+                            "chars": len(str(state.get("output") or "")),
+                        },
+                        raw_line=line,
+                    )
                 # Both servers open a tool part as pending, with an empty input,
                 # while the model is still writing the call's arguments. The
                 # call is reported from the update that starts it running,
@@ -2155,12 +2184,48 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
             opened, turn.unopened_call = turn.unopened_call, None
             return [event] if opened is None else [opened, event]
         turn.preview.clear()
+        # Synthetic parts whose owner was not known when they arrived.
+        injected = [
+            injection
+            for part_id in list(turn.synthetic_parts)
+            if (injection := self._synthetic_injection(turn, part_id)) is not None
+        ]
         answer = [
             HarnessEvent(MESSAGE, {"text": text, "preview_id": part_id}, raw_line=line)
             for part_id, (message_id, text) in turn.text_parts.items()
-            if text.strip() and turn.message_roles.get(message_id) == "assistant"
+            if text.strip()
+            and turn.message_roles.get(message_id) == "assistant"
+            and part_id not in turn.synthetic_parts
         ]
-        return answer or [self.event_for_protocol_line(line, turn)]
+        if answer:
+            return [*injected, *answer]
+        return [*injected, self.event_for_protocol_line(line, turn)]
+
+    @staticmethod
+    def _synthetic_injection(turn: HttpAgentLiveTurn, part_id: str) -> HarnessEvent | None:
+        """A synthetic text part of a user message, once: what the server injected.
+
+        The pinned servers mark text they add to a user message themselves
+        (a reminder, a file they read on the user's behalf) as ``synthetic``.
+        Reported when its message is known to be the user's, at most once.
+        """
+        message_id, text = turn.text_parts.get(part_id, ("", ""))
+        if turn.synthetic_parts.get(part_id) or turn.message_roles.get(message_id) != "user":
+            return None
+        if not text.strip():
+            return None
+        turn.synthetic_parts[part_id] = True
+        return HarnessEvent(
+            LIFECYCLE,
+            {
+                "phase": "context_injection",
+                "source": "server_synthetic_part",
+                "label": "synthetic",
+                "text": text[:4000],
+                "chars": len(text),
+                **({"truncated": True} if len(text) > 4000 else {}),
+            },
+        )
 
     def interrupt_turn(self, turn: _JsonResidentTurn[ResidentLiveRuntime]) -> None:
         """Interrupt only the active bridge turn on the resident session."""

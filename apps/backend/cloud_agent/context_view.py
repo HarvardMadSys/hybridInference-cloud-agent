@@ -17,6 +17,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from cloud_agent.context_events import (  # Pydantic resolves the models.
+    ContextEvent,
+    EventCapability,
+    assemble_context_events,
+    event_capabilities,
+)
 from cloud_agent.context_profile import (
     POINT_FIELDS,
     profile_is_current,
@@ -197,6 +203,13 @@ class ThreadContextView(BaseModel):
     compactions: list[ContextCompaction]
     largest_changes: list[ContextChange]
     coverage: ContextCoverage
+    #: Injections, compactions, prunes, model switches and mode changes, in
+    #: conversation order (``cloud_agent.context_events``), with every kind's
+    #: count, what was left out of the list, and what each runtime can show.
+    events: list[ContextEvent] = Field(default_factory=list)
+    event_counts: dict[str, int] = Field(default_factory=dict)
+    events_omitted: int = Field(default=0, ge=0)
+    event_capabilities: list[EventCapability] = Field(default_factory=list)
 
 
 #: What each pinned runtime's stored events can carry, checked against the
@@ -480,6 +493,7 @@ def assemble_thread_context(
     for job in jobs:
         runtime = str(job.get("runtime") or "unknown")
         runtimes[runtime] = runtimes.get(runtime, 0) + 1
+    events, event_counts, events_omitted = assemble_context_events(jobs=jobs, by_job=by_job)
     omitted_here = max(0, len(points) - MAX_VIEW_POINTS)
     coverage = assembly.coverage
     coverage.points_omitted += omitted_here
@@ -502,4 +516,8 @@ def assemble_thread_context(
         compactions=assembly.compactions,
         largest_changes=_largest_changes(points),
         coverage=coverage,
+        events=events,
+        event_counts=event_counts,
+        events_omitted=events_omitted,
+        event_capabilities=event_capabilities(list(runtimes)),
     )
