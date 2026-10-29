@@ -39,6 +39,7 @@ async def bind_identity_source(app: FastAPI, pool: asyncpg.Pool) -> AuthMode:
         check_local_configuration()
         _check_local_inference()
         await ensure_local_namespace(pool)
+        await _announce_setup(pool)
         app.state.gateway_issuer = None
         return mode
     # An empty deployment must remain reachable through recovery-token setup.
@@ -46,6 +47,25 @@ async def bind_identity_source(app: FastAPI, pool: asyncpg.Pool) -> AuthMode:
     issuer = (setting_env("GATEWAY_ISSUER") or "").strip() or None
     app.state.gateway_issuer = await ensure_gateway_namespace(pool, issuer)
     return mode
+
+
+async def _announce_setup(pool: asyncpg.Pool) -> None:
+    """Log the first-run setup code while no local administrator exists.
+
+    Never stops startup: an operator can still bootstrap from the command line.
+    """
+    from cloud_agent.accounts.setup import announce_setup_code
+    from cloud_agent.logging_utils import get_logger
+    from cloud_agent.storage.assembly import Storage
+
+    try:
+        await announce_setup_code(Storage(pool).local_accounts)
+    except Exception:
+        get_logger(__name__).warning(
+            "agent_local_setup_unavailable",
+            exc_info=True,
+            extra={"event": "agent_local_setup_unavailable"},
+        )
 
 
 def _check_local_inference() -> None:

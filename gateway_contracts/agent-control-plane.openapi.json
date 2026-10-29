@@ -13,7 +13,9 @@
               "suspend",
               "restore",
               "grant_admin",
-              "revoke_admin"
+              "revoke_admin",
+              "delete",
+              "resume"
             ],
             "title": "Action",
             "type": "string"
@@ -47,14 +49,44 @@
       "AccountEntry": {
         "description": "One account as the administration page lists it.",
         "properties": {
+          "admin_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admin Note"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
             "type": "string"
           },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
           "email": {
-            "title": "Email",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
           },
           "email_verified": {
             "title": "Email Verified",
@@ -64,17 +96,51 @@
             "title": "Id",
             "type": "string"
           },
+          "identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "is_admin": {
             "title": "Is Admin",
             "type": "boolean"
           },
+          "last_login_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Login At"
+          },
           "status": {
             "enum": [
               "active",
-              "suspended"
+              "suspended",
+              "deleted"
             ],
             "title": "Status",
             "type": "string"
+          },
+          "suspension_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suspension Message"
           },
           "waitlist": {
             "$ref": "#/components/schemas/WaitlistEntry"
@@ -90,6 +156,124 @@
           "created_at"
         ],
         "title": "AccountEntry",
+        "type": "object"
+      },
+      "AccountIdentity": {
+        "description": "How an account signs in. ``label`` is its email, else login name, else phone.",
+        "properties": {
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "email_verified": {
+            "title": "Email Verified",
+            "type": "boolean"
+          },
+          "has_password": {
+            "title": "Has Password",
+            "type": "boolean"
+          },
+          "identity_verified": {
+            "title": "Identity Verified",
+            "type": "boolean"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "login_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Login Name"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone"
+          },
+          "user_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Name"
+          }
+        },
+        "required": [
+          "email",
+          "email_verified",
+          "login_name",
+          "phone",
+          "has_password",
+          "identity_verified",
+          "user_name",
+          "label"
+        ],
+        "title": "AccountIdentity",
+        "type": "object"
+      },
+      "AccountNotesRequest": {
+        "additionalProperties": false,
+        "description": "The administrator's note and the message a suspended account is shown.",
+        "properties": {
+          "admin_note": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admin Note"
+          },
+          "expected_version": {
+            "maximum": 4.611686018427388e+18,
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "suspension_message": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suspension Message"
+          }
+        },
+        "required": [
+          "expected_version"
+        ],
+        "title": "AccountNotesRequest",
         "type": "object"
       },
       "AcquireHostDrainFenceRequest": {
@@ -385,7 +569,7 @@
         "type": "object"
       },
       "AdminAccountsResponse": {
-        "description": "One page of accounts and the filtered total.",
+        "description": "One page of accounts, the filtered total and the counts per state.",
         "properties": {
           "accounts": {
             "items": {
@@ -393,6 +577,13 @@
             },
             "title": "Accounts",
             "type": "array"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
           },
           "total": {
             "title": "Total",
@@ -9623,6 +9814,53 @@
         "title": "AuthConfigResponse",
         "type": "object"
       },
+      "AuthOptionsResponse": {
+        "description": "What a local deployment's account pages offer. Public; carries no secret.",
+        "properties": {
+          "email_delivery": {
+            "default": false,
+            "title": "Email Delivery",
+            "type": "boolean"
+          },
+          "max_accounts_per_browser": {
+            "default": 5,
+            "title": "Max Accounts Per Browser",
+            "type": "integer"
+          },
+          "phone": {
+            "$ref": "#/components/schemas/PhoneAuthConfig"
+          },
+          "require_email_verification": {
+            "default": true,
+            "title": "Require Email Verification",
+            "type": "boolean"
+          },
+          "setup_required": {
+            "default": false,
+            "title": "Setup Required",
+            "type": "boolean"
+          },
+          "signup_enabled": {
+            "title": "Signup Enabled",
+            "type": "boolean"
+          },
+          "terms_url": {
+            "default": "",
+            "title": "Terms Url",
+            "type": "string"
+          },
+          "turnstile_site_key": {
+            "default": "",
+            "title": "Turnstile Site Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "signup_enabled"
+        ],
+        "title": "AuthOptionsResponse",
+        "type": "object"
+      },
       "AuthorizeRequest": {
         "additionalProperties": false,
         "description": "The client to authorize as, when the server cannot register one for us.\n\nOptional, and it exists because some servers expect the user to bring a\nclient id: refusing to accept one would leave the browser flow permanently\nunavailable on exactly the servers that document it as the way in.",
@@ -9757,6 +9995,67 @@
           "protected_cidrs"
         ],
         "title": "AutomaticDeploymentSetup",
+        "type": "object"
+      },
+      "BindEmailRequest": {
+        "additionalProperties": false,
+        "description": "Bind or change the account's email, confirmed as the account signs in.",
+        "properties": {
+          "email": {
+            "maxLength": 320,
+            "minLength": 1,
+            "title": "Email",
+            "type": "string"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
+          },
+          "phone_code": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{6}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone Code"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "title": "BindEmailRequest",
+        "type": "object"
+      },
+      "BindEmailResponse": {
+        "description": "Whether a link was sent, or the address is already the account's.",
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "email_verified": {
+            "title": "Email Verified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "email",
+          "email_verified"
+        ],
+        "title": "BindEmailResponse",
         "type": "object"
       },
       "BindingRequest": {
@@ -9927,6 +10226,135 @@
           }
         },
         "title": "BindingsResponse",
+        "type": "object"
+      },
+      "BrowserAccountEntry": {
+        "description": "One account signed in on this browser, for the account chooser. No credential.",
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "agent_access": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Access"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "signed_in": {
+            "title": "Signed In",
+            "type": "boolean"
+          },
+          "user_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Name"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "user_name",
+          "active",
+          "signed_in",
+          "agent_access"
+        ],
+        "title": "BrowserAccountEntry",
+        "type": "object"
+      },
+      "BrowserAccountsResponse": {
+        "description": "The accounts signed in on this browser.",
+        "properties": {
+          "accounts": {
+            "items": {
+              "$ref": "#/components/schemas/BrowserAccountEntry"
+            },
+            "title": "Accounts",
+            "type": "array"
+          },
+          "active_account_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Account Id"
+          },
+          "max_accounts": {
+            "title": "Max Accounts",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "active_account_id",
+          "accounts",
+          "max_accounts"
+        ],
+        "title": "BrowserAccountsResponse",
+        "type": "object"
+      },
+      "ChangePasswordRequest": {
+        "additionalProperties": false,
+        "description": "Change the password (``old_password``), or set a first one (``phone_code``).",
+        "properties": {
+          "new_password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "New Password",
+            "type": "string"
+          },
+          "old_password": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Old Password"
+          },
+          "phone_code": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{6}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone Code"
+          }
+        },
+        "required": [
+          "new_password"
+        ],
+        "title": "ChangePasswordRequest",
         "type": "object"
       },
       "ClaimInvitationRequest": {
@@ -11236,6 +11664,48 @@
         "title": "DefaultInput",
         "type": "object"
       },
+      "DeleteAccountRequest": {
+        "additionalProperties": false,
+        "description": "Delete the signed-in account: its identifier typed out, and its proof.",
+        "properties": {
+          "confirm": {
+            "maxLength": 320,
+            "minLength": 1,
+            "title": "Confirm",
+            "type": "string"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
+          },
+          "phone_code": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{6}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone Code"
+          }
+        },
+        "required": [
+          "confirm"
+        ],
+        "title": "DeleteAccountRequest",
+        "type": "object"
+      },
       "DiscoverModelsRequest": {
         "additionalProperties": false,
         "description": "Where to list model ids, with which key: the form's, before anything is saved.\n\nExactly one of ``api_key`` (the key the owner just entered) and\n``connection_id`` (the owner's saved connection, whose stored key is used\nonly while ``base_url`` is still that connection's Base URL). A key that\nwas entered is never replaced by a stored one.",
@@ -11291,30 +11761,6 @@
           "models"
         ],
         "title": "DiscoveredModels",
-        "type": "object"
-      },
-      "EmailPasswordRequest": {
-        "additionalProperties": false,
-        "description": "Sign-up and sign-in.",
-        "properties": {
-          "email": {
-            "maxLength": 320,
-            "minLength": 1,
-            "title": "Email",
-            "type": "string"
-          },
-          "password": {
-            "maxLength": 1024,
-            "minLength": 1,
-            "title": "Password",
-            "type": "string"
-          }
-        },
-        "required": [
-          "email",
-          "password"
-        ],
-        "title": "EmailPasswordRequest",
         "type": "object"
       },
       "EmailRequest": {
@@ -11383,6 +11829,23 @@
           "command"
         ],
         "title": "EnvironmentAction",
+        "type": "object"
+      },
+      "EraseAccountRequest": {
+        "additionalProperties": false,
+        "description": "Permanently erase a deleted account: its id typed out again.",
+        "properties": {
+          "confirm": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Confirm",
+            "type": "string"
+          }
+        },
+        "required": [
+          "confirm"
+        ],
+        "title": "EraseAccountRequest",
         "type": "object"
       },
       "ExecutionProfile": {
@@ -14143,6 +14606,120 @@
         "title": "LocalSnapshotImages",
         "type": "object"
       },
+      "LoginEventEntry": {
+        "description": "One sign-in attempt of an account.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "failure_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Reason"
+          },
+          "ip": {
+            "title": "Ip",
+            "type": "string"
+          },
+          "method": {
+            "title": "Method",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "user_agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Agent"
+          }
+        },
+        "required": [
+          "method",
+          "outcome",
+          "failure_reason",
+          "ip",
+          "user_agent",
+          "created_at"
+        ],
+        "title": "LoginEventEntry",
+        "type": "object"
+      },
+      "LoginEventsResponse": {
+        "description": "An account's most recent sign-in attempts.",
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/LoginEventEntry"
+            },
+            "title": "Events",
+            "type": "array"
+          }
+        },
+        "required": [
+          "events"
+        ],
+        "title": "LoginEventsResponse",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "additionalProperties": false,
+        "description": "Sign-in with an email or a login name. ``email`` is the older name of the field.",
+        "properties": {
+          "email": {
+            "anyOf": [
+              {
+                "maxLength": 320,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "identifier": {
+            "anyOf": [
+              {
+                "maxLength": 320,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Identifier"
+          },
+          "password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "title": "LoginRequest",
+        "type": "object"
+      },
       "McpBindingInput": {
         "description": "One connection's use by a session, as the caller asks for it.\n\nThe policy map is name to ``deny`` / ``confirm`` / ``allow``. A name that\nis absent is denied: a session means what it says, and a capability the\nserver adds later is not covered by what its owner chose earlier.",
         "properties": {
@@ -15637,6 +16214,171 @@
         "title": "PgAdminSetup",
         "type": "object"
       },
+      "PhoneAuthConfig": {
+        "description": "Phone sign-in as the forms need it.",
+        "properties": {
+          "allowed_prefixes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Prefixes",
+            "type": "array"
+          },
+          "default_country_code": {
+            "default": "",
+            "title": "Default Country Code",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "PhoneAuthConfig",
+        "type": "object"
+      },
+      "PhoneCodeRequest": {
+        "additionalProperties": false,
+        "description": "Ask for a code for one purpose.",
+        "properties": {
+          "phone": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Phone",
+            "type": "string"
+          },
+          "purpose": {
+            "enum": [
+              "signup",
+              "login",
+              "bind",
+              "delete_account",
+              "bind_email",
+              "set_password"
+            ],
+            "title": "Purpose",
+            "type": "string"
+          },
+          "turnstile_token": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turnstile Token"
+          }
+        },
+        "required": [
+          "phone",
+          "purpose"
+        ],
+        "title": "PhoneCodeRequest",
+        "type": "object"
+      },
+      "PhoneCodeResponse": {
+        "description": "The same answer whatever the number; how long until another may be asked for.",
+        "properties": {
+          "ok": {
+            "const": true,
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "retry_after": {
+            "title": "Retry After",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "retry_after"
+        ],
+        "title": "PhoneCodeResponse",
+        "type": "object"
+      },
+      "PhoneSignupRequest": {
+        "additionalProperties": false,
+        "description": "Sign up with a phone code.",
+        "properties": {
+          "accepted_tos": {
+            "default": false,
+            "title": "Accepted Tos",
+            "type": "boolean"
+          },
+          "code": {
+            "pattern": "^[0-9]{6}$",
+            "title": "Code",
+            "type": "string"
+          },
+          "phone": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Phone",
+            "type": "string"
+          },
+          "use_case": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Case"
+          },
+          "user_name": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "minLength": 2,
+                "pattern": "^\\S(.{0,48}\\S)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Name"
+          }
+        },
+        "required": [
+          "phone",
+          "code"
+        ],
+        "title": "PhoneSignupRequest",
+        "type": "object"
+      },
+      "PhoneVerifyRequest": {
+        "additionalProperties": false,
+        "description": "A number and the code sent to it: phone sign-in and binding.",
+        "properties": {
+          "code": {
+            "pattern": "^[0-9]{6}$",
+            "title": "Code",
+            "type": "string"
+          },
+          "phone": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Phone",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phone",
+          "code"
+        ],
+        "title": "PhoneVerifyRequest",
+        "type": "object"
+      },
       "ProcessObservation": {
         "description": "One process created during a turn, observed by the Kata guest kernel.",
         "properties": {
@@ -15997,6 +16739,20 @@
           "message"
         ],
         "title": "ProtocolResultView",
+        "type": "object"
+      },
+      "PurgedResponse": {
+        "description": "How many rows a purge deleted.",
+        "properties": {
+          "deleted": {
+            "title": "Deleted",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deleted"
+        ],
+        "title": "PurgedResponse",
         "type": "object"
       },
       "RebuildInput": {
@@ -17724,6 +18480,27 @@
             "title": "Id",
             "type": "string"
           },
+          "identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "is_local_admin": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Local Admin"
+          },
           "waitlist": {
             "anyOf": [
               {
@@ -17957,6 +18734,51 @@
         "title": "SetTeamMemberRoleRequest",
         "type": "object"
       },
+      "SetupAdminRequest": {
+        "additionalProperties": false,
+        "description": "First-run setup: the code from the startup log and the administrator to create.",
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "minLength": 2,
+                "pattern": "^\\S(.{0,48}\\S)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "login_name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Login Name",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          },
+          "setup_code": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Setup Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "setup_code",
+          "login_name",
+          "password"
+        ],
+        "title": "SetupAdminRequest",
+        "type": "object"
+      },
       "SetupMachine": {
         "additionalProperties": false,
         "description": "A stable infrastructure machine reached through an existing verified key.",
@@ -17995,6 +18817,166 @@
           "username"
         ],
         "title": "SetupMachine",
+        "type": "object"
+      },
+      "SignupDomainEntry": {
+        "description": "One allowed sign-up domain.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "title": "Created By",
+            "type": "string"
+          },
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "is_wildcard": {
+            "title": "Is Wildcard",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "domain",
+          "is_wildcard",
+          "created_at",
+          "created_by"
+        ],
+        "title": "SignupDomainEntry",
+        "type": "object"
+      },
+      "SignupDomainRequest": {
+        "additionalProperties": false,
+        "description": "A domain to allow: ``example.edu``, or ``*.example.edu`` for its subdomains.",
+        "properties": {
+          "domain": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Domain",
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain"
+        ],
+        "title": "SignupDomainRequest",
+        "type": "object"
+      },
+      "SignupDomainsResponse": {
+        "description": "The allowlist and the approval policy it serves.",
+        "properties": {
+          "approval_policy": {
+            "title": "Approval Policy",
+            "type": "string"
+          },
+          "domains": {
+            "items": {
+              "$ref": "#/components/schemas/SignupDomainEntry"
+            },
+            "title": "Domains",
+            "type": "array"
+          }
+        },
+        "required": [
+          "domains",
+          "approval_policy"
+        ],
+        "title": "SignupDomainsResponse",
+        "type": "object"
+      },
+      "SignupRequest": {
+        "additionalProperties": false,
+        "description": "Email sign-up. ``use_case`` present submits the Agent application with it.",
+        "properties": {
+          "accepted_tos": {
+            "default": false,
+            "title": "Accepted Tos",
+            "type": "boolean"
+          },
+          "email": {
+            "maxLength": 320,
+            "minLength": 1,
+            "title": "Email",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          },
+          "turnstile_token": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turnstile Token"
+          },
+          "use_case": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Case"
+          },
+          "user_name": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "minLength": 2,
+                "pattern": "^\\S(.{0,48}\\S)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Name"
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "SignupRequest",
+        "type": "object"
+      },
+      "SignupResponse": {
+        "description": "A sign-up's answer. The same for a taken address, so it reveals nothing.",
+        "properties": {
+          "ok": {
+            "const": true,
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "requires_approval": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requires Approval"
+          }
+        },
+        "title": "SignupResponse",
         "type": "object"
       },
       "SkillImportPreview": {
@@ -19099,6 +20081,23 @@
           "repo"
         ],
         "title": "SuggestInput",
+        "type": "object"
+      },
+      "SwitchAccountRequest": {
+        "additionalProperties": false,
+        "description": "Make another account signed in on this browser the active one.",
+        "properties": {
+          "account_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Account Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id"
+        ],
+        "title": "SwitchAccountRequest",
         "type": "object"
       },
       "TeamAuditEventListResponse": {
@@ -29309,7 +30308,7 @@
     },
     "/v1/admin/accounts": {
       "get": {
-        "description": "One page of accounts, newest first, optionally by application status.",
+        "description": "One page of accounts, newest first, filtered and searched, with counts per state.\n\n``q`` matches an email, login name, phone number or name anywhere, or an\naccount id by its prefix.",
         "operationId": "list_accounts_v1_admin_accounts_get",
         "parameters": [
           {
@@ -29360,6 +30359,44 @@
             }
           },
           {
+            "in": "query",
+            "name": "account_status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "active",
+                    "suspended",
+                    "deleted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Account Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 320,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,
@@ -29399,6 +30436,269 @@
           }
         },
         "summary": "List Accounts",
+        "tags": [
+          "admin-accounts"
+        ]
+      }
+    },
+    "/v1/admin/accounts/login-events": {
+      "delete": {
+        "description": "Purge sign-in events by age (retention) or for one account; exactly one of the two.",
+        "operationId": "purge_login_events_v1_admin_accounts_login_events_delete",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "older_than_days",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 36500,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Older Than Days"
+            }
+          },
+          {
+            "in": "query",
+            "name": "account_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Account Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurgedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Purge Login Events",
+        "tags": [
+          "admin-accounts"
+        ]
+      }
+    },
+    "/v1/admin/accounts/signup-domains": {
+      "get": {
+        "description": "The signup domain allowlist, and the approval policy that uses it.",
+        "operationId": "list_signup_domains_v1_admin_accounts_signup_domains_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignupDomainsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Signup Domains",
+        "tags": [
+          "admin-accounts"
+        ]
+      },
+      "post": {
+        "description": "Allow a domain, or a ``*.`` wildcard of its subdomains.",
+        "operationId": "add_signup_domain_v1_admin_accounts_signup_domains_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignupDomainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignupDomainsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Signup Domain",
+        "tags": [
+          "admin-accounts"
+        ]
+      }
+    },
+    "/v1/admin/accounts/signup-domains/{domain}": {
+      "delete": {
+        "description": "Remove a domain (``wildcard=true`` for its ``*.`` entry).",
+        "operationId": "remove_signup_domain_v1_admin_accounts_signup_domains__domain__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "domain",
+            "required": true,
+            "schema": {
+              "title": "Domain",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "wildcard",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Wildcard",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignupDomainsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Signup Domain",
         "tags": [
           "admin-accounts"
         ]
@@ -29468,6 +30768,215 @@
           }
         },
         "summary": "Change Account",
+        "tags": [
+          "admin-accounts"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account_id}/erase": {
+      "post": {
+        "description": "Erase a deleted account's identity permanently; its id typed out again confirms it.",
+        "operationId": "erase_account_v1_admin_accounts__account_id__erase_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EraseAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountEntry"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Erase Account",
+        "tags": [
+          "admin-accounts"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account_id}/login-events": {
+      "get": {
+        "description": "The account's most recent sign-in attempts, newest first.",
+        "operationId": "account_login_events_v1_admin_accounts__account_id__login_events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginEventsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Account Login Events",
+        "tags": [
+          "admin-accounts"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account_id}/notes": {
+      "patch": {
+        "description": "Set the private administrator note and the message a suspended account is shown.\n\nA field left out is unchanged; an empty one is cleared.",
+        "operationId": "annotate_account_v1_admin_accounts__account_id__notes_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountNotesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountEntry"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Annotate Account",
         "tags": [
           "admin-accounts"
         ]
@@ -43032,9 +44541,264 @@
         "summary": "Worker Wait"
       }
     },
+    "/v1/auth/account": {
+      "get": {
+        "description": "How the signed-in account signs in.",
+        "operationId": "read_account_v1_auth_account_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountIdentity"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Read Account",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/account/delete": {
+      "post": {
+        "description": "Delete the signed-in account at its owner's request.\n\nThe same soft delete an administrator performs: the account signs in\nnowhere, it is taken off every browser, its links stop working and its\nwork stops, while its data is kept and an administrator can resume it.",
+        "operationId": "delete_account_v1_auth_account_delete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Account",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/account/email": {
+      "post": {
+        "description": "Mail a link that makes the address the account's email once it is followed.\n\nThe new address is always proven by that link, whatever the sign-up\nverification setting: an address nobody proved is never recorded as\nverified. The current address stays until then, and is told.",
+        "operationId": "bind_email_v1_auth_account_email_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BindEmailRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BindEmailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bind Email",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/account/password": {
+      "post": {
+        "description": "Change the password, or set a first one; every other session is signed out.",
+        "operationId": "change_password_v1_auth_account_password_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Change Password",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/account/phone": {
+      "post": {
+        "description": "Bind a phone number to an account that has none, with a ``bind`` code.",
+        "operationId": "bind_phone_v1_auth_account_phone_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PhoneVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountIdentity"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bind Phone",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/accounts": {
+      "get": {
+        "description": "The accounts signed in on this browser, oldest first, for the chooser.",
+        "operationId": "list_browser_accounts_v1_auth_accounts_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserAccountsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Browser Accounts",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/accounts/{account_id}": {
+      "delete": {
+        "description": "Sign one account out of this browser and drop it from the chooser.\n\nWorks for an account whose session already ended, so the chooser can\nforget it; the cookie goes with the last account.",
+        "operationId": "remove_browser_account_v1_auth_accounts__account_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserAccountsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Browser Account",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/v1/auth/config": {
       "get": {
-        "description": "Which sign-in this deployment offers.",
+        "description": "Which sign-in this deployment offers: read before every page renders, so kept small.",
         "operationId": "auth_config_v1_auth_config_get",
         "responses": {
           "200": {
@@ -43098,13 +44862,13 @@
     },
     "/v1/auth/login": {
       "post": {
-        "description": "Check the password and set the session cookie.",
+        "description": "Check the password, add the account to this browser and set the cookie.\n\nThe identifier is an email address or, for an account created without\none, its login name.",
         "operationId": "sign_in_v1_auth_login_post",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/EmailPasswordRequest"
+                "$ref": "#/components/schemas/LoginRequest"
               }
             }
           },
@@ -43133,6 +44897,176 @@
           }
         },
         "summary": "Sign In",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/logout-all": {
+      "post": {
+        "description": "Sign every account out of this browser and drop its cookie.",
+        "operationId": "sign_out_everywhere_here_v1_auth_logout_all_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Sign Out Everywhere Here",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/options": {
+      "get": {
+        "description": "What the sign-in, sign-up and account pages offer. Public; carries no secret.",
+        "operationId": "auth_options_v1_auth_options_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthOptionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Auth Options",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/phone/code": {
+      "post": {
+        "description": "Send a purpose-bound code where it can be used; the same answer for any number.",
+        "operationId": "send_phone_code_v1_auth_phone_code_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PhoneCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhoneCodeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Send Phone Code",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/phone/login": {
+      "post": {
+        "description": "Spend a login code and add the account to this browser.",
+        "operationId": "phone_sign_in_v1_auth_phone_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PhoneVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionUserResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Phone Sign In",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/phone/signup": {
+      "post": {
+        "description": "Create a verified phone account from a sign-up code.",
+        "operationId": "phone_sign_up_v1_auth_phone_signup_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PhoneSignupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignupResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Phone Sign Up",
         "tags": [
           "auth"
         ]
@@ -43222,15 +45156,57 @@
         ]
       }
     },
+    "/v1/auth/setup/admin": {
+      "post": {
+        "description": "Create the deployment's first administrator with the setup code, and sign them in.\n\nThe administrator signs in with a login name, needs no email and no SMTP,\nand is verified, approved and an administrator at once. Only a wrong code\ncounts against its own per-address limit (ten in 15 minutes), so junk sent\nfrom an address the operator shares cannot lock the operator out; the\ncode's 60 random bits are what make guessing it hopeless.",
+        "operationId": "create_setup_admin_v1_auth_setup_admin_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupAdminRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionUserResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Setup Admin",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/v1/auth/signup": {
       "post": {
-        "description": "Create an account and mail its verification link; the same answer for a taken address.",
+        "description": "Create an account and mail its verification link; the same answer for a taken address.\n\nThe answer is identical whether or not the address had an account, so it\ntells nothing about who exists; the page explains what happens next from\nthe deployment's options instead.",
         "operationId": "sign_up_v1_auth_signup_post",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/EmailPasswordRequest"
+                "$ref": "#/components/schemas/SignupRequest"
               }
             }
           },
@@ -43264,9 +45240,51 @@
         ]
       }
     },
+    "/v1/auth/switch": {
+      "post": {
+        "description": "Make another account signed in on this browser the active one.",
+        "operationId": "switch_account_v1_auth_switch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwitchAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionUserResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Switch Account",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/v1/auth/verify-email": {
       "post": {
-        "description": "Redeem a verification link. Does not sign in.",
+        "description": "Redeem a verification or address-binding link. Does not sign in.",
         "operationId": "verify_email_v1_auth_verify_email_post",
         "requestBody": {
           "content": {

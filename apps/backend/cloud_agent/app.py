@@ -177,6 +177,9 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         admin_usage,
         agent_memory,
         auth,
+        auth_account,
+        auth_browser,
+        auth_phone,
         compute_registration,
         environments,
         host_profiling,
@@ -321,11 +324,18 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     # ``routes.py`` because it authenticates nothing on entry — it is the route
     # that *creates* the credential every other route requires.
     app.include_router(session.router)
-    # Local accounts (AGENT_AUTH_MODE=local): sign-in, the waiting list and
-    # their administration. Each answers 404 in Gateway mode.
-    app.include_router(auth.router)
-    app.include_router(waitlist.router)
-    app.include_router(admin_accounts.router)
+    # Local accounts (AGENT_AUTH_MODE=local): sign-in, phone codes, the
+    # browser's accounts, the owner's own account, the waiting list and their
+    # administration. Each answers 404 in Gateway mode.
+    for local_router in (
+        auth.router,
+        auth_account.router,
+        auth_browser.router,
+        auth_phone.router,
+        waitlist.router,
+        admin_accounts.router,
+    ):
+        app.include_router(local_router)
     app.include_router(site_config.router)
 
     @app.get("/healthz")

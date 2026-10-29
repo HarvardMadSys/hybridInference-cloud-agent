@@ -194,7 +194,9 @@ async def _approved_account(env: SimpleNamespace, email: str) -> dict[str, Any]:
     client = env.client
     client.cookies.clear()
     credentials = {"email": email, "password": _PASSWORD}
-    assert (await client.post("/v1/auth/signup", json=credentials)).status_code == 200
+    assert (
+        await client.post("/v1/auth/signup", json={**credentials, "accepted_tos": True})
+    ).status_code == 200
     verify = await client.post("/v1/auth/verify-email", json={"token": _token(env.mails[-1])})
     assert verify.status_code == 200, verify.text
     assert (await client.post("/v1/auth/login", json=credentials)).status_code == 200
@@ -222,7 +224,7 @@ async def _claim(env: SimpleNamespace) -> Any:
 
 async def test_an_approved_account_sets_up_its_own_model_and_runs_a_task_on_it(env):
     client = env.client
-    me = await _approved_account(env, "first@example.org")
+    me = await _approved_account(env, "first@example.edu")
     assert me["agent_access"]["allowed"] is True
 
     # Approval is not model readiness: nothing is offered and setup is asked for.
@@ -308,7 +310,7 @@ async def test_an_approved_account_sets_up_its_own_model_and_runs_a_task_on_it(e
 
 async def test_another_account_cannot_see_or_run_on_someone_elses_connection(env):
     client = env.client
-    await _approved_account(env, "owner@example.org")
+    await _approved_account(env, "owner@example.edu")
     created = await client.post(
         "/v1/agent/model-connections",
         json={"name": "Mine", "base_url": _BASE_URL, "api_key": _PROVIDER_KEY, "models": [_MODEL]},
@@ -316,7 +318,7 @@ async def test_another_account_cannot_see_or_run_on_someone_elses_connection(env
     assert created.status_code == 201, created.text
     connection_id = created.json()["id"]
 
-    await _approved_account(env, "other@example.org")
+    await _approved_account(env, "other@example.edu")
     listed = await client.get("/v1/agent/model-connections")
     assert listed.status_code == 200 and listed.json()["connections"] == []
     config = (await client.get("/v1/agent/config")).json()
@@ -348,7 +350,7 @@ async def test_another_account_cannot_see_or_run_on_someone_elses_connection(env
 
 async def test_revoked_access_stops_connection_management_and_new_turns(env):
     client = env.client
-    me = await _approved_account(env, "revoked@example.org")
+    me = await _approved_account(env, "revoked@example.edu")
     created = await client.post(
         "/v1/agent/model-connections",
         json={"name": "Mine", "base_url": _BASE_URL, "api_key": _PROVIDER_KEY, "models": [_MODEL]},
@@ -399,7 +401,7 @@ async def test_revoked_access_stops_connection_management_and_new_turns(env):
 
 async def test_follow_ups_keep_their_personal_source_and_never_fall_back(env):
     client = env.client
-    await _approved_account(env, "follow@example.org")
+    await _approved_account(env, "follow@example.edu")
     created = await client.post(
         "/v1/agent/model-connections",
         json={"name": "Mine", "base_url": _BASE_URL, "api_key": _PROVIDER_KEY, "models": [_MODEL]},

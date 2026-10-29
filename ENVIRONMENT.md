@@ -81,7 +81,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0107_local_accounts`) before
+Run `alembic upgrade head` (through `0108_local_account_parity`) before
 starting this release; the [upgrade notes](docs/developer/upgrade-notes.md)
 say what each recent migration changes. The main control-plane listener then
 initializes the settings document once from its existing environment. The
@@ -270,15 +270,27 @@ accounts, sessions, and saved connections persist in `agent-pgadmin`.
 
 ### Local accounts (`AGENT_AUTH_MODE=local`)
 
-Off by default. Read from the process environment only, never from Admin Settings, by both
-listeners. See [local accounts](docs/developer/local-accounts.md).
+Off by default. `AGENT_AUTH_MODE` and `AGENT_LOCAL_SESSION_SECRET` are read from the
+process environment only, never from Admin Settings, by both listeners. Every other variable
+here is the initial value of a setting in Admin → Settings → Accounts: imported once, the
+first time the settings registry sees it, and edited there afterwards. Secrets are stored
+encrypted and never shown again. See [local accounts](docs/developer/local-accounts.md).
 
 | Variable | Value / who provisions |
 |---|---|
 | `AGENT_AUTH_MODE` | `gateway` (default) or `local`. `local` serves Cloud Agent's own email/password accounts, sessions and waiting list instead of Gateway sign-in, answers identity and admission from this database, and makes no Gateway identity, admission, catalog or grant call. It starts only on a database with no Gateway issuer binding and no owner data; a Gateway-bound database refuses it. Any other value stops startup. Set the same value on both control-plane listeners and their hosts. Local hosts omit the inference tunnel and accept personal model sources only; control-plane and MCP tunnels remain required. Managed host setup derives this value from the control plane. |
 | `AGENT_LOCAL_SESSION_SECRET` | Required in local mode: at least 32 random bytes, different from `AGENT_SESSION_SECRET`. Keys the hashes of local session cookies, emailed tokens and abuse counters. Rotating it ends every local session and outstanding link. |
-| `AGENT_LOCAL_SIGNUP_ENABLED` | Defaults to on in local mode. `false` closes public sign-up; existing accounts still sign in. Signing up never grants Agent use. |
-| `AGENT_SMTP_HOST` / `AGENT_SMTP_PORT` | Mail relay for verification and password-reset links. Port defaults to 587, or 465 with `AGENT_SMTP_SECURITY=tls`. Without a host and sender, sign-up is closed and recovery answers 503. |
+| `AGENT_LOCAL_SIGNUP_ENABLED` | Defaults to on in local mode. `false` closes public sign-up, by email and by phone; existing accounts still sign in. Signing up never grants Agent use. |
+| `AGENT_LOCAL_SIGNUP_REQUIRE_EMAIL_VERIFICATION` | NEW. Defaults to `true`. `false` treats a new email account as verified at sign-up and sends it no link, so sign-up works without SMTP. Accounts created while it was on still verify. |
+| `AGENT_LOCAL_SIGNUP_APPROVAL` | NEW. `manual` (default): every account waits for an administrator. `domains`: a verified account whose email domain is on the signup domain list (Admin → Accounts) is approved at once; with an empty list, every verified account is. |
+| `AGENT_LOCAL_SIGNUP_ADMIN_NOTIFY` / `AGENT_LOCAL_SIGNUP_NOTIFY_EMAILS` | NEW. Mail administrators when a sign-up waits for approval (default on). Recipients are the comma-separated list, or every local administrator with a verified email when it is empty. |
+| `AGENT_LOCAL_TERMS_URL` | NEW. Optional link to the Terms of Service the sign-up forms ask every new account to accept. Acceptance is required either way. |
+| `AGENT_LOCAL_SMS_ENABLED` / `AGENT_LOCAL_SMS_PROVIDER` | NEW. Phone sign-up, sign-in and binding with a code sent by text message. Off (`false` / `none`) by default; on needs a configured provider (`tencent`). |
+| `AGENT_LOCAL_SMS_DEFAULT_COUNTRY_CODE` / `AGENT_LOCAL_SMS_ALLOWED_PREFIXES` | NEW. Digits prepended to a number typed without `+`, and the comma-separated `+` prefixes codes may be sent to (empty: any). |
+| `AGENT_TENCENT_CLOUD_SECRET_ID` / `AGENT_TENCENT_CLOUD_SECRET_KEY` / `AGENT_TENCENT_CLOUD_TOKEN` | NEW. Tencent Cloud CAM credentials of the `tencent` text message provider (the token only for temporary credentials). This deployment's own; never the Gateway's, never sent to a host or sandbox. |
+| `AGENT_TENCENT_SMS_REGION` / `AGENT_TENCENT_SMS_SDK_APP_ID` / `AGENT_TENCENT_SMS_SIGN_NAME` / `AGENT_TENCENT_SMS_TEMPLATE_ID` | NEW. The Tencent SMS application, its approved signature and its approved template, which takes the code and its lifetime in minutes. Region defaults to `ap-guangzhou`. |
+| `AGENT_TURNSTILE_SITE_KEY` / `AGENT_TURNSTILE_SECRET_KEY` | NEW. Cloudflare Turnstile for sign-up and phone codes. With no secret key nothing is checked; with one, a missing or rejected token, or no answer from Cloudflare, refuses. |
+| `AGENT_SMTP_HOST` / `AGENT_SMTP_PORT` | Mail relay for verification, password-reset and address-change links and the account notices. Port defaults to 587, or 465 with `AGENT_SMTP_SECURITY=tls`. Without a host and sender, email sign-up is closed while verification is required, and recovery answers 503. |
 | `AGENT_SMTP_SECURITY` | `starttls` (default), `tls` for implicit TLS, or `none` for a local relay. |
 | `AGENT_SMTP_USERNAME` / `AGENT_SMTP_PASSWORD` | Optional relay credentials. Never logged. |
 | `AGENT_SMTP_FROM` | Sender address of account mail, e.g. `Cloud Agent <no-reply@example.org>`. Links in it are built from `AGENT_WEB_BASE_URL` only. |

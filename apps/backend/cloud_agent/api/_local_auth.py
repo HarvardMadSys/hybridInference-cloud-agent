@@ -24,8 +24,13 @@ from cloud_agent.accounts.config import (
     mail_web_base_url,
     signup_flag_enabled,
 )
-from cloud_agent.accounts.mail import SmtpAccountMailer
+from cloud_agent.accounts.mail import AccountMail, SmtpAccountMailer
 from cloud_agent.accounts.passwords import HasherBusy
+from cloud_agent.accounts.policy import (
+    admin_notify_enabled,
+    notify_recipients,
+    require_email_verification,
+)
 from cloud_agent.accounts.tokens import rate_limit_key
 from cloud_agent.api._sensitive_routes import SensitiveRoute
 from cloud_agent.api.deps import get_client_ip, get_storage, require_store
@@ -35,24 +40,45 @@ from cloud_agent.api.errors import (
     local_auth_disabled,
     typed_error,
 )
+from cloud_agent.application.account_security import (
+    AccountChanged,
+    ConfirmationMismatch,
+    OwnerProofRequired,
+    OwnerProofUnavailable,
+    SamePassword,
+    WrongPassword,
+)
 from cloud_agent.application.accounts import (
+    AccountDeleted,
     AccountSuspended,
+    BlockedEmailDomain,
     EmailNotVerified,
     InvalidCredentials,
     InvalidEmail,
+    InvalidLoginName,
     InvalidToken,
     LocalAccountFlows,
     WeakPassword,
+)
+from cloud_agent.application.phone_accounts import (
+    InvalidPhone,
+    InvalidPhoneCode,
+    PhoneCooldown,
+    PhoneSendFailed,
+    PhoneUnavailable,
 )
 from cloud_agent.domain.accounts import (
     AccountNotFound,
     AccountTransitionRefused,
     AccountVersionConflict,
+    IdentifierTaken,
+    SelfDeleteRefused,
     WaitlistNotResubmittable,
 )
 from cloud_agent.identity import session_cookie_is_secure
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.schemas.accounts import AccountEntry, WaitlistEntry
+from cloud_agent.ports.accounts import BrowserFull
+from cloud_agent.schemas.accounts import AccountEntry, AccountIdentity, WaitlistEntry
 from cloud_agent.schemas.session import SessionUserResponse
 
 if TYPE_CHECKING:
@@ -73,6 +99,8 @@ RateRule = tuple[str, str, int, int]
 #: The fixed answer for each refusal a flow raises.
 _REFUSALS: dict[type[Exception], tuple[int, str, str | None]] = {
     InvalidEmail: (400, "invalid_email", "Enter a valid email address."),
+    InvalidLoginName: (400, "invalid_login_name", None),
+    BlockedEmailDomain: (400, "email_domain_blocked", "This email domain is not allowed."),
     WeakPassword: (400, "weak_password", None),
     InvalidCredentials: (401, "invalid_credentials", "Invalid email or password."),
     EmailNotVerified: (
@@ -80,8 +108,38 @@ _REFUSALS: dict[type[Exception], tuple[int, str, str | None]] = {
         "email_not_verified",
         "Email not verified. Please check your email for the verification link.",
     ),
-    AccountSuspended: (403, "account_suspended", "This account is suspended."),
+    AccountSuspended: (403, "account_suspended", None),
+    AccountDeleted: (403, "account_deleted", "This account has been deleted."),
     InvalidToken: (400, "invalid_token", "This link is invalid or has expired."),
+    IdentifierTaken: (409, "identifier_taken", "That cannot be used for this account."),
+    SelfDeleteRefused: (403, "self_delete_refused", None),
+    BrowserFull: (
+        409,
+        "browser_full",
+        "This browser is already signed in to 5 accounts. Sign one of them out first.",
+    ),
+    InvalidPhone: (400, "invalid_phone", None),
+    PhoneUnavailable: (503, "phone_unavailable", "Phone sign-in is currently unavailable."),
+    PhoneSendFailed: (
+        503,
+        "sms_failed",
+        "Could not send the verification code. Please try again later.",
+    ),
+    InvalidPhoneCode: (400, "invalid_code", "Invalid or expired verification code."),
+    WrongPassword: (400, "wrong_password", "Current password is incorrect."),
+    OwnerProofRequired: (400, "proof_required", None),
+    OwnerProofUnavailable: (
+        503,
+        "phone_unavailable",
+        "Phone verification is currently unavailable. Please contact the administrator.",
+    ),
+    SamePassword: (400, "same_password", None),
+    AccountChanged: (
+        409,
+        "account_changed",
+        "The account changed while this was being saved. Reload and try again.",
+    ),
+    ConfirmationMismatch: (400, "confirmation_mismatch", None),
     AccountNotFound: (404, "not_found", "No such account."),
     HasherBusy: (503, "unavailable", "Sign-in is busy. Please try again shortly."),
     AccountVersionConflict: (
@@ -121,6 +179,10 @@ class LocalAuthRoute(SensitiveRoute):
         """Translate a flow's refusal into its fixed envelope."""
         if isinstance(exc, AccountTransitionRefused):
             return _envelope(403 if exc.code == "actor_not_admin" else 409, exc.code, str(exc))
+        if isinstance(exc, PhoneCooldown):
+            response = _envelope(429, "rate_limited", str(exc))
+            response.headers["Retry-After"] = str(exc.retry_after)
+            return response
         if isinstance(exc, LocalAuthNotConfigured):
             logger.warning(
                 "agent_local_auth_unconfigured", extra={"event": "agent_local_auth_unconfigured"}
@@ -240,14 +302,46 @@ def _web_base_or_none() -> str | None:
         return None
 
 
+def mail_available(request: Request) -> bool:
+    """Whether this deployment can send account mail: SMTP and a web base for links."""
+    return account_mailer(request).configured and _web_base_or_none() is not None
+
+
 def signup_enabled(request: Request) -> bool:
-    """Whether sign-up is offered: switched on, and able to mail its links."""
+    """Whether email sign-up is offered: switched on, and able to verify what it creates.
+
+    As HybridInference, sign-up works without SMTP when email verification is
+    off: the account is verified at creation and nothing needs mailing.
+    """
     return (
         local_mode()
         and signup_flag_enabled()
-        and account_mailer(request).configured
-        and _web_base_or_none() is not None
+        and (not require_email_verification() or mail_available(request))
     )
+
+
+def _admin_notifier(
+    request: Request, accounts: LocalAccountRepository, send: Any, base: str
+) -> Any:
+    async def notify(record: AccountRecord) -> None:
+        if not (admin_notify_enabled() and base and account_mailer(request).configured):
+            return
+        recipients = notify_recipients() or await accounts.admin_emails()
+        for recipient in recipients:
+            send(
+                AccountMail(
+                    kind="new_application",
+                    to=recipient,
+                    link=f"{base}/admin/accounts",
+                    details={
+                        "account": record.label,
+                        "user_name": record.user_name or "",
+                        "purpose": record.purpose,
+                    },
+                )
+            )
+
+    return notify
 
 
 def local_flows(
@@ -255,19 +349,27 @@ def local_flows(
 ) -> LocalAccountFlows:
     """The flows for one request; mail is sent after the response.
 
-    A flow that mails checks its configuration before touching the database,
-    so a misconfigured deployment refuses every address the same way.
+    A flow that must mail (``mails``) checks its configuration before touching
+    the database, so a misconfigured deployment refuses every address the same
+    way. Any other flow mails what it can, a notice or a link, when mail is
+    configured, and drops it silently otherwise.
     """
     mailer = account_mailer(request)
-    base = _web_base_or_none() if mails else ""
-    if base is None or (mails and not mailer.configured):
+    base = _web_base_or_none()
+    if mails and (base is None or not mailer.configured):
         raise AgentConfigurationError()
 
     def send(mail: Any) -> None:
-        if background is not None:
+        if background is not None and base is not None and mailer.configured:
             background.add_task(mailer.send, mail)
 
-    return LocalAccountFlows(local_accounts(request), web_base_url=lambda: base or "", send=send)
+    accounts = local_accounts(request)
+    return LocalAccountFlows(
+        accounts,
+        web_base_url=lambda: base or "",
+        send=send,
+        notify_admins=_admin_notifier(request, accounts, send, base or ""),
+    )
 
 
 def client_bucket(request: Request) -> str:
@@ -334,6 +436,20 @@ def waitlist_entry(record: AccountRecord) -> WaitlistEntry:
     )
 
 
+def account_identity(record: AccountRecord) -> AccountIdentity:
+    """How an account signs in, as its owner and administrators read it."""
+    return AccountIdentity(
+        email=record.email,
+        email_verified=record.email_verified,
+        login_name=record.login_name,
+        phone=record.phone,
+        has_password=record.has_password,
+        identity_verified=record.identity_verified,
+        user_name=record.user_name,
+        label=record.label,
+    )
+
+
 def account_entry(record: AccountRecord) -> AccountEntry:
     """One account for the administration page."""
     return AccountEntry(
@@ -344,6 +460,11 @@ def account_entry(record: AccountRecord) -> AccountEntry:
         is_admin=record.is_admin,
         waitlist=waitlist_entry(record),
         created_at=record.created_at,
+        identity=account_identity(record),
+        admin_note=record.admin_note,
+        suspension_message=record.suspension_message,
+        last_login_at=record.last_login_at,
+        deleted_at=record.deleted_at,
     )
 
 
@@ -355,6 +476,8 @@ def local_session_user(record: AccountRecord, decision: AgentAccessDecision) -> 
         auth_mode="local",
         email=record.email,
         waitlist=waitlist_entry(record),
+        identity=account_identity(record),
+        is_local_admin=record.is_admin,
     )
 
 
@@ -362,12 +485,14 @@ __all__ = [
     "LocalAuthRoute",
     "RateRule",
     "account_entry",
+    "account_identity",
     "account_mailer",
     "client_bucket",
     "enforce_rate_limits",
     "local_accounts",
     "local_flows",
     "local_session_user",
+    "mail_available",
     "refuse_in_local_mode",
     "require_json",
     "require_local_mode",

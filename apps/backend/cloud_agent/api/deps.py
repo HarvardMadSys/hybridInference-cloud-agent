@@ -669,15 +669,37 @@ async def verify_admin_access(
 # ── Local accounts (AGENT_AUTH_MODE=local) ─────────────────────────────
 
 
+#: The account a tab is showing. A request naming one is refused with 409
+#: ``account_switched`` once the browser's active account is another, so a tab
+#: left open on one account never acts as the next. Streams, which cannot set
+#: a header, name it in the query instead.
+LOCAL_ACCOUNT_HEADER = "x-agent-account"
+LOCAL_ACCOUNT_QUERY = "agent_account"
+
+
+def pinned_local_account(request: Request) -> str | None:
+    """The account the request says it acts as, if it names one."""
+    from urllib.parse import parse_qs
+
+    value = request.headers.get(LOCAL_ACCOUNT_HEADER)
+    if not value:
+        query = parse_qs((request.scope.get("query_string") or b"").decode("latin-1"))
+        value = (query.get(LOCAL_ACCOUNT_QUERY) or [""])[0]
+    return value.strip() or None
+
+
 async def local_session_owner(request: Request, authorization: str | None) -> SessionOwner | None:
     """The live local session a request presents, read from this database.
 
     The local cookie, or a bearer of the local session's shape; a Gateway-mode
-    cookie or JWT is neither, and finds nothing. One read per request: the
-    answer is kept on the request, never across requests.
+    cookie or JWT is neither, and finds nothing. The cookie names a browser,
+    and the request acts as its active account (or the account it pins, which
+    must be the active one). One read per request: the answer is kept on the
+    request, never across requests.
 
     Raises:
-        HTTPException: 503 when the session store cannot be read.
+        HTTPException: 503 when the session store cannot be read; 409
+            ``account_switched`` when the request pins another account.
     """
     from cloud_agent.accounts.session_cookie import presented_local_token
 
@@ -692,14 +714,42 @@ async def local_session_owner(request: Request, authorization: str | None) -> Se
     return owner
 
 
+def _account_switched() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": {
+                "type": "account_switched",
+                "message": "This browser switched to another account. Reload to continue.",
+            }
+        },
+    )
+
+
 async def _read_local_session(request: Request, token: str) -> SessionOwner | None:
     from cloud_agent.accounts.config import LocalAuthNotConfigured
-    from cloud_agent.accounts.tokens import session_hash
+    from cloud_agent.accounts.tokens import browser_hash, looks_like_browser_token, session_hash
     from cloud_agent.domain.accounts import may_sign_in
+    from cloud_agent.ports.accounts import SessionOwner
 
     storage = require_store(get_storage(request))
     try:
-        owner = await storage.local_accounts.session_owner(session_hash(token))
+        browser = None
+        if looks_like_browser_token(token):
+            browser = await storage.local_accounts.browser_state(browser_hash(token))
+            request.state.local_browser = browser
+        if browser is not None:
+            owner = None
+            pinned = pinned_local_account(request)
+            if pinned is not None and pinned != browser.active_account_id:
+                raise _account_switched()
+            member = browser.member(browser.active_account_id)
+            if member is not None and member.session_live:
+                owner = SessionOwner(session_id=member.session_id, account=member.account)
+        else:
+            owner = await storage.local_accounts.session_owner(session_hash(token))
+    except HTTPException:
+        raise
     except LocalAuthNotConfigured:
         raise AgentConfigurationError() from None
     except Exception:

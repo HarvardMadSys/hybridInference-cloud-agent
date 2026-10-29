@@ -268,6 +268,34 @@ PUBLIC_ROUTES = {
     ("POST", "/v1/waitlist"): (
         "identity only by design: applying is what an unadmitted account may do"
     ),
+    ("GET", "/v1/auth/options"): "says what the sign-in pages offer, before sign-in",
+    ("POST", "/v1/auth/setup/admin"): "redeems the one-time first-run setup code",
+    ("POST", "/v1/auth/phone/code"): "sends a code; answers the same for any number",
+    ("POST", "/v1/auth/phone/signup"): "redeems a single-use code; there is no session yet",
+    ("POST", "/v1/auth/phone/login"): "redeems a single-use code, creating the session",
+    ("GET", "/v1/auth/accounts"): (
+        "the browser's own chooser: reads its server-side browser row on every request"
+    ),
+    ("POST", "/v1/auth/switch"): (
+        "re-reads the browser row and the chosen account's live session in its handler"
+    ),
+    ("DELETE", "/v1/auth/accounts/{account_id}"): "only signs an account out of its own browser",
+    ("POST", "/v1/auth/logout-all"): "only ends the browser it was sent with",
+    ("GET", "/v1/auth/account"): (
+        "identity only by design: the server-side session row is read on every request"
+    ),
+    ("POST", "/v1/auth/account/password"): (
+        "identity only, re-read per request, and the owner proves it again in the handler"
+    ),
+    ("POST", "/v1/auth/account/email"): (
+        "identity only, re-read per request, and the owner proves it again in the handler"
+    ),
+    ("POST", "/v1/auth/account/phone"): (
+        "identity only, re-read per request, and a single-use code proves the number"
+    ),
+    ("POST", "/v1/auth/account/delete"): (
+        "identity only, re-read per request, and the owner proves it again in the handler"
+    ),
 }
 
 

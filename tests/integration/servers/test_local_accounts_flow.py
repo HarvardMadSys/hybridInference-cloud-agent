@@ -33,7 +33,7 @@ pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 _ADMIN = {"authorization": "Bearer admin-token-for-tests-0123456789abcdef"}
 _WEB = "https://agents.example/agents"
-_EMAIL = "Flow.Person@Example.org"
+_EMAIL = "Flow.Person@Example.edu"
 _PASSWORD = "Correct1Horse"
 
 
@@ -86,7 +86,9 @@ async def env(pool, monkeypatch):
 
 
 async def _sign_up_and_verify(http, app) -> None:
-    response = await http.post("/v1/auth/signup", json={"email": _EMAIL, "password": _PASSWORD})
+    response = await http.post(
+        "/v1/auth/signup", json={"email": _EMAIL, "password": _PASSWORD, "accepted_tos": True}
+    )
     assert response.status_code == 200, response.text
     assert response.json() == {"ok": True}
     token = app.state.account_mailer.token("verify_email")
@@ -111,9 +113,12 @@ async def _admin(http, account_id: str, action: str, version: int, **extra: Any)
 
 async def test_sign_up_answers_the_same_and_never_hands_a_stranger_the_password(env):
     http, app = env
-    first = await http.post("/v1/auth/signup", json={"email": _EMAIL, "password": _PASSWORD})
+    first = await http.post(
+        "/v1/auth/signup", json={"email": _EMAIL, "password": _PASSWORD, "accepted_tos": True}
+    )
     again = await http.post(
-        "/v1/auth/signup", json={"email": _EMAIL.upper(), "password": "Stranger1Pass"}
+        "/v1/auth/signup",
+        json={"email": _EMAIL.upper(), "password": "Stranger1Pass", "accepted_tos": True},
     )
     assert first.json() == again.json() == {"ok": True}
     kinds = [mail.kind for mail in app.state.account_mailer.sent]
@@ -129,9 +134,11 @@ async def test_sign_up_answers_the_same_and_never_hands_a_stranger_the_password(
 async def test_sign_in_refusals_say_nothing_about_who_exists(env):
     http, app = env
     unknown = await http.post(
-        "/v1/auth/login", json={"email": "nobody@example.org", "password": _PASSWORD}
+        "/v1/auth/login", json={"email": "nobody@example.edu", "password": _PASSWORD}
     )
-    await http.post("/v1/auth/signup", json={"email": _EMAIL, "password": _PASSWORD})
+    await http.post(
+        "/v1/auth/signup", json={"email": _EMAIL, "password": _PASSWORD, "accepted_tos": True}
+    )
     wrong = await _login(http, "Wrong1Horse")
     assert unknown.status_code == wrong.status_code == 401
     assert unknown.json() == wrong.json()
@@ -158,7 +165,7 @@ async def test_the_whole_waiting_list_lifecycle(env):
     assert "HttpOnly" in cookie and "Secure" in cookie and "samesite=lax" in cookie.lower()
     assert "cals1." not in login.text
     account_id = body["id"]
-    assert body["auth_mode"] == "local" and body["email"] == "Flow.Person@example.org"
+    assert body["auth_mode"] == "local" and body["email"] == "Flow.Person@example.edu"
     assert body["agent_access"] == {"allowed": False, "permissions": []}
     assert body["waitlist"]["status"] == "not_applied"
 
@@ -189,7 +196,7 @@ async def test_the_whole_waiting_list_lifecycle(env):
     assert me["agent_access"] == {"allowed": True, "permissions": ["agent.use"]}
     profile = await http.get("/v1/agent/profile")
     assert profile.status_code == 200, profile.text
-    assert profile.json()["email"] == "Flow.Person@example.org"
+    assert profile.json()["email"] == "Flow.Person@example.edu"
     config_body = (await http.get("/v1/agent/config")).json()
     assert config_body["models"] == [] and config_body["model_connection_required"] is True
 

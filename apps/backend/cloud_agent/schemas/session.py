@@ -10,6 +10,7 @@ from cloud_agent.agent_access import (
     AgentAccess,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
 from cloud_agent.schemas.accounts import (
+    AccountIdentity,  # noqa: TC001 — Pydantic resolves annotations at runtime.
     WaitlistEntry,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
 
@@ -31,3 +32,5 @@ class SessionUserResponse(BaseModel):
     auth_mode: Literal["local", "gateway"] | None = None
     email: str | None = None
     waitlist: WaitlistEntry | None = None
+    identity: AccountIdentity | None = None
+    is_local_admin: bool | None = None

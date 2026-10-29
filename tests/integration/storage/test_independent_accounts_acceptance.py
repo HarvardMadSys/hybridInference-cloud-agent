@@ -27,7 +27,7 @@ from cloud_agent.storage.assembly import Storage
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
-_EMAIL = "independent-owner@example.com"
+_EMAIL = "independent-owner@example.edu"
 _PASSWORD = "PrivateExample73!"
 _ADMIN = "test-only-independent-account-admin"
 
@@ -97,7 +97,7 @@ def _mail_token(mail):
 async def _verified_login(state):
     client = state.client
     credentials = {"email": _EMAIL, "password": _PASSWORD}
-    response = await client.post("/v1/auth/signup", json=credentials)
+    response = await client.post("/v1/auth/signup", json={**credentials, "accepted_tos": True})
     assert response.status_code == 200, response.text
     assert len(state.mails) == 1
     token = _mail_token(state.mails[-1])
@@ -232,7 +232,7 @@ async def test_invalid_account_bodies_never_echo_credentials(acceptance, path, b
 async def test_cross_site_signup_and_legacy_gateway_login_are_refused(acceptance):
     cross_site = await acceptance.client.post(
         "/v1/auth/signup",
-        json={"email": _EMAIL, "password": _PASSWORD},
+        json={"email": _EMAIL, "password": _PASSWORD, "accepted_tos": True},
         headers={"Sec-Fetch-Site": "cross-site", "Origin": "https://other.example"},
     )
     assert cross_site.status_code == 403

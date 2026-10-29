@@ -152,10 +152,10 @@ async def byok(monkeypatch):
         reset_settings()
 
 
-async def _login(state, email: str = "byok-owner@example.org", *, client=None) -> dict[str, Any]:
+async def _login(state, email: str = "byok-owner@example.edu", *, client=None) -> dict[str, Any]:
     client = client or state.client
     credentials = {"email": email, "password": PASSWORD}
-    response = await client.post("/v1/auth/signup", json=credentials)
+    response = await client.post("/v1/auth/signup", json={**credentials, "accepted_tos": True})
     assert response.status_code == 200, response.text
     assert state.mails[-1].to == email
     token = _mail_token(state.mails[-1])
@@ -395,7 +395,7 @@ async def test_another_approved_account_cannot_read_verify_or_run_the_owners_con
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=state.app), base_url=_WEB
     ) as other:
-        outsider = await _login(state, "byok-other@example.org", client=other)
+        outsider = await _login(state, "byok-other@example.edu", client=other)
         await _approve(state, outsider, client=other)
         own = await _connect(state, client=other, name="My other provider", base_url=_OTHER_BASE)
         calls = len(state.provider.requests)
