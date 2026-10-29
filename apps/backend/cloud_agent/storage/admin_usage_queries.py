@@ -6,7 +6,7 @@ grouping come from one view of the database. Snapshots are projected through an
 explicit protocol allowlist: optional keys keep their absence, and a damaged
 report stays damaged instead of being repaired into a valid one.
 
-The three statements below are module constants so that a plan review or the
+The statements below are module constants so that a plan review or the
 measurement script exercises exactly what the route runs.
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.storage._sql.ledger import UNREFERENCED_ATTEMPT_SQL
@@ -21,7 +22,6 @@ from cloud_agent.storage._sql.rows import load_json
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-    from datetime import datetime
 
     import asyncpg
 
@@ -98,17 +98,40 @@ _FILTERS_SQL = """
       AND ($6::text IS NULL OR t.repo = $6)
 """
 
-#: A Fork's copies of its source's turns are left out. They are history copied
-#: for display, with no attempt and no ledger reference: counted, each was one
-#: more run, its usage unavailable, beside the run it copies.
-_COHORT_SQL = f"""
-    SELECT {_JOB_COLUMNS}
+#: The runs a selection counts, created in ``[$1, $2)`` and matching filters
+#: ``$3`` to ``$6``. A Fork's copies of its source's turns are left out. They
+#: are history copied for display, with no attempt and no ledger reference:
+#: counted, each was one more run, its usage unavailable, beside the run it
+#: copies. The cohort and the run bounds share this text, so a period the
+#: bounds narrow to the run budget is one the cohort then fits.
+_SELECTED_RUNS_SQL = f"""
     FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id
     WHERE j.created_at >= $1 AND j.created_at < $2
       AND j.fork_source_job_id IS NULL
     {_FILTERS_SQL}
+"""
+
+_COHORT_SQL = f"""
+    SELECT {_JOB_COLUMNS}
+    {_SELECTED_RUNS_SQL}
     ORDER BY j.created_at, j.id
     LIMIT $7
+"""
+
+#: When the first selected run was created.
+_EARLIEST_RUN_SQL = f"""
+    SELECT MIN(j.created_at)
+    {_SELECTED_RUNS_SQL}
+"""
+
+#: When the newest selected run past the first ``$7`` was created, counting
+#: back from ``$2``: every run created after it fits a budget of ``$7`` runs.
+_OVERFLOW_RUN_SQL = f"""
+    SELECT j.created_at
+    {_SELECTED_RUNS_SQL}
+    ORDER BY j.created_at DESC
+    OFFSET $7
+    LIMIT 1
 """
 
 #: What the selection would cost, measured in Postgres so an oversized one is
@@ -134,6 +157,10 @@ _PROJECTION_SQL = f"""
       AND j.created_at >= $2 AND j.created_at < $3
     ORDER BY j.created_at, j.id, a.attempt_no, l.id
 """
+
+
+#: The lower bound of a selection that has none: every stored run is after it.
+_BEGINNING = datetime.min.replace(tzinfo=UTC)
 
 
 def _decoded_reports(rows: list[Any]) -> list[dict[str, Any]]:
@@ -236,6 +263,33 @@ class AdminUsageQueries:
             raise UsageQueryUnavailable from error
         # Up to the snapshot budget of JSON: decoded off the shared event loop.
         return cohort, await asyncio.to_thread(_decoded_reports, rows)
+
+    async def owner_run_bounds(
+        self, user_id: str, *, until: datetime, max_runs: int
+    ) -> tuple[datetime | None, datetime | None]:
+        """Where an owner's all-time period can start, from the runs a selection counts.
+
+        Both statements read the same runs the cohort selects, through the same
+        predicate, inside one read-only repeatable-read transaction.
+
+        Returns:
+            When the owner's first run before ``until`` was created, and when
+            the newest run past the newest ``max_runs`` was created. Each is
+            None when there is no such run: no runs at all, or all of them fit.
+
+        Raises:
+            UsageQueryUnavailable: If a statement fails or exceeds its timeout.
+        """
+        filters = (user_id, None, None, None)
+        try:
+            async with self._read() as conn:
+                earliest = await conn.fetchval(_EARLIEST_RUN_SQL, _BEGINNING, until, *filters)
+                overflow = await conn.fetchval(
+                    _OVERFLOW_RUN_SQL, _BEGINNING, until, *filters, max_runs
+                )
+        except Exception as error:
+            raise UsageQueryUnavailable from error
+        return earliest, overflow
 
     async def _cohort(
         self,

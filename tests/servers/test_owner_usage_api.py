@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -13,10 +13,12 @@ from fastapi import FastAPI
 
 from cloud_agent import identity
 from cloud_agent.admin_observability import encode_cursor
+from cloud_agent.admin_usage import MAX_USAGE_RESPONSE_BYTES, MAX_USAGE_RUNS
 from cloud_agent.api import owner_usage
 from cloud_agent.api.deps import get_gateway_client, get_storage
 from cloud_agent.owner_usage import (
     CONTAINER_CURSOR_SCOPE,
+    MAX_ALL_TIME_DAYS,
     OwnerContainerCursor,
     OwnerContainerList,
     OwnerCurrentUse,
@@ -50,6 +52,7 @@ def app(monkeypatch):
     )
     usage = AsyncMock()
     usage.selection.return_value = ([], [])
+    usage.owner_run_bounds.return_value = (None, None)
     gateway = AsyncMock()
     gateway.agent_access.side_effect = lambda owner: {
         "user_id": owner,
@@ -146,10 +149,89 @@ async def test_tokens_select_only_the_owners_runs(app):
 
 
 @pytest.mark.parametrize(
-    ("failure", "status"), [(UsageQueryTooLarge(), 422), (UsageQueryUnavailable(), 503)]
+    ("failure", "status", "error_type"),
+    [
+        (UsageQueryTooLarge(), 422, "usage_query_too_large"),
+        (UsageQueryUnavailable(), 503, "usage_temporarily_unavailable"),
+    ],
 )
-async def test_tokens_refuse_rather_than_return_a_partial_sum(app, failure, status):
+async def test_tokens_refuse_rather_than_return_a_partial_sum(app, failure, status, error_type):
     app.state.usage.selection.side_effect = failure
     response = await _get(app, "/v1/agent/usage/tokens")
     assert response.status_code == status
+    assert "summary" not in response.text
+    # A typed reason the page translates, not prose it shows as sent.
+    assert response.json()["detail"]["error"]["type"] == error_type
+
+
+@pytest.mark.parametrize("path", ["resources", "tokens"])
+async def test_no_period_reads_the_last_seven_days(app, path):
+    response = await _get(app, f"/v1/agent/usage/{path}")
+    assert response.status_code == 200
+    period = response.json()["period"]
+    assert period["kind"] == "days"
+    span = datetime.fromisoformat(period["until"]) - datetime.fromisoformat(period["since"])
+    assert timedelta(days=6) <= span < timedelta(days=7)
+    app.state.usage.owner_run_bounds.assert_not_awaited()
+
+
+@pytest.mark.parametrize("path", ["resources", "tokens"])
+@pytest.mark.parametrize("params", [{"days": 7, "all": "true"}, {"days": 30, "all": "false"}])
+async def test_days_and_all_time_are_one_choice(app, path, params):
+    response = await _get(app, f"/v1/agent/usage/{path}", **params)
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"]["type"] == "usage_period_conflict"
+    app.state.usage.owner_run_bounds.assert_not_awaited()
+    app.state.usage.selection.assert_not_awaited()
+    app.state.queries.resource_history.assert_not_awaited()
+
+
+async def test_all_time_starts_on_the_owners_first_day(app):
+    first = datetime.now(UTC) - timedelta(days=40)
+    app.state.usage.owner_run_bounds.return_value = (first, None)
+    response = await _get(app, "/v1/agent/usage/tokens", all="true")
+    assert response.status_code == 200
+    bounds = app.state.usage.owner_run_bounds.await_args
+    assert bounds.args == ("owner-1",)
+    assert bounds.kwargs["max_runs"] == MAX_USAGE_RUNS
+    body = response.json()
+    assert body["period"]["kind"] == "all"
+    assert body["period"]["limited_by"] is None
+    assert datetime.fromisoformat(body["period"]["first_activity_at"]) == first
+    since = datetime.fromisoformat(body["since"])
+    assert since == first.replace(hour=0, minute=0, second=0, microsecond=0)
+    assert app.state.usage.selection.await_args.kwargs["since"] == since
+    assert body["days"][0]["date"] == first.date().isoformat()
+
+
+async def test_both_halves_of_an_all_time_read_cover_the_same_days(app):
+    now = datetime.now(UTC)
+    app.state.usage.owner_run_bounds.return_value = (
+        now - timedelta(days=MAX_ALL_TIME_DAYS + 30),
+        now - timedelta(days=12),
+    )
+    tokens = (await _get(app, "/v1/agent/usage/tokens", all="true")).json()
+    resources = await _get(app, "/v1/agent/usage/resources", all="true")
+    assert resources.status_code == 200
+    buckets = app.state.queries.resource_history.await_args.kwargs["buckets"]
+    assert tokens["period"]["limited_by"] == "runs"
+    assert resources.json()["period"]["limited_by"] == "runs"
+    assert buckets[0][0] == datetime.fromisoformat(tokens["since"])
+    assert len(buckets) == len(tokens["days"]) == 12
+
+
+async def test_all_time_is_unavailable_when_its_bounds_cannot_be_read(app):
+    app.state.usage.owner_run_bounds.side_effect = UsageQueryUnavailable()
+    response = await _get(app, "/v1/agent/usage/resources", all="true")
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"]["type"] == "usage_temporarily_unavailable"
+    app.state.queries.resource_history.assert_not_awaited()
+
+
+async def test_a_response_past_the_byte_bound_is_refused_whole(app, monkeypatch):
+    monkeypatch.setattr(owner_usage, "MAX_USAGE_RESPONSE_BYTES", 512)
+    assert MAX_USAGE_RESPONSE_BYTES > 512
+    response = await _get(app, "/v1/agent/usage/tokens", days=30)
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"]["type"] == "usage_response_too_large"
     assert "summary" not in response.text
