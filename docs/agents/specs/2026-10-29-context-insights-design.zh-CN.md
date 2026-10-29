@@ -40,7 +40,7 @@ dsh-context 运行在 DeepSeek Harness 里面，能读到 Harness 自己组装�
 |---|---|---|---|---|---|---|
 | Claude Code 2.1.220 | **历史已有**：每个 assistant 事件带 `usage` + `usage_id`（同一响应的多个块重复同一用量，按 `usage_id` 去重） | `parent_tool_use_id` | **历史已有**：lifecycle `phase=compact_boundary` | **本次新增采集**：`compact_metadata.trigger/pre_tokens/post_tokens` | **本次新增采集**：result 行的 `modelUsage[model].contextWindow` | CLI 有 `get_context_usage` 控制请求（agent-sdk 类型已核对），需要改常驻会话的 stdin/stdout 协议，本次未采集 |
 | Codex 0.145.0 | **历史已有**：原样存下的 `thread/tokenUsage/updated`，`tokenUsage.last` 是最后一次请求 | `agent_thread_id` 标记子线程 | **历史已有**：`item/completed` 的 `contextCompaction`（以及已弃用的 `thread/compacted`） | 未报告 | **历史已有**：`tokenUsage.modelContextWindow` | 未报告（Codex 自己的百分比也是按最后一次请求算的） |
-| pi 0.73.1 | **历史已有**：每条 assistant 消息一个 `usage` 事件 | 无子 Agent | 历史只存了被截断的原始行；**本次新增采集**：`compaction_end` → lifecycle `phase=compaction` | **本次新增**：`tokensBefore` | 未在事件流上；RPC `get_session_stats.contextUsage` 有，本次未采集 | 同左 |
+| pi 0.73.1 | **历史已有**：每条 assistant 消息一个 `usage` 事件 | 无子 Agent | 历史只存了被截断的原始行；**本次新增采集**：完成的 `compaction_end` 记为与 Claude 相同的 lifecycle `phase=compact_boundary`（带 `completed`），被中止的记为 `compaction_aborted` 诊断 | **本次新增**：`tokensBefore` | 未在事件流上；RPC `get_session_stats.contextUsage` 有，本次未采集 | 同左 |
 | OpenCode 1.18.9 | **历史已有**：bridge 原样行里的 `step-finish` part（一次 step = 一次请求） | bridge 只转发根会话 | **历史已有**：`session.compacted` 事件 | 未报告 | 未在事件流上（服务端 provider 列表里有，bridge 未读） | 未报告 |
 | Kilo 7.4.17 | 同 OpenCode（源码核对 `step-finish` 结构相同） | 同上 | 同上 | 未报告 | 未在事件流上 | 未报告 |
 

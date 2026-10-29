@@ -31,8 +31,9 @@ Each runtime reports these differently; the readers below are per protocol:
 - Codex: the app-server's ``thread/tokenUsage/updated`` notifications, stored
   whole as raw events, whose ``last`` is the latest request and which name the
   model's context window; ``contextCompaction`` items.
-- pi: one ``usage`` event per assistant message, and ``compaction`` lifecycle
-  events (collected since context insights; raw before).
+- pi: one ``usage`` event per assistant message, and ``compact_boundary``
+  lifecycle events for completed compactions (collected since context
+  insights; stored raw before).
 - OpenCode and Kilo: ``step-finish`` parts and ``session.compacted`` events in
   the bridge's stored raw lines.
 """
@@ -74,10 +75,9 @@ _CONTENT_EVENT: dict[str, ContentCategory] = {
 #: Where each runtime's evidence came from, as a profile names it.
 RequestSource = Literal["claude_usage", "codex_token_usage", "pi_usage", "opencode_step"]
 CompactionSource = Literal[
-    "claude_compact_boundary",
+    "cli_compact_boundary",
     "codex_context_compaction",
     "codex_thread_compacted",
-    "pi_compaction",
     "pi_compaction_raw",
     "opencode_session_compacted",
 ]
@@ -441,20 +441,14 @@ class ContextProfileAccumulator:
         elif phase == "result":
             self._windows(payload.get("context_windows"))
         elif phase == "compact_boundary":
-            self._compacted(
-                _Compaction(
-                    *meta,
-                    source="claude_compact_boundary",
-                    **_report_fields(payload.get("compaction")),
-                )
-            )
-        elif phase == "compaction":
+            # Claude Code's own boundary, and pi's completed compaction (which
+            # says ``completed`` alongside); either is a compaction that happened.
             completed = payload.get("completed")
             self._compacted(
                 _Compaction(
                     *meta,
-                    source="pi_compaction",
-                    completed=completed if isinstance(completed, bool) else None,
+                    source="cli_compact_boundary",
+                    completed=completed if isinstance(completed, bool) else True,
                     **_report_fields(payload.get("compaction")),
                 )
             )

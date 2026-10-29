@@ -71,13 +71,33 @@ export interface OwnerResourceDay extends OwnerResourceTotals {
   until: string;
 }
 
+/** The presets every half of the Usage page reads, in UTC days. */
+export type UsageRangePreset = 'today' | '7d' | '30d' | 'all';
+export const USAGE_RANGE_PRESETS: readonly UsageRangePreset[] = ['today', '7d', '30d', 'all'];
+export type UsageBucket = 'day' | 'week' | 'month';
+
+/** The interval a read covers, as the server resolved it. */
+export interface UsageRange {
+  preset: UsageRangePreset | null;
+  days: number | null;
+  since: string;
+  until: string;
+  day_timezone: 'UTC';
+  /** Each entry of a history is one of these: a day, an ISO week or a month. */
+  bucket: UsageBucket;
+  /** For `all`: the earliest retained record; null when there is none. */
+  first_record_at: string | null;
+}
+
 export interface OwnerResourceHistory {
   since: string;
   until: string;
   day_timezone: 'UTC';
   generated_at: string;
   totals: OwnerResourceTotals;
+  /** One entry per bucket of `period` (a day, week or month). */
   days: OwnerResourceDay[];
+  period: UsageRange | null;
 }
 
 /** The admin Usage page's accounting, selected for the owner's own runs. */
@@ -88,8 +108,65 @@ export interface OwnerTokenUsage {
   time_basis: 'job_created_at';
   generated_at: string;
   summary: AdminUsageAggregate;
+  /** One entry per bucket of `period`. */
   days: AdminUsageDay[];
   by_model: AdminUsageBreakdown;
+  period: UsageRange | null;
+  /** Bounded batches the server summed this in; more than one for a long history. */
+  batches: number;
+}
+
+export type ContextSort = 'recent' | 'peak' | 'compactions' | 'requests';
+export const CONTEXT_SORTS: readonly ContextSort[] = ['recent', 'peak', 'compactions', 'requests'];
+
+/** One conversation's context profile over its runs in the range. */
+export interface ConversationContext {
+  thread_id: string;
+  title: string | null;
+  repo: string | null;
+  archived: boolean;
+  latest_job_id: string;
+  turns: number;
+  first_turn_at: string;
+  last_turn_at: string;
+  runtimes: string[];
+  models: string[];
+  attempts: number;
+  attempts_profiled: number;
+  main_requests: number;
+  subagent_requests: number;
+  peak_prompt_tokens: number | null;
+  latest_prompt_tokens: number | null;
+  latest_observed_at: string | null;
+  context_window: number | null;
+  compactions: number;
+  /** Server-summed Gateway usage of these runs; null when none was recorded. */
+  usage: AdminUsageAggregate | null;
+}
+
+export interface ContextInsightsPage {
+  period: UsageRange;
+  sort: ContextSort;
+  time_basis: 'job_created_at';
+  generated_at: string;
+  summary: {
+    conversations: number;
+    conversations_observed: number;
+    main_requests: number;
+    subagent_requests: number;
+    compactions: number;
+    peak_prompt_tokens: number | null;
+    peak_thread_id: string | null;
+    deleted_conversation_runs: number;
+  };
+  profiling: {
+    pending_attempts: number;
+    pending_capped: boolean;
+    refreshed: number;
+    complete: boolean;
+  };
+  conversations: ConversationContext[];
+  next_cursor: string | null;
 }
 
 export async function getOwnerContainers(
@@ -108,20 +185,40 @@ export async function getOwnerContainers(
 }
 
 export async function getOwnerResources(
-  days: number,
+  range: UsageRangePreset,
   signal?: AbortSignal,
 ): Promise<OwnerResourceHistory> {
-  const response = await fetchWithAuth(config.apiBase, `${USAGE}/resources?days=${days}`, {
+  const response = await fetchWithAuth(config.apiBase, `${USAGE}/resources?range=${range}`, {
     signal,
     cache: 'no-store',
   });
   return jsonOrThrow<OwnerResourceHistory>(response);
 }
 
-export async function getOwnerTokens(days: number, signal?: AbortSignal): Promise<OwnerTokenUsage> {
-  const response = await fetchWithAuth(config.apiBase, `${USAGE}/tokens?days=${days}`, {
+export async function getOwnerTokens(
+  range: UsageRangePreset,
+  signal?: AbortSignal,
+): Promise<OwnerTokenUsage> {
+  const response = await fetchWithAuth(config.apiBase, `${USAGE}/tokens?range=${range}`, {
     signal,
     cache: 'no-store',
   });
   return jsonOrThrow<OwnerTokenUsage>(response);
+}
+
+export async function getContextInsights(options: {
+  range: UsageRangePreset;
+  sort: ContextSort;
+  cursor?: string | null;
+  limit?: number;
+  signal?: AbortSignal;
+}): Promise<ContextInsightsPage> {
+  const params = new URLSearchParams({ range: options.range, sort: options.sort });
+  if (options.cursor) params.set('cursor', options.cursor);
+  if (options.limit) params.set('limit', String(options.limit));
+  const response = await fetchWithAuth(config.apiBase, `${USAGE}/context?${params}`, {
+    signal: options.signal,
+    cache: 'no-store',
+  });
+  return jsonOrThrow<ContextInsightsPage>(response);
 }

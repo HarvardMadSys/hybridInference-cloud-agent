@@ -234,12 +234,12 @@ def test_pi_usage_adds_the_cache_back_into_the_prompt():
             (
                 "lifecycle",
                 {
-                    "phase": "compaction",
+                    "phase": "compact_boundary",
                     "completed": True,
                     "compaction": {"trigger": "threshold", "pre_tokens": 4150},
                 },
             ),
-            ("lifecycle", {"phase": "compaction", "completed": False, "compaction": {}}),
+            ("lifecycle", {"phase": "compaction_aborted", "completed": False, "compaction": {}}),
         )
     )
     assert profile["requests"][0][3] == 4150

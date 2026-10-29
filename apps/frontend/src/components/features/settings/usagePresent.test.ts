@@ -24,6 +24,9 @@ import {
   tokenTotal,
   unrecordedTurns,
   utcMidnightLocal,
+  bucketLabel,
+  crossesYear,
+  rangeSpan,
 } from './usagePresent';
 
 const GIB = 1024 ** 3;
@@ -353,5 +356,51 @@ describe('the start of a UTC day on the reader’s clock', () => {
     expect(utcMidnightLocal(at, 'en-US', 'Asia/Kolkata')).toBe('5:30 AM');
     expect(utcMidnightLocal(at, 'en-US', 'UTC')).toBeNull();
     expect(utcMidnightLocal(Number.NaN, 'en-US', 'Asia/Shanghai')).toBeNull();
+  });
+});
+
+describe('ranges and buckets', () => {
+  it('names a bucket by its day, week start or month, with the year once bars cross one', () => {
+    expect(bucketLabel('2026-10-12', 'day', 'en-US', false)).toBe('Oct 12');
+    expect(bucketLabel('2026-10-12', 'week', 'en-US', true)).toBe('Oct 12, 2026');
+    expect(bucketLabel('2025-12-01', 'month', 'en-US', true)).toBe('Dec 2025');
+    expect(bucketLabel('2025-12-01', 'month', 'en-US', false)).toBe('Dec');
+    expect(crossesYear(['2025-12-01', '2026-01-01'])).toBe(true);
+    expect(crossesYear(['2026-01-01', '2026-10-01'])).toBe(false);
+  });
+
+  it('writes a range’s first and last UTC days', () => {
+    const week = {
+      preset: '7d' as const,
+      days: null,
+      since: '2026-10-09T00:00:00Z',
+      until: '2026-10-15T12:00:00Z',
+      day_timezone: 'UTC' as const,
+      bucket: 'day' as const,
+      first_record_at: null,
+    };
+    expect(rangeSpan(week, 'en-US')).toEqual({ since: 'Oct 9', until: 'Oct 15' });
+    expect(rangeSpan({ ...week, preset: 'all', since: '2024-03-09T00:00:00Z' }, 'en-US')).toEqual({
+      since: 'Mar 9, 2024',
+      until: 'Oct 15, 2026',
+    });
+  });
+
+  it('treats only the bucket that ends now as still going', () => {
+    const day = (since: string, until: string) => ({
+      date: since.slice(0, 10),
+      since,
+      until,
+      running_seconds: 0,
+      measured_seconds: 0,
+      cpu_core_seconds: 0,
+      memory_byte_seconds: 0,
+    });
+    const days = chartDays(undefined, [
+      // A week clipped by the range's first day is whole.
+      day('2024-03-09T00:00:00Z', '2024-03-11T00:00:00Z'),
+      day('2026-10-12T00:00:00Z', '2026-10-15T12:00:00Z'),
+    ]);
+    expect(days.map((entry) => entry.whole)).toEqual([true, false]);
   });
 });

@@ -26,6 +26,10 @@ export const TrajectoryView = dynamic(
   () => import('../TrajectoryView').then((module) => module.TrajectoryView),
   { loading: () => <PanelLoading>Loading trajectory…</PanelLoading> },
 );
+export const ContextView = dynamic(
+  () => import('../context/ContextView').then((module) => module.ContextView),
+  { loading: () => <PanelLoading>Loading context…</PanelLoading> },
+);
 export const TrajectoryInspector = dynamic(
   () => import('../TrajectoryInspector').then((module) => module.TrajectoryInspector),
   { loading: () => <PanelLoading>Loading details…</PanelLoading> },

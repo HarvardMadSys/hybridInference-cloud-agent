@@ -97,7 +97,7 @@ export function JobDetailHeader({
             aria-label="Run views"
             className="flex shrink-0 items-center gap-0.5 rounded-md bg-surface-muted p-0.5 text-xs"
           >
-            {(['chat', 'trajectory'] as const).map((view) => (
+            {(['chat', 'trajectory', 'context'] as const).map((view) => (
               <button
                 key={view}
                 type="button"

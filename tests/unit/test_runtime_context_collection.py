@@ -82,7 +82,7 @@ def test_claude_result_without_model_usage_reports_no_window():
     assert event is not None and "context_windows" not in event.payload
 
 
-def test_pi_compaction_end_is_a_lifecycle_with_the_trigger_and_tokens_before():
+def test_pi_completed_compaction_is_a_compact_boundary_with_its_report():
     runtime = PiRuntime()
     [event] = runtime.parse_events(
         json.dumps(
@@ -101,7 +101,7 @@ def test_pi_compaction_end_is_a_lifecycle_with_the_trigger_and_tokens_before():
     )
     assert event.event_type == "lifecycle"
     assert event.payload == {
-        "phase": "compaction",
+        "phase": "compact_boundary",
         "compaction": {"trigger": "threshold", "pre_tokens": 120_500},
         "completed": True,
         "aborted": False,
@@ -111,7 +111,7 @@ def test_pi_compaction_end_is_a_lifecycle_with_the_trigger_and_tokens_before():
     assert "x" * 100 not in json.dumps(event.payload)
 
 
-def test_pi_aborted_compaction_is_not_completed():
+def test_pi_aborted_compaction_is_a_diagnostic_not_a_boundary():
     [event] = PiRuntime().parse_events(
         json.dumps(
             {
@@ -124,6 +124,7 @@ def test_pi_aborted_compaction_is_not_completed():
             }
         )
     )
+    assert event.payload["phase"] == "compaction_aborted"
     assert event.payload["completed"] is False
     assert event.payload["aborted"] is True
     assert event.payload["text"] == "cancelled"

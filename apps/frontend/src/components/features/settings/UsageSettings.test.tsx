@@ -8,9 +8,11 @@ import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
 import { NEUTRAL_SITE_CONFIG } from '@/config/site';
 import type { AdminUsageAggregate } from '@/lib/api/adminUsage';
 import {
+  getContextInsights,
   getOwnerContainers,
   getOwnerResources,
   getOwnerTokens,
+  type ContextInsightsPage,
   type OwnerContainer,
   type OwnerContainerList,
   type OwnerResourceHistory,
@@ -20,11 +22,46 @@ import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 
 import { CONTAINER_REFRESH_MS, UsageSettings } from './UsageSettings';
 
-vi.mock('@/lib/api/ownerUsage', () => ({
+vi.mock('@/lib/api/ownerUsage', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/ownerUsage')>()),
+  getContextInsights: vi.fn(),
   getOwnerContainers: vi.fn(),
   getOwnerResources: vi.fn(),
   getOwnerTokens: vi.fn(),
 }));
+
+const WEEK = {
+  preset: '7d' as const,
+  days: null,
+  since: '2026-10-09T00:00:00Z',
+  until: '2026-10-15T12:00:00Z',
+  day_timezone: 'UTC' as const,
+  bucket: 'day' as const,
+  first_record_at: null,
+};
+
+function insights(overrides: Partial<ContextInsightsPage> = {}): ContextInsightsPage {
+  return {
+    period: WEEK,
+    sort: 'recent',
+    time_basis: 'job_created_at',
+    generated_at: '2026-10-15T12:00:00Z',
+    summary: {
+      conversations: 0,
+      conversations_observed: 0,
+      main_requests: 0,
+      subagent_requests: 0,
+      compactions: 0,
+      peak_prompt_tokens: null,
+      peak_thread_id: null,
+      deleted_conversation_runs: 0,
+    },
+    profiling: { pending_attempts: 0, pending_capped: false, refreshed: 0, complete: true },
+    conversations: [],
+    next_cursor: null,
+    ...overrides,
+  };
+}
 
 const GIB = 1024 ** 3;
 const NOW = Date.parse('2026-10-15T12:00:00Z');
@@ -128,6 +165,8 @@ function tokens(): OwnerTokenUsage {
       ],
       other: null,
     },
+    period: WEEK,
+    batches: 1,
   };
 }
 
@@ -154,6 +193,7 @@ function resources(): OwnerResourceHistory {
         memory_byte_seconds: 3 * 3600 * GIB,
       },
     ],
+    period: WEEK,
   };
 }
 
@@ -183,6 +223,7 @@ beforeEach(() => {
   vi.mocked(getOwnerContainers).mockResolvedValue(list());
   vi.mocked(getOwnerTokens).mockResolvedValue(tokens());
   vi.mocked(getOwnerResources).mockResolvedValue(resources());
+  vi.mocked(getContextInsights).mockResolvedValue(insights());
 });
 
 afterEach(() => {
@@ -365,17 +406,72 @@ describe('UsageSettings', () => {
     vi.mocked(getOwnerTokens).mockResolvedValue(usage);
     section();
     await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
-    expect(screen.queryByRole('note')).not.toBeInTheDocument();
+    // The range note stays; the not-final note does not appear.
+    expect(
+      screen.queryByRole('note', { name: 'These model numbers are not final yet.' }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText(/not final/)).not.toBeInTheDocument();
   });
 
-  it('reads both histories again for another period', async () => {
+  it('reads both histories and the insights again for another range', async () => {
     section();
     await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
-    fireEvent.click(screen.getByRole('button', { name: '30 days' }));
-    await waitFor(() => expect(getOwnerTokens).toHaveBeenLastCalledWith(30, expect.anything()));
-    expect(getOwnerResources).toHaveBeenLastCalledWith(30, expect.anything());
-    expect(screen.getByRole('button', { name: '30 days' })).toHaveAttribute('aria-pressed', 'true');
+    expect(getOwnerTokens).toHaveBeenLastCalledWith('7d', expect.anything());
+    const [history] = screen.getAllByRole('combobox', { name: 'Range' });
+    fireEvent.click(history);
+    fireEvent.click(within(screen.getByRole('listbox')).getByRole('option', { name: 'All time' }));
+    await waitFor(() => expect(getOwnerTokens).toHaveBeenLastCalledWith('all', expect.anything()));
+    expect(getOwnerResources).toHaveBeenLastCalledWith('all', expect.anything());
+    await waitFor(() =>
+      expect(getContextInsights).toHaveBeenLastCalledWith(
+        expect.objectContaining({ range: 'all', sort: 'recent' }),
+      ),
+    );
+    // Both cards show the one shared range.
+    for (const control of screen.getAllByRole('combobox', { name: 'Range' })) {
+      expect(control).toHaveTextContent('All time');
+    }
+  });
+
+  it('offers exactly today, 7 days, 30 days and all time', async () => {
+    section();
+    const [history] = await screen.findAllByRole('combobox', { name: 'Range' });
+    fireEvent.click(history);
+    const options = within(screen.getByRole('listbox')).getAllByRole('option');
+    expect(options.map((option) => option.textContent)).toEqual([
+      'Today',
+      'Last 7 days',
+      'Last 30 days',
+      'All time',
+    ]);
+  });
+
+  it('names the range it shows in UTC days, and all time from its first record', async () => {
+    const all = {
+      ...WEEK,
+      preset: 'all' as const,
+      since: '2024-03-09T00:00:00Z',
+      bucket: 'week' as const,
+      first_record_at: '2024-03-09T17:30:00Z',
+    };
+    vi.mocked(getOwnerTokens).mockResolvedValue({ ...tokens(), period: all });
+    vi.mocked(getOwnerResources).mockResolvedValue({ ...resources(), period: all });
+    section();
+    expect(
+      await screen.findByText(
+        'Everything since Mar 9, 2024, the first day with a run or container (UTC) Bars are weeks, Monday to Sunday, UTC.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('shows a refusal in the reader’s words', async () => {
+    const { APIError } = await import('@/lib/utils/errors');
+    vi.mocked(getOwnerTokens).mockRejectedValue(
+      new APIError('usage_unavailable', 'Usage could not be read right now.', 503),
+    );
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
+    section();
+    expect(await screen.findByText('暂时无法读取用量，请重试。')).toBeInTheDocument();
   });
 
   it('keeps container history when model usage cannot be read', async () => {

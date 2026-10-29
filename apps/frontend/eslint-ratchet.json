@@ -98,8 +98,7 @@
     {
       "files": [
         "src/components/features/agents/AgentNotifications.tsx",
-        "src/components/features/agents/environment/EnvironmentManager.tsx",
-        "src/components/features/settings/UsageSettings.tsx"
+        "src/components/features/agents/environment/EnvironmentManager.tsx"
       ],
       "rules": {
         "complexity": ["error", 21]
@@ -449,7 +448,7 @@
         "max-lines": [
           "error",
           {
-            "max": 939
+            "max": 932
           }
         ]
       }
@@ -548,7 +547,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1413
+            "max": 1326
           }
         ]
       }
@@ -559,7 +558,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1314
+            "max": 1230
           }
         ]
       }

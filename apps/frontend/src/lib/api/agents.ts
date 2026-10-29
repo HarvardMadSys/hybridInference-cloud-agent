@@ -71,6 +71,20 @@ export {
 } from './agents/threads';
 
 export type {
+  ContextCategory,
+  ContextChangeApi,
+  ContextCompactionApi,
+  ContextCompositionApi,
+  ContextPointApi,
+  ContextSupport,
+  ContextTurnApi,
+  RuntimeContextCapabilityApi,
+  ThreadContextApi,
+} from './agents/context';
+
+export { getAgentThreadContext } from './agents/context';
+
+export type {
   AgentThreadArchiveApi,
   AgentSessionState,
   AgentSessionApi,

@@ -500,18 +500,21 @@ def _compaction_event(event: dict[str, Any]) -> NormalizedEvent:
 
     ``compaction_end`` carries the trigger (``manual``, ``threshold`` or
     ``overflow``), the tokens before, and whether it was aborted or will be
-    retried. Only an end that was neither is a compaction that happened; the
-    summary text itself stays out of the stream.
+    retried. An end that was neither is a compaction that happened, and is
+    stored as the same ``compact_boundary`` milestone Claude Code reports; one
+    that did not happen is a diagnostic. The summary text stays out of the
+    stream.
     """
     result = event.get("result")
     result = result if isinstance(result, dict) else {}
     report = reported_compaction(trigger=event.get("reason"), pre_tokens=result.get("tokensBefore"))
     if event.get("type") == "compaction_start":
         return NormalizedEvent(LIFECYCLE, {"phase": "compaction_start", "compaction": report})
+    completed = bool(result) and event.get("aborted") is not True
     payload: dict[str, Any] = {
-        "phase": "compaction",
+        "phase": "compact_boundary" if completed else "compaction_aborted",
         "compaction": report,
-        "completed": bool(result) and event.get("aborted") is not True,
+        "completed": completed,
         "aborted": event.get("aborted") is True,
         "will_retry": event.get("willRetry") is True,
     }
