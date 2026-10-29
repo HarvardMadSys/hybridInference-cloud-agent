@@ -24,6 +24,7 @@ from __future__ import annotations
 import secrets
 from typing import TYPE_CHECKING
 
+from cloud_agent_host.chat_sandbox_exec import install_once
 from cloud_agent_host.runtime_images import (
     discover,
     image_id,
@@ -93,6 +94,38 @@ def _source_image(manager: ChatSandboxManager, runtime_id: str, version: str) ->
     return builds[0].ref
 
 
+def _marker(manager: ChatSandboxManager, runtime_id: str, version: str) -> str | None:
+    """Where a chat's copy of ``version`` is marked whole; ``None`` for one it needs no copy of."""
+    if runtime_id not in downloadable_runtimes():
+        return None
+    if version in manager.backend.image_menu().get(runtime_id, []):
+        return None
+    return f"{runtime_bin_dir(runtime_id, version).removesuffix('/bin')}/{MARKER}"
+
+
+def ensure_downloaded_runtime_once(
+    manager: ChatSandboxManager, spec: ChatSandboxSpec, runtime_id: str, version: str
+) -> None:
+    """Run :func:`ensure_downloaded_runtime` under the chat's install lock, once per container.
+
+    Its marker names the runtime and version, and once found it holds for
+    the container's life. The activation moves in only a tree that root owns
+    and no one else can write, into a directory of the same kind under the
+    image's root-owned ``/opt/runtimes``, and writes the marker last, as root,
+    mode 0644. No member is ever root, so none can change, move or remove
+    either, and no platform exec replaces a version that has its marker. A
+    container proven since, or never proven, is asked again.
+    """
+    marker = _marker(manager, runtime_id, version)
+    if marker is not None:
+        install_once(
+            manager,
+            spec,
+            marker,
+            lambda: ensure_downloaded_runtime(manager, spec, runtime_id, version),
+        )
+
+
 def ensure_downloaded_runtime(
     manager: ChatSandboxManager, spec: ChatSandboxSpec, runtime_id: str, version: str
 ) -> None:
@@ -100,13 +133,12 @@ def ensure_downloaded_runtime(
 
     The caller serializes this with other trusted runtime preparation.
     """
-    if runtime_id not in downloadable_runtimes():
+    marker = _marker(manager, runtime_id, version)
+    if marker is None:
         return
-    if version in manager.backend.image_menu().get(runtime_id, []):
+    if has_root_marker(manager, spec, marker, version):
         return
-    prefix = runtime_bin_dir(runtime_id, version).removesuffix("/bin")
-    if has_root_marker(manager, spec, f"{prefix}/{MARKER}", version):
-        return
+    prefix = marker.removesuffix(f"/{MARKER}")
     stage = f"/opt/runtimes/{runtime_id}/.install-{secrets.token_hex(8)}"
     with staged_tree(
         manager,

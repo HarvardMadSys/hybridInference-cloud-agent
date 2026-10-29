@@ -18,8 +18,13 @@ from typing import TYPE_CHECKING, Protocol
 
 from fastapi import HTTPException
 
+from cloud_agent.application.model_connections import (
+    model_connections_enabled,
+    resolve_turn_connection,
+)
 from cloud_agent.attachments.models import AttachmentError
 from cloud_agent.attachments.selection import resolve_attachments
+from cloud_agent.domain.model_connections import ModelConnectionUnusable
 from cloud_agent.domain.requests import request_fingerprint
 from cloud_agent.domain.ssh_servers import SshServerUnavailable
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
@@ -61,6 +66,7 @@ if TYPE_CHECKING:
         AttachmentRepository,
         ConversationCommands,
         McpConnectionRepository,
+        ModelConnectionRepository,
         SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
@@ -78,6 +84,7 @@ class _JobCreationStorage(Protocol):
 
     conversation_commands: ConversationCommands
     mcp: McpConnectionRepository
+    model_connections: ModelConnectionRepository
     attachments: AttachmentRepository
     skills: SkillRepository
     source_control: SourceControlPort
@@ -99,6 +106,96 @@ def model_catalog_unavailable() -> HTTPException:
             }
         },
     )
+
+
+def model_connection_unusable(exc: ModelConnectionUnusable) -> HTTPException:
+    """400 for a turn its owner's connection cannot run, naming the reason.
+
+    A 400 rather than a 503: nothing about it improves by waiting, and a
+    waiting message's check holds the message with this sentence until its
+    owner changes the connection or the model.
+    """
+    return HTTPException(
+        status_code=400,
+        detail={
+            "error": {
+                "type": "model_connection_unusable",
+                "reason": exc.reason,
+                "message": str(exc),
+            }
+        },
+    )
+
+
+async def require_connection_source(
+    connections: ModelConnectionRepository,
+    *,
+    user_id: str,
+    connection_id: str,
+    runtime: str,
+    model: str,
+    reasoning_effort: str | None,
+) -> None:
+    """Refuse a turn on an owner connection it cannot run on.
+
+    Asks the connection only: neither the Gateway catalog nor its grant is a
+    prerequisite for a turn the owner's own provider serves, and the model id
+    is the provider's exact spelling, never resolved through Gateway aliases.
+    Refused outright while the deployment has not turned connections on.
+    """
+    try:
+        if not model_connections_enabled():
+            raise ModelConnectionUnusable("feature_disabled")
+        await resolve_turn_connection(
+            connections,
+            user_id=user_id,
+            connection_id=connection_id,
+            runtime=runtime,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+    except ModelConnectionUnusable as exc:
+        raise model_connection_unusable(exc) from None
+
+
+async def _admit_model(
+    body: AgentJobCreate,
+    user: dict[str, Any],
+    *,
+    gateway: Any,
+    connections: ModelConnectionRepository,
+) -> tuple[str, str | None]:
+    """The model and effort a new job runs with, checked against the source it names."""
+    if body.model_connection_id is not None:
+        await require_connection_source(
+            connections,
+            user_id=user["user_id"],
+            connection_id=body.model_connection_id,
+            runtime=body.runtime,
+            model=body.model,
+            reasoning_effort=body.reasoning_effort,
+        )
+        return body.model, None
+    # Canonical from here on. The grant the gateway mints names canonical
+    # ids, so a job that stored the alias would carry a scope matching
+    # nothing — created successfully, dead at its first inference call.
+    # One catalog read serves both admission checks (issue #781).
+    try:
+        catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
+    except ModelCatalogUnavailable:
+        raise model_catalog_unavailable() from None
+    model = await require_resolvable_model(body.model, gateway=gateway, user=user, catalog=catalog)
+    # Checked against the *resolved* model, not the requested spelling: the
+    # domain belongs to the model the turn will actually call.
+    reasoning_effort = await require_offered_effort(
+        body.reasoning_effort,
+        runtime=body.runtime,
+        model=model,
+        gateway=gateway,
+        user=user,
+        efforts=catalog[2],
+    )
+    return model, reasoning_effort
 
 
 async def require_resolvable_model(
@@ -608,24 +705,8 @@ async def create_job_as(  # noqa: PLR0912 complexity baseline, #771
                 }
             },
         ) from exc
-    # Canonical from here on. The grant the gateway mints names canonical
-    # ids, so a job that stored the alias would carry a scope matching
-    # nothing — created successfully, dead at its first inference call.
-    # One catalog read serves both admission checks (issue #781).
-    try:
-        catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
-    except ModelCatalogUnavailable:
-        raise model_catalog_unavailable() from None
-    model = await require_resolvable_model(body.model, gateway=gateway, user=user, catalog=catalog)
-    # Checked against the *resolved* model, not the requested spelling: the
-    # domain belongs to the model the turn will actually call.
-    reasoning_effort = await require_offered_effort(
-        body.reasoning_effort,
-        runtime=body.runtime,
-        model=model,
-        gateway=gateway,
-        user=user,
-        efforts=catalog[2],
+    model, reasoning_effort = await _admit_model(
+        body, user, gateway=gateway, connections=job_store.model_connections
     )
     if body.repo is None:
         # A temporary workspace: there is no repository to be entitled to and no
@@ -684,6 +765,7 @@ async def create_job_as(  # noqa: PLR0912 complexity baseline, #771
             task_prompt=body.task_prompt,
             runtime=body.runtime,
             model=model,
+            model_connection_id=body.model_connection_id,
             execution_profile=execution_profile,
             reasoning_effort=reasoning_effort,
             base_sha=base_sha,

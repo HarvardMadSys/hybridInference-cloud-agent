@@ -35,6 +35,7 @@ def test_an_owner_who_never_chose_has_no_effective_model():
     assert view.model_dump() == {
         "default_model": None,
         "last_model": None,
+        "last_model_connection_id": None,
         "effective_model": None,
         "deployment_default": None,
     }

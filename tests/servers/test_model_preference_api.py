@@ -83,6 +83,7 @@ async def test_a_new_owner_follows_their_last_used_model(app):
     assert response.json() == {
         "default_model": None,
         "last_model": "qwen-next",
+        "last_model_connection_id": None,
         "effective_model": "qwen-next",
         # This test sets no deployment default, so nothing is reported.
         "deployment_default": None,
@@ -168,6 +169,7 @@ async def test_one_owner_never_sees_or_sets_another_owners_choice(app):
     assert other.json() == {
         "default_model": None,
         "last_model": None,
+        "last_model_connection_id": None,
         "effective_model": None,
         "deployment_default": None,
         "models": MODELS,

@@ -59,15 +59,13 @@ _GIT_ENV = {
 }
 
 
-def _entries(root: pathlib.Path, *, stop: StopSignal | None = None) -> Iterator[pathlib.Path]:
-    """Yield every entry, checking cancellation even inside large directories."""
+def _entries(root: str, *, stop: StopSignal | None = None) -> Iterator[str]:
+    """Yield every entry's path, checking cancellation even inside large directories."""
     return source_entries(root, stop)
 
 
-def _manifest_paths(
-    root: pathlib.Path, manifest: BinaryIO, *, stop: StopSignal | None = None
-) -> Iterator[pathlib.Path]:
-    """Replay the length-prefixed filesystem paths in a validated disk manifest."""
+def _manifest_names(manifest: BinaryIO, *, stop: StopSignal | None = None) -> Iterator[str]:
+    """Replay the length-prefixed names below the checkout in a validated disk manifest."""
     while True:
         check_source_stop(stop)
         header = manifest.read(_MANIFEST_LENGTH.size)
@@ -81,7 +79,7 @@ def _manifest_paths(
         if len(encoded) != length:
             raise SandboxError("source checkout manifest is truncated")
         check_source_stop(stop)
-        yield root / os.fsdecode(encoded)
+        yield os.fsdecode(encoded)
 
 
 def _human_size(size: int) -> str:
@@ -92,7 +90,7 @@ def _human_size(size: int) -> str:
 
 
 def _write_source_manifest(
-    root: pathlib.Path,
+    root: str,
     manifest: BinaryIO,
     *,
     max_bytes: int,
@@ -103,6 +101,8 @@ def _write_source_manifest(
     """Validate one streamed tree walk and spool only its bounded path records."""
     estimated = 0
     manifest_bytes = 0
+    # The walk joins each name below the checkout to this prefix.
+    prefix = os.path.join(root, "")
     entry_paths = _entries(root) if stop is None else _entries(root, stop=stop)
     for entries, path in enumerate(checked_entries(entry_paths, stop), start=1):
         if entries > max_entries:
@@ -111,15 +111,19 @@ def _write_source_manifest(
                 "this host's retained import metadata limit"
             )
         try:
-            info = path.lstat()
+            info = os.lstat(path)
         except OSError as exc:
-            raise SandboxError(f"source checkout changed while archiving: {path.name}") from exc
+            raise SandboxError(
+                f"source checkout changed while archiving: {os.path.basename(path)}"
+            ) from exc
         mode = info.st_mode
         if stat.S_ISREG(mode):
             estimated += info.st_size
         elif not (stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
-            raise SandboxError(f"source checkout contains refused file type at {path.name!r}")
-        relative = os.fsencode(path.relative_to(root))
+            raise SandboxError(
+                f"source checkout contains refused file type at {os.path.basename(path)!r}"
+            )
+        relative = os.fsencode(path.removeprefix(prefix))
         manifest_bytes += _MANIFEST_LENGTH.size + len(relative)
         if manifest_bytes > max_manifest_bytes:
             raise SandboxError(
@@ -141,8 +145,8 @@ def _write_source_manifest(
 
 
 def _normalize_source_member(member: tarfile.TarInfo, *, uid: int, gid: int) -> tarfile.TarInfo:
-    name = pathlib.PurePosixPath(member.name)
-    if name.is_absolute() or ".." in name.parts:
+    # What PurePosixPath would find, without parsing a path per member.
+    if member.name.startswith("/") or ".." in member.name.split("/"):
         raise SandboxError(f"source archive path escapes workspace: {member.name!r}")
     if not (member.isfile() or member.isdir() or member.issym()):
         raise SandboxError(f"source archive has refused member type: {member.name!r}")
@@ -152,11 +156,17 @@ def _normalize_source_member(member: tarfile.TarInfo, *, uid: int, gid: int) -> 
     member.gname = ""
     # Reproducible metadata and no setuid/setgid bits crossing the boundary.
     member.mode &= 0o1777
+    # Whole seconds, which the ustar header holds. A fractional one, as every
+    # stat returns, costs each member a 1 KiB pax header, written to the spool,
+    # copied into the container and counted against the size limit. Git there
+    # compares every file's content after the copy whatever its mtime: its
+    # inode, ctime and owner no longer match the index.
+    member.mtime = int(member.mtime)
     return member
 
 
 def _write_source_tar(
-    root: pathlib.Path,
+    root: str,
     manifest: BinaryIO,
     out: BinaryIO,
     *,
@@ -170,6 +180,7 @@ def _write_source_tar(
         f"source archive exceeds this host's {_human_size(max_bytes)} retained import size limit"
     )
     start = out.tell()
+    prefix = os.path.join(root, "")
 
     def normalize(member: tarfile.TarInfo) -> tarfile.TarInfo:
         return _normalize_source_member(member, uid=uid, gid=gid)
@@ -178,10 +189,9 @@ def _write_source_tar(
         with tarfile.open(
             fileobj=CancellableArchiveWriter(out, stop), mode="w", dereference=False
         ) as archive:
-            paths = _manifest_paths(root, manifest, stop=stop)
-            for path in checked_entries(paths, stop):
-                relative = path.relative_to(root).as_posix()
-                archive.add(path, arcname=relative, recursive=False, filter=normalize)
+            names = _manifest_names(manifest, stop=stop)
+            for name in checked_entries(names, stop):
+                archive.add(prefix + name, arcname=name, recursive=False, filter=normalize)
                 # A write-only source archive never reads TarFile's random-access index.
                 archive.getmembers().clear()
                 if out.tell() - start > max_bytes:
@@ -227,7 +237,7 @@ def build_source_archive(
     try:
         with tempfile.TemporaryFile(prefix="freeinference-source-manifest-") as manifest:
             _write_source_manifest(
-                root,
+                str(root),
                 manifest,
                 max_bytes=max_bytes,
                 max_entries=max_entries,
@@ -235,7 +245,7 @@ def build_source_archive(
                 stop=stop,
             )
             return _write_source_tar(
-                root,
+                str(root),
                 manifest,
                 out,
                 uid=uid,

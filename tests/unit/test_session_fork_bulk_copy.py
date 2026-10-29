@@ -118,6 +118,7 @@ async def test_finalize_session_fork_batches_a_thousand_turns_and_preserves_line
             "task_prompt": f"prompt {turn_no}",
             "runtime": "codex",
             "model": "gpt-test",
+            "model_connection_id": "mconn_" + "a" * 32 if turn_no % 3 == 0 else None,
             "reasoning_effort": "high",
             "state": "succeeded" if turn_no % 2 else "running",
             "published_pr_url": f"https://example.test/pr/{turn_no}",
@@ -173,6 +174,8 @@ async def test_finalize_session_fork_batches_a_thousand_turns_and_preserves_line
     assert copied_turns[0][2] is None
     assert [row[2] for row in copied_turns[1:]] == [row[0] for row in copied_turns[:-1]]
     assert [row[16] for row in copied_turns] == [turn["id"] for turn in turns]
+    # Every copied turn keeps the source it ran on, Gateway (null) included.
+    assert [row[18] for row in copied_turns] == [turn["model_connection_id"] for turn in turns]
     assert [row[11] for row in copied_turns[0:2]] == ["succeeded", "cancelled"]
     assert copied_turns[-1][1:15] == (
         operation["target_thread_id"],

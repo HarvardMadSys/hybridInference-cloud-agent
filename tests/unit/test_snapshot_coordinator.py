@@ -98,6 +98,13 @@ def _claimed_snapshot() -> dict[str, Any]:
     }
 
 
+class _NoConnectionKeys:
+    """A group that never ran on a model connection."""
+
+    async def scan_key_ciphertexts(self, *, sandbox_id: str, limit: int) -> list[str]:
+        return []
+
+
 class _CapturePort:
     def __init__(self) -> None:
         self.recorded: list[dict[str, Any]] = []
@@ -144,7 +151,9 @@ async def test_a_receipt_patch_past_the_capture_limit_is_never_recorded(monkeypa
 
     monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", sandbox_manager_for_job)
     port = _CapturePort()
-    store = type("Store", (), {"snapshot": port, "host_pool": None})()
+    store = type(
+        "Store", (), {"snapshot": port, "host_pool": None, "model_connections": _NoConnectionKeys()}
+    )()
 
     assert await control_plane._capture_due_shared_snapshot(store) is True
     if oversized:
@@ -200,7 +209,9 @@ async def test_a_capture_whose_base_git_pruned_imports_it_again_instead_of_faili
 
     _refusing_sandbox_manager(monkeypatch, 409, SNAPSHOT_BASE_MISSING)
     port = _ReimportPort(importable=importable)
-    store = type("Store", (), {"snapshot": port, "host_pool": None})()
+    store = type(
+        "Store", (), {"snapshot": port, "host_pool": None, "model_connections": _NoConnectionKeys()}
+    )()
 
     assert await control_plane._capture_due_shared_snapshot(store) is True
 
@@ -236,7 +247,9 @@ async def test_other_capture_refusals_keep_their_meaning(monkeypatch, status_cod
     """Only the exact missing-base answer imports again; a busy host still retries."""
     _refusing_sandbox_manager(monkeypatch, status_code, detail)
     port = _ReimportPort(importable=True)
-    store = type("Store", (), {"snapshot": port, "host_pool": None})()
+    store = type(
+        "Store", (), {"snapshot": port, "host_pool": None, "model_connections": _NoConnectionKeys()}
+    )()
 
     assert await control_plane._capture_due_shared_snapshot(store) is True
 

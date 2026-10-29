@@ -42,7 +42,8 @@ def test_resident_turn_forwards_native_question_reads_and_replies():
         ("kilo", False, True),
         ("claude-code", False, False),
         ("codex", False, False),
-        ("pi", False, False),
+        # pi always runs through its wrapper and the reviewed bridge.
+        ("pi", False, True),
         ("claude-code", True, True),
         ("codex", True, True),
         ("pi", True, True),

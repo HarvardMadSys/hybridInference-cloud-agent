@@ -1,0 +1,221 @@
+export const modelConnectionsEn = {
+  'connections.invalid': 'Check the highlighted fields, then try again.',
+  'connections.invalid.name': 'Enter a connection name of up to 64 characters.',
+  'connections.invalid.url':
+    'Enter an HTTPS Base URL without a username, password, query or fragment.',
+  'connections.invalid.key': 'Use a printable API key without spaces.',
+  'connections.invalid.model': 'Use the exact model ID, without spaces (up to 200 characters).',
+  'connections.timedOut': 'Verification took too long. Nothing was saved; try again later.',
+  'connections.modelLimit': 'Up to {max} models per connection.',
+  'connections.reason.supported': 'Streaming and a tool call round trip both worked.',
+  'connections.reason.blocked_address':
+    'That address cannot be used: it resolves to a private, reserved or protected address, or has no public IPv4 address a sandbox can reach.',
+  'connections.reason.unreachable': 'The provider could not be reached, or did not answer in time.',
+  'connections.reason.tls': "The provider's TLS certificate could not be verified.",
+  'connections.reason.redirected':
+    'The provider redirected the request. Enter the final Base URL instead.',
+  'connections.reason.auth': 'The provider refused the API key (401/403).',
+  'connections.reason.rate_limited':
+    'The provider is rate limiting this key (429). Try again later.',
+  'connections.reason.upstream_error': 'The provider failed to answer (5xx). Try again later.',
+  'connections.reason.too_large': "The provider's answer was larger than a check reads.",
+  'connections.reason.endpoint_missing':
+    'The provider has no such endpoint or model (404). Check the Base URL and model ID.',
+  'connections.reason.request_rejected':
+    'The provider rejected a streaming request with a tool (400/422). The model may not support tool calls.',
+  'connections.reason.not_streaming': 'The provider did not answer with a stream.',
+  'connections.reason.no_tool_call': 'The model did not call the offered tool exactly once.',
+  'connections.reason.missing_call_id':
+    "The model's tool call carried no call id to answer it with.",
+  'connections.reason.wrong_tool_arguments':
+    'The model called the tool, but not with the value it was asked for.',
+  'connections.reason.no_final_answer':
+    "The model's answer after the tool result did not repeat that result.",
+  'connections.reason.stream_error':
+    'The provider reported an error, or cut the answer short, inside the stream.',
+  'connections.reason.incomplete_stream': "The provider's stream ended before the answer finished.",
+  'connections.reason.unexpected_status': 'The provider answered with an unexpected HTTP status.',
+  'connections.reason.invalid_response':
+    "The provider's answer could not be read in the expected format.",
+  'connections.title': 'Personal model connections',
+  'connections.description':
+    'Run your tasks on your own provider’s API key. Connections are private to you, and your provider bills that key separately from platform inference.',
+  'connections.add': 'Add connection',
+  'connections.empty': 'No personal connections yet.',
+  'connections.unavailable': 'Personal model connections are not available on this deployment yet.',
+  'connections.loadError': 'Could not load your connections.',
+  'connections.error': 'The request failed. Check the connection details and try again.',
+  'connections.name': 'Connection name',
+  'connections.url': 'Base URL',
+  'connections.key': 'API key',
+  'connections.keyKept': 'Leave blank to keep the saved key',
+  'connections.secretHint':
+    'The agent and the code it runs can read this key inside your sandbox. Use a dedicated key with limits set at your provider.',
+  'connections.models': 'Model IDs',
+  'connections.modelsHint':
+    'Exactly as your provider names them. Press Enter to add another, up to {max}.',
+  'connections.modelList': 'Models to save',
+  'connections.anotherModel': 'Another model ID',
+  'connections.addModel': 'Add',
+  'connections.removeModel': 'Remove {model}',
+  'connections.modelRefused': 'Not usable: {reason}',
+  'connections.modelRefusedNamed': '{model}: {reason}',
+  'connections.edit': 'Edit',
+  'connections.save': 'Save',
+  'connections.verifySave': 'Verify and save',
+  'connections.verifying': 'Verifying with your provider… this can take up to four minutes.',
+  'connections.verifyingShort': 'Verifying…',
+  'connections.cancel': 'Cancel',
+  'connections.busy': 'Working…',
+  'connections.billing':
+    'Verifying sends a few small requests to your provider for each model, which it may bill.',
+  'connections.refused':
+    'Not saved: a model could not be verified for any agent. Fix or remove it, then try again.',
+  'connections.limited': 'Too many verifications in the last hour. Nothing was saved; try later.',
+  'connections.changed':
+    'The connection changed while this was being saved. Nothing was saved; try again.',
+  'connections.nameTaken': 'You already have a connection with this name.',
+  'connections.enabled': 'Enabled',
+  'connections.disabled': 'Disabled',
+  'connections.enable': 'Enable',
+  'connections.disable': 'Disable',
+  'connections.delete': 'Delete',
+  'connections.confirmDelete':
+    'Delete {name}? Chats using it will need another model connection. Keys your tasks already used stay encrypted with those workspaces’ history so their output can still be scanned for them. This does not revoke the key at your provider.',
+  'connections.confirmDisable':
+    'Disable {name}? Its running agent processes will stop and its queued turns cannot start until it is enabled.',
+  'connections.confirm': 'Confirm',
+  'connections.agents': 'Works with {agents}',
+  'connections.notUsable': 'No agent can use this model. Edit the connection to fix it.',
+  'connections.suggest.load': 'Load models from provider',
+  'connections.suggest.loadingShort': 'Loading…',
+  'connections.suggest.hint':
+    'Optional. Uses one of your hourly checks. Nothing is saved; picked models are verified when you save.',
+  'connections.suggest.needsDetails':
+    'Enter the Base URL and API key to load your provider’s models.',
+  'connections.suggest.needsKey': 'Enter the API key to load models from the changed Base URL.',
+  'connections.suggest.loading': 'Loading your provider’s models…',
+  'connections.suggest.listed': 'Your provider lists {total}. Pick one to add, or type any ID.',
+  'connections.suggest.narrow': 'Showing {shown} of {total}. Type above to narrow the list.',
+  'connections.suggest.noMatch': 'No listed model matches. Press Enter to add what you typed.',
+  'connections.suggest.allAdded': 'All listed models have been added. You can still type an ID.',
+  'connections.suggest.empty': 'Your provider listed no models. Type the model ID instead.',
+  'connections.suggest.list': 'Models your provider lists',
+  'connections.suggest.pick': 'Add {model}',
+  'connections.suggest.problem.unsupported':
+    'Your provider doesn’t offer a model list. Type the model ID instead.',
+  'connections.suggest.problem.auth':
+    'Your provider refused this API key, so no list was loaded. Check the key, or type the model ID.',
+  'connections.suggest.problem.unreachable':
+    'Couldn’t reach your provider at this Base URL. Check it, or type the model ID.',
+  'connections.suggest.problem.rateLimited':
+    'Your provider is rate limiting this key. Try again later, or type the model ID.',
+  'connections.suggest.problem.limited':
+    'Too many checks in the last hour. Try again later, or type the model ID.',
+  'connections.suggest.problem.keyRequired':
+    'Enter the API key to load models from the changed Base URL.',
+  'connections.suggest.problem.failed':
+    'Couldn’t load the model list. You can still type the model ID.',
+} as const;
+
+export const modelConnectionsZhCN: Record<keyof typeof modelConnectionsEn, string> = {
+  'connections.invalid': '请检查标出的字段后重试。',
+  'connections.invalid.name': '请输入连接名称，最多 64 个字符。',
+  'connections.invalid.url': '请输入 HTTPS Base URL，不含用户名、密码、查询参数或片段。',
+  'connections.invalid.key': '请输入不含空格的可打印 API key。',
+  'connections.invalid.model': '请输入完整的模型 ID，不含空格，最多 200 个字符。',
+  'connections.timedOut': '验证超时，未保存任何内容，请稍后重试。',
+  'connections.modelLimit': '每个连接最多添加 {max} 个模型。',
+  'connections.reason.supported': '流式回复及工具调用往返验证成功。',
+  'connections.reason.blocked_address':
+    '地址指向私有、保留或受保护的网络，或没有可用的公网 IPv4 地址。',
+  'connections.reason.unreachable': '无法连接服务商，或服务商未及时响应。',
+  'connections.reason.tls': '无法验证服务商的 TLS 证书。',
+  'connections.reason.redirected': '服务商返回了重定向，请填写最终的 Base URL。',
+  'connections.reason.auth': '服务商拒绝了 API key（401/403），请检查密钥。',
+  'connections.reason.rate_limited': '此密钥被服务商限流（429），请稍后重试。',
+  'connections.reason.upstream_error': '服务商返回错误（5xx），请稍后重试。',
+  'connections.reason.too_large': '服务商返回的数据超过验证的大小限制。',
+  'connections.reason.endpoint_missing': '未找到接口或模型（404），请检查地址和模型 ID。',
+  'connections.reason.request_rejected':
+    '服务商拒绝了流式工具调用请求（400/422），此模型可能不支持工具调用。',
+  'connections.reason.not_streaming': '服务商未返回流式回复。',
+  'connections.reason.no_tool_call': '模型未按要求调用工具。',
+  'connections.reason.missing_call_id': '工具调用缺少调用 ID。',
+  'connections.reason.wrong_tool_arguments': '模型未按要求传入工具参数。',
+  'connections.reason.no_final_answer': '模型未正确处理工具返回的结果。',
+  'connections.reason.stream_error': '服务商在流式回复中报错或提前中断。',
+  'connections.reason.incomplete_stream': '回复尚未完成，流式连接已结束。',
+  'connections.reason.unexpected_status': '服务商返回了非预期的 HTTP 状态。',
+  'connections.reason.invalid_response': '无法解析服务商返回的数据。',
+  'connections.title': '个人模型连接',
+  'connections.description':
+    '用自己服务商的 API key 运行任务。连接只有你自己能用，费用由服务商按这个 key 单独计费，与平台推理额度无关。',
+  'connections.add': '添加连接',
+  'connections.empty': '还没有个人模型连接。',
+  'connections.unavailable': '当前部署尚未开放个人模型连接。',
+  'connections.loadError': '无法加载模型连接。',
+  'connections.error': '操作失败，请检查连接信息后重试。',
+  'connections.name': '连接名称',
+  'connections.url': 'Base URL',
+  'connections.key': 'API key',
+  'connections.keyKept': '留空则保留已保存的密钥',
+  'connections.secretHint':
+    'Agent 及其运行的代码可以在你的沙箱内读取此密钥。建议使用专用密钥，并在服务商处设置额度限制。',
+  'connections.models': '模型 ID',
+  'connections.modelsHint': '须与服务商的写法完全一致。按回车可继续添加，最多 {max} 个。',
+  'connections.modelList': '要保存的模型',
+  'connections.anotherModel': '再添加一个模型 ID',
+  'connections.addModel': '添加',
+  'connections.removeModel': '移除 {model}',
+  'connections.modelRefused': '无法使用：{reason}',
+  'connections.modelRefusedNamed': '{model}：{reason}',
+  'connections.edit': '编辑',
+  'connections.save': '保存',
+  'connections.verifySave': '验证并保存',
+  'connections.verifying': '正在向服务商验证……最长可能需要四分钟。',
+  'connections.verifyingShort': '验证中…',
+  'connections.cancel': '取消',
+  'connections.busy': '处理中…',
+  'connections.billing': '验证会为每个模型向服务商发送几个小请求，服务商可能对此计费。',
+  'connections.refused': '未保存：有模型无法用于任何 Agent。请修改或移除该模型后重试。',
+  'connections.limited': '过去一小时内验证次数过多，未保存任何内容，请稍后再试。',
+  'connections.changed': '保存期间连接已被修改，未保存任何内容，请重试。',
+  'connections.nameTaken': '已有同名的连接。',
+  'connections.enabled': '已启用',
+  'connections.disabled': '已停用',
+  'connections.enable': '启用',
+  'connections.disable': '停用',
+  'connections.delete': '删除',
+  'connections.confirmDelete':
+    '删除 {name}？使用此连接的会话需要选择其他模型连接。任务已用过的密钥会加密保留在对应工作区的历史中，用于继续扫描其输出。此操作不会在服务商处撤销密钥。',
+  'connections.confirmDisable':
+    '停用 {name}？使用它的 Agent 进程将停止，排队的对话轮次需重新启用后才能运行。',
+  'connections.confirm': '确认',
+  'connections.agents': '可用于 {agents}',
+  'connections.notUsable': '没有 Agent 能使用此模型，请编辑连接修正。',
+  'connections.suggest.load': '从服务商获取模型',
+  'connections.suggest.loadingShort': '获取中…',
+  'connections.suggest.hint':
+    '可选，计入每小时检查次数。不会保存任何内容，选中的模型会在保存时验证。',
+  'connections.suggest.needsDetails': '填写 Base URL 和 API key 后即可获取服务商的模型。',
+  'connections.suggest.needsKey': 'Base URL 已修改，请填写 API key 后再获取模型。',
+  'connections.suggest.loading': '正在获取服务商的模型…',
+  'connections.suggest.listed': '服务商提供 {total} 个模型。点击即可添加，也可以手动输入任意 ID。',
+  'connections.suggest.narrow': '显示 {total} 个中的 {shown} 个，可在上方输入以筛选。',
+  'connections.suggest.noMatch': '没有匹配的模型。按回车即可添加所输入的 ID。',
+  'connections.suggest.allAdded': '已添加列表中的所有模型，也可以手动输入其他模型 ID。',
+  'connections.suggest.empty': '服务商未列出任何模型，请手动输入模型 ID。',
+  'connections.suggest.list': '服务商提供的模型',
+  'connections.suggest.pick': '添加 {model}',
+  'connections.suggest.problem.unsupported': '服务商未提供模型列表，请手动输入模型 ID。',
+  'connections.suggest.problem.auth':
+    '服务商拒绝了此 API key，未能获取列表。请检查密钥，或手动输入模型 ID。',
+  'connections.suggest.problem.unreachable':
+    '无法通过此 Base URL 连接服务商。请检查地址，或手动输入模型 ID。',
+  'connections.suggest.problem.rateLimited': '此密钥被服务商限流，请稍后重试，或手动输入模型 ID。',
+  'connections.suggest.problem.limited':
+    '过去一小时内检查次数过多，请稍后重试，或手动输入模型 ID。',
+  'connections.suggest.problem.keyRequired': 'Base URL 已修改，请填写 API key 后再获取模型。',
+  'connections.suggest.problem.failed': '未能获取模型列表，仍可手动输入模型 ID。',
+};

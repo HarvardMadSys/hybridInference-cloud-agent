@@ -159,6 +159,7 @@ def _job_response(
         title_source=job.get("title_source"),
         runtime=job["runtime"],
         model=job["model"],
+        model_connection_id=job.get("model_connection_id"),
         execution_profile=job.get("execution_profile", "trusted-v1"),
         reasoning_effort=job.get("reasoning_effort"),
         base_ref=base_ref,
@@ -260,6 +261,7 @@ def _pending_response(message: dict[str, Any]) -> AgentPendingMessageResponse:
             for attachment in message.get("attachments") or []
         ],
         model=message.get("model"),
+        model_connection_id=message.get("model_connection_id"),
         reasoning_effort=message.get("reasoning_effort"),
         last_error=message.get("last_error"),
         created_at=_iso(message.get("created_at")),

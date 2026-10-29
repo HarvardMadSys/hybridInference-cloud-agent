@@ -28,8 +28,11 @@ export interface AgentAdminSettings {
   definitions: AdminSettingDefinition[];
   values: Record<string, AdminSettingValue | null>;
   secret_configured: Record<string, boolean>;
-  /** Deployment prerequisites that must be supplied before the service starts. */
-  bootstrap: { key: string; label: string; description: string }[];
+  /**
+   * Deployment-managed configuration notes. The API still returns them, with
+   * optional metadata, but the settings pages do not render them.
+   */
+  bootstrap: { id?: string; key: string; label: string; description: string }[];
   setup?: {
     required: boolean;
     groups: {

@@ -11,13 +11,8 @@ import {
 } from '@/lib/api/adminSettings';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
-import { SettingsSection } from '../SettingsSection';
 import { ApplicationSettingGroup, SettingsIcon } from './ApplicationSettingGroup';
-import {
-  applicationCategory,
-  applicationSettingGroup,
-  applicationSettingPriority,
-} from './settingsOrganization';
+import { applicationCategory, applicationSettingGroup } from './settingsOrganization';
 
 const BUTTON_CLASS = 'ui-button ui-button-secondary min-h-11';
 
@@ -359,26 +354,16 @@ export function ApplicationSettingsCategory({
   const definitions = groups.get(category);
   const id = `application-settings-category-${encodeURIComponent(category)}`;
 
-  const renderGroups = (priority: 'important' | 'advanced') => {
-    const related = new Map<string, AdminSettingDefinition[]>();
-    for (const definition of definitions ?? []) {
-      if (applicationSettingPriority(definition) !== priority) continue;
-      const group = applicationSettingGroup(definition);
-      related.set(group, [...(related.get(group) ?? []), definition]);
-    }
-    if (related.size === 0) {
-      return <p className="py-4 text-sm text-muted">No {priority} settings on this page.</p>;
-    }
-    return [...related].map(([group, fields]) => (
-      <ApplicationSettingGroup key={group} title={group} fields={fields} settings={settings} />
-    ));
-  };
+  // Every related group appears exactly once, in registry order.
+  const related = new Map<string, AdminSettingDefinition[]>();
+  for (const definition of definitions ?? []) {
+    const group = applicationSettingGroup(definition);
+    related.set(group, [...(related.get(group) ?? []), definition]);
+  }
 
   useEffect(() => {
     if (!active || !focusField || !definitions?.some((field) => field.key === focusField)) return;
     const input = document.getElementById(`application-setting-${focusField}`);
-    const advanced = input?.closest('details');
-    if (advanced) advanced.open = true;
     input?.focus();
     input?.scrollIntoView?.({ block: 'center' });
     clearFocusField();
@@ -401,49 +386,21 @@ export function ApplicationSettingsCategory({
       )}
       <div className={showHeading ? 'px-4 sm:px-5' : undefined}>
         <div className="mt-5">
-          <h3 className="sr-only">Important</h3>
-          <div>{renderGroups('important')}</div>
+          {related.size === 0 ? (
+            <p className="py-4 text-sm text-muted">No settings on this page.</p>
+          ) : (
+            [...related].map(([group, fields]) => (
+              <ApplicationSettingGroup
+                key={group}
+                title={group}
+                fields={fields}
+                settings={settings}
+              />
+            ))
+          )}
         </div>
-        <SettingsSection title="Advanced" description="Connection details and operational tuning.">
-          {renderGroups('advanced')}
-        </SettingsSection>
       </div>
     </section>
-  );
-}
-
-export function ApplicationDeploymentSetup({ settings }: { settings: ApplicationSettingsState }) {
-  const { snapshot } = settings;
-  return (
-    <>
-      {(snapshot?.bootstrap.length ?? 0) > 0 && (
-        <details className="mt-6 border-t border-border pt-4">
-          <summary className="ui-focus-ring min-h-11 cursor-pointer rounded-lg py-3 text-sm font-medium text-foreground">
-            Deployment setup
-          </summary>
-          <p className="mt-2 text-sm leading-6 text-muted">
-            These settings are supplied when the service starts. Their values are hidden here.
-          </p>
-          <dl className="mt-3 space-y-3">
-            {snapshot?.bootstrap.map((definition) => (
-              <div
-                key={definition.key}
-                id={`application-bootstrap-${definition.key}`}
-                tabIndex={-1}
-              >
-                <dt className="text-sm font-medium text-foreground">
-                  {definition.label}{' '}
-                  <code className="ml-1 break-all rounded bg-surface-muted px-1.5 py-0.5 text-xs font-normal text-muted">
-                    {definition.key}
-                  </code>
-                </dt>
-                <dd className="mt-1 text-sm leading-6 text-muted">{definition.description}</dd>
-              </div>
-            ))}
-          </dl>
-        </details>
-      )}
-    </>
   );
 }
 
@@ -512,7 +469,6 @@ export default function ApplicationSettings(options: ApplicationSettingsOptions)
           No application settings are available.
         </p>
       )}
-      <ApplicationDeploymentSetup settings={settings} />
     </section>
   );
 }

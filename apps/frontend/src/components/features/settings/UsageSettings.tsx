@@ -15,29 +15,26 @@ import {
   type OwnerResourceHistory,
   type OwnerTokenUsage,
 } from '@/lib/api/ownerUsage';
+import { UsageChart } from './UsageChart';
 import {
-  CHART_METRICS,
   STATE_ORDER,
   USAGE_PERIODS,
   chartDays,
   compactCount,
   coreHours,
-  dayValue,
   decimal,
   duration,
   formatCost,
-  formatDayValue,
   formatMemory,
   gibHours,
+  historyErrorKey,
   partlyMeasured,
+  periodQuery,
+  rangeNote,
   relativeTime,
-  shortDay,
-  tickIndexes,
   tokenTotal,
   unrecordedTurns,
   utcMidnightLocal,
-  type ChartDay,
-  type ChartMetric,
   type UsagePeriod,
 } from './usagePresent';
 
@@ -81,12 +78,11 @@ const DURATION_UNIT: Record<'hours' | 'minutes', TranslationKey> = {
   minutes: 'settings.usage.minutes',
 };
 
-const CHART_LABEL: Record<ChartMetric, TranslationKey> = {
-  cost: 'settings.usage.chart.cost',
-  tokens: 'settings.usage.chart.tokens',
-  running: 'settings.usage.chart.running',
-  cpu: 'settings.usage.chart.cpu',
-  memory: 'settings.usage.chart.memory',
+const PERIOD_LABEL: Record<UsagePeriod, TranslationKey> = {
+  today: 'settings.usage.periodToday',
+  '7d': 'settings.usage.period7d',
+  '30d': 'settings.usage.period30d',
+  all: 'settings.usage.periodAll',
 };
 
 function errorText(cause: unknown): string | null {
@@ -361,7 +357,7 @@ function ContainerRow({ container, nowMs }: { container: OwnerContainer; nowMs: 
 function History() {
   const { t, locale } = useLocale();
   const { branding } = useSiteConfig();
-  const [period, setPeriod] = useState<UsagePeriod>(7);
+  const [period, setPeriod] = useState<UsagePeriod>('7d');
   const [tokens, setTokens] = useState<OwnerTokenUsage | null>(null);
   const [resources, setResources] = useState<OwnerResourceHistory | null>(null);
   const [tokenError, setTokenError] = useState<string | null>(null);
@@ -375,17 +371,19 @@ function History() {
     setTokenError(null);
     setResourceError(null);
     // Each half fails on its own: model usage can be refused for a selection
-    // too large to sum while container history still reads.
+    // too large to sum while container history still reads. A refusal is
+    // told in the reader's language, never in the server's English.
+    const query = periodQuery(period);
     const reads = [
-      getOwnerTokens(period, controller.signal).then(setTokens, (cause: unknown) => {
+      getOwnerTokens(query, controller.signal).then(setTokens, (cause: unknown) => {
         if (controller.signal.aborted) return;
         setTokens(null);
-        setTokenError(errorText(cause) ?? t('settings.usage.loadError'));
+        setTokenError(t(historyErrorKey(cause)));
       }),
-      getOwnerResources(period, controller.signal).then(setResources, (cause: unknown) => {
+      getOwnerResources(query, controller.signal).then(setResources, (cause: unknown) => {
         if (controller.signal.aborted) return;
         setResources(null);
-        setResourceError(errorText(cause) ?? t('settings.usage.loadError'));
+        setResourceError(t(historyErrorKey(cause)));
       }),
     ];
     void Promise.all(reads).then(() => {
@@ -394,16 +392,71 @@ function History() {
     return () => controller.abort();
   }, [period, attempt, t]);
 
+  // Only after a history loads: the server's render has no reader time zone,
+  // and the first browser render has to match it.
+  const generatedAt = resources?.generated_at ?? tokens?.generated_at;
+  const dayStart = generatedAt ? utcMidnightLocal(Date.parse(generatedAt), locale) : null;
+  // Both halves read the same period; either one names it.
+  const note = rangeNote(tokens?.period ?? resources?.period);
+  return (
+    <Card
+      id="settings-usage-history"
+      title={t('settings.usage.history')}
+      action={<PeriodPicker period={period} onChange={setPeriod} />}
+    >
+      {note && !loading ? (
+        <p role="note" className="mt-2 text-xs text-muted">
+          {t(note.key, note.vars)}
+        </p>
+      ) : null}
+      {tokenError ? (
+        <LoadError message={tokenError} onRetry={() => setAttempt((value) => value + 1)} />
+      ) : null}
+      {resourceError ? (
+        <LoadError message={resourceError} onRetry={() => setAttempt((value) => value + 1)} />
+      ) : null}
+      <HistoryTotals tokens={tokens} resources={resources} loading={loading} />
+      {tokens || resources ? (
+        <UsageChart days={chartDays(tokens?.days, resources?.days)} locale={locale} />
+      ) : null}
+      {tokens ? <ByModel usage={tokens} /> : null}
+      <p className="mt-4 text-xs text-muted">
+        {dayStart
+          ? t('settings.usage.utcNoteLocal', { time: dayStart })
+          : t('settings.usage.utcNote')}
+        {branding.gatewayUrl ? (
+          <>
+            {' '}
+            <a
+              href={`${branding.gatewayUrl}/dashboard`}
+              className="ui-focus-ring rounded font-medium text-accent hover:underline"
+            >
+              {t('settings.usage.dashboardLink')}
+            </a>
+          </>
+        ) : null}
+      </p>
+    </Card>
+  );
+}
+
+/** The period's totals, each a dash until its half of the history reads. */
+function HistoryTotals({
+  tokens,
+  resources,
+  loading,
+}: {
+  tokens: OwnerTokenUsage | null;
+  resources: OwnerResourceHistory | null;
+  loading: boolean;
+}) {
+  const { t } = useLocale();
   const totals = resources?.totals;
   const hours = (seconds: number) => {
     const { unit, value } = duration(seconds);
     return t(DURATION_UNIT[unit], { value });
   };
   const summary = tokens?.summary;
-  // Only after a history loads: the server's render has no reader time zone,
-  // and the first browser render has to match it.
-  const generatedAt = resources?.generated_at ?? tokens?.generated_at;
-  const dayStart = generatedAt ? utcMidnightLocal(Date.parse(generatedAt), locale) : null;
   const unrecorded = summary ? unrecordedTurns(summary) : 0;
   let tokenDetail: string | undefined;
   if (summary?.totals) {
@@ -412,37 +465,8 @@ function History() {
       out: compactCount(summary.totals.tokens_out),
     });
   }
-  const periods = (
-    <div
-      role="group"
-      aria-label={t('settings.usage.period')}
-      className="flex gap-1 rounded-lg border border-border bg-surface-muted p-1"
-    >
-      {USAGE_PERIODS.map((days) => (
-        <button
-          key={days}
-          type="button"
-          aria-pressed={period === days}
-          onClick={() => setPeriod(days)}
-          className={`ui-focus-ring min-h-9 rounded-md px-3 text-sm font-medium transition-colors [@media(pointer:coarse)]:min-h-11 ${
-            period === days
-              ? 'bg-surface text-foreground shadow-subtle'
-              : 'text-muted hover:bg-surface-hover hover:text-foreground'
-          }`}
-        >
-          {t('settings.usage.days', { count: days })}
-        </button>
-      ))}
-    </div>
-  );
   return (
-    <Card id="settings-usage-history" title={t('settings.usage.history')} action={periods}>
-      {tokenError ? (
-        <LoadError message={tokenError} onRetry={() => setAttempt((value) => value + 1)} />
-      ) : null}
-      {resourceError ? (
-        <LoadError message={resourceError} onRetry={() => setAttempt((value) => value + 1)} />
-      ) : null}
+    <>
       <dl
         aria-busy={loading}
         className={`mt-3 grid grid-cols-2 gap-2 lg:grid-cols-5 ${loading ? 'opacity-60' : ''}`}
@@ -485,139 +509,41 @@ function History() {
           {t('settings.usage.unrecorded', { count: unrecorded })}
         </p>
       ) : null}
-      {tokens || resources ? (
-        <DailyChart days={chartDays(tokens?.days, resources?.days)} locale={locale} />
-      ) : null}
-      {tokens ? <ByModel usage={tokens} /> : null}
-      <p className="mt-4 text-xs text-muted">
-        {dayStart
-          ? t('settings.usage.utcNoteLocal', { time: dayStart })
-          : t('settings.usage.utcNote')}
-        {branding.gatewayUrl ? (
-          <>
-            {' '}
-            <a
-              href={`${branding.gatewayUrl}/dashboard`}
-              className="ui-focus-ring rounded font-medium text-accent hover:underline"
-            >
-              {t('settings.usage.dashboardLink')}
-            </a>
-          </>
-        ) : null}
-      </p>
-    </Card>
+    </>
   );
 }
 
-function DailyChart({ days, locale }: { days: ChartDay[]; locale: string }) {
+function PeriodPicker({
+  period,
+  onChange,
+}: {
+  period: UsagePeriod;
+  onChange: (period: UsagePeriod) => void;
+}) {
   const { t } = useLocale();
-  const [metric, setMetric] = useState<ChartMetric>('cost');
-  const [pointed, setPointed] = useState<number | null>(null);
-  if (days.length === 0) return null;
-  const values = days.map((day) => dayValue(day, metric));
-  const peak = Math.max(0, ...values.map((value) => value ?? 0));
-  const ticks = new Set(tickIndexes(days.length));
-  const phoneTicks = new Set(tickIndexes(days.length, 4));
-  const shown = pointed !== null && pointed < days.length ? pointed : days.length - 1;
-  const label = t(CHART_LABEL[metric]);
-  const reading = (index: number) => {
-    const day = days[index];
-    const name = `${shortDay(day.date, locale)}${day.whole ? '' : ` (${t('settings.usage.today')})`}`;
-    const value = values[index];
-    return `${name} · ${value === null ? t('settings.usage.notRecorded') : formatDayValue(metric, value)}`;
-  };
   return (
-    <section aria-label={t('settings.usage.chartLabel', { metric: label })} className="mt-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div
-          role="group"
-          aria-label={t('settings.usage.chartMetric')}
-          className="flex flex-wrap gap-1 rounded-lg border border-border bg-surface-muted p-1"
+    <div
+      role="group"
+      aria-label={t('settings.usage.period')}
+      className="flex gap-1 rounded-lg border border-border bg-surface-muted p-1"
+    >
+      {USAGE_PERIODS.map((item) => (
+        <button
+          key={item}
+          type="button"
+          aria-pressed={period === item}
+          onClick={() => onChange(item)}
+          className={`ui-focus-ring min-h-9 rounded-md px-3 text-sm font-medium transition-colors [@media(pointer:coarse)]:min-h-11 ${
+            period === item
+              ? 'bg-surface text-foreground shadow-subtle'
+              : 'text-muted hover:bg-surface-hover hover:text-foreground'
+          }`}
         >
-          {CHART_METRICS.map((item) => (
-            <button
-              key={item}
-              type="button"
-              aria-pressed={item === metric}
-              onClick={() => setMetric(item)}
-              className={`ui-focus-ring min-h-8 rounded-md px-2.5 text-xs font-medium transition-colors [@media(pointer:coarse)]:min-h-11 ${
-                item === metric
-                  ? 'bg-surface text-foreground shadow-subtle'
-                  : 'text-muted hover:bg-surface-hover hover:text-foreground'
-              }`}
-            >
-              {t(CHART_LABEL[item])}
-            </button>
-          ))}
-        </div>
-        <p aria-hidden="true" className="text-xs tabular-nums text-muted">
-          {reading(shown)}
-        </p>
-      </div>
-      <div aria-hidden="true" className="relative mt-3 h-36 border-b border-border">
-        <div className="absolute inset-x-0 top-0 border-t border-dashed border-border" />
-        <span className="absolute left-0 top-1 text-[11px] tabular-nums text-muted">
-          {formatDayValue(metric, peak)}
-        </span>
-        <div className="flex h-full items-end gap-[2px] pt-6">
-          {days.map((day, index) => {
-            const value = values[index];
-            const height = peak > 0 && value ? Math.max(2, (value / peak) * 100) : 0;
-            return (
-              <div
-                key={day.date}
-                onMouseEnter={() => setPointed(index)}
-                onMouseLeave={() => setPointed(null)}
-                className="group flex h-full min-w-0 flex-1 items-end justify-center"
-              >
-                {value === null ? (
-                  // Unknown, not zero: marked rather than drawn as an empty bar.
-                  <span className="block w-full max-w-8 border-t-2 border-dotted border-muted" />
-                ) : (
-                  <span
-                    className={`block w-full max-w-8 rounded-t-[4px] transition-colors ${
-                      index === pointed ? 'bg-accent' : 'bg-accent/40 group-hover:bg-accent'
-                    } ${day.whole ? '' : 'opacity-60'}`}
-                    style={{ height: `${height}%` }}
-                  />
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-      <div aria-hidden="true" className="relative mt-1.5 h-4 text-[11px] tabular-nums text-muted">
-        {days.map((day, index) =>
-          ticks.has(index) ? (
-            <span
-              key={day.date}
-              className={`absolute top-0 whitespace-nowrap ${phoneTicks.has(index) ? '' : 'max-sm:hidden'}`}
-              style={tickPosition(index, days.length)}
-            >
-              {shortDay(day.date, locale)}
-            </span>
-          ) : null,
-        )}
-      </div>
-      <table className="sr-only">
-        <caption>{t('settings.usage.chartLabel', { metric: label })}</caption>
-        <tbody>
-          {days.map((day, index) => (
-            <tr key={day.date}>
-              <td>{reading(index)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </section>
+          {t(PERIOD_LABEL[item])}
+        </button>
+      ))}
+    </div>
   );
-}
-
-/** Where a day's label sits: under its bar, kept inside the chart at both ends. */
-function tickPosition(index: number, total: number): React.CSSProperties {
-  if (index === 0) return { left: 0 };
-  if (index === total - 1) return { right: 0 };
-  return { left: `${((index + 0.5) / total) * 100}%`, transform: 'translateX(-50%)' };
 }
 
 function ByModel({ usage }: { usage: OwnerTokenUsage }) {

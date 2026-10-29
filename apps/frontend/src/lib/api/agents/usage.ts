@@ -60,6 +60,11 @@ export interface AgentJobUsageApi {
     normalized_input_tokens?: number | null;
   };
   /**
+   * The turn ran on its owner's own model connection: that provider bills it,
+   * and an empty or zero Gateway ledger says nothing about its cost.
+   */
+  external_provider?: boolean;
+  /**
    * Orders two reads of this job's usage, asked for or pushed: the one whose
    * version compares greater saw everything the other did. Opaque.
    */
@@ -74,6 +79,8 @@ export interface AgentJobUsageApi {
     refreshing: boolean;
     next_refresh_at?: string | null;
     active?: boolean;
+    /** Some turn ran on the owner's own connection: `totals` is the Gateway's share only. */
+    external_provider?: boolean;
   } | null;
 }
 

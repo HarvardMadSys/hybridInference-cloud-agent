@@ -122,6 +122,9 @@ class ConversationUsage(BaseModel):
     refreshing: bool = False
     next_refresh_at: datetime | None = None
     active: bool = False
+    #: Some turn ran on the owner's own connection; ``totals`` is the Gateway's
+    #: share alone, and that provider's charges are unknown here.
+    external_provider: bool = False
 
 
 class JobUsageResponse(BaseModel):
@@ -130,6 +133,10 @@ class JobUsageResponse(BaseModel):
     ledger: JobLedgerSummary
     runtime: RuntimeUsage
     conversation: ConversationUsage | None = None
+    #: The turn ran on its owner's own model connection. Its provider bills it,
+    #: and the Gateway ledger records none of it: an empty or zero ledger then
+    #: says nothing about what it cost.
+    external_provider: bool = False
     version: str | None = Field(
         default=None,
         description=(
@@ -160,6 +167,7 @@ def summarize_job_usage(
     runtime: str | None,
     terminal: bool,
     conversation: ConversationUsage | None = None,
+    external_provider: bool = False,
 ) -> JobUsageResponse:
     """Use one accounting definition for owner and admin reads of a turn.
 
@@ -178,6 +186,7 @@ def summarize_job_usage(
             ),
         ),
         conversation=conversation,
+        external_provider=external_provider,
     )
 
 
@@ -381,8 +390,20 @@ def summarize_ledger(rows: list[dict[str, Any]]) -> JobLedgerSummary:  # noqa: P
 
 
 def summarize_conversation(rows: list[dict[str, Any]]) -> ConversationUsage:
-    """Sum this conversation's snapshots once, retaining gaps and stale reads."""
-    summary = summarize_ledger([row for row in rows if row.get("attempt_id") is not None])
+    """Sum this conversation's snapshots once, retaining gaps and stale reads.
+
+    Turns on the owner's own connection are not in the Gateway sum: their
+    provider bills them and reported nothing here. Their presence makes the
+    total incomplete, never a claim that they cost nothing.
+    """
+    external = any(row.get("model_connection_id") for row in rows)
+    summary = summarize_ledger(
+        [
+            row
+            for row in rows
+            if row.get("attempt_id") is not None and not row.get("model_connection_id")
+        ]
+    )
     unknown = summary.unknown_rows
     return ConversationUsage(
         totals=summary.totals,
@@ -390,8 +411,10 @@ def summarize_conversation(rows: list[dict[str, Any]]) -> ConversationUsage:
         estimated_calls=summary.estimated_calls,
         queried_at=summary.queried_at,
         turn_count=len({row["job_id"] for row in rows}),
+        external_provider=external,
         incomplete=bool(
-            summary.missing_attempts
+            external
+            or summary.missing_attempts
             # An attempt that called no model has nothing missing.
             or any(
                 attempt.reason not in (None, "pending", NO_MODEL_CALLS)

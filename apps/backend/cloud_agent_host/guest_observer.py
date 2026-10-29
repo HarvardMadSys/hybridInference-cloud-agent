@@ -270,6 +270,7 @@ class GuestObserverController:
         bounded_wait = min(3.0, max(0.0, wait_s))
         argv = [
             "python3",
+            "-I",
             "-c",
             SNAPSHOT_SCRIPT,
             GUEST_OBSERVER_STATUS,
@@ -360,6 +361,7 @@ class GuestObserverController:
         cleaned = self._privileged(
             [
                 "python3",
+                "-I",
                 "-c",
                 cleanup,
                 GUEST_OBSERVER_STATUS,
@@ -562,6 +564,7 @@ class GuestObserverController:
         result = self._capture(
             [
                 "python3",
+                "-I",
                 "-c",
                 DRAIN_SCRIPT,
                 GUEST_OBSERVER_STATUS,

@@ -208,6 +208,7 @@ def test_the_manager_runs_each_program_as_guest_root_trusting_only_root(
     # Root, name and bound, then the only owner a program trusts: guest root.
     assert argv == [
         "python3",
+        "-I",
         "-c",
         program,
         markers.INITIAL_ARCHIVE_MARKER_ROOT,

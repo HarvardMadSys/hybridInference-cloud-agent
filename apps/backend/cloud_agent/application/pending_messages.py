@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from cloud_agent.ports import (
         AttachmentRepository,
         ConversationQueries,
+        ModelConnectionRepository,
         PendingMessageRepository,
         SkillRepository,
         SourceControlRepository as SourceControlPort,
@@ -66,6 +67,7 @@ class QueueStorage(Protocol):
     attachments: AttachmentRepository
     skills: SkillRepository
     source_control: SourceControlPort
+    model_connections: ModelConnectionRepository
 
 
 def prepared_head(
@@ -77,6 +79,7 @@ def prepared_head(
         revision=int(message["revision"]),
         parent_job_id=parent_job_id,
         model=resolved.model,
+        model_connection_id=resolved.model_connection_id,
         reasoning_effort=resolved.reasoning_effort,
         reset_reasoning_effort=resolved.reset_reasoning_effort,
         skills=resolved.skills,
@@ -150,6 +153,7 @@ async def prepare_message(
             attachment_ids=message.get("attachment_ids"),
             runtime=None,
             model=message.get("model"),
+            model_connection_id=message.get("model_connection_id"),
             reasoning_effort=message.get("reasoning_effort"),
             store=store,
             app_credentials=app_credentials,

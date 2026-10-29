@@ -36,7 +36,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary
+from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary, NoAccounts
 
 from cloud_agent import sandbox_manager_routing
 from cloud_agent.api import routes as agent_jobs_router, worker, workspace as agent_workspace
@@ -360,7 +360,7 @@ class FakeGoals:
                 job["cancel_requested"] = True
 
 
-class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
+class FakeStorage(EmptySkillLibrary, EmptyAttachments, NoAccounts, AllCapabilities):
     """In-memory stand-in exposing the storage surface the router uses."""
 
     async def ledger_rows_for_job(self, *, job_id: str) -> list[dict[str, Any]]:
@@ -606,11 +606,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "label": row["label"],
         }
 
-    async def get_gitlab_connection(self, *, user_id: str) -> dict[str, Any] | None:
-        """No GitLab account connected, for the same reason as the grants above."""
-        del user_id
-        return None
-
     async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
         """No GitHub App installations in these tests, which is the usual state.
 
@@ -621,11 +616,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         """
         del user_id
         return []
-
-    async def get_github_account(self, *, user_id: str) -> dict[str, Any] | None:
-        """No GitHub account connected either, for the same reason."""
-        del user_id
-        return None
 
     # -- owner surface --
     async def create_job(self, **kwargs: Any) -> dict[str, Any]:
@@ -723,6 +713,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         yield_to_queued: bool = False,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
+        model_connection_id: str | None = None,
     ) -> dict[str, Any] | None:
         """A person's next turn, as the store's ``insert_follow_up`` appends it.
 
@@ -766,6 +757,10 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         )
         thread_id = str(parent["thread_id"])
         self.thread_input_seqs[thread_id] = self.thread_input_seqs.get(thread_id, 0) + 1
+        # Mirrors the store: a model is named with its source (null being the
+        # Gateway), and an omitted model keeps the parent's model and source
+        # together, so a follow-up never changes source without being told.
+        source = model_connection_id if model else parent.get("model_connection_id")
         job = {
             **parent,
             "id": job_id,
@@ -775,6 +770,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "task_prompt": prompt,
             "skills": skills if skills is not None else parent.get("skills"),
             "model": model or parent["model"],
+            "model_connection_id": source,
             # Mirrors the store: inherit when omitted, and only the explicit
             # reset clears an effort the thread already carries.
             "reasoning_effort": (
@@ -964,6 +960,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         reset_reasoning_effort: bool = False,
         skills: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        model_connection_id: str | None = None,
     ) -> dict[str, Any]:
         turns = self._thread_turns(thread_id)
         if not turns or turns[-1]["user_id"] != user_id:
@@ -999,6 +996,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
                 user_id=user_id,
                 prompt=prompt,
                 model=model,
+                model_connection_id=model_connection_id,
                 reasoning_effort=reasoning_effort,
                 reset_reasoning_effort=reset_reasoning_effort,
                 skills=skills,
@@ -1029,6 +1027,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "attachment_ids": attachment_ids or None,
             "attachments": [],
             "model": model,
+            "model_connection_id": model_connection_id if model else None,
             "reasoning_effort": reasoning_effort,
             "client_request_id": client_request_id,
             "client_request_fingerprint": client_request_fingerprint,
@@ -1130,6 +1129,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             user_id=head["user_id"],
             prompt=head["prompt"],
             model=prepared.model,
+            model_connection_id=prepared.model_connection_id,
             reasoning_effort=prepared.reasoning_effort,
             reset_reasoning_effort=prepared.reset_reasoning_effort,
             skills=prepared.skills,

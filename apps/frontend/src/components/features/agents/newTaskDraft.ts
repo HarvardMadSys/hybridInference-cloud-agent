@@ -13,6 +13,11 @@ export interface NewTaskDraft {
    * and so is ignored.
    */
   chosenModel: string;
+  /**
+   * The owner connection `chosenModel` was picked from, or empty for the
+   * Gateway — which is what every draft written before sources existed held.
+   */
+  chosenModelConnectionId: string;
   effort: string;
   branch: string;
   plugins: AgentPluginInputApi[];
@@ -28,7 +33,11 @@ export function readNewTaskDraft(value: string): NewTaskDraft | null {
     const plugins = readDraftPlugins(record.plugins);
     if (plugins === null) return null;
     const chosenModel = typeof record.chosenModel === 'string' ? record.chosenModel : '';
-    return { ...(saved as NewTaskDraft), chosenModel, plugins };
+    const chosenModelConnectionId =
+      chosenModel && typeof record.chosenModelConnectionId === 'string'
+        ? record.chosenModelConnectionId
+        : '';
+    return { ...(saved as NewTaskDraft), chosenModel, chosenModelConnectionId, plugins };
   } catch {
     return null;
   }

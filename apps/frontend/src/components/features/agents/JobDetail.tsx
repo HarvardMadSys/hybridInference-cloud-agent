@@ -9,7 +9,7 @@ import { JobDetailSidePanels } from './job-detail/JobDetailSidePanels';
 import { JobTranscript } from './job-detail/JobTranscript';
 import { hasPublishableWorkspaceChanges } from './job-detail/RunOutcome';
 import { TrajectoryView } from './job-detail/LazyPanels';
-import { useJobComposerSettings } from './job-detail/useJobComposerSettings';
+import { inheritedFrom, useJobComposerSettings } from './job-detail/useJobComposerSettings';
 import { useJobConversation } from './job-detail/useJobConversation';
 import { useJobDetailPanels, type SubagentTarget } from './job-detail/useJobDetailPanels';
 import { useJobRunActions } from './job-detail/useJobRunActions';
@@ -160,25 +160,21 @@ export function JobDetail({
   const followUpBox = useRef<HTMLTextAreaElement>(null);
   const [readingFiles, setReadingFiles] = useState(false);
   // Follow-ups append to the thread's latest turn, even from an older URL, and
-  // an omitted skill set, model or effort is inherited from that turn.
+  // an omitted skill set, model (with its source) or effort is inherited from it.
   const newestTurn = latestJob(threadJobs);
   const parentTurn =
     newestTurn && (newestTurn.turn_no ?? 1) > (job.turnNo ?? 1) ? newestTurn : undefined;
   const inheritedSkills = parentTurn ? (parentTurn.skills ?? []) : (job.skills ?? []);
-  const inherited = {
-    model: parentTurn ? parentTurn.model : job.model,
-    reasoningEffort: parentTurn ? (parentTurn.reasoning_effort ?? undefined) : job.reasoningEffort,
-  };
-  // Unsent composer choices belong to the conversation, including when a PR
-  // action advances it to another turn without sending the owner's draft.
-  // The composer settings reset the chosen model and effort by the same rule.
+  const inherited = inheritedFrom(parentTurn, job);
+  // Unsent choices (skills here; model and effort in the composer settings) belong
+  // to the conversation, even when a PR action advances it without the draft.
   useEffect(() => setChosenSkills(null), [threadId]);
   // The same rule for the goal guidance. This component is deliberately not
   // remounted when the conversation moves to its next turn, so anything that
   // belongs to *one* message has to be reset explicitly when that turn does.
   useEffect(() => setGoalHint(null), [job.id]);
   const settings = useJobComposerSettings(job, inherited);
-  const { config, model, effort } = settings;
+  const { config, choice, effort } = settings;
   const attachments = useAttachments(t, config?.attachment_limits);
   const mcp = useThreadComposerMcp(job.threadId);
   const ssh = useThreadComposerSsh(job.threadId);
@@ -350,6 +346,7 @@ export function JobDetail({
     try {
       // Commands use their own operation and are never queued as messages.
       if (await command()) return null;
+      if (settings.inheritedUnavailable) return null;
       // One request whatever the conversation is doing: idle, the message is
       // the next turn when this returns; busy, it waits in the queue above the
       // composer. ``queue.apply`` shows the card or, for a turn, moves to it.
@@ -358,9 +355,9 @@ export function JobDetail({
           prompt,
           ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
           ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
-          // Omitted controls inherit the parent's validated model and effort.
-          // The parent is the latest turn, which need not be the one on screen.
-          ...composerOverrides(inherited, model, effort),
+          // Omitted controls inherit the parent's model, source and effort: the
+          // latest turn's, which need not be the one on screen.
+          ...composerOverrides(inherited, choice, effort),
         }),
       );
       draft.acknowledge(snapshot);

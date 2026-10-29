@@ -80,6 +80,7 @@ import { getCloudLabDefaults, saveCloudLabDefaults } from '@/lib/api/compute';
 
 import { categoryTabId } from './ApplicationSettings';
 import AdminSettingsPage from './page';
+import { applicationSnapshot } from './settingsTestFixtures';
 import { chooseOption, openSelect, optionNames } from '@/components/ui/__tests__/select';
 
 const list = vi.mocked(getAgentRunnerHosts);
@@ -114,51 +115,6 @@ const archiveSettings: SandboxArchiveSettings = {
   updated_at: null,
 };
 
-function applicationSnapshot(over: Partial<AgentAdminSettings> = {}): AgentAdminSettings {
-  return {
-    revision: 1,
-    definitions: [
-      {
-        key: 'site.app_name',
-        label: 'Application name',
-        description: 'Name shown in the application.',
-        category: 'Appearance',
-        kind: 'string',
-        default: 'Cloud Agent',
-        secret: false,
-      },
-      {
-        key: 'identity.registration_enabled',
-        label: 'Registration enabled',
-        description: 'Allow new users to register.',
-        category: 'Identity & access',
-        kind: 'boolean',
-        default: true,
-        secret: false,
-      },
-      {
-        key: 'future.maximum',
-        label: 'Future limit',
-        description: 'A setting introduced by the server.',
-        category: 'Future / category ✓',
-        kind: 'integer',
-        default: 10,
-        minimum: 1,
-        maximum: 100,
-        secret: false,
-      },
-    ],
-    values: {
-      'site.app_name': 'Cloud Agent',
-      'identity.registration_enabled': true,
-      'future.maximum': 10,
-    },
-    secret_configured: {},
-    bootstrap: [],
-    ...over,
-  };
-}
-
 function organizedApplicationSnapshot(): AgentAdminSettings {
   const fields = [
     ['site.app_name', 'Appearance', 'Application name'],
@@ -184,9 +140,9 @@ function organizedApplicationSnapshot(): AgentAdminSettings {
   });
 }
 
-function openAdvancedForField(field: HTMLElement) {
-  const details = field.closest('details')!;
-  if (!details.open) fireEvent.click(details.querySelector('summary')!);
+function expectVisibleSetting(field: HTMLElement) {
+  expect(field).toBeVisible();
+  expect(field.closest('details')).toBeNull();
 }
 
 function deferred<T>() {
@@ -677,7 +633,7 @@ describe('application category tabs', () => {
     },
   );
 
-  it('opens Advanced and focuses a linked field from Publication in the merged Source control page', async () => {
+  it('focuses a linked Publication field in the merged Source control page', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(organizedApplicationSnapshot());
     window.history.replaceState(
       null,
@@ -687,7 +643,7 @@ describe('application category tabs', () => {
     renderSettings();
     const input = await screen.findByLabelText('Publication Git timeout');
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Source control' })).toBeVisible();
     expect(screen.getByLabelText('GitHub App ID')).toBeVisible();
     expect(new URLSearchParams(window.location.search).get('tab')).toBe(
@@ -695,7 +651,7 @@ describe('application category tabs', () => {
     );
   });
 
-  it('expands Advanced for a missing Security field beside the merged Sign-in settings', async () => {
+  it('focuses a missing Security field beside the merged Sign-in settings', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue({
       ...organizedApplicationSnapshot(),
       setup: {
@@ -719,7 +675,7 @@ describe('application category tabs', () => {
     expect(input).not.toBeVisible();
     fireEvent.click(link);
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Identity & access' })).toBeVisible();
     expect(screen.getByLabelText('Sign-in authorization URL')).toBeVisible();
     expect(new URLSearchParams(window.location.search).get('tab')).toBe(
@@ -764,7 +720,7 @@ describe('application category tabs', () => {
     expect(updateArchiveSettings).not.toHaveBeenCalled();
   });
 
-  it('reveals an Advanced deletion archive link in the existing Sandbox tab', async () => {
+  it('reveals a deletion archive link in the existing Sandbox tab', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(organizedApplicationSnapshot());
     window.history.replaceState(
       null,
@@ -774,7 +730,7 @@ describe('application category tabs', () => {
     renderSettings();
     const input = await screen.findByLabelText('Sandbox archive S3 endpoint');
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
     expect(new URLSearchParams(window.location.search).get('tab')).toBe('sandbox');
   });
@@ -1299,11 +1255,9 @@ describe('agent versions', () => {
     expect(screen.queryByLabelText('Claude Code')).not.toBeInTheDocument();
     const inventory = screen.getByRole('table', {
       name: 'Agent versions installed on each server',
-      hidden: true,
     });
-    expect(inventory).not.toBeVisible();
-    openAdvancedForField(inventory);
     expect(inventory).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Installed versions' })).toBeVisible();
     const row = within(inventory).getByRole('row', {
       name: 'runner-a Claude Code 2.1.220 Not reported',
     });
@@ -1445,7 +1399,7 @@ describe('global limits', () => {
     list.mockResolvedValue(pool({ host_settings: { terminal_max_sessions: 16 } }));
     setLimit.mockResolvedValue(pool());
     renderSettings('Sandbox');
-    openAdvancedForField(await screen.findByLabelText('Terminals per server for all servers'));
+    expect(await screen.findByLabelText('Terminals per server for all servers')).toBeVisible();
     fireEvent.click(await screen.findByRole('button', { name: 'Use deployment default' }));
     await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ terminal_max_sessions: null }));
   });
@@ -1459,7 +1413,7 @@ describe('global limits', () => {
     );
     renderSettings('Sandbox');
     await screen.findByLabelText('Turn time limit for all servers');
-    openAdvancedForField(screen.getByLabelText('Terminals per server for all servers'));
+    expect(screen.getByLabelText('Terminals per server for all servers')).toBeVisible();
     const sandboxCard = screen.getByRole('heading', { name: 'Sandbox' }).parentElement!;
     expect(within(sandboxCard).getAllByText(/runner-a needs a redeploy/)).toHaveLength(2);
   });
@@ -1492,7 +1446,7 @@ describe('global limits', () => {
   it('warns before a shorter terminal lifetime closes open terminals', async () => {
     renderSettings('Sandbox');
     const input = await screen.findByLabelText('Terminal max lifetime for all servers');
-    openAdvancedForField(input);
+    expect(input).toBeVisible();
     fireEvent.change(input, { target: { value: '4' } });
     expect(screen.getByText('Open terminals older than 4 h will close.')).toBeInTheDocument();
     fireEvent.change(input, { target: { value: '12' } });
@@ -1504,7 +1458,7 @@ describe('global limits', () => {
       pool({ hosts: [host({ settings_desired: { terminal_max_sessions: 128 } })] }),
     );
     renderSettings('Sandbox');
-    openAdvancedForField(await screen.findByLabelText('Terminals per server for all servers'));
+    expect(await screen.findByLabelText('Terminals per server for all servers')).toBeVisible();
     expect(await screen.findByText(/runner-a sets its own \(128\)/)).toBeInTheDocument();
   });
 
@@ -1556,7 +1510,7 @@ describe('global limits', () => {
     });
     renderSettings('Sandbox');
     const maximum = await screen.findByLabelText('Maximum archive bytes');
-    openAdvancedForField(maximum);
+    expect(maximum).toBeVisible();
     fireEvent.change(maximum, { target: { value: '1073741824' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
 
@@ -1568,7 +1522,7 @@ describe('global limits', () => {
     renderSettings('Sandbox');
 
     const maximum = await screen.findByLabelText('Maximum archive bytes');
-    openAdvancedForField(maximum);
+    expect(maximum).toBeVisible();
     fireEvent.change(maximum, { target: { value: '02147483648' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
 
@@ -1627,12 +1581,14 @@ describe('settings search', () => {
     },
   );
 
-  it('opens an Advanced application result in its merged category and clears the query', async () => {
+  it('opens a related application result in its merged category and clears the query', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(organizedApplicationSnapshot());
     renderSettings();
     await screen.findByRole('tab', { name: 'Appearance' });
     const input = screen.getByLabelText('Publication Git timeout');
+    // The field is always rendered; its tab is inactive until search selects it.
     expect(input).not.toBeVisible();
+    expect(input.closest('details')).toBeNull();
 
     const results = searchFor('PUBLICATION timeout');
     expect(within(results).getAllByRole('button')).toHaveLength(1);
@@ -1643,7 +1599,7 @@ describe('settings search', () => {
     );
 
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Source control' })).toBeVisible();
     expect(new URLSearchParams(window.location.search).get('tab')).toBe(
       categoryTabId('Source control'),
@@ -1686,11 +1642,13 @@ describe('settings search', () => {
     expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
   });
 
-  it('opens an Advanced host setting by its environment key and preserves its draft across searches', async () => {
+  it('opens a host setting by its environment key and preserves its draft across searches', async () => {
     renderSettings();
     await screen.findByText('No application settings are available.');
     const input = await screen.findByLabelText('Terminals per server for all servers');
+    // The field is always rendered; its tab is inactive until search selects it.
     expect(input).not.toBeVisible();
+    expect(input.closest('details')).toBeNull();
 
     fireEvent.click(
       within(searchFor('AGENT_TERMINAL_MAX_SESSIONS')).getByRole('button', {
@@ -1699,7 +1657,7 @@ describe('settings search', () => {
     );
 
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
     fireEvent.change(input, { target: { value: '100' } });
     fireEvent.click(
@@ -1723,7 +1681,7 @@ describe('settings search', () => {
     expect(setVersion).not.toHaveBeenCalled();
   });
 
-  it('searches CloudLab before visiting it and focuses its Advanced field after defaults arrive', async () => {
+  it('searches CloudLab before visiting it and focuses its template field after defaults arrive', async () => {
     const pending = deferred<{ defaults: typeof cloudLabDefaults }>();
     vi.mocked(getCloudLabDefaults).mockReturnValueOnce(pending.promise);
     renderSettings();
@@ -1744,8 +1702,7 @@ describe('settings search', () => {
     await act(async () => pending.resolve({ defaults: cloudLabDefaults }));
     const input = await screen.findByLabelText('CloudLab SSH public key');
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
-    expect(input).toBeVisible();
+    expectVisibleSetting(input);
     expect(saveCloudLabDefaults).not.toHaveBeenCalled();
   });
 
@@ -1774,8 +1731,7 @@ describe('settings search', () => {
         name: 'Open Claude Code in Agent versions',
       }),
     ).toBeVisible();
-    expect(oldTarget.closest('details')).not.toHaveAttribute('open');
-    expect(oldTarget).not.toBeVisible();
+    expectVisibleSetting(oldTarget);
   });
 
   it('cancels delayed CloudLab result focus when the user chooses another tab', async () => {
@@ -1801,11 +1757,10 @@ describe('settings search', () => {
     act(() => cloudLabTab.focus());
     fireEvent.click(cloudLabTab);
     expect(cloudLabTab).toHaveFocus();
-    expect(oldTarget.closest('details')).not.toHaveAttribute('open');
-    expect(oldTarget).not.toBeVisible();
+    expectVisibleSetting(oldTarget);
   });
 
-  it('routes an Advanced archive policy result to Sandbox and focuses its editor', async () => {
+  it('routes an archive policy result to Sandbox and focuses its editor', async () => {
     renderSettings();
     await screen.findByText('No application settings are available.');
     await screen.findByLabelText('Maximum archive bytes');
@@ -1817,7 +1772,7 @@ describe('settings search', () => {
 
     const input = screen.getByLabelText('Maximum archive bytes');
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
     expect(new URLSearchParams(window.location.search).get('tab')).toBe('sandbox');
     expect(updateArchiveSettings).not.toHaveBeenCalled();
@@ -1835,7 +1790,7 @@ describe('settings search', () => {
 
     const input = screen.getByLabelText('Sandbox archive S3 endpoint');
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
     expect(screen.getByRole('region', { name: 'Deletion archive destination' })).toContainElement(
       input,
@@ -1843,7 +1798,7 @@ describe('settings search', () => {
     expect(screen.queryByRole('tab', { name: 'Sandbox archives' })).not.toBeInTheDocument();
   });
 
-  it('reveals and focuses deployment prerequisites from another settings section', async () => {
+  it('does not offer deployment notes as search results or a settings section', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(
       applicationSnapshot({
         bootstrap: [
@@ -1855,19 +1810,15 @@ describe('settings search', () => {
         ],
       }),
     );
-    renderSettings('Sandbox');
+    renderSettings();
     await screen.findByRole('tab', { name: 'Appearance' });
-    fireEvent.click(
-      within(searchFor('agent_database_url')).getByRole('button', {
-        name: 'Open Database connection in Deployment setup',
-      }),
+    const results = searchFor('agent_database_url');
+    await waitFor(() =>
+      expect(within(results).getByRole('status')).toHaveTextContent('No settings found.'),
     );
-
-    const target = screen.getByText('Database connection').closest('div')!;
-    await waitFor(() => expect(target).toHaveFocus());
-    expect(target.closest('details')).toHaveAttribute('open');
-    expect(screen.getByRole('tabpanel', { name: 'Appearance' })).toBeVisible();
-    expect(target).toBeVisible();
+    expect(within(results).queryAllByRole('button')).toHaveLength(0);
+    expect(screen.queryByRole('tab', { name: 'Deployment' })).not.toBeInTheDocument();
+    expect(screen.queryByText('AGENT_DATABASE_URL')).not.toBeInTheDocument();
   });
 
   it('focuses the current value when an application result is read-only', async () => {

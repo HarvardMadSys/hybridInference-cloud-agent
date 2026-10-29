@@ -41,6 +41,7 @@ from cloud_agent.schemas.audit import (
 )
 from cloud_agent.schemas.config import (
     AgentConfigResponse,
+    ModelConnectionOption,
 )
 from cloud_agent.schemas.conversations import (
     AgentConversation,
@@ -402,6 +403,7 @@ __all__ = [
     "McpBindingSummary",
     "McpConnectionSummary",
     "McpIntegrationResponse",
+    "ModelConnectionOption",
     "OAuthConnectRequest",
     "OwnJoinRequestListResponse",
     "OwnJoinRequestResponse",

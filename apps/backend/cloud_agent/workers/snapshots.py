@@ -12,6 +12,7 @@ import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
+from cloud_agent.application.model_connections import known_connection_secrets
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting
 from cloud_agent.workers.background_wake import SNAPSHOT
@@ -20,7 +21,11 @@ from cloud_agent_shared.host_settings import HOST_SETTINGS_BY_KEY
 from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
 
 if TYPE_CHECKING:
-    from cloud_agent.ports import HostPoolRepository, SnapshotCaptureRepository
+    from cloud_agent.ports import (
+        HostPoolRepository,
+        ModelConnectionRepository,
+        SnapshotCaptureRepository,
+    )
     from cloud_agent.ports.environments import EnvironmentBindingRepository
     from cloud_agent.workers.background_wake import BackgroundWake
 
@@ -34,6 +39,7 @@ class _SnapshotCapture(Protocol):
     """Capturing a due shared-workspace snapshot, through its host's sandbox manager."""
 
     host_pool: HostPoolRepository
+    model_connections: ModelConnectionRepository
 
     @property
     def snapshot(self) -> SnapshotCaptureRepository:
@@ -94,6 +100,14 @@ async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> bool:  # noqa
         if environment is not None and environment.required:
             # The scan needs no snapshot fields; an older broker would refuse them.
             snapshot = {**snapshot, "environment": environment_payload(environment, ())}
+        # Every model connection key revision this group's members were
+        # handed, rotated and deleted ones included: a workspace file may still
+        # hold one. Only this group's, and sent only when there is one.
+        connection_keys = await known_connection_secrets(
+            store.model_connections, sandbox_id=str(snapshot["sandbox_id"])
+        )
+        if connection_keys:
+            snapshot = {**snapshot, "known_secrets": connection_keys}
         receipt = await sandbox_manager.capture_shared_snapshot(snapshot)
         expected = {
             "snapshot_id": int(snapshot["snapshot_id"]),

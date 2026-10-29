@@ -873,6 +873,8 @@ async def test_empty_binding_snapshot_uses_the_existing_broker_protocol(monkeypa
         environments=SimpleNamespace(
             get_job_environment=AsyncMock(return_value=BoundEnvironment(binding_id="empty"))
         ),
+        # A group that never ran on a model connection: no keys to scan for.
+        model_connections=SimpleNamespace(scan_key_ciphertexts=AsyncMock(return_value=[])),
     )
     assert await _capture_due_shared_snapshot(store)
     assert "environment" not in broker.capture_shared_snapshot.call_args.args[0]
@@ -912,3 +914,19 @@ async def test_empty_binding_fork_reaches_coordination_without_environment_prepa
     assert failure.value.detail["error"]["type"] == "fork_in_progress"
     broker.prepare_environment.assert_not_awaited()
     store.session_fork.claim_session_fork_materialization.assert_awaited_once()
+
+
+def test_snapshot_refuses_a_model_connection_key_with_no_environment_at_all(git_workspace):
+    """A provider key need not look like one; the group's known keys are scanned by value."""
+    root, _git, base, backend = git_workspace
+    key = "Zq7-provider-key-without-any-prefix"
+    (root / "notes.txt").write_text(f"export PROVIDER={key}\n")
+    with pytest.raises(SandboxError, match="Secret value"):
+        check_snapshot_secrets(
+            backend, base, None, workdir=str(root), known_secrets={"model-connection-key-0": key}
+        )
+    # And it is not a pattern match: other text passes.
+    (root / "notes.txt").write_text("export PROVIDER=someone-elses-value\n")
+    check_snapshot_secrets(
+        backend, base, None, workdir=str(root), known_secrets={"model-connection-key-0": key}
+    )

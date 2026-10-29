@@ -107,7 +107,7 @@ def test_source_archive_refuses_tar_overhead_past_the_limit(tmp_path):
 
 def test_source_archive_stops_streaming_at_the_entry_limit(tmp_path, monkeypatch):
     root = _checkout(tmp_path)
-    paths = [root / ".git", root / ".git" / "config", root / "src"]
+    paths = [str(root / ".git"), str(root / ".git" / "config"), str(root / "src")]
 
     def entries(_root):
         yield from paths
