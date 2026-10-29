@@ -240,6 +240,10 @@ function ErasePanel({
       <p className="text-sm font-medium">{t('adminAccounts.erase.title')}</p>
       <p className="text-xs text-muted">{t('adminAccounts.erase.explain')}</p>
       <OwnedTeams accountId={account.id} reload={reload} />
+      <p className="text-xs text-muted">
+        {t('adminAccounts.erase.accountId')}{' '}
+        <code className="select-all break-all font-mono text-foreground">{account.id}</code>
+      </p>
       <label className="block text-sm" htmlFor="erase-confirm">
         {t('adminAccounts.erase.confirm')}
       </label>

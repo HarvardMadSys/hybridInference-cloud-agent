@@ -85,6 +85,7 @@ export const accountAdminEn = {
   'adminAccounts.erase.title': 'Erase permanently',
   'adminAccounts.erase.explain':
     'Removes the account’s identity and all its Agent data. Only once its work has stopped, its sandboxes are deleted, every host has cleaned up its environment runs, and each team other members use has a new owner. This cannot be undone, and it cannot be resumed after.',
+  'adminAccounts.erase.accountId': 'Account id:',
   'adminAccounts.erase.confirm': 'Type the account id to confirm',
   'adminAccounts.erase.button': 'Erase account',
   'adminAccounts.erase.rows': 'Erased {count} rows of Agent data.',
@@ -255,6 +256,7 @@ export const accountAdminZh: Record<keyof typeof accountAdminEn, string> = {
   'adminAccounts.erase.title': '彻底擦除',
   'adminAccounts.erase.explain':
     '删除账号身份及其全部 Agent 数据。只有在其工作已停止、沙箱已删除、每台主机都已清理其环境运行、且其他成员仍在使用的每个团队都已有新 owner 之后才能擦除。此操作无法撤销，擦除后也不能再恢复。',
+  'adminAccounts.erase.accountId': '账号 ID：',
   'adminAccounts.erase.confirm': '输入账号 ID 以确认',
   'adminAccounts.erase.button': '擦除账号',
   'adminAccounts.erase.rows': '已擦除 {count} 行 Agent 数据。',

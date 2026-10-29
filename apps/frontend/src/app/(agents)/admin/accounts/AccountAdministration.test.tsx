@@ -98,6 +98,8 @@ describe('account decisions', () => {
     );
     const erase = screen.getByRole('button', { name: 'Erase account' });
     expect(erase).toBeDisabled();
+    // The id the administrator must type is shown, to copy.
+    expect(screen.getByText(base.id)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Type the account id to confirm'), {
       target: { value: base.id },
     });

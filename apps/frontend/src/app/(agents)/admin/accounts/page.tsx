@@ -56,11 +56,21 @@ function useDebounced(value: string, delay = 300): string {
   return settled;
 }
 
+/** A state's own label, the one its filter shows; the code itself for one it does not know. */
+function stateLabel(
+  options: readonly { value: string; label: TranslationKey }[],
+  value: string,
+  t: Translator,
+) {
+  const option = options.find((candidate) => candidate.value === value);
+  return option ? t(option.label) : value.replaceAll('_', ' ');
+}
+
 function identityLine(account: AccountEntry, t: Translator): string {
   const identity = account.identity;
   const parts = [
-    account.status,
-    account.waitlist.status.replaceAll('_', ' '),
+    stateLabel(STATES, account.status, t),
+    stateLabel(FILTERS, account.waitlist.status, t),
     (identity?.identity_verified ?? account.email_verified)
       ? t('adminAccounts.identityVerified')
       : t('adminAccounts.emailUnverified'),
