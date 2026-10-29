@@ -49,6 +49,7 @@ ACCOUNT_PURPOSES = OWNER_PURPOSES | {"bind"}
 
 _E164 = re.compile(r"\+[1-9][0-9]{7,14}")
 _CODE = re.compile(r"[0-9]{6}")
+_MAINLAND = re.compile(r"\+861[3-9][0-9]{9}")
 
 
 class InvalidPhone(ValueError):
@@ -94,6 +95,9 @@ def normalize_phone(raw: str) -> str:
         if item.strip()
     ]
     if prefixes and not any(value.startswith(prefix) for prefix in prefixes):
+        raise InvalidPhone("Phone numbers in this region are not enabled for this deployment.")
+    if text_setting("accounts.sms_provider") == "tencent" and not _MAINLAND.fullmatch(value):
+        # The Tencent templates send to mainland China mobile numbers only.
         raise InvalidPhone("Phone numbers in this region are not enabled for this deployment.")
     return value
 

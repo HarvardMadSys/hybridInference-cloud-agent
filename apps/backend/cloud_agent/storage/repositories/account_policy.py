@@ -110,10 +110,17 @@ class PolicyMixin:
         return row is not None
 
     async def invalidate_phone_code(self, challenge_id: str) -> None:
-        """Drop a code whose message was not sent, without touching a newer one."""
+        """Make a code that was not sent, or not eligible, unusable, without touching a newer one.
+
+        The row stays, inactive and spent, so it still counts toward the
+        number's cooldown: a request answers the same whether or not the
+        number has an account, as HybridInference's attempts table makes it.
+        """
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "DELETE FROM agent_local_phone_codes WHERE challenge_id = $1", challenge_id
+                "UPDATE agent_local_phone_codes SET active = FALSE, consumed_at = NOW() "
+                "WHERE challenge_id = $1",
+                challenge_id,
             )
 
     async def consume_phone_code(
@@ -348,15 +355,31 @@ class PolicyMixin:
             row = await conn.fetchrow(
                 "SELECT setup_code, completed_at FROM agent_local_setup WHERE singleton"
             )
-            if row is not None:
-                return row["setup_code"]
-            if await conn.fetchval(
+            has_admin = await conn.fetchval(
                 "SELECT EXISTS (SELECT 1 FROM agent_local_accounts WHERE is_admin)"
-            ):
-                await conn.execute("INSERT INTO agent_local_setup (completed_at) VALUES (NOW())")
+            )
+            if row is not None and (row["setup_code"] is None or not has_admin):
+                return row["setup_code"]
+            if has_admin:
+                # An administrator made some other way (the command line, the
+                # deployment's token) closes setup as well.
+                await conn.execute(
+                    "INSERT INTO agent_local_setup (completed_at) VALUES (NOW()) "
+                    "ON CONFLICT (singleton) DO UPDATE SET setup_code = NULL, completed_at = NOW()"
+                )
                 return None
             await conn.execute("INSERT INTO agent_local_setup (setup_code) VALUES ($1)", candidate)
             return candidate
+
+    async def setup_pending(self) -> bool:
+        """Whether first-run setup is still open, without writing anything."""
+        async with self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    "SELECT NOT EXISTS (SELECT 1 FROM agent_local_accounts WHERE is_admin) "
+                    "AND NOT EXISTS (SELECT 1 FROM agent_local_setup WHERE completed_at IS NOT NULL)"
+                )
+            )
 
     async def complete_setup(
         self,

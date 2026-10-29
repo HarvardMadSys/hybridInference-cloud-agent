@@ -20,6 +20,7 @@ from cloud_agent.storage._sql.local_accounts import (
     BUMP_VERSION_SQL,
     REVOKE_OTHER_SESSIONS_SQL,
     REVOKE_SESSIONS_SQL,
+    NotBindable,
     lock_account_row,
     locked_account,
 )
@@ -159,7 +160,9 @@ class CredentialsMixin:
                 )
                 current = await locked_account(conn, account_id)
                 if current.status != "active":
-                    return None
+                    # Rolled back with the consumption: the link still works
+                    # once the account is restored.
+                    raise NotBindable
                 previous = current.email
                 await conn.execute(
                     """
@@ -182,6 +185,8 @@ class CredentialsMixin:
                 )
         except asyncpg.UniqueViolationError:
             raise IdentifierTaken from None
+        except NotBindable:
+            return None
 
     async def reset_password(self, *, token_hash: bytes, password_hash: str) -> str | None:
         """Consume a reset token, set the password and end every session; its account id."""

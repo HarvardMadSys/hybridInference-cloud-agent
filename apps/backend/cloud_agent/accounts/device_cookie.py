@@ -49,10 +49,20 @@ if TYPE_CHECKING:
 MAX_ENTRIES = 5
 #: How long an entry, and the cookie, last after the sign-in that issued them.
 LIFETIME_SECONDS = 180 * 24 * 60 * 60
-#: Sent to the sign-in and account endpoints only, never with any other request.
-COOKIE_PATH = "/v1/auth"
-#: Its own name; not ``__Host-``, which would force ``Path=/``.
-COOKIE_NAME = "cloud_agent_device"
+#: ``Path=/``: the browser reaches the API under a prefix this service does not
+#: know (``/api``, ``/agents/api``), so a narrower path would never match.
+#: Unlike HybridInference's ``/auth`` path the entry rides on every request;
+#: it carries no authority, and every read of it checks its signature.
+COOKIE_PATH = "/"
+#: ``__Host-`` wherever the cookie is ``Secure``, as the session cookie.
+COOKIE_NAME = "__Host-cloud_agent_device"
+COOKIE_NAME_INSECURE = "cloud_agent_device"
+
+
+def cookie_name() -> str:
+    """The name the entry is set and read under on this deployment."""
+    return COOKIE_NAME if session_cookie_is_secure() else COOKIE_NAME_INSECURE
+
 
 _NONCE_BYTES = 16
 _TAG_BYTES = hashlib.sha256().digest_size
@@ -132,7 +142,7 @@ def recognized_device(cookies: Mapping[str, str], identifier_key: str) -> str | 
     ``identifier_key`` is the sign-in limiter's key for what the client signs
     in with (:func:`cloud_agent.application.accounts.identifier_key`).
     """
-    value = cookies.get(COOKIE_NAME)
+    value = cookies.get(cookie_name())
     key = _key() if value else None
     if key is None:
         return None
@@ -160,11 +170,11 @@ def remember_device(
     expires = now + LIFETIME_SECONDS
     nonce = secrets.token_bytes(_NONCE_BYTES)
     entries = [_Entry(nonce, expires, tuple(_tag(key, nonce, expires, i) for i in identifiers))]
-    for entry in _entries((cookies or {}).get(COOKIE_NAME)):
+    for entry in _entries((cookies or {}).get(cookie_name())):
         if entry.expires > now and not any(_matches(key, entry, i) for i in identifiers):
             entries.append(entry)
     response.set_cookie(
-        COOKIE_NAME,
+        cookie_name(),
         ".".join(_encode(entry) for entry in entries[:MAX_ENTRIES]),
         max_age=LIFETIME_SECONDS,
         path=COOKIE_PATH,
@@ -174,4 +184,12 @@ def remember_device(
     )
 
 
-__all__ = ["COOKIE_NAME", "COOKIE_PATH", "MAX_ENTRIES", "recognized_device", "remember_device"]
+__all__ = [
+    "COOKIE_NAME",
+    "COOKIE_NAME_INSECURE",
+    "COOKIE_PATH",
+    "MAX_ENTRIES",
+    "cookie_name",
+    "recognized_device",
+    "remember_device",
+]

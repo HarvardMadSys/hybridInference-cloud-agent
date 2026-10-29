@@ -25,9 +25,11 @@ from cloud_agent.accounts.device_cookie import remember_device
 from cloud_agent.accounts.session_cookie import (
     expire_local_session_cookies,
     local_session_from_cookies,
+    presented_local_token,
     set_local_session_cookie,
 )
 from cloud_agent.api._local_auth import local_accounts
+from cloud_agent.api.deps import bearer_token
 from cloud_agent.application.accounts import identifier_key
 from cloud_agent.ports.accounts import BrowserFull
 
@@ -47,7 +49,9 @@ async def current_browser(request: Request) -> BrowserState | None:
     kept = getattr(request.state, "local_browser", None)
     if kept is not None:
         return kept
-    value = local_session_from_cookies(request.cookies)
+    value = presented_local_token(
+        request.cookies, bearer_token(request.headers.get("authorization"))
+    )
     if not tokens.looks_like_browser_token(value):
         return None
     assert value is not None
@@ -73,6 +77,25 @@ async def prepare_sign_in(request: Request, account_id: str | None) -> BrowserSt
     ):
         raise BrowserFull(MAX_ACCOUNTS_PER_BROWSER)
     return browser
+
+
+async def joinable_browser(request: Request, signed_in: SignedIn) -> BrowserState | None:
+    """The browser a sign-in that just succeeded joins, or a refusal that ends its session.
+
+    Checked once the account is known, so an account signing in again on a
+    full browser takes its own place, as in HybridInference; a refusal
+    revokes the session just opened, which nothing else holds.
+
+    Raises:
+        BrowserFull: The browser holds the maximum of other accounts.
+    """
+    try:
+        return await prepare_sign_in(request, signed_in.account.id)
+    except BrowserFull:
+        await local_accounts(request).revoke_session(
+            tokens.session_hash(signed_in.token), reason="browser_full"
+        )
+        raise
 
 
 async def complete_sign_in(
@@ -161,6 +184,7 @@ __all__ = [
     "complete_sign_in",
     "current_browser",
     "device_identifiers",
+    "joinable_browser",
     "prepare_sign_in",
     "sign_out_of_browser",
 ]

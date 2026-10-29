@@ -23,6 +23,7 @@ import re
 from cloud_agent.setting_definition import Setting, _numeric
 
 CATEGORY = "Accounts"
+_SES_TEMPLATE = "0 means no template. Verification and password reset are required."
 _LOCAL = "Local accounts only (AGENT_AUTH_MODE=local). "
 
 _DIGITS = re.compile(r"(?:[1-9][0-9]{0,2})?")
@@ -270,25 +271,65 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_TENCENT_SES_FROM_NAME",
     ),
-    *(
-        _numeric(
-            f"accounts.tencent_ses_template_{template}",
-            f"Tencent SES {label} template ID",
-            CATEGORY,
-            0,
-            0,
-            2**31 - 1,
-            env=f"AGENT_TENCENT_SES_TEMPLATE_{template.upper()}",
-            description="0 means no template. Verification and password reset are required.",
-        )
-        for template, label in (
-            ("verification", "verification"),
-            ("password_reset", "password reset"),
-            ("approval", "approval"),
-            ("rejection", "rejection"),
-            ("admin_signup", "new application"),
-            ("notice", "plain notice"),
-        )
+    _numeric(
+        "accounts.tencent_ses_template_verification",
+        "Tencent SES verification template ID",
+        CATEGORY,
+        0,
+        0,
+        2**31 - 1,
+        env="AGENT_TENCENT_SES_TEMPLATE_VERIFICATION",
+        description=_SES_TEMPLATE,
+    ),
+    _numeric(
+        "accounts.tencent_ses_template_password_reset",
+        "Tencent SES password reset template ID",
+        CATEGORY,
+        0,
+        0,
+        2**31 - 1,
+        env="AGENT_TENCENT_SES_TEMPLATE_PASSWORD_RESET",
+        description=_SES_TEMPLATE,
+    ),
+    _numeric(
+        "accounts.tencent_ses_template_approval",
+        "Tencent SES approval template ID",
+        CATEGORY,
+        0,
+        0,
+        2**31 - 1,
+        env="AGENT_TENCENT_SES_TEMPLATE_APPROVAL",
+        description=_SES_TEMPLATE,
+    ),
+    _numeric(
+        "accounts.tencent_ses_template_rejection",
+        "Tencent SES rejection template ID",
+        CATEGORY,
+        0,
+        0,
+        2**31 - 1,
+        env="AGENT_TENCENT_SES_TEMPLATE_REJECTION",
+        description=_SES_TEMPLATE,
+    ),
+    _numeric(
+        "accounts.tencent_ses_template_admin_signup",
+        "Tencent SES new application template ID",
+        CATEGORY,
+        0,
+        0,
+        2**31 - 1,
+        env="AGENT_TENCENT_SES_TEMPLATE_ADMIN_SIGNUP",
+        description=_SES_TEMPLATE,
+    ),
+    _numeric(
+        "accounts.tencent_ses_template_notice",
+        "Tencent SES plain notice template ID",
+        CATEGORY,
+        0,
+        0,
+        2**31 - 1,
+        env="AGENT_TENCENT_SES_TEMPLATE_NOTICE",
+        description=_SES_TEMPLATE,
     ),
     # ── Phone sign-in ────────────────────────────────────────────────────
     Setting(

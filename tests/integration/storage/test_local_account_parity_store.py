@@ -851,7 +851,7 @@ async def test_erasing_refuses_while_a_sandbox_of_the_account_still_exists(stora
 
 async def test_erasing_never_touches_another_owners_row(storage, pool):
     """A row of the account referenced by another owner's row blocks the whole erasure."""
-    from cloud_agent.storage.repositories.account_erasure import ErasureBlocked, erase_owner_rows
+    from cloud_agent.storage._sql.local_erasure import ErasureBlocked, erase_owner_rows
 
     owner, _job = await _finished_owner(storage, pool, "shared@example.edu")
     other = await make_account(storage, "borrower@example.edu")

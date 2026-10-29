@@ -281,6 +281,9 @@ PUBLIC_ROUTES = {
     ),
     ("DELETE", "/v1/auth/accounts/{account_id}"): "only signs an account out of its own browser",
     ("POST", "/v1/auth/logout-all"): "only ends the browser it was sent with",
+    ("PUT", "/v1/auth/account/locale"): (
+        "identity only, re-read per request: stores the account's own interface language"
+    ),
     ("GET", "/v1/auth/account"): (
         "identity only by design: the server-side session row is read on every request"
     ),

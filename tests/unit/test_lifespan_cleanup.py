@@ -46,11 +46,12 @@ _EXPECTED_SHUTDOWN_TASKS = (
     "profiling_policy_task",
     "compute_resource_task",
     "account_access_task",
+    "account_broadcast_task",
     "notification_listener_task",
 )
 
 #: Started only with AGENT_AUTH_MODE=local.
-_LOCAL_MODE_TASKS = frozenset({"account_access_task"})
+_LOCAL_MODE_TASKS = frozenset({"account_access_task", "account_broadcast_task"})
 
 _BEFORE_SETTINGS_TASK = frozenset(
     {

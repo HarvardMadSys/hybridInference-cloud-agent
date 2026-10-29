@@ -30,7 +30,7 @@ from cloud_agent.accounts.device_cookie import recognized_device
 from cloud_agent.accounts.passwords import hash_password
 from cloud_agent.accounts.policy import require_email_verification, terms_url
 from cloud_agent.accounts.setup import new_setup_code, normalize_setup_code
-from cloud_agent.accounts.sms import configured_sender, sms_enabled
+from cloud_agent.accounts.sms import sms_enabled
 from cloud_agent.api._local_auth import (
     LocalAuthRoute,
     client_bucket,
@@ -42,11 +42,13 @@ from cloud_agent.api._local_auth import (
     require_json,
     require_local_mode,
     signup_enabled,
+    sms_sender,
 )
 from cloud_agent.api._local_browser import (
     MAX_ACCOUNTS_PER_BROWSER,
     complete_sign_in,
     device_identifiers,
+    joinable_browser,
     prepare_sign_in,
 )
 from cloud_agent.api.deps import get_client_ip, get_gateway_client, resolve_agent_access
@@ -189,7 +191,7 @@ async def signed_in_response(
 
 async def _setup_pending(request: Request) -> bool:
     try:
-        return await local_accounts(request).setup_code(new_setup_code()) is not None
+        return await local_accounts(request).setup_pending()
     except Exception:
         return False
 
@@ -206,8 +208,7 @@ async def auth_config(request: Request) -> AuthConfigResponse:
 )
 async def auth_options(request: Request) -> AuthOptionsResponse:
     """What the sign-in, sign-up and account pages offer. Public; carries no secret."""
-    sender = configured_sender()
-    phone_on = sms_enabled(sender)
+    phone_on = sms_enabled(sms_sender(request))
     prefixes = [
         item.strip()
         for item in text_setting("accounts.sms_allowed_prefixes").split(",")
@@ -338,8 +339,8 @@ async def sign_in(
         raise
     flows = local_flows(request)
     try:
-        browser = await prepare_sign_in(request, None)
         signed_in = await flows.sign_in(body.name, body.password)
+        browser = await joinable_browser(request, signed_in)
         await complete_sign_in(
             request,
             response,
@@ -358,7 +359,7 @@ async def sign_in(
             request,
             method="password",
             identifier=key,
-            account_id=None,
+            account_id=getattr(exc, "account_id", None),
             failure=_FAILURE_REASONS[type(exc)],
         )
         raise
@@ -441,6 +442,8 @@ async def create_setup_admin(
             request, [("setup_code_ip", client_bucket(request), FIFTEEN_MIN, 10)]
         )
         raise typed_error(403, "invalid_setup_code", "That setup code is not valid.")
+    # A full browser refuses before the administrator exists, not after.
+    browser = await prepare_sign_in(request, None)
     account_id = tokens.new_account_id()
     password_hash = await hash_password(body.password)
     created = await accounts.complete_setup(
@@ -463,7 +466,6 @@ async def create_setup_admin(
     )
     assert account is not None
     signed_in = SignedIn(token=token, account=account, session_id=session_id)
-    browser = await prepare_sign_in(request, account_id)
     await complete_sign_in(
         request,
         response,

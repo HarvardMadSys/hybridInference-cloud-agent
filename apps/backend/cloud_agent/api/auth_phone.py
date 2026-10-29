@@ -21,7 +21,6 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 
 from cloud_agent.accounts.captcha import verify_captcha
 from cloud_agent.accounts.config import signup_flag_enabled
-from cloud_agent.accounts.sms import configured_sender
 from cloud_agent.api._local_auth import (
     LocalAuthRoute,
     client_bucket,
@@ -30,8 +29,9 @@ from cloud_agent.api._local_auth import (
     local_flows,
     require_json,
     require_local_mode,
+    sms_sender,
 )
-from cloud_agent.api._local_browser import complete_sign_in, prepare_sign_in
+from cloud_agent.api._local_browser import complete_sign_in, joinable_browser
 from cloud_agent.api.auth import (
     DAY,
     FIFTEEN_MIN,
@@ -73,8 +73,7 @@ router = APIRouter(
 
 def phone_flows(request: Request, background: BackgroundTasks | None = None) -> PhoneFlows:
     """The phone flows for one request: a test's provider, or the configured one."""
-    sender = getattr(request.app.state, "sms_sender", None) or configured_sender()
-    return PhoneFlows(local_flows(request, background), sender)
+    return PhoneFlows(local_flows(request, background), sms_sender(request))
 
 
 async def enforce_code_checks(request: Request, phone: str) -> None:
@@ -187,8 +186,8 @@ async def phone_sign_in(
     key = f"phone:{phone}"
     try:
         await enforce_code_checks(request, phone)
-        browser = await prepare_sign_in(request, None)
         signed_in = await flows.sign_in(phone, body.code)
+        browser = await joinable_browser(request, signed_in)
         await complete_sign_in(request, response, browser, signed_in)
     except (InvalidPhoneCode, InvalidCredentials) as exc:
         reason = "invalid_code" if isinstance(exc, InvalidPhoneCode) else "user_not_found"

@@ -192,6 +192,10 @@ class SessionsMixin:
             BrowserFull: The browser already holds ``max_accounts`` other accounts.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            # The account first, then the browser, then sessions: the order a
+            # deletion takes, so the two cannot deadlock.
+            if not await lock_account_row(conn, account_id, mode="SHARE"):
+                return False
             if not await _lock_browser(conn, browser_id):
                 return False
             others = await conn.fetchval(

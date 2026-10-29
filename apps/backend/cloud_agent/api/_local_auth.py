@@ -32,6 +32,7 @@ from cloud_agent.accounts.policy import (
     notify_recipients,
     require_email_verification,
 )
+from cloud_agent.accounts.sms import configured_sender
 from cloud_agent.accounts.tokens import rate_limit_key
 from cloud_agent.api._sensitive_routes import SensitiveRoute
 from cloud_agent.api.deps import get_client_ip, get_storage, require_store
@@ -88,6 +89,7 @@ if TYPE_CHECKING:
     from fastapi import BackgroundTasks, Response
 
     from cloud_agent.accounts.mail import AccountMailer
+    from cloud_agent.accounts.sms import SmsSender
     from cloud_agent.agent_access import AgentAccessDecision
     from cloud_agent.domain.accounts import AccountRecord
     from cloud_agent.ports.accounts import LocalAccountRepository
@@ -289,6 +291,11 @@ def account_mailer(request: Request) -> AccountMailer:
         mailer = DeliveryMailer()
         request.app.state.account_mailer = mailer
     return mailer
+
+
+def sms_sender(request: Request) -> SmsSender | None:
+    """The application's text message provider: a test's substitute, or the configured one."""
+    return getattr(request.app.state, "sms_sender", None) or configured_sender()
 
 
 def local_accounts(request: Request) -> LocalAccountRepository:
@@ -501,6 +508,7 @@ __all__ = [
     "require_json",
     "require_local_mode",
     "signup_enabled",
+    "sms_sender",
     "terminal_open_fence",
     "waitlist_entry",
 ]

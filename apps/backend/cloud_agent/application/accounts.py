@@ -96,20 +96,29 @@ class InvalidCredentials(Exception):
         self.account_id = account_id
 
 
-class EmailNotVerified(Exception):
+class _AccountRefusal(Exception):
+    """A right proof for an account that cannot sign in; ``account_id`` is for the event log."""
+
+    def __init__(self, message: str = "", *, account_id: str | None = None) -> None:
+        """Keep the account the refusal concerns."""
+        super().__init__(message)
+        self.account_id = account_id
+
+
+class EmailNotVerified(_AccountRefusal):
     """The right password for an account whose email is unverified."""
 
 
-class AccountSuspended(Exception):
+class AccountSuspended(_AccountRefusal):
     """The right password for a suspended account; ``message`` is the admin's, if any."""
 
-    def __init__(self, message: str | None = None) -> None:
+    def __init__(self, message: str | None = None, *, account_id: str | None = None) -> None:
         """Keep the administrator's message for the sign-in page."""
-        super().__init__(message or "This account is suspended.")
+        super().__init__(message or "This account is suspended.", account_id=account_id)
         self.admin_message = message
 
 
-class AccountDeleted(Exception):
+class AccountDeleted(_AccountRefusal):
     """The right proof for a deleted account."""
 
 
@@ -209,11 +218,11 @@ def refuse_unusable_account(account: AccountRecord) -> None:
             the account's state is reported before an address it cannot use.
     """
     if account.status == "deleted":
-        raise AccountDeleted
+        raise AccountDeleted(account_id=account.id)
     if account.status != "active":
-        raise AccountSuspended(account.suspension_message)
+        raise AccountSuspended(account.suspension_message, account_id=account.id)
     if not account.identity_verified:
-        raise EmailNotVerified
+        raise EmailNotVerified(account_id=account.id)
 
 
 class LocalAccountFlows:
@@ -325,8 +334,11 @@ class LocalAccountFlows:
         """Apply the approval policy once an identity is (or may be) verified.
 
         An account the policy admits is approved at once, audited as
-        ``signup-policy``; one waiting with an application tells the
-        administrators, if they asked to be told.
+        ``signup-policy``. One waiting with an application tells the
+        administrators, if they asked to be told, exactly once: when its
+        identity becomes verified (at sign-up when it already is, otherwise
+        when its link is followed), since only then can it be approved.
+        ``applied`` is false for a re-check that must not notify again.
         """
         account = await self._accounts.get_account(account_id)
         if account is None:
@@ -340,7 +352,7 @@ class LocalAccountFlows:
             if approved is not None:
                 return SignUpOutcome(account=approved, waits_for_approval=False)
         waits = account.admission_status == "pending"
-        if waits and applied and self._notify_admins is not None:
+        if waits and applied and account.identity_verified and self._notify_admins is not None:
             await self._notify_admins(account)
         return SignUpOutcome(account=account, waits_for_approval=waits)
 
@@ -445,7 +457,7 @@ class LocalAccountFlows:
             self._send(
                 AccountMail(kind="email_changed", to=previous, details={"new_email": binding.email})
             )
-        await self.after_verified_identity(binding.account_id, applied=True)
+        await self.after_verified_identity(binding.account_id, applied=False)
         return Redeemed(
             account_id=binding.account_id,
             kind="email_bound",
@@ -485,13 +497,15 @@ class LocalAccountFlows:
         if not tokens.looks_like_email_token(token):
             raise InvalidToken
         hashed = await hash_password(password)
-        if (
-            await self._accounts.reset_password(
-                token_hash=tokens.email_token_hash(token), password_hash=hashed
-            )
-            is None
-        ):
+        account_id = await self._accounts.reset_password(
+            token_hash=tokens.email_token_hash(token), password_hash=hashed
+        )
+        if account_id is None:
             raise InvalidToken
+        # A reset link proves the mailbox as a verification link does, so the
+        # approval policy applies here too (and the administrators hear of an
+        # application that only now can be approved).
+        await self.after_verified_identity(account_id, applied=True)
 
     async def session_owner(self, token: str | None) -> SessionOwner | None:
         """The live session behind a presented value, or ``None``."""

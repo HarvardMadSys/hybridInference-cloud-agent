@@ -63,6 +63,10 @@ VALUES ($1, $2, $3, $4, $5::jsonb, TRUE)
 """
 
 
+class NotBindable(Exception):
+    """An account may not bind an address now; raised to roll its transaction back."""
+
+
 def record(row: Any) -> AccountRecord:
     """The account a row of :data:`ACCOUNT_COLUMNS` describes."""
     return AccountRecord(
@@ -145,6 +149,7 @@ __all__ = [
     "BUMP_VERSION_SQL",
     "REVOKE_OTHER_SESSIONS_SQL",
     "REVOKE_SESSIONS_SQL",
+    "NotBindable",
     "lock_account_row",
     "locked_account",
     "read_account",

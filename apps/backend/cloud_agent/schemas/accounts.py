@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003 — Pydantic resolves annotations at runtime.
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cloud_agent.domain.accounts import MAX_PURPOSE_CHARS, MAX_REASON_CHARS
 
@@ -75,6 +75,12 @@ class LoginRequest(_Request):
     identifier: str | None = Field(default=None, min_length=1, max_length=_EMAIL_MAX_CHARS)
     email: str | None = Field(default=None, min_length=1, max_length=_EMAIL_MAX_CHARS)
     password: str = Field(min_length=1, max_length=_PASSWORD_MAX_CHARS)
+
+    @model_validator(mode="after")
+    def _names_someone(self) -> LoginRequest:
+        if not (self.identifier or self.email):
+            raise ValueError("Give identifier (or email).")
+        return self
 
     @property
     def name(self) -> str:

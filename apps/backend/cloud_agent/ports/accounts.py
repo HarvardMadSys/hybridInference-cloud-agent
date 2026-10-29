@@ -539,6 +539,10 @@ class LocalAccountRepository(AccountBroadcasts, Protocol):
         """The pending setup code, or ``None`` once setup is complete."""
         ...
 
+    async def setup_pending(self) -> bool:
+        """Whether first-run setup is still open; reads only."""
+        ...
+
     async def complete_setup(
         self,
         *,

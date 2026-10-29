@@ -344,12 +344,13 @@ async def test_a_device_entry_names_its_account_and_nothing_else():
     response = Response()
     device_cookie.remember_device(response, ["person@example.edu"], None)
     header = response.headers["set-cookie"]
-    assert "Path=/v1/auth" in header and "HttpOnly" in header
+    # Path=/ so a browser reaching the API under /api or /agents/api sends it back.
+    assert "Path=/;" in header and "HttpOnly" in header and "__Host-" in header
     cookies = _cookies_after(response)
     nonce = device_cookie.recognized_device(cookies, "person@example.edu")
     assert nonce is not None and len(nonce) == 32
     assert device_cookie.recognized_device(cookies, "other@example.edu") is None
-    forged = {device_cookie.COOKIE_NAME: "A" * 64}
+    forged = {device_cookie.cookie_name(): "A" * 64}
     assert device_cookie.recognized_device(forged, "person@example.edu") is None
 
 

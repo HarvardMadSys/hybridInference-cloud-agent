@@ -40,13 +40,13 @@ from cloud_agent.storage._sql.local_accounts import (
     record,
     write_audit,
 )
-from cloud_agent.storage.repositories.account_broadcasts import BroadcastsMixin
-from cloud_agent.storage.repositories.account_credentials import CredentialsMixin
-from cloud_agent.storage.repositories.account_erasure import (
+from cloud_agent.storage._sql.local_erasure import (
     ErasureBlocked,
     erase_owner_rows,
     retained_archives,
 )
+from cloud_agent.storage.repositories.account_broadcasts import BroadcastsMixin
+from cloud_agent.storage.repositories.account_credentials import CredentialsMixin
 from cloud_agent.storage.repositories.account_policy import PolicyMixin
 from cloud_agent.storage.repositories.account_sessions import SessionsMixin
 
@@ -588,7 +588,7 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
         termination is acknowledged, none of its turns is queued, running or
         resident and every sandbox it owns is deleted, or when erasing would
         touch another owner's row. Then, in one transaction, every row of its
-        Agent data goes (:mod:`.account_erasure`), with its identifiers (freed
+        Agent data goes (:mod:`cloud_agent.storage._sql.local_erasure`), with its identifiers (freed
         for new accounts), password, sessions, browsers, links, codes,
         sign-in events, mail recipients and earlier audit rows. The account
         row stays, erased: it signs in nowhere and cannot be resumed, and its
@@ -644,6 +644,7 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
             "UPDATE agent_local_accounts SET erased_at = coalesce(erased_at, NOW()), "
             "user_name = NULL, admin_note = NULL, suspension_message = NULL, "
             "tos_accepted_at = NULL, locale = NULL, locale_chosen_at = NULL, "
+            "last_login_at = NULL, "
             "version = version + 1, updated_at = NOW() WHERE id = $1",
             account_id,
         )
@@ -691,6 +692,13 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
             edit.review_reason,
             actor_id,
         )
+        if edit.account_status == "deleted":
+            # Its browsers before its sessions: the order a sign-in takes.
+            await conn.execute(
+                "SELECT 1 FROM agent_local_browser_sessions WHERE id IN (SELECT browser_id FROM "
+                "agent_local_browser_accounts WHERE account_id = $1) ORDER BY id FOR UPDATE",
+                current.id,
+            )
         if edit.account_status != "active" and current.status == "active":
             await conn.execute(REVOKE_SESSIONS_SQL, current.id, edit.account_status)
         if edit.account_status == "deleted":
