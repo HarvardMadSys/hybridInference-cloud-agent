@@ -3059,7 +3059,7 @@ def test_fork_copies_a_private_home_without_widening_either_side(tmp_path: Path)
     (source / f"{runtime_id}/state/{runtime_id}/locks/server.lock").write_text("pid")
     manager.calls.clear()
 
-    factory._clone_private_member_state(_spec(), source_launch, target_launch)
+    factory._clone_private_member_state(_spec(), source_launch, target_launch, "native-child")
 
     child = manager.local(factory._member_state_dir(target_launch))
     _assert_private(child)
@@ -3351,7 +3351,7 @@ def test_a_clean_home_and_a_fork_copy_pass_the_every_start_check(_multi_uid_stat
     assert written.returncode == 0, written.stderr
     factory._prepare_member_state(_spec(), source, factory._member_state_dir(source))
 
-    factory._clone_private_member_state(_spec(), source, child)
+    factory._clone_private_member_state(_spec(), source, child, "native-child")
     factory._prepare_member_state(_spec(), child, factory._member_state_dir(child))
 
     child_home = manager.local(factory._member_state_dir(child))
@@ -3396,7 +3396,7 @@ def test_codex_preparing_journal_recovers_one_persisted_child_without_refork(mon
         "target_slot_id": 2,
     }
     writes: list[dict[str, object]] = []
-    clones: list[tuple[ResidentLaunch, ResidentLaunch]] = []
+    clones: list[tuple[ResidentLaunch | str, ...]] = []
     monkeypatch.setattr(
         factory,
         "_read_fork_journal",
@@ -3414,7 +3414,7 @@ def test_codex_preparing_journal_recovers_one_persisted_child_without_refork(mon
     monkeypatch.setattr(
         factory,
         "_clone_private_member_state",
-        lambda _spec, source_item, target_item: clones.append((source_item, target_item)),
+        lambda _spec, *clone: clones.append(clone),
     )
     monkeypatch.setattr(
         factory,
@@ -3432,7 +3432,7 @@ def test_codex_preparing_journal_recovers_one_persisted_child_without_refork(mon
 
     assert child_id == "native-recovered-child"
     assert mutation_calls == ["close"]
-    assert clones == [(source_launch, target_launch)]
+    assert clones == [(source_launch, target_launch, "native-recovered-child")]
     assert writes == [{**expected, "state": "ready", "target_session_id": "native-recovered-child"}]
 
 
@@ -3470,8 +3470,8 @@ def test_http_native_fork_flushes_and_clones_private_provider_state(monkeypatch,
     monkeypatch.setattr(
         factory,
         "_clone_private_member_state",
-        lambda _spec, source_item, target_item: lifecycle.append(
-            f"clone:{source_item.thread_id}:{target_item.thread_id}"
+        lambda _spec, source_item, target_item, child: lifecycle.append(
+            f"clone:{source_item.thread_id}:{target_item.thread_id}:{child}"
         ),
     )
     monkeypatch.setattr(
@@ -3493,7 +3493,7 @@ def test_http_native_fork_flushes_and_clones_private_provider_state(monkeypatch,
         "fork",
         "close",
         "clear:athr_source",
-        "clone:athr_source:athr_child",
+        "clone:athr_source:athr_child:native-child",
     ]
     assert manager.events == [("normalize", 0), ("normalize", 2)]
     assert writes[0]["state"] == "preparing"

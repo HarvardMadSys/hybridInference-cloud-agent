@@ -29,7 +29,7 @@ from cloud_agent_host.chat_sandbox import (
     member_inference_env_path,
 )
 from cloud_agent_host.codex_plugins import install_codex_plugins
-from cloud_agent_host.codex_state_index import REBASE_ROLLOUT_PATHS
+from cloud_agent_host.codex_state_index import REBASE_ROLLOUT_PATHS, codex_state_index
 from cloud_agent_host.compat_helper import compat_token_env, install_compat_helper
 from cloud_agent_host.drivers import (
     DialectRuntime,
@@ -666,7 +666,7 @@ class ResidentTransportFactory:
         has nothing to rewrite.
         """
         script = (
-            'set -eu; source="$1"; target="$2"; legacy="$3"; trusted="$4"; '
+            'set -eu; source="$1"; target="$2"; legacy="$3"; trusted="$4"; index="$5"; '
             'marker="$target/.freeinference-member-state-v1"; '
             + _PRIVATE_MEMBER_HOME_PROLOGUE
             + 'if test ! -e "$marker"; then '
@@ -677,7 +677,11 @@ class ResidentTransportFactory:
             "fi; "
             # A member's own start: this may not fail the launch, so it repairs
             # what it can and reports what it cannot on stderr.
-            "python3 -I - \"$target\" repair <<'PY'\n" + REBASE_ROLLOUT_PATHS + "\nPY"
+            # A release with no index on record arrives as an empty name, which
+            # the script reports rather than guesses at.
+            'python3 -I - "$target" repair "$index" "${legacy%/*}" <<\'PY\'\n'
+            + REBASE_ROLLOUT_PATHS
+            + "\nPY"
         )
         return (
             "/bin/sh",
@@ -688,15 +692,37 @@ class ResidentTransportFactory:
             state_dir,
             self._legacy_member_state_dir(launch),
             str(self._manager.backend.uid),
+            codex_state_index(launch.runtime_version) or "",
         )
+
+    @staticmethod
+    def _codex_fork_index(launch: ResidentLaunch) -> str:
+        """The session index a fork of ``launch`` must rebase, or a refusal.
+
+        A fork whose copy cannot be rebased hands the child a thread it cannot
+        resume, so a Codex release with no index on record is not forked.
+        """
+        index = codex_state_index(launch.runtime_version)
+        if index is None:
+            raise DriverError(
+                f"Codex {launch.runtime_version} has no session index on record; add the "
+                "file it keeps to CODEX_STATE_INDEX_BY_VERSION in "
+                "cloud_agent_host/codex_state_index.py before forking with it"
+            )
+        return index
 
     def _clone_private_member_state(
         self,
         spec: ChatSandboxSpec,
         source_launch: ResidentLaunch,
         target_launch: ResidentLaunch,
+        child_session_id: str,
     ) -> None:
-        """Copy one flushed provider home into the child UID's private home."""
+        """Copy one flushed provider home into the child UID's private home.
+
+        For Codex, ``child_session_id`` is the thread whose index row the copy
+        must prove it rebased.
+        """
         source_dir = self._member_state_dir(source_launch)
         target_dir = self._member_state_dir(target_launch)
         if source_dir == target_dir:
@@ -704,6 +730,11 @@ class ResidentTransportFactory:
         runtime_id = source_launch.runtime_id
         if runtime_id != target_launch.runtime_id or runtime_id not in PRIVATE_MEMBER_STATE_ROOTS:
             raise DriverError("native fork cannot clone incompatible provider homes")
+        index = self._codex_fork_index(source_launch) if runtime_id == "codex" else ""
+        # It reaches the sandbox as one argv entry and the index as a bound
+        # parameter; NUL is the one byte an argv entry cannot carry intact.
+        if not child_session_id or len(child_session_id) > 256 or "\0" in child_session_id:
+            raise DriverError("native fork child id cannot name an index row")
         # Neither UID can open the other's home. The source archives its own
         # flushed home, scratch excluded, and the child unpacks that stream
         # into a home only it can open; the copy crosses this host's pipe and
@@ -719,6 +750,7 @@ class ResidentTransportFactory:
         )
         unpack = (
             'set -eu; target="$1"; runtime="$2"; trusted="$3"; '
+            'index="$4"; old_homes="$5"; child="$6"; '
             + _NEW_PRIVATE_MEMBER_HOME_PROLOGUE
             + 'find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; '
             'tar --extract --file=- --directory="$target" --no-same-owner '
@@ -727,7 +759,9 @@ class ResidentTransportFactory:
             'if [ "$runtime" = codex ]; then '
             # The fork path: it has a PREPARING journal and a retry, so a copy
             # this cannot verify must fail the step rather than be published.
-            "python3 -I - \"$target\" strict <<'PY'\n" + REBASE_ROLLOUT_PATHS + "\nPY\n"
+            'python3 -I - "$target" strict "$index" "$old_homes" "$child" <<\'PY\'\n'
+            + REBASE_ROLLOUT_PATHS
+            + "\nPY\n"
             "fi; "
             'case "$runtime" in '
             '  opencode|kilo) rm -rf -- "$target/$runtime/state/$runtime/locks";; '
@@ -750,6 +784,9 @@ class ResidentTransportFactory:
                 target_dir,
                 runtime_id,
                 str(self._manager.backend.uid),
+                index,
+                _LEGACY_MEMBER_STATE_ROOTS[runtime_id],
+                child_session_id,
             ],
             target_uid=MEMBER_UID_BASE + target_launch.slot_id,
             user_gid=self._manager.backend.gid,
@@ -1050,6 +1087,9 @@ class ResidentTransportFactory:
         else:
             preparing = {**expected, "state": "preparing"}
             if runtime_id == "codex":
+                # Before the fork is made, not after: a child whose copy the
+                # rebase cannot handle is one more thread that cannot resume.
+                self._codex_fork_index(source.launch)
                 codex_baseline = self._codex_fork_children(
                     spec,
                     source.launch,
@@ -1125,11 +1165,7 @@ class ResidentTransportFactory:
                 user_uid=MEMBER_UID_BASE + source.launch.slot_id,
                 user_gid=self._manager.backend.gid,
             )
-            self._clone_private_member_state(
-                spec,
-                source.launch,
-                target_launch,
-            )
+            self._clone_private_member_state(spec, source.launch, target_launch, child_id)
             normalization_slot = target_launch.slot_id
         elif runtime_id == "pi":
             # Pi's RPC fork/clone switches the process itself onto the child.
