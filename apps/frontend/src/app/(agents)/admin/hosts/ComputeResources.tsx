@@ -114,6 +114,18 @@ export default function ComputeResources({
   const inventoryChanged = useRef(onInventory);
   inventoryChanged.current = onInventory;
 
+  useEffect(() => {
+    const revealSetup = () => {
+      if (denied || window.location.hash !== '#compute-setup') return;
+      addReturnFocus.current = null;
+      setAddSetupOpen(false);
+      setPanel({ kind: 'setup' });
+    };
+    revealSetup();
+    window.addEventListener('hashchange', revealSetup);
+    return () => window.removeEventListener('hashchange', revealSetup);
+  }, [denied]);
+
   const refresh = useCallback(async () => {
     const current = ++generation.current;
     // Catalog failure must not conceal a continuing operation or existing Host controls.
@@ -328,7 +340,7 @@ export default function ComputeResources({
     );
 
   return (
-    <section className="mt-6" aria-label="Servers">
+    <section id="compute-setup" tabIndex={-1} className="mt-6" aria-label="Servers">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-sm font-semibold text-foreground">Server inventory</h2>
         <div className="flex flex-wrap items-center gap-2">
@@ -466,7 +478,16 @@ export default function ComputeResources({
       )}
 
       {panel?.kind === 'setup' && (
-        <Panel title="Server setup" onClose={() => setPanel(null)}>
+        <Panel
+          title="Server setup"
+          onClose={() => {
+            setPanel(null);
+            if (window.location.hash === '#compute-setup') {
+              const { pathname, search } = window.location;
+              window.history.replaceState(window.history.state, '', `${pathname}${search}`);
+            }
+          }}
+        >
           <ComputeSetup
             connections={connections}
             onSaved={() => {

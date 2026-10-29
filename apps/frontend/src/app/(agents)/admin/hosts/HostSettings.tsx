@@ -88,12 +88,12 @@ function organizeSettings(definitions: HostSettingDefinition[]) {
 
   return [
     {
-      title: 'Important' as const,
+      title: 'Session resources',
       description: 'Container resources and limits for running sessions.',
       groups: [resources, sessions, other].filter((group) => group.definitions.length > 0),
     },
     {
-      title: 'Advanced' as const,
+      title: 'Terminal and storage limits',
       description: 'Terminal, workspace and storage admission limits.',
       groups: [terminals, workspace, storage].filter((group) => group.definitions.length > 0),
     },

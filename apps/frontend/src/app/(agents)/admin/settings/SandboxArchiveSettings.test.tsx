@@ -56,11 +56,12 @@ describe('sandbox archive settings card', () => {
     expect(screen.getByLabelText('AWS region').closest('details')).toBeNull();
     expect(screen.getByLabelText('Expected bucket owner').closest('details')).toBeNull();
     expect(screen.getByLabelText('Customer-managed KMS key ARN').closest('details')).toBeNull();
-    const advanced = screen.getByText('Advanced').closest('details');
-    expect(advanced).not.toHaveAttribute('open');
-    expect(advanced).toContainElement(screen.getByLabelText('Maximum archive bytes'));
-    expect(advanced).toContainElement(screen.getByLabelText('Multipart threshold bytes'));
-    expect(advanced).toContainElement(screen.getByLabelText('Multipart part bytes'));
+    expect(screen.queryByText('Advanced')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Archive storage' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Upload limits' })).toBeVisible();
+    expect(screen.getByLabelText('Maximum archive bytes')).toBeVisible();
+    expect(screen.getByLabelText('Multipart threshold bytes')).toBeVisible();
+    expect(screen.getByLabelText('Multipart part bytes')).toBeVisible();
   });
 
   it('separates saved policy from sandbox manager rollout by revision and capability', () => {
@@ -273,19 +274,14 @@ describe('sandbox archive settings card', () => {
     });
   });
 
-  it('preserves collapsed upload edits and saves them with important settings', () => {
+  it('keeps upload edits visible and saves them with the storage settings', () => {
     const onSave = vi.fn();
     render(<SandboxArchiveSettingsCard settings={settings()} busy={false} onSave={onSave} />);
 
-    const advanced = screen.getByText('Advanced').closest('details')!;
-    const summary = advanced.querySelector('summary')!;
-    fireEvent.click(summary);
-    expect(advanced).toHaveAttribute('open');
     const maximum = screen.getByLabelText('Maximum archive bytes');
+    expect(maximum).toBeVisible();
     fireEvent.change(maximum, { target: { value: '1073741824' } });
-    fireEvent.click(summary);
 
-    expect(advanced).not.toHaveAttribute('open');
     expect(screen.getByLabelText('Maximum archive bytes')).toBe(maximum);
     expect(maximum).toHaveValue(1_073_741_824);
     fireEvent.click(screen.getByLabelText('Enable sandbox archives'));
@@ -338,9 +334,6 @@ describe('sandbox archive settings card', () => {
     const onSave = vi.fn();
     render(<SandboxArchiveSettingsCard settings={settings()} busy={false} onSave={onSave} />);
 
-    const advanced = screen.getByText('Advanced').closest('details')!;
-    const summary = advanced.querySelector('summary')!;
-    fireEvent.click(summary);
     fireEvent.change(screen.getByLabelText('Maximum archive bytes'), {
       target: { value: '100' },
     });
@@ -350,19 +343,15 @@ describe('sandbox archive settings card', () => {
     fireEvent.change(screen.getByLabelText('Multipart part bytes'), {
       target: { value: '5242879' },
     });
-    fireEvent.click(summary);
-    expect(advanced).not.toHaveAttribute('open');
     fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
 
-    expect(advanced).toHaveAttribute('open');
     expect(screen.getByText('Enter a whole number from 1 to 100.')).toBeInTheDocument();
     expect(screen.getByText('Enter a whole number from 5242880 to 67108864.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Maximum archive bytes')).toBeVisible();
     expect(onSave).not.toHaveBeenCalled();
 
-    fireEvent.click(summary);
-    expect(advanced).not.toHaveAttribute('open');
     fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
-    expect(advanced).toHaveAttribute('open');
+    expect(screen.getByLabelText('Maximum archive bytes')).toBeVisible();
     expect(onSave).not.toHaveBeenCalled();
   });
 

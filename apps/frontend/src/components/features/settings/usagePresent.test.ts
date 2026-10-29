@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AdminUsageAggregate, AdminUsageDay } from '@/lib/api/adminUsage';
-import type { OwnerResourceDay } from '@/lib/api/ownerUsage';
+import type { OwnerHistoryPeriod, OwnerResourceDay } from '@/lib/api/ownerUsage';
+import { translate } from '@/lib/i18n/translate';
+import { APIError } from '@/lib/utils/errors';
 
 import {
+  MAX_DAILY_BARS,
+  USAGE_PERIODS,
   cachedShare,
+  chartBars,
   chartDays,
+  crossesYear,
   compactCount,
   coreHours,
   dayValue,
@@ -16,10 +22,14 @@ import {
   formatMemory,
   formatShare,
   gibHours,
+  historyErrorKey,
   notFinal,
   partlyMeasured,
+  periodQuery,
+  rangeNote,
   reasoningPartly,
   relativeTime,
+  shortDay,
   tickIndexes,
   tokenTotal,
   unrecordedTurns,
@@ -353,5 +363,160 @@ describe('the start of a UTC day on the reader’s clock', () => {
     expect(utcMidnightLocal(at, 'en-US', 'Asia/Kolkata')).toBe('5:30 AM');
     expect(utcMidnightLocal(at, 'en-US', 'UTC')).toBeNull();
     expect(utcMidnightLocal(Number.NaN, 'en-US', 'Asia/Shanghai')).toBeNull();
+  });
+});
+
+describe('periods', () => {
+  it('ask for a number of days, or for all time', () => {
+    expect(USAGE_PERIODS.map(periodQuery)).toEqual([
+      { days: 1 },
+      { days: 7 },
+      { days: 30 },
+      { all: true },
+    ]);
+  });
+});
+
+/** ``count`` whole UTC days from ``first``, the last of them today so far. */
+function history(
+  first: string,
+  count: number,
+  cost = (index: number) =>
+    aggregate({ totals: { ...aggregate().totals!, spent_usd: String(index + 1) } }),
+) {
+  const start = Date.parse(`${first}T00:00:00Z`);
+  const days = Array.from({ length: count }, (_, index) => {
+    const date = new Date(start + index * 86_400_000).toISOString().slice(0, 10);
+    const day = resourceDay(date);
+    return index === count - 1 ? { ...day, until: `${date}T12:00:00.000Z` } : day;
+  });
+  const tokens = days.map((day, index) => ({
+    ...tokenDay(day.date, cost(index)),
+    until: day.until,
+  }));
+  return chartDays(tokens, days);
+}
+
+describe('chart bars', () => {
+  it('stay one per day up to the bound', () => {
+    const bars = chartBars(history('2026-10-01', MAX_DAILY_BARS), 'cost');
+    expect(bars).toHaveLength(MAX_DAILY_BARS);
+    expect(bars[0]).toEqual({
+      first: '2026-10-01',
+      last: '2026-10-01',
+      days: 1,
+      whole: true,
+      value: 1,
+    });
+    expect(bars.at(-1)!.whole).toBe(false);
+  });
+
+  it('sum calendar weeks past it, from the first real day and with no padding', () => {
+    // 2026-09-03 is a Thursday: its week holds only the four days the period has.
+    const bars = chartBars(history('2026-09-03', 40), 'cost');
+    expect(bars[0]).toEqual({
+      first: '2026-09-03',
+      last: '2026-09-06',
+      days: 4,
+      whole: false,
+      value: 1 + 2 + 3 + 4,
+    });
+    expect(bars[1]).toMatchObject({
+      first: '2026-09-07',
+      last: '2026-09-13',
+      days: 7,
+      whole: true,
+    });
+    expect(bars[1].value).toBe(5 + 6 + 7 + 8 + 9 + 10 + 11);
+    // The week that holds today has not ended either.
+    expect(bars.at(-1)).toMatchObject({ last: '2026-10-12', whole: false });
+    expect(bars.reduce((days, bar) => days + bar.days, 0)).toBe(40);
+  });
+
+  it('call a week unknown when any one of its days is', () => {
+    const unknownOn = '2026-09-09';
+    const days = history('2026-09-07', 40).map((day) =>
+      day.date === unknownOn
+        ? { ...day, tokens: tokenDay(day.date, aggregate({ totals: null })) }
+        : day,
+    );
+    const bars = chartBars(days, 'cost');
+    expect(bars[0]).toMatchObject({ first: '2026-09-07', value: null });
+    expect(bars[1].value).not.toBeNull();
+    // A week with no turns at all is zero, not unknown.
+    const quiet = history('2026-09-07', 40, () => aggregate({ run_count: 0, totals: null }));
+    expect(chartBars(quiet, 'cost')[0].value).toBe(0);
+  });
+
+  it('name the year only when the bars cross one', () => {
+    expect(crossesYear(chartBars(history('2026-09-03', 40), 'cost'))).toBe(false);
+    expect(crossesYear(chartBars(history('2025-12-20', 40), 'cost'))).toBe(true);
+    expect(shortDay('2025-12-22', 'en-US', true)).toBe('Dec 22, 2025');
+    expect(shortDay('2025-12-22', 'en-US')).toBe('Dec 22');
+  });
+});
+
+function allTime(overrides: Partial<OwnerHistoryPeriod> = {}): OwnerHistoryPeriod {
+  return {
+    kind: 'all',
+    since: '2026-04-12T00:00:00Z',
+    until: '2026-10-15T12:00:00Z',
+    first_activity_at: '2026-04-12T08:30:00Z',
+    limited_by: null,
+    ...overrides,
+  };
+}
+
+describe('the range note', () => {
+  const say = (period: OwnerHistoryPeriod | null, locale: 'en' | 'zh-CN' = 'en') => {
+    const note = rangeNote(period);
+    return note && translate(locale, note.key, note.vars);
+  };
+
+  it('says nothing about a number of days', () => {
+    expect(say({ ...allTime(), kind: 'days', first_activity_at: null })).toBeNull();
+    expect(say(null)).toBeNull();
+  });
+
+  it('calls all time all only from the first turn', () => {
+    expect(say(allTime())).toBe('Since 2026-04-12, the day of your first turn.');
+    expect(say(allTime({ first_activity_at: null, since: '2026-10-15T00:00:00Z' }))).toBe(
+      'No turns yet, so this shows today only.',
+    );
+  });
+
+  it('names the real start and the reason when all time is narrowed', () => {
+    const runs = allTime({ first_activity_at: '2026-01-02T00:00:00Z', limited_by: 'runs' });
+    expect(say(runs, 'zh-CN')).toBe('自 2026-04-12 起 · 更早的用量超出单次汇总上限，未计入。');
+    expect(say(runs)).not.toMatch(/\ball\b/i);
+    const days = allTime({
+      since: '2025-10-15T00:00:00Z',
+      first_activity_at: '2025-01-02T00:00:00Z',
+      limited_by: 'days',
+    });
+    expect(say(days)).toBe(
+      'Since 2025-10-15 · Usage from before the last 366 days is not included.',
+    );
+  });
+});
+
+describe('a refused history read', () => {
+  it('is told in the reader’s words, never the server’s', () => {
+    const refused = (code: string, status: number) => new APIError(code, 'English prose', status);
+    expect(historyErrorKey(refused('usage_query_too_large', 422))).toBe(
+      'settings.usage.error.tooLarge',
+    );
+    expect(historyErrorKey(refused('usage_response_too_large', 422))).toBe(
+      'settings.usage.error.responseTooLarge',
+    );
+    expect(historyErrorKey(refused('usage_temporarily_unavailable', 503))).toBe(
+      'settings.usage.error.unavailable',
+    );
+    // No database behind the service: a 503 without the usage envelope.
+    expect(historyErrorKey(refused('SERVICE_UNAVAILABLE', 503))).toBe(
+      'settings.usage.error.unavailable',
+    );
+    expect(historyErrorKey(refused('UNKNOWN_ERROR', 422))).toBe('settings.usage.loadError');
+    expect(historyErrorKey(new Error('Failed to fetch'))).toBe('settings.usage.loadError');
   });
 });

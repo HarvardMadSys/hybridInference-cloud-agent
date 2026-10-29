@@ -831,14 +831,14 @@ export function TrajectoryView({
             onChange={(event) => onQueryChange(event.target.value)}
             placeholder="Search steps"
             aria-label="Search steps"
-            className="min-w-0 basis-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-[13px] text-gray-900 outline-none focus:border-gray-300 dark:border-white/10 dark:bg-gray-950 dark:text-gray-100 sm:flex-1 sm:basis-auto"
+            className="ui-input min-w-0 basis-full sm:flex-1 sm:basis-auto"
           />
           {subagents.length > 0 && onSubagentFilterChange ? (
             <Select
               value={subagentFilter}
               onValueChange={onSubagentFilterChange}
               aria-label="Show steps from"
-              className="min-w-0 max-w-full shrink rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-[12px] text-gray-700 dark:border-white/10 dark:bg-gray-950 dark:text-gray-200 sm:max-w-64"
+              className="ui-input min-w-0 max-w-full shrink px-2 py-1.5 text-[12px] sm:max-w-64"
               options={[
                 { value: '', label: 'All agents' },
                 ...subagents.map(({ value, label }) => ({ value, label })),

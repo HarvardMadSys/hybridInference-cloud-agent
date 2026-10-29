@@ -26,15 +26,15 @@
     },
     {
       "files": ["src/app/(agents)/admin/settings/page.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 2333 }] }
+      "rules": { "max-lines": ["error", { "max": 2281 }] }
     },
     {
       "files": ["src/app/(agents)/admin/hosts/ComputeResources.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 2073 }] }
+      "rules": { "max-lines": ["error", { "max": 2069 }] }
     },
     {
       "files": ["src/app/(agents)/admin/hosts/page.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 1910 }] }
+      "rules": { "max-lines": ["error", { "max": 1909 }] }
     },
     {
       "files": ["src/components/features/agents/adapt.test.ts"],
@@ -58,7 +58,7 @@
     },
     {
       "files": ["src/app/(agents)/admin/settings/ApplicationSettings.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 1349 }] }
+      "rules": { "max-lines": ["error", { "max": 1339 }] }
     },
     {
       "files": ["src/components/features/agents/SidebarNavigation.test.tsx"],

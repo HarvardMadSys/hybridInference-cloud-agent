@@ -45,6 +45,17 @@
     "@typescript-eslint/explicit-module-boundary-types": "off",
     "@typescript-eslint/no-explicit-any": "warn",
     "no-console": ["warn", { "allow": ["warn", "error"] }],
+    "no-restricted-syntax": [
+      "error",
+      {
+        "selector": "JSXOpeningElement[name.name='select']",
+        "message": "Use the shared themed Select from @/components/ui/Select instead of a native <select>."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='datalist']",
+        "message": "Use SuggestionInput from @/components/ui/SuggestionInput instead of a native <datalist>."
+      }
+    ],
     "prefer-const": "error",
     "no-var": "error",
     "object-shorthand": "error",

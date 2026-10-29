@@ -2,6 +2,13 @@
 
 import { useEffect, useId, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
+import {
+  MENU_POSITIONED,
+  MENU_ROW,
+  MENU_ROW_DESTRUCTIVE,
+  MENU_ACTIONS,
+} from '@/components/ui/menuStyles';
+import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import { AGENT_SESSION_SELECTION_LIMIT } from '@/lib/api/agents';
 
 export const ARCHIVE_FOCUS =
@@ -96,53 +103,19 @@ export function ArchiveProjectMenu({
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const menuId = useId();
-
-  useEffect(() => {
-    if (!open) return;
-    menu.current?.querySelector('button')?.focus();
-    const onPointerDown = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener('pointerdown', onPointerDown);
-    return () => document.removeEventListener('pointerdown', onPointerDown);
-  }, [open]);
+  const popup = usePopupMenu({
+    open,
+    onOpenChange: setOpen,
+    triggerRef: trigger,
+    menuRef: menu,
+    placement: { gap: 4, width: 224, maxWidth: 280, preferredHeight: 140, maxHeight: 320 },
+  });
 
   return (
-    <div
-      ref={root}
-      className="relative shrink-0"
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
-      }}
-      onKeyDown={(event) => {
-        if (!open && ['ArrowDown', 'ArrowUp'].includes(event.key)) {
-          event.preventDefault();
-          setOpen(true);
-          return;
-        }
-        if (event.key === 'Escape' && open) {
-          event.preventDefault();
-          event.stopPropagation();
-          setOpen(false);
-          trigger.current?.focus();
-        }
-        if (!open || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
-        event.preventDefault();
-        const items = [...(menu.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])];
-        const index = items.indexOf(document.activeElement as HTMLButtonElement);
-        const next =
-          event.key === 'Home'
-            ? 0
-            : event.key === 'End'
-              ? items.length - 1
-              : (index + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
-        items[next]?.focus();
-      }}
-    >
+    <div className="relative shrink-0">
       <button
         ref={trigger}
         type="button"
@@ -151,8 +124,9 @@ export function ArchiveProjectMenu({
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
         disabled={disabled}
-        className={`flex h-9 w-9 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-50 dark:text-gray-500 dark:hover:bg-white/5 dark:hover:text-gray-200 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 ${ARCHIVE_FOCUS}`}
+        className={`ui-icon-button ui-button-ghost h-9 w-9 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 ${ARCHIVE_FOCUS}`}
         onClick={() => setOpen(!open)}
+        onKeyDown={popup.triggerKeyDown}
       >
         <ArchiveIcon name="more" />
       </button>
@@ -162,12 +136,15 @@ export function ArchiveProjectMenu({
           id={menuId}
           role="menu"
           aria-label={t('archive.projectActions', { project })}
-          className="absolute right-0 top-10 z-20 min-w-56 rounded-lg border border-gray-200 bg-white p-1 shadow-lg dark:border-white/10 dark:bg-gray-900"
+          style={popup.style}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-56`}
+          onKeyDown={popup.onKeyDown}
         >
           <button
             type="button"
             role="menuitem"
-            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-white/5 ${ARCHIVE_FOCUS}`}
+            tabIndex={-1}
+            className={MENU_ROW}
             onClick={() => {
               setOpen(false);
               trigger.current?.focus();
@@ -180,7 +157,8 @@ export function ArchiveProjectMenu({
           <button
             type="button"
             role="menuitem"
-            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs text-red-600 hover:bg-red-50 dark:text-red-300 dark:hover:bg-red-500/10 ${ARCHIVE_FOCUS}`}
+            tabIndex={-1}
+            className={MENU_ROW_DESTRUCTIVE}
             onClick={() => {
               setOpen(false);
               trigger.current?.focus();
