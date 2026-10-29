@@ -55,7 +55,7 @@ export function ContextActivityHeatmap({
             {/* As wide as a cell: a month's name runs over the next columns. */}
             <span aria-hidden="true" className="relative h-3 w-3.5">
               <span className="absolute left-0 top-0 whitespace-nowrap text-[10px] leading-3 text-muted">
-                {monthLabel(week, view.weeks[index - 1], locale)}
+                {monthLabel(week, view.weeks[index - 1], view.weeks[index + 1], locale)}
               </span>
             </span>
             {week.cells.map((cell) => (
@@ -136,13 +136,21 @@ function WeekdayLabels() {
   );
 }
 
-/** The month a week column starts, written where the month changes. */
-function monthLabel(week: HeatmapWeek, previous: HeatmapWeek | undefined, locale: string): string {
+/** The month a week column starts, where the month changes; never on two columns in a row. */
+function monthLabel(
+  week: HeatmapWeek,
+  previous: HeatmapWeek | undefined,
+  next: HeatmapWeek | undefined,
+  locale: string,
+): string {
   const first = week.cells.find((cell) => cell.inRange) ?? week.cells[0];
   const before = previous
     ? (previous.cells.find((cell) => cell.inRange) ?? previous.cells[0])
     : null;
   if (before && before.day.slice(0, 7) === first.day.slice(0, 7)) return '';
+  // A first column whose month ends at once leaves the name to the next one.
+  const after = next ? (next.cells.find((cell) => cell.inRange) ?? next.cells[0]) : null;
+  if (!before && after && after.day.slice(0, 7) !== first.day.slice(0, 7)) return '';
   return new Intl.DateTimeFormat(locale, { month: 'short', timeZone: 'UTC' }).format(
     new Date(`${first.day}T00:00:00Z`),
   );
