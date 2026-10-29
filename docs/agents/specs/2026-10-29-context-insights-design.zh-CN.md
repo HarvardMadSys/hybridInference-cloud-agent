@@ -127,3 +127,42 @@ dsh-context 运行在 DeepSeek Harness 里面，能读到 Harness 自己组装�
 - 不做 Fleet / 多 Agent 编排页面，不编辑系统提示词，不做新插件平台。
 - 不采集 Claude `get_context_usage` 和 pi `get_session_stats`：两者都需要在常驻会话里插入额外的控制请求并处理其回复，
   牵涉常驻流的回合结算，需要真实 Docker 下的验证，单独做。
+
+## 六、续：单次请求的上下文构成（2026-10-29 第二部分）
+
+第一部分的"构成估算"把上次压缩之后存下的全部文本加在一起，回答不了"某一次请求里到底有什么"，还用"最近请求减估算"
+的差额暗示系统提示词和工具定义占了多少。第二部分改成**按请求**展示，三种来源分开标注：
+
+1. **服务商报告的输入**：这次请求的输入 token（精确值）；缓存读取/写入只是同一份输入的计费拆分，不另加。
+2. **CLI 自己的统计（快照）**：轮次结束后向 CLI 询问它的上下文由什么组成，作为 `context_snapshot` 生命周期事件存下
+   （类别、来源名、大小、短预览；不存整段内容）。它描述的是"本轮最后一次请求及其回复之后"的上下文，
+   所以较早的请求会注明"之后本轮还有 N 次请求"。
+3. **根据存储内容重建**：按记录顺序挑出这次请求之前的存储内容——各轮提问、回答、推理、工具调用与结果、压缩摘要；
+   去掉压缩之前的内容、被重试替换的尝试、子 Agent 自己上下文里的内容、这次请求自己的输出（Claude/pi 按 `usage_id`，
+   Codex/OpenCode 按"上一次用量报告之后的助手内容"）。这是重建，不是实际组装的请求：CLI 自己加入的系统提示词、
+   工具定义、指令不在其中，预览可能被截短，大小是估算。每一项可以展开看存储的原文（分段读取，属主校验），
+   或跳到对应的轨迹步骤。
+
+不再用两个总数相减来推断某个类别的大小。
+
+### 6.1 各 CLI 的接口核对（固定版本）
+
+| 运行时 | 核对的接口 | 结论 | 实现 |
+|---|---|---|---|
+| Claude Code 2.1.220 | stream-json 控制请求 `get_context_usage`（agent-sdk 类型 `SDKControlGetContextUsageResponse`）；用真实 2.1.220 二进制对本机假 Messages API 实测 | 回答系统提示词、内置工具、MCP 工具（含服务名）、记忆文件（路径）、技能、Agent、按种类和按工具拆分的消息、附件种类、`apiUsage`；不需要模型推理；会调用约 18 次 `/v1/messages/count_tokens`，端点不支持时 CLI 改用本地估算（已实测） | 轮次结算后发送；只读自己 `request_id` 的回复，其他行按原顺序放回；20 秒超时后记下请求 id，迟到的回复到达时直接丢弃，不会被后续读取者看到；出错结果、取消、API 重试后不询问 |
+| Claude Code 2.1.220 | `compact_boundary` 之后的合成 user 消息（`isSynthetic`，uuid 等于 `preserved_segment.anchor_uuid`） | 就是压缩摘要正文；以前被存成没有内容的原始行 | 存为 `compaction_summary` 生命周期事件（最多 4000 字符，记录原长度） |
+| pi 0.73.1 | RPC `get_session_stats`（`contextUsage`：估算 token 与窗口）、`get_messages`（上下文消息，含压缩摘要）；`get_state` 不含系统提示词，RPC 也不提供工具定义 | 消息和 pi 自己的估算可得；系统提示词、工具定义不可得 | 先读统计；pi 估算不超过 10 万 token 时才读消息——`get_messages` 是单行 JSON，含 base64 图片，超过主机 8 MB 协议行上限会终止进程；超过时记为 `partial` 并说明原因。完成的压缩记录 `summary_text`（4000 字符上限） |
+| OpenCode 1.18.9 / Kilo 7.4.17 | `GET /session/{id}/message`（全部消息与 part）、`GET /experimental/tool?provider&model`（工具 ID、描述、JSON schema）；系统提示词没有接口 | 按服务端 `filterCompacted` 规则得到下一次请求携带的消息；被修剪的工具输出标为已清除 | bridge 新增只读 `context` 命令（仅在两个轮次之间应答），在沙箱内汇总为最多 300 项、每项 160 字符预览；helper pin 升到 `5`。旧 bridge 回复 `command_error`，记为不支持 |
+| Codex 0.145.0 | app-server v2：`thread/read` 只返回界面条目（已存储）；模型可见的 ResponseItem 只能通过 `thread/start.experimentalRawEvents` 获得，需要在 `initialize` 中开启 `experimentalApi`，协议注明"仅供内部使用（如 Codex Cloud）" | 没有受支持的接口 | 不启用实验接口；Codex 只显示服务商输入与重建结果，界面说明原因 |
+
+### 6.2 token 估算
+
+项目依赖里没有各服务商的分词器。估算规则（`cloud_agent_shared.text_tokens`，Postgres 中按同一规则计数）：
+ASCII 每 4 字符 1 token，CJK（中日韩字符、全角）每字符 1 token，其他非 ASCII 每 2 字符 1 token。
+代码按 ASCII 计，标点密集的代码会偏少；截短的预览会偏少。Claude 的快照用 CLI 自己的计数（`cli_meter`）。
+
+### 6.3 历史与覆盖
+
+快照只对本版本之后的运行存在；更早的请求显示"此运行早于快照采集"，重建结果照常可用。能力表新增
+"CLI 上下文快照"一行，并给出"N 轮中有 M 轮有快照"。属主校验：组成与原文读取都要求会话属于调用者且未删除，
+原文只返回平台存储时已经脱敏的文本。

@@ -37,6 +37,16 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
 from cloud_agent_host.bounded_output import OutputPump
+from cloud_agent_host.context_reads import (
+    CLAUDE_CONTEXT_USAGE_S,
+    error_snapshot,
+    is_late_answer,
+    read_bridge_context,
+    read_claude_context,
+    read_pi_context,
+    should_ask,
+    snapshot_payload,
+)
 from cloud_agent_host.runtimes import (
     DIFF,
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -58,7 +68,9 @@ from cloud_agent_host.runtimes import (
     merged_mcp_server,
 )
 from cloud_agent_host.sandbox import STATE_MOUNT_TARGET
+from cloud_agent_host.stream_deltas import DeltaBatcher, StreamDelta
 from cloud_agent_host.tool_windows import TOOL_MARK_FILE, hook_settings
+from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.event_payloads import subagent_owned
 from cloud_agent_shared.shared_protocol import (
     INPUT_PROCESS_GONE,
@@ -432,6 +444,8 @@ class LaunchContext:
     #: Claude launch settings and its process registry are member-private;
     #: only native project history is linked to the group's shared store.
     claude_config_dir: str | None = None
+    #: Ask the CLI what its context holds after each settled turn (context_reads).
+    context_snapshots: bool = False
 
 
 class HarnessTurn(Generic[_RuntimeT]):
@@ -550,6 +564,10 @@ class HarnessTurn(Generic[_RuntimeT]):
 
     def flush_events(self) -> list[HarnessEvent]:
         """Rows still gathered from earlier lines; none unless a driver batches."""
+        return []
+
+    def after_settle_events(self) -> list[HarnessEvent]:
+        """Events read once the turn's stream ended (``context_reads``); none by default."""
         return []
 
     def event_for_line(self, line: str) -> HarnessEvent:
@@ -760,35 +778,6 @@ class _InputReceipt:
         return self._outcome
 
 
-@dataclass(frozen=True)
-class StreamDelta:
-    """One native record that only adds a few characters to a stream.
-
-    ``path`` leads to the added text inside ``value``; ``render`` turns a
-    record and its line into the row the platform stores for it.
-    """
-
-    value: dict[str, Any]
-    path: tuple[str, ...]
-    delta: str
-    line: str
-    render: Callable[[dict[str, Any], str], HarnessEvent]
-
-
-def _with_delta(value: dict[str, Any], path: tuple[str, ...], delta: str) -> dict[str, Any]:
-    """A copy of ``value`` whose text at ``path`` is ``delta``."""
-    head, *rest = path
-    inner = value.get(head)
-    if rest and isinstance(inner, dict):
-        return {**value, head: _with_delta(inner, tuple(rest), delta)}
-    return {**value, head: delta}
-
-
-def _escaped_chars(text: str) -> int:
-    """How many characters ``text`` takes inside a JSON string."""
-    return len(json.dumps(text)) - 2
-
-
 def _codex_raw_row(
     value: dict[str, Any], line: str, owner: Mapping[str, str] | None = None
 ) -> HarnessEvent:
@@ -811,80 +800,6 @@ def _codex_raw_row(
 def _bridge_raw_row(value: dict[str, Any], line: str) -> HarnessEvent:
     """An OpenCode/Kilo bridge record stored as its bounded line."""
     return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
-
-
-class DeltaBatcher:
-    """Merge adjacent per-token deltas of one native stream into fewer rows.
-
-    Codex's reasoning and command-output deltas and OpenCode/Kilo's reasoning
-    deltas arrive a few characters at a time, and every row the runner gets is
-    a stored event and a synchronous control-plane request. Only *adjacent*
-    deltas of the *same* stream are merged, so no text is dropped or
-    reordered: the first piece of a quiet stream goes out at once, later ones
-    at most once per :attr:`INTERVAL_S`, and any other protocol line -- the
-    item's completion, the turn's boundary, an interrupt's settlement --
-    first flushes what is gathered (see ``_JsonResidentTurn.events_for_line``).
-    """
-
-    INTERVAL_S = ReplyPreview.INTERVAL_S
-    #: A merged row's line stays within the 4,000 characters a raw row keeps
-    #: of its line, so merging never clips text that separate rows kept whole.
-    MAX_LINE_CHARS = 4000
-
-    def __init__(self, clock: Callable[[], float] | None = None) -> None:
-        """``clock`` is for tests; it defaults to ``time.monotonic``."""
-        self._clock = clock or time.monotonic
-        self._first: StreamDelta | None = None
-        self._key = ""
-        self._pieces: list[str] = []
-        self._line_chars = 0
-        self._reported_at: dict[str, float] = {}
-
-    @property
-    def holding(self) -> bool:
-        """Whether the latest delta is gathered rather than reported yet."""
-        return self._first is not None
-
-    def add(self, item: StreamDelta) -> list[HarnessEvent]:
-        """Gather ``item``; return the rows now due, in stream order."""
-        empty = _with_delta(item.value, item.path, "")
-        key = json.dumps(empty, sort_keys=True)
-        added = _escaped_chars(item.delta)
-        rows: list[HarnessEvent] = []
-        if self._first is not None and (
-            key != self._key or self._line_chars + added > self.MAX_LINE_CHARS
-        ):
-            rows.extend(self.flush())
-        now = self._clock()
-        if self._first is None:
-            reported_at = self._reported_at.get(key)
-            if reported_at is None or now - reported_at >= self.INTERVAL_S:
-                self._reported_at[key] = now
-                rows.append(item.render(item.value, item.line))
-                return rows
-            self._first, self._key = item, key
-            self._pieces = [item.delta]
-            self._line_chars = len(json.dumps(empty, separators=(",", ":"))) + added
-            return rows
-        self._pieces.append(item.delta)
-        self._line_chars += added
-        if now - self._reported_at[key] >= self.INTERVAL_S:
-            rows.extend(self.flush())
-        return rows
-
-    def flush(self) -> list[HarnessEvent]:
-        """Report whatever is gathered, as one row."""
-        first = self._first
-        if first is None:
-            return []
-        if len(self._pieces) == 1:
-            value, line = first.value, first.line
-        else:
-            value = _with_delta(first.value, first.path, "".join(self._pieces))
-            line = json.dumps(value, separators=(",", ":"))
-        self._reported_at[self._key] = self._clock()
-        self._first, self._key, self._pieces, self._line_chars = None, "", [], 0
-        return [first.render(value, line)]
 
 
 class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
@@ -950,6 +865,19 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
                 self._protocol_failed = failed
                 self._process.poll()
                 return
+
+    def after_settle_events(self) -> list[HarnessEvent]:
+        """Ask the session what its context holds once this turn settled cleanly."""
+        session = self._session
+        if not should_ask(
+            enabled=session._context.context_snapshots,
+            settled=self._saw_result,
+            failed=self._protocol_failed,
+            cancelled=self._cancelled,
+            alive=session.process_alive(),
+        ):
+            return []
+        return session.context_snapshot_events()
 
     def iter_events(self) -> Iterator[HarnessEvent]:
         yield HarnessEvent(TURN_STARTED)
@@ -1137,6 +1065,10 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
     ) -> InputOutcome:
         """Hand ``pending`` to ``turn`` mid-turn; a protocol without a seam declines."""
         return InputOutcome(False, INPUT_UNSUPPORTED)
+
+    def context_snapshot_events(self) -> list[HarnessEvent]:
+        """What the CLI says its context holds; none for a protocol without a read."""
+        return []
 
     def _next_line(self) -> str:
         if self._lines is None:
@@ -1870,6 +1802,22 @@ class PiRpcSession(_JsonResidentSession[PiRuntime]):
             for event in events
         ]
 
+    def context_snapshot_events(self) -> list[HarnessEvent]:
+        """Pi's own context estimate and, when small enough, its messages."""
+
+        def request(kind: str) -> dict[str, Any]:
+            request_id = self._request_id(f"context-{kind}")
+            self._write_json({"id": request_id, "type": kind})
+            return self._read_until(
+                lambda value: value.get("type") == "response" and value.get("id") == request_id
+            )
+
+        try:
+            snapshot = read_pi_context(request)
+        except (DriverError, SandboxError) as exc:
+            snapshot = error_snapshot("pi_rpc", exc)
+        return [HarnessEvent(LIFECYCLE, snapshot_payload(snapshot))]
+
     def interrupt_turn(self, turn: _JsonResidentTurn[PiRuntime]) -> None:
         """Abort the active Pi RPC turn without closing its session process."""
         self._write_json({"id": self._request_id("abort"), "type": "abort"})
@@ -2257,6 +2205,22 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
         ]
         return answer or [self.event_for_protocol_line(line, turn)]
 
+    def context_snapshot_events(self) -> list[HarnessEvent]:
+        """The server's carried messages and tool definitions, through the bridge."""
+        command_id = self._request_id("context")
+        try:
+            self._write_json({"id": command_id, "type": "context"})
+            answer = self._read_until(
+                lambda value: (
+                    value.get("bridge") in {"context_result", "command_error", "fatal"}
+                    and value.get("id") in {None, "", command_id}
+                )
+            )
+            snapshot = read_bridge_context(answer, runtime=self.runtime.name)
+        except (DriverError, SandboxError) as exc:
+            snapshot = error_snapshot(f"{self.runtime.name}_session_messages", exc)
+        return [HarnessEvent(LIFECYCLE, snapshot_payload(snapshot))]
+
     def interrupt_turn(self, turn: _JsonResidentTurn[ResidentLiveRuntime]) -> None:
         """Interrupt only the active bridge turn on the resident session."""
         self._write_json(
@@ -2508,6 +2472,29 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
             self._clear_questions()
             self._session.turn_finished()
         return self._result
+
+    def after_settle_events(self) -> list[HarnessEvent]:
+        """Claude's context meter once this turn settled cleanly (not after a retry)."""
+        session = self._session
+        if not should_ask(
+            enabled=session._context.context_snapshots,
+            settled=self._saw_result and not self._saw_api_retry,
+            failed=self._error_result,
+            cancelled=self._cancelled,
+            alive=session.process_alive(),
+        ):
+            return []
+        try:
+            snapshot = read_claude_context(
+                write_line=session._write_line,
+                next_line=session.next_line,
+                put_back=lambda lines: session._pushed_back.extendleft(reversed(lines)),
+                stale=session._stale_controls,
+                timeout=CLAUDE_CONTEXT_USAGE_S,
+            )
+        except (DriverError, SandboxError, OSError) as exc:
+            snapshot = error_snapshot("claude_get_context_usage", exc)
+        return [HarnessEvent(LIFECYCLE, snapshot_payload(snapshot))]
 
     def cancel(self) -> None:
         """Send Claude's control ``interrupt`` without killing the session."""
@@ -2786,6 +2773,9 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         self._stdout: OutputPump[str] | None = None
         self._stdout_ended = False
         self._pushed_back: deque[str] = deque()
+        #: Context requests that timed out. A late answer to one is dropped as
+        #: it arrives, so no later reader ever sees a reply it did not ask for.
+        self._stale_controls: set[str] = set()
         self._model: str | None = None
         #: Pinned by the first turn alongside the model, and compared against
         #: every later one. ``None`` is a real value here (Auto), so this is
@@ -2812,6 +2802,12 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
 
     def next_line(self, timeout: float | None) -> str | None:
         """The next stdout line, ``None`` at its end; ``queue.Empty`` on timeout."""
+        while True:
+            line = self._read_line(timeout)
+            if line is None or not is_late_answer(line, self._stale_controls):
+                return line
+
+    def _read_line(self, timeout: float | None) -> str | None:
         if self._pushed_back:
             return self._pushed_back.popleft()
         assert self._lines is not None

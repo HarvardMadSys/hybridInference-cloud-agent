@@ -72,6 +72,12 @@ jsonb_strip_nulls(jsonb_build_object(
     'phase', CASE WHEN e.event_type = 'lifecycle' THEN e.payload->'phase' END,
     'model', CASE WHEN e.event_type IN ('lifecycle', 'usage') THEN e.payload->'model' END,
     'compaction', e.payload->'compaction',
+    'snapshot', CASE WHEN e.event_type = 'lifecycle' AND e.payload->>'phase' = 'context_snapshot'
+                     THEN jsonb_build_object(
+                         'source', e.payload->'snapshot'->'source',
+                         'status', e.payload->'snapshot'->'status',
+                         'total_tokens', e.payload->'snapshot'->'total_tokens',
+                         'context_window', e.payload->'snapshot'->'context_window') END,
     'completed', CASE WHEN e.event_type = 'lifecycle' THEN e.payload->'completed' END,
     'context_windows', e.payload->'context_windows',
     'input_tokens', CASE WHEN e.event_type = 'usage' THEN e.payload->'input_tokens' END,

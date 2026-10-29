@@ -5,7 +5,10 @@
 // agent CLI reported for one request, the latest of those (never the live
 // window), a window the CLI reported, and an estimate from stored text.
 
+import { contextRequestEn, contextRequestZhCN } from './contextRequest';
+
 export const contextEn = {
+  ...contextRequestEn,
   'usage.range.label': 'Range',
   'usage.range.today': 'Today',
   'usage.range.7d': 'Last 7 days',
@@ -99,20 +102,6 @@ export const contextEn = {
   'context.output': '{tokens} output',
   'context.openStep': 'Open step',
   'context.openTurn': 'Open turn',
-  'context.composition': 'Estimated composition',
-  'context.composition.since':
-    'Text stored since the last compaction, at 4 characters per token. An estimate, not what the CLI counted.',
-  'context.composition.whole':
-    'Text stored for the whole conversation, at 4 characters per token. An estimate, not what the CLI counted.',
-  'context.composition.truncated': 'Some stored previews were shortened, so these undercount.',
-  'context.category.user': 'Your messages',
-  'context.category.assistant': 'Answers',
-  'context.category.reasoning': 'Reasoning',
-  'context.category.tool_calls': 'Tool calls',
-  'context.category.tool_results': 'Tool results',
-  'context.category.unattributed': 'Not attributable',
-  'context.unattributedDetail':
-    'Latest request minus the estimate: system prompt, tool schemas, instructions and anything the CLI did not stream.',
   'context.compactionList': 'Compactions',
   'context.compactionTurn': 'Turn {turn}',
   'context.trigger.auto': 'Automatic',
@@ -145,6 +134,8 @@ export const contextEn = {
   'context.cap.compactionEvents': 'Compaction events',
   'context.cap.compactionSizes': 'Compaction sizes',
   'context.cap.window': 'Context window',
+  'context.cap.nativeComposition': 'CLI context snapshot',
+  'context.snapshotCoverage': 'Snapshot for {count} of {turns} turns',
   'context.cap.live': 'Live occupancy',
   'context.support.reported': 'Reported',
   'context.support.partly_reported': 'Reported from this release on',
@@ -160,6 +151,7 @@ export const contextEn = {
 } as const;
 
 export const contextZhCN: Record<keyof typeof contextEn, string> = {
+  ...contextRequestZhCN,
   'usage.range.label': '时间范围',
   'usage.range.today': '今天',
   'usage.range.7d': '最近 7 天',
@@ -250,20 +242,6 @@ export const contextZhCN: Record<keyof typeof contextEn, string> = {
   'context.output': '输出 {tokens}',
   'context.openStep': '打开步骤',
   'context.openTurn': '打开这一轮',
-  'context.composition': '构成估算',
-  'context.composition.since':
-    '上次压缩之后存下的文本，按 4 个字符 1 个 token 估算。这是估算，不是 CLI 统计的数字。',
-  'context.composition.whole':
-    '整个会话存下的文本，按 4 个字符 1 个 token 估算。这是估算，不是 CLI 统计的数字。',
-  'context.composition.truncated': '部分存储的预览被截短了，所以这些数字偏小。',
-  'context.category.user': '你的消息',
-  'context.category.assistant': '回答',
-  'context.category.reasoning': '推理',
-  'context.category.tool_calls': '工具调用',
-  'context.category.tool_results': '工具结果',
-  'context.category.unattributed': '无法归因',
-  'context.unattributedDetail':
-    '最近一次请求减去估算值：系统提示词、工具 schema、指令，以及 CLI 没有流出来的内容。',
   'context.compactionList': '压缩记录',
   'context.compactionTurn': '第 {turn} 轮',
   'context.trigger.auto': '自动',
@@ -295,6 +273,8 @@ export const contextZhCN: Record<keyof typeof contextEn, string> = {
   'context.cap.compactionEvents': '压缩事件',
   'context.cap.compactionSizes': '压缩前后大小',
   'context.cap.window': '上下文窗口',
+  'context.cap.nativeComposition': 'CLI 上下文快照',
+  'context.snapshotCoverage': '{turns} 轮中有 {count} 轮有快照',
   'context.cap.live': '实时占用',
   'context.support.reported': '有报告',
   'context.support.partly_reported': '从这个版本起有报告',

@@ -4,14 +4,9 @@
 // - a size is one request's input tokens as an agent CLI reported it;
 // - a share of the window exists only when the CLI reported the window;
 // - a compaction is one the CLI reported, never inferred from a drop;
-// - the composition is an estimate of stored text, labelled as one.
+// - a composition says which of three things it is (see requestPresent.ts).
 
-import type {
-  ContextCategory,
-  ContextCompositionApi,
-  ContextPointApi,
-  ContextTurnApi,
-} from '@/lib/api/agents';
+import type { ContextPointApi, ContextTurnApi } from '@/lib/api/agents';
 
 /** Where a conversation's Context view opens: its latest turn, on the Context tab. */
 export function contextHref(jobId: string): string {
@@ -87,37 +82,4 @@ export function turnPoints(
     const point = lastOfTurn.get(turn.job_id);
     return point ? [{ turn, point }] : [];
   });
-}
-
-export const CATEGORY_ORDER: ContextCategory[] = [
-  'user',
-  'assistant',
-  'reasoning',
-  'tool_calls',
-  'tool_results',
-];
-
-export interface CompositionSegment {
-  key: ContextCategory | 'unattributed';
-  tokens: number;
-  share: number;
-}
-
-/**
- * The composition as bar segments: each estimated category and, when the
- * server could attribute it, the part of the latest request the stored text
- * does not explain. Shares are of their sum, which is the latest request when
- * that part is shown and the estimate otherwise.
- */
-export function compositionSegments(composition: ContextCompositionApi): CompositionSegment[] {
-  const parts: Array<{ key: CompositionSegment['key']; tokens: number }> = CATEGORY_ORDER.map(
-    (key) => ({ key, tokens: composition.categories[key] ?? 0 }),
-  );
-  if (composition.unattributed_tokens !== null && composition.unattributed_tokens > 0) {
-    parts.push({ key: 'unattributed', tokens: composition.unattributed_tokens });
-  }
-  const total = parts.reduce((sum, part) => sum + part.tokens, 0);
-  return parts
-    .filter((part) => part.tokens > 0)
-    .map((part) => ({ ...part, share: total > 0 ? part.tokens / total : 0 }));
 }

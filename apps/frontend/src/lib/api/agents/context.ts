@@ -21,6 +21,9 @@ export interface RuntimeContextCapabilityApi {
   compaction_sizes: ContextSupport;
   context_window: ContextSupport;
   window_reported_turns: number;
+  /** The CLI's own account of its context after a turn, from this release on. */
+  native_composition: ContextSupport;
+  snapshot_turns: number;
   live_occupancy: 'not_collected';
 }
 
@@ -94,17 +97,6 @@ export interface ContextChangeApi {
   compaction_between: boolean;
 }
 
-export type ContextCategory = 'user' | 'assistant' | 'reasoning' | 'tool_calls' | 'tool_results';
-
-export interface ContextCompositionApi {
-  basis: 'since_last_compaction' | 'whole_conversation';
-  chars_per_token: number;
-  categories: Partial<Record<ContextCategory, number>>;
-  estimated_tokens: number;
-  truncated: boolean;
-  unattributed_tokens: number | null;
-}
-
 export interface ContextCoverageApi {
   turns: number;
   attempts: number;
@@ -127,7 +119,6 @@ export interface ThreadContextApi {
   requests: ContextPointApi[];
   compactions: ContextCompactionApi[];
   largest_changes: ContextChangeApi[];
-  composition: ContextCompositionApi | null;
   coverage: ContextCoverageApi;
 }
 
@@ -143,4 +134,142 @@ export async function getAgentThreadContext(
   );
   if (resp.status === 404) return null;
   return jsonOrThrow<ThreadContextApi>(resp);
+}
+
+// One request's composition, as GET .../thread/context/requests/{event_id}
+// returns it: the provider's reported input, the CLI's own snapshot when one
+// was taken, and stored content reconstructed in transcript order.
+
+export interface NativeSnapshotCategoryApi {
+  key: string;
+  tokens: number | null;
+  chars?: number;
+  entries?: number;
+  /** False: the CLI does not expose this category; its size is unknown. */
+  exposed: boolean;
+  labels?: string[];
+}
+
+export interface NativeSnapshotEntryApi {
+  category: string;
+  label: string;
+  source?: string;
+  tokens: number | null;
+  chars?: number;
+  token_basis?: string;
+  preview?: string;
+  deferred?: boolean;
+  pruned?: boolean;
+  synthetic?: boolean;
+  is_error?: boolean;
+}
+
+export interface NativeSnapshotApi {
+  v: number;
+  source: string;
+  status: string;
+  detail?: string;
+  /** `cli_meter`: the CLI counted; otherwise an estimate from text. */
+  token_basis?: string;
+  total_basis?: string;
+  total_tokens?: number | null;
+  context_window?: number | null;
+  categories?: NativeSnapshotCategoryApi[];
+  entries?: NativeSnapshotEntryApi[];
+  entries_total?: number;
+  entries_omitted?: number;
+  excluded?: Record<string, number>;
+}
+
+export interface CompositionEntryApi {
+  category: string;
+  label: string;
+  event_id: number | null;
+  job_id: string;
+  turn_no: number;
+  chars: number;
+  tokens: number;
+  truncated: boolean;
+  preview: string;
+}
+
+export interface CompositionCategoryApi {
+  key: string;
+  entries: number;
+  chars: number;
+  tokens: number;
+  truncated_entries: number;
+}
+
+export interface ReconstructedCompositionApi {
+  basis: 'stored_events_transcript_order';
+  token_basis: string;
+  categories: CompositionCategoryApi[];
+  entries: CompositionEntryApi[];
+  entries_total: number;
+  entries_omitted: number;
+  estimated_tokens: number;
+  boundary: {
+    job_id: string;
+    turn_no: number;
+    seq: number;
+    event_id: number | null;
+    source: string;
+    may_preserve_recent: boolean;
+  } | null;
+  excluded: Record<string, { entries: number; chars: number }>;
+  copied_turns: number;
+  events_capped: boolean;
+}
+
+export interface RequestCompositionApi {
+  thread_id: string;
+  request: ContextPointApi;
+  runtime: string | null;
+  native: NativeSnapshotApi | null;
+  native_relation: { event_id: number | null; requests_after: number } | null;
+  native_status: string;
+  reconstructed: ReconstructedCompositionApi;
+}
+
+export interface EventContentApi {
+  event_id: number;
+  event_type: string;
+  phase: string | null;
+  offset: number;
+  text: string;
+  total_chars: number;
+  truncated: boolean;
+  next_offset: number | null;
+}
+
+/** What one request carried; null when it is not the caller's. */
+export async function getRequestComposition(
+  jobId: string,
+  eventId: number,
+  signal?: AbortSignal,
+): Promise<RequestCompositionApi | null> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread/context/requests/${eventId}`,
+    { signal, cache: 'no-store' },
+  );
+  if (resp.status === 404) return null;
+  return jsonOrThrow<RequestCompositionApi>(resp);
+}
+
+/** A window of one stored event's text; null when it is not the caller's. */
+export async function getEventContent(
+  jobId: string,
+  eventId: number,
+  offset = 0,
+  signal?: AbortSignal,
+): Promise<EventContentApi | null> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread/context/content/${eventId}?offset=${offset}`,
+    { signal, cache: 'no-store' },
+  );
+  if (resp.status === 404) return null;
+  return jsonOrThrow<EventContentApi>(resp);
 }

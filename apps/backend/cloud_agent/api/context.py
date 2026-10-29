@@ -11,7 +11,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
+from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.admin_observability import decode_cursor, encode_cursor
 from cloud_agent.api._owner_auth import require_agent_owner
@@ -31,6 +32,7 @@ from cloud_agent.context_insights import (
     ConversationContext,
     context_cursor_scope,
 )
+from cloud_agent.context_request import RequestComposition
 from cloud_agent.context_view import ThreadContextView, assemble_thread_context
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage.admin_usage_queries import UsageQueryTooLarge, UsageQueryUnavailable
@@ -81,6 +83,86 @@ async def get_thread_context(
         generated_at=datetime.now(UTC),
         jobs=result["jobs"],
         attempts=result["attempts"],
+    )
+
+
+#: Characters of one stored event a content read returns.
+MAX_CONTENT_WINDOW = 20_000
+
+
+class EventContent(BaseModel):
+    """A window of one stored content event's text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: int
+    event_type: str
+    phase: str | None = None
+    offset: int = Field(ge=0)
+    text: str
+    total_chars: int = Field(ge=0)
+    #: The stored event itself was clipped when it was recorded.
+    truncated: bool
+    next_offset: int | None = None
+
+
+def _not_found(job_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail={"error": {"type": "not_found", "message": f"No such request for {job_id}"}},
+    )
+
+
+@router.get("/jobs/{job_id}/thread/context/requests/{event_id}", response_model=RequestComposition)
+async def get_request_composition(
+    job_id: str,
+    event_id: int = Path(ge=1),
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _ContextStorage | None = Depends(get_storage),
+) -> RequestComposition:
+    """What one request of the caller's conversation carried, labelled by kind."""
+    context_store: _ContextStorage = require_store(store)
+    result = await context_store.context_queries.request_composition(
+        job_id=job_id, user_id=user["user_id"], event_id=event_id
+    )
+    if result is None:
+        raise _not_found(job_id)
+    return result
+
+
+@router.get("/jobs/{job_id}/thread/context/content/{event_id}", response_model=EventContent)
+async def get_event_content(
+    job_id: str,
+    event_id: int = Path(ge=1),
+    offset: int = Query(0, ge=0, le=10_000_000),
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _ContextStorage | None = Depends(get_storage),
+) -> EventContent:
+    """A window of one stored content event of the caller's conversation.
+
+    The text is what the platform stored, already masked when it was recorded.
+    """
+    context_store: _ContextStorage = require_store(store)
+    row = await context_store.context_queries.event_content(
+        job_id=job_id,
+        user_id=user["user_id"],
+        event_id=event_id,
+        offset=offset,
+        limit=MAX_CONTENT_WINDOW,
+    )
+    if row is None:
+        raise _not_found(job_id)
+    total = int(row["total_chars"] or 0)
+    end = offset + len(row["text"] or "")
+    return EventContent(
+        event_id=event_id,
+        event_type=str(row["event_type"]),
+        phase=row.get("phase"),
+        offset=offset,
+        text=str(row["text"] or ""),
+        total_chars=total,
+        truncated=bool(row["truncated"]),
+        next_offset=end if end < total else None,
     )
 
 

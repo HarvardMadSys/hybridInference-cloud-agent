@@ -77,6 +77,9 @@ class ClaudeCodeRuntime(AgentRuntime):
         # The text block being written: ``<message id>:<block index>``.
         self._message_id: str | None = None
         self._text_block: str | None = None
+        #: The synthetic user message a ``compact_boundary`` names as its
+        #: summary (``preserved_segment.anchor_uuid``), until it arrives.
+        self._summary_anchor: str | None = None
 
     def prepare_live(
         self,
@@ -312,6 +315,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             if harness is not None:
                 payload["harness"] = harness
             payload.update(_compaction_fields(subtype, event))
+            self._summary_anchor = _summary_anchor(subtype, event) or self._summary_anchor
             return NormalizedEvent(LIFECYCLE, payload)
         if kind == "stream_event":
             return self._from_stream(event)
@@ -429,6 +433,9 @@ class ClaudeCodeRuntime(AgentRuntime):
             # A user message the CLI read from stdin, echoed back: the driver
             # accounts for it, and it is nothing new to report.
             return None
+        summary = self._compaction_summary(event)
+        if summary is not None:
+            return summary
         blocks = (event.get("message") or {}).get("content") or []
         parent_tool_use_id = event.get("parent_tool_use_id")
         parent_fields = (
@@ -458,6 +465,28 @@ class ClaudeCodeRuntime(AgentRuntime):
                     },
                 )
         return NormalizedEvent(RAW, {"text": "user turn without a tool result"})
+
+    def _compaction_summary(self, event: dict[str, Any]) -> NormalizedEvent | None:
+        """The summary a compaction carries forward, from the message it names.
+
+        After ``compact_boundary`` the pinned 2.1.220 writes the summary as a
+        synthetic user message whose uuid is the boundary's anchor. It is what
+        the next request carries in place of the compacted history.
+        """
+        anchor = self._summary_anchor
+        if not anchor or event.get("uuid") != anchor or not event.get("isSynthetic"):
+            return None
+        self._summary_anchor = None
+        text = _record_content_text((event.get("message") or {}).get("content"))
+        return NormalizedEvent(
+            LIFECYCLE,
+            {
+                "phase": "compaction_summary",
+                "text": text[:SUMMARY_TEXT_CHARS],
+                "chars": len(text),
+                **({"truncated": True} if len(text) > SUMMARY_TEXT_CHARS else {}),
+            },
+        )
 
     def _from_result(self, event: dict[str, Any]) -> NormalizedEvent:
         """Map the terminal result line."""
@@ -550,3 +579,30 @@ def _context_window_fields(event: dict[str, Any]) -> dict[str, Any]:
     """The context window each model of this query ran under, when reported."""
     windows = reported_context_windows(event.get("modelUsage"))
     return {"context_windows": windows} if windows else {}
+
+
+#: Characters of a compaction summary kept on its event.
+SUMMARY_TEXT_CHARS = 4000
+
+
+def _summary_anchor(subtype: str, event: dict[str, Any]) -> str | None:
+    """The uuid of the message a compaction boundary names as its summary."""
+    if subtype != "compact_boundary":
+        return None
+    metadata = event.get("compact_metadata")
+    segment = metadata.get("preserved_segment") if isinstance(metadata, dict) else None
+    anchor = segment.get("anchor_uuid") if isinstance(segment, dict) else None
+    return anchor if isinstance(anchor, str) and anchor else None
+
+
+def _record_content_text(content: Any) -> str:
+    """A message's text, whether the CLI sent a string or text blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return ""

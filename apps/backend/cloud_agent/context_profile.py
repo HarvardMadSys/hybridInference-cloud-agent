@@ -49,13 +49,15 @@ from typing import Any, Literal
 
 #: Rollups name their reducer; a semantic change bumps it so every stored
 #: profile is rebuilt from the ledger instead of being served stale.
-CONTEXT_PROFILE_VERSION = 1
+CONTEXT_PROFILE_VERSION = 2
 #: Request points one attempt keeps. Past it, the first and last halves are
 #: kept and the number left out is recorded; peaks and counts still see every
 #: request.
 MAX_ATTEMPT_POINTS = 2_000
 #: Compactions one attempt keeps in detail. Counted beyond that.
 MAX_ATTEMPT_COMPACTIONS = 200
+#: CLI context snapshots one attempt notes (one per settled turn is usual).
+MAX_ATTEMPT_SNAPSHOTS = 20
 #: The reference plugin's density, and the harness token meter it mirrors.
 CHARS_PER_TOKEN = 4
 
@@ -241,6 +243,9 @@ class ContextProfileAccumulator:
         self._content = dict.fromkeys(CONTENT_CATEGORIES, 0)
         self._after = dict.fromkeys(CONTENT_CATEGORIES, 0)
         self.truncated = False
+        #: The CLI's own context snapshots of this attempt, without entries.
+        self._snapshots: list[dict[str, Any]] = []
+        self._snapshot_window: int | None = None
 
     # -- entry -------------------------------------------------------------
 
@@ -440,6 +445,8 @@ class ContextProfileAccumulator:
                 self.main_model = model[:256]
         elif phase == "result":
             self._windows(payload.get("context_windows"))
+        elif phase == "context_snapshot":
+            self._snapshot(payload.get("snapshot"), meta)
         elif phase == "compact_boundary":
             # Claude Code's own boundary, and pi's completed compaction (which
             # says ``completed`` alongside); either is a compaction that happened.
@@ -452,6 +459,26 @@ class ContextProfileAccumulator:
                     **_report_fields(payload.get("compaction")),
                 )
             )
+
+    def _snapshot(self, report: Any, meta: tuple[int, int | None, str | None]) -> None:
+        """Note a CLI context snapshot; its entries stay on the event."""
+        if not isinstance(report, Mapping) or len(self._snapshots) >= MAX_ATTEMPT_SNAPSHOTS:
+            return
+        status = str(report.get("status") or "")
+        window = _count(report.get("context_window")) or None
+        self._snapshots.append(
+            {
+                "seq": meta[0],
+                "event_id": meta[1],
+                "at": meta[2],
+                "source": str(report.get("source") or "")[:64],
+                "status": status[:32],
+                "total_tokens": _count(report.get("total_tokens")),
+                "context_window": window,
+            }
+        )
+        if status in {"ok", "partial"} and window:
+            self._snapshot_window = window
 
     # -- raw protocol rows ---------------------------------------------------
 
@@ -620,6 +647,7 @@ class ContextProfileAccumulator:
                 "truncated": self.truncated,
             },
             "unparsed_raw": self.unparsed_raw,
+            "snapshots": self._snapshots,
             "summary": {
                 "main_requests": len(requests),
                 "subagent_requests": self.subagent_requests,
@@ -638,7 +666,8 @@ class ContextProfileAccumulator:
             return self.windows[self.main_model]
         if len(self.windows) == 1:
             return next(iter(self.windows.values()))
-        return None
+        # A CLI snapshot's window (pi reports its model's) when nothing else did.
+        return self._snapshot_window if not self.windows else None
 
 
 def _bounded(requests: list[_Request]) -> tuple[list[_Request], int]:

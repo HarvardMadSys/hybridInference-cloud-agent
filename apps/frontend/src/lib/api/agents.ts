@@ -71,18 +71,24 @@ export {
 } from './agents/threads';
 
 export type {
-  ContextCategory,
+  CompositionCategoryApi,
+  CompositionEntryApi,
   ContextChangeApi,
   ContextCompactionApi,
-  ContextCompositionApi,
   ContextPointApi,
+  EventContentApi,
+  NativeSnapshotApi,
+  NativeSnapshotCategoryApi,
+  NativeSnapshotEntryApi,
+  ReconstructedCompositionApi,
+  RequestCompositionApi,
   ContextSupport,
   ContextTurnApi,
   RuntimeContextCapabilityApi,
   ThreadContextApi,
 } from './agents/context';
 
-export { getAgentThreadContext } from './agents/context';
+export { getAgentThreadContext, getEventContent, getRequestComposition } from './agents/context';
 
 export type {
   AgentThreadArchiveApi,

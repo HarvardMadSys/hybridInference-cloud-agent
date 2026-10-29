@@ -100,15 +100,17 @@ def test_pi_completed_compaction_is_a_compact_boundary_with_its_report():
         )
     )
     assert event.event_type == "lifecycle"
+    summary_text = event.payload.pop("summary_text")
     assert event.payload == {
         "phase": "compact_boundary",
         "compaction": {"trigger": "threshold", "pre_tokens": 120_500},
         "completed": True,
         "aborted": False,
         "will_retry": False,
+        "summary_chars": 20_000,
     }
-    # The summary text never reaches the stored event.
-    assert "x" * 100 not in json.dumps(event.payload)
+    # The summary the next request carries is kept, bounded.
+    assert summary_text == "x" * 4000
 
 
 def test_pi_aborted_compaction_is_a_diagnostic_not_a_boundary():

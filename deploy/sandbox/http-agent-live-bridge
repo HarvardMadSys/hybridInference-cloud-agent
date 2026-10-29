@@ -17,6 +17,7 @@ import base64
 import contextlib
 import json
 import os
+import re
 import secrets
 import signal
 import socket
@@ -96,6 +97,189 @@ def fork_payload(messages: Any, source_native_turn_no: int) -> dict[str, str]:
     if not isinstance(next_message_id, str) or not next_message_id:
         raise BridgeError("next native user message has no id")
     return {"messageID": next_message_id}
+
+
+#: Entries one context summary carries; the largest are kept.
+CONTEXT_MAX_ENTRIES = 300
+CONTEXT_PREVIEW_CHARS = 160
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]")
+_ASCII = re.compile(r"[\x00-\x7f]")
+#: What the servers put in place of a tool output they pruned from context.
+PRUNED_OUTPUT = "[Old tool result content cleared]"
+
+
+def carried_messages(messages: Any) -> list[dict[str, Any]]:
+    """The messages a request carries, as the pinned servers filter compacted history.
+
+    A port of ``filterCompacted`` (OpenCode 1.18.9 ``session/message-v2.ts``,
+    the same in Kilo 7.4.17), applied to the oldest-first list
+    ``GET /session/{id}/message`` returns.
+    """
+    if not isinstance(messages, list):
+        return []
+    newest_first = [m for m in reversed(messages) if isinstance(m, dict) and isinstance(m.get("info"), dict)]
+    result: list[dict[str, Any]] = []
+    completed: set[str] = set()
+    retain = None
+    for msg in newest_first:
+        info = msg["info"]
+        parts = [p for p in msg.get("parts") or [] if isinstance(p, dict)]
+        result.append(msg)
+        if retain:
+            if info.get("id") == retain:
+                break
+            continue
+        if info.get("role") == "user" and info.get("id") in completed:
+            part = next((p for p in parts if p.get("type") == "compaction"), None)
+            if part is None:
+                continue
+            if not part.get("tail_start_id"):
+                break
+            retain = part["tail_start_id"]
+            if info.get("id") == retain:
+                break
+            continue
+        if info.get("role") == "assistant" and info.get("summary") and info.get("finish") and not info.get("error"):
+            completed.add(str(info.get("parentID")))
+    result.reverse()
+
+    def has_tail_compaction(msg: dict[str, Any]) -> dict[str, Any] | None:
+        if msg["info"].get("role") != "user":
+            return None
+        return next(
+            (p for p in msg.get("parts") or [] if isinstance(p, dict) and p.get("type") == "compaction" and p.get("tail_start_id")),
+            None,
+        )
+
+    compaction_index = max((i for i, m in enumerate(result) if has_tail_compaction(m)), default=-1)
+    if compaction_index < 0:
+        return result
+    compaction = result[compaction_index]
+    part = has_tail_compaction(compaction) or {}
+    summary_index = next(
+        (
+            i
+            for i, m in enumerate(result)
+            if i > compaction_index
+            and m["info"].get("role") == "assistant"
+            and m["info"].get("summary")
+            and m["info"].get("parentID") == compaction["info"].get("id")
+        ),
+        -1,
+    )
+    tail_index = next((i for i, m in enumerate(result) if m["info"].get("id") == part.get("tail_start_id")), -1)
+    if 0 <= tail_index < compaction_index and summary_index > compaction_index:
+        return [
+            *result[compaction_index : summary_index + 1],
+            *result[tail_index:compaction_index],
+            *result[summary_index + 1 :],
+        ]
+    return result
+
+
+def _context_entry(category: str, label: Any, text: str, **extra: Any) -> dict[str, Any]:
+    cjk = len(_CJK.findall(text))
+    ascii_chars = len(_ASCII.findall(text))
+    preview = " ".join(text.split())[:CONTEXT_PREVIEW_CHARS]
+    entry = {
+        "category": category,
+        "label": str(label or "")[:200],
+        "chars": len(text),
+        "ascii": ascii_chars,
+        "cjk": cjk,
+        "other": max(0, len(text) - ascii_chars - cjk),
+        "preview": preview,
+    }
+    entry.update({key: value for key, value in extra.items() if value})
+    return entry
+
+
+def _part_entries(info: dict[str, Any], part: dict[str, Any]) -> list[dict[str, Any]]:
+    kind = part.get("type")
+    message_ref = {"message_id": str(info.get("id") or ""), "part_id": str(part.get("id") or "")}
+    if kind == "text":
+        text = str(part.get("text") or "")
+        if info.get("role") == "user":
+            category = "injected" if part.get("synthetic") else "user_messages"
+        else:
+            category = "compaction_summary" if info.get("summary") else "assistant"
+        return [_context_entry(category, info.get("role"), text, ref=message_ref, synthetic=part.get("synthetic") is True)]
+    if kind == "reasoning":
+        return [_context_entry("reasoning", "reasoning", str(part.get("text") or ""), ref=message_ref)]
+    if kind == "file":
+        return [_context_entry("user_messages", part.get("filename") or "file", f"[file {part.get('mime') or ''}]", ref=message_ref)]
+    if kind != "tool":
+        return []
+    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+    call_ref = {**message_ref, "tool_use_id": str(part.get("callID") or "")}
+    tool = part.get("tool") or "tool"
+    entries = [
+        _context_entry("tool_calls", tool, json.dumps(state.get("input"), ensure_ascii=False, default=str), ref=call_ref)
+    ]
+    timing = state.get("time") if isinstance(state.get("time"), dict) else {}
+    if state.get("status") in {"completed", "error"}:
+        if timing.get("compacted"):
+            entries.append(_context_entry("tool_results", tool, PRUNED_OUTPUT, ref=call_ref, pruned=True))
+        else:
+            output = str(state.get("output") or state.get("error") or "")
+            entries.append(_context_entry("tool_results", tool, output, ref=call_ref, is_error=state.get("status") == "error"))
+    return entries
+
+
+def _tool_entries(tools: Any) -> list[dict[str, Any]]:
+    entries = []
+    for tool in tools if isinstance(tools, list) else []:
+        if not isinstance(tool, dict):
+            continue
+        name = str(tool.get("id") or "")
+        if name == "invalid":
+            # Registered to absorb malformed calls, never offered to the model:
+            # ``activeTools`` filters it out (OpenCode 1.18.9 session/llm.ts).
+            continue
+        text = f"{tool.get('description') or ''}\n{json.dumps(tool.get('parameters'), ensure_ascii=False, default=str)}"
+        # The platform's relay names its tools session_<alias>__<tool>.
+        category = "mcp_tools" if name.startswith("session_") and "__" in name else "tool_definitions"
+        entries.append(_context_entry(category, name, text))
+    return entries
+
+
+def latest_model(messages: Any) -> tuple[str, str]:
+    """The provider and model of the newest assistant message."""
+    for msg in reversed(messages if isinstance(messages, list) else []):
+        info = msg.get("info") if isinstance(msg, dict) else None
+        if isinstance(info, dict) and info.get("role") == "assistant" and info.get("providerID") and info.get("modelID"):
+            return str(info["providerID"]), str(info["modelID"])
+    return "", ""
+
+
+def context_summary(messages: Any, tools: Any, *, provider: str = "") -> dict[str, Any]:
+    """What the session's next request would carry, as bounded entries.
+
+    Messages are filtered as the server filters compacted history; a tool
+    output the server pruned is listed as pruned, with the placeholder the
+    server sends instead. ``tools`` is ``None`` when the list could not be read.
+    """
+    all_messages = [m for m in messages if isinstance(m, dict)] if isinstance(messages, list) else []
+    carried = carried_messages(all_messages)
+    entries: list[dict[str, Any]] = []
+    for msg in carried:
+        info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+        for part in msg.get("parts") or []:
+            if isinstance(part, dict):
+                entries.extend(_part_entries(info, part))
+    entries.extend(_tool_entries(tools))
+    kept = sorted(entries, key=lambda e: -e["chars"])[:CONTEXT_MAX_ENTRIES]
+    return {
+        "messages": len(carried),
+        "provider": provider,
+        "tools_listed": tools is not None,
+        "entries": kept,
+        "entries_omitted": max(0, len(entries) - len(kept)),
+        "excluded": {
+            "compacted_messages": max(0, len(all_messages) - len(carried)),
+            "pruned_tool_outputs": sum(1 for e in entries if e.get("pruned")),
+        },
+    }
 
 
 class Bridge:
@@ -664,6 +848,32 @@ class Bridge:
             return
         if kind == "ping":
             self.emit({"bridge": "pong", "id": command_id, "session_id": self.session_id})
+            return
+        if kind == "context":
+            # Read-only and between turns only: what the next request carries.
+            with self._turn_lock:
+                if self._turn_id is not None:
+                    raise BridgeError("context is read between turns")
+            messages = self.request(
+                "GET",
+                f"/session/{urllib.parse.quote(str(self.session_id), safe='')}/message",
+            )
+            provider, model = latest_model(messages)
+            tools = None
+            if provider and model:
+                with contextlib.suppress(Exception):
+                    tools = self.request(
+                        "GET",
+                        "/experimental/tool?"
+                        + urllib.parse.urlencode({"provider": provider, "model": model}),
+                    )
+            self.emit(
+                {
+                    "bridge": "context_result",
+                    "id": command_id,
+                    "context": context_summary(messages, tools, provider=provider),
+                }
+            )
             return
         raise BridgeError(f"unknown command type: {kind!r}")
 

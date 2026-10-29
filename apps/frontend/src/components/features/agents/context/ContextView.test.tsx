@@ -6,7 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import {
   getAgentThreadContext,
+  getEventContent,
+  getRequestComposition,
   type ContextPointApi,
+  type RequestCompositionApi,
   type ThreadContextApi,
 } from '@/lib/api/agents';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
@@ -16,6 +19,8 @@ import { ContextView } from './ContextView';
 vi.mock('@/lib/api/agents', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/agents')>()),
   getAgentThreadContext: vi.fn(),
+  getRequestComposition: vi.fn(),
+  getEventContent: vi.fn(),
 }));
 
 function point(
@@ -64,6 +69,8 @@ function view(overrides: Partial<ThreadContextApi> = {}): ThreadContextApi {
         compaction_sizes: 'partly_reported',
         context_window: 'partly_reported',
         window_reported_turns: 0,
+        native_composition: 'partly_reported',
+        snapshot_turns: 1,
         live_occupancy: 'not_collected',
       },
     ],
@@ -150,14 +157,6 @@ function view(overrides: Partial<ThreadContextApi> = {}): ThreadContextApi {
         compaction_between: false,
       },
     ],
-    composition: {
-      basis: 'since_last_compaction',
-      chars_per_token: 4,
-      categories: { user: 0, assistant: 210, reasoning: 0, tool_calls: 0, tool_results: 0 },
-      estimated_tokens: 210,
-      truncated: true,
-      unattributed_tokens: 1_800,
-    },
     coverage: {
       turns: 2,
       attempts: 2,
@@ -189,8 +188,94 @@ async function fact(label: string): Promise<HTMLElement> {
   return name.parentElement!;
 }
 
+function composition(
+  eventId: number,
+  overrides: Partial<RequestCompositionApi> = {},
+): RequestCompositionApi {
+  const request = view().requests.find((p) => p.event_id === eventId)!;
+  return {
+    thread_id: 'athr_1',
+    request,
+    runtime: 'claude-code',
+    native: {
+      v: 1,
+      source: 'claude_get_context_usage',
+      status: 'ok',
+      token_basis: 'cli_meter',
+      total_tokens: 30_328,
+      context_window: 200_000,
+      categories: [
+        { key: 'system_prompt', tokens: 7284, exposed: true },
+        { key: 'tool_definitions', tokens: 20_151, exposed: true },
+        { key: 'tool_results', tokens: 28, exposed: true },
+      ],
+      entries: [
+        { category: 'instructions', label: '/state/claude/CLAUDE.md', tokens: 120, source: 'User' },
+      ],
+      entries_omitted: 0,
+    },
+    native_relation: { event_id: 900, requests_after: 0 },
+    native_status: 'ok',
+    reconstructed: {
+      basis: 'stored_events_transcript_order',
+      token_basis: 'chars_cjk_v1',
+      categories: [
+        { key: 'user_messages', entries: 1, chars: 8, tokens: 6, truncated_entries: 0 },
+        { key: 'tool_results', entries: 1, chars: 4000, tokens: 1000, truncated_entries: 1 },
+      ],
+      entries: [
+        {
+          category: 'tool_results',
+          label: 'Bash',
+          event_id: 777,
+          job_id: 'j2',
+          turn_no: 2,
+          chars: 4000,
+          tokens: 1000,
+          truncated: true,
+          preview: 'line line line',
+        },
+        {
+          category: 'user_messages',
+          label: 'prompt',
+          event_id: null,
+          job_id: 'j2',
+          turn_no: 2,
+          chars: 8,
+          tokens: 6,
+          preview: '继续 continue',
+          truncated: false,
+        },
+      ],
+      entries_total: 2,
+      entries_omitted: 0,
+      estimated_tokens: 1006,
+      boundary: {
+        job_id: 'j2',
+        turn_no: 2,
+        seq: 1,
+        event_id: 776,
+        source: 'cli_compact_boundary',
+        may_preserve_recent: true,
+      },
+      excluded: {
+        compacted: { entries: 6, chars: 900 },
+        superseded_attempts: { entries: 0, chars: 0 },
+        subagent: { entries: 1, chars: 10 },
+        this_request_output: { entries: 0, chars: 0 },
+      },
+      copied_turns: 0,
+      events_capped: false,
+    },
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.mocked(getAgentThreadContext).mockResolvedValue(view());
+  vi.mocked(getRequestComposition).mockImplementation(async (_job, eventId) =>
+    composition(eventId),
+  );
 });
 
 afterEach(() => {
@@ -268,15 +353,6 @@ describe('ContextView', () => {
     expect(screen.getAllByText('Request 2 · turn 1 · 60K').length).toBeGreaterThan(0);
   });
 
-  it('labels the composition an estimate and keeps what it cannot attribute apart', async () => {
-    show();
-    expect(
-      await screen.findByText(/Text stored since the last compaction, at 4 characters per token/),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Some stored previews were shortened/)).toBeInTheDocument();
-    expect(screen.getByText('Not attributable')).toBeInTheDocument();
-  });
-
   it('says what each runtime reports, and how much of it this conversation has', async () => {
     show();
     const table = (await screen.findByRole('heading', { name: 'What each agent reports' }))
@@ -298,7 +374,6 @@ describe('ContextView', () => {
         peak: null,
         largest_changes: [],
         compactions: [],
-        composition: null,
         coverage: { ...view().coverage, attempts_observed: 0, main_requests: 0, compactions: 0 },
       }),
     );
@@ -325,5 +400,111 @@ describe('ContextView', () => {
     show();
     expect(await screen.findByText('最近观测到的上下文')).toBeInTheDocument();
     expect(within(await fact('实时占用')).getByText('未采集')).toBeInTheDocument();
+  });
+
+  it('reads the composition of the selected request, the newest by default', async () => {
+    show();
+    expect(await screen.findByText('What this request carried')).toBeInTheDocument();
+    expect(getRequestComposition).toHaveBeenLastCalledWith('j2', 503, expect.anything());
+    const svg = screen.getByRole('img', { name: 'Input tokens of each model request' });
+    fireEvent.keyDown(svg, { key: 'Home' });
+    await vi.waitFor(() =>
+      expect(getRequestComposition).toHaveBeenLastCalledWith('j2', 500, expect.anything()),
+    );
+  });
+
+  it('keeps provider input, the CLI account and the reconstruction apart', async () => {
+    show();
+    expect(await screen.findByText(/Reported input: 2,010/)).toBeInTheDocument();
+    expect(screen.getByText(/not more content/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/right after this request and its reply\. Counted by the CLI\./),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('30.3K in context, per the CLI · of a 200K window'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('System prompt')).toBeInTheDocument();
+    expect(screen.getByText(/It is not the assembled request/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Starts after the compaction in turn 2\. Claude can keep/),
+    ).toBeInTheDocument();
+    expect(screen.getByText('6 items before the compaction')).toBeInTheDocument();
+    expect(screen.getByText('1 items in subagents’ own contexts')).toBeInTheDocument();
+    expect(screen.getByText('clipped')).toBeInTheDocument();
+  });
+
+  it('expands an item into its stored text and opens its step or turn', async () => {
+    vi.mocked(getEventContent).mockResolvedValue({
+      event_id: 777,
+      event_type: 'tool_result',
+      phase: null,
+      offset: 0,
+      text: '中文 output',
+      total_chars: 9,
+      truncated: true,
+      next_offset: null,
+    });
+    const { onOpenPoint, onOpenTurn } = show();
+    fireEvent.click(await screen.findByRole('button', { name: 'Show content' }));
+    expect(await screen.findByText('中文 output')).toBeInTheDocument();
+    expect(getEventContent).toHaveBeenCalledWith('j2', 777, 0);
+    expect(screen.getByText(/This is the clipped preview the platform stored/)).toBeInTheDocument();
+    const steps = screen.getAllByRole('button', { name: 'Open step' });
+    fireEvent.click(steps[steps.length - 1]);
+    expect(onOpenPoint).toHaveBeenLastCalledWith({ jobId: 'j2', turnNo: 2, eventId: 777 });
+    const turns = screen.getAllByRole('button', { name: 'Open turn' });
+    fireEvent.click(turns[turns.length - 1]);
+    expect(onOpenTurn).toHaveBeenLastCalledWith('j2', 2);
+  });
+
+  it('says why there is no CLI account, without inventing one', async () => {
+    vi.mocked(getRequestComposition).mockImplementation(async (_job, eventId) =>
+      composition(eventId, { native: null, native_relation: null, native_status: 'not_collected' }),
+    );
+    show();
+    expect(
+      await screen.findByText(/this run was recorded before snapshots were collected/),
+    ).toBeInTheDocument();
+    vi.mocked(getRequestComposition).mockImplementation(async (_job, eventId) =>
+      composition(eventId, {
+        runtime: 'codex',
+        native: null,
+        native_relation: null,
+        native_status: 'not_offered',
+      }),
+    );
+    cleanup();
+    show();
+    expect(
+      await screen.findByText(/codex offers no supported way to read its context/),
+    ).toBeInTheDocument();
+  });
+
+  it('marks what a CLI does not expose instead of a zero', async () => {
+    vi.mocked(getRequestComposition).mockImplementation(async (_job, eventId) =>
+      composition(eventId, {
+        runtime: 'pi',
+        native: {
+          v: 1,
+          source: 'pi_rpc',
+          status: 'partial',
+          token_basis: 'chars_cjk_v1',
+          total_tokens: 250_000,
+          categories: [{ key: 'system_prompt', tokens: null, exposed: false }],
+          entries: [],
+        },
+      }),
+    );
+    show();
+    expect(await screen.findByText('Not exposed by this CLI')).toBeInTheDocument();
+    expect(screen.getByText(/messages were too large to read safely/)).toBeInTheDocument();
+    expect(screen.getByText(/Sizes estimated from the text the CLI listed/)).toBeInTheDocument();
+  });
+
+  it('filters the reconstruction by category', async () => {
+    show();
+    fireEvent.click(await screen.findByRole('button', { name: /^Tool results ≈1,000 · 1$/ }));
+    expect(screen.queryByText('继续 continue')).not.toBeInTheDocument();
+    expect(screen.getByText('line line line')).toBeInTheDocument();
   });
 });

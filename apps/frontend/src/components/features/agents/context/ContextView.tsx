@@ -12,10 +12,10 @@ import { getAgentThreadContext, type ThreadContextApi } from '@/lib/api/agents';
 import { isActiveConversationState, isActiveJobState } from '../conversationJob';
 import type { AgentJob } from '../types';
 import { ContextGrowthChart } from './ContextGrowthChart';
+import { RequestComposition } from './RequestComposition';
 import {
   Capabilities,
   Compactions,
-  Composition,
   ContextSummary,
   LargestChanges,
   PointDetail,
@@ -122,13 +122,20 @@ export function ContextView({
           {point ? (
             <PointDetail point={point} onOpenPoint={onOpenPoint} onOpenTurn={onOpenTurn} />
           ) : null}
+          {point ? (
+            <RequestComposition
+              jobId={job.id}
+              point={point}
+              onOpenPoint={onOpenPoint}
+              onOpenTurn={onOpenTurn}
+            />
+          ) : null}
         </Section>
       ) : (
         <p className="mt-6 rounded-lg border border-border px-3 py-2 text-sm text-muted">
           {t('context.empty')}
         </p>
       )}
-      {view.composition ? <Composition composition={view.composition} /> : null}
       <Compactions compactions={view.compactions} nowMs={nowMs} onOpenPoint={onOpenPoint} />
       <LargestChanges changes={view.largest_changes} points={points} onSelect={setSelected} />
       <Turns turns={view.turns} onOpenTurn={onOpenTurn} />

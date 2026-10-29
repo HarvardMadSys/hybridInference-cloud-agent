@@ -34,6 +34,7 @@ from cloud_agent.context_insights import ContextInsightsCursor, context_cursor_s
 from cloud_agent.context_profile import CONTEXT_PROFILE_VERSION
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.usage_batches import owner_usage
+from cloud_agent_shared.text_tokens import estimate_text_tokens
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -413,3 +414,141 @@ async def test_all_sums_every_run_beyond_one_selections_bound(db, store, monkeyp
     assert all(c["peak_prompt_tokens"] is None for c in insights["conversations"])
     assert all(c["attempts_profiled"] == c["attempts"] == 1 for c in insights["conversations"])
     assert insights["profiling"]["complete"] is True
+
+
+async def _event_id(db, job_id: str, seq: int) -> int:
+    async with db.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT e.id FROM agent_job_events e JOIN agent_attempts a ON a.id = e.attempt_id"
+            " WHERE a.job_id = $1 AND e.seq = $2",
+            job_id,
+            seq,
+        )
+
+
+async def test_request_composition_reads_carried_content_and_the_snapshot(db, store):
+    [first, second] = await _thread(db, store, "athr_req", turns=2)
+    big = "def f():\n    return '中文'\n" * 400
+    await _events(
+        db,
+        first,
+        [
+            _claude("msg_1", 1000),
+            ("tool_use", {"name": "Read", "id": "toolu_1", "input": {"file_path": "a.py"}}),
+            ("tool_result", {"tool_use_id": "toolu_1", "content": big}),
+            _claude("msg_1b", 2000),
+        ],
+    )
+    await _events(
+        db,
+        second,
+        [
+            ("lifecycle", {"phase": "compact_boundary", "compaction": {"trigger": "auto"}}),
+            ("lifecycle", {"phase": "compaction_summary", "text": "摘要 summary", "chars": 10}),
+            _claude("msg_2", 5000),
+            ("message", {"text": "helper", "parent_tool_use_id": "toolu_x"}),
+            _claude("msg_3", 6000),
+            (
+                "lifecycle",
+                {
+                    "phase": "context_snapshot",
+                    "snapshot": {
+                        "v": 1,
+                        "source": "claude_get_context_usage",
+                        "status": "ok",
+                        "total_tokens": 6100,
+                        "categories": [{"key": "system_prompt", "tokens": 4000, "exposed": True}],
+                        "entries": [
+                            {"category": "instructions", "label": "/state/CLAUDE.md", "tokens": 30}
+                        ],
+                    },
+                },
+            ),
+        ],
+    )
+    [stranger] = await _thread(db, store, "athr_req_x", user_id=OTHER)
+    await _events(db, stranger, [_claude("msg_x", 1)])
+
+    request_event = await _event_id(db, second, 5)
+    composition = await store.context_queries.request_composition(
+        job_id=first, user_id=OWNER, event_id=request_event
+    )
+    assert composition is not None
+    rebuilt = composition.reconstructed
+    categories = {c.key: c for c in rebuilt.categories}
+    # Turn 1 and both prompts went in before the compaction.
+    assert rebuilt.excluded["compacted"].entries == 6
+    assert categories["compaction_summary"].tokens == 2 + 2  # 摘要 + " summary"
+    assert rebuilt.excluded["subagent"].entries == 1
+    # The request's own block (seq 5) is not its input; the earlier reply is.
+    assert categories["assistant"].entries == 1
+    assert composition.native is not None
+    assert composition.native["entries"][0]["label"] == "/state/CLAUDE.md"
+    assert (
+        composition.native_relation is not None and composition.native_relation.requests_after == 0
+    )
+
+    earlier = await store.context_queries.request_composition(
+        job_id=first, user_id=OWNER, event_id=await _event_id(db, first, 1)
+    )
+    assert earlier is not None
+    assert earlier.native is None and earlier.native_status == "not_collected"
+    assert [e.label for e in earlier.reconstructed.entries] == ["prompt"]
+
+    # The CJK-aware estimate is computed from Postgres's own counts.
+    middle = await store.context_queries.request_composition(
+        job_id=first, user_id=OWNER, event_id=await _event_id(db, second, 3)
+    )
+    assert middle is not None and middle.native_relation is not None
+    assert middle.native_relation.requests_after == 1
+    whole = await store.context_queries.request_composition(
+        job_id=first, user_id=OWNER, event_id=await _event_id(db, first, 4)
+    )
+    assert whole is not None
+    big_entry = next(e for e in whole.reconstructed.entries if e.category == "tool_results")
+    assert big_entry.chars == len(big)
+    assert big_entry.tokens == estimate_text_tokens(big)
+
+    # Stranger and wrong-conversation reads answer None.
+    assert (
+        await store.context_queries.request_composition(
+            job_id=stranger, user_id=OWNER, event_id=request_event
+        )
+        is None
+    )
+    assert (
+        await store.context_queries.request_composition(
+            job_id=first, user_id=OTHER, event_id=request_event
+        )
+        is None
+    )
+
+
+async def test_event_content_is_windowed_and_owner_scoped(db, store):
+    [job] = await _thread(db, store, "athr_content")
+    text = "中文行 line\n" * 5000
+    await _events(db, job, [("tool_result", {"tool_use_id": "t", "content": text})])
+    [stranger] = await _thread(db, store, "athr_content_x", user_id=OTHER)
+    event_id = await _event_id(db, job, 1)
+    first = await store.context_queries.event_content(
+        job_id=job, user_id=OWNER, event_id=event_id, offset=0, limit=1000
+    )
+    assert first is not None and first["total_chars"] == len(text)
+    assert first["text"] == text[:1000]
+    later = await store.context_queries.event_content(
+        job_id=job, user_id=OWNER, event_id=event_id, offset=1000, limit=1000
+    )
+    assert later is not None and later["text"] == text[1000:2000]
+    # Another owner, or the owner through another conversation, reads nothing.
+    assert (
+        await store.context_queries.event_content(
+            job_id=job, user_id=OTHER, event_id=event_id, offset=0, limit=10
+        )
+        is None
+    )
+    assert (
+        await store.context_queries.event_content(
+            job_id=stranger, user_id=OWNER, event_id=event_id, offset=0, limit=10
+        )
+        is None
+    )

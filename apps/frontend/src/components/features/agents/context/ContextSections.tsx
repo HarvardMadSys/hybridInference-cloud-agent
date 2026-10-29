@@ -4,7 +4,6 @@ import { useLocale } from '@/components/providers';
 import type {
   ContextChangeApi,
   ContextCompactionApi,
-  ContextCompositionApi,
   ContextPointApi,
   ContextSupport,
   ContextTurnApi,
@@ -17,19 +16,10 @@ import {
   formatShare,
   relativeTime,
 } from '@/components/features/settings/usagePresent';
-import { compositionSegments, signedTokens } from './contextPresent';
+import { signedTokens } from './contextPresent';
 
 export type OpenPoint = (target: { jobId: string; turnNo: number; eventId: number | null }) => void;
 export type OpenTurn = (jobId: string, turnNo: number) => void;
-
-const SEGMENT_COLOR: Record<string, string> = {
-  user: 'bg-sky-500/70',
-  assistant: 'bg-emerald-500/70',
-  reasoning: 'bg-violet-500/70',
-  tool_calls: 'bg-amber-500/70',
-  tool_results: 'bg-orange-600/70',
-  unattributed: 'bg-muted/40',
-};
 
 const TRIGGER: Record<string, TranslationKey> = {
   auto: 'context.trigger.auto',
@@ -197,54 +187,6 @@ export function PointDetail({
         </button>
       </div>
     </div>
-  );
-}
-
-export function Composition({ composition }: { composition: ContextCompositionApi }) {
-  const { t } = useLocale();
-  const segments = compositionSegments(composition);
-  return (
-    <Section title={t('context.composition')}>
-      <p className="mt-1 text-xs text-muted">
-        {t(
-          composition.basis === 'since_last_compaction'
-            ? 'context.composition.since'
-            : 'context.composition.whole',
-        )}
-        {composition.truncated ? ` ${t('context.composition.truncated')}` : ''}
-      </p>
-      <div
-        aria-hidden="true"
-        className="mt-2 flex h-3 overflow-hidden rounded-full bg-surface-muted"
-      >
-        {segments.map((segment) => (
-          <span
-            key={segment.key}
-            className={SEGMENT_COLOR[segment.key]}
-            style={{ width: `${segment.share * 100}%` }}
-          />
-        ))}
-      </div>
-      <ul className="mt-2 grid grid-cols-1 gap-x-4 gap-y-1 text-xs sm:grid-cols-2">
-        {segments.map((segment) => (
-          <li key={segment.key} className="flex items-center justify-between gap-2">
-            <span className="flex min-w-0 items-center gap-1.5 text-muted">
-              <span
-                aria-hidden="true"
-                className={`h-2 w-2 shrink-0 rounded-full ${SEGMENT_COLOR[segment.key]}`}
-              />
-              {t(`context.category.${segment.key}` as TranslationKey)}
-            </span>
-            <span className="tabular-nums text-foreground">
-              ≈{compactCount(segment.tokens)} · {formatShare(segment.share)}
-            </span>
-          </li>
-        ))}
-      </ul>
-      {composition.unattributed_tokens !== null ? (
-        <p className="mt-1 text-xs text-muted">{t('context.unattributedDetail')}</p>
-      ) : null}
-    </Section>
   );
 }
 
@@ -442,8 +384,30 @@ const CAPABILITY_ROWS: Array<
   ['context.cap.compactionEvents', (cap) => cap.compaction_events],
   ['context.cap.compactionSizes', (cap) => cap.compaction_sizes],
   ['context.cap.window', (cap) => cap.context_window],
+  ['context.cap.nativeComposition', (cap) => cap.native_composition],
   ['context.cap.live', (cap) => cap.live_occupancy],
 ];
+
+/** How many of a runtime's turns carry a fact it reports only sometimes. */
+function CapabilityCoverage({
+  label,
+  cap,
+}: {
+  label: TranslationKey;
+  cap: RuntimeContextCapabilityApi;
+}) {
+  const { t } = useLocale();
+  let text: string | null = null;
+  if (label === 'context.cap.window' && cap.context_window !== 'not_reported') {
+    text = t('context.windowCoverage', { count: cap.window_reported_turns, turns: cap.turns });
+  } else if (
+    label === 'context.cap.nativeComposition' &&
+    cap.native_composition !== 'not_reported'
+  ) {
+    text = t('context.snapshotCoverage', { count: cap.snapshot_turns, turns: cap.turns });
+  }
+  return text ? <span className="block text-muted">{text}</span> : null;
+}
 
 /** What each runtime of this conversation can report, and how much of it is here. */
 export function Capabilities({ view }: { view: ThreadContextApi }) {
@@ -496,14 +460,7 @@ export function Capabilities({ view }: { view: ThreadContextApi }) {
                 {view.capabilities.map((cap) => (
                   <td key={cap.runtime} className="py-1.5 pr-3 text-foreground">
                     {t(SUPPORT[read(cap)])}
-                    {label === 'context.cap.window' && cap.context_window !== 'not_reported' ? (
-                      <span className="block text-muted">
-                        {t('context.windowCoverage', {
-                          count: cap.window_reported_turns,
-                          turns: cap.turns,
-                        })}
-                      </span>
-                    ) : null}
+                    <CapabilityCoverage label={label} cap={cap} />
                   </td>
                 ))}
               </tr>

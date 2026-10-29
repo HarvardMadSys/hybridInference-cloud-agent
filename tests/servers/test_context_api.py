@@ -195,3 +195,44 @@ async def test_a_bad_insights_request_is_refused_before_any_read(app, params):
     response = await _get(app, "/v1/agent/usage/context", **params)
     assert response.status_code == 422
     app.state.queries.insights_page.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "path", ["jobs/j1/thread/context/requests/5", "jobs/j1/thread/context/content/5"]
+)
+async def test_request_reads_need_an_owner_and_answer_404_for_anything_not_theirs(app, path):
+    app.state.queries.request_composition.return_value = None
+    app.state.queries.event_content.return_value = None
+    assert (await _get(app, f"/v1/agent/{path}", owner=None)).status_code == 401
+    response = await _get(app, f"/v1/agent/{path}")
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "path", ["jobs/j1/thread/context/requests/0", "jobs/j1/thread/context/content/x"]
+)
+async def test_request_reads_refuse_a_bad_event_id(app, path):
+    assert (await _get(app, f"/v1/agent/{path}")).status_code == 422
+
+
+async def test_content_is_read_in_windows_for_its_owner(app):
+    app.state.queries.event_content.return_value = {
+        "id": 5,
+        "event_type": "tool_result",
+        "phase": None,
+        "total_chars": 50_000,
+        "text": "x" * 20_000,
+        "truncated": False,
+    }
+    response = await _get(app, "/v1/agent/jobs/j1/thread/context/content/5", offset=20_000)
+    assert response.status_code == 200
+    call = app.state.queries.event_content.await_args.kwargs
+    assert call == {
+        "job_id": "j1",
+        "user_id": "owner-1",
+        "event_id": 5,
+        "offset": 20_000,
+        "limit": 20_000,
+    }
+    assert response.json()["next_offset"] == 40_000
+    assert response.headers["cache-control"] == "no-store"

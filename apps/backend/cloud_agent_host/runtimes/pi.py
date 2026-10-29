@@ -518,7 +518,16 @@ def _compaction_event(event: dict[str, Any]) -> NormalizedEvent:
         "aborted": event.get("aborted") is True,
         "will_retry": event.get("willRetry") is True,
     }
+    summary = result.get("summary")
+    if completed and isinstance(summary, str) and summary:
+        # What the next request carries in place of the compacted history.
+        payload["summary_text"] = summary[:SUMMARY_TEXT_CHARS]
+        payload["summary_chars"] = len(summary)
     error = event.get("errorMessage")
     if isinstance(error, str) and error:
         payload["text"] = _truncate(error, 500)
     return NormalizedEvent(LIFECYCLE, payload)
+
+
+#: Characters of a compaction summary kept on its event.
+SUMMARY_TEXT_CHARS = 4000

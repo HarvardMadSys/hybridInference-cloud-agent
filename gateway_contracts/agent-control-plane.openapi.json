@@ -10035,6 +10035,154 @@
         "title": "CloudLabDefaults",
         "type": "object"
       },
+      "CompositionBoundary": {
+        "additionalProperties": false,
+        "description": "The last compaction the CLI reported before this request.",
+        "properties": {
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "may_preserve_recent": {
+            "default": false,
+            "title": "May Preserve Recent",
+            "type": "boolean"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "turn_no",
+          "seq",
+          "source"
+        ],
+        "title": "CompositionBoundary",
+        "type": "object"
+      },
+      "CompositionCategory": {
+        "additionalProperties": false,
+        "description": "One category's totals over every entry, not only the listed ones.",
+        "properties": {
+          "chars": {
+            "minimum": 0.0,
+            "title": "Chars",
+            "type": "integer"
+          },
+          "entries": {
+            "minimum": 0.0,
+            "title": "Entries",
+            "type": "integer"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "tokens": {
+            "minimum": 0.0,
+            "title": "Tokens",
+            "type": "integer"
+          },
+          "truncated_entries": {
+            "minimum": 0.0,
+            "title": "Truncated Entries",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "entries",
+          "chars",
+          "tokens",
+          "truncated_entries"
+        ],
+        "title": "CompositionCategory",
+        "type": "object"
+      },
+      "CompositionEntry": {
+        "additionalProperties": false,
+        "description": "One piece of stored content this request is reconstructed to carry.",
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "chars": {
+            "minimum": 0.0,
+            "title": "Chars",
+            "type": "integer"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "preview": {
+            "title": "Preview",
+            "type": "string"
+          },
+          "tokens": {
+            "minimum": 0.0,
+            "title": "Tokens",
+            "type": "integer"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "category",
+          "label",
+          "job_id",
+          "turn_no",
+          "chars",
+          "tokens",
+          "preview"
+        ],
+        "title": "CompositionEntry",
+        "type": "object"
+      },
       "ComputeOperationAction": {
         "additionalProperties": false,
         "description": "An explicit action whose current state is checked under the operation lock.",
@@ -10470,60 +10618,6 @@
           "source"
         ],
         "title": "ContextCompaction",
-        "type": "object"
-      },
-      "ContextComposition": {
-        "additionalProperties": false,
-        "description": "Stored content priced at four characters per token.\n\nAn estimate of what the conversation's own text weighs, never a reading of\nwhat the CLI put in its window: system prompts, tool schemas and anything\nthe CLI did not stream are invisible here, and clipped previews undercount.",
-        "properties": {
-          "basis": {
-            "enum": [
-              "since_last_compaction",
-              "whole_conversation"
-            ],
-            "title": "Basis",
-            "type": "string"
-          },
-          "categories": {
-            "additionalProperties": {
-              "type": "integer"
-            },
-            "title": "Categories",
-            "type": "object"
-          },
-          "chars_per_token": {
-            "default": 4,
-            "title": "Chars Per Token",
-            "type": "integer"
-          },
-          "estimated_tokens": {
-            "minimum": 0.0,
-            "title": "Estimated Tokens",
-            "type": "integer"
-          },
-          "truncated": {
-            "title": "Truncated",
-            "type": "boolean"
-          },
-          "unattributed_tokens": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Unattributed Tokens"
-          }
-        },
-        "required": [
-          "basis",
-          "categories",
-          "estimated_tokens",
-          "truncated"
-        ],
-        "title": "ContextComposition",
         "type": "object"
       },
       "ContextCoverage": {
@@ -12108,6 +12202,90 @@
           "command"
         ],
         "title": "EnvironmentAction",
+        "type": "object"
+      },
+      "EventContent": {
+        "additionalProperties": false,
+        "description": "A window of one stored content event's text.",
+        "properties": {
+          "event_id": {
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "event_type": {
+            "title": "Event Type",
+            "type": "string"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "offset": {
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "total_chars": {
+            "minimum": 0.0,
+            "title": "Total Chars",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "event_id",
+          "event_type",
+          "offset",
+          "text",
+          "total_chars",
+          "truncated"
+        ],
+        "title": "EventContent",
+        "type": "object"
+      },
+      "ExcludedContent": {
+        "additionalProperties": false,
+        "description": "Stored content counted out of this request, by reason.",
+        "properties": {
+          "chars": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Chars",
+            "type": "integer"
+          },
+          "entries": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Entries",
+            "type": "integer"
+          }
+        },
+        "title": "ExcludedContent",
         "type": "object"
       },
       "ExecutionProfile": {
@@ -16793,6 +16971,90 @@
         "title": "RebuildInput",
         "type": "object"
       },
+      "ReconstructedComposition": {
+        "additionalProperties": false,
+        "description": "Stored content selected for this request, in transcript order.",
+        "properties": {
+          "basis": {
+            "const": "stored_events_transcript_order",
+            "default": "stored_events_transcript_order",
+            "title": "Basis",
+            "type": "string"
+          },
+          "boundary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompositionBoundary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/CompositionCategory"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "copied_turns": {
+            "minimum": 0.0,
+            "title": "Copied Turns",
+            "type": "integer"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/CompositionEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "entries_omitted": {
+            "minimum": 0.0,
+            "title": "Entries Omitted",
+            "type": "integer"
+          },
+          "entries_total": {
+            "minimum": 0.0,
+            "title": "Entries Total",
+            "type": "integer"
+          },
+          "estimated_tokens": {
+            "minimum": 0.0,
+            "title": "Estimated Tokens",
+            "type": "integer"
+          },
+          "events_capped": {
+            "default": false,
+            "title": "Events Capped",
+            "type": "boolean"
+          },
+          "excluded": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ExcludedContent"
+            },
+            "title": "Excluded",
+            "type": "object"
+          },
+          "token_basis": {
+            "default": "chars_cjk_v1",
+            "title": "Token Basis",
+            "type": "string"
+          }
+        },
+        "required": [
+          "categories",
+          "entries",
+          "entries_total",
+          "entries_omitted",
+          "estimated_tokens",
+          "excluded",
+          "copied_turns"
+        ],
+        "title": "ReconstructedComposition",
+        "type": "object"
+      },
       "ReleaseHostDrainFenceRequest": {
         "description": "Release only the automated drain owned by this opaque token.",
         "properties": {
@@ -16965,6 +17227,67 @@
           }
         },
         "title": "RepoBranchesResponse",
+        "type": "object"
+      },
+      "RequestComposition": {
+        "additionalProperties": false,
+        "description": "Everything known about what one model request carried.",
+        "properties": {
+          "native": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Native"
+          },
+          "native_relation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotRelation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "native_status": {
+            "title": "Native Status",
+            "type": "string"
+          },
+          "reconstructed": {
+            "$ref": "#/components/schemas/ReconstructedComposition"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ContextPoint"
+          },
+          "runtime": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtime"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "request",
+          "native_status",
+          "reconstructed"
+        ],
+        "title": "RequestComposition",
         "type": "object"
       },
       "RequestRuntimeUpgradeRequest": {
@@ -17435,6 +17758,15 @@
             "title": "Live Occupancy",
             "type": "string"
           },
+          "native_composition": {
+            "enum": [
+              "reported",
+              "partly_reported",
+              "not_reported"
+            ],
+            "title": "Native Composition",
+            "type": "string"
+          },
           "request_usage": {
             "enum": [
               "reported",
@@ -17447,6 +17779,12 @@
           "runtime": {
             "title": "Runtime",
             "type": "string"
+          },
+          "snapshot_turns": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Snapshot Turns",
+            "type": "integer"
           },
           "subagent_split": {
             "enum": [
@@ -17476,7 +17814,8 @@
           "compaction_events",
           "compaction_sizes",
           "context_window",
-          "window_reported_turns"
+          "window_reported_turns",
+          "native_composition"
         ],
         "title": "RuntimeContextCapability",
         "type": "object"
@@ -19124,6 +19463,33 @@
         "title": "SkillView",
         "type": "object"
       },
+      "SnapshotRelation": {
+        "additionalProperties": false,
+        "description": "How the CLI's snapshot relates to this request.",
+        "properties": {
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "requests_after": {
+            "minimum": 0.0,
+            "title": "Requests After",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requests_after"
+        ],
+        "title": "SnapshotRelation",
+        "type": "object"
+      },
       "SourceControlAccount": {
         "description": "Public identity metadata for a connected provider account.",
         "properties": {
@@ -20387,16 +20753,6 @@
             },
             "title": "Compactions",
             "type": "array"
-          },
-          "composition": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ContextComposition"
-              },
-              {
-                "type": "null"
-              }
-            ]
           },
           "coverage": {
             "$ref": "#/components/schemas/ContextCoverage"
@@ -34632,6 +34988,156 @@
           }
         },
         "summary": "Get Thread Context",
+        "tags": [
+          "context"
+        ]
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/context/content/{event_id}": {
+      "get": {
+        "description": "A window of one stored content event of the caller's conversation.\n\nThe text is what the platform stored, already masked when it was recorded.",
+        "operationId": "get_event_content_v1_agent_jobs__job_id__thread_context_content__event_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "event_id",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Event Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 10000000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventContent"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Event Content",
+        "tags": [
+          "context"
+        ]
+      }
+    },
+    "/v1/agent/jobs/{job_id}/thread/context/requests/{event_id}": {
+      "get": {
+        "description": "What one request of the caller's conversation carried, labelled by kind.",
+        "operationId": "get_request_composition_v1_agent_jobs__job_id__thread_context_requests__event_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "event_id",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Event Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestComposition"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Request Composition",
         "tags": [
           "context"
         ]

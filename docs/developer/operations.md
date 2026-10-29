@@ -540,7 +540,7 @@ identity; stopped, completed, or replaced attempts cannot take a stale answer,
 and question answers are never queued as follow-up turns.
 
 Deploy the runner, Sandbox Manager and rebuilt sandbox image together. The
-`http-agent-live-bridge` helper pin is `4` (see
+`http-agent-live-bridge` helper pin is `5` (see
 [native conversation recall](context-recall.md)); helper `2` and earlier cannot
 execute native question replies, and anything older than the pin does not
 satisfy the turn-time attestation. Before starting a

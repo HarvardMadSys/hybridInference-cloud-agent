@@ -397,11 +397,6 @@ def test_view_orders_turns_marks_compaction_and_lists_changes():
     # The second turn reported no window: no share, never 0%.
     assert view.latest.window_share is None
     assert view.turns[0].context_window == 200_000
-    composition = view.composition
-    assert composition is not None and composition.basis == "since_last_compaction"
-    assert composition.categories["assistant"] == estimate_tokens(840)
-    assert composition.categories["user"] == 0  # the compacting turn's prompt went in before
-    assert composition.unattributed_tokens == 2_010 - composition.estimated_tokens
     claude = view.capabilities[0]
     assert claude.window_reported_turns == 1 and claude.live_occupancy == "not_collected"
 
@@ -428,8 +423,6 @@ def test_view_shares_only_a_reported_window_and_flags_a_later_compaction():
     assert view.latest is not None
     assert view.latest.window_share == 68_000 / 272_000
     assert view.latest.compacted_after is True
-    # The observation predates the compaction: nothing is attributed to it.
-    assert view.composition is not None and view.composition.unattributed_tokens is None
 
 
 def test_view_of_a_conversation_without_observations_is_honestly_empty():

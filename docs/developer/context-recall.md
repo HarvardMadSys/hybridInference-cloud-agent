@@ -89,8 +89,10 @@ settles the turn, and the next launch reaps the member's slot before it starts.
 A successful turn without a retry keeps the live process. This handling does
 not repair transcripts that the older behavior already damaged.
 
-The sandbox's `http-agent-live-bridge=4` helper pin is required by host
-attestation. Version 4 gates every turn on the current live SSE subscription,
+The sandbox's `http-agent-live-bridge=5` helper pin is required by host
+attestation. Version 5 adds a read-only `context` command, answered only
+between turns, that lists what the session's next request carries for the
+Context view. Version 4 gates every turn on the current live SSE subscription,
 and aborts an active native turn if that non-replayable stream is lost. It also
 extends autonomous permission replies for both OpenCode and Kilo to the Task
 child sessions the root turn explicitly reports, retries a failed one-shot

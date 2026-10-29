@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from cloud_agent.context_insights import ContextInsightsCursor, ContextSort
+    from cloud_agent.context_request import RequestComposition
 
 
 class ContextQueries(Protocol):
@@ -31,4 +32,16 @@ class ContextQueries(Protocol):
         pending_cap: int,
     ) -> dict[str, Any]:
         """One ranked page of the owner's conversations with runs in the range."""
+        ...
+
+    async def request_composition(
+        self, *, job_id: str, user_id: str, event_id: int
+    ) -> RequestComposition | None:
+        """What one request carried, in the caller's conversation holding ``job_id``."""
+        ...
+
+    async def event_content(
+        self, *, job_id: str, user_id: str, event_id: int, offset: int, limit: int
+    ) -> dict[str, Any] | None:
+        """A window of one stored content event's text, in the caller's conversation."""
         ...

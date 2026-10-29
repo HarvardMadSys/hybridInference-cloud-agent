@@ -18,9 +18,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.context_profile import (
-    CONTENT_CATEGORIES,
     POINT_FIELDS,
-    estimate_tokens,
     profile_is_current,
 )
 
@@ -53,6 +51,12 @@ class RuntimeContextCapability(BaseModel):
     context_window: Support
     #: Turns whose stored events reported a context window for the main model.
     window_reported_turns: int = Field(ge=0)
+    #: The CLI's own account of its context after a turn, with categories and
+    #: sources (system prompt, tools, instructions, messages): collected from
+    #: this release on where the runtime offers one.
+    native_composition: Support
+    #: Turns with such a snapshot.
+    snapshot_turns: int = Field(default=0, ge=0)
     #: No pinned CLI streams its live window occupancy.
     live_occupancy: Literal["not_collected"] = "not_collected"
 
@@ -160,26 +164,6 @@ class ContextChange(BaseModel):
     compaction_between: bool
 
 
-class ContextComposition(BaseModel):
-    """Stored content priced at four characters per token.
-
-    An estimate of what the conversation's own text weighs, never a reading of
-    what the CLI put in its window: system prompts, tool schemas and anything
-    the CLI did not stream are invisible here, and clipped previews undercount.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    basis: Literal["since_last_compaction", "whole_conversation"]
-    chars_per_token: int = 4
-    categories: dict[str, int]
-    estimated_tokens: int = Field(ge=0)
-    truncated: bool
-    #: Latest observed request minus the estimate, when the request is the
-    #: larger and comes after the content counted; otherwise None.
-    unattributed_tokens: int | None = None
-
-
 class ContextCoverage(BaseModel):
     """How much of the conversation the numbers above stand on."""
 
@@ -212,7 +196,6 @@ class ThreadContextView(BaseModel):
     requests: list[ContextPoint]
     compactions: list[ContextCompaction]
     largest_changes: list[ContextChange]
-    composition: ContextComposition | None = None
     coverage: ContextCoverage
 
 
@@ -226,6 +209,7 @@ _RUNTIME_SUPPORT: dict[str, dict[str, str]] = {
         "compaction_events": "reported",
         "compaction_sizes": "partly_reported",
         "context_window": "partly_reported",
+        "native_composition": "partly_reported",
     },
     "codex": {
         "request_usage": "reported",
@@ -233,13 +217,15 @@ _RUNTIME_SUPPORT: dict[str, dict[str, str]] = {
         "compaction_events": "reported",
         "compaction_sizes": "not_reported",
         "context_window": "reported",
+        "native_composition": "not_reported",
     },
     "pi": {
         "request_usage": "reported",
         "subagent_split": "not_applicable",
         "compaction_events": "reported",
         "compaction_sizes": "partly_reported",
-        "context_window": "not_reported",
+        "context_window": "partly_reported",
+        "native_composition": "partly_reported",
     },
     "opencode": {
         "request_usage": "reported",
@@ -247,6 +233,7 @@ _RUNTIME_SUPPORT: dict[str, dict[str, str]] = {
         "compaction_events": "reported",
         "compaction_sizes": "not_reported",
         "context_window": "not_reported",
+        "native_composition": "partly_reported",
     },
     "kilo": {
         "request_usage": "reported",
@@ -254,6 +241,7 @@ _RUNTIME_SUPPORT: dict[str, dict[str, str]] = {
         "compaction_events": "reported",
         "compaction_sizes": "not_reported",
         "context_window": "not_reported",
+        "native_composition": "partly_reported",
     },
 }
 _UNKNOWN_RUNTIME = {
@@ -262,16 +250,20 @@ _UNKNOWN_RUNTIME = {
     "compaction_events": "not_reported",
     "compaction_sizes": "not_reported",
     "context_window": "not_reported",
+    "native_composition": "not_reported",
 }
 
 
-def runtime_capability(runtime: str, *, turns: int, window_turns: int) -> RuntimeContextCapability:
-    """The fixed capability of a runtime, with how many turns reported a window."""
+def runtime_capability(
+    runtime: str, *, turns: int, window_turns: int, snapshot_turns: int = 0
+) -> RuntimeContextCapability:
+    """The fixed capability of a runtime, with how many turns reported each fact."""
     support = _RUNTIME_SUPPORT.get(runtime, _UNKNOWN_RUNTIME)
     return RuntimeContextCapability(
         runtime=runtime,
         turns=turns,
         window_reported_turns=window_turns,
+        snapshot_turns=snapshot_turns,
         **support,  # type: ignore[arg-type]
     )
 
@@ -300,12 +292,8 @@ class _Assembly:
             unparsed_raw=0,
         )
         self.peak: ContextPoint | None = None
-        self.content_total = dict.fromkeys(CONTENT_CATEGORIES, 0)
-        self.content_after: dict[str, int] | None = None
-        self.user_total = 0
-        self.user_after = 0
-        self.truncated = False
         self.window_turns: dict[str, int] = {}
+        self.snapshot_turns: dict[str, int] = {}
         self.last_compaction_index = -1
         self._pending_compaction = False
         self._awaiting_after: list[ContextCompaction] = []
@@ -324,13 +312,12 @@ class _Assembly:
             subagent_requests=0,
             compactions=0,
         )
-        prompt_chars = int(job.get("prompt_chars") or 0)
-        self.user_total += prompt_chars
-        self.user_after += prompt_chars
         for attempt in attempts:
             self._add_attempt(turn, attempt)
         if turn.context_window is not None and turn.runtime:
             self.window_turns[turn.runtime] = self.window_turns.get(turn.runtime, 0) + 1
+        if turn.runtime and any(_has_snapshot(attempt) for attempt in attempts):
+            self.snapshot_turns[turn.runtime] = self.snapshot_turns.get(turn.runtime, 0) + 1
         previous = next((t for t in reversed(self.turns) if t.last_prompt_tokens is not None), None)
         if previous is not None and turn.last_prompt_tokens is not None:
             turn.change_tokens = turn.last_prompt_tokens - (previous.last_prompt_tokens or 0)
@@ -353,7 +340,6 @@ class _Assembly:
         compactions = sorted(profile.get("compactions") or [], key=lambda c: int(c.get("seq") or 0))
         requests = [_point(raw) for raw in profile.get("requests") or []]
         self._merge(turn, attempt_id, requests, compactions)
-        self._content(profile.get("content") or {})
 
     def _merge(
         self,
@@ -427,20 +413,16 @@ class _Assembly:
         turn.compactions += 1
         self._pending_compaction = True
         self.last_compaction_index = len(self.points)
-        # The turn's own prompt went in before the compaction.
-        self.user_after = 0
 
-    def _content(self, content: Mapping[str, Any]) -> None:
-        total = content.get("total") or {}
-        after = content.get("after_compaction")
-        for category in CONTENT_CATEGORIES:
-            self.content_total[category] += int(total.get(category) or 0)
-        if isinstance(after, Mapping):
-            self.content_after = {c: int(after.get(c) or 0) for c in CONTENT_CATEGORIES}
-        elif self.content_after is not None:
-            for category in CONTENT_CATEGORIES:
-                self.content_after[category] += int(total.get(category) or 0)
-        self.truncated = self.truncated or bool(content.get("truncated"))
+
+def _has_snapshot(attempt: Mapping[str, Any]) -> bool:
+    profile = attempt.get("profile")
+    if not isinstance(profile, Mapping) or not profile_is_current(profile):
+        return False
+    return any(
+        isinstance(snapshot, Mapping) and snapshot.get("status") in {"ok", "partial"}
+        for snapshot in profile.get("snapshots") or []
+    )
 
 
 def _largest_changes(points: Sequence[ContextPoint]) -> list[ContextChange]:
@@ -458,35 +440,6 @@ def _largest_changes(points: Sequence[ContextPoint]) -> list[ContextChange]:
     growth = sorted((c for c in changes if c.delta_tokens > 0), key=lambda c: -c.delta_tokens)
     drops = sorted((c for c in changes if c.delta_tokens < 0), key=lambda c: c.delta_tokens)
     return [*growth[:LARGEST_CHANGES], *drops[:LARGEST_CHANGES]]
-
-
-def _composition(assembly: _Assembly, latest: ContextPoint | None) -> ContextComposition | None:
-    since_compaction = bool(assembly.compactions)
-    content = (
-        assembly.content_after
-        if since_compaction and assembly.content_after is not None
-        else assembly.content_total
-    )
-    user = assembly.user_after if since_compaction else assembly.user_total
-    categories = {"user": estimate_tokens(user)}
-    categories.update({c: estimate_tokens(content[c]) for c in CONTENT_CATEGORIES})
-    estimated = sum(categories.values())
-    if estimated == 0 and latest is None:
-        return None
-    unattributed = None
-    if (
-        latest is not None
-        and latest.prompt_tokens > estimated
-        and not (since_compaction and latest.index < assembly.last_compaction_index)
-    ):
-        unattributed = latest.prompt_tokens - estimated
-    return ContextComposition(
-        basis="since_last_compaction" if since_compaction else "whole_conversation",
-        categories=categories,
-        estimated_tokens=estimated,
-        truncated=assembly.truncated,
-        unattributed_tokens=unattributed,
-    )
 
 
 def assemble_thread_context(
@@ -531,7 +484,12 @@ def assemble_thread_context(
         thread_id=thread_id,
         generated_at=generated_at,
         capabilities=[
-            runtime_capability(name, turns=count, window_turns=assembly.window_turns.get(name, 0))
+            runtime_capability(
+                name,
+                turns=count,
+                window_turns=assembly.window_turns.get(name, 0),
+                snapshot_turns=assembly.snapshot_turns.get(name, 0),
+            )
             for name, count in runtimes.items()
         ],
         latest=latest,
@@ -540,6 +498,5 @@ def assemble_thread_context(
         requests=points[omitted_here:],
         compactions=assembly.compactions,
         largest_changes=_largest_changes(points),
-        composition=_composition(assembly, latest_point),
         coverage=coverage,
     )

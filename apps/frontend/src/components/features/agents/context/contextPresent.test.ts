@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import type { ContextPointApi, ContextTurnApi } from '@/lib/api/agents';
 import {
   chartScale,
-  compositionSegments,
   contextBar,
   contextHref,
   opensContext,
@@ -101,30 +100,5 @@ describe('contextPresent', () => {
       [1, 1],
       [3, 2],
     ]);
-  });
-
-  it('adds the unattributed part only when the server could attribute it', () => {
-    const segments = compositionSegments({
-      basis: 'whole_conversation',
-      chars_per_token: 4,
-      categories: { user: 100, assistant: 300, tool_results: 0 },
-      estimated_tokens: 400,
-      truncated: false,
-      unattributed_tokens: 600,
-    });
-    expect(segments.map((segment) => [segment.key, segment.share])).toEqual([
-      ['user', 0.1],
-      ['assistant', 0.3],
-      ['unattributed', 0.6],
-    ]);
-    const unknown = compositionSegments({
-      basis: 'since_last_compaction',
-      chars_per_token: 4,
-      categories: { user: 100, assistant: 100 },
-      estimated_tokens: 200,
-      truncated: true,
-      unattributed_tokens: null,
-    });
-    expect(unknown.map((segment) => segment.key)).toEqual(['user', 'assistant']);
   });
 });
