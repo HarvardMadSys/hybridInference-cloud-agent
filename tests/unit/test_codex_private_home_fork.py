@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_shared_session_supervisor import (
+from tests.unit.test_shared_session_supervisor import (
     _assert_private,
     _launch,
     _LocalMemberShell,
@@ -23,56 +23,64 @@ from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.resident_transport import ResidentTransportFactory
 
 
-def test_codex_fork_rebases_indexed_rollouts_into_the_child_home(tmp_path: Path):
-    runtime_id = "codex"
+def _indexed_home(home: Path, rows: dict[str, str]) -> None:
+    """Write the Codex session index a CLI leaves beside its rollout files."""
+    index = sqlite3.connect(home / "state_5.sqlite")
+    index.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)")
+    index.executemany("INSERT INTO threads (id, rollout_path) VALUES (?, ?)", sorted(rows.items()))
+    index.commit()
+    index.close()
+
+
+def _paths(home: Path) -> dict[str, str]:
+    index = sqlite3.connect(f"file:{home / 'state_5.sqlite'}?mode=ro", uri=True)
+    try:
+        return dict(index.execute("SELECT id, rollout_path FROM threads"))
+    finally:
+        index.close()
+
+
+def test_codex_fork_reroots_sibling_rollouts_into_the_child_home(tmp_path: Path):
     _private_state_root(tmp_path)
     manager = _LocalMemberShell(tmp_path)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     source_launch = replace(
-        _launch("athr_source", native_session_id="native-source", slot=0), runtime_id=runtime_id
+        _launch("athr_source", native_session_id="native-source", slot=0), runtime_id="codex"
     )
     target_launch = replace(
-        _launch("athr_child", native_session_id=None, slot=2), runtime_id=runtime_id
+        _launch("athr_child", native_session_id=None, slot=2), runtime_id="codex"
     )
     source_home = factory._member_state_dir(source_launch)
     factory._prepare_member_state(_spec(), source_launch, source_home)
     source = manager.local(source_home)
+    child_home = manager.local(factory._member_state_dir(target_launch))
     (source / "sessions").mkdir()
     (source / "sessions/rollout.jsonl").write_text('{"id":"native-source"}\n')
-    if runtime_id == "codex":
-        index = sqlite3.connect(source / "state_5.sqlite")
-        index.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)")
-        index.executemany(
-            "INSERT INTO threads (id, rollout_path) VALUES (?, ?)",
-            [
-                ("native-source", str(source / "sessions/rollout.jsonl")),
-                ("codex fork child", str(source / "sessions/child-rollout.jsonl")),
-                ("unrelated", "/outside/source/home/rollout.jsonl"),
-                ("prefix collision", str(source) + "-sibling/rollout.jsonl"),
-                (
-                    "already target-rooted",
-                    str(
-                        manager.local(factory._member_state_dir(target_launch))
-                        / "sessions/target.jsonl"
-                    ),
-                ),
-            ],
-        )
-        index.commit()
-        index.close()
-        (source / "sessions/child-rollout.jsonl").write_text("child\n")
-        (source / "state_5.sqlite").chmod(0o600)
-        source_index_before = (source / "state_5.sqlite").read_bytes()
+    _indexed_home(
+        source,
+        {
+            "native-source": str(source / "sessions/rollout.jsonl"),
+            "codex fork child": str(source / "sessions/child-rollout.jsonl"),
+            # Neither of these is another member's home: one is outside the
+            # collection, the other merely shares the prefix.
+            "unrelated": "/outside/source/home/rollout.jsonl",
+            "prefix collision": str(source) + "-sibling/rollout.jsonl",
+            "already target-rooted": str(child_home / "sessions/target.jsonl"),
+        },
+    )
+    (source / "sessions/child-rollout.jsonl").write_text("child\n")
+    (source / "state_5.sqlite").chmod(0o600)
+    source_index_before = (source / "state_5.sqlite").read_bytes()
     (source / ".hidden").write_text("dotfile")
     (source / "tmp").mkdir(exist_ok=True)
     (source / "tmp/scratch").write_text("never copied")
-    (source / f"{runtime_id}/state/{runtime_id}/locks").mkdir(parents=True)
-    (source / f"{runtime_id}/state/{runtime_id}/locks/server.lock").write_text("pid")
+    (source / "codex/state/codex/locks").mkdir(parents=True)
+    (source / "codex/state/codex/locks/server.lock").write_text("pid")
     manager.calls.clear()
 
     factory._clone_private_member_state(_spec(), source_launch, target_launch)
 
-    child = manager.local(factory._member_state_dir(target_launch))
+    child = child_home
     _assert_private(child)
     # The CLI's own files keep its umask; the closed home is what protects them.
     assert stat.S_IMODE(source.stat().st_mode) == 0o700
@@ -84,17 +92,12 @@ def test_codex_fork_rebases_indexed_rollouts_into_the_child_home(tmp_path: Path)
     )
     assert (child / "sessions/rollout.jsonl").read_text() == '{"id":"native-source"}\n'
     assert (source / "state_5.sqlite").read_bytes() == source_index_before
-    child_index = sqlite3.connect(f"file:{child / 'state_5.sqlite'}?mode=ro", uri=True)
-    paths = dict(child_index.execute("SELECT id, rollout_path FROM threads"))
-    assert child_index.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-    child_index.close()
+    paths = _paths(child)
     assert paths["native-source"] == str(child / "sessions/rollout.jsonl")
     assert paths["codex fork child"] == str(child / "sessions/child-rollout.jsonl")
     assert paths["unrelated"] == "/outside/source/home/rollout.jsonl"
     assert paths["prefix collision"] == str(source) + "-sibling/rollout.jsonl"
-    assert paths["already target-rooted"] == str(
-        manager.local(factory._member_state_dir(target_launch)) / "sessions/target.jsonl"
-    )
+    assert paths["already target-rooted"] == str(child / "sessions/target.jsonl")
     assert Path(paths["native-source"]).read_text() == '{"id":"native-source"}\n'
     assert Path(paths["codex fork child"]).read_text() == "child\n"
     Path(paths["codex fork child"]).write_text("child changed\n")
@@ -102,9 +105,109 @@ def test_codex_fork_rebases_indexed_rollouts_into_the_child_home(tmp_path: Path)
     assert (child / ".hidden").read_text() == "dotfile"
     assert list((child / "tmp").iterdir()) == []
     assert (child / ".freeinference-member-state-v1").exists()
-    locks = child / f"{runtime_id}/state/{runtime_id}/locks"
-    assert locks.exists() is (runtime_id == "codex")
+    # Codex keeps its project locks: unlike the HTTP runtimes, the CLI is the
+    # only process in this home, so a lock naming a dead PID is not a conflict.
+    assert (child / "codex/state/codex/locks").exists()
     assert (source / "tmp/scratch").exists(), "the source home is read, never changed"
+
+
+def test_codex_start_repairs_a_home_forked_by_an_earlier_release(tmp_path: Path):
+    """A child copied before this fix is repaired the next time it starts."""
+    _private_state_root(tmp_path)
+    manager = _LocalMemberShell(tmp_path)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    sibling_launch = replace(
+        _launch("athr_sibling", native_session_id="native-sibling", slot=0), runtime_id="codex"
+    )
+    launch = replace(
+        _launch("athr_child", native_session_id="native-child", slot=2), runtime_id="codex"
+    )
+    sibling_home = manager.local(factory._member_state_dir(sibling_launch))
+    home_dir = factory._member_state_dir(launch)
+    home = manager.local(home_dir)
+    (home / "sessions").mkdir(parents=True)
+    (home / "sessions/rollout.jsonl").write_text("rollout\n")
+    # Exactly what the closed copy left behind: rows still rooted in the sibling.
+    _indexed_home(
+        home,
+        {
+            "native-child": str(sibling_home / "sessions/rollout.jsonl"),
+            "kept": "/outside/home/rollout.jsonl",
+        },
+    )
+
+    factory._prepare_member_state(_spec(), launch, home_dir)
+    assert _paths(home)["native-child"] == str(home / "sessions/rollout.jsonl")
+    assert _paths(home)["kept"] == "/outside/home/rollout.jsonl"
+
+    # Starting again is a no-op, and "no-op" must not mean "rewritten twice".
+    factory._prepare_member_state(_spec(), launch, home_dir)
+    assert _paths(home)["native-child"] == str(home / "sessions/rollout.jsonl")
+
+
+@pytest.mark.parametrize(
+    "damage",
+    ["no index", "no threads table", "no sibling rows"],
+)
+def test_codex_rebase_leaves_a_home_with_nothing_to_rebase_alone(tmp_path: Path, damage: str):
+    """An index the CLI has not written yet is not a fork failure."""
+    _private_state_root(tmp_path)
+    manager = _LocalMemberShell(tmp_path)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    sibling_launch = replace(
+        _launch("athr_sibling", native_session_id="native-sibling", slot=0), runtime_id="codex"
+    )
+    launch = replace(
+        _launch("athr_child", native_session_id="native-child", slot=2), runtime_id="codex"
+    )
+    factory._prepare_member_state(
+        _spec(), sibling_launch, factory._member_state_dir(sibling_launch)
+    )
+    home = manager.local(factory._member_state_dir(launch))
+    home.mkdir(parents=True)
+    index = home / "state_5.sqlite"
+    if damage == "no threads table":
+        connection = sqlite3.connect(index)
+        connection.execute("CREATE TABLE other (x)")
+        connection.commit()
+        connection.close()
+    elif damage == "no sibling rows":
+        _indexed_home(home, {"own": "/outside/home/rollout.jsonl"})
+
+    factory._prepare_member_state(_spec(), launch, factory._member_state_dir(launch))
+
+    if damage == "no index":
+        assert not index.exists()
+    else:
+        # Whatever was there is what is still there, unchanged.
+        assert index.exists()
+
+
+def test_codex_rebase_leaves_an_index_it_cannot_read_to_the_cli(tmp_path: Path):
+    """The index is the CLI's own file; a copy it cannot parse is its report to make.
+
+    Refusing here would wedge every start of the member over state the CLI is
+    about to read and complain about far more precisely.
+    """
+    _private_state_root(tmp_path)
+    manager = _LocalMemberShell(tmp_path)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    sibling_launch = replace(
+        _launch("athr_sibling", native_session_id="native-sibling", slot=0), runtime_id="codex"
+    )
+    launch = replace(
+        _launch("athr_child", native_session_id="native-child", slot=2), runtime_id="codex"
+    )
+    factory._prepare_member_state(
+        _spec(), sibling_launch, factory._member_state_dir(sibling_launch)
+    )
+    home = manager.local(factory._member_state_dir(launch))
+    home.mkdir(parents=True)
+    (home / "state_5.sqlite").write_bytes(b"not a database")
+
+    factory._prepare_member_state(_spec(), launch, factory._member_state_dir(launch))
+
+    assert (home / "state_5.sqlite").read_bytes() == b"not a database"
 
 
 def test_codex_rollout_rebase_failure_rolls_back_target_index(tmp_path: Path):
@@ -141,12 +244,49 @@ def test_codex_rollout_rebase_failure_rolls_back_target_index(tmp_path: Path):
         factory._clone_private_member_state(_spec(), source_launch, target_launch)
 
     assert index_path.read_bytes() == index_before
-    child_db = manager.local(factory._member_state_dir(target_launch)) / "state_5.sqlite"
-    child_index = sqlite3.connect(child_db)
-    paths = dict(child_index.execute("SELECT id, rollout_path FROM threads"))
-    child_index.close()
-    assert paths == {"first": str(rollout), "second": str(rollout)}
+    assert _paths(manager.local(factory._member_state_dir(target_launch))) == {
+        "first": str(rollout),
+        "second": str(rollout),
+    }
     assert rollout.read_text() == "source rollout\n"
+
+
+def test_codex_rebase_refuses_a_sibling_rewrite_it_cannot_trust(tmp_path: Path):
+    """The index is the CLI's file: a trigger can undo the rewrite behind it."""
+    _private_state_root(tmp_path)
+    manager = _LocalMemberShell(tmp_path)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    source_launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0), runtime_id="codex"
+    )
+    target_launch = replace(
+        _launch("athr_child", native_session_id=None, slot=2), runtime_id="codex"
+    )
+    source_dir = manager.local(factory._member_state_dir(source_launch))
+    factory._prepare_member_state(_spec(), source_launch, factory._member_state_dir(source_launch))
+    (source_dir / "sessions").mkdir()
+    (source_dir / "sessions/rollout.jsonl").write_text("source rollout\n")
+    index = sqlite3.connect(source_dir / "state_5.sqlite")
+    index.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)")
+    index.execute(
+        "INSERT INTO threads (id, rollout_path) VALUES (?, ?)",
+        ("native-source", str(source_dir / "sessions/rollout.jsonl")),
+    )
+    index.execute(
+        "CREATE TRIGGER undo_rebase AFTER UPDATE OF rollout_path ON threads "
+        "BEGIN UPDATE threads SET rollout_path = '/agent-state/codex-homes/elsewhere/x.jsonl' "
+        "WHERE id = NEW.id; END"
+    )
+    index.commit()
+    index.close()
+    index_before = (source_dir / "state_5.sqlite").read_bytes()
+
+    with pytest.raises(DriverError, match="state could not be materialized"):
+        factory._clone_private_member_state(_spec(), source_launch, target_launch)
+
+    assert (source_dir / "state_5.sqlite").read_bytes() == index_before
+    child = manager.local(factory._member_state_dir(target_launch))
+    assert _paths(child) == {"native-source": str(source_dir / "sessions/rollout.jsonl")}
 
 
 def test_codex_rollout_rebase_rejects_parent_traversal(tmp_path: Path):
@@ -159,30 +299,52 @@ def test_codex_rollout_rebase_rejects_parent_traversal(tmp_path: Path):
     target_launch = replace(
         _launch("athr_child", native_session_id=None, slot=2), runtime_id="codex"
     )
-    factory._prepare_member_state(_spec(), source_launch, factory._member_state_dir(source_launch))
-    source = manager.local(factory._member_state_dir(source_launch))
+    source_home = factory._member_state_dir(source_launch)
+    factory._prepare_member_state(_spec(), source_launch, source_home)
+    source = manager.local(source_home)
     (source / "sessions").mkdir()
     (source / "sessions/rollout.jsonl").write_text("source rollout\n")
-    escaped = str(source / "../outside/rollout.jsonl")
-    index_path = source / "state_5.sqlite"
-    index = sqlite3.connect(index_path)
-    index.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)")
-    index.execute("INSERT INTO threads (id, rollout_path) VALUES (?, ?)", ("escape", escaped))
-    index.commit()
-    index.close()
-    source_index_before = index_path.read_bytes()
+    escaped = f"{source}/../outside/rollout.jsonl"
+    _indexed_home(source, {"escape": escaped})
+    source_index_before = (source / "state_5.sqlite").read_bytes()
 
     with pytest.raises(DriverError, match="state could not be materialized"):
         factory._clone_private_member_state(_spec(), source_launch, target_launch)
 
-    assert index_path.read_bytes() == source_index_before
-    child_index = sqlite3.connect(
-        manager.local(factory._member_state_dir(target_launch)) / "state_5.sqlite"
+    assert (source / "state_5.sqlite").read_bytes() == source_index_before
+    assert _paths(manager.local(factory._member_state_dir(target_launch))) == {"escape": escaped}
+
+
+def test_codex_rollout_rebase_refuses_a_symlink_out_of_the_child_home(tmp_path: Path):
+    """A rollout directory that is a link to elsewhere is copied as a link.
+
+    The unpack writes whatever the source home held, so the child's index can
+    name a path that resolves outside its own home. Re-rooting that would hand
+    the child a file in someone else's tree; refusing leaves the copy as it is.
+    """
+    _private_state_root(tmp_path)
+    manager = _LocalMemberShell(tmp_path)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    source_launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0), runtime_id="codex"
     )
-    assert child_index.execute(
-        "SELECT rollout_path FROM threads WHERE id = 'escape'"
-    ).fetchone() == (escaped,)
-    child_index.close()
+    target_launch = replace(
+        _launch("athr_child", native_session_id=None, slot=2), runtime_id="codex"
+    )
+    source_home = factory._member_state_dir(source_launch)
+    factory._prepare_member_state(_spec(), source_launch, source_home)
+    source = manager.local(source_home)
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere/rollout.jsonl").write_text("kept\n")
+    (source / "sessions").symlink_to(tmp_path / "elsewhere")
+    _indexed_home(source, {"native-source": str(source / "sessions/rollout.jsonl")})
+    source_index_before = (source / "state_5.sqlite").read_bytes()
+
+    with pytest.raises(DriverError, match="state could not be materialized"):
+        factory._clone_private_member_state(_spec(), source_launch, target_launch)
+
+    assert (source / "state_5.sqlite").read_bytes() == source_index_before
+    assert (tmp_path / "elsewhere/rollout.jsonl").read_text() == "kept\n"
 
 
 def test_codex_rebase_failure_leaves_preparing_journal_for_idempotent_recovery(monkeypatch):

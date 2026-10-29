@@ -78,53 +78,90 @@ _LEGACY_MEMBER_STATE_ROOTS = dict(
     zip(("codex", "opencode", "kilo"), LEGACY_MEMBER_HOME_COLLECTIONS, strict=True)
 )
 
-# Codex stores absolute rollout paths in its private SQLite index. A private
-# fork copies that database and rollout files into a different member home, so
-# its paths must be rebased before the child app-server can resume a thread.
+#: Codex's private session index, beside the rollout files it names. It tracks
+#: the pinned Codex version (``SHARED_SANDBOX_RUNTIME_PINS``); the rebase below
+#: treats a different layout as nothing to do rather than a failure, so a
+#: future rename costs this repair, not every fork.
+_CODEX_STATE_INDEX = "state_5.sqlite"
+
+# Codex records each rollout's absolute path in its private session index. Every
+# member home holds its own copy of that index, so the paths a fork copied still
+# name the *source* member's home: the child can open neither the directory nor
+# the file, and cannot resume its own forked thread.
+#
+# The rule is about the collection, not about one fork: a rollout path rooted at
+# some *other* member home of this collection names a file this member's own copy
+# of the tree holds, under its own home. Re-rooting it at $target is therefore
+# both what a fork needs and what repairs a child forked by an earlier release --
+# so this runs on every Codex start as well as at fork time, and repeating it
+# changes nothing.
+#
+# The index is the CLI's own file, so this reads it as an unknown shape: an
+# absent index, a table it cannot query, or no path in another member's home all
+# mean there is nothing to do. Only a path that would end up outside $target is
+# refused, because that one would point this member at a sibling's state. Any
+# refusal rolls back, leaving the copy exactly as it was, so the caller's
+# PREPARING fork journal can be retried against it.
 _CODEX_REBASE_ROLLOUT_PATHS = r"""
-from pathlib import Path
+import re
 import sqlite3
 import sys
+from pathlib import Path
 
-target = Path(sys.argv[1]).resolve(strict=True)
-source = str(Path(sys.argv[2]).resolve(strict=True))
-prefix = source + "/"
-database = target / "state_5.sqlite"
-if database.is_symlink() or not database.is_file():
-    raise SystemExit("Codex fork state has no regular state_5.sqlite")
-connection = sqlite3.connect(database)
+target = Path(sys.argv[1])
+# Codex records the literal CODEX_HOME it was given, which need not be resolved
+# (a symlinked /agent-state would not be), so match literal prefixes here and
+# resolve only to decide whether a rebased path stays inside this home.
+home = str(target).rstrip("/")
+collection = str(target.parent).rstrip("/") + "/"
+# A member home is named by the hash of its thread, and every one of them lives
+# in this collection. Read the home out of the path itself rather than probing
+# the directory: the sibling a fork copied from may have been deleted since,
+# and the files it named are in this member's own copy either way.
+index = target / "__INDEX__"
+if index.is_symlink() or not index.is_file():
+    raise SystemExit(0)
+root = target.resolve(strict=True)
 try:
-    rows = connection.execute("SELECT id, rollout_path FROM threads").fetchall()
-    changed = 0
-    for thread_id, rollout_path in rows:
-        if isinstance(rollout_path, str) and rollout_path.startswith(prefix):
-            suffix = rollout_path[len(source):]
-            relative = Path(rollout_path).relative_to(source)
-            if not relative.parts or ".." in relative.parts:
-                raise SystemExit("Codex fork rollout path escaped its private home")
-            rebased = str(target) + suffix
-            try:
-                Path(rebased).resolve(strict=False).relative_to(target)
-            except ValueError:
-                raise SystemExit("Codex fork rollout path escaped its private home") from None
-            connection.execute(
-                "UPDATE threads SET rollout_path = ? WHERE id = ?",
-                (rebased, thread_id),
-            )
-            changed += 1
-    remaining = connection.execute(
-        "SELECT COUNT(*) FROM threads WHERE substr(rollout_path, 1, ?) = ?",
-        (len(prefix), prefix),
-    ).fetchone()[0]
-    if changed == 0 or remaining:
-        raise SystemExit("Codex fork rollout path rebase was incomplete")
+    connection = sqlite3.connect(index)
+except sqlite3.Error:
+    raise SystemExit(0) from None
+try:
+    try:
+        rows = connection.execute("SELECT id, rollout_path FROM threads").fetchall()
+    except sqlite3.Error:
+        # Not a shape this member's CLI owns: its own start reports it.
+        raise SystemExit(0) from None
+    rebased = {}
+    for thread_id, path in rows:
+        if not isinstance(path, str) or not path.startswith(collection):
+            continue
+        sibling, _, rest = path[len(collection):].partition("/")
+        if not re.fullmatch(r"[0-9a-f]{64}", sibling) or sibling == target.name:
+            continue
+        rebased[thread_id] = (home + "/" + rest, rest)
+    for thread_id, (path, suffix) in rebased.items():
+        relative = Path(suffix)
+        if not relative.parts or ".." in relative.parts:
+            raise SystemExit("Codex rollout path in another member home escaped this one")
+        if not Path(path).resolve(strict=False).is_relative_to(root):
+            raise SystemExit("Codex rollout path in another member home escaped this one")
+        connection.execute("UPDATE threads SET rollout_path = ? WHERE id = ?", (path, thread_id))
+    # The index carries whatever schema the CLI wrote, triggers included, so a
+    # row can be rewritten behind this update. Read every one back before the
+    # commit: a rebase that did not stick leaves the thread unable to resume.
+    for thread_id, (path, _suffix) in rebased.items():
+        stored = connection.execute(
+            "SELECT rollout_path FROM threads WHERE id = ?", (thread_id,)
+        ).fetchone()
+        if stored is None or stored[0] != path:
+            raise SystemExit("Codex rollout path rebase did not persist")
+    if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+        raise SystemExit("Codex session index failed integrity check")
     connection.commit()
-    check = connection.execute("PRAGMA integrity_check").fetchone()[0]
-    if check != "ok":
-        raise SystemExit("Codex fork index failed integrity check")
 finally:
     connection.close()
-"""
+""".replace("__INDEX__", _CODEX_STATE_INDEX)
 
 #: Exit status of a member script that found its collection untrusted. The
 #: caller secures the collections as the sandbox user and asks once more.
@@ -704,7 +741,13 @@ class ResidentTransportFactory:
         )
 
     def _codex_member_state_argv(self, launch: ResidentLaunch, state_dir: str) -> tuple[str, ...]:
-        """The member command that creates its Codex home from the image's bootstrap config."""
+        """The member command that creates its Codex home, and rebases its index.
+
+        The rebase also runs here, not only after a fork, so a home whose index
+        an earlier release copied from a sibling is repaired the next time its
+        member starts. It is idempotent: a home already rooted where it belongs
+        has nothing to rewrite.
+        """
         script = (
             'set -eu; source="$1"; target="$2"; legacy="$3"; trusted="$4"; '
             'marker="$target/.freeinference-member-state-v1"; '
@@ -714,7 +757,8 @@ class ResidentTransportFactory:
             '    cp -- "$source/config.toml" "$target/config.toml"; '
             "  fi; "
             '  mkdir -p -- "$target/tmp" "$target/.tmp"; : > "$marker"; '
-            "fi"
+            "fi; "
+            "python3 -I - \"$target\" <<'PY'\n" + _CODEX_REBASE_ROLLOUT_PATHS + "\nPY"
         )
         return (
             "/bin/sh",
@@ -755,14 +799,14 @@ class ResidentTransportFactory:
             'exec tar --create --file=- --files-from=/dev/null "$@"'
         )
         unpack = (
-            'set -eu; target="$1"; source="$2"; runtime="$3"; trusted="$4"; '
+            'set -eu; target="$1"; runtime="$2"; trusted="$3"; '
             + _NEW_PRIVATE_MEMBER_HOME_PROLOGUE
             + 'find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; '
             'tar --extract --file=- --directory="$target" --no-same-owner '
             "--no-same-permissions; "
             'mkdir -p -- "$target/tmp" "$target/.tmp"; '
             'if [ "$runtime" = codex ]; then '
-            'python3 - "$target" "$source" <<\'PY\'\n' + _CODEX_REBASE_ROLLOUT_PATHS + "\nPY\n"
+            "python3 -I - \"$target\" <<'PY'\n" + _CODEX_REBASE_ROLLOUT_PATHS + "\nPY\n"
             "fi; "
             'case "$runtime" in '
             '  opencode|kilo) rm -rf -- "$target/$runtime/state/$runtime/locks";; '
@@ -783,7 +827,6 @@ class ResidentTransportFactory:
                 unpack,
                 "sh",
                 target_dir,
-                source_dir,
                 runtime_id,
                 str(self._manager.backend.uid),
             ],

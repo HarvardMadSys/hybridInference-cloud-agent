@@ -558,33 +558,37 @@ def main() -> int:
             if turn.get("sandbox_id") != sandbox_id or turn.get("workspace_shared") is not True:
                 raise RuntimeError(f"{runtime} {side} escaped the shared sandbox")
 
-        print(f"  {runtime}: restored source accepts another live turn", flush=True)
-        source_live_turn = send_message(
-            client,
-            source_restored,
-            f"Continue the restored source {runtime} session after its native fork.",
-        )
-        source_live = wait_job(client, str(source_live_turn["id"]))
-        if source_live.get("context_status") != "live":
-            raise RuntimeError(
-                f"{runtime} subsequent source turn was not LIVE: "
-                f"{source_live.get('context_status')!r}"
+        print(f"  {runtime}: both fork sessions accept a HOT turn again", flush=True)
+        # A fork closes both CLIs to copy the private state, so their next turn
+        # resumes a native session in a fresh process: RESTORED, not LIVE. A
+        # second turn then reuses that process, which is where the HOT
+        # continuity this smoke claims is actually proved -- for the child as
+        # well as the source, since neither keeps its fork-time process.
+        resumed: dict[str, dict[str, Any]] = {}
+        for side, turn in (("source", source_restored), ("child", child_restored)):
+            hot_turn = send_message(
+                client,
+                turn,
+                f"Continue the restored {side} {runtime} session after its native fork.",
             )
-        if (
-            source_live.get("sandbox_id") != sandbox_id
-            or source_live.get("workspace_shared") is not True
-        ):
-            raise RuntimeError(f"{runtime} subsequent source turn escaped the shared sandbox")
+            hot = wait_job(client, str(hot_turn["id"]))
+            if hot.get("context_status") != "live":
+                raise RuntimeError(
+                    f"{runtime} subsequent {side} turn was not LIVE: {hot.get('context_status')!r}"
+                )
+            if hot.get("sandbox_id") != sandbox_id or hot.get("workspace_shared") is not True:
+                raise RuntimeError(f"{runtime} subsequent {side} turn escaped the shared sandbox")
+            resumed[side] = hot
         live_id, live_status, live_mounts = chat_container(sandbox_id)
         if live_id != source_container_id or live_status != "running" or live_mounts != "[]":
             raise RuntimeError(
-                f"{runtime} subsequent source turn replaced, stopped, or mounted the shared "
+                f"{runtime} subsequent turns replaced, stopped, or mounted the shared "
                 f"container: {live_id} {live_status} {live_mounts}"
             )
         stopped_id = wait_stopped(sandbox_id)
         if stopped_id != source_container_id:
             raise RuntimeError(f"{runtime} fork group idle stop replaced the shared container")
-        forked_sessions[runtime] = (child_restored, sandbox_id, source_container_id)
+        forked_sessions[runtime] = (resumed["child"], sandbox_id, source_container_id)
 
     print(
         "[7/7] Group idle stops once; waking either child restores that exact container", flush=True
@@ -614,10 +618,10 @@ def main() -> int:
 
     print(
         "PASS: OAuth + all five CLIs NEW → LIVE → docker stop → RESTORED; "
-        "all five native-fork source/child sessions stay LIVE in one workspace; "
-        "group stop → child RESTORED; snapshots publish; all containers keep mounts=[] "
-        "and unrelated groups use distinct guarded bridges that reach the relays and "
-        "the public web but not the stack",
+        "all five native forks resume both source and child, then serve each HOT "
+        "in one workspace; group stop → child RESTORED; snapshots publish; "
+        "all containers keep mounts=[] and unrelated groups use distinct guarded "
+        "bridges that reach the relays and the public web but not the stack",
         flush=True,
     )
     return 0

@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import os
 import pathlib
+import re
 import shutil
 import stat
 import subprocess
@@ -38,6 +39,13 @@ HOST = REPO / "apps/backend/cloud_agent_host"
 SANDBOX = REPO / "deploy/sandbox"
 REAPER = SANDBOX / "member-process-reaper"
 PI_WRAPPER = SANDBOX / "pi-freeinference"
+
+#: A ``python3`` in snippet text that runs something without ``-I``: an option
+#: other than ``-I`` (``-c``, ``-u``, or the bare ``-`` that reads a heredoc),
+#: a script path, or an absolute interpreter invocation. ``command -v python3``
+#: and ``python3 -I ...`` are not matches, so the guard reads the form rather
+#: than a list of the spellings someone remembered to forbid.
+_UNISOLATED_INTERPRETER = re.compile(r"""python3\s+(?:-(?!I\b)|["']?[^\s"']*\.py\b|/)""")
 
 
 def _interpreter_argv() -> list[tuple[str, list[object]]]:
@@ -84,14 +92,28 @@ def test_the_reaper_is_started_by_an_isolated_interpreter():
 
 
 def test_no_shell_snippet_starts_python_unisolated():
+    """Every ``python3`` a shell snippet runs carries ``-I``, whatever the form.
+
+    This is a search over snippet text, not a lookup of known spellings: a
+    snippet that runs Python from a heredoc (``python3 - "$x"``) is exactly as
+    unisolated as one that runs ``-c``, and a guard that lists the spellings it
+    knows lets that regression through.
+    """
     strings = [
-        node.value
+        (path.relative_to(REPO).as_posix(), node.lineno, node.value)
         for path in sorted(HOST.rglob("*.py"))
         for node in ast.walk(ast.parse(path.read_text(), str(path)))
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     ]
-    assert any("python3 -I -c" in value for value in strings)
-    assert [value[:60] for value in strings if "python3 -c" in value] == []
+    assert any("python3 -I -c" in value for _where, _line, value in strings)
+
+    unisolated = [
+        f"{where}:{line}: {match.group(0)!r} in {value[:60]!r}"
+        for where, line, value in strings
+        for match in [_UNISOLATED_INTERPRETER.search(value)]
+        if match is not None
+    ]
+    assert unisolated == []
 
 
 def test_every_python_script_the_sandbox_ships_names_an_isolated_interpreter():
