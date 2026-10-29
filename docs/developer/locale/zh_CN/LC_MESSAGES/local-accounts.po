@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 22:23+0800\n"
+"POT-Creation-Date: 2026-10-29 13:11-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -27,15 +27,23 @@ msgstr "本地账号与等候名单"
 msgid ""
 "Cloud Agent can run with its own accounts instead of HybridInference "
 "Gateway sign-in. Set `AGENT_AUTH_MODE=local` and people sign up with an "
-"email address and a password, verify the address, sign in, and apply for "
-"Agent use through a waiting list that administrators review. Gateway mode"
-" remains the default, and nothing in this page changes it."
+"email address and a password, or with a phone number and a code, verify "
+"the address, sign in, and apply for Agent use through a waiting list that"
+" administrators review. Local accounts have every account feature "
+"HybridInference has: login names, phone codes, several accounts in one "
+"browser, changing the password and the email, deleting the account, a "
+"sign-up policy, first-run setup, administrator mail and the rest (see the"
+" [feature parity table](../agents/specs/2026-10-29-account-feature-parity"
+".zh-CN.md)). Gateway mode remains the default, and nothing in this page "
+"changes it."
 msgstr ""
 "Cloud Agent 可以使用自己的账号体系，无需通过 HybridInference Gateway 登录。设置 "
-"`AGENT_AUTH_MODE=local` 后，用户使用邮箱和密码注册、验证邮箱并登录，再通过等候名单申请使用 "
-"Agent，由管理员审核。默认仍为网关模式，本文不会改变这一默认值。"
+"`AGENT_AUTH_MODE=local` 后，用户使用邮箱和密码、或手机号和验证码注册，验证邮箱并登录，再通过等候名单申请使用 "
+"Agent，由管理员审核。本地账号具备 HybridInference "
+"的全部账号功能：登录名、手机验证码、同一浏览器多账号、修改密码和邮箱、注销账号、注册策略、首次设置、管理员邮件等（见[功能对齐表](../agents/specs/2026-10-29"
+"-account-feature-parity.zh-CN.md)）。默认仍为网关模式，本文不会改变这一默认值。"
 
-#: ../developer/local-accounts.md:9
+#: ../developer/local-accounts.md:14
 msgid ""
 "The design is [independent accounts and waiting "
 "list](../agents/specs/2026-10-27-independent-accounts-and-waitlist-design"
@@ -44,7 +52,7 @@ msgstr ""
 "设计见[独立账号与 waiting list](../agents/specs/2026-10-27-independent-accounts-"
 "and-waitlist-design.zh-CN.md)。本文说明已实现的功能。"
 
-#: ../developer/local-accounts.md:13
+#: ../developer/local-accounts.md:18
 msgid "What local mode changes"
 msgstr "本地模式改变了什么"
 
@@ -84,7 +92,7 @@ msgstr "HS256 cookie `__Host-cloud_agent_session`，不可撤销"
 msgid "Server-side row, cookie `__Host-cloud_agent_local_session`, revocable"
 msgstr "在服务端保存记录，使用 cookie `__Host-cloud_agent_local_session`，可撤销"
 
-#: ../developer/local-accounts.md ../developer/local-accounts.md:120
+#: ../developer/local-accounts.md ../developer/local-accounts.md:171
 msgid "Identity and admission"
 msgstr "身份与准入"
 
@@ -132,7 +140,7 @@ msgstr "网关授权与模型目录，或所有者自己的模型连接"
 msgid "The owner's model connection only (see [Models](#models))"
 msgstr "仅使用所有者自己的模型连接（见[模型](#models)）"
 
-#: ../developer/local-accounts.md:24
+#: ../developer/local-accounts.md:29
 msgid ""
 "In local mode `app.state.gateway` is `LocalModeGateway` "
 "(`cloud_agent/accounts/directory.py`). It has the methods the Gateway "
@@ -147,11 +155,11 @@ msgstr ""
 "`LocalModeGateway`（`cloud_agent/accounts/directory.py`）。它提供与网关客户端相同的方法。身份与准入从本服务的数据库读取；仅网关支持的方法直接返回带类型的错误，不发起网络请求。因此，所有现有的所有者检查都会读取本地准入决定，包括请求准入、认领、目标轮次、等待消息、团队审批与所有权转移、值班服务账号、Profile"
 " 和团队成员名单。本地账号 ID 不会传到网关。"
 
-#: ../developer/local-accounts.md:33
+#: ../developer/local-accounts.md:38
 msgid "Enabling it"
 msgstr "启用本地模式"
 
-#: ../developer/local-accounts.md:35
+#: ../developer/local-accounts.md:40
 msgid ""
 "Local mode needs its own database. At startup it binds an empty database "
 "to local identity (`agent_local_identity_namespace`). It refuses a "
@@ -213,24 +221,6 @@ msgid ""
 msgstr "启用个人模型配置及新轮次。本地模式同样遵守这个显式发布开关；保持关闭不会启用共享推理。"
 
 #: ../developer/local-accounts.md
-msgid "`AGENT_LOCAL_SIGNUP_ENABLED`"
-msgstr "`AGENT_LOCAL_SIGNUP_ENABLED`"
-
-#: ../developer/local-accounts.md
-msgid "On by default. Set `false` to close public sign-up."
-msgstr "默认开启。设置为 `false` 可关闭公开注册。"
-
-#: ../developer/local-accounts.md
-msgid "`AGENT_SMTP_*`"
-msgstr "`AGENT_SMTP_*`"
-
-#: ../developer/local-accounts.md
-msgid ""
-"The mail relay. Without a host and a sender, sign-up is closed and "
-"recovery answers 503."
-msgstr "邮件中继。未配置主机或发件人时，注册关闭，账号恢复请求返回 503。"
-
-#: ../developer/local-accounts.md
 msgid "`AGENT_WEB_BASE_URL`"
 msgstr "`AGENT_WEB_BASE_URL`"
 
@@ -238,20 +228,44 @@ msgstr "`AGENT_WEB_BASE_URL`"
 msgid "The only base used for emailed links. A request's `Host` is never used."
 msgstr "邮件链接只使用这个基地址，不使用请求中的 `Host`。"
 
-#: ../developer/local-accounts.md:54
+#: ../developer/local-accounts.md:57
+msgid ""
+"Everything else is in **Admin → Settings → Accounts**, saved in the "
+"database and imported once from its environment variable (see "
+"[ENVIRONMENT.md](../../ENVIRONMENT.md)): public sign-up, whether a new "
+"email must be verified, the approval policy (`manual`, or `domains` with "
+"the signup domain list), administrator notices and their recipients, "
+"administrator email addresses promoted at sign-in, the Terms of Service "
+"link or text, the session lifetime, the sign-in and sign-up limits "
+"(including sign-ups whose client address cannot be told), the email "
+"transport (SMTP, Tencent SES or a registered one), phone sign-in and its "
+"Tencent SMS provider, and Turnstile. Secrets are encrypted and never "
+"shown again. Without mail, email sign-up is closed while verification is "
+"required, and recovery answers 503; with verification turned off, sign-up"
+" works without SMTP."
+msgstr ""
+"其余设置都在 **管理 → 设置 → 账号** 中，保存在数据库里，并从对应的环境变量导入一次（见 "
+"[ENVIRONMENT.md](../../ENVIRONMENT.md)）：公开注册、新邮箱是否必须验证、审批策略（`manual`，或配合注册域名名单的"
+" "
+"`domains`）、管理员通知及其收件人、登录时提升为管理员的管理员邮箱地址、服务条款链接或正文、会话有效期、登录和注册限制（包括无法识别客户端地址的注册）、邮件传输方式（SMTP、腾讯云"
+" SES 或已注册的传输方式）、手机登录及其腾讯云短信服务商，以及 "
+"Turnstile。密钥加密保存，保存后不再显示。没有邮件服务时，在要求验证的情况下邮箱注册关闭，账号恢复返回 503；关闭验证后，没有 SMTP"
+" 也能注册。"
+
+#: ../developer/local-accounts.md:70
 msgid ""
 "The web server must reach the same control plane "
 "(`AGENT_CONTROL_PLANE_URL`). The web app reads `GET /v1/auth/config` to "
-"choose its sign-in pages."
+"choose its sign-in pages and `GET /v1/auth/options` for what they offer."
 msgstr ""
 "Web 服务器必须能访问同一控制平面（`AGENT_CONTROL_PLANE_URL`）。Web 应用读取 `GET "
-"/v1/auth/config` 来选择登录页面。"
+"/v1/auth/config` 来选择登录页面，读取 `GET /v1/auth/options` 了解这些页面提供哪些功能。"
 
-#: ../developer/local-accounts.md:57
+#: ../developer/local-accounts.md:74
 msgid "Hosts without a Gateway"
 msgstr "不依赖 Gateway 的主机"
 
-#: ../developer/local-accounts.md:59
+#: ../developer/local-accounts.md:76
 msgid ""
 "Set `AGENT_AUTH_MODE=local` in each host's deployment environment as well"
 " as the control plane. Keep `AGENT_GATEWAY_URL` empty. The supported "
@@ -260,54 +274,99 @@ msgid ""
 "address, key or health check. Source deployments need Python with PyYAML "
 "to render this recipe; artifact deployments use their deployment Python "
 "environment."
-msgstr "除了控制面，还应在每台主机的部署环境中设置 `AGENT_AUTH_MODE=local`，并将 `AGENT_GATEWAY_URL` 留空。支持的 `deploy/host/sandbox_host.sh` 配方会在 Compose 解析必填设置之前移除不再使用的推理隧道，因此无需 Gateway SSH 地址、密钥或健康检查。源码部署需要安装 PyYAML 的 Python 来生成该配方；构件部署使用已有的部署 Python 环境。"
+msgstr ""
+"除了控制面，还应在每台主机的部署环境中设置 `AGENT_AUTH_MODE=local`，并将 `AGENT_GATEWAY_URL` "
+"留空。支持的 `deploy/host/sandbox_host.sh` 配方会在 Compose "
+"解析必填设置之前移除不再使用的推理隧道，因此无需 Gateway SSH 地址、密钥或健康检查。源码部署需要安装 PyYAML 的 Python "
+"来生成该配方；构件部署使用已有的部署 Python 环境。"
 
-#: ../developer/local-accounts.md:66
+#: ../developer/local-accounts.md:83
 msgid ""
 "The host still requires the control-plane and MCP tunnels and their "
 "separate credentials. Personal model calls use the existing public HTTPS "
 "egress. No sandbox gains access to the management API, private networks "
 "or another group. Gateway-mode hosts retain their inference relay and its"
 " checks; an empty URL never turns a Gateway host into a local one."
-msgstr "主机仍需要控制面与 MCP 隧道及各自的凭据。个人模型调用使用现有的公共 HTTPS 出站通道，不会让沙箱获得管理 API、私网或其他沙箱组的访问权限。Gateway 模式主机保留推理中继及其检查；空 URL 不会将 Gateway 主机自动改为本地主机。"
+msgstr ""
+"主机仍需要控制面与 MCP 隧道及各自的凭据。个人模型调用使用现有的公共 HTTPS 出站通道，不会让沙箱获得管理 "
+"API、私网或其他沙箱组的访问权限。Gateway 模式主机保留推理中继及其检查；空 URL 不会将 Gateway 主机自动改为本地主机。"
 
-#: ../developer/local-accounts.md:72
+#: ../developer/local-accounts.md:89
 msgid ""
 "In **Servers → deployment setup**, local administrators enter only the "
 "control-plane machine. Setup derives the host mode from the control "
 "plane, omits Gateway provisioning, and discards stale Gateway form "
 "values. Gateway deployments still require the Gateway machine. A manually"
 " supplied managed host profile must agree with the control plane's mode."
-msgstr "在 **Servers → deployment setup** 中，本地管理员只需填写控制面机器。配置流程从控制面确定主机模式，省略 Gateway 配置，并丢弃表单中残留的旧 Gateway 值。Gateway 部署仍需要 Gateway 机器。手动提供的托管主机配置必须与控制面模式一致。"
+msgstr ""
+"在 **Servers → deployment setup** 中，本地管理员只需填写控制面机器。配置流程从控制面确定主机模式，省略 "
+"Gateway 配置，并丢弃表单中残留的旧 Gateway 值。Gateway 部署仍需要 Gateway "
+"机器。手动提供的托管主机配置必须与控制面模式一致。"
 
-#: ../developer/local-accounts.md:78
+#: ../developer/local-accounts.md:95
 msgid "The first administrator"
 msgstr "首位管理员"
 
-#: ../developer/local-accounts.md:80
+#: ../developer/local-accounts.md:97
 msgid ""
-"No endpoint grants the first administrator, and the first account to sign"
-" up gets nothing. Someone who holds the deployment's database credential "
-"and local secret runs:"
-msgstr "没有任何接口会授予首位管理员权限，首个注册账号也不会获得额外权限。持有本部署数据库凭据和本地密钥的人需要运行："
-
-#: ../developer/local-accounts.md:89
-msgid ""
-"The account must exist and must have verified its email. `--approve` also"
-" approves its Agent application, because administration is granted only "
-"to an approved account. Each step goes through the same audited, "
-"versioned action the administration API uses, with the actor `deployment-"
-"bootstrap`."
+"The first account to sign up gets nothing. While the deployment has no "
+"administrator, every control-plane process logs a one-time setup code at "
+"startup (`agent_local_setup_pending`, at WARNING). At "
+"**/setup/administrator** the operator exchanges it for an administrator "
+"that signs in with a login name and needs no email or SMTP; wrong codes "
+"are limited to 10 per address in 15 minutes, and of two requests with the"
+" right code exactly one succeeds. An administrator made any other way "
+"closes setup too."
 msgstr ""
-"账号必须已经存在，并已验证邮箱。`--approve` 还会批准该账号的 Agent "
+"第一个注册的账号不会获得任何权限。部署还没有管理员时，每个控制平面进程在启动时记录一次性设置码（`agent_local_setup_pending`，WARNING"
+" 级别）。运维人员在 **/setup/administrator** 用它换取一个使用登录名登录、不需要邮箱或 SMTP "
+"的管理员；错误的设置码每个地址每 15 分钟最多 10 次，两个携带正确设置码的请求只有一个会成功。以其他方式创建的管理员同样会关闭首次设置。"
+
+#: ../developer/local-accounts.md:105
+msgid ""
+"Someone who holds the deployment's database credential and local secret "
+"can also work from the command line, without mail. The password is read "
+"from standard input or a terminal prompt, never from the command line:"
+msgstr "持有部署数据库凭据和本地密钥的人也可以在命令行中操作，无需邮件。密码从标准输入或终端提示中读取，绝不出现在命令行上："
+
+#: ../developer/local-accounts.md:116
+msgid ""
+"`--create-*` makes a verified, approved account, an administrator unless "
+"`--member`. An existing account must have a verified sign-in identity; "
+"`--approve` also approves its Agent application, because administration "
+"is granted only to an approved account. Each step goes through the same "
+"audited, versioned action the administration API uses, with the actor "
+"`deployment-bootstrap`."
+msgstr ""
+"`--create-*` 创建一个已验证、已批准的账号，除非指定 "
+"`--member`，否则是管理员。已有账号必须拥有已验证的登录身份；`--approve` 还会批准该账号的 Agent "
 "使用申请，因为只有获批账号才能获得管理权限。每一步都使用与管理 API 相同的操作，执行版本校验并记录审计，操作者记为 `deployment-"
 "bootstrap`。"
 
-#: ../developer/local-accounts.md:94
+#: ../developer/local-accounts.md:123
+msgid ""
+"An account whose **proven** email is one of the **administrator email "
+"addresses** setting is approved and made an administrator when it signs "
+"in, as HybridInference's `ADMIN_EMAILS` does. Proven means a link sent to"
+" the address was followed (verification, an address change or a password "
+"reset) or the operator created the account. An address accepted while "
+"email verification is off is not proven, so listing one does not hand the"
+" console to whoever signs up with it first; its holder proves it with a "
+"password reset. The list stays in charge: withdrawing a listed account's "
+"administration or access, or declining it, is refused with 409 "
+"`listed_admin_address` until the address is removed from the list (or the"
+" account is suspended), because the next sign-in would grant it back."
+msgstr ""
+"如果账号的**已证明**邮箱在**管理员邮箱地址**设置中，它在登录时会被批准并设为管理员，与 HybridInference 的 "
+"`ADMIN_EMAILS` "
+"相同。已证明是指点击过发送到该地址的链接（验证、修改邮箱或重置密码），或账号由运维人员创建。关闭邮箱验证期间接受的地址不算已证明，因此把某个地址列入名单，不会把控制台交给第一个用它注册的人；地址的真正持有者通过重置密码来证明。名单始终优先：只要地址仍在名单中，撤销该账号的管理权限或使用权限、或拒绝其申请，都会以"
+" 409 `listed_admin_address` 拒绝，直到地址从名单中移除（或账号被停用），因为下次登录会重新授予。"
+
+#: ../developer/local-accounts.md:135
 msgid "The HTTP surface"
 msgstr "HTTP 接口"
 
-#: ../developer/local-accounts.md:96
+#: ../developer/local-accounts.md:137
 #, python-brace-format
 msgid ""
 "Errors use the usual envelope, `{\"detail\": {\"error\": {\"type\", "
@@ -335,28 +394,67 @@ msgid "`{mode, signup_enabled}`. Public, in both modes."
 msgstr "`{mode, signup_enabled}`。两种模式下都公开可读。"
 
 #: ../developer/local-accounts.md
+msgid "`GET /v1/auth/options`"
+msgstr "`GET /v1/auth/options`"
+
+#: ../developer/local-accounts.md
+msgid ""
+"What the account pages offer: email and phone sign-up, mail delivery, "
+"phone policy, Turnstile site key, Terms, whether setup is pending, "
+"browser limit. Reads only."
+msgstr "账号页面提供的功能：邮箱和手机注册、邮件发送、手机策略、Turnstile site key、服务条款、是否待首次设置、浏览器账号上限。只读。"
+
+#: ../developer/local-accounts.md
 msgid "`POST /v1/auth/signup`"
 msgstr "`POST /v1/auth/signup`"
 
 #: ../developer/local-accounts.md
 #, python-brace-format
 msgid ""
-"`{ok: true}` for every address. A registered address gets a password-"
-"reset link, not a second account, and its password is not changed."
-msgstr "对所有邮箱地址都返回 `{ok: true}`。已注册地址会收到密码重置链接，不会创建第二个账号，也不会修改原密码。"
+"`{email, password, user_name?, use_case?, accepted_tos, "
+"turnstile_token?}`; `{ok: true}` for every address. The Terms must be "
+"accepted and the captcha (when configured) must verify; disposable and "
+"reserved domains are refused. A registered address gets a password-reset "
+"link, not a second account, and its password is not changed. A `use_case`"
+" submits the Agent application with the sign-up."
+msgstr ""
+"`{email, password, user_name?, use_case?, accepted_tos, "
+"turnstile_token?}`；对任何地址都返回 `{ok: true}`。必须接受服务条款，配置了 captcha "
+"时必须通过验证；一次性邮箱和保留域名会被拒绝。已注册的地址会收到重置密码链接，而不是第二个账号，其密码也不会改变。提供 `use_case` "
+"时，注册同时提交 Agent 使用申请。"
 
 #: ../developer/local-accounts.md
 msgid "`POST /v1/auth/login`"
 msgstr "`POST /v1/auth/login`"
 
 #: ../developer/local-accounts.md
+#, python-brace-format
 msgid ""
-"Sets the cookie and returns the session body. `invalid_credentials` for "
-"an unknown email and for a wrong password alike. `email_not_verified` and"
-" `account_suspended` only after the right password."
+"`{email, password}`, where `email` may also be a login name. Adds the "
+"account to this browser, sets the cookie and returns the session body. "
+"`invalid_credentials` for an unknown identifier and for a wrong password "
+"alike. `account_deleted`, `account_suspended` (with the administrator's "
+"message) and `email_not_verified`, in that order, only after the right "
+"password. `browser_full` past five accounts."
 msgstr ""
-"设置 cookie 并返回会话响应。邮箱不存在或密码错误都返回 `invalid_credentials`；只有密码正确时才会返回 "
-"`email_not_verified` 或 `account_suspended`。"
+"`{email, password}`，其中 `email` 也可以是登录名。把账号加入当前浏览器，设置 cookie "
+"并返回会话内容。未知标识和错误密码同样返回 `invalid_credentials`。只有在密码正确之后，才依次返回 "
+"`account_deleted`、`account_suspended`（附管理员的说明）和 "
+"`email_not_verified`。超过五个账号时返回 `browser_full`。"
+
+#: ../developer/local-accounts.md
+msgid "`POST /v1/auth/phone/code`, `/phone/signup`, `/phone/login`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"A six-digit code bound to its purpose (`signup`, `login`, `bind`, "
+"`delete_account`, `bind_email`, `set_password`), number and account; the "
+"same answer for every number. Every code request carries a Turnstile "
+"token when one is configured, and each token is good for one request."
+msgstr ""
+"六位验证码，与用途（`signup`、`login`、`bind`、`delete_account`、`bind_email`、`set_password`）、号码和账号绑定；对任何号码的回答都相同。配置了"
+" Turnstile 时，每次请求验证码都要附带 token，每个 token 只能用于一次请求。"
 
 #: ../developer/local-accounts.md
 msgid ""
@@ -369,12 +467,46 @@ msgstr ""
 #: ../developer/local-accounts.md
 #, python-brace-format
 msgid ""
-"`{ok: true}`. Tokens are single-use and expire (24 hours to verify, 1 "
-"hour to reset); a newer token replaces older ones. A reset verifies the "
-"email and ends every session of the account."
+"`{ok: true}`. Tokens are single-use and expire (24 hours to verify or "
+"bind, 1 hour to reset); a newer token replaces older ones, and a used one"
+" is refused. A reset verifies the email and ends every session of the "
+"account."
 msgstr ""
-"返回 `{ok: true}`。令牌只能使用一次，并有有效期：验证邮箱为 24 小时，重置密码为 1 "
-"小时；新令牌替换旧令牌。重置密码也会验证邮箱，并结束该账号的所有会话。"
+"`{ok: true}`。令牌只能使用一次，并有有效期（验证或绑定 24 小时，重置 1 "
+"小时）；新令牌替换旧令牌，已使用的令牌会被拒绝。重置密码也会验证邮箱，并结束该账号的所有会话。"
+
+#: ../developer/local-accounts.md
+#, python-brace-format
+msgid ""
+"`GET /v1/auth/accounts`, `POST /v1/auth/switch`, `DELETE "
+"/v1/auth/accounts/{id}`, `POST /v1/auth/logout-all`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"The accounts signed in on this browser: list, switch, sign one out, sign "
+"all out."
+msgstr "当前浏览器上已登录的账号：列出、切换、退出其中一个、全部退出。"
+
+#: ../developer/local-accounts.md
+msgid ""
+"`GET /v1/auth/account`, `POST /v1/auth/account/password`, `/email`, "
+"`/phone`, `/delete`, `PUT /v1/auth/account/locale`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"The signed-in account's own changes; see [The owner's own changes](#the-"
+"owners-own-changes)."
+msgstr "已登录账号本人的修改；见[本人的修改](#the-owners-own-changes)。"
+
+#: ../developer/local-accounts.md
+msgid "`POST /v1/auth/setup/admin`"
+msgstr "`POST /v1/auth/setup/admin`"
+
+#: ../developer/local-accounts.md
+msgid "First-run setup."
+msgstr "首次设置。"
 
 #: ../developer/local-accounts.md
 msgid "`GET /v1/session/me`"
@@ -382,17 +514,21 @@ msgstr "`GET /v1/session/me`"
 
 #: ../developer/local-accounts.md
 msgid ""
-"Adds `auth_mode`, `email` and `waitlist` for a local account. The "
-"Gateway-mode body is unchanged."
-msgstr "为本地账号增加 `auth_mode`、`email` 和 `waitlist`。网关模式的响应体保持不变。"
+"Adds `auth_mode`, `email`, `waitlist`, `identity` and `is_local_admin` "
+"for a local account. The Gateway-mode body is unchanged."
+msgstr ""
+"为本地账号增加 `auth_mode`、`email`、`waitlist`、`identity` 和 "
+"`is_local_admin`。网关模式的响应体保持不变。"
 
 #: ../developer/local-accounts.md
 msgid "`POST /v1/session/logout`"
 msgstr "`POST /v1/session/logout`"
 
 #: ../developer/local-accounts.md
-msgid "Revokes the local session, then clears the cookie."
-msgstr "先撤销本地会话，再清除 cookie。"
+msgid ""
+"Signs the browser's active account out; the cookie goes with its last "
+"account."
+msgstr "让浏览器当前使用的账号退出登录；最后一个账号退出时 cookie 一并失效。"
 
 #: ../developer/local-accounts.md
 msgid "`GET`/`POST /v1/waitlist`"
@@ -406,20 +542,81 @@ msgid ""
 msgstr "只要求账号已验证邮箱并已登录。待审批时再次提交不会改变状态。申请被拒绝或准入被撤销后，只有所有者主动操作才会重新提交。"
 
 #: ../developer/local-accounts.md
+msgid "`GET /v1/admin/accounts`"
+msgstr "`GET /v1/admin/accounts`"
+
+#: ../developer/local-accounts.md
+msgid ""
+"`q` (email, login name, phone or name anywhere, or an id prefix), "
+"`status`, `account_status`, `sort` (`created` or `last_login`); the "
+"answer has counts per state."
+msgstr ""
+"`q`（在邮箱、登录名、手机号或姓名中任意位置匹配，或按 id "
+"前缀）、`status`、`account_status`、`sort`（`created` 或 "
+"`last_login`）；响应包含各状态的数量。"
+
+#: ../developer/local-accounts.md
 #, python-brace-format
-msgid "`GET /v1/admin/accounts`, `PATCH /v1/admin/accounts/{id}`"
-msgstr "`GET /v1/admin/accounts`, `PATCH /v1/admin/accounts/{id}`"
+msgid "`PATCH /v1/admin/accounts/{id}`"
+msgstr "`PATCH /v1/admin/accounts/{id}`"
 
 #: ../developer/local-accounts.md
 msgid ""
 "`approve`, `reject`, `revoke`, `suspend`, `restore`, `grant_admin`, "
-"`revoke_admin`, at `expected_version`."
+"`revoke_admin`, `delete`, `resume`, at `expected_version`. Approval and "
+"rejection are mailed to the account. Withdrawing what the administrator "
+"address list grants back is refused (`listed_admin_address`)."
 msgstr ""
 "按 `expected_version` 执行 "
-"`approve`、`reject`、`revoke`、`suspend`、`restore`、`grant_admin` 或 "
-"`revoke_admin`。"
+"`approve`、`reject`、`revoke`、`suspend`、`restore`、`grant_admin`、`revoke_admin`、`delete`、`resume`。批准和拒绝会以邮件通知账号。管理员邮箱名单会重新授予的撤销操作会被拒绝（`listed_admin_address`）。"
 
-#: ../developer/local-accounts.md:111
+#: ../developer/local-accounts.md
+#, python-brace-format
+msgid ""
+"`PATCH /v1/admin/accounts/{id}/notes`, `GET /{id}/login-events`, `POST "
+"/{id}/erase`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"The private note and suspension message, sign-in history, permanent "
+"erasure."
+msgstr "私密备注和停用说明、登录记录、彻底擦除。"
+
+#: ../developer/local-accounts.md
+#, python-brace-format
+msgid "`GET /v1/admin/accounts/{id}/teams`, `POST /{id}/teams/{team}/transfer`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"The teams a deleted account owns, and handing one to a member before "
+"erasure."
+msgstr "已删除账号拥有的团队，以及在擦除前把团队移交给某个成员。"
+
+#: ../developer/local-accounts.md
+msgid ""
+"`GET`/`POST`/`DELETE /v1/admin/accounts/signup-domains`, `DELETE "
+"/v1/admin/accounts/login-events`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "The signup domain list; purging sign-in events by age or by account."
+msgstr "注册域名名单；按时间或按账号清除登录事件。"
+
+#: ../developer/local-accounts.md
+msgid "`/v1/admin/account-mail`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid ""
+"Mail to accounts: `POST /preview` (with `delivery_problem`), `POST "
+"/test`, create, list, detail, cancel, each list paged."
+msgstr ""
+"发送邮件给账号：`POST /preview`（含 `delivery_problem`）、`POST "
+"/test`、创建、列表、详情、取消，列表均分页。"
+
+#: ../developer/local-accounts.md:162
 msgid ""
 "Mail links point at the web app's `/verify-email#token=…` and `/reset-"
 "password#token=…`. A browser never sends the fragment to a server, so the"
@@ -429,7 +626,7 @@ msgstr ""
 "邮件链接指向 Web 应用的 `/verify-email#token=…` 和 `/reset-password#token=…`。浏览器不会把"
 " URL 片段发送给服务器，因此令牌不会进入访问日志。页面通过显式 POST 请求发送令牌，仅打开链接不会改变任何状态。"
 
-#: ../developer/local-accounts.md:116
+#: ../developer/local-accounts.md:167
 msgid ""
 "Each unsafe `/v1/auth/*` request is checked by the cross-site write "
 "guard, whether or not it carries a cookie, and the body must be JSON. A "
@@ -439,11 +636,37 @@ msgstr ""
 "所有会改变状态的 `/v1/auth/*` 请求，无论是否携带 cookie，都要经过跨站写入保护检查，且请求体必须是 "
 "JSON。否则，跨站登录可能把攻击者的账号登录到受害者的浏览器中。"
 
-#: ../developer/local-accounts.md:122
+#: ../developer/local-accounts.md:173
 msgid ""
 "An account is who signs in. Its admission is whether that person may use "
 "Agent. These are separate records:"
 msgstr "账号说明登录者是谁，准入决定此人能否使用 Agent。两者分别记录："
+
+#: ../developer/local-accounts.md:176
+msgid ""
+"An identity is **verified** when the account has no unverified email and "
+"at least one verified sign-in identity: a confirmed email, a login name "
+"(made by the operator, so verified by construction) or a phone number "
+"confirmed by a code. Each identity records what verified it "
+"(`verified_by`): `link`, `code`, `operator`, or `policy` for an email "
+"accepted unproven because verification is off. Only `link` and `operator`"
+" prove a mailbox, which the administrator address list and the signup "
+"domain list require. A password reset that proves a `policy` email is its"
+" holder taking the account back: whatever the first claimant wrote "
+"(display name, language, Terms acceptance, application text) is cleared, "
+"a pending application returns to not applied, and the reclaim is audited;"
+" administrators' decisions and the sign-in history stay. One database "
+"view, `agent_local_account_access`, answers whether an account's identity"
+" is verified, whether it may sign in and whether it may use Agent; every "
+"SQL gate reads it, and it is built so that an account missing a row has "
+"no access."
+msgstr ""
+"当账号没有未验证的邮箱、且至少有一个已验证的登录身份时，其身份为**已验证**：已确认的邮箱、登录名（由运维人员创建，因此天然已验证），或通过验证码确认的手机号。每个身份都记录它是如何被验证的（`verified_by`）：`link`、`code`、`operator`，或者在关闭验证时被接受、未经证明的邮箱记为"
+" `policy`。只有 `link` 和 `operator` 能证明邮箱归属，管理员邮箱名单和注册域名名单都要求这一点。证明了 "
+"`policy` "
+"邮箱的重置密码，相当于地址持有者收回账号：先注册者写下的内容（显示名称、语言、服务条款确认、申请说明）会被清除，待审核的申请恢复为未申请，并记录审计；管理员已作出的决定和登录记录保留。一个数据库视图"
+" `agent_local_account_access` 回答账号身份是否已验证、能否登录、能否使用 Agent；所有 SQL "
+"闸门都读取它，并且缺少任何一行的账号都没有访问权限。"
 
 #: ../developer/local-accounts.md
 msgid "Account and admission"
@@ -458,8 +681,8 @@ msgid "Owner routes, tasks, terminals, MCP"
 msgstr "所有者路由、任务、终端、MCP"
 
 #: ../developer/local-accounts.md
-msgid "Email unverified"
-msgstr "邮箱未验证"
+msgid "Identity unverified"
+msgstr "身份未验证"
 
 #: ../developer/local-accounts.md
 msgid "Verification and recovery only"
@@ -505,7 +728,28 @@ msgstr "账号已停用"
 msgid "No; every session is revoked"
 msgstr "否；所有会话均被撤销"
 
-#: ../developer/local-accounts.md:134
+#: ../developer/local-accounts.md
+msgid "Deleted"
+msgstr "已删除"
+
+#: ../developer/local-accounts.md
+msgid "No; off every browser, every session and link ended"
+msgstr "否；从所有浏览器移除，所有会话和链接失效"
+
+#: ../developer/local-accounts.md:201
+msgid ""
+"With the `domains` approval policy an account whose proven email domain "
+"is on the signup domain list (exactly, or as a subdomain of a `*.` entry)"
+" is approved, audited as `signup-policy`, as soon as its identity is "
+"verified; with an empty list every verified account is. A phone account "
+"has no domain, so it is approved automatically only while the list is "
+"empty."
+msgstr ""
+"在 `domains` 审批策略下，已证明邮箱的域名在注册域名名单中（完全匹配，或是 `*.` "
+"条目的子域名）的账号，会在其身份验证后立即被批准，审计记为 `signup-"
+"policy`；名单为空时，所有已验证账号都会被批准。手机账号没有域名，因此只有在名单为空时才会被自动批准。"
+
+#: ../developer/local-accounts.md:207
 msgid ""
 "`agent.use` needs a verified, active, approved account. `agent.admin` "
 "also needs the explicit administrator flag; the flag alone grants "
@@ -519,7 +763,7 @@ msgstr ""
 "还要求显式管理员标记；只有这个标记并不授予任何权限。授予管理权限不会自动批准账号。停用账号会撤销其会话、清除管理员标记，并将已批准的准入改为撤销。恢复账号后可以重新登录和申请，但不会恢复任何权限。管理员不能停用自己或移除自己的准入权限；`ADMIN_TOKEN`"
 " 可以执行这些操作。"
 
-#: ../developer/local-accounts.md:142
+#: ../developer/local-accounts.md:215
 msgid ""
 "Every account or admission change increments the account's `version`, "
 "which is `WaitlistEntry.version`. An administrator action names the "
@@ -538,11 +782,40 @@ msgstr ""
 "记录在同一事务中提交。审计记录保存状态、版本以及是否填写原因，不记录邮箱、密码、哈希或令牌。该事务内还会再次检查操作者本人的管理权限，所以请求执行期间若管理员被停用，该请求不会更改任何数据，并返回"
 " `actor_not_admin`。"
 
-#: ../developer/local-accounts.md:152
+#: ../developer/local-accounts.md:225
 msgid "Sessions and credentials"
 msgstr "会话与凭据"
 
-#: ../developer/local-accounts.md:154
+#: ../developer/local-accounts.md:227
+msgid ""
+"The cookie names a **browser**, which holds up to five signed-in "
+"accounts, each through its own session row, and which one is active. "
+"Every sign-in rotates the cookie's value. Switching needs no password "
+"while the chosen account's own session lasts. Every request of the web "
+"app names the account its tab shows (`X-Agent-Account`; streams use "
+"`agent_account`); once the browser's active account is another, the "
+"request is refused with 409 `account_switched` and the tab reloads, so a "
+"tab left on one account never acts as the next one. An open stream re-"
+"checks every 30 s and ends once the cookie no longer resolves to its "
+"account."
+msgstr ""
+"cookie 指向一个**浏览器**，它最多持有五个已登录账号，每个账号都有自己的会话行，并记录当前使用哪一个。每次登录都会更换 cookie "
+"的值。在所选账号自己的会话有效期内，切换无需密码。Web 应用的每个请求都会注明当前标签页显示的账号（`X-Agent-"
+"Account`；流式请求使用 `agent_account`）；一旦浏览器当前账号变成另一个，请求会以 409 "
+"`account_switched` 拒绝，标签页随之重新加载，因此停留在某个账号上的标签页永远不会以下一个账号的身份操作。已打开的流每 30 "
+"秒复核一次，cookie 不再对应其账号时结束。"
+
+#: ../developer/local-accounts.md:236
+msgid ""
+"A browser that signed in to an account before is recognized by a signed "
+"device cookie (`__Host-cloud_agent_device`, keyed from the local secret) "
+"and counted in a sign-in window of its own, so others guessing the "
+"account's password from the same address cannot lock it out there."
+msgstr ""
+"曾经登录过某账号的浏览器通过签名的设备 cookie（`__Host-"
+"cloud_agent_device`，密钥来自本地密钥）识别，并单独计入一个登录窗口，因此从同一地址猜测该账号密码的他人无法在这里把账号锁住。"
+
+#: ../developer/local-accounts.md:240
 msgid ""
 "Passwords use HybridInference's Argon2id parameters and rules (see "
 "[Reused code](#reused-code)). Hashing runs on a pool of four threads; at "
@@ -552,7 +825,7 @@ msgstr ""
 "密码使用 HybridInference 的 Argon2id 参数与规则，见[复用代码](#reused-"
 "code)。哈希计算使用四个线程的线程池，最多允许 64 次哈希计算排队；超出时请求返回 503，不再入队。"
 
-#: ../developer/local-accounts.md:158
+#: ../developer/local-accounts.md:244
 msgid ""
 "A session value is `cals1.` followed by 256 random bits. The database "
 "keeps only an HMAC of it, keyed from `AGENT_LOCAL_SESSION_SECRET`. A "
@@ -561,13 +834,14 @@ msgstr ""
 "会话值由 `cals1.` 前缀和 256 个随机位组成。数据库只保存以 `AGENT_LOCAL_SESSION_SECRET` 为密钥计算的 "
 "HMAC。本地模式不读取网关模式的 cookie 或 JWT。"
 
-#: ../developer/local-accounts.md:161
+#: ../developer/local-accounts.md:247
 msgid ""
-"A session lasts 30 days and is never extended. Sign-out, a password reset"
-" and a suspension revoke it."
-msgstr "会话有效期为 30 天，不会续期。退出登录、重置密码或停用账号都会撤销会话。"
+"A session lasts 30 days by default (`accounts.session_ttl_days`) and is "
+"never extended. Sign-out, a password change or reset, a suspension and a "
+"deletion revoke it."
+msgstr "会话默认有效 30 天（`accounts.session_ttl_days`），不会续期。退出登录、修改或重置密码、停用和删除都会撤销会话。"
 
-#: ../developer/local-accounts.md:163
+#: ../developer/local-accounts.md:250
 msgid ""
 "Opening a session takes a lock on the account row before it reads the "
 "password, so a session cannot be opened with a password that a concurrent"
@@ -575,42 +849,224 @@ msgid ""
 "suspended."
 msgstr "创建会话时，先锁定账号行，再读取密码。因此，并发重置已经替换的旧密码无法用于创建会话，并发停用的账号也无法创建会话。"
 
-#: ../developer/local-accounts.md:167
+#: ../developer/local-accounts.md:254
 msgid ""
 "Abuse limits are fixed-window counters in Postgres, so every worker and "
-"replica shares them. Their keys are keyed hashes. Sign-in allows 5 "
-"attempts per email and address and 50 per email in 15 minutes, and 20 per"
-" address in an hour. Sign-up allows 5 per address in an hour and 10 in a "
-"day. Mail allows 3 per email in an hour, 10 per email in a day and 10 per"
-" address in an hour. Token redemption allows 30 per address in 15 "
-"minutes."
+"replica shares them. Their keys are keyed hashes, by the normalized "
+"identifier. Sign-in allows 5 attempts per identifier and address and 50 "
+"per identifier in 15 minutes, counting only attempts the per-address "
+"windows let through, and 20 per address in an hour; all three are "
+"settings. Sign-up allows 5 per address in an hour and 10 in a day, or one"
+" shared budget for sign-ups whose address cannot be told. Mail allows 3 "
+"per email in an hour, 10 per email in a day and 10 per address in an "
+"hour. Token redemption allows 30 per address in 15 minutes. Phone codes, "
+"by default and each a setting: one every 60 s per number, 5 an hour and "
+"10 a day per number, 20 an hour and 100 a day per address, 5 checks per "
+"code, and check windows per number and per address."
 msgstr ""
-"防滥用限制使用 Postgres 中的固定窗口计数器，所有 worker 和副本共享同一组计数，计数器键使用带密钥的哈希。登录限制为：每 15 "
-"分钟每个邮箱与地址组合最多 5 次、每个邮箱最多 50 次，每小时每个地址最多 20 次。注册限制为每个地址每小时 5 次、每天 10 "
-"次。邮件限制为每个邮箱每小时 3 次、每天 10 次，每个地址每小时 10 次。令牌兑换限制为每个地址每 15 分钟 30 次。"
+"防滥用限制使用 Postgres 中的固定窗口计数器，所有 worker "
+"和副本共享同一组计数，计数器键是按规范化标识计算的带密钥哈希。登录限制为：每 15 分钟每个标识与地址组合最多 5 次、每个标识最多 50 "
+"次（只计入通过了按地址窗口的尝试），每小时每个地址最多 20 次；这三项都可以设置。注册限制为每个地址每小时 5 次、每天 10 "
+"次，无法识别地址的注册共享一份额度。邮件限制为每个邮箱每小时 3 次、每天 10 次，每个地址每小时 10 次。令牌兑换限制为每个地址每 15 "
+"分钟 30 次。手机验证码默认如下，每项都可设置：每个号码每 60 秒一条，每个号码每小时 5 条、每天 10 条，每个地址每小时 20 条、每天"
+" 100 条，每个验证码最多校验 5 次，并有按号码和按地址的校验窗口。"
 
-#: ../developer/local-accounts.md:173
+#: ../developer/local-accounts.md:266
+msgid ""
+"A hash cancelled while it runs keeps its slot in the pool until it ends. "
+"Two sign-ins racing to upgrade an outdated hash both succeed: the one "
+"whose compare-and-swap loses re-reads the winner's hash."
+msgstr "运行中被取消的哈希计算会占用池中的名额直到结束。两个同时升级过时哈希的登录都会成功：比较并交换失败的一方会重新读取胜出方写入的哈希。"
+
+#: ../developer/local-accounts.md:269
 msgid "Neither a recipient address nor a link is written to a log."
 msgstr "日志既不记录收件地址，也不记录链接。"
 
-#: ../developer/local-accounts.md:175
+#: ../developer/local-accounts.md:271
+msgid "The owner's own changes"
+msgstr "本人的修改"
+
+#: ../developer/local-accounts.md:273
+msgid ""
+"Each change is proven again the way the account signs in: its current "
+"password, counted against the sign-in limits (with the device window), or"
+" for an account without one a code sent to its own verified phone."
+msgstr "每次修改都要按账号的登录方式重新证明身份：当前密码（计入登录限制，含设备窗口），或者对没有密码的账号，发送到其本人已验证手机的验证码。"
+
+#: ../developer/local-accounts.md:277
+msgid ""
+"**Password**: change it, or give a phone account its first one. Every "
+"other session ends, open reset links stop working, and a verified email "
+"is told."
+msgstr "**密码**：修改密码，或为手机账号设置第一个密码。其他会话全部结束，未使用的重置链接失效，并通知已验证的邮箱。"
+
+#: ../developer/local-accounts.md:279
+msgid ""
+"**Email**: a link goes to the new address, which becomes the account's "
+"only when it is followed; the old address is told and its reset links "
+"stop working. Whether the address is taken is answered only after the "
+"proof."
+msgstr "**邮箱**：链接发送到新地址，点击后才成为账号的邮箱；旧地址会收到通知，其重置链接失效。地址是否已被占用，只在证明身份之后才回答。"
+
+#: ../developer/local-accounts.md:282
+msgid ""
+"**Phone**: bind a number proven by a code to an account that has none. As"
+" in HybridInference, a bound number is not removed or replaced."
+msgstr "**手机**：为没有手机号的账号绑定一个经验证码证明的号码。与 HybridInference 相同，已绑定的号码不能移除或更换。"
+
+#: ../developer/local-accounts.md:284
+msgid ""
+"**Delete**: type the account's identifier, give the proof. An "
+"administrator cannot delete itself. The account is soft-deleted (below)."
+msgstr "**删除**：输入账号标识并提供证明。管理员不能删除自己。账号被软删除（见下文）。"
+
+#: ../developer/local-accounts.md:286
+msgid ""
+"**Language**: kept with the account; the most recent choice wins, "
+"including one made on this browser while signed out, which is carried "
+"into the account with its time at the next sign-in."
+msgstr "**语言**：随账号保存，以最近一次选择为准，包括在当前浏览器未登录时作出的选择，它会在下次登录时连同选择时间一起写入账号。"
+
+#: ../developer/local-accounts.md:290
+msgid "Deleting and erasing"
+msgstr "删除与擦除"
+
+#: ../developer/local-accounts.md:292
+msgid ""
+"Deleting an account (by its owner or an administrator) marks it `deleted`"
+" in one transaction with: every session revoked, the account taken off "
+"every browser, open links and phone codes ended, approved access turned "
+"into a revocation, an audit row, and a termination record of action "
+"`delete`, which stops its work as below. Its data stays. An administrator"
+" may **resume** it once that cleanup is acknowledged: it signs in again, "
+"without Agent access."
+msgstr ""
+"删除账号（由本人或管理员）会在一个事务中把它标记为 "
+"`deleted`，同时：撤销所有会话，从所有浏览器移除该账号，未使用的链接和手机验证码失效，已批准的权限变为撤销，写入审计记录，并创建一条操作为"
+" `delete` 的终止记录，按下文所述停止其工作。数据保留。清理确认完成后，管理员可以**恢复**它：账号可以重新登录，但没有 Agent "
+"权限。"
+
+#: ../developer/local-accounts.md:299
+msgid ""
+"An administrator may then **erase** it, typing its id to confirm. Erasure"
+" is refused (`erase_blocked`) until the account is deleted, its "
+"termination acknowledged, no turn of it queued, running or resident, and "
+"every sandbox it owns deleted through the sandbox deletion path. It is "
+"also refused while a host still has to clean up one of the account's "
+"environment runs (`host_cleanup_pending`, naming the runs and hosts): a "
+"host learns what to clean only from those rows, so they stay until it "
+"reports them clean, which an offline host does when it reconnects."
+msgstr ""
+"之后管理员可以**擦除**它，需要输入账号 id "
+"确认。以下条件未满足时擦除会被拒绝（`erase_blocked`）：账号已删除、终止已确认、没有排队、运行中或驻留的轮次，且它拥有的每个沙箱都已通过沙箱删除流程删除。只要还有主机需要清理该账号的环境运行，擦除也会被拒绝（`host_cleanup_pending`，并列出这些运行和主机）：主机只能从这些记录得知要清理什么，因此它们会保留到主机报告清理完成为止，离线的主机会在重新连接时完成。"
+
+#: ../developer/local-accounts.md:308
+#, python-brace-format
+msgid ""
+"**Teams** are shared, so erasure settles them first. A team the account "
+"owns alone is deleted, as its owner would delete it. A team other members"
+" still use refuses the erasure (`team_transfer_required`, naming each "
+"team); the account's review panel lists those teams with their members, "
+"and an administrator hands each to one of them, as the owner's own "
+"ownership transfer would (`GET /v1/admin/accounts/{id}/teams`, `POST "
+".../teams/{team}/transfer`; only for a deleted account). Invitations the "
+"account issued are revoked, and a team environment it made stays with its"
+" team, recorded as the team owner's."
+msgstr ""
+"**团队**是共享的，因此擦除会先处理团队。账号独自拥有的团队会像 owner "
+"自己删除那样被删除。其他成员仍在使用的团队会使擦除被拒绝（`team_transfer_required`，并逐一列出团队）；账号的审核面板会列出这些团队及其成员，管理员可以像"
+" owner 自己转让那样把每个团队交给其中一名成员（`GET /v1/admin/accounts/{id}/teams`、`POST "
+".../teams/{team}/transfer`；仅限已删除的账号）。账号发出的邀请会被撤销，它创建的团队环境留在团队中，记在团队 owner"
+" 名下。"
+
+#: ../developer/local-accounts.md:318
+msgid ""
+"Erasure then removes every row of the account's Agent data, walking the "
+"foreign keys from the catalog (children first), and never touches another"
+" owner's row: a row of another owner that refers to the account's data "
+"blocks the erasure. Its identifiers, password, sessions, tokens, codes, "
+"sign-in events, mail recipients and earlier audit rows go too. The "
+"account row stays as a tombstone, erased, which every gate keeps denying "
+"and which can never be resumed. The erasure's own audit row records the "
+"rows removed, the teams deleted, the team environments handed over and "
+"the sandbox deletion archive objects left in the bucket, which the "
+"control plane may not delete and which follow the bucket's retention "
+"policy; the administrator sees the same, archive keys included."
+msgstr ""
+"随后擦除会删除该账号所有 Agent 数据行，按 catalog 中的外键遍历（先删子表），并且绝不触碰其他 owner 的行：如果其他 "
+"owner "
+"的行引用了该账号的数据，擦除会被阻止。账号的标识、密码、会话、令牌、验证码、登录事件、邮件收件记录和之前的审计行也会一并删除。账号行作为墓碑保留，标记为已擦除，所有闸门都继续拒绝它，且永远不能恢复。擦除自己的审计行记录删除的行数、删除的团队、移交的团队环境，以及留在存储桶中的沙箱删除归档对象；控制平面无权删除这些对象，它们遵循存储桶的保留策略。管理员看到的内容相同，包括归档"
+" key。"
+
+#: ../developer/local-accounts.md:330
+msgid ""
+"What stays are ids in columns that name a person without owning a row: a "
+"deleted team's `owner_user_id` and `created_by_user_id`, team audit "
+"events' `actor_user_id` and `target_user_id`, invitations' "
+"`created_by_user_id` and join requests' `decided_by_user_id`. They name "
+"the erased account, which nothing can sign in as or resolve to a person "
+"again."
+msgstr ""
+"保留下来的是那些指代某个人、但并不拥有某一行的列中的 id：已删除团队的 `owner_user_id` 和 "
+"`created_by_user_id`、团队审计事件的 `actor_user_id` 和 `target_user_id`、邀请的 "
+"`created_by_user_id`，以及加入请求的 "
+"`decided_by_user_id`。它们指向已擦除的账号，任何人都无法再以它登录，也无法再将它对应到某个人。"
+
+#: ../developer/local-accounts.md:336
+msgid "Mail to accounts"
+msgstr "发送邮件给账号"
+
+#: ../developer/local-accounts.md:338
+msgid ""
+"Administrators mail active or suspended accounts chosen by account state "
+"and application state, with a ready-made message (maintenance, "
+"announcement) or a subject and a Markdown body (raw HTML is not "
+"rendered). They preview the recipient count and the message, send it to "
+"themselves as a test, then send it now or at a chosen time, confirming "
+"the count. A preview belongs to the exact message and audience it showed;"
+" any change asks for a new one. The recipients are fixed when it is "
+"created, and only verified addresses receive it. A message the selected "
+"transport would refuse is refused at preview, test and creation with the "
+"reason: Tencent SES sends only approved templates, and a message without "
+"its own goes through the notice template, whose variables are limited to "
+"800 bytes; SMTP takes any message."
+msgstr ""
+"管理员可以按账号状态和申请状态，给正常或已停用的账号发送邮件，内容可以是现成模板（维护、公告），也可以是主题加 Markdown 正文（不渲染原始"
+" "
+"HTML）。他们先预览收件人数量和邮件内容，给自己发一封测试邮件，再立即发送或定时发送，发送前需确认收件人数量。预览只对应它所展示的那份内容和收件范围，任何修改都需要重新预览。收件人在创建时固定，只有已验证的地址会收到。所选传输方式会拒绝的邮件，在预览、测试和创建时就会被拒绝并给出原因：腾讯云"
+" SES 只发送已审核的模板，没有专属模板的邮件走通知模板，其变量最多 800 字节；SMTP 接受任何邮件。"
+
+#: ../developer/local-accounts.md:350
+msgid ""
+"One process at a time sends a message: a claim with its own token, held "
+"before every message and taken over once it is 15 minutes old. Each "
+"recipient's outcome is recorded as soon as its message is handed over, so"
+" a sender that stops resends nothing; one that stalled and resumes after "
+"a takeover finds its claim gone and stops. At most the one message in "
+"flight when the claim changed hands can arrive twice. An account deleted "
+"since is skipped."
+msgstr ""
+"同一时间只有一个进程发送某封邮件：认领带有自己的令牌，每发一封前都会确认，认领超过 15 "
+"分钟即可被接管。每个收件人的结果在其邮件交出后立即记录，因此停止的发送者不会重发任何邮件；停顿后在被接管之后才恢复的发送者会发现认领已被取走并停止。最多只有认领易手时正在发送的那一封可能重复送达。期间被删除的账号会被跳过。"
+
+#: ../developer/local-accounts.md:358
 msgid "Stopping an account's work"
 msgstr "停止账号的工作"
 
-#: ../developer/local-accounts.md:177
+#: ../developer/local-accounts.md:360
 msgid ""
-"Revoking or suspending an account commits the change and opens a "
-"termination record (`agent_local_access_terminations`) for the new "
+"Revoking, suspending or deleting an account commits the change and opens "
+"a termination record (`agent_local_access_terminations`) for the new "
 "version in the same transaction. From that commit on, every new owner "
 "request, claim, goal round and waiting message reads the denial. "
 "Residency establishment and residency heartbeats carry the same condition"
 " in their own SQL, so an attempt admitted before the revocation cannot "
 "establish or extend a residency afterwards."
 msgstr ""
-"撤销准入或停用账号时，在同一事务中提交变更，并为新版本创建终止记录（`agent_local_access_terminations`）。从提交完成起，所有新的所有者请求、认领、目标轮次和等待消息都会读取到拒绝决定。residency"
+"撤销准入、停用或删除账号时，在同一事务中提交变更，并为新版本创建终止记录（`agent_local_access_terminations`）。从提交完成起，所有新的所有者请求、认领、目标轮次和等待消息都会读取到拒绝决定。residency"
 " 建立和心跳也在各自的 SQL 中检查同一条件，因此撤权前已获准的 attempt 不能在撤权后建立或延长 residency。"
 
-#: ../developer/local-accounts.md:185
+#: ../developer/local-accounts.md:368
 msgid ""
 "`terminate_owner_access` (`application/owner_termination.py`) then stops "
 "the work already running, using the paths that already end work safely. "
@@ -628,7 +1084,7 @@ msgstr ""
 " "
 "residency。已释放成员的进程也会被关闭。对于成员全部属于该账号的沙箱组，先冻结该组终端，再终止终端，最后解除冻结。与其他所有者的对话共享的组不会被操作。若撤权前获准的请求在撤权后才打开终端，该请求会先重新开启终止记录，再自行终止新开的终端。这样，即使该请求未能终止终端，下一轮清理也会继续处理。"
 
-#: ../developer/local-accounts.md:197
+#: ../developer/local-accounts.md:380
 msgid ""
 "The record stays open until a pass finds the terminal cleanup "
 "acknowledged and none of the account's turns running. Each reopen "
@@ -649,7 +1105,7 @@ msgstr ""
 " 409 "
 "`access_cleanup_pending`。因此，延迟执行的清理不会停止后来获批的新工作。恢复准入不会重放任何工作：已取消的轮次保持取消，暂停的目标和队列等待所有者操作。"
 
-#: ../developer/local-accounts.md:210
+#: ../developer/local-accounts.md:393
 msgid ""
 "No step has a fixed wall-clock deadline. A host that keeps failing, or a "
 "backlog of more than one batch of accounts, delays completion. What is "
@@ -713,11 +1169,11 @@ msgstr "沙箱组终端与环境操作"
 msgid "Killed by a pass; retried at each check until the host acknowledges"
 msgstr "由清理轮次终止；每次检查都会重试，直到主机确认完成"
 
-#: ../developer/local-accounts.md:223
+#: ../developer/local-accounts.md:406
 msgid "Models"
 msgstr "模型"
 
-#: ../developer/local-accounts.md:225
+#: ../developer/local-accounts.md:408
 msgid ""
 "After approval, an owner opens **My settings → Model connections**, "
 "enters a provider's Base URL, API key and model IDs, and chooses **Verify"
@@ -732,7 +1188,7 @@ msgstr ""
 "ID，点击**验证并保存**。用户可以填写自己的 FreeInference key，将 FreeInference "
 "作为服务商。服务会先检查兼容性再保存；检查失败不会新增连接或替换密钥。只有连接所有者可以使用它。如果账号在验证期间失去准入权限，保存事务会持有账号锁重新检查权限，拒绝迟到的结果且不保存密钥。"
 
-#: ../developer/local-accounts.md:233
+#: ../developer/local-accounts.md:416
 msgid ""
 "Local accounts have no shared model, default provider credential or "
 "inference allowance. Inference costs and limits belong to the supplied "
@@ -745,7 +1201,7 @@ msgstr ""
 "账号独立不会产生独立的服务商额度：同一 FreeInference 账号的 key 仍可能共用该上游账号的额度。Cloud Agent "
 "的沙箱及并发限制另行管理。"
 
-#: ../developer/local-accounts.md:239
+#: ../developer/local-accounts.md:422
 msgid ""
 "`GET /v1/agent/config` reports `gateway_inference: false`, an empty "
 "Gateway catalog, and the owner's usable connections. Without a usable "
@@ -762,7 +1218,7 @@ msgstr ""
 "`model_connection_required`。本地账号 ID 不会发送给 Gateway，也不会签发 Gateway "
 "grant，包括发布标题生成。通过 Gateway 改写提示词的功能不可用。"
 
-#: ../developer/local-accounts.md:247
+#: ../developer/local-accounts.md:430
 msgid ""
 "A task records both the model ID and connection ID. Follow-ups, queued "
 "turns, goals, Fork and residency keep that source; an unavailable "
@@ -777,7 +1233,7 @@ msgstr ""
 "模型或其他连接。保存、停用或删除连接会刷新已打开的输入框；不可用的选择仍保留，直到所有者选择可用来源前都禁止提交。验证、密钥处理及发布要求见[个人模型连接](operations.md"
 "#owner-model-connections)。"
 
-#: ../developer/local-accounts.md:255
+#: ../developer/local-accounts.md:438
 #, python-brace-format
 msgid ""
 "The Gateway-only per-request usage views (`/admin/agent/runs/{id}/llm-"
@@ -789,17 +1245,20 @@ msgstr ""
 "requests`、`/admin/agent/steps`，以及所有者逐条消息的请求明细）在本地模式下返回 503 "
 "`gateway_feature_unavailable`，不调用网关。"
 
-#: ../developer/local-accounts.md:259
+#: ../developer/local-accounts.md:442
 msgid "Data model"
 msgstr "数据模型"
 
-#: ../developer/local-accounts.md:261
+#: ../developer/local-accounts.md:444
 msgid ""
 "Migration `0107_local_accounts`, after `0106_user_model_connections`, "
-"adds empty tables. Gateway mode never writes them."
+"adds the tables; `0108_local_account_parity` splits sign-in identities "
+"from passwords (carrying every account over) and adds the rest. Gateway "
+"mode never writes them."
 msgstr ""
 "迁移 `0107_local_accounts` 接在 `0106_user_model_connections` "
-"后面，新增空表。网关模式不会写入这些表。"
+"后面，新增这些表；`0108_local_account_parity` "
+"把登录身份与密码拆开（保留所有账号），并新增其余内容。网关模式不会写入这些表。"
 
 #: ../developer/local-accounts.md
 msgid "Table"
@@ -814,16 +1273,37 @@ msgid "`agent_local_accounts`"
 msgstr "`agent_local_accounts`"
 
 #: ../developer/local-accounts.md
-msgid "ID (ULID), status, administrator flag and version"
-msgstr "ID（ULID）、状态、管理员标记和版本"
+msgid ""
+"ID (ULID), status (`active`, `suspended`, `deleted`), administrator flag,"
+" version, name, note, suspension message, Terms acceptance, last sign-in,"
+" deletion and erasure times, language"
+msgstr "ID（ULID）、状态（`active`、`suspended`、`deleted`）、管理员标记、版本、姓名、备注、停用说明、服务条款确认、最近登录、删除和擦除时间、语言"
 
 #: ../developer/local-accounts.md
-msgid "`agent_local_password_logins`"
-msgstr "`agent_local_password_logins`"
+msgid "`agent_local_login_identities`"
+msgstr "`agent_local_login_identities`"
 
 #: ../developer/local-accounts.md
-msgid "Email, normalized email (unique), Argon2id hash, verification time"
-msgstr "邮箱、规范化邮箱（唯一）、Argon2id 哈希、验证时间"
+msgid ""
+"One email, login name and phone number per account, each unique, with its"
+" verification time"
+msgstr "每个账号各一个邮箱、登录名和手机号，均唯一，并记录验证时间"
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_password_credentials`"
+msgstr "`agent_local_password_credentials`"
+
+#: ../developer/local-accounts.md
+msgid "The Argon2id hash, for an account that has a password"
+msgstr "Argon2id 哈希，仅用于有密码的账号"
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_account_access` (view)"
+msgstr "`agent_local_account_access`（视图）"
+
+#: ../developer/local-accounts.md
+msgid "Identity verified, may sign in, has Agent use"
+msgstr "身份已验证、可以登录、可以使用 Agent"
 
 #: ../developer/local-accounts.md
 msgid "`agent_local_admissions`"
@@ -836,20 +1316,32 @@ msgid ""
 msgstr "申请状态、用途、公开审核原因、审核时间和审核人"
 
 #: ../developer/local-accounts.md
-msgid "`agent_local_sessions`"
-msgstr "`agent_local_sessions`"
+msgid ""
+"`agent_local_sessions`, `agent_local_browser_sessions`, "
+"`agent_local_browser_accounts`"
+msgstr ""
 
 #: ../developer/local-accounts.md
-msgid "Session HMAC, expiry and revocation"
-msgstr "会话 HMAC、到期和撤销信息"
+msgid "Session HMACs, browsers and the accounts signed in on each"
+msgstr "会话 HMAC、浏览器以及每个浏览器上已登录的账号"
 
 #: ../developer/local-accounts.md
 msgid "`agent_local_auth_tokens`"
 msgstr "`agent_local_auth_tokens`"
 
 #: ../developer/local-accounts.md
-msgid "Hashes of emailed tokens, their purpose, expiry and consumption"
-msgstr "邮件令牌的哈希、用途、到期和使用信息"
+msgid ""
+"Hashes of emailed tokens, their purpose (and the address a binding "
+"proves), expiry and consumption"
+msgstr "邮件令牌的哈希、用途（以及绑定所证明的地址）、到期和使用信息"
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_phone_codes`"
+msgstr "`agent_local_phone_codes`"
+
+#: ../developer/local-accounts.md
+msgid "Keyed hashes of phone codes, their purpose, attempts and state"
+msgstr "手机验证码的带密钥哈希、用途、尝试次数和状态"
 
 #: ../developer/local-accounts.md
 msgid "`agent_local_auth_rate_limits`"
@@ -860,12 +1352,46 @@ msgid "Abuse counters"
 msgstr "防滥用计数器"
 
 #: ../developer/local-accounts.md
+msgid "`agent_local_login_events`"
+msgstr "`agent_local_login_events`"
+
+#: ../developer/local-accounts.md
+msgid "Sign-in attempts and their outcome"
+msgstr "登录尝试及其结果"
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_signup_domains`"
+msgstr "`agent_local_signup_domains`"
+
+#: ../developer/local-accounts.md
+msgid "The signup domain list"
+msgstr "注册域名名单"
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_setup`"
+msgstr "`agent_local_setup`"
+
+#: ../developer/local-accounts.md
+msgid "First-run setup"
+msgstr "首次设置"
+
+#: ../developer/local-accounts.md
+msgid "`agent_local_broadcasts`, `agent_local_broadcast_recipients`"
+msgstr ""
+
+#: ../developer/local-accounts.md
+msgid "Mail to accounts and each recipient's outcome"
+msgstr "发给账号的邮件及每个收件人的结果"
+
+#: ../developer/local-accounts.md
 msgid "`agent_local_access_terminations`"
 msgstr "`agent_local_access_terminations`"
 
 #: ../developer/local-accounts.md
-msgid "One record per revocation or suspension, until its cleanup is acknowledged"
-msgstr "每次撤权或停用对应一条记录，保留到清理确认完成"
+msgid ""
+"One record per revocation, suspension or deletion, until its cleanup is "
+"acknowledged"
+msgstr "每次撤权、停用或删除对应一条记录，保留到清理确认完成"
 
 #: ../developer/local-accounts.md
 msgid "`agent_local_identity_namespace`"
@@ -875,11 +1401,11 @@ msgstr "`agent_local_identity_namespace`"
 msgid "The marker that binds a database to local identity"
 msgstr "将数据库绑定到本地身份的标记"
 
-#: ../developer/local-accounts.md:275
+#: ../developer/local-accounts.md:466
 msgid "Tests"
 msgstr "测试"
 
-#: ../developer/local-accounts.md:277
+#: ../developer/local-accounts.md:468
 msgid ""
 "`tests/unit/test_local_account_rules.py` and "
 "`tests/unit/test_local_account_credentials.py` cover the rules, the "
@@ -888,7 +1414,7 @@ msgstr ""
 "`tests/unit/test_local_account_rules.py` 和 "
 "`tests/unit/test_local_account_credentials.py` 覆盖规则、密码策略、凭据、配置和邮件。"
 
-#: ../developer/local-accounts.md:280
+#: ../developer/local-accounts.md:471
 msgid ""
 "`tests/servers/test_local_auth_surface.py` checks that Gateway mode is "
 "unchanged, and covers the cross-site guard, JSON-only bodies, 422 bodies "
@@ -898,7 +1424,7 @@ msgstr ""
 "`tests/servers/test_local_auth_surface.py` 检查网关模式行为不变，并覆盖跨站保护、仅接受 JSON "
 "的请求体、不含敏感信息的 422 响应、本地模式拒绝网关会话，以及仅网关支持的视图。"
 
-#: ../developer/local-accounts.md:284
+#: ../developer/local-accounts.md:475
 msgid ""
 "The real-Postgres tier (`make test-db-local`) covers local accounts in "
 "six files: `tests/integration/storage/test_local_account_store.py` "
@@ -931,7 +1457,40 @@ msgstr ""
 "验证等待密码重置完成的登录请求不能用旧密码创建会话；`tests/integration/storage/test_local_cleanup_lock_acceptance.py`"
 " 验证申请清理锁的结果尚未返回时取消操作，仍会释放该锁。"
 
-#: ../developer/local-accounts.md:297
+#: ../developer/local-accounts.md:488
+msgid ""
+"`tests/unit/test_local_account_parity.py`, "
+"`tests/integration/storage/test_local_account_parity_store.py` and "
+"`tests/integration/servers/test_local_account_parity_flow.py` cover the "
+"account features added for HybridInference parity: login names and setup,"
+" phone codes and providers, browsers and pinned tabs, password and email "
+"changes, deletion, resumption and erasure, the sign-up policy, "
+"administration, mail to accounts and the language. "
+"`tests/integration/storage/test_local_account_review_store.py` pins the "
+"findings of the independent review: proof of a mailbox before the "
+"administrator and domain lists trust it, reclaiming an address, host "
+"cleanup and teams before erasure, one notice per application, broadcast "
+"claims and crash recovery, lock order when signing out everywhere, and "
+"audiences. `tests/unit/test_local_account_mail_delivery.py` covers the "
+"Tencent SES transport and its size bound. In the web app, "
+"`AccountParity.test.tsx`, `AccountCaptcha.test.tsx` (Turnstile on every "
+"phone code, one token per request), `AccountAdministration.test.tsx`, "
+"`AccountsPageErase.test.tsx` and `AccountLocaleSync.test.tsx` cover the "
+"pages with mocked API answers."
+msgstr ""
+"`tests/unit/test_local_account_parity.py`、`tests/integration/storage/test_local_account_parity_store.py`"
+" 和 `tests/integration/servers/test_local_account_parity_flow.py` 覆盖为对齐 "
+"HybridInference "
+"而新增的账号功能：登录名和首次设置、手机验证码及服务商、浏览器多账号与标签页锁定、修改密码和邮箱、删除、恢复与擦除、注册策略、管理功能、发送邮件给账号以及语言。`tests/integration/storage/test_local_account_review_store.py`"
+" "
+"固定了独立审查的发现：管理员和域名名单信任某个邮箱之前必须证明邮箱归属、收回地址、擦除前的主机清理和团队处理、每个申请只通知一次、群发认领与崩溃恢复、全部退出时的锁顺序，以及收件范围。`tests/unit/test_local_account_mail_delivery.py`"
+" 覆盖腾讯云 SES 传输及其大小限制。在 Web "
+"应用中，`AccountParity.test.tsx`、`AccountCaptcha.test.tsx`（每个手机验证码都使用 "
+"Turnstile，每个 token "
+"只用一次）、`AccountAdministration.test.tsx`、`AccountsPageErase.test.tsx` 和 "
+"`AccountLocaleSync.test.tsx` 使用模拟的 API 响应覆盖这些页面。"
+
+#: ../developer/local-accounts.md:506
 msgid ""
 "`tests/integration/servers/test_local_byok_acceptance.py` and "
 "`test_local_model_onboarding.py` exercise approval, verified connection "
@@ -945,31 +1504,50 @@ msgstr ""
 "Postgres，覆盖审批、验证并保存连接、创建任务、续聊、所有者隔离、不可用来源及显式功能开关。它们使用模拟服务商传输层，并禁止 Gateway"
 " 调用；这不等于真实服务商或 Kata 主机验收。"
 
-#: ../developer/local-accounts.md:304
+#: ../developer/local-accounts.md:513
 msgid "Reused code"
 msgstr "复用代码"
 
-#: ../developer/local-accounts.md:306
+#: ../developer/local-accounts.md:515
+msgid ""
+"The administration pages for local accounts follow the administrator's "
+"language (English or Simplified Chinese); the rest of the console is "
+"English."
+msgstr "本地账号的管理页面跟随管理员的语言（英文或简体中文）；控制台其余部分为英文。"
+
+#: ../developer/local-accounts.md:518
 msgid ""
 "The password hashing and policy, the sign-up, sign-in, verification and "
 "recovery behaviour, the mail templates and the abuse limits are adapted "
 "from HybridInference (`HarvardMadSys/hybridInference` at "
-"`321e9a6c457dcc80d35977aaac472d54041204a8`, MIT License, Copyright (c) "
-"2026 Harvard SEAS: the same license and holder as this repository). Each "
-"adapted module names its source file. Nothing imports `serving.*`, and "
+"`321e9a6c457dcc80d35977aaac472d54041204a8`, and the features added since "
+"at `8b49872d1dcbed5c4bc8132b026b6740c3437aa7`, MIT License, Copyright (c)"
+" 2026 Harvard SEAS: the same license and holder as this repository). Each"
+" adapted module names its source file. Nothing imports `serving.*`, and "
 "nothing shares HybridInference's database, sessions, secrets or tokens. "
 "The deliberate differences: a pending account can sign in, a sign-up with"
-" a registered address changes nothing, the abuse counters are persisted "
-"rather than kept per process, tokens travel in URL fragments, and "
-"`argon2-cffi` is called directly rather than through `passlib`."
+" a registered address changes nothing, a used link is refused rather than"
+" reported on, the abuse counters are persisted rather than kept per "
+"process, tokens travel in URL fragments, setup waits for an administrator"
+" rather than closing sign-up, an erased account keeps a tombstone, "
+"administrator mail goes only to verified addresses and renders Markdown "
+"without raw HTML, an address accepted while verification is off is not "
+"trusted by the administrator or domain lists until it is proven, the "
+"administrator list refuses withdrawals it would undo, erasure hands "
+"shared teams over rather than deleting them, mail Tencent SES cannot send"
+" is refused before it is queued, and `argon2-cffi` is called directly "
+"rather than through `passlib`."
 msgstr ""
 "密码哈希与策略、注册、登录、验证和账号恢复行为、邮件模板及防滥用限制均改编自 "
 "HybridInference（`HarvardMadSys/hybridInference` 的 "
-"`321e9a6c457dcc80d35977aaac472d54041204a8`，MIT License，Copyright (c) 2026"
+"`321e9a6c457dcc80d35977aaac472d54041204a8`，以及之后新增功能所在的 "
+"`8b49872d1dcbed5c4bc8132b026b6740c3437aa7`，MIT License，Copyright (c) 2026"
 " Harvard SEAS，与本仓库的许可证和版权持有者相同）。每个改编模块都注明来源文件。没有模块导入 `serving.*`，也不共享 "
 "HybridInference "
-"的数据库、会话、密钥或令牌。明确保留的差异是：待审批账号可以登录，使用已注册地址注册不会改变账号状态，防滥用计数器持久化保存而非各进程分别保存，令牌通过"
-" URL 片段传递，并直接调用 `argon2-cffi`，不经过 `passlib`。"
+"的数据库、会话、密钥或令牌。明确保留的差异是：待审批账号可以登录；使用已注册地址注册不会改变账号状态；已使用的链接直接拒绝，而不是报告其状态；防滥用计数器持久化保存，而非各进程分别保存；令牌通过"
+" URL 片段传递；首次设置会等待管理员出现，而不是关闭注册；已擦除的账号保留墓碑；管理员邮件只发给已验证地址，并渲染不含原始 HTML 的 "
+"Markdown；关闭验证期间接受的地址在被证明之前，不受管理员名单和域名名单信任；管理员名单拒绝它会撤回的撤销操作；擦除会移交共享团队而不是删除它们；腾讯云"
+" SES 无法发送的邮件在入队前就被拒绝；并直接调用 `argon2-cffi`，不经过 `passlib`。"
 
 #~ msgid ""
 #~ "None: no Gateway grant is minted "
@@ -1009,3 +1587,167 @@ msgstr ""
 #~ msgstr ""
 #~ "个人模型连接是另一分支上的独立功能，通过模型目录接口 `LocalModeGateway(catalog=...)` "
 #~ "接入。在本地模式下端到端运行任务需要该分支，本分支不声称已完成这项能力。不需要模型的仓库、团队、资料及其他账号流程不受影响。"
+
+#~ msgid "On by default. Set `false` to close public sign-up."
+#~ msgstr "默认开启。设置为 `false` 可关闭公开注册。"
+
+#~ msgid "`AGENT_SMTP_*`"
+#~ msgstr "`AGENT_SMTP_*`"
+
+#~ msgid ""
+#~ "The mail relay. Without a host and"
+#~ " a sender, sign-up is closed "
+#~ "and recovery answers 503."
+#~ msgstr "邮件中继。未配置主机或发件人时，注册关闭，账号恢复请求返回 503。"
+
+#~ msgid ""
+#~ "No endpoint grants the first "
+#~ "administrator, and the first account to"
+#~ " sign up gets nothing. Someone who"
+#~ " holds the deployment's database credential"
+#~ " and local secret runs:"
+#~ msgstr "没有任何接口会授予首位管理员权限，首个注册账号也不会获得额外权限。持有本部署数据库凭据和本地密钥的人需要运行："
+
+#~ msgid ""
+#~ "`{ok: true}` for every address. A "
+#~ "registered address gets a password-reset"
+#~ " link, not a second account, and "
+#~ "its password is not changed."
+#~ msgstr "对所有邮箱地址都返回 `{ok: true}`。已注册地址会收到密码重置链接，不会创建第二个账号，也不会修改原密码。"
+
+#~ msgid ""
+#~ "Sets the cookie and returns the "
+#~ "session body. `invalid_credentials` for an "
+#~ "unknown email and for a wrong "
+#~ "password alike. `email_not_verified` and "
+#~ "`account_suspended` only after the right "
+#~ "password."
+#~ msgstr ""
+#~ "设置 cookie 并返回会话响应。邮箱不存在或密码错误都返回 "
+#~ "`invalid_credentials`；只有密码正确时才会返回 `email_not_verified` 或"
+#~ " `account_suspended`。"
+
+#~ msgid "Revokes the local session, then clears the cookie."
+#~ msgstr "先撤销本地会话，再清除 cookie。"
+
+#~ msgid "ID (ULID), status, administrator flag and version"
+#~ msgstr "ID（ULID）、状态、管理员标记和版本"
+
+#~ msgid "Email, normalized email (unique), Argon2id hash, verification time"
+#~ msgstr "邮箱、规范化邮箱（唯一）、Argon2id 哈希、验证时间"
+
+#~ msgid "Session HMAC, expiry and revocation"
+#~ msgstr "会话 HMAC、到期和撤销信息"
+
+#~ msgid ""
+#~ "A six-digit code bound to its "
+#~ "purpose (`signup`, `login`, `bind`, "
+#~ "`delete_account`, `bind_email`, `set_password`), "
+#~ "number and account; the same answer "
+#~ "for every number."
+#~ msgstr ""
+
+#~ msgid ""
+#~ "Mail to accounts: `POST /preview`, `POST"
+#~ " /test`, create, list, detail, cancel."
+#~ msgstr ""
+
+#~ msgid ""
+#~ "An identity is **verified** when the "
+#~ "account has no unverified email and "
+#~ "at least one verified sign-in "
+#~ "identity: a confirmed email, a login "
+#~ "name (made by the operator, so "
+#~ "verified by construction) or a phone "
+#~ "number confirmed by a code. One "
+#~ "database view, `agent_local_account_access`, answers"
+#~ " whether an account's identity is "
+#~ "verified, whether it may sign in "
+#~ "and whether it may use Agent; "
+#~ "every SQL gate reads it, and it"
+#~ " is built so that an account "
+#~ "missing a row has no access."
+#~ msgstr ""
+
+#~ msgid ""
+#~ "With the `domains` approval policy an"
+#~ " account whose email domain is on "
+#~ "the signup domain list (exactly, or "
+#~ "as a subdomain of a `*.` entry)"
+#~ " is approved, audited as `signup-"
+#~ "policy`, as soon as its identity "
+#~ "is verified; with an empty list "
+#~ "every verified account is. A phone "
+#~ "account has no domain, so it is"
+#~ " approved automatically only while the "
+#~ "list is empty."
+#~ msgstr ""
+
+#~ msgid "**Language**: kept with the account; the most recent choice wins."
+#~ msgstr ""
+
+#~ msgid ""
+#~ "An administrator may then **erase** it,"
+#~ " typing its id to confirm. Erasure"
+#~ " is refused until the account is "
+#~ "deleted, its termination acknowledged, no "
+#~ "turn of it queued, running or "
+#~ "resident, and every sandbox it owns "
+#~ "deleted through the sandbox deletion "
+#~ "path. It removes every row of the"
+#~ " account's Agent data, walking the "
+#~ "foreign keys from the catalog (children"
+#~ " first), and never touches another "
+#~ "owner's row: a row of another "
+#~ "owner that refers to the account's "
+#~ "data blocks the erasure. Its "
+#~ "identifiers, password, sessions, tokens, "
+#~ "codes, sign-in events, mail recipients"
+#~ " and earlier audit rows go too. "
+#~ "The account row stays as a "
+#~ "tombstone, erased, which every gate "
+#~ "keeps denying and which can never "
+#~ "be resumed; the erasure's own audit "
+#~ "row records the rows removed and "
+#~ "the sandbox deletion archive objects "
+#~ "left in the bucket, which the "
+#~ "control plane may not delete and "
+#~ "which follow the bucket's retention "
+#~ "policy."
+#~ msgstr ""
+
+#~ msgid ""
+#~ "Administrators mail accounts chosen by "
+#~ "account state and application state, "
+#~ "with a ready-made message (maintenance,"
+#~ " announcement) or a subject and a "
+#~ "Markdown body (raw HTML is not "
+#~ "rendered). They preview the recipient "
+#~ "count and the message, send it to"
+#~ " themselves as a test, then send "
+#~ "it now or at a chosen time. "
+#~ "The recipients are fixed when it "
+#~ "is created, and only verified addresses"
+#~ " receive it. One process at a "
+#~ "time sends a message (a claim it"
+#~ " refreshes as it goes, taken over "
+#~ "when stale), each recipient's outcome is"
+#~ " recorded once, and an account "
+#~ "deleted since is skipped."
+#~ msgstr ""
+
+#~ msgid ""
+#~ "`tests/unit/test_local_account_parity.py`, "
+#~ "`tests/integration/storage/test_local_account_parity_store.py` "
+#~ "and "
+#~ "`tests/integration/servers/test_local_account_parity_flow.py` "
+#~ "cover the account features added for "
+#~ "HybridInference parity: login names and "
+#~ "setup, phone codes and providers, "
+#~ "browsers and pinned tabs, password and"
+#~ " email changes, deletion, resumption and"
+#~ " erasure, the sign-up policy, "
+#~ "administration, mail to accounts and the"
+#~ " language."
+#~ msgstr ""
+

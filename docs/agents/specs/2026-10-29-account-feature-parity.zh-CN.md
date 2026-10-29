@@ -1,200 +1,265 @@
 # 本地账号与 HybridInference 账号功能对齐（feature parity）
 
-日期：2026-10-29
-状态：**草稿**——功能清单与适配决定已定，实现逐条推进；「状态」一列随提交更新。
+- **日期**：2026-10-29。
+- **状态**：**定稿**。下表每一行都标出了实现位置、前端入口和测试；状态是本分支最终提交时的状态。
+- **比较源**：HybridInference `origin/dev` `8b49872d1dcbed5c4bc8132b026b6740c3437aa7`，只读。原始 copy 来源是 `321e9a6c`。
+- **Cloud Agent 起点**：PR #1030 head `506f33fe` 合入 dev `4b7b826d`。
 
-比较源：HybridInference `origin/dev` `8b49872d1dcbed5c4bc8132b026b6740c3437aa7`（只读）。
-原始 copy 来源 `321e9a6c`。Cloud Agent 起点：PR #1030 head `506f33fe` 合入 dev `4b7b826d`。
+本文取代 [本地登录身份设计](2026-10-29-local-login-identities-design.zh-CN.md) 和[身份范围评审](../reviews/2026-10-29-identity-scope-review.zh-CN.md)里的**分期与排除决定**。那两份文件中经核实成立的证据和设计继续沿用：身份表加 `LEFT JOIN` 访问视图、限流分桶。
 
-本文取代 [本地登录身份设计](2026-10-29-local-login-identities-design.zh-CN.md) 与
-[身份范围评审](../reviews/2026-10-29-identity-scope-review.zh-CN.md) 里的**分期与排除决定**：
-手机号、改绑邮箱、删号、多账号、已识别设备、ToS、captcha、域名策略全部在本次范围内。
-那两份文件里经核实成立的证据与设计（身份表 + `LEFT JOIN` 访问视图、限流分桶）继续沿用。
+独立评审的发现及其处理（B1–B20、N1–N10、R1–R3、F1–F11）不在本文逐条展开，见任务证据目录中的 resolution map。
 
-## 一、范围
+## 一、范围（用户确认）
 
-**在范围内**：HybridInference 账号系统的全部能力——注册、验证、登录（邮箱、登录名、手机号）、
-找回与修改密码、邮箱与手机号绑定、ToS、captcha、注册策略（开关、邮箱验证要求、域名
-允许名单与自动批准、一次性邮箱拒绝）、首次部署建管理员、删号（自助与管理员，软删、恢复、
-彻底删除）、同浏览器多账号、登出与会话撤销、已识别设备限流、登录事件、管理员账号管理与
-审批通知邮件、账号相关配置。
+**在范围内：HybridInference 账号身份与管理的全部能力，复制或改编到本地实现。**
 
-**不在范围内**（不是账号系统）：推理调度、计费与额度（API key、角色额度 `free/pro/internal`、
-`max_concurrent_requests`、`disabled_models`、用量统计、成本历史、自动化评分）、
-API key 认证失败封禁（`auth_failure_blocklist`、`/admin/auth-blocks`——只保护推理 API key 入口，
-Agent 没有 API key）、营销群发邮件（`/admin/broadcast`、`email_scheduler`）、
-Gateway↔Agent 的 OAuth 同意页（`/authorize`，Agent 的 Gateway 模式已经在用，本地模式没有对应物）、
-推理会话标识（`session_identity`）。
+- **注册与验证**：注册、验证、找回与修改密码、ToS、captcha、注册策略。
+- **登录**：邮箱、登录名、手机号三种方式。
+- **身份绑定**：邮箱与手机号绑定。
+- **账号生命周期**：首次部署建管理员；删号，包括自助与管理员两种，以及软删、恢复、彻底擦除。
+- **会话与设备**：同浏览器多账号、登出与会话撤销、已识别设备、登录事件。
+- **管理员功能**：账号管理（搜索、排序、计数、备注、全部状态动作）、审批通知邮件，以及**面向账号的群发与定时邮件**。
+- **设置与偏好**：账号相关的全部运行时设置、可插拔邮件与短信供应商、账号界面语言。
 
-**不变的边界**：不共享 Gateway 数据库、token、密钥或供应商凭据，不 import `serving.*`，不引入共享包。
-所有新路由只在 `AGENT_AUTH_MODE=local` 下开放，Gateway 模式行为不变；沙箱网络与凭据边界不变。
+**用户确认留在上游模型服务的**：推理 API key 与套餐额度。Agent 的推理走用户自己的模型连接，计费在供应商侧。Agent 不建本地计费或推理 key 体系，逐项边界见 §五。
+
+**不变的边界**：
+- 不共享 Gateway 数据库、token、密钥或供应商凭据，不 import `serving.*`，不引入共享包。
+- 所有新路由只在 `AGENT_AUTH_MODE=local` 下开放，Gateway 模式行为不变。由 `test_gateway_mode_serves_none_of_the_local_account_routes` 覆盖。
+- 沙箱网络与凭据边界不变。
 
 ## 二、关键适配决定
 
-1. **身份与准入分离（保留）。** 上游的 `pending_approval/rejected` 是账号状态，Agent 是独立的
-   准入（waiting list）状态。上游「自动批准」= Agent 在身份验证完成时由策略自动 `approve`
-   （审计 actor `signup-policy`）。上游 pending 账号不能登录；Agent 保持「能登录、看申请状态」
-   的有意偏离。
-2. **身份表 + 访问视图，fail-closed。** 新迁移 `0108_local_account_parity` 把
-   `agent_local_password_logins` 拆成 `agent_local_login_identities`（email / login_name / phone，
-   一类一行）和 `agent_local_password_credentials`（可选），数据保留。准入判断收敛为视图
-   `agent_local_account_access`（`LEFT JOIN` + `coalesce`）：缺任何一行即无权。
-   「身份已验证」= 没有未验证的邮箱身份，且至少有一个已验证身份（login_name 由运维创建即已验证，
-   手机号只在验证码通过后写入）。原来硬编码 `email_verified` 的 7 处（Python 3 处、SQL 4 处）全部改读它。
-3. **注册开关按上游语义成为管理员设置**（`Admin → Settings → Accounts`，数据库保存，首次从环境变量导入）：
-   `signup_enabled`、`require_email_verification`（关闭时新注册邮箱视为已验证，因而无 SMTP 也能注册；
-   已有未验证账号仍需验证——偏离上游「登录时放行」，fail-closed）、`signup_admin_notify`、
-   通知收件人、`approval_policy`（`manual` 为 Agent 现状默认；`domains` 完全按上游：
-   允许名单为空 = 全部自动批准，否则名单内域名自动批准）。
-4. **删号是软删 + 终止栅栏。** 状态新增 `deleted`：同一事务撤销会话、移出所有浏览器、作废令牌、
-   撤销准入、写审计和 `agent_local_access_terminations` 记录（action `delete`），之后走既有
-   `terminate_owner_access` 停止排队/运行/驻留工作与终端；记录未闭合前不能恢复。
-   管理员恢复（`resume`）只恢复登录，准入保持 revoked。彻底删除（hard delete）要求已软删且终止已完成。
-5. **多账号 = 浏览器会话**（上游 `browser_sessions`，最多 5 个）。cookie 仍一个，值改为浏览器令牌。
-   每次请求解析到浏览器的**当前账号**；前端每个请求带 `X-Agent-Account`（流式连接用查询参数），
-   与当前账号不符即 409 `account_switched`，避免标签页以错 owner 写入。已开的 SSE/WebSocket
-   在 30 s 复查时发现 cookie 已指向另一账号即结束，不迁移。
-6. **已识别设备**：上游无状态 HMAC cookie（`device_cookie.py`），密钥改为 `AGENT_LOCAL_SESSION_SECRET`
-   的 HKDF 派生；限流仍在 Postgres。
-7. **手机号**：按上游实际能力——验证码注册、登录、绑定（仅未绑定时；上游没有解绑和更换），
-   以及无密码账号用手机验证码确认敏感操作。OTP 一次性、每码尝试上限、发送冷却与配额按上游参数；
-   计数复用 Postgres 限流表（键为 keyed hash），验证码只存 keyed hash。
-   短信供应商：适配器接口 + 腾讯云实现（照上游 TC3 签名），默认关闭；测试只用假供应商与 mock 传输。
-8. **SMTP 与 captcha 配置**也进 Accounts 设置（密钥加密、只写）。Turnstile 未配置密钥即不校验（上游语义）。
-9. **一次性/保留域名拒绝**：上游硬编码列表照搬，适用于注册与改绑邮箱。
+1. **身份与准入分离。**
+   - 上游的 `pending_approval/rejected` 是账号状态；Agent 用独立的准入（waiting list）状态表达。
+   - 上游的"自动批准"，在 Agent 中是身份验证完成时由策略执行 `approve`，审计 actor 记为 `signup-policy`。
+   - 待审账号可以登录、查看申请状态，这是有意偏离。
+2. **身份表加访问视图，fail-closed。**
+   - `0108_local_account_parity` 把旧表拆成 `agent_local_login_identities`（email、login_name、phone 各一行）和可选的 `agent_local_password_credentials`，数据全部保留。
+   - 视图 `agent_local_account_access` 用 `LEFT JOIN` 加 `coalesce` 构造，缺任何一行即无权。所有 SQL 闸门都读它。
+   - 每个身份记录 `verified_by`，取值为 `link`、`code`、`operator` 或 `policy`。只有 `link` 和 `operator` 算作**已证明**邮箱。管理员邮箱名单提权和注册域名自动批准都要求已证明（N1）。
+3. **注册与账号配置是管理员设置。** 设置位于 `Admin → Settings → Accounts`，保存在数据库，首次从环境变量导入；密钥只写。共 52 项，见 `accounts/settings_registry.py`，并有测试保证每项都在设置页的分组里。
+4. **删号是软删加终止栅栏。**
+   - 新增 `deleted` 状态。删除时在同一事务内撤销会话、移出所有浏览器、作废令牌和手机验证码、撤销准入、写审计和终止记录。
+   - 彻底擦除还需满足三个前置：工作已停、主机已清理、共享团队已移交。擦除后保留墓碑。
+5. **多账号就是浏览器会话**，每个浏览器最多 5 个账号。
+   - 每次请求解析到浏览器的当前账号。前端每个请求都带 `X-Agent-Account`，不符即返回 409 `account_switched`。
+   - 已打开的流每 30 秒复查一次。
+6. **已识别设备**沿用上游的 HMAC cookie。密钥由 `AGENT_LOCAL_SESSION_SECRET` 经 HKDF 派生，cookie 为 `__Host-` 前缀、`Path=/`。
+7. **手机号**按上游实际能力实现：注册、登录、绑定（仅限尚未绑定时）、无密码账号的本人确认。短信供应商为接口加腾讯云实现，默认关闭；测试只用假供应商。
+8. **邮件供应商**是 `smtp`、`tencent_ses` 或注册进来的传输方式，每封邮件发送时重新读取设置。SES 无法发送的邮件在入队前就被拒绝（N8）。
+9. **cookie 与会话参数**：
+   - 上游 `samesite`、`secure`、`domain` 可配置；Agent 固定使用 `__Host-` 名，这要求 Secure、`Path=/`、不得设置 Domain，是更严格的安全选择。
+   - 会话有效期是设置项 `accounts.session_ttl_days`。
+   - 上游的 JWT access-token 有效期在 Agent 中没有对应物（见 G14）。
 
 ## 三、功能对齐表
 
-状态：✅ 已实现并有测试 ｜ 🔧 本分支实现中 ｜ ⬜ 待实现 ｜ ➖ 不适用（说明原因）。
-上游路径相对 `apps/backend/serving/`（后端）或 `apps/frontend/src/`（前端）。
+**状态**：✅ 已实现并有测试；➖ 不适用，同时写明原因。
+**上游路径**相对于 `apps/backend/serving/`。
+
+**测试缩写**：
+
+| 缩写 | 文件 |
+|---|---|
+| U | `tests/unit/test_local_account_parity.py` |
+| S | `tests/integration/storage/test_local_account_parity_store.py` |
+| F | `tests/integration/servers/test_local_account_parity_flow.py` |
+| RV | `tests/integration/storage/test_local_account_review_store.py` |
+| MD | `tests/unit/test_local_account_mail_delivery.py` |
+| RL | `tests/servers/test_login_rate_limits.py` |
+| LF | `tests/integration/servers/test_local_accounts_flow.py` |
+| LS | `tests/integration/storage/test_local_account_store.py` |
+| web:AP | `AccountParity.test.tsx` |
+| web:AC | `AccountCaptcha.test.tsx` |
+| web:AA | `AccountAdministration.test.tsx` |
+| web:PE | `AccountsPageErase.test.tsx` |
+| web:LS | `AccountLocaleSync.test.tsx` |
 
 ### 3.1 注册
 
-| # | 上游能力 | 上游来源 | Agent 入口 / 实现 | 测试 | 状态 |
-|---|---|---|---|---|---|
-| R1 | 邮箱+密码注册，密码强度规则 | `servers/routers/auth_routes.py` `signup`；`utils/password.py` | `POST /v1/auth/signup`；`application/accounts.py` | `test_local_accounts_flow.py` | ✅（PR #1030） |
-| R2 | 注册填写昵称 `user_name`、用途 `use_case` | `schemas_auth.py` `SignupRequest` | signup 增字段；`use_case` 写入准入申请（需审批时直接 pending） | 待补 | ⬜ |
-| R3 | 必须同意 ToS（`accepted_tos`），前端条款确认步骤 | `auth_routes.py:231`；`app/signup/SignupConsentStep.tsx`、`app/terms` | signup/phone signup 校验并记录 `tos_accepted_at`；前端勾选 + 条款链接（`terms_url` 设置） | 待补 | ⬜ |
-| R4 | Turnstile captcha（注册、发验证码） | `utils/turnstile.py`；`components/auth/TurnstileChallenge.tsx` | `accounts/captcha.py`；设置 `turnstile_site_key/secret_key`；前端组件 | 待补 | ⬜ |
-| R5 | 一次性/保留邮箱域名拒绝 | `utils/email_blocklist.py` | 注册与改绑邮箱 | 待补 | ⬜ |
-| R6 | 公开注册开关（运行时） | `auth/signup_policy.py` `is_public_signup_enabled` | 设置 `signup_enabled`（原 `AGENT_LOCAL_SIGNUP_ENABLED` 导入） | 待补 | ⬜ |
-| R7 | 邮箱验证要求开关（运行时） | `config/runtime_settings.py` `signup_require_email_verification` | 设置 `require_email_verification` | 待补 | ⬜ |
-| R8 | 域名允许名单（精确 + `*.` 通配）与自动批准，管理员增删 | `auth/signup_policy.py`；`routers/admin/signup_domains.py`；`dashboard/admin/SignupPolicySection.tsx` | 表 `agent_local_signup_domains`；`/v1/admin/accounts/signup-domains`；设置 `approval_policy`；管理页 | 待补 | ⬜ |
-| R9 | 注册 IP 限流（5/h、10/d） | `utils/signup_rate_limit.py` | Postgres 计数 | `test_login_rate_limits.py` | ✅ |
-| R10 | 新注册通知管理员邮件（开关、收件人） | `utils/email.py` `send_new_registration_admin_email`；`get_signup_notify_emails` | 设置 `signup_admin_notify`、`signup_notify_emails`（空则发给当前本地管理员） | 待补 | ⬜ |
-| R11 | 已注册邮箱再注册不泄露（上游 409；Agent 更严：发重置链接） | `auth_routes.py:257` | 保持 Agent 行为；已删除账号不发信 | 待补 | 🔧 |
-| R12 | 注册审计（anonymous actor） | `auth_routes.py:330` | `agent_admin_audit_log` `agent.local_account.signup` | 待补 | ⬜ |
+| # | 上游能力 | 上游来源 | Agent 实现 | 前端入口 | 测试 | 状态 |
+|---|---|---|---|---|---|---|
+| R1 | 邮箱加密码注册，密码强度规则 | `auth_routes.py` `signup`；`utils/password.py` | `POST /v1/auth/signup`；`application/accounts.py` | `/signup` | LF；web:AP | ✅ |
+| R2 | 昵称 `user_name`、用途 `use_case` | `SignupRequest` | `use_case` 随注册提交准入申请 | `/signup` 资料步骤 | web:AP "asks for the Terms first…" | ✅ |
+| R3 | 必须同意 ToS，前端两步确认，提供 `/terms` 页 | `auth_routes.py:231`；`SignupConsentStep.tsx` | 记录 `tos_accepted_at`；`terms_url` 或 `terms_text` 设置；两项都为空时仍要求勾选（G12） | `/signup` 同意步骤；`/terms` | F `test_sign_up_requires_the_terms_a_captcha_and_an_allowed_domain` | ✅ |
+| R4 | Turnstile，用于注册和每一次发验证码 | `utils/turnstile.py`；`TurnstileChallenge.tsx` | `accounts/captcha.py`，未配置密钥时不校验，校验失败即拒绝 | 注册页，以及每个手机验证码表单；每个 token 只用一次 | U captcha 3 项；F 同上；web:AC 5 项 | ✅ |
+| R5 | 拒绝一次性或保留域名 | `utils/email_blocklist.py` | 注册和改绑邮箱时检查 | — | U `test_disposable_and_reserved_domains_are_refused` | ✅ |
+| R6 | 公开注册开关 | `signup_policy.py` | 设置 `signup_enabled`，同时作用于邮箱和手机注册 | 注册关闭页 | web:AP "says sign-up is closed…" | ✅ |
+| R7 | 邮箱验证要求开关 | `runtime_settings.py` | `require_email_verification`；关闭时邮箱被接受但未证明（`policy`） | — | F `test_without_smtp_sign_up_works_once_verification_is_off`；RV N1 两项 | ✅ |
+| R8 | 域名允许名单（精确或 `*.` 通配）与自动批准 | `signup_policy.py`；`admin/signup_domains.py` | `agent_local_signup_domains`；`/v1/admin/accounts/signup-domains`；只认已证明的邮箱 | `/admin/accounts/policy` | U domain 4 项；S wildcard；F domain policy；RV | ✅ |
+| R9 | 注册 IP 限流（每小时 5 次、每天 10 次）和未解析来源分支（G11） | `signup_rate_limit.py` | `signup_rules`：共享额度，或返回 503 | — | RL 2 项（G11） | ✅ |
+| R10 | 新注册通知管理员（开关、收件人），每个申请只通知一次 | `send_new_registration_admin_email` | `signup_admin_notify`、`signup_notify_emails`；在身份验证时通知 | 设置页 | RV N4 | ✅ |
+| R11 | 用已注册邮箱再注册不泄露信息 | `auth_routes.py:257` | 统一返回 `{ok:true}`，并向该地址发送重置链接（比上游更严格） | — | LF | ✅ |
+| R12 | 注册审计 | `auth_routes.py:330` | `agent.local_account.signup` | `/admin/audit` | S | ✅ |
+| R13 | 发行版硬性禁止注册（G13） | `distribution.features.public_signup` | Agent 没有发行版概念 | — | — | ➖ |
 
 ### 3.2 邮箱验证
 
-| # | 上游能力 | 上游来源 | Agent 入口 / 实现 | 测试 | 状态 |
-|---|---|---|---|---|---|
-| V1 | 验证链接（24h、单次） | `auth_routes.py` `verify_email` | `POST /v1/auth/verify-email`（fragment 令牌） | `test_local_account_store.py` | ✅ |
-| V2 | 重发验证（不泄露） | `auth_routes.py` `resend_verification` | `POST /v1/auth/resend-verification` | ✅ | ✅ |
-| V3 | 验证后按策略自动批准 | `signup` 初始状态 | 验证事务内按 `approval_policy` 自动 approve | 待补 | ⬜ |
+| # | 上游能力 | 上游来源 | Agent 实现 | 前端入口 | 测试 | 状态 |
+|---|---|---|---|---|---|---|
+| V1 | 验证链接（24 小时、单次） | `verify_email` | `POST /v1/auth/verify-email`；令牌放在 URL fragment；已用链接直接拒绝（偏离） | `/verify-email` | LS | ✅ |
+| V2 | 重发验证邮件，不泄露 | `resend_verification` | `POST /v1/auth/resend-verification` | `/resend-verification` | LS | ✅ |
+| V3 | 验证后按策略自动批准 | — | `after_verified_identity` | — | F；RV | ✅ |
 
 ### 3.3 登录
 
-| # | 上游能力 | 上游来源 | Agent 入口 / 实现 | 测试 | 状态 |
-|---|---|---|---|---|---|
-| L1 | 邮箱+密码登录，反枚举 | `auth_routes.py` `login` | `POST /v1/auth/login` | `test_local_accounts_flow.py` | ✅ |
-| L2 | 登录名（无邮箱）+密码登录 | `auth_routes.py:439` | login 的 `identifier` 不含 `@` 即按登录名 | 待补 | ⬜ |
-| L3 | 手机号+验证码登录 | `phone_auth_routes.py` `phone_login` | `POST /v1/auth/phone/login` | 待补 | ⬜ |
-| L4 | 停用账号登录时显示管理员填写的停用说明 | `exceptions.AccountSuspendedError`；`suspension_message` | 403 `account_suspended` 带 `message` | 待补 | ⬜ |
-| L5 | 登录限流三桶 + 先过地址桶才计账号桶 | `utils/login_rate_limit.py` | `api/auth.py` `enforce_login_limits` | `test_login_rate_limits.py` | ✅ |
-| L6 | 已识别设备（device cookie）独立限流桶 | `utils/device_cookie.py`；`login_rate_limit.py` device | `accounts/device_cookie.py`；login 与重新认证使用 | 待补 | ⬜ |
-| L7 | 登录事件（成功/失败原因/IP/UA） | `storage/...record_login_event`；`phone_auth.record_phone_login_event` | 表 `agent_local_login_events` | 待补 | ⬜ |
-| L8 | 登录事件清理（按天数 / 按账号） | `routers/admin/login_events.py` | `DELETE /v1/admin/accounts/login-events`；管理页按钮 | 待补 | ⬜ |
-| L9 | 需要 rehash 时并发登录不误 401 | （上游无此竞态：passlib 同步） | 修复 CAS 失败方 | 待补 | ⬜ |
-| L10 | 取消请求不提前释放 hash 槽位 | — | `accounts/passwords.py` | 待补 | ⬜ |
+| # | 上游能力 | 上游来源 | Agent 实现 | 前端入口 | 测试 | 状态 |
+|---|---|---|---|---|---|---|
+| L1 | 邮箱加密码登录，反枚举 | `login` | `POST /v1/auth/login` | `/login` | LF | ✅ |
+| L2 | 登录名加密码登录 | `auth_routes.py:439` | `identifier` 不含 `@` 时按登录名处理 | `/login` | F `test_a_login_name_account_signs_in_without_any_email` | ✅ |
+| L3 | 手机号加验证码登录 | `phone_login` | `POST /v1/auth/phone/login` | `/login` 的手机标签页 | F phone；web:AP；web:AC | ✅ |
+| L4 | 停用账号登录时显示停用说明 | `AccountSuspendedError` | 403 `account_suspended`，消息为管理员填写的说明 | `/login` | F administrators… | ✅ |
+| L5 | 登录限流三个桶，先通过地址桶才计入账号桶 | `login_rate_limit.py` | `enforce_login_limits`，三项都可设置 | — | RL | ✅ |
+| L6 | 已识别设备的独立限流桶 | `device_cookie.py` | `accounts/device_cookie.py` | — | U device 3 项；F `test_a_recognized_browser_signs_in…` | ✅ |
+| L7 | 登录事件 | `record_login_event` | `agent_local_login_events` | 审核面板中的登录记录 | S `test_sign_in_events_are_recorded_and_purged…` | ✅ |
+| L8 | 清理登录事件（按天数、按账号），需要确认 | `admin/login_events.py` | `DELETE /v1/admin/accounts/login-events` | 策略页；审核面板（F6 增加确认） | S；web:AA | ✅ |
+| L9 | rehash 并发时 CAS 失败方不误报 401 | — | `_current_hash` 重新读取 | — | U rehash 2 项 | ✅ |
+| L10 | 请求取消时不提前释放 hash 槽位 | — | `accounts/passwords.py` | — | U slot 2 项 | ✅ |
 
 ### 3.4 会话与多账号
 
-| # | 上游能力 | 上游来源 | Agent 入口 / 实现 | 测试 | 状态 |
-|---|---|---|---|---|---|
-| S1 | 登出当前账号（其他账号保留） | `auth_routes.py` `logout` | `POST /v1/session/logout` | 待补 | 🔧 |
-| S2 | 登出本浏览器全部账号 | `auth_routes.py` `logout_all` | `POST /v1/auth/logout-all` | 待补 | ⬜ |
-| S3 | 浏览器多账号（最多 5）列表、切换、移除 | `auth/browser_sessions.py`；`/auth/accounts`、`/auth/switch`、`DELETE /auth/accounts/{id}`；`components/auth/AccountChooser.tsx` | 表 `agent_local_browser_sessions`、`agent_local_browser_accounts`；同名路由；账号菜单 | 待补 | ⬜ |
-| S4 | 切换后其他标签页提示/重载 | `lib/auth/accountSync.ts`；`AccountChangedNotice.tsx` | `X-Agent-Account` + 409；`SessionSwitchWatcher` 扩展 | 待补 | ⬜ |
-| S5 | 会话过期、密码重置/停用/删号撤销会话 | `browser_sessions.session_live` | 服务器端会话行 | `test_local_account_store.py` | ✅（删号待补） |
+| # | 上游能力 | 上游来源 | Agent 实现 | 前端入口 | 测试 | 状态 |
+|---|---|---|---|---|---|---|
+| S1 | 登出当前账号，其他账号保留 | `logout` | `POST /v1/session/logout` | 账号菜单 | F browser | ✅ |
+| S2 | 登出本浏览器的全部账号 | `logout_all` | `POST /v1/auth/logout-all`，先锁浏览器（N6） | `/accounts` | S；RV N6 两项 | ✅ |
+| S3 | 浏览器多账号（最多 5 个）：列表、切换、移除，显示准入状态 | `browser_sessions.py`；`AccountChooser.tsx` | `/v1/auth/accounts`、`/switch` | `/accounts`；登录页的"使用已登录账号"链接 | S；F；web:AP（含跨标签页刷新，F10） | ✅ |
+| S4 | 其他标签页换号后的保护 | `accountSync.ts` | `X-Agent-Account` 加 409 `account_switched`，流每 30 秒复查 | `client.ts` `pinAccount` | F `test_two_accounts_share_a_browser…`；`accountPin.test.ts` | ✅ |
+| S5 | 会话过期，以及改密、重置、停用、删号时撤销会话 | `session_live` | 服务器端会话行 | — | LS；S | ✅ |
+| S6 | access token 加 refresh 轮换架构（G14） | `client.ts:140-190` | Agent 用服务器端会话 cookie，没有 access token；S4 的 pin 加 409 覆盖了上游"刷新时发现换号就停止"的保护 | — | — | ➖（架构差异） |
 
 ### 3.5 密码
 
-| # | 上游能力 | 上游来源 | Agent 入口 / 实现 | 测试 | 状态 |
-|---|---|---|---|---|---|
-| P1 | 忘记密码 / 重置（1h，作废其他链接，撤销全部会话） | `auth_routes.py` | 已有 | `test_local_session_reset_race.py` | ✅ |
-| P2 | 已登录改密码（验旧密码、计入登录限流、撤销其他会话、作废重置链接、通知邮箱） | `user_routes.py` `change_password` | `POST /v1/account/password` | 待补 | ⬜ |
-| P3 | 无密码账号（手机号）用 `set_password` 验证码设首个密码 | 同上；`reauth.py` | 同上 | 待补 | ⬜ |
-| P4 | 密码已更改通知邮件 | `utils/email.py` `send_password_changed_email` | mail kind `password_changed` | 待补 | ⬜ |
+| # | 上游能力 | 上游来源 | Agent 实现 | 前端入口 | 测试 | 状态 |
+|---|---|---|---|---|---|---|
+| P1 | 忘记密码与重置 | `auth_routes.py` | 已有；只在重置首次让身份变为已验证时通知管理员（N4）；重置证明了 `policy` 邮箱时即为收回账号（R3） | `/forgot-password`、`/reset-password` | `test_local_session_reset_race.py`；RV | ✅ |
+| P2 | 已登录时修改密码 | `change_password` | `POST /v1/auth/account/password` | 设置 → 账号 | F `test_changing_the_password…`；web:AP | ✅ |
+| P3 | 无密码账号凭验证码设置首个密码 | `reauth.py` | 同上，用途为 `set_password` | 设置 → 账号 | S；web:AC | ✅ |
+| P4 | 密码已更改通知 | `send_password_changed_email` | 邮件类型 `password_changed` | — | U render | ✅ |
 
 ### 3.6 邮箱与手机号绑定
 
-| # | 上游能力 | 上游来源 | Agent 入口 / 实现 | 测试 | 状态 |
-|---|---|---|---|---|---|
-| B1 | 绑定或更换邮箱：先确认本人（密码或手机验证码），新地址发验证链接，点击后才生效，通知旧地址，作废旧重置链接 | `auth_routes.py` `bind_email`、`verify_email` pending 分支；`components/auth/EmailBindForm.tsx` | `POST /v1/account/email`；令牌表增 `pending_email`；verify 分支 | 待补 | ⬜ |
-| B2 | 邮箱已更改通知 | `send_email_changed_email` | mail kind `email_changed` | 待补 | ⬜ |
-| B3 | 绑定手机号（验证码，未绑定时） | `phone_auth_routes.py` `bind_phone`；`storage/phone_auth.py` `bind_user_phone` | `POST /v1/account/phone` | 待补 | ⬜ |
-| B4 | 解绑/更换手机号 | 上游**没有**（`bind_user_phone` 只允许 `phone IS NULL OR phone = $2`） | — | — | ➖ 上游无此能力 |
+| # | 上游能力 | 上游来源 | Agent 实现 | 前端入口 | 测试 | 状态 |
+|---|---|---|---|---|---|---|
+| B1 | 绑定或更换邮箱（G16）：先确认本人再查重，点击链接后才生效，通知旧地址，作废旧的重置链接 | `bind_email` | `POST /v1/auth/account/email`；令牌带 `pending_email`；无 SMTP 时返回 503 | 设置 → 账号 | F `test_a_new_email_takes_effect_only_from_its_link…`；S binding 2 项 | ✅ |
+| B2 | 邮箱已更改通知 | `send_email_changed_email` | `email_changed` | — | F | ✅ |
+| B3 | 绑定手机号（仅限尚未绑定时） | `bind_phone` | `POST /v1/auth/account/phone` | 设置 → 账号（captcha 见 F1） | F phone；S race；web:AC | ✅ |
+| B4 | 解绑或更换手机号 | 上游没有 | — | — | — | ➖（上游无此能力） |
 
-### 3.7 手机号认证基础
+### 3.7 手机认证基础
 
-| # | 上游能力 | 上游来源 | Agent 入口 / 实现 | 测试 | 状态 |
-|---|---|---|---|---|---|
-| H1 | 发送用途绑定的验证码（signup/login/bind/delete_account/bind_email/set_password），captcha、冷却与每号/每 IP 配额，不泄露号码是否注册 | `phone_auth_routes.py` `send_phone_code`；`storage/phone_auth.py` | `POST /v1/auth/phone/code` | 待补 | ⬜ |
-| H2 | 手机号注册（ToS、注册限流、策略、通知） | `phone_signup` | `POST /v1/auth/phone/signup` | 待补 | ⬜ |
-| H3 | 号码规范化、默认国家码、允许前缀 | `utils/phone_auth.py` `normalize_phone` | `accounts/phone.py` | 待补 | ⬜ |
-| H4 | 验证码 keyed hash、每码尝试上限、先预留后发送、供应商确认才激活 | `storage/phone_auth.py` | 表 `agent_local_phone_codes` | 待补 | ⬜ |
-| H5 | 短信供应商接口与配置（默认关闭）+ 腾讯云实现 | `utils/sms.py`、`utils/delivery.py`、`integrations/tencent_cloud/sms.py`、`api.py` | `accounts/sms.py`、`accounts/sms_tencent.py`；Accounts 设置 | 待补 | ⬜ |
-| H6 | 前端：登录/注册方式选择、手机表单、国家码 | `components/auth/AuthMethodSelector.tsx`、`PhoneAuthForm.tsx`、`lib/phone-countries.ts` | 同名组件 | 待补 | ⬜ |
+| # | 上游能力 | 上游来源 | Agent 实现 | 前端入口 | 测试 | 状态 |
+|---|---|---|---|---|---|---|
+| H1 | 按用途发送验证码、冷却与配额、不泄露号码是否注册 | `send_phone_code` | `POST /v1/auth/phone/code` | `PhoneCodeFields` | U 6 项；S codes 4 项 | ✅ |
+| H2 | 手机号注册 | `phone_signup` | `POST /v1/auth/phone/signup` | `/signup` 的手机标签页 | F；web:AP；web:AC | ✅ |
+| H3 | 号码规范化、默认国家码、允许的前缀 | `normalize_phone` | `accounts/sms.py` | — | U | ✅ |
+| H4 | 验证码只存 keyed hash，有尝试上限，先预留后发送 | `phone_auth.py` | `agent_local_phone_codes` | — | U；S | ✅ |
+| H5 | 短信供应商接口和腾讯云实现 | `utils/sms.py`；`tencent_cloud/sms.py` | `accounts/sms.py`、`sms_tencent.py`、`tencent_cloud.py` | 设置页"Phone sign-in" | U tencent 3 项（mock 传输） | ✅ |
+| H6 | 前端登录、注册方式选择 | `AuthMethodSelector.tsx` | 标签页切换 | `/login`、`/signup` | web:AP | ✅ |
 
-### 3.8 删号
+### 3.8 删号与擦除
 
-| # | 上游能力 | 上游来源 | Agent 入口 / 实现 | 测试 | 状态 |
-|---|---|---|---|---|---|
-| D1 | 自助删号：输入账号标识确认 + 密码（或手机验证码）；管理员不可自删；软删；通知邮件 | `auth_routes.py` `delete_own_account`；`components/features/auth/DeleteAccount.tsx` | `POST /v1/account/delete`；终止栅栏 | 待补 | ⬜ |
-| D2 | 管理员软删（active/suspended），不可删自己 | `routers/admin/users.py` `delete_user` | admin action `delete` | 待补 | ⬜ |
-| D3 | 管理员恢复已删账号 | `resume_user` | admin action `resume` | 待补 | ⬜ |
-| D4 | 管理员彻底删除（需先软删，确认） | `hard_delete_user` | `POST /v1/admin/accounts/{id}/erase` | 待补 | ⬜ |
-| D5 | 账号已删除通知邮件 | `send_account_deleted_email` | mail kind `account_deleted` | 待补 | ⬜ |
+| # | 上游能力 | 上游来源 | Agent 实现 | 前端入口 | 测试 | 状态 |
+|---|---|---|---|---|---|---|
+| D1 | 自助删号：输入标识并证明本人；管理员不能删除自己；软删；发通知 | `delete_own_account` | `POST /v1/auth/account/delete` | 设置 → 账号的"删除账号"区块 | F deleting…；U；web:AP | ✅ |
+| D2 | 管理员软删 | `delete_user` | 管理动作 `delete` | `/admin/accounts` | S；F | ✅ |
+| D3 | 管理员恢复 | `resume_user` | `resume`，等清理确认后才能执行；已擦除的账号不能恢复 | 同上 | U；S | ✅ |
+| D4 | 管理员彻底删除，含清除清单和写入栅栏（G1） | `hard_delete_user`、`erasure_fence` | `POST /{id}/erase`：按外键遍历删除全部 owner 数据，不触碰其他 owner 的行，墓碑同时充当栅栏；要求主机已清理（N2），共享团队已移交（N3） | 擦除区块，结果在页面上保留（F3） | S erasing 5 项；RV N2、N3；F；web:PE | ✅ |
+| D5 | 账号已删除通知 | `send_account_deleted_email` | `account_deleted` | — | U render | ✅ |
+| D6 | 删号时清理手机验证码（G17） | `_forget_phone_challenges` | 删除时删除该账号的验证码；擦除时再清理一次 | — | RV `test_deleting_an_account_forgets_its_phone_codes` | ✅ |
 
 ### 3.9 管理员
 
-| # | 上游能力 | 上游来源 | Agent 入口 / 实现 | 测试 | 状态 |
-|---|---|---|---|---|---|
-| A1 | 列表按状态过滤、分页 | `admin/users.py` `list_users` | `GET /v1/admin/accounts` | `admin/accounts/page.test.tsx` | ✅ |
-| A2 | 搜索（邮箱、登录名、手机号、昵称、id 前缀） | 同上 `search` | `?q=` | 待补 | ⬜ |
-| A3 | 批准 / 拒绝（含原因）/ 停用 / 恢复 / 授予撤销管理员 | `approve_user`、`reject_user`、`update_user` | 已有 7 动作 | `test_local_access_termination.py` | ✅ |
-| A4 | 批准、拒绝结果邮件通知用户 | `send_approval_email`、`send_rejection_email` | mail kind `approved`、`rejected` | 待补 | ⬜ |
-| A5 | 管理员备注 `admin_note`、停用说明 `suspension_message` | `update_user` | admin action `annotate` | 待补 | ⬜ |
-| A6 | 用户详情（标识、状态、最近登录） | `get_user_detail`（账号部分） | 列表项扩展 `last_login_at`、标识 | 待补 | ⬜ |
-| A7 | 审计日志 | `list_audit_log` | 已有 `/admin/audit` | — | ✅ |
-| A8 | 状态计数 | `StatusCounts` | 列表响应 `counts` | 待补 | ⬜ |
+| # | 上游能力 | 上游来源 | Agent 实现 | 前端入口 | 测试 | 状态 |
+|---|---|---|---|---|---|---|
+| A1 | 列表过滤、分页、按创建或最近登录排序（G10） | `list_users` | `GET /v1/admin/accounts` 的 `sort` 参数 | `/admin/accounts` | S sort；`page.test.tsx` | ✅ |
+| A2 | 搜索 | `search` | `?q=` | 搜索框，300 毫秒防抖 | S search | ✅ |
+| A3 | 批准、拒绝、停用、恢复、授予或撤销管理员 | `approve_user` 等 | 9 个动作，带版本号；管理员名单会重新授予的撤销操作被拒绝（N10、R2） | 审核面板，有中文界面（F11） | `test_local_access_termination.py`；F；RV R2；web:AA | ✅ |
+| A4 | 批准和拒绝结果邮件 | `send_approval_email` | `approved`、`rejected` | — | F | ✅ |
+| A5 | 管理员备注、停用说明 | `update_user` | `PATCH /{id}/notes` | 审核面板 | F；web:AA | ✅ |
+| A6 | 详情字段（G10） | `get_user_detail` | 标识、最近登录、审核人、用途、备注 | 列表行 | F | ✅ |
+| A7 | 审计（G9） | `list_audit_log` | 14 个上游动作各有对应，另加 reclaim、transfer_team、broadcast | `/admin/audit` | S；RV | ✅ |
+| A8 | 状态计数 | `StatusCounts` | 响应中的 `counts` | 计数卡 | F | ✅ |
+| A9 | `ADMIN_EMAILS` 登录自动提权（G3） | `auth_routes.py:527` | 设置项 `admin_emails`，只认已证明的邮箱（N1），名单优先（N10） | 设置页说明，动作说明 | F 3 项；RV 4 项 | ✅ |
+| A10 | 账号群发与定时邮件 | `admin/broadcast.py`、`email_scheduler` | `/v1/admin/account-mail`：预览、测试、创建或定时、取消、收件人明细；收件人在创建时固定；认领带令牌（R1）；每个收件人逐条记录（N5）；SES 发不出的邮件预先拒绝（N8）；不能以已删除账号为受众（N7） | `/admin/accounts/mail`：预览与内容绑定、发送前确认（F2）、分页（F8） | S broadcast 3 项；RV 4 项；F 2 项；MD；web:AA | ✅ |
+| A11 | 移交已删除 owner 的团队 | — | `GET /{id}/teams`、`POST /{id}/teams/{team}/transfer` | 擦除区块中的"它拥有的团队" | RV；F；web:AA | ✅（Agent 特有） |
 
 ### 3.10 首次部署与运维建号
 
-| # | 上游能力 | 上游来源 | Agent 入口 / 实现 | 测试 | 状态 |
-|---|---|---|---|---|---|
-| F1 | 首次部署：启动日志打印一次性 setup code，`/setup` 用它创建登录名管理员并登录；未完成前注册 503 | `servers/routers/setup.py`、`setup_state.py`；`app/setup/CreateAdminStep.tsx` | `GET /v1/auth/setup`、`POST /v1/auth/setup/admin`；登录页内的建管理员表单 | 待补 | ⬜ |
-| F2 | 运维 CLI 建号（无 SMTP） | （上游只有 F1）| `python -m cloud_agent.accounts.bootstrap_admin --create-login-name` | 待补 | ⬜ |
+| # | 上游能力 | 上游来源 | Agent 实现 | 前端入口 | 测试 | 状态 |
+|---|---|---|---|---|---|---|
+| F1 | 一次性 setup code 创建登录名管理员 | `routers/setup.py` | `POST /v1/auth/setup/admin`，启动日志写明 `/setup/administrator` | `/setup/administrator`；登录页链接 | F setup 2 项；S setup 2 项；web:AP | ✅ |
+| F2 | 运维 CLI 建号或提权，无需 SMTP（G15） | `ops/admin/create_admin.py` | `bootstrap_admin --create-email/--create-login-name/--member/--approve`，记为 `operator` | — | S `test_the_operator_creates…`；RV | ✅ |
+| F3 | 公开配置端点（G4） | `/site-config` | `GET /v1/auth/options`；`/config` 保持不变 | 登录页和注册页 | F；web:AP | ✅ |
 
-### 3.11 个人资料
+### 3.11 个人资料与偏好
 
-| # | 上游能力 | 上游来源 | Agent 入口 / 实现 | 测试 | 状态 |
-|---|---|---|---|---|---|
-| U1 | `/user/me` 账号信息（标识、是否有密码、手机） | `user_routes.py` `get_current_user_info` | `GET /v1/session/me` 扩展 | 待补 | ⬜ |
-| U2 | 昵称、头像 | `update_profile` | Agent 既有 Profile（名、姓、头像） | 既有 | ✅（形状不同） |
-| U3 | 界面语言偏好 | `update_locale_preference` | Agent 前端只有英文 | — | ➖ Agent 无多语言界面 |
+| # | 上游能力 | 上游来源 | Agent 实现 | 前端入口 | 测试 | 状态 |
+|---|---|---|---|---|---|---|
+| U1 | 账号信息 | `get_current_user_info` | `/v1/session/me` 的 `identity` 字段；`GET /v1/auth/account` | 设置 → 账号 | F | ✅ |
+| U2 | 昵称、头像 | `update_profile` | Agent 已有 Profile 功能；注册时的 `user_name` 存在账号上 | — | 既有测试 | ✅（形状不同） |
+| U3 | 界面语言随账号保存（G7），以最新选择为准，未登录时的选择带上 `chosen_at` | `PUT /user/preferences/locale` | `PUT /v1/auth/account/locale`，返回 `locale_chosen_at` | `AccountLocaleSync` | F language；web:LS 4 项 | ✅ |
 
-## 四、已知原 copy 问题（一并修复）
+### 3.12 设置与供应商（G5、G6）
 
-| 问题 | 位置 | 处理 |
+| # | 上游能力 | Agent 实现 | 测试 | 状态 |
+|---|---|---|---|---|
+| C1 | 登录限流 3 项、注册限流 2 项、未解析来源 3 项、短信 13 项、Turnstile、SMTP 6 项加 `email_provider`、通知收件人 | 全部放进 Accounts 设置（52 项），只写密钥加密保存 | `test_account_settings_groups.py`；U | ✅ |
+| C2 | cookie 的 `samesite`、`secure`、`domain` | 固定使用 `__Host-`（见 §二第 9 条） | U device | ➖（有意固定） |
+| C3 | 可插拔邮件供应商，包括腾讯云 SES 模板发送 | `accounts/delivery.py`、`ses_tencent.py`、`register_email_provider` | MD（mock 传输） | ✅ |
+
+## 四、已知原 copy 问题（已修复）
+
+| 问题 | 处理 | 测试 |
 |---|---|---|
-| 取消 await 过早释放 hash 槽位 | `accounts/passwords.py` `_run` | 槽位在 executor 任务结束时释放 |
-| `needs_rehash` 并发 CAS 失败方 401 | `application/accounts.py` `sign_in` | CAS 返回是否成功；失败则重读并重验 |
-| 登录限流先 per-IP 通过才计 account-wide | `api/auth.py` | PR #1030 已修，补设备桶后复核 |
-| 邮件限流键与登录规范化不一致 | `api/auth.py` `_email_key` | 统一用规范化标识 |
+| 取消 await 时过早释放 hash 槽位 | 槽位在 executor 任务结束时才释放 | U |
+| `needs_rehash` 并发时 CAS 失败方返回 401 | CAS 返回成败；失败方重新读取并重新校验 | U |
+| 登录限流先过 per-IP 才计入账号桶 | 已核对，并增加设备桶 | RL |
+| 邮件限流键与登录规范化不一致 | 统一使用规范化标识 | U |
 
-## 五、真实环境验收缺口（实现完成后填写）
+## 五、上游计费与推理面边界（G2，用户确认留在上游）
 
-未获授权发送真实短信/邮件、生产部署或修改生产账号；这些只在隔离环境用假供应商验证。
-</content>
+| 上游能力 | 用途 | Agent 对应边界 |
+|---|---|---|
+| 角色 `free/pro/internal/admin` | 模型可见性、额度、并发 | Agent 只有 `agent.use` 和 `agent.admin` 两级准入，"授予/撤销管理员"已实现；没有付费分级 → ➖。管理员自我保护规则保留：不能自降、自停、自删。 |
+| 每用户日额度、月额度，按角色的默认额度 | 计费限额 | 推理走用户自己的模型连接，计费在供应商侧 → ➖ |
+| 并发 `max_concurrent_requests` | 推理并发闸 | 由 Agent 调度器配置 → ➖ |
+| `disabled_models` | 模型访问控制 | 模型来自用户连接 → ➖ |
+| API key 生成、列表、删除、重生成 | 推理 API 认证 | Agent 没有公共推理 API → ➖。账号的凭据类对象（模型连接密钥）在停用和删号时随终止栅栏失效，擦除时被删除（S `test_erasing_removes_the_provider_key…`）。 |
+| 用量、成本、最近请求、自动化评分 | 计费观测 | 本地模式没有 → ➖ |
+| API-key 认证失败封禁 | 只保护推理 key 入口 | → ➖ |
+| `llm-prober-layout` 偏好 | 推理调试页布局 | 不属于账号功能 → ➖ |
+
+## 六、有意偏离
+
+| 偏离 | 理由 |
+|---|---|
+| 待审账号可以登录，查看申请状态 | Agent 的准入独立于身份 |
+| 已注册地址再注册时，不改账号状态，只发重置链接 | 不泄露，也不改动他人账号 |
+| 已用过的验证链接直接拒绝，不报告其状态 | 不向持有旧链接的人透露账号信息 |
+| 限流计数器持久化在 Postgres，令牌放在 URL fragment | 多副本共享计数；令牌不进入访问日志 |
+| 首次设置等到管理员出现为止，不关闭注册 | 由已存在的管理员关闭首次设置 |
+| `require_email_verification=false` 时，旧的未验证账号仍需验证 | fail-closed |
+| 关闭验证期间接受的邮箱不被管理员名单和域名名单信任，直到证明为止；重置密码即收回账号 | 上游在此存在提权漏洞（N1），不照搬 |
+| 管理员名单优先，拒绝它会撤回的撤销操作 | 不报告实际不会持久的撤销（N10） |
+| 擦除保留墓碑；共享团队先移交；保留的 id 列见开发文档 | 不误删其他成员的数据（N3） |
+| 群发只发给已验证地址；Markdown 不渲染原始 HTML；SES 发不出的邮件预先拒绝 | 安全，且失败不再静默（N8） |
+| 沙箱删除归档留在存储桶中，按保留策略处理 | 控制平面无权删除这些对象 |
+| 不能解绑或更换手机号 | 与上游一致 |
+| 管理页的中文只覆盖新增的账号管理页面 | 控制台其余部分仍为英文（F11） |
+
+## 七、迁移说明
+
+`0108_local_account_parity` 在开发期间曾原地扩展，加入了 locale、群发、`verified_by`、`claim_token`。早期版本只应用于任务隔离的测试库，从未发布或部署（N9）。基于旧快照建立的任务库需要重建；`make test-db-local` 每次运行都会新建数据库。0107→0108 的数据保留迁移测试仍然保留，见 S `test_the_migration_carries_accounts_over_and_refuses_a_lossy_downgrade`。
+
+## 八、真实环境验收缺口
+
+以下没有获得授权，也没有执行，只在隔离环境中用假供应商、mock 传输或合成数据验证：
+
+- 真实 SMTP 投递。
+- 腾讯云 SES 的实际模板审核与发送。
+- 腾讯云短信的实际发送。
+- Cloudflare Turnstile 的真实挑战，前端测试用的是替身。
+- 生产数据库的 0107→0108 升级。
+- 生产部署与生产账号的修改。
+- 真实浏览器对真实 API 的 smoke 只覆盖合成账号和本机隔离环境，使用本地邮件 sink 和假短信，见交付文档。
