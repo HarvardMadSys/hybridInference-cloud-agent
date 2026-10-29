@@ -4,9 +4,11 @@
 setting, a heartbeat-delivered host setting, deployment configuration, and so
 on. These tests hold the code to it:
 
-* **Classified.** A variable that Python reads, or that a Compose file, an
-  example env file, a Dockerfile ``ARG`` or the web app names, has exactly one
-  entry; an entry nothing names any more is removed.
+* **Classified.** A variable that Python reads, that a deploy or tooling shell
+  script takes from its environment (``tests/support/env_shell.py``), or that a
+  Compose file, an example env file, a Dockerfile ``ARG`` or the web app names,
+  has exactly one entry; an entry nothing names any more is removed. A shell
+  read whose variable the script computes is listed with its reason.
 * **Consistent.** The ``admin`` entries are exactly the environment names of
   ``SETTINGS``, the ``host_admin`` ones those of ``HOST_SETTINGS`` (plus a
   host's slots), and the ``retired`` ones the former names still mapped.
@@ -28,8 +30,9 @@ regression and expect it to fail.
 
 from __future__ import annotations
 
+import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -43,6 +46,7 @@ from tests.support.env_scan import (
     scan_paths,
     template_names,
 )
+from tests.support.env_shell import ShellDynamic, ShellInput, scan_shell, shell_sources
 
 from cloud_agent.settings import MIGRATED_SETTINGS, SETTINGS
 from cloud_agent_shared.host_settings import HOST_SETTINGS
@@ -57,6 +61,8 @@ BACKEND = "apps/backend/"
 PRODUCTION_TEMPLATES = ("deploy/control-plane/", "deploy/host/")
 #: The one ``host_admin`` variable that is not in HOST_SETTINGS.
 HOST_ADMIN_OUTSIDE_REGISTRY = frozenset({"AGENT_HOST_SLOTS"})
+#: Retired names that are not former Sandbox Manager spellings.
+RETIRED_OUTSIDE_LEGACY = frozenset({"AGENT_RUNNER_REPLICAS"})
 
 SETTING_ENVS = frozenset(setting.env for setting in SETTINGS if setting.env)
 HOST_SETTING_ENVS = frozenset(setting.env for setting in HOST_SETTINGS)
@@ -67,6 +73,21 @@ REGISTRIES = {"HOST_SETTINGS": HOST_SETTING_ENVS}
 class Scan:
     reads: list[EnvRead]
     templates: list[TemplateName]
+    shell: list[ShellInput] = field(default_factory=list)
+    shell_dynamic: list[ShellDynamic] = field(default_factory=list)
+    #: Every function the scanned shell scripts define.
+    shell_functions: frozenset[str] = frozenset()
+
+
+def scan_scripts(scripts: dict[str, str]) -> tuple[list[ShellInput], list[ShellDynamic]]:
+    """Shell inputs and computed reads of ``scripts`` (path -> text)."""
+    inputs: list[ShellInput] = []
+    dynamics: list[ShellDynamic] = []
+    for path, text in sorted(scripts.items()):
+        found, computed = scan_shell(text, path, inventory.SHELL_HELPERS)
+        inputs += found
+        dynamics += computed
+    return inputs, dynamics
 
 
 def _files() -> list[str]:
@@ -92,7 +113,15 @@ def scan() -> Scan:
     reads = scan_paths(sources, root=REPO, package_root=REPO / "apps" / "backend")
     templates = template_names(REPO, files)
     assert {t.kind for t in templates} >= {"compose", "container", "example", "web"}
-    return Scan(reads, templates)
+    scripts = {path: (REPO / path).read_text(encoding="utf-8") for path in shell_sources(files)}
+    assert "deploy/host/sandbox_host.sh" in scripts
+    shell, dynamic = scan_scripts(scripts)
+    functions = frozenset(
+        name
+        for text in scripts.values()
+        for name in re.findall(r"^[ \t]*(?:function[ \t]+)?(\w+)[ \t]*\(\)", text, re.MULTILINE)
+    )
+    return Scan(reads, templates, shell, dynamic, functions)
 
 
 # -- the checks ------------------------------------------------------------
@@ -121,6 +150,9 @@ def _named(scan: Scan) -> dict[str, list[str]]:
             found.setdefault(name, []).append(f"{read.module}:{read.line} ({read.via})")
     for template in scan.templates:
         found.setdefault(template.name, []).append(f"{template.path} ({template.kind})")
+    for read in scan.shell:
+        if (read.path, read.name) not in inventory.SHELL_NOT_INPUTS:
+            found.setdefault(read.name, []).append(f"{read.path}:{read.line} (shell {read.how})")
     return found
 
 
@@ -188,7 +220,11 @@ def registry_mismatches(families: Iterable[inventory.Family] = inventory.FAMILIE
             HOST_SETTING_ENVS | HOST_ADMIN_OUTSIDE_REGISTRY,
             by.get("host_admin", set()),
         ),
-        ("retired", set(LEGACY_ENV_NAMES.values()), by.get("retired", set())),
+        (
+            "retired",
+            set(LEGACY_ENV_NAMES.values()) | RETIRED_OUTSIDE_LEGACY,
+            by.get("retired", set()),
+        ),
     ):
         problems += [
             f"{name} is registered but not classified {label}" for name in expected - actual
@@ -307,6 +343,34 @@ def unused_exceptions(reads: list[EnvRead]) -> list[str]:
     return problems
 
 
+def shell_problems(scan: Scan) -> list[str]:
+    """Computed shell reads without a reason, and shell exceptions nothing needs."""
+    problems = [
+        f"{read.path}:{read.line} {read.function} reads a variable it computes "
+        f"({read.construct}): read a literal name, or add it to SHELL_DYNAMIC_READS"
+        for read in scan.shell_dynamic
+        if (read.path, read.function, read.construct) not in inventory.SHELL_DYNAMIC_READS
+    ]
+    computed = {(read.path, read.function, read.construct) for read in scan.shell_dynamic}
+    problems += [
+        f"SHELL_DYNAMIC_READS entry {key} matches no read now"
+        for key in inventory.SHELL_DYNAMIC_READS
+        if key not in computed
+    ]
+    inputs = {(read.path, read.name) for read in scan.shell}
+    problems += [
+        f"SHELL_NOT_INPUTS entry {key} matches no read now"
+        for key in inventory.SHELL_NOT_INPUTS
+        if key not in inputs
+    ]
+    problems += [
+        f"SHELL_HELPERS names {name}, which no script defines now"
+        for name in inventory.SHELL_HELPERS
+        if name not in scan.shell_functions
+    ]
+    return problems
+
+
 def misplaced(scan: Scan, families: Iterable[inventory.Family] = inventory.FAMILIES) -> list[str]:
     """Internal names an operator template offers, and tooling names production reads."""
     families = tuple(families)
@@ -370,6 +434,11 @@ def test_new_environment_imports_are_migrated() -> None:
 
 def test_every_exception_is_still_needed(scan: Scan) -> None:
     assert unused_exceptions(scan.reads) == []
+
+
+def test_every_shell_read_names_its_variable(scan: Scan) -> None:
+    problems = shell_problems(scan)
+    assert problems == [], "\n".join(problems)
 
 
 def test_internal_and_tooling_names_stay_in_their_place(scan: Scan) -> None:
@@ -534,3 +603,63 @@ def test_registry_and_exception_entries_must_still_match(scan: Scan) -> None:
         "settings_root_key no longer reads AGENT_SESSION_SECRET" in p
         for p in unused_exceptions(trimmed)
     )
+
+
+def test_a_new_literal_shell_input_must_be_classified() -> None:
+    script = (
+        'SHA="${1:-${DEPLOY_SHA:-}}"\n'
+        'TIMEOUT="${AGENT_DEPLOY_NEW_TIMEOUT:-30}"\n'
+        'env_or_dotenv() { local name="$1"; printf \'%s\' "${!name}"; }\n'
+        'slots="$(env_or_dotenv AGENT_HOST_SLOTS)"\n'
+        'token="$(env_or_dotenv AGENT_NEW_HOST_TOKEN)"\n'
+    )
+    shell, dynamic = scan_scripts({"deploy/host/new.sh": script})
+    problems = unclassified(Scan([], [], shell, dynamic))
+    assert [problem.split(":")[0] for problem in problems] == [
+        "AGENT_DEPLOY_NEW_TIMEOUT",
+        "AGENT_NEW_HOST_TOKEN",
+    ]
+
+
+def test_ordinary_shell_locals_are_not_inputs() -> None:
+    script = (
+        'log() { local message="$1"; echo "$message" >&2; }\n'
+        "count=0; for item in a b; do count=$((count + 1)); done\n"
+        'while IFS= read -r line; do log "$line"; done < /dev/null\n'
+        'stack_name="${stack_name:-}"\n'
+    )
+    shell, dynamic = scan_scripts({"deploy/host/locals.sh": script})
+    # `stack_name` is read guarded on its own first assignment: an input.
+    assert [read.name for read in shell] == ["stack_name"]
+    assert dynamic == []
+    assert unclassified(Scan([], [], shell)) == [
+        "stack_name: deploy/host/locals.sh:4 (shell defaulted)"
+    ]
+
+
+def test_shell_exceptions_cover_only_their_own_read() -> None:
+    sourced = 'requested="${SHA:-}"; other="${ANOTHER_CALLER_VALUE:-}"\n'
+    shell, _ = scan_scripts(
+        {"deploy/release/artifact_env.sh": sourced, "deploy/host/other.sh": sourced}
+    )
+    problems = unclassified(Scan([], [], shell))
+    # SHA is excused in artifact_env.sh only; the new name nowhere.
+    assert [problem.split(":")[0] for problem in problems] == ["ANOTHER_CALLER_VALUE", "SHA"]
+    assert "artifact_env.sh" in problems[0]
+    assert "artifact_env.sh" not in problems[1]
+    computed = 'name="$(pick)"; echo "${!name}"\n'
+    _, dynamic = scan_scripts({"deploy/host/dynamic.sh": computed})
+    assert (
+        "deploy/host/dynamic.sh:1 <script> reads a variable it computes (${!name}): read a "
+        "literal name, or add it to SHELL_DYNAMIC_READS"
+    ) in shell_problems(Scan([], [], [], dynamic))
+
+
+def test_a_shell_exception_nothing_needs_fails(scan: Scan) -> None:
+    shell = [read for read in scan.shell if read.name != "SHA"]
+    assert shell_problems(Scan([], [], shell, [], scan.shell_functions)) == [
+        "SHELL_NOT_INPUTS entry ('deploy/release/artifact_env.sh', 'SHA') matches no read now"
+    ]
+    assert shell_problems(Scan([], [], scan.shell, [], frozenset())) == [
+        "SHELL_HELPERS names artifact_env_value, which no script defines now"
+    ]

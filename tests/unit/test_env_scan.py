@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from tests.support.env_scan import EnvRead, find_env_reads, scan_paths, template_names
+from tests.support.env_shell import scan_shell, shell_sources
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -212,3 +213,137 @@ def test_template_names_come_from_each_kind_of_file(tmp_path: Path) -> None:
         ("web", "NEXT_PUBLIC_Y"),
         ("web", "AGENT_Y"),
     }
+
+
+# -- shell -----------------------------------------------------------------
+
+_SHELL_INPUTS = r"""#!/usr/bin/env bash
+set -Eeuo pipefail
+SHA="${1:-${DEPLOY_SHA_X:-}}"
+ROOT_X="${ROOT_X:-/srv}"
+: "${WAIT_X:=30}"
+if [[ -z "${LOG_DIR_X:-}" ]]; then
+  LOG_DIR_X=/tmp/logs
+fi
+deadline=$((SECONDS + TIMEOUT_X))
+echo "$UNSET_X ${REQUIRED_X:?set it}"
+cat <<EOF
+expanded $HEREDOC_X
+EOF
+
+raw_value() {
+  local name="$1"
+  printf '%s' "${!name}"
+}
+env_value() {
+  raw_value "$1"
+}
+from_env() {
+  printf '%s' "${!1}"
+}
+require() {
+  local name
+  for name in "$@"; do
+    [[ -n "$(env_value "$name")" ]]
+  done
+}
+port="$(env_value PORT_X)"
+from_env MODE_X
+require NEEDED_A_X NEEDED_B_X
+for name in LOOP_A_X LOOP_B_X; do
+  echo "${!name}"
+done
+for prefix in TUNNEL_A_X TUNNEL_B_X; do
+  key="$(env_value "${prefix}_KEY")"
+done
+rendered_value LOOKED_UP_X
+"""
+
+_SHELL_LOCALS = r"""#!/usr/bin/env bash
+set -Eeuo pipefail
+# A comment naming $COMMENT_X is not a read.
+echo '$SINGLE_X' $'$ANSI_X'
+cat <<'EOF'
+literal $QUOTED_HEREDOC_X
+EOF
+count=1
+echo "$count $1 $@ $# $? $$ ${BASH_SOURCE[0]} $RANDOM $IFS $PWD"
+local_default=2
+local_default="${local_default:-3}"
+f() {
+  local a="$1" b c=3
+  b=2
+  echo "$a $b $c"
+}
+while IFS= read -r line other; do echo "$line $other"; done < /dev/null
+read -r -a parts -p prompt <<< "x y"
+for item in one two; do echo "$item"; done
+case "$count" in
+  1) picked=one ;;
+esac
+mapfile -t rows < /dev/null
+printf -v formatted '%s' x
+declare -A table=()
+echo "$picked $rows $formatted ${parts[0]} ${table[x]:-} ${!table[@]}"
+COPIED=1 env | grep COPIED
+export count
+"""
+
+
+def test_the_shell_scan_finds_each_input_form() -> None:
+    inputs, dynamic = scan_shell(_SHELL_INPUTS, "deploy/x.sh", ["rendered_value"])
+    found = {(read.name, read.how) for read in inputs}
+    assert found == {
+        ("DEPLOY_SHA_X", "unassigned"),
+        ("ROOT_X", "defaulted"),
+        ("WAIT_X", "unassigned"),
+        ("LOG_DIR_X", "guarded"),
+        ("TIMEOUT_X", "unassigned"),
+        ("UNSET_X", "unassigned"),
+        ("REQUIRED_X", "unassigned"),
+        ("HEREDOC_X", "unassigned"),
+        ("PORT_X", "helper"),
+        ("MODE_X", "helper"),
+        ("NEEDED_A_X", "helper"),
+        ("NEEDED_B_X", "helper"),
+        ("LOOP_A_X", "loop"),
+        ("LOOP_B_X", "loop"),
+        ("TUNNEL_A_X_KEY", "loop"),
+        ("TUNNEL_B_X_KEY", "loop"),
+        ("LOOKED_UP_X", "helper"),
+    }
+    assert dynamic == []
+
+
+def test_local_variables_parameters_and_unexpanded_text_are_not_inputs() -> None:
+    inputs, dynamic = scan_shell(_SHELL_LOCALS, "deploy/y.sh")
+    assert inputs == []
+    assert dynamic == []
+
+
+def test_a_computed_shell_read_is_reported_not_guessed() -> None:
+    source = (
+        'get() { local name="$1"; printf \'%s\' "${!name}"; }\n'
+        'name="$(compute)"\n'
+        'echo "${!name}"\n'
+        'get "${name}_SUFFIX"\n'
+        'eval "echo \\$$name"\n'
+    )
+    inputs, dynamic = scan_shell(source, "deploy/z.sh")
+    assert inputs == []
+    assert [(read.function, read.construct) for read in dynamic] == [
+        ("<script>", "${!name}"),
+        ("<script>", "get ${name}_SUFFIX"),
+        ("<script>", "eval"),
+    ]
+
+
+def test_shell_sources_are_the_deploy_and_tooling_scripts() -> None:
+    files = [
+        "deploy/host/sandbox_host.sh",
+        "scripts/ci-local.sh",
+        ".claude/hooks/pre-pr-check.sh",
+        "deploy/sandbox/pi-freeinference",
+        "apps/frontend/run.sh",
+    ]
+    assert shell_sources(files) == ["deploy/host/sandbox_host.sh", "scripts/ci-local.sh"]

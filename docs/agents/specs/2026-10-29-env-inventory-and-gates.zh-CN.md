@@ -27,7 +27,7 @@
 
 **应当留在部署环境里的**：数据库连接、设置根密钥、恢复用的 `ADMIN_TOKEN`、挂载文件和路径、
 发布身份（部署 SHA、镜像来源、构建时间）、监听地址和 Compose 拓扑、主机身份与注册凭据、主机拓扑、
-沙箱隔离和沙箱网络边界、性能剖析的部署上限、镜像构建输入。理由是：要么在设置快照可读之前就要用，
+沙箱隔离和沙箱网络边界、性能剖析的部署上限、镜像构建输入，以及部署脚本本身的输入（部署哪个提交、从哪里取、等多久、安装哪个制品版本）和主机 Kata 运行时的版本与摘要。理由是：要么在设置快照可读之前就要用，
 要么是部署对自身的陈述，要么一旦可改就能放宽隔离（AGENTS.md §7）。
 
 其余是我们自己注入子进程的内部变量、平台或第三方镜像的变量、仍在兼容期内的旧名，以及只给测试、
@@ -38,7 +38,8 @@ CI 和本地开发栈用的变量。
 **做**：
 
 1. 一个 AST 扫描器，识别本仓库实际用到的环境变量读法（§6.1），以及 Compose、示例 env 文件、
-   Dockerfile `ARG` 和前端里出现的变量名。
+   Dockerfile `ARG` 和前端里出现的变量名；另有一个有界的 shell 扫描器，找出 `deploy/` 和 `scripts/`
+   下 11 个 shell 脚本消费的外部输入（§6.4）。
 2. 一张分类表：每个变量（或一个变量族的前缀）恰好归到一个去向，并写明理由。
 3. 在现有 `make test` 里新增门禁测试，CI 的单元测试分片自动执行，不需要改工作流：
    - 新出现的变量没有归类，测试失败；
@@ -48,6 +49,8 @@ CI 和本地开发栈用的变量。
    - 后端代码绕过解析器直接读已注册设置，必须在精确的例外表里（模块、函数、变量名三元组）写明理由；
    - 主机设置只能在登记过的引导位置从主机环境读取，控制面不得读主机设置的环境变量；
    - 读不出变量名的读取只能是登记过的注册表循环；把整个环境交给子进程的地方也要逐一登记；
+   - shell 脚本新增的字面量外部输入没有归类，测试失败；脚本里计算出来的间接读取（`${!name}`、
+     `eval`、拼出来的名字）必须按（脚本、函数、写法）登记理由；
    - 新的带环境变量名的注册必须进 `MIGRATED_SETTINGS`（§5.1）；
    - 内部变量不得出现在运维模板里，工具类变量不得被后端读取或出现在生产模板里；
    - 每一条例外都必须仍然对应一处真实读取，不再需要时测试会要求删除。
@@ -69,14 +72,16 @@ CI 和本地开发栈用的变量。
 
 | 口径 | 数量 |
 |---|---|
-| 唯一变量名（含 1 个动态前缀 `AGENT_SECRET_PATTERN_*`） | 333 |
+| 唯一变量名（含 1 个动态前缀 `AGENT_SECRET_PATTERN_*`） | 369 |
 | 其中 Python 读取的唯一名 | 166 |
 | 其中模板、构建文件或前端出现的唯一名 | 252 |
-| 两边都出现的 | 102 |
+| 其中 shell 脚本消费的外部输入（唯一名） | 116，其中 36 个只出现在 shell 里 |
+| Python 与模板都出现的 | 102 |
 | 只存在于注册表里的（没有任何读取点或模板） | 4（四个网页搜索变量，见 §8） |
 | Python 读取记录（所有扫描范围） | 315：`raw` 184、`resolver` 88、`copy` 28、`compat` 10、`helper` 5 |
 | 其中后端（`apps/backend`）读取记录 | 253，涉及 132 个唯一名 |
 | 模板引用记录 | 758：Compose 替换 272、容器 `environment:` 键 258、示例 env 157、Dockerfile `ARG` 39、前端 25、Compose 构建参数 7 |
+| shell 输入记录（11 个脚本，每个脚本每个名字记首次） | 153：经辅助函数 55、未赋值即读 41、字面量循环 28、自身默认值 25、赋值前带默认的读取 4；计算出来的读取 0 |
 
 按去向分（唯一名）：
 
@@ -86,14 +91,14 @@ CI 和本地开发栈用的变量。
 | `host_admin` | 24 | 主机设置，经心跳下发 |
 | `candidate` | 2 | 可按常规方式迁入 Admin |
 | `design` | 3 | 要另做设计才能迁 |
-| `deployment` | 135 | 启动、部署、引导输入，留在环境里 |
+| `deployment` | 154 | 启动、部署、引导输入，留在环境里 |
 | `operation` | 1 | 改值是专门的运维流程（根密钥轮换） |
-| `internal` | 35 | 我们的代码注入子进程，运维不设 |
+| `internal` | 39 | 我们的代码注入子进程，运维不设 |
 | `platform` | 25 | 操作系统、Docker、sshd、AWS SDK、第三方镜像的变量 |
-| `retired` | 9 | 兼容期内的旧名 |
-| `tooling` | 35 | 测试、CI、基准、本地开发栈 |
+| `retired` | 10 | 兼容期内的旧名，或已不再读取 |
+| `tooling` | 47 | 测试、CI、基准、本地开发栈、脚本的测试接缝 |
 
-分类表本身有 39 个族、291 个精确名和 6 个前缀（`AGENT_TUNNEL_`、`AGENT_MCP_TUNNEL_`、
+分类表本身有 44 个族、327 个精确名和 6 个前缀（`AGENT_TUNNEL_`、`AGENT_MCP_TUNNEL_`、
 `AGENT_CONTROL_PLANE_TUNNEL_`、`AGENT_SECRET_PATTERN_`、`PGADMIN_`、`LOCAL_`）。前缀只用在
 ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量、第三方 pgAdmin 镜像的命名空间和本地开发栈上；
 本地开发栈前缀另有约束：这些名字不得被后端读取，也不得出现在 `deploy/control-plane`、`deploy/host` 的模板里。
@@ -207,8 +212,7 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 - `getattr(os, "environ")`、`os.environb`，以及第三方库自己读的变量（boto3 的 `AWS_*`、Docker CLI、
   git、ssh），后者只在模板里出现时才被分类；
 - 继承、重写和动态分派下的被调函数；
-- Shell 脚本（`deploy.sh`、`sandbox_host.sh`、`artifact_env.sh`、`ci-local.sh`、`test-db-local.sh`）：
-  里面的 `$NAME` 分不清是环境变量还是局部变量，不纳入门禁；
+- shell 脚本里看不到的读法见 §6.4 末尾；`.claude/hooks/` 下的脚本属于编码代理的工具配置，不在扫描范围内；
 - Dockerfile 里 `RUN` 的 `${...}`（是 shell 变量），以及 `ENV` 行（那是赋值，不是读取）；
 - `tests/` 目录（`TEST_DB_NAME` 等只在测试里读）和 TypeScript 写的沙箱辅助程序（`pi-mcp-bridge.ts`）；
 - 只写不读的子进程变量（如运行时适配器设置的 `ANTHROPIC_MODEL`、`CLAUDE_CONFIG_DIR`）：它们不是运维配置面。
@@ -223,9 +227,64 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `REGISTRY_READS` | （模块，函数） | 3 条，都是 `HOST_SETTINGS` 循环 |
 | `ENVIRONMENT_COPIES` | （模块，函数） | 8 条：ssh、Docker CLI、git、协议兼容启动器、运行时探测 |
 | `UNMIGRATED_ENV_SETTINGS` | 变量 | 44 个，冻结 |
+| `SHELL_HELPERS` | 函数名 | 1 条：`artifact_env_value`（在渲染好的 Compose 环境里按名字查值，模式认不出） |
+| `SHELL_NOT_INPUTS` | （脚本，变量） | 1 条：`artifact_env.sh` 里的 `SHA`，由 source 它的两个 `deploy.sh` 先设好 |
+| `SHELL_DYNAMIC_READS` | （脚本，函数，写法） | 0 条：现有的间接读取都能解析成字面量循环，或位于辅助函数内部 |
 
 所有例外都是精确键，没有按目录或按模块整体豁免（两个解析器模块除外）；每条都有理由，并由
 `test_every_exception_is_still_needed` 检查仍然需要。没有使用 `xfail`。
+
+### 6.4 shell 脚本
+
+范围：`deploy/` 和 `scripts/` 下所有 `.sh`，共 11 个：两个 `deploy.sh`、`sandbox_host.sh`、
+`setup_kata_runtime.sh`、`agent-gateway-tunnel.sh`、`deploy/local/dev.sh`、`deploy/release/artifact_env.sh`、
+沙箱镜像构建用的 `build-kilo.sh` 和 `install-runtimes.sh`、`scripts/ci-local.sh`、`scripts/test-db-local.sh`。
+实现是 `tests/support/env_shell.py`：一个词法预处理加几条模式，不是 shell 解释器。
+
+先把 shell 不展开的内容抹掉（注释、单引号和 `$'...'` 字符串、带引号定界符的 here-document 正文），
+保留行号；然后对每个脚本区分：
+
+- **引用**：`$NAME`、`${NAME...}`，以及 `$(( ))`/`(( ))` 里的裸名。位置参数和特殊参数（`$1`、`$@`、
+  `$#`、`$?`……）和 bash 自己的变量（`BASH_SOURCE`、`IFS`、`RANDOM`、`PWD`……）永远不算输入。
+- **赋值**：命令开头的 `NAME=`（包括 `;`、`&&`、`then`、`case` 分支之后），`local`/`declare`/`typeset`
+  声明的名字，带值的 `export`/`readonly`，`for NAME in`，以及 `read`、`mapfile`/`readarray`、`getopts`、
+  `printf -v` 填写的名字。不带值的 `export NAME` 是把继承来的值传下去，不算赋值；`NAME=value command`
+  这种前缀赋值是给子进程设值，算赋值，不算读取。
+- **输入**：被引用，并且满足其一：脚本里从未赋值；第一次赋值就是给自己设默认值（`NAME="${NAME:-x}"`、
+  `${NAME:=x}`）；或者在第一次赋值之前带默认值读取（`${NAME:-}`、`${NAME-}`、`${NAME:+}`），也就是
+  `set -u` 下表示「可能来自外部」的写法。
+- **辅助函数**：读取第一个参数所指变量的函数，即 `${!1}`、`local name="$1"` 加 `${!name}`，或者把
+  `"$1"`/`"$name"` 交给另一个辅助函数；`for name in "$@"` 的函数对每个参数都这样处理（`require_env A B`）。
+  `env_or_dotenv AGENT_HOST_SLOTS` 这样的字面量调用记为对 `AGENT_HOST_SLOTS` 的读取。用别的办法查值的函数
+  （`artifact_env_value`）在 `SHELL_HELPERS` 里声明。
+- **循环**：`for name in A B C` 里的 `${!name}` 和 `helper "$name"`，以及 `helper "${prefix}_SSH_KEY"`
+  （`prefix` 来自字面量循环），按最近的那个循环展开成具体名字。读回脚本自己赋过值的名字不算输入。
+- 其余的 `${!name}`、用计算出的参数调用辅助函数、`eval`，报告为**计算读取**，必须在
+  `SHELL_DYNAMIC_READS` 里按（脚本、函数、写法）登记。`${!array[@]}` 列的是数组下标，不是读取。
+
+结果：11 个脚本共消费 116 个外部输入，没有计算读取。其中 80 个也出现在 Python 或模板里，归类不变；
+36 个只出现在 shell 里，新增为下列几个族：
+
+| 去向 | 名字 | 说明 |
+|---|---|---|
+| `deployment` | `DEPLOY_SHA`、`SOURCE_REPO`、`DEPLOY_ROOT`、`APP_DIR`、`ALLOW_DIRTY`、`ALLOW_STRAY_STACK`、`HEALTH_TIMEOUT`、`AGENT_DEPLOY_MODE`、`AGENT_DEPLOY_PYTHON`、`AGENT_DEPLOY_DRAINING_HOST`、`AGENT_RELEASE_MANIFEST`、`AGENT_WEB_VARIANT` | 部署入口的输入：部署哪个提交、从哪里取、装到哪里、等多久、安装哪个制品版本。每次部署都可能不同，由运行部署的人或流水线提供，不进 Admin |
+| `deployment` | `KATA_VERSION`、`KATA_SHA256`、`KATA_DOWNLOAD_BASE`、`KATA_LINK_DIR`、`KATA_CONFIG_PATH`、`KATA_DEBUG_KERNEL_PATH`、`KATA_SETUP_SCRIPT` | 主机安装的 Kata 运行时：主机的隔离边界，按版本固定、按摘要校验 |
+| `internal` | `DEFER_SHARED_READY_MARKER`、`WATCH_READINESS`、`TUNNEL_SSH_KEY`、`TUNNEL_SSH_KNOWN_HOSTS` | 一个脚本给它自己启动的脚本或容器设置的值 |
+| `retired` | `AGENT_RUNNER_REPLICAS` | 已不再读取，`sandbox_host.sh` 发现它时只提醒删除 |
+| `tooling` | `KATA_EXTRACT_ROOT`、`KATA_CPUINFO`、`KATA_KVM_DEVICE`、`DOCKER_DAEMON_JSON` | 主机脚本留给测试的接缝 |
+| `tooling` | `CI_LOG_DIR`、`DEPLOY_PEER_JOB`、`TEST_DB_LOCAL_*`（4 个）、`TEST_DB_WORKERS`、`UV_RUN` | 本地 CI、部署工作流的对端作业、本机测试数据库 |
+
+shell 脚本还读 5 个已注册设置的名字，都不是绕过解析器：控制面 `deploy.sh` 在首次部署时生成
+`AGENT_COMPUTE_SECRET_KEY` 并写进 `.env`，供首次导入；`deploy/local/dev.sh` 给本地栈的
+`GATEWAY_AUTHORIZE_URL`、`AGENT_SESSION_REDIRECT_URI`、`AGENT_WEB_BASE_URL` 设默认值；`sandbox_host.sh`
+读主机自己那份 `AGENT_SANDBOX_MANAGER_TOKEN`（§5.2）。主机设置名（`AGENT_HOST_SLOTS`、
+`AGENT_SHARED_RESIDENT_CAPACITY` 等）在 `sandbox_host.sh` 里只用于部署前检查本地引导值。
+
+shell 部分看不到的：只由调用方赋值、函数里读取的变量（`SHA` 这种 source 关系用 `SHELL_NOT_INPUTS`
+逐条说明）；source 进来的文件设的值；交给另一个 shell 的字符串里的读取（`bash -c`、`ssh`、Compose 的
+`command:`）；用 `grep`/`sed` 直接从 `.env` 里按名字取值（控制面 `deploy.sh` 对 `AGENT_COMPUTE_SECRET_KEY`
+就是这样，这个名字另外也经 `${...}` 读取，所以仍被分类）；函数内部的执行顺序（在函数里赋值前的带默认读取，
+按行号判断）。这些写法今天没有让任何输入漏掉，但门禁也证明不了以后不会。
 
 ## 7. 第一批迁移候选
 
@@ -283,10 +342,15 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
   按受支持的 Compose 部署时，首次导入只能通过 override 文件发生；它们又不在 `MIGRATED_SETTINGS` 里。
   现有的 `test_environment_inventory.py` 只检查 `AGENT_`/`GATEWAY_`/`IDENTITY_` 前缀，所以没有发现。
   建议的后续：在 Admin 里设置这四项，ENVIRONMENT.md 补行并说明「首次导入，之后在 Admin 修改」。
-- **只在文档里出现的名字**（17 个）：已退役的 `AGENT_EGRESS_*`、`AGENT_SANDBOX_NETWORK`、
-  `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`、`AGENT_MCP_CONFIG`；`sandbox_host.sh` 会提醒的
-  `AGENT_RUNNER_REPLICAS`；Gateway 侧的 `IDENTITY_*`；只在 shell 或测试里读的 `CI_LOG_DIR`、
-  `TEST_DB_NAME`；只被写入的 `AGENT_ACTION_UID`。门禁只管被读取或在模板里出现的名字，这些不进分类表。
+- **只在文档里出现的名字**（15 个）：已退役的 `AGENT_EGRESS_*`、`AGENT_SANDBOX_NETWORK`、
+  `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`、`AGENT_MCP_CONFIG`；Gateway 侧的 `IDENTITY_*`；由
+  `test-db-local.sh` 自己设置、只在测试里读的 `TEST_DB_NAME`；只被写入的 `AGENT_ACTION_UID`。
+  门禁只管被读取或在模板里出现的名字，这些不进分类表。上一版列在这里的 `AGENT_RUNNER_REPLICAS` 和
+  `CI_LOG_DIR` 现在由 shell 扫描发现并归类。
+- **shell 输入的文档覆盖**：只出现在 shell 里的 36 个输入中，19 个在 ENVIRONMENT.md、`deploy/release/README.md`、
+  `deploy/local/README.md` 和 `docs/developer/` 里都找不到（`DEPLOY_SHA`、`SOURCE_REPO`、`ALLOW_DIRTY`、
+  `ALLOW_STRAY_STACK`、`APP_DIR`、`HEALTH_TIMEOUT`、七个 `KATA_*`、`TEST_DB_LOCAL_*` 四个、`TEST_DB_WORKERS`、
+  `UV_RUN`），只在脚本开头的注释或用法说明里写着。它们都是部署或工具的输入，不涉及 Admin；是否补进指南留给维护者。
 - **主机能力检查用本地 `AGENT_SHARED_RESIDENT_CAPACITY`**（§5.3）：已登记为欠账。
 - **托管主机的 sandbox manager 令牌是设置时的快照**（§5.2）：轮换设计范围外。
 - **部署实际取值**：哪些部署设置过 §5.1 的 8 个变量、生产库里设置行建于何时，本 PR 没有查看生产配置。
@@ -295,7 +359,7 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 
 ## 附录 A：逐名去向
 
-由门禁扫描生成（基线 `4b7b826d` 加本 PR）。「出现位置」里 `py` 后面是读取它的包（`cp` 控制面、`host`、
+由门禁扫描生成（基线 `4b7b826d` 加本 PR）。`sh` 后面是消费它的 shell 脚本。「出现位置」里 `py` 后面是读取它的包（`cp` 控制面、`host`、
 `shared`、`sandbox-helper` 沙箱镜像里的 Python 辅助程序、`deploy-py`、`scripts`、`migrations`）和读法；
 其余是模板类型和所在部署目录（`cp` 为 `deploy/control-plane`，`host` 为 `deploy/host`，`local` 为本地开发栈，
 `sandbox` 为沙箱镜像，`web` 为前端）。「仅注册表」表示只在 `SETTINGS` 里出现。
@@ -305,7 +369,7 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `AGENT_ALERT_WEBHOOK_URL` | admin | compose cp; container cp; py cp/resolver |
 | `AGENT_CLOUDLAB_API_URL` | admin | compose cp; container cp; py cp/raw |
 | `AGENT_COMPUTE_REGISTRATION_URL` | admin | compose cp; container cp; py cp/resolver |
-| `AGENT_COMPUTE_SECRET_KEY` | admin | compose cp; container cp; example cp; py cp/resolver |
+| `AGENT_COMPUTE_SECRET_KEY` | admin | compose cp; container cp; example cp; py cp/resolver; sh deploy.sh |
 | `AGENT_CONTROL_TOKEN_SECRET` | admin | compose cp; container cp; example local; py cp/resolver |
 | `AGENT_DEFAULT_EXECUTION_PROFILE` | admin | compose cp; container cp; container local; py cp/resolver |
 | `AGENT_DEFAULT_MODEL` | admin | compose cp; container cp |
@@ -339,15 +403,15 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `AGENT_SANDBOX_ARCHIVE_S3_ENDPOINT` | admin | compose cp; container cp; example cp |
 | `AGENT_SANDBOX_ARCHIVE_S3_PREFIX` | admin | compose cp; container cp; example cp |
 | `AGENT_SANDBOX_ARCHIVE_S3_REGION` | admin | compose cp; container cp; example cp |
-| `AGENT_SANDBOX_MANAGER_TOKEN` | admin | compose cp; compose host; compose local; container cp; container host; container local; example cp; example host; example local; py cp/resolver; py host/compat |
+| `AGENT_SANDBOX_MANAGER_TOKEN` | admin | compose cp; compose host; compose local; container cp; container host; container local; example cp; example host; example local; py cp/resolver; py host/compat; sh sandbox_host.sh |
 | `AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS` | admin | compose cp; container cp; example local; py cp/resolver |
 | `AGENT_SESSION_COOKIE_SECURE` | admin | compose cp; container cp; example local; py cp/resolver |
-| `AGENT_SESSION_REDIRECT_URI` | admin | compose cp; container cp; example local; py cp/resolver |
+| `AGENT_SESSION_REDIRECT_URI` | admin | compose cp; container cp; example local; py cp/resolver; sh dev.sh |
 | `AGENT_SESSION_SECRET` | admin | compose cp; container cp; example local; py cp/raw; py cp/resolver |
 | `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | admin | compose cp; container cp; example local; py cp/resolver |
 | `AGENT_TRUST_PROXY_HEADERS` | admin | compose cp; container cp; py cp/resolver |
 | `AGENT_WEB_APP_NAME` | admin | compose cp; container cp; example local; web web |
-| `AGENT_WEB_BASE_URL` | admin | compose cp; container cp; example local; py cp/resolver |
+| `AGENT_WEB_BASE_URL` | admin | compose cp; container cp; example local; py cp/resolver; sh dev.sh |
 | `AGENT_WEB_CONTACT_URL` | admin | compose cp; container cp; web web |
 | `AGENT_WEB_DOCS_URL` | admin | compose cp; container cp; web web |
 | `AGENT_WEB_FEATURE_RAG` | admin | compose cp; container cp; web web |
@@ -356,7 +420,7 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `AGENT_WEB_ORG_URL` | admin | compose cp; container cp; web web |
 | `AGENT_WEB_STATUS_URL` | admin | compose cp; container cp; web web |
 | `BRAVE_SEARCH_API_KEY` | admin | 仅注册表 |
-| `GATEWAY_AUTHORIZE_URL` | admin | compose cp; container cp; example local; py cp/resolver |
+| `GATEWAY_AUTHORIZE_URL` | admin | compose cp; container cp; example local; py cp/resolver; sh dev.sh |
 | `GATEWAY_BASE_URL` | admin | compose cp; container cp; example local; py cp/resolver |
 | `GATEWAY_GRANT_BASE_PATH` | admin | compose cp; container cp; py cp/resolver |
 | `GATEWAY_GRANT_BINDING_ID` | admin | compose cp; container cp; py cp/resolver |
@@ -366,13 +430,13 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `PARALLEL_API_KEY` | admin | 仅注册表 |
 | `SERPER_API_KEY` | admin | 仅注册表 |
 | `WEB_SEARCH_PROVIDER` | admin | 仅注册表 |
-| `AGENT_CHAT_IDLE_TIMEOUT_S` | host_admin | compose host; container host; container local; example host; py host/raw |
-| `AGENT_HOST_SLOTS` | host_admin | compose host; container host; container local; example cp; example host; py host/raw |
+| `AGENT_CHAT_IDLE_TIMEOUT_S` | host_admin | compose host; container host; container local; example host; py host/raw; sh sandbox_host.sh |
+| `AGENT_HOST_SLOTS` | host_admin | compose host; container host; container local; example cp; example host; py host/raw; sh sandbox_host.sh |
 | `AGENT_SANDBOX_CPU_MILLICORES` | host_admin | compose host; container host; example host; py host/raw |
 | `AGENT_SANDBOX_DISK_MIB` | host_admin | compose host; container host; example host; py host/raw |
 | `AGENT_SANDBOX_MEMORY_MIB` | host_admin | compose host; container host; example host; py host/raw |
-| `AGENT_SHARED_RESIDENT_CAPACITY` | host_admin | compose host; container host; container local; example cp; example host; py host/raw |
-| `AGENT_SOURCE_IMPORT_MAX_MIB` | host_admin | compose host; container host; example host; py host/raw |
+| `AGENT_SHARED_RESIDENT_CAPACITY` | host_admin | compose host; container host; container local; example cp; example host; py host/raw; sh sandbox_host.sh |
+| `AGENT_SOURCE_IMPORT_MAX_MIB` | host_admin | compose host; container host; example host; py host/raw; sh sandbox_host.sh |
 | `AGENT_STORAGE_MIN_AVAILABLE_MIB` | host_admin | py host/raw |
 | `AGENT_TERMINAL_BUFFER_MAX_EVENTS` | host_admin | py host/raw |
 | `AGENT_TERMINAL_BUFFER_MAX_MIB` | host_admin | py host/raw |
@@ -397,32 +461,35 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `AGENT_RUNTIME_REGISTRY_URL` | design | compose cp; compose host; container cp; container host; example host; py cp/raw; py host/raw |
 | `ADMIN_TOKEN` | deployment | compose cp; container cp; example cp; py cp/raw |
 | `AGENT_COMPUTE_CONFIG` | deployment | compose cp; container cp; example cp; py cp/raw |
-| `AGENT_COMPUTE_DIRECTORY` | deployment | compose cp; example cp |
+| `AGENT_COMPUTE_DIRECTORY` | deployment | compose cp; example cp; sh deploy.sh |
 | `AGENT_COMPUTE_SANDBOX_IMAGE_REPOSITORY` | deployment | compose cp; container cp; py cp/raw |
 | `AGENT_CONTAINERD_CONTENT_DIR` | deployment | container host; py host/raw |
 | `AGENT_CONTROL_PLANE_BIND` | deployment | compose cp |
-| `AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE` | deployment | example cp |
-| `AGENT_CONTROL_PLANE_HOSTNAME` | deployment | compose host |
-| `AGENT_CONTROL_PLANE_PORT` | deployment | compose cp; example local |
-| `AGENT_CONTROL_PLANE_SSH_HOST` | deployment | compose cp; container cp; example cp; py cp/raw |
+| `AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE` | deployment | example cp; sh deploy.sh |
+| `AGENT_CONTROL_PLANE_HOSTNAME` | deployment | compose host; sh sandbox_host.sh |
+| `AGENT_CONTROL_PLANE_PORT` | deployment | compose cp; example local; sh deploy.sh |
+| `AGENT_CONTROL_PLANE_SSH_HOST` | deployment | compose cp; container cp; example cp; py cp/raw; sh deploy.sh |
 | `AGENT_CONTROL_PLANE_TUNNEL_LISTEN_PORT` | deployment | compose host |
 | `AGENT_CONTROL_PLANE_TUNNEL_REMOTE_HOST` | deployment | compose host; example cp |
 | `AGENT_CONTROL_PLANE_TUNNEL_REMOTE_PORT` | deployment | compose host; example cp |
-| `AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION` | deployment | compose host; example cp; example host |
-| `AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY` | deployment | compose host; example cp; example host |
-| `AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS` | deployment | compose host; example cp; example host |
+| `AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION` | deployment | compose host; example cp; example host; sh sandbox_host.sh |
+| `AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY` | deployment | compose host; example cp; example host; sh sandbox_host.sh |
+| `AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS` | deployment | compose host; example cp; example host; sh sandbox_host.sh |
 | `AGENT_CONTROL_PLANE_TUNNEL_SSH_PORT` | deployment | compose host |
 | `AGENT_CONTROL_PLANE_URL` | deployment | compose host; container cp; container host; container local; py host/raw; web web |
 | `AGENT_DATABASE_URL` | deployment | compose cp; container cp; example cp; example local; py cp/raw; py migrations/raw |
-| `AGENT_DEPLOYMENT_SHA` | deployment | compose cp; compose host; compose local; container cp; container host; container local; example cp; example local; py cp/raw; py host/raw; web web |
+| `AGENT_DEPLOYMENT_SHA` | deployment | compose cp; compose host; compose local; container cp; container host; container local; example cp; example local; py cp/raw; py host/raw; sh artifact_env.sh; sh sandbox_host.sh; web web |
+| `AGENT_DEPLOY_DRAINING_HOST` | deployment | sh deploy.sh |
+| `AGENT_DEPLOY_MODE` | deployment | sh deploy.sh; sh sandbox_host.sh |
+| `AGENT_DEPLOY_PYTHON` | deployment | sh artifact_env.sh |
 | `AGENT_EDGE_BIND` | deployment | compose cp; example cp |
 | `AGENT_EDGE_CONFIG_FILE` | deployment | compose cp |
-| `AGENT_EDGE_PORT` | deployment | compose cp; example cp |
-| `AGENT_EGRESS_CHAT_NETWORK_POOL` | deployment | compose host; container host; container local; example cp; example host; py shared/raw |
-| `AGENT_EGRESS_DNS_SERVER` | deployment | compose host; container host; container local; example cp; example host; py shared/raw |
-| `AGENT_EGRESS_PROTECTED_CIDRS` | deployment | compose cp; compose host; container cp; container host; container local; example cp; example host; py cp/raw; py shared/raw |
-| `AGENT_ENROLL_TOKEN` | deployment | compose host; container host; container local; example host; py host/raw |
-| `AGENT_GATEWAY_HOSTNAME` | deployment | compose host |
+| `AGENT_EDGE_PORT` | deployment | compose cp; example cp; sh deploy.sh |
+| `AGENT_EGRESS_CHAT_NETWORK_POOL` | deployment | compose host; container host; container local; example cp; example host; py shared/raw; sh sandbox_host.sh |
+| `AGENT_EGRESS_DNS_SERVER` | deployment | compose host; container host; container local; example cp; example host; py shared/raw; sh sandbox_host.sh |
+| `AGENT_EGRESS_PROTECTED_CIDRS` | deployment | compose cp; compose host; container cp; container host; container local; example cp; example host; py cp/raw; py shared/raw; sh sandbox_host.sh |
+| `AGENT_ENROLL_TOKEN` | deployment | compose host; container host; container local; example host; py host/raw; sh sandbox_host.sh |
+| `AGENT_GATEWAY_HOSTNAME` | deployment | compose host; sh sandbox_host.sh |
 | `AGENT_GATEWAY_SSH_HOST` | deployment | compose cp; container cp; example cp; py cp/raw |
 | `AGENT_GATEWAY_URL` | deployment | container host; container local; py host/raw; py shared/raw |
 | `AGENT_GITHUB_APP_PRIVATE_KEY_FILE` | deployment | compose cp; example cp |
@@ -431,19 +498,19 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `AGENT_HOST_CONTAINERD_CONTENT_DIR` | deployment | compose host; example host |
 | `AGENT_HOST_CREDENTIAL` | deployment | py host/raw |
 | `AGENT_HOST_CREDENTIAL_FILE` | deployment | container host; container local; py host/raw |
-| `AGENT_HOST_STATE_ROOT` | deployment | compose host; example host |
-| `AGENT_HOST_STORAGE_PROBE` | deployment | compose host; container host; example cp; example host; py host/raw |
-| `AGENT_MCP_HOSTNAME` | deployment | compose host |
+| `AGENT_HOST_STATE_ROOT` | deployment | compose host; example host; sh sandbox_host.sh |
+| `AGENT_HOST_STORAGE_PROBE` | deployment | compose host; container host; example cp; example host; py host/raw; sh sandbox_host.sh |
+| `AGENT_MCP_HOSTNAME` | deployment | compose host; sh sandbox_host.sh |
 | `AGENT_MCP_RELAY_BIND` | deployment | compose cp |
-| `AGENT_MCP_RELAY_PORT` | deployment | compose cp; example local |
-| `AGENT_MCP_TUNNEL_LISTEN_PORT` | deployment | compose host |
+| `AGENT_MCP_RELAY_PORT` | deployment | compose cp; example local; sh deploy.sh |
+| `AGENT_MCP_TUNNEL_LISTEN_PORT` | deployment | compose host; sh sandbox_host.sh |
 | `AGENT_MCP_TUNNEL_REMOTE_HOST` | deployment | compose host; example cp |
 | `AGENT_MCP_TUNNEL_REMOTE_PORT` | deployment | compose host; example cp |
-| `AGENT_MCP_TUNNEL_SSH_DESTINATION` | deployment | compose host; example cp; example host |
-| `AGENT_MCP_TUNNEL_SSH_KEY` | deployment | compose host; example cp; example host |
-| `AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS` | deployment | compose host; example cp; example host |
+| `AGENT_MCP_TUNNEL_SSH_DESTINATION` | deployment | compose host; example cp; example host; sh sandbox_host.sh |
+| `AGENT_MCP_TUNNEL_SSH_KEY` | deployment | compose host; example cp; example host; sh sandbox_host.sh |
+| `AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS` | deployment | compose host; example cp; example host; sh sandbox_host.sh |
 | `AGENT_MCP_TUNNEL_SSH_PORT` | deployment | compose host |
-| `AGENT_NETWORK_NAME` | deployment | compose cp; example cp; example local |
+| `AGENT_NETWORK_NAME` | deployment | compose cp; example cp; example local; sh dev.sh |
 | `AGENT_OPERATION_PROFILING_DEPLOYMENT` | deployment | compose cp; compose local; container cp; container local; example cp; py cp/raw |
 | `AGENT_OPERATION_PROFILING_ENABLED` | deployment | compose cp; compose host; compose local; container cp; container host; container local; example cp; example host; py shared/raw |
 | `AGENT_OPERATION_PROFILING_MODE` | deployment | compose cp; compose host; compose local; container cp; container host; container local; example cp; example host; py shared/raw |
@@ -453,31 +520,32 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL` | deployment | compose cp; container cp; example cp; py cp/raw |
 | `AGENT_PGADMIN_BOOTSTRAP_URL` | deployment | compose cp; container cp; example cp; py cp/raw |
 | `AGENT_PGADMIN_COOKIE_SECURE` | deployment | compose cp; example cp |
-| `AGENT_PGADMIN_ENTRYPOINT_FILE` | deployment | compose cp; example cp |
-| `AGENT_PGADMIN_SERVERS_FILE` | deployment | compose cp; example cp |
-| `AGENT_PHYSICAL_HOST` | deployment | compose host; container host; example host; py host/raw |
+| `AGENT_PGADMIN_ENTRYPOINT_FILE` | deployment | compose cp; example cp; sh artifact_env.sh |
+| `AGENT_PGADMIN_SERVERS_FILE` | deployment | compose cp; example cp; sh artifact_env.sh |
+| `AGENT_PHYSICAL_HOST` | deployment | compose host; container host; example host; py host/raw; sh sandbox_host.sh |
 | `AGENT_POSTGRES_DB` | deployment | compose cp; compose local; example local |
 | `AGENT_POSTGRES_PASSWORD` | deployment | compose cp; compose local; example cp; example local |
 | `AGENT_POSTGRES_USER` | deployment | compose cp; compose local; example local |
-| `AGENT_RELAY_NETWORK` | deployment | compose host; container host; container local; py shared/raw |
+| `AGENT_RELAY_NETWORK` | deployment | compose host; container host; container local; py shared/raw; sh sandbox_host.sh |
+| `AGENT_RELEASE_MANIFEST` | deployment | sh artifact_env.sh |
 | `AGENT_REPO_CLONE_BASE_URL` | deployment | container local; py host/raw |
-| `AGENT_RETAINED_DOCKER_DATA_ROOT` | deployment | compose host; compose local; container host; container local; example cp; example host; example local; py host/raw |
-| `AGENT_RUNNER_HOST` | deployment | compose host; container host; container local; example host; py host/raw |
+| `AGENT_RETAINED_DOCKER_DATA_ROOT` | deployment | compose host; compose local; container host; container local; example cp; example host; example local; py host/raw; sh sandbox_host.sh |
+| `AGENT_RUNNER_HOST` | deployment | compose host; container host; container local; example host; py host/raw; sh sandbox_host.sh |
 | `AGENT_RUNNER_STOP_GRACE` | deployment | compose host; example host |
 | `AGENT_RUNNER_VERSION` | deployment | py host/raw |
 | `AGENT_RUNTIME_DOWNLOAD_NETWORK` | deployment | compose host; container host; example host; py host/raw |
 | `AGENT_SANDBOX_ALLOW_UNISOLATED` | deployment | py host/raw |
 | `AGENT_SANDBOX_ARCHIVE_STATE_DIR` | deployment | container host; py host/raw |
-| `AGENT_SANDBOX_BACKEND` | deployment | compose host; container host; container local; example host; py host/raw |
+| `AGENT_SANDBOX_BACKEND` | deployment | compose host; container host; container local; example host; py host/raw; sh sandbox_host.sh |
 | `AGENT_SANDBOX_DOCKER` | deployment | py host/raw |
 | `AGENT_SANDBOX_EXTRA_ARGS` | deployment | py host/raw |
 | `AGENT_SANDBOX_GID` | deployment | py host/raw |
 | `AGENT_SANDBOX_HOME` | deployment | py host/raw |
-| `AGENT_SANDBOX_IMAGE` | deployment | compose host; container host; container local; example cp; example host; py host/raw |
-| `AGENT_SANDBOX_IMAGE_PULL` | deployment | example cp |
-| `AGENT_SANDBOX_MANAGER_ADVERTISE_URL` | deployment | compose host; container host; container local; example cp; example host; py host/compat |
-| `AGENT_SANDBOX_MANAGER_REVERSE_BIND` | deployment | compose host; example cp; example host |
-| `AGENT_SANDBOX_MANAGER_REVERSE_PORT` | deployment | compose host; example cp; example host |
+| `AGENT_SANDBOX_IMAGE` | deployment | compose host; container host; container local; example cp; example host; py host/raw; sh sandbox_host.sh |
+| `AGENT_SANDBOX_IMAGE_PULL` | deployment | example cp; sh sandbox_host.sh |
+| `AGENT_SANDBOX_MANAGER_ADVERTISE_URL` | deployment | compose host; container host; container local; example cp; example host; py host/compat; sh sandbox_host.sh |
+| `AGENT_SANDBOX_MANAGER_REVERSE_BIND` | deployment | compose host; example cp; example host; sh sandbox_host.sh |
+| `AGENT_SANDBOX_MANAGER_REVERSE_PORT` | deployment | compose host; example cp; example host; sh sandbox_host.sh |
 | `AGENT_SANDBOX_MANAGER_REVERSE_TARGET_HOST` | deployment | compose host |
 | `AGENT_SANDBOX_MANAGER_REVERSE_TARGET_PORT` | deployment | compose host |
 | `AGENT_SANDBOX_MANAGER_STOP_GRACE` | deployment | compose host |
@@ -487,47 +555,62 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `AGENT_SANDBOX_RUNTIME` | deployment | py host/raw |
 | `AGENT_SANDBOX_UID` | deployment | py host/raw |
 | `AGENT_SHARED_LIVE_READY_FILE` | deployment | container host; container local; py host/raw |
-| `AGENT_TUNNEL_LISTEN_PORT` | deployment | compose host |
+| `AGENT_TUNNEL_LISTEN_PORT` | deployment | compose host; sh sandbox_host.sh |
 | `AGENT_TUNNEL_REMOTE_HOST` | deployment | compose host; example cp |
 | `AGENT_TUNNEL_REMOTE_PORT` | deployment | compose host; example cp |
-| `AGENT_TUNNEL_SSH_DESTINATION` | deployment | compose host; example cp; example host |
-| `AGENT_TUNNEL_SSH_KEY` | deployment | compose host; example cp; example host |
-| `AGENT_TUNNEL_SSH_KNOWN_HOSTS` | deployment | compose host; example cp; example host |
+| `AGENT_TUNNEL_SSH_DESTINATION` | deployment | compose host; example cp; example host; sh sandbox_host.sh |
+| `AGENT_TUNNEL_SSH_KEY` | deployment | compose host; example cp; example host; sh sandbox_host.sh |
+| `AGENT_TUNNEL_SSH_KNOWN_HOSTS` | deployment | compose host; example cp; example host; sh sandbox_host.sh |
 | `AGENT_TUNNEL_SSH_PORT` | deployment | compose host |
 | `AGENT_UPLOAD_RECEIPT_DIR` | deployment | container host; container local; py host/raw |
 | `AGENT_WEB_API_URL` | deployment | compose cp; example cp; example local |
-| `AGENT_WEB_BASE_PATH` | deployment | compose cp; example cp; example local |
+| `AGENT_WEB_BASE_PATH` | deployment | compose cp; example cp; example local; sh artifact_env.sh; sh deploy.sh |
 | `AGENT_WEB_BIND` | deployment | compose cp |
 | `AGENT_WEB_DEPLOYED_AT` | deployment | compose cp; container cp; web web |
-| `AGENT_WEB_PORT` | deployment | compose cp; example local |
+| `AGENT_WEB_PORT` | deployment | compose cp; example local; sh deploy.sh |
+| `AGENT_WEB_VARIANT` | deployment | sh artifact_env.sh |
 | `AGENT_WORKER_ID` | deployment | container local; py host/raw |
+| `ALLOW_DIRTY` | deployment | sh deploy.sh |
+| `ALLOW_STRAY_STACK` | deployment | sh deploy.sh |
+| `APP_DIR` | deployment | sh sandbox_host.sh |
 | `BUILD_SHA` | deployment | compose cp |
 | `BUILD_TIMESTAMP` | deployment | compose cp |
-| `CLAUDE_CODE_EXTRA_VERSIONS` | deployment | dockerfile_arg sandbox; example host |
-| `CLAUDE_CODE_VERSION` | deployment | dockerfile_arg sandbox |
+| `CLAUDE_CODE_EXTRA_VERSIONS` | deployment | dockerfile_arg sandbox; example host; sh sandbox_host.sh |
+| `CLAUDE_CODE_VERSION` | deployment | dockerfile_arg sandbox; sh sandbox_host.sh |
 | `CLAUDE_CODE_VERSIONS` | deployment | dockerfile_arg sandbox |
-| `CODEX_EXTRA_VERSIONS` | deployment | dockerfile_arg sandbox; example host |
-| `CODEX_VERSION` | deployment | dockerfile_arg sandbox |
+| `CODEX_EXTRA_VERSIONS` | deployment | dockerfile_arg sandbox; example host; sh sandbox_host.sh |
+| `CODEX_VERSION` | deployment | dockerfile_arg sandbox; sh sandbox_host.sh |
 | `CODEX_VERSIONS` | deployment | dockerfile_arg sandbox |
-| `COMPOSE_PROJECT` | deployment | compose host; example host |
+| `COMPOSE_PROJECT` | deployment | compose host; example host; sh deploy.sh; sh sandbox_host.sh |
 | `DEBIAN_MIRROR` | deployment | dockerfile_arg cp; dockerfile_arg host; dockerfile_arg local; dockerfile_arg sandbox |
-| `KILO_EXTRA_VERSIONS` | deployment | dockerfile_arg sandbox; example host |
-| `KILO_VERSION` | deployment | dockerfile_arg sandbox |
+| `DEPLOY_ROOT` | deployment | sh deploy.sh |
+| `DEPLOY_SHA` | deployment | sh deploy.sh |
+| `HEALTH_TIMEOUT` | deployment | sh deploy.sh |
+| `KATA_CONFIG_PATH` | deployment | sh setup_kata_runtime.sh |
+| `KATA_DEBUG_KERNEL_PATH` | deployment | sh setup_kata_runtime.sh |
+| `KATA_DOWNLOAD_BASE` | deployment | sh setup_kata_runtime.sh |
+| `KATA_LINK_DIR` | deployment | sh setup_kata_runtime.sh |
+| `KATA_SETUP_SCRIPT` | deployment | sh sandbox_host.sh |
+| `KATA_SHA256` | deployment | sh setup_kata_runtime.sh |
+| `KATA_VERSION` | deployment | sh setup_kata_runtime.sh |
+| `KILO_EXTRA_VERSIONS` | deployment | dockerfile_arg sandbox; example host; sh sandbox_host.sh |
+| `KILO_VERSION` | deployment | dockerfile_arg sandbox; sh sandbox_host.sh |
 | `KILO_VERSIONS` | deployment | dockerfile_arg sandbox |
 | `NEXT_PUBLIC_AGENT_API_URL` | deployment | build_arg cp; dockerfile_arg cp; web web |
 | `NEXT_PUBLIC_BASE_PATH` | deployment | build_arg cp; dockerfile_arg cp; web web |
 | `NEXT_PUBLIC_BUILD_SHA` | deployment | build_arg cp; dockerfile_arg cp; web web |
 | `NEXT_PUBLIC_BUILD_TIMESTAMP` | deployment | build_arg cp; dockerfile_arg cp; web web |
-| `OPENCODE_EXTRA_VERSIONS` | deployment | dockerfile_arg sandbox; example host |
-| `OPENCODE_VERSION` | deployment | dockerfile_arg sandbox |
+| `OPENCODE_EXTRA_VERSIONS` | deployment | dockerfile_arg sandbox; example host; sh sandbox_host.sh |
+| `OPENCODE_VERSION` | deployment | dockerfile_arg sandbox; sh sandbox_host.sh |
 | `OPENCODE_VERSIONS` | deployment | dockerfile_arg sandbox |
 | `PIP_DEFAULT_TIMEOUT` | deployment | dockerfile_arg cp; dockerfile_arg host; dockerfile_arg local; dockerfile_arg sandbox |
-| `PI_EXTRA_VERSIONS` | deployment | dockerfile_arg sandbox; example host |
-| `PI_VERSION` | deployment | dockerfile_arg sandbox |
+| `PI_EXTRA_VERSIONS` | deployment | dockerfile_arg sandbox; example host; sh sandbox_host.sh |
+| `PI_VERSION` | deployment | dockerfile_arg sandbox; sh sandbox_host.sh |
 | `PI_VERSIONS` | deployment | dockerfile_arg sandbox |
-| `SHARED_READY_TIMEOUT` | deployment | example host |
-| `SIBLING_COMPOSE_PROJECTS` | deployment | example host |
+| `SHARED_READY_TIMEOUT` | deployment | example host; sh deploy.sh; sh sandbox_host.sh |
+| `SIBLING_COMPOSE_PROJECTS` | deployment | example host; sh deploy.sh; sh sandbox_host.sh |
 | `SOURCE_COMMIT` | deployment | build_arg cp; dockerfile_arg cp; dockerfile_arg host; dockerfile_arg sandbox |
+| `SOURCE_REPO` | deployment | sh deploy.sh |
 | `UV_HTTP_TIMEOUT` | deployment | dockerfile_arg cp; dockerfile_arg host |
 | `UV_VERSION` | deployment | dockerfile_arg cp; dockerfile_arg host |
 | `AGENT_SETTINGS_ENCRYPTION_KEY` | operation | compose cp; container cp; example cp; py cp/raw |
@@ -545,6 +628,7 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `AGENT_PLUGIN_PATHS` | internal | py sandbox-helper/raw |
 | `AGENT_SCRIPT_STATUS` | internal | py host(embedded)/raw |
 | `AGENT_SECRET_PATTERN_*` | internal | py host(embedded)/raw |
+| `DEFER_SHARED_READY_MARKER` | internal | sh sandbox_host.sh |
 | `KILO_FREEINFERENCE_CONFIG_DIR` | internal | py sandbox-helper/raw |
 | `KILO_GATEWAY_MODEL` | internal | py sandbox-helper/raw |
 | `KILO_GATEWAY_REASONING_EFFORT` | internal | py sandbox-helper/raw |
@@ -556,16 +640,19 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `PI_CODING_AGENT_DIR` | internal | py sandbox-helper/raw |
 | `PI_GATEWAY_MODEL` | internal | py sandbox-helper/raw |
 | `PI_GATEWAY_REASONING` | internal | py sandbox-helper/raw |
-| `TUNNEL_LISTEN_PORT` | internal | container host |
-| `TUNNEL_REMOTE_HOST` | internal | container host |
-| `TUNNEL_REMOTE_PORT` | internal | container host |
-| `TUNNEL_REVERSE_BIND` | internal | container host |
-| `TUNNEL_REVERSE_PORT` | internal | container host |
-| `TUNNEL_REVERSE_TARGET_HOST` | internal | container host |
-| `TUNNEL_REVERSE_TARGET_PORT` | internal | container host |
-| `TUNNEL_SSH_DESTINATION` | internal | container host |
-| `TUNNEL_SSH_PORT` | internal | container host |
-| `_KATA_RUNTIME_EPOCH_LOCK_FD` | internal | py deploy-py/raw |
+| `TUNNEL_LISTEN_PORT` | internal | container host; sh agent-gateway-tunnel.sh |
+| `TUNNEL_REMOTE_HOST` | internal | container host; sh agent-gateway-tunnel.sh |
+| `TUNNEL_REMOTE_PORT` | internal | container host; sh agent-gateway-tunnel.sh |
+| `TUNNEL_REVERSE_BIND` | internal | container host; sh agent-gateway-tunnel.sh |
+| `TUNNEL_REVERSE_PORT` | internal | container host; sh agent-gateway-tunnel.sh |
+| `TUNNEL_REVERSE_TARGET_HOST` | internal | container host; sh agent-gateway-tunnel.sh |
+| `TUNNEL_REVERSE_TARGET_PORT` | internal | container host; sh agent-gateway-tunnel.sh |
+| `TUNNEL_SSH_DESTINATION` | internal | container host; sh agent-gateway-tunnel.sh |
+| `TUNNEL_SSH_KEY` | internal | sh agent-gateway-tunnel.sh |
+| `TUNNEL_SSH_KNOWN_HOSTS` | internal | sh agent-gateway-tunnel.sh |
+| `TUNNEL_SSH_PORT` | internal | container host; sh agent-gateway-tunnel.sh |
+| `WATCH_READINESS` | internal | sh deploy.sh |
+| `_KATA_RUNTIME_EPOCH_LOCK_FD` | internal | py deploy-py/raw; sh setup_kata_runtime.sh |
 | `AWS_ACCESS_KEY_ID` | platform | example cp |
 | `AWS_DEFAULT_REGION` | platform | example cp |
 | `AWS_SECRET_ACCESS_KEY` | platform | example cp |
@@ -590,32 +677,39 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `POSTGRES_USER` | platform | container cp |
 | `SSH_ORIGINAL_COMMAND` | platform | py cp(embedded)/raw |
 | `TERM` | platform | py host/raw |
-| `TMPDIR` | platform | py host/raw |
+| `TMPDIR` | platform | py host/raw; sh artifact_env.sh |
 | `AGENT_BROKER_REVERSE_BIND` | retired | compose host |
 | `AGENT_BROKER_REVERSE_PORT` | retired | compose host |
 | `AGENT_BROKER_REVERSE_TARGET_HOST` | retired | compose host |
 | `AGENT_BROKER_REVERSE_TARGET_PORT` | retired | compose host |
 | `AGENT_BROKER_STOP_GRACE` | retired | compose host |
 | `AGENT_BROKER_URL_ALLOWED_HOSTS` | retired | compose cp |
+| `AGENT_RUNNER_REPLICAS` | retired | sh sandbox_host.sh |
 | `AGENT_WORKSPACE_BROKER_ADVERTISE_URL` | retired | compose host |
 | `AGENT_WORKSPACE_BROKER_TOKEN` | retired | compose cp |
 | `AGENT_WORKSPACE_BROKER_URL` | retired | 仅注册表 |
 | `CAE_BENCH_DNS_SERVER` | tooling | py scripts/raw |
 | `CI` | tooling | web web |
+| `CI_LOG_DIR` | tooling | sh ci-local.sh |
 | `CLOUD_AGENT_E2E_PORT` | tooling | web web |
 | `CLOUD_AGENT_E2E_SKIP_BUILD` | tooling | web web |
 | `CLOUD_AGENT_TEST_API_KEY_FILE` | tooling | py deploy-py/raw |
 | `CLOUD_AGENT_TEST_PROXY` | tooling | py deploy-py/raw |
+| `DEPLOY_PEER_JOB` | tooling | sh deploy.sh |
+| `DOCKER_DAEMON_JSON` | tooling | sh sandbox_host.sh |
 | `GITHUB_API_URL` | tooling | py deploy-py/raw |
 | `GITHUB_REPOSITORY` | tooling | py deploy-py/raw |
-| `GITHUB_RUN_ATTEMPT` | tooling | py deploy-py/raw |
-| `GITHUB_RUN_ID` | tooling | py deploy-py/raw |
+| `GITHUB_RUN_ATTEMPT` | tooling | py deploy-py/raw; sh deploy.sh |
+| `GITHUB_RUN_ID` | tooling | py deploy-py/raw; sh deploy.sh |
 | `GITHUB_TOKEN` | tooling | py deploy-py/raw |
+| `KATA_CPUINFO` | tooling | sh setup_kata_runtime.sh |
+| `KATA_EXTRACT_ROOT` | tooling | sh sandbox_host.sh; sh setup_kata_runtime.sh |
+| `KATA_KVM_DEVICE` | tooling | sh setup_kata_runtime.sh |
 | `LEGACY_COPY_DATABASE_URL` | tooling | py scripts/raw |
 | `LOCAL_AGENT_TIMEOUT_S` | tooling | compose local; example local |
 | `LOCAL_CHAT_IDLE_TIMEOUT_S` | tooling | compose local; example local |
 | `LOCAL_CHAT_NETWORK_POOL` | tooling | compose local; example local |
-| `LOCAL_EDGE_PORT` | tooling | compose local; container local; example local; py deploy-py/raw |
+| `LOCAL_EDGE_PORT` | tooling | compose local; container local; example local; py deploy-py/raw; sh dev.sh |
 | `LOCAL_EGRESS_DNS_SERVER` | tooling | compose local; example local |
 | `LOCAL_EGRESS_PROTECTED_CIDRS` | tooling | compose local; example local |
 | `LOCAL_ENROLL_TOKEN` | tooling | compose local; example local |
@@ -623,8 +717,8 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `LOCAL_GATEWAY_DISPATCH_TOKEN` | tooling | container local; py deploy-py/raw |
 | `LOCAL_HOST_SLOTS` | tooling | compose local; example local |
 | `LOCAL_IDENTITY_ALLOWED_REDIRECTS` | tooling | compose local; container local; example local; py deploy-py/raw |
-| `LOCAL_PROJECT_NAME` | tooling | compose local; example local |
-| `LOCAL_RELAY_NETWORK` | tooling | compose local; example local |
+| `LOCAL_PROJECT_NAME` | tooling | compose local; example local; sh dev.sh |
+| `LOCAL_RELAY_NETWORK` | tooling | compose local; example local; sh dev.sh |
 | `LOCAL_SANDBOX_IMAGE` | tooling | compose local; example local |
 | `LOCAL_STACK_ID` | tooling | container local; py deploy-py/raw |
 | `PGDATABASE` | tooling | container local |
@@ -632,6 +726,12 @@ ENVIRONMENT.md 也按族记录的隧道变量、按前缀扫描的内部变量�
 | `PGPASSWORD` | tooling | container local |
 | `PGUSER` | tooling | container local |
 | `TEST_DB_HOST` | tooling | py scripts/raw |
+| `TEST_DB_LOCAL_CONTAINER` | tooling | sh test-db-local.sh |
+| `TEST_DB_LOCAL_IMAGE` | tooling | sh test-db-local.sh |
+| `TEST_DB_LOCAL_NAME` | tooling | sh test-db-local.sh |
+| `TEST_DB_LOCAL_PORT` | tooling | sh test-db-local.sh |
 | `TEST_DB_PASSWORD` | tooling | py scripts/raw |
 | `TEST_DB_PORT` | tooling | py scripts/raw |
 | `TEST_DB_USER` | tooling | py scripts/raw |
+| `TEST_DB_WORKERS` | tooling | sh test-db-local.sh |
+| `UV_RUN` | tooling | sh test-db-local.sh |
