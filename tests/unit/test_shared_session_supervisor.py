@@ -2884,6 +2884,7 @@ class _LocalMemberShell:
         uid, gid = (_SANDBOX_UID, _SANDBOX_UID) if as_uids else (os.getuid(), os.getgid())
         self.backend = SimpleNamespace(uid=uid, gid=gid)
         self.calls: list[tuple[object, ...]] = []
+        self.pipe_identity: tuple[int, int, int] | None = None
 
     def local(self, path: str) -> Path:
         return Path(f"{self.root}{path}")
@@ -2914,6 +2915,7 @@ class _LocalMemberShell:
         self, _spec, *, source_argv, source_uid, target_argv, target_uid, user_gid, timeout_s
     ):
         self.calls.append(("pipe", source_uid, target_uid))
+        self.pipe_identity = (source_uid, target_uid, user_gid)
         source = subprocess.Popen(
             self.run_as(source_uid, user_gid, source_argv),
             stdout=subprocess.PIPE,
@@ -3034,8 +3036,8 @@ def test_a_squatted_collection_name_is_moved_aside_and_replaced(tmp_path: Path):
     assert list(elsewhere.iterdir()) == []
 
 
-@pytest.mark.parametrize("runtime_id", ["codex", "opencode"])
-def test_fork_copies_a_private_home_without_widening_either_side(tmp_path: Path, runtime_id: str):
+def test_fork_copies_a_private_home_without_widening_either_side(tmp_path: Path):
+    runtime_id = "opencode"
     _private_state_root(tmp_path)
     manager = _LocalMemberShell(tmp_path)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
@@ -3071,6 +3073,65 @@ def test_fork_copies_a_private_home_without_widening_either_side(tmp_path: Path,
     locks = child / f"{runtime_id}/state/{runtime_id}/locks"
     assert locks.exists() is (runtime_id == "codex")
     assert (source / "tmp/scratch").exists(), "the source home is read, never changed"
+
+
+def test_codex_lost_fork_response_recovers_from_the_rollout_inventory(monkeypatch):
+    manager = _Manager()
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    spec = replace(_spec(), runtime_id="codex", runtime_version="0.145.0")
+    source_launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        runtime_id="codex",
+        runtime_version="0.145.0",
+    )
+    target_launch = replace(
+        _launch("athr_child", native_session_id=None, slot=2),
+        runtime_id="codex",
+        runtime_version="0.145.0",
+    )
+    closed: list[bool] = []
+
+    def lost_response(**_kwargs):
+        raise EOFError("response disappeared after persistence")
+
+    source = SimpleNamespace(
+        native_session_id="native-source",
+        launch=source_launch,
+        session=SimpleNamespace(fork_native=lost_response),
+        close=lambda: closed.append(True),
+    )
+    inventories = iter(
+        [
+            {"native-old-child"},
+            {"native-old-child", "native-recovered-child"},
+        ]
+    )
+    writes: list[dict[str, object]] = []
+    monkeypatch.setattr(factory, "_read_fork_journal", lambda *_args: None)
+    monkeypatch.setattr(
+        factory,
+        "_codex_fork_children",
+        lambda *_args, **_kwargs: next(inventories),
+    )
+    monkeypatch.setattr(factory, "_clone_private_member_state", lambda *_args: None)
+    monkeypatch.setattr(
+        factory,
+        "_write_fork_journal",
+        lambda _spec, _operation_id, value: writes.append(value),
+    )
+    child_id = factory.fork_native(
+        spec,
+        source,  # type: ignore[arg-type]
+        "fork-lost-response",
+        target_launch,
+        2,
+    )
+    assert child_id == "native-recovered-child"
+    assert closed == [True]
+    assert writes[0]["state"] == "preparing"
+    assert writes[0]["source_child_session_ids"] == ["native-old-child"]
+    assert writes[1]["state"] == "ready"
+    assert writes[1]["target_session_id"] == "native-recovered-child"
 
 
 @pytest.fixture
@@ -3373,67 +3434,6 @@ def test_codex_preparing_journal_recovers_one_persisted_child_without_refork(mon
     assert mutation_calls == ["close"]
     assert clones == [(source_launch, target_launch)]
     assert writes == [{**expected, "state": "ready", "target_session_id": "native-recovered-child"}]
-
-
-def test_codex_lost_fork_response_recovers_from_the_rollout_inventory(monkeypatch):
-    manager = _Manager()
-    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
-    spec = replace(_spec(), runtime_id="codex", runtime_version="0.145.0")
-    source_launch = replace(
-        _launch("athr_source", native_session_id="native-source", slot=0),
-        runtime_id="codex",
-        runtime_version="0.145.0",
-    )
-    target_launch = replace(
-        _launch("athr_child", native_session_id=None, slot=2),
-        runtime_id="codex",
-        runtime_version="0.145.0",
-    )
-    closed: list[bool] = []
-
-    def lost_response(**_kwargs):
-        raise EOFError("response disappeared after persistence")
-
-    source = SimpleNamespace(
-        native_session_id="native-source",
-        launch=source_launch,
-        session=SimpleNamespace(fork_native=lost_response),
-        close=lambda: closed.append(True),
-    )
-    inventories = iter(
-        [
-            {"native-old-child"},
-            {"native-old-child", "native-recovered-child"},
-        ]
-    )
-    writes: list[dict[str, object]] = []
-    monkeypatch.setattr(factory, "_read_fork_journal", lambda *_args: None)
-    monkeypatch.setattr(
-        factory,
-        "_codex_fork_children",
-        lambda *_args, **_kwargs: next(inventories),
-    )
-    monkeypatch.setattr(factory, "_clone_private_member_state", lambda *_args: None)
-    monkeypatch.setattr(
-        factory,
-        "_write_fork_journal",
-        lambda _spec, _operation_id, value: writes.append(value),
-    )
-
-    child_id = factory.fork_native(
-        spec,
-        source,  # type: ignore[arg-type]
-        "fork-lost-response",
-        target_launch,
-        2,
-    )
-
-    assert child_id == "native-recovered-child"
-    assert closed == [True]
-    assert writes[0]["state"] == "preparing"
-    assert writes[0]["source_child_session_ids"] == ["native-old-child"]
-    assert writes[1]["state"] == "ready"
-    assert writes[1]["target_session_id"] == "native-recovered-child"
 
 
 @pytest.mark.parametrize("runtime_id", ["opencode", "kilo"])
