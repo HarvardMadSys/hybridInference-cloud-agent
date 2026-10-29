@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from cloud_agent.accounts.config import (
     LOCAL_SESSION_COOKIE,
     LOCAL_SESSION_COOKIE_INSECURE,
-    LOCAL_SESSION_TTL_S,
+    local_session_ttl_s,
 )
 from cloud_agent.accounts.tokens import looks_like_session_token
 from cloud_agent.identity import session_cookie_is_secure
@@ -54,7 +54,7 @@ def set_local_session_cookie(response: Response, token: str) -> None:
     response.set_cookie(
         local_cookie_name(secure=secure),
         token,
-        max_age=LOCAL_SESSION_TTL_S,
+        max_age=local_session_ttl_s(),
         httponly=True,
         samesite="lax",
         secure=secure,

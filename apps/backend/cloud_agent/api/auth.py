@@ -25,7 +25,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 
 from cloud_agent.accounts import tokens
 from cloud_agent.accounts.captcha import site_key, verify_captcha
-from cloud_agent.accounts.config import LOCAL_SESSION_TTL_S, auth_mode
+from cloud_agent.accounts.config import auth_mode, local_session_ttl_s
 from cloud_agent.accounts.device_cookie import recognized_device
 from cloud_agent.accounts.passwords import hash_password
 from cloud_agent.accounts.policy import require_email_verification, terms_url
@@ -76,7 +76,7 @@ from cloud_agent.schemas.accounts import (
     TokenRequest,
 )
 from cloud_agent.schemas.session import SessionUserResponse
-from cloud_agent.settings import text_setting
+from cloud_agent.settings import boolean_setting, integer_setting, text_setting
 
 if TYPE_CHECKING:
     from cloud_agent.api._local_auth import RateRule
@@ -119,19 +119,23 @@ async def enforce_login_limits(request: Request, identifier: str) -> None:
     one transaction (see ``docs/developer/local-accounts.md``).
     """
     key = identifier_key(identifier)
+    per_address = integer_setting("accounts.login_per_15min")
     device = recognized_device(request.cookies, key)
     if device is not None:
-        await enforce_rate_limits(request, [("login_device", device, FIFTEEN_MIN, 5)])
+        await enforce_rate_limits(request, [("login_device", device, FIFTEEN_MIN, per_address)])
         return
     address = client_bucket(request)
     await enforce_rate_limits(
         request,
         [
-            ("login_email_ip", f"{key}\x00{address}", FIFTEEN_MIN, 5),
-            ("login_ip", address, HOUR, 20),
+            ("login_email_ip", f"{key}\x00{address}", FIFTEEN_MIN, per_address),
+            ("login_ip", address, HOUR, integer_setting("accounts.login_ip_per_hour")),
         ],
     )
-    await enforce_rate_limits(request, [("login_email", key, FIFTEEN_MIN, 50)])
+    await enforce_rate_limits(
+        request,
+        [("login_email", key, FIFTEEN_MIN, integer_setting("accounts.login_account_per_15min"))],
+    )
 
 
 def mail_rules(request: Request, email: str) -> list[RateRule]:
@@ -222,6 +226,7 @@ async def auth_options(request: Request) -> AuthOptionsResponse:
         ),
         turnstile_site_key=site_key(),
         terms_url=terms_url(),
+        terms_text=text_setting("accounts.terms_text").strip(),
         setup_required=await _setup_pending(request),
         max_accounts_per_browser=MAX_ACCOUNTS_PER_BROWSER,
     )
@@ -245,10 +250,35 @@ async def require_signup_consent(
 
 
 def signup_rules(request: Request) -> list[RateRule]:
-    """The per-address sign-up windows (5 an hour, 10 a day)."""
+    """The sign-up windows: per address, or one shared budget when there is no address.
+
+    As HybridInference's ``check_and_record_signup``: a request whose client
+    address cannot be told (``unknown``, behind a proxy this deployment does
+    not trust) shares one coarse budget with every other such request, rather
+    than pretending the proxy is one client; ``accounts.signup_require_resolved_ip``
+    refuses it outright instead (503).
+    """
+    address = client_bucket(request)
+    if address == "unknown":
+        if boolean_setting("accounts.signup_require_resolved_ip"):
+            raise typed_error(
+                503,
+                "client_unresolved",
+                "Sign-up is temporarily unavailable because the client address "
+                "could not be verified.",
+            )
+        return [
+            ("signup_unresolved", "", HOUR, integer_setting("accounts.unresolved_signup_per_hour")),
+            (
+                "signup_unresolved_day",
+                "",
+                DAY,
+                integer_setting("accounts.unresolved_signup_per_day"),
+            ),
+        ]
     return [
-        ("signup_ip", client_bucket(request), HOUR, 5),
-        ("signup_ip_day", client_bucket(request), DAY, 10),
+        ("signup_ip", address, HOUR, integer_setting("accounts.signup_per_hour")),
+        ("signup_ip_day", address, DAY, integer_setting("accounts.signup_per_day")),
     ]
 
 
@@ -428,7 +458,7 @@ async def create_setup_admin(
         session_id=session_id,
         account_id=account_id,
         token_hash=tokens.session_hash(token),
-        ttl_s=LOCAL_SESSION_TTL_S,
+        ttl_s=local_session_ttl_s(),
         password_hash=password_hash,
     )
     assert account is not None

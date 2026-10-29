@@ -158,6 +158,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
 
     from cloud_agent.api import (
         _cross_site,
+        admin_account_mail,
         admin_accounts,
         admin_audit,
         admin_compute,
@@ -334,6 +335,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         auth_phone.router,
         waitlist.router,
         admin_accounts.router,
+        admin_account_mail.router,
     ):
         app.include_router(local_router)
     app.include_router(site_config.router)

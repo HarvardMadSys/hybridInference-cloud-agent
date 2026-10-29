@@ -15,6 +15,7 @@ background and again from the enforcement pass until acknowledged.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
@@ -49,6 +50,8 @@ from cloud_agent.schemas.accounts import (
     BindEmailResponse,
     ChangePasswordRequest,
     DeleteAccountRequest,
+    LocaleRequest,
+    LocaleResponse,
     OkResponse,
     PhoneVerifyRequest,
 )
@@ -86,6 +89,24 @@ async def _count_proof(request: Request, owner: SessionOwner) -> None:
 async def read_account(request: Request) -> AccountIdentity:
     """How the signed-in account signs in."""
     return account_identity((await _owner(request)).account)
+
+
+@router.put("/locale", response_model=LocaleResponse, dependencies=[Depends(require_json)])
+async def save_locale(body: LocaleRequest, request: Request) -> LocaleResponse:
+    """Keep the interface language with the account; the most recent choice wins.
+
+    As HybridInference's ``PUT /user/preferences/locale``: a choice carried in
+    from a signed-out browser keeps the time it was made, never later than
+    now, and one older than the account's stored choice is not written; the
+    answer is the language the account keeps, which the page then shows.
+    """
+    owner = await _owner(request)
+    now = datetime.now(UTC)
+    chosen = now if body.chosen_at is None else min(body.chosen_at.astimezone(UTC), now)
+    locale, chosen_at = await local_accounts(request).set_locale(
+        account_id=owner.account.id, locale=body.locale, chosen_at=chosen
+    )
+    return LocaleResponse(locale=locale, chosen_at=chosen_at)
 
 
 @router.post("/password", response_model=OkResponse, dependencies=[Depends(require_json)])

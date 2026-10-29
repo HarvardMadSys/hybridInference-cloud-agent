@@ -447,9 +447,10 @@ async def test_erasing_frees_the_identifiers_and_keeps_a_tombstone(storage, pool
             account_id=account_id, actor_id="admin-token", actor_account_id=None, admin_ip="t"
         )
     await _stopped(storage, account_id)
-    erased = await storage.local_accounts.erase_account(
+    result = await storage.local_accounts.erase_account(
         account_id=account_id, actor_id="admin-token", actor_account_id=None, admin_ip="t"
     )
+    erased = result.account
     assert (erased.email, erased.erased_at is not None, erased.has_password) == (None, True, False)
     assert await storage.local_accounts.identifier_owner("email", "gone@example.edu") is None
     with pytest.raises(AccountTransitionRefused):
@@ -775,3 +776,309 @@ async def test_the_database_refuses_an_identity_no_flow_may_write(storage, pool,
                 kind,
                 value,
             )
+
+
+# ── Erasing the account's Agent data ─────────────────────────────────────
+
+
+async def _finished_owner(storage: Storage, pool, email: str) -> tuple[str, str]:
+    """An approved account with one finished turn in a temporary chat."""
+    account_id = await make_account(storage, email, admission="approved")
+    job = await storage.conversation_commands.create_job(
+        user_id=account_id, repo=None, task_prompt="p", runtime="codex", model="m"
+    )
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state = 'cancelled' WHERE id = $1", job["id"])
+    return account_id, job["id"]
+
+
+async def test_erasing_removes_every_row_of_the_accounts_agent_data(storage, pool):
+    account_id, job_id = await _finished_owner(storage, pool, "erase-all@example.edu")
+    other_id, other_job = await _finished_owner(storage, pool, "keeps@example.edu")
+    await act(storage, account_id, "delete")
+    await _stopped(storage, account_id)
+    result = await storage.local_accounts.erase_account(
+        account_id=account_id, actor_id="admin-token", actor_account_id=None, admin_ip="t"
+    )
+    assert result.deleted.get("agent_jobs") == 1 and result.deleted.get("agent_threads") == 1
+    async with pool.acquire() as conn:
+        tables = await conn.fetch(
+            "SELECT table_name FROM information_schema.columns WHERE table_schema = "
+            "current_schema() AND column_name = 'user_id' AND left(table_name, 6) = 'agent_'"
+        )
+        for row in tables:
+            left = await conn.fetchval(
+                f'SELECT count(*) FROM "{row["table_name"]}" WHERE user_id = $1', account_id
+            )
+            assert left == 0, row["table_name"]
+        assert await conn.fetchval("SELECT count(*) FROM agent_jobs WHERE id = $1", other_job) == 1
+        audit = await conn.fetch(
+            "SELECT action, details FROM agent_admin_audit_log WHERE target_user_id = $1",
+            account_id,
+        )
+    # Earlier audit rows about the account go; the erasure's own row stays.
+    assert [row["action"] for row in audit] == ["agent.local_account.erase"]
+    assert other_id and job_id
+
+
+async def test_erasing_refuses_while_a_sandbox_of_the_account_still_exists(storage, pool):
+    account_id, _job = await _finished_owner(storage, pool, "sandboxed@example.edu")
+    async with pool.acquire() as conn:
+        thread_id = await conn.fetchval(
+            "SELECT id FROM agent_threads WHERE user_id = $1", account_id
+        )
+        await conn.execute(
+            """INSERT INTO agent_sandboxes
+               (id, user_id, origin_thread_id, host, container_id, container_name,
+                runtime_id, execution_profile, memory_limit, cpu_limit, disk_limit_mib,
+                state, created_at, last_activity_at, updated_at)
+               VALUES ('sandbox-erase', $1, $2, 'runner-one', 'container-erase',
+                       'agent-erase', 'codex', 'untrusted-kata-v1', '4g', 2, 10240,
+                       'stopped', NOW(), NOW(), NOW())""",
+            account_id,
+            thread_id,
+        )
+    await act(storage, account_id, "delete")
+    await _stopped(storage, account_id)
+    with pytest.raises(AccountTransitionRefused) as blocked:
+        await storage.local_accounts.erase_account(
+            account_id=account_id, actor_id="admin-token", actor_account_id=None, admin_ip="t"
+        )
+    assert blocked.value.code == "erase_blocked" and "sandbox" in str(blocked.value)
+    record = await storage.local_accounts.get_account(account_id)
+    assert record is not None and record.erased_at is None and record.email
+
+
+async def test_erasing_never_touches_another_owners_row(storage, pool):
+    """A row of the account referenced by another owner's row blocks the whole erasure."""
+    from cloud_agent.storage.repositories.account_erasure import ErasureBlocked, erase_owner_rows
+
+    owner, _job = await _finished_owner(storage, pool, "shared@example.edu")
+    other = await make_account(storage, "borrower@example.edu")
+    async with pool.acquire() as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            # A table of some later feature: another owner's row pointing at ours.
+            await conn.execute(
+                "CREATE TABLE agent_tmp_borrow (user_id TEXT NOT NULL, "
+                "job_id TEXT REFERENCES agent_jobs (id))"
+            )
+            await conn.execute(
+                "INSERT INTO agent_tmp_borrow SELECT $1, id FROM agent_jobs WHERE user_id = $2",
+                other,
+                owner,
+            )
+            with pytest.raises(ErasureBlocked) as blocked:
+                await erase_owner_rows(conn, owner)
+        finally:
+            await transaction.rollback()
+        assert blocked.value.table == "agent_tmp_borrow"
+        assert await conn.fetchval("SELECT count(*) FROM agent_jobs WHERE user_id = $1", owner)
+
+
+# ── Administrator addresses, language, sorting ───────────────────────────
+
+
+async def test_a_listed_address_is_approved_and_made_an_administrator_once(storage, pool):
+    account_id = await make_account(storage, "lead@example.edu")
+    unverified = await make_account(storage, "unproven@example.edu", verified=False)
+    promoted = await storage.local_accounts.promote_listed_admin(
+        account_id=account_id, actor_id="admin-emails"
+    )
+    assert promoted is not None and permissions_for(promoted) == ["agent.use", "agent.admin"]
+    assert (
+        await storage.local_accounts.promote_listed_admin(
+            account_id=account_id, actor_id="admin-emails"
+        )
+        is None
+    )
+    assert (
+        await storage.local_accounts.promote_listed_admin(
+            account_id=unverified, actor_id="admin-emails"
+        )
+        is None
+    )
+    async with pool.acquire() as conn:
+        actions = await conn.fetch(
+            "SELECT action FROM agent_admin_audit_log WHERE target_user_id = $1 "
+            "AND actor_id = 'admin-emails' ORDER BY id",
+            account_id,
+        )
+    assert [row["action"] for row in actions] == [
+        "agent.local_account.approve",
+        "agent.local_account.grant_admin",
+    ]
+
+
+async def test_the_most_recent_language_choice_wins(storage):
+    from datetime import UTC, datetime, timedelta
+
+    account_id = await make_account(storage, "lang@example.edu")
+    now = datetime.now(UTC)
+    assert await storage.local_accounts.set_locale(
+        account_id=account_id, locale="zh-CN", chosen_at=now
+    ) == ("zh-CN", now)
+    kept = await storage.local_accounts.set_locale(
+        account_id=account_id, locale="en", chosen_at=now - timedelta(minutes=5)
+    )
+    assert kept == ("zh-CN", now)
+    record = await storage.local_accounts.get_account(account_id)
+    assert record is not None and record.locale == "zh-CN"
+
+
+async def test_accounts_sort_by_their_last_sign_in(storage):
+    first = await make_account(storage, "first-in@example.edu")
+    second = await make_account(storage, "second-in@example.edu")
+    never = await make_account(storage, "never-in@example.edu")
+    for account_id in (second, first):
+        await _session(storage, account_id, password_hash=await _hash(storage, account_id))
+        await asyncio.sleep(0.01)
+    records, _ = await storage.local_accounts.list_accounts(
+        admission_status=None, limit=10, offset=0, sort="last_login"
+    )
+    assert [record.id for record in records] == [first, second, never]
+
+
+# ── Administrator mail ───────────────────────────────────────────────────
+
+
+class _Mailer:
+    configured = True
+
+    def __init__(self, fail: set[str] | None = None) -> None:
+        self.sent: list[str] = []
+        self.fail = fail or set()
+
+    async def send(self, mail) -> bool:
+        if mail.to in self.fail:
+            return False
+        self.sent.append(mail.to)
+        return True
+
+
+async def _broadcast(storage: Storage, **fields) -> str:
+    broadcast_id = tokens.new_session_id()
+    await storage.local_accounts.create_broadcast(
+        broadcast_id=broadcast_id,
+        subject="Hello",
+        body_html="<p>Hi</p>",
+        body_text="Hi",
+        template_key=None,
+        statuses=fields.get("statuses", ["active"]),
+        admissions=fields.get("admissions", ["approved"]),
+        scheduled_at=fields.get("scheduled_at"),
+        created_by="admin-token",
+        admin_ip="t",
+    )
+    return broadcast_id
+
+
+async def test_a_broadcast_reaches_exactly_its_verified_audience_once(storage):
+    from cloud_agent.application.account_broadcasts import send_due_broadcasts
+
+    approved = await make_account(storage, "approved@example.edu", admission="approved")
+    await make_account(storage, "waiting@example.edu", admission="pending")
+    await make_account(storage, "unverified@example.edu", verified=False)
+    leaving = await make_account(storage, "leaving-later@example.edu", admission="approved")
+    accounts = storage.local_accounts
+    assert await accounts.broadcast_audience(statuses=["active"], admissions=["approved"]) == 2
+    broadcast_id = await _broadcast(storage)
+    await act(storage, leaving, "delete")
+    mailer = _Mailer()
+    assert await send_due_broadcasts(accounts, mailer) == 1
+    assert mailer.sent == ["approved@example.edu"]
+    found = await accounts.broadcast_detail(broadcast_id=broadcast_id, limit=10, offset=0)
+    assert found is not None
+    row, recipients, total = found
+    assert (row["status"], row["recipient_count"], total) == ("sent", 2, 2)
+    assert {r["account_id"]: r["status"] for r in recipients} == {
+        approved: "sent",
+        leaving: "skipped",
+    }
+    assert await send_due_broadcasts(accounts, mailer) == 0
+    assert mailer.sent == ["approved@example.edu"]
+
+
+async def test_a_scheduled_broadcast_waits_and_can_be_cancelled_only_while_waiting(storage):
+    from datetime import UTC, datetime, timedelta
+
+    from cloud_agent.application.account_broadcasts import send_due_broadcasts
+
+    await make_account(storage, "later@example.edu", admission="approved")
+    accounts = storage.local_accounts
+    later = await _broadcast(storage, scheduled_at=datetime.now(UTC) + timedelta(hours=1))
+    mailer = _Mailer()
+    assert await send_due_broadcasts(accounts, mailer) == 0
+    assert (
+        await accounts.cancel_broadcast(broadcast_id=later, actor_id="admin-token", admin_ip="t")
+        == "cancelled"
+    )
+    now = await _broadcast(storage)
+    assert await send_due_broadcasts(accounts, mailer) == 1
+    assert (
+        await accounts.cancel_broadcast(broadcast_id=now, actor_id="admin-token", admin_ip="t")
+        == "sent"
+    )
+    assert await accounts.cancel_broadcast(broadcast_id="nope", actor_id="a", admin_ip="t") is None
+
+
+async def test_concurrent_senders_claim_a_broadcast_once_and_a_stale_claim_resumes(storage, pool):
+    from cloud_agent.application.account_broadcasts import send_broadcast
+
+    for index in range(3):
+        await make_account(storage, f"many{index}@example.edu", admission="approved")
+    accounts = storage.local_accounts
+    broadcast_id = await _broadcast(storage)
+    claims = await asyncio.gather(*(accounts.claim_due_broadcast() for _ in range(4)))
+    assert [claim["id"] for claim in claims if claim] == [broadcast_id]
+    first = await accounts.pending_broadcast_recipients(broadcast_id=broadcast_id, limit=1)
+    await accounts.record_broadcast_results(
+        broadcast_id=broadcast_id, outcomes=[(first[0]["account_id"], "sent", None)]
+    )
+    # The sender dies here; once its claim is stale another resumes the rest.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_local_broadcasts SET claimed_at = NOW() - INTERVAL '1 hour' "
+            "WHERE id = $1",
+            broadcast_id,
+        )
+    resumed = await accounts.claim_due_broadcast()
+    assert resumed is not None and resumed["id"] == broadcast_id
+    rest = await accounts.pending_broadcast_recipients(broadcast_id=broadcast_id, limit=10)
+    mailer = _Mailer(fail={rest[-1]["email"]})
+    assert await send_broadcast(accounts, mailer, resumed) == "sent"
+    # Only the two still pending were mailed: the first was never mailed again.
+    assert mailer.sent == [rest[0]["email"]] and first[0]["email"] not in mailer.sent
+    found = await accounts.broadcast_detail(broadcast_id=broadcast_id, limit=10, offset=0)
+    assert found is not None
+    statuses = sorted(r["status"] for r in found[1])
+    assert statuses == ["failed", "sent", "sent"]
+
+
+async def test_the_operator_creates_a_verified_administrator_without_mail(storage):
+    from cloud_agent.accounts.bootstrap_admin import BootstrapRefused, create_account
+
+    account_id = await create_account(
+        storage.local_accounts, email=None, login_name="Ops", password=PASSWORD, admin=True
+    )
+    record = await storage.local_accounts.get_account(account_id)
+    assert record is not None and record.login_name == "ops"
+    assert permissions_for(record) == ["agent.use", "agent.admin"]
+    member = await create_account(
+        storage.local_accounts,
+        email="m@example.edu",
+        login_name=None,
+        password=PASSWORD,
+        admin=False,
+    )
+    member_record = await storage.local_accounts.get_account(member)
+    assert member_record is not None and permissions_for(member_record) == ["agent.use"]
+    with pytest.raises(BootstrapRefused):
+        await create_account(
+            storage.local_accounts, email=None, login_name="ops", password=PASSWORD, admin=True
+        )
+    with pytest.raises(BootstrapRefused):
+        await create_account(
+            storage.local_accounts, email=None, login_name="weak", password="short", admin=True
+        )

@@ -108,12 +108,17 @@ def attach_local_identity(app: FastAPI, storage: Storage, *, local: bool) -> Non
 def local_identity_tasks(
     storage: Storage, grants: Any, *, local: bool
 ) -> list[tuple[str, Coroutine[Any, Any, None]]]:
-    """The background loops local mode adds: keeping ended access ended."""
+    """The background loops local mode adds: keeping ended access ended, and account mail."""
     if not local:
         return []
+    from cloud_agent.accounts.delivery import DeliveryMailer
     from cloud_agent.workers.account_access import run_account_access_enforcement
+    from cloud_agent.workers.account_broadcasts import run_account_broadcasts
 
-    return [("account_access_task", run_account_access_enforcement(storage, grants))]
+    return [
+        ("account_access_task", run_account_access_enforcement(storage, grants)),
+        ("account_broadcast_task", run_account_broadcasts(storage, DeliveryMailer())),
+    ]
 
 
 __all__ = ["attach_local_identity", "bind_identity_source", "local_identity_tasks"]

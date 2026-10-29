@@ -51,6 +51,7 @@ from cloud_agent.schemas.accounts import (
     AccountNotesRequest,
     AdminAccountsResponse,
     EraseAccountRequest,
+    EraseAccountResponse,
     LoginEventEntry,
     LoginEventsResponse,
     PurgedResponse,
@@ -84,6 +85,7 @@ async def list_accounts(
     status: AdmissionFilter | None = Query(None),
     account_status: StatusFilter | None = Query(None),
     q: str | None = Query(None, max_length=320),
+    sort: Literal["created", "last_login"] = Query("created"),
     _admin: str = Depends(verify_admin_access),
 ) -> AdminAccountsResponse:
     """One page of accounts, newest first, filtered and searched, with counts per state.
@@ -98,6 +100,7 @@ async def list_accounts(
         offset=offset,
         account_status=account_status,
         query=q,
+        sort=sort,
     )
     return AdminAccountsResponse(
         accounts=[account_entry(record) for record in records],
@@ -291,24 +294,35 @@ async def account_login_events(
 
 
 @router.post(
-    "/{account_id}/erase", response_model=AccountEntry, dependencies=[Depends(require_json)]
+    "/{account_id}/erase",
+    response_model=EraseAccountResponse,
+    dependencies=[Depends(require_json)],
 )
 async def erase_account(
     account_id: str,
     body: EraseAccountRequest,
     request: Request,
     admin: str = Depends(verify_admin_access),
-) -> AccountEntry:
-    """Erase a deleted account's identity permanently; its id typed out again confirms it."""
+) -> EraseAccountResponse:
+    """Erase a deleted account and all its Agent data; its id typed out again confirms it.
+
+    Sandbox deletion archives stay in the deployment's bucket, which the
+    control plane may not delete from; their keys come back (and are in the
+    audit row) for the operator's retention policy.
+    """
     if body.confirm.strip() != account_id:
         raise typed_error(400, "confirmation_mismatch", "Type the account id to confirm.")
-    record = await local_accounts(request).erase_account(
+    result = await local_accounts(request).erase_account(
         account_id=account_id,
         actor_id=admin,
         actor_account_id=_actor_account(admin),
         admin_ip=get_client_ip(request),
     )
-    return account_entry(record)
+    return EraseAccountResponse(
+        account=account_entry(result.account),
+        deleted=result.deleted,
+        retained_archives=result.retained_archives,
+    )
 
 
 async def _terminate(storage: Any, grants: Any, account_id: str, generation: int) -> None:

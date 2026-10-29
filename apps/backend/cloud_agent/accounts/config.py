@@ -44,9 +44,18 @@ LOCAL_SESSION_COOKIE = "__Host-cloud_agent_local_session"
 #: The plain-HTTP development name, used only where the cookie is not Secure.
 LOCAL_SESSION_COOKIE_INSECURE = "cloud_agent_local_session"
 
-#: A local session's fixed lifetime. It is never extended on use; revocation
-#: (sign-out, password reset, suspension) ends it before then.
+#: A local session's default fixed lifetime (``accounts.session_ttl_days``). It
+#: is never extended on use; revocation (sign-out, password change or reset,
+#: suspension, deletion) ends it before then.
 LOCAL_SESSION_TTL_S = 30 * 24 * 60 * 60
+
+
+def local_session_ttl_s() -> int:
+    """The configured lifetime of a new local session, in seconds."""
+    from cloud_agent.settings import integer_setting
+
+    return integer_setting("accounts.session_ttl_days") * 24 * 60 * 60
+
 
 #: How long an emailed link stays usable.
 VERIFY_EMAIL_TTL_S = 24 * 60 * 60
@@ -172,6 +181,7 @@ __all__ = [
     "check_local_configuration",
     "derived_key",
     "local_mode",
+    "local_session_ttl_s",
     "mail_web_base_url",
     "signup_flag_enabled",
 ]

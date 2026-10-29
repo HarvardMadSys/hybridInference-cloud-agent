@@ -24,7 +24,8 @@ from cloud_agent.accounts.config import (
     mail_web_base_url,
     signup_flag_enabled,
 )
-from cloud_agent.accounts.mail import AccountMail, SmtpAccountMailer
+from cloud_agent.accounts.delivery import DeliveryMailer
+from cloud_agent.accounts.mail import AccountMail
 from cloud_agent.accounts.passwords import HasherBusy
 from cloud_agent.accounts.policy import (
     admin_notify_enabled,
@@ -282,10 +283,10 @@ def require_json(request: Request) -> None:
 
 
 def account_mailer(request: Request) -> AccountMailer:
-    """The application's mailer: a test's substitute, or SMTP from ``AGENT_SMTP_*``."""
+    """The application's mailer: a test's substitute, or the transport the settings select."""
     mailer = getattr(request.app.state, "account_mailer", None)
     if mailer is None:
-        mailer = SmtpAccountMailer()
+        mailer = DeliveryMailer()
         request.app.state.account_mailer = mailer
     return mailer
 
@@ -439,6 +440,7 @@ def waitlist_entry(record: AccountRecord) -> WaitlistEntry:
 def account_identity(record: AccountRecord) -> AccountIdentity:
     """How an account signs in, as its owner and administrators read it."""
     return AccountIdentity(
+        locale=record.locale,
         email=record.email,
         email_verified=record.email_verified,
         login_name=record.login_name,
@@ -465,6 +467,8 @@ def account_entry(record: AccountRecord) -> AccountEntry:
         suspension_message=record.suspension_message,
         last_login_at=record.last_login_at,
         deleted_at=record.deleted_at,
+        erased_at=record.erased_at,
+        reviewed_by=record.reviewed_by,
     )
 
 

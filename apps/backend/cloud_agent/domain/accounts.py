@@ -117,6 +117,9 @@ class AccountRecord:
     last_login_at: datetime | None = None
     deleted_at: datetime | None = None
     erased_at: datetime | None = None
+    locale: str | None = None
+    locale_chosen_at: datetime | None = None
+    reviewed_by: str | None = None
 
     @property
     def label(self) -> str:

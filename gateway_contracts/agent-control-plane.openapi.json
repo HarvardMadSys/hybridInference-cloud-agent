@@ -92,6 +92,18 @@
             "title": "Email Verified",
             "type": "boolean"
           },
+          "erased_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Erased At"
+          },
           "id": {
             "title": "Id",
             "type": "string"
@@ -121,6 +133,17 @@
               }
             ],
             "title": "Last Login At"
+          },
+          "reviewed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed By"
           },
           "status": {
             "enum": [
@@ -187,6 +210,17 @@
           "label": {
             "title": "Label",
             "type": "string"
+          },
+          "locale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale"
           },
           "login_name": {
             "anyOf": [
@@ -9844,6 +9878,11 @@
             "title": "Signup Enabled",
             "type": "boolean"
           },
+          "terms_text": {
+            "default": "",
+            "title": "Terms Text",
+            "type": "string"
+          },
           "terms_url": {
             "default": "",
             "title": "Terms Url",
@@ -10226,6 +10265,316 @@
           }
         },
         "title": "BindingsResponse",
+        "type": "object"
+      },
+      "BroadcastDetailResponse": {
+        "description": "One broadcast and a page of its recipients.",
+        "properties": {
+          "broadcast": {
+            "$ref": "#/components/schemas/BroadcastEntry"
+          },
+          "recipients": {
+            "items": {
+              "$ref": "#/components/schemas/BroadcastRecipientEntry"
+            },
+            "title": "Recipients",
+            "type": "array"
+          },
+          "total_recipients": {
+            "title": "Total Recipients",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "broadcast",
+          "recipients",
+          "total_recipients"
+        ],
+        "title": "BroadcastDetailResponse",
+        "type": "object"
+      },
+      "BroadcastEntry": {
+        "description": "One broadcast as the administration page lists it.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "title": "Created By",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "recipient_count": {
+            "title": "Recipient Count",
+            "type": "integer"
+          },
+          "scheduled_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduled At"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "status": {
+            "enum": [
+              "scheduled",
+              "sending",
+              "sent",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "target_admissions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Target Admissions",
+            "type": "array"
+          },
+          "target_statuses": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Target Statuses",
+            "type": "array"
+          },
+          "template_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template Key"
+          }
+        },
+        "required": [
+          "id",
+          "subject",
+          "status",
+          "recipient_count",
+          "scheduled_at",
+          "sent_at",
+          "created_by",
+          "created_at",
+          "template_key",
+          "target_statuses",
+          "target_admissions"
+        ],
+        "title": "BroadcastEntry",
+        "type": "object"
+      },
+      "BroadcastPreviewRequest": {
+        "additionalProperties": false,
+        "description": "A message (a template with its values, or a subject and Markdown) and its audience.",
+        "properties": {
+          "body_markdown": {
+            "default": "",
+            "maxLength": 100000,
+            "title": "Body Markdown",
+            "type": "string"
+          },
+          "subject": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Subject",
+            "type": "string"
+          },
+          "target_admissions": {
+            "items": {
+              "enum": [
+                "not_applied",
+                "pending",
+                "approved",
+                "rejected",
+                "revoked"
+              ],
+              "type": "string"
+            },
+            "maxItems": 5,
+            "minItems": 1,
+            "title": "Target Admissions",
+            "type": "array"
+          },
+          "target_statuses": {
+            "items": {
+              "enum": [
+                "active",
+                "suspended",
+                "deleted"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Target Statuses",
+            "type": "array"
+          },
+          "template_key": {
+            "anyOf": [
+              {
+                "enum": [
+                  "maintenance",
+                  "announcement"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template Key"
+          },
+          "template_vars": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 20,
+            "title": "Template Vars",
+            "type": "object"
+          }
+        },
+        "required": [
+          "target_statuses",
+          "target_admissions"
+        ],
+        "title": "BroadcastPreviewRequest",
+        "type": "object"
+      },
+      "BroadcastPreviewResponse": {
+        "description": "How many accounts it would reach, and the message as they would read it.",
+        "properties": {
+          "html": {
+            "title": "Html",
+            "type": "string"
+          },
+          "recipient_count": {
+            "title": "Recipient Count",
+            "type": "integer"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "recipient_count",
+          "subject",
+          "html",
+          "text"
+        ],
+        "title": "BroadcastPreviewResponse",
+        "type": "object"
+      },
+      "BroadcastRecipientEntry": {
+        "description": "One recipient's outcome.",
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "sent",
+              "failed",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "email",
+          "status",
+          "error",
+          "sent_at"
+        ],
+        "title": "BroadcastRecipientEntry",
+        "type": "object"
+      },
+      "BroadcastsResponse": {
+        "description": "A page of broadcasts, newest first, and how many there are.",
+        "properties": {
+          "broadcasts": {
+            "items": {
+              "$ref": "#/components/schemas/BroadcastEntry"
+            },
+            "title": "Broadcasts",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "broadcasts",
+          "total"
+        ],
+        "title": "BroadcastsResponse",
         "type": "object"
       },
       "BrowserAccountEntry": {
@@ -11011,6 +11360,95 @@
           "name"
         ],
         "title": "CopyInput",
+        "type": "object"
+      },
+      "CreateBroadcastRequest": {
+        "additionalProperties": false,
+        "description": "Send now, or at ``scheduled_at``.",
+        "properties": {
+          "body_markdown": {
+            "default": "",
+            "maxLength": 100000,
+            "title": "Body Markdown",
+            "type": "string"
+          },
+          "scheduled_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduled At"
+          },
+          "subject": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Subject",
+            "type": "string"
+          },
+          "target_admissions": {
+            "items": {
+              "enum": [
+                "not_applied",
+                "pending",
+                "approved",
+                "rejected",
+                "revoked"
+              ],
+              "type": "string"
+            },
+            "maxItems": 5,
+            "minItems": 1,
+            "title": "Target Admissions",
+            "type": "array"
+          },
+          "target_statuses": {
+            "items": {
+              "enum": [
+                "active",
+                "suspended",
+                "deleted"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Target Statuses",
+            "type": "array"
+          },
+          "template_key": {
+            "anyOf": [
+              {
+                "enum": [
+                  "maintenance",
+                  "announcement"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template Key"
+          },
+          "template_vars": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 20,
+            "title": "Template Vars",
+            "type": "object"
+          }
+        },
+        "required": [
+          "target_statuses",
+          "target_admissions"
+        ],
+        "title": "CreateBroadcastRequest",
         "type": "object"
       },
       "CreateConnectionRequest": {
@@ -11846,6 +12284,35 @@
           "confirm"
         ],
         "title": "EraseAccountRequest",
+        "type": "object"
+      },
+      "EraseAccountResponse": {
+        "description": "An erased account, the Agent rows removed per table, and archives left in storage.",
+        "properties": {
+          "account": {
+            "$ref": "#/components/schemas/AccountEntry"
+          },
+          "deleted": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Deleted",
+            "type": "object"
+          },
+          "retained_archives": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Retained Archives",
+            "type": "array"
+          }
+        },
+        "required": [
+          "account",
+          "deleted",
+          "retained_archives"
+        ],
+        "title": "EraseAccountResponse",
         "type": "object"
       },
       "ExecutionProfile": {
@@ -14604,6 +15071,71 @@
           "snapshot_ids"
         ],
         "title": "LocalSnapshotImages",
+        "type": "object"
+      },
+      "LocaleRequest": {
+        "additionalProperties": false,
+        "description": "The interface language the owner chose, and when (a choice made signed out).",
+        "properties": {
+          "chosen_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chosen At"
+          },
+          "locale": {
+            "enum": [
+              "en",
+              "zh-CN"
+            ],
+            "title": "Locale",
+            "type": "string"
+          }
+        },
+        "required": [
+          "locale"
+        ],
+        "title": "LocaleRequest",
+        "type": "object"
+      },
+      "LocaleResponse": {
+        "description": "The language the account keeps: the most recent choice wins.",
+        "properties": {
+          "chosen_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chosen At"
+          },
+          "locale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale"
+          }
+        },
+        "required": [
+          "locale",
+          "chosen_at"
+        ],
+        "title": "LocaleResponse",
         "type": "object"
       },
       "LoginEventEntry": {
@@ -30306,6 +30838,398 @@
         "summary": "Healthz"
       }
     },
+    "/v1/admin/account-mail": {
+      "get": {
+        "description": "Every broadcast, newest first.",
+        "operationId": "list_all_v1_admin_account_mail_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 1000000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BroadcastsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List All",
+        "tags": [
+          "admin-accounts"
+        ]
+      },
+      "post": {
+        "description": "Fix the recipients now and send at ``scheduled_at``, or within the next pass.",
+        "operationId": "create_v1_admin_account_mail_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBroadcastRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BroadcastEntry"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create",
+        "tags": [
+          "admin-accounts"
+        ]
+      }
+    },
+    "/v1/admin/account-mail/preview": {
+      "post": {
+        "description": "How many accounts it would reach now, and the rendered message; sends nothing.",
+        "operationId": "preview_v1_admin_account_mail_preview_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BroadcastPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BroadcastPreviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview",
+        "tags": [
+          "admin-accounts"
+        ]
+      }
+    },
+    "/v1/admin/account-mail/test": {
+      "post": {
+        "description": "Send the message to the requesting administrator's own verified address only.",
+        "operationId": "send_test_v1_admin_account_mail_test_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BroadcastPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Send Test",
+        "tags": [
+          "admin-accounts"
+        ]
+      }
+    },
+    "/v1/admin/account-mail/{broadcast_id}": {
+      "delete": {
+        "description": "Cancel a message that is still waiting to be sent.",
+        "operationId": "cancel_v1_admin_account_mail__broadcast_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "broadcast_id",
+            "required": true,
+            "schema": {
+              "title": "Broadcast Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel",
+        "tags": [
+          "admin-accounts"
+        ]
+      },
+      "get": {
+        "description": "One broadcast and each recipient's outcome.",
+        "operationId": "detail_v1_admin_account_mail__broadcast_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "broadcast_id",
+            "required": true,
+            "schema": {
+              "title": "Broadcast Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 1000000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BroadcastDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Detail",
+        "tags": [
+          "admin-accounts"
+        ]
+      }
+    },
     "/v1/admin/accounts": {
       "get": {
         "description": "One page of accounts, newest first, filtered and searched, with counts per state.\n\n``q`` matches an email, login name, phone number or name anywhere, or an\naccount id by its prefix.",
@@ -30394,6 +31318,20 @@
                 }
               ],
               "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "created",
+              "enum": [
+                "created",
+                "last_login"
+              ],
+              "title": "Sort",
+              "type": "string"
             }
           },
           {
@@ -30775,7 +31713,7 @@
     },
     "/v1/admin/accounts/{account_id}/erase": {
       "post": {
-        "description": "Erase a deleted account's identity permanently; its id typed out again confirms it.",
+        "description": "Erase a deleted account and all its Agent data; its id typed out again confirms it.\n\nSandbox deletion archives stay in the deployment's bucket, which the\ncontrol plane may not delete from; their keys come back (and are in the\naudit row) for the operator's retention policy.",
         "operationId": "erase_account_v1_admin_accounts__account_id__erase_post",
         "parameters": [
           {
@@ -30819,7 +31757,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AccountEntry"
+                  "$ref": "#/components/schemas/EraseAccountResponse"
                 }
               }
             },
@@ -44642,6 +45580,48 @@
           }
         },
         "summary": "Bind Email",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/account/locale": {
+      "put": {
+        "description": "Keep the interface language with the account; the most recent choice wins.\n\nAs HybridInference's ``PUT /user/preferences/locale``: a choice carried in\nfrom a signed-out browser keeps the time it was made, never later than\nnow, and one older than the account's stored choice is not written; the\nanswer is the language the account keeps, which the page then shows.",
+        "operationId": "save_locale_v1_auth_account_locale_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocaleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocaleResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Locale",
         "tags": [
           "auth"
         ]

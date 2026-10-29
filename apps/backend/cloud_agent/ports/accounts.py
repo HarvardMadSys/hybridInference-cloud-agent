@@ -90,6 +90,15 @@ class EmailBinding:
 
 
 @dataclass(frozen=True)
+class ErasureResult:
+    """An erased account, the Agent rows deleted per table, and archives left in the bucket."""
+
+    account: AccountRecord
+    deleted: dict[str, int]
+    retained_archives: list[str]
+
+
+@dataclass(frozen=True)
 class SignupDomain:
     """One allowlist row. A wildcard is stored without ``*.`` and matches subdomains."""
 
@@ -99,7 +108,68 @@ class SignupDomain:
     created_by: str
 
 
-class LocalAccountRepository(Protocol):
+class AccountBroadcasts(Protocol):
+    """Administrator mail to accounts: snapshot, claim and outcomes."""
+
+    async def broadcast_audience(self, *, statuses: list[str], admissions: list[str]) -> int:
+        """How many accounts a broadcast to these states would reach now."""
+        ...
+
+    async def create_broadcast(
+        self,
+        *,
+        broadcast_id: str,
+        subject: str,
+        body_html: str,
+        body_text: str,
+        template_key: str | None,
+        statuses: list[str],
+        admissions: list[str],
+        scheduled_at: datetime | None,
+        created_by: str,
+        admin_ip: str,
+    ) -> int:
+        """Create a scheduled broadcast with its recipients fixed now; how many."""
+        ...
+
+    async def list_broadcasts(self, *, limit: int, offset: int) -> tuple[list[dict[str, Any]], int]:
+        """Broadcasts, newest first, and how many there are."""
+        ...
+
+    async def broadcast_detail(
+        self, *, broadcast_id: str, limit: int, offset: int
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], int] | None:
+        """One broadcast, a page of its recipients and their total."""
+        ...
+
+    async def cancel_broadcast(
+        self, *, broadcast_id: str, actor_id: str, admin_ip: str
+    ) -> str | None:
+        """Cancel a scheduled broadcast; its status after."""
+        ...
+
+    async def claim_due_broadcast(self) -> dict[str, Any] | None:
+        """Claim one broadcast that is due, or whose sender stopped."""
+        ...
+
+    async def pending_broadcast_recipients(
+        self, *, broadcast_id: str, limit: int
+    ) -> list[dict[str, Any]]:
+        """The next pending recipients, with whether each may still be mailed."""
+        ...
+
+    async def record_broadcast_results(
+        self, *, broadcast_id: str, outcomes: list[tuple[str, str, str | None]]
+    ) -> None:
+        """Record each handled recipient's outcome."""
+        ...
+
+    async def finish_broadcast(self, *, broadcast_id: str) -> str:
+        """Close a fully handled broadcast; its final status."""
+        ...
+
+
+class LocalAccountRepository(AccountBroadcasts, Protocol):
     """Accounts, sign-in credentials, sessions, browsers and the waiting list."""
 
     async def create_account(
@@ -159,8 +229,19 @@ class LocalAccountRepository(Protocol):
         offset: int,
         account_status: str | None = None,
         query: str | None = None,
+        sort: str = "created",
     ) -> tuple[list[AccountRecord], int]:
-        """Return one page of accounts, newest first, and the filtered total."""
+        """Return one page of accounts and the filtered total."""
+        ...
+
+    async def promote_listed_admin(self, *, account_id: str, actor_id: str) -> AccountRecord | None:
+        """Make an account with a configured admin email an administrator."""
+        ...
+
+    async def set_locale(
+        self, *, account_id: str, locale: str, chosen_at: datetime
+    ) -> tuple[str | None, datetime | None]:
+        """Store the interface language if it is the newest choice; the one kept."""
         ...
 
     async def account_counts(self) -> dict[str, int]:
@@ -320,8 +401,8 @@ class LocalAccountRepository(Protocol):
 
     async def erase_account(
         self, *, account_id: str, actor_id: str, actor_account_id: str | None, admin_ip: str
-    ) -> AccountRecord:
-        """Erase a deleted, stopped account's identity for good."""
+    ) -> ErasureResult:
+        """Erase a deleted, stopped account and all its Agent data."""
         ...
 
     async def hit_rate_limit(
@@ -484,12 +565,14 @@ class OwnerWorkTermination(Protocol):
 
 
 __all__ = [
+    "AccountBroadcasts",
     "AdminActionResult",
     "BrowserAccount",
     "BrowserFull",
     "BrowserState",
     "EmailBinding",
     "EmailTokenPurpose",
+    "ErasureResult",
     "IdentifierKind",
     "LocalAccountRepository",
     "OwnerWorkTermination",

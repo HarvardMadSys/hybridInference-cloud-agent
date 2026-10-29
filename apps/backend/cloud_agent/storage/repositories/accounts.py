@@ -12,6 +12,8 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING, Any
 
+import asyncpg
+
 from cloud_agent.domain.accounts import (
     ACCESS_GRANTING_ACTIONS,
     AccountNotFound,
@@ -25,7 +27,7 @@ from cloud_agent.domain.accounts import (
     plan_waitlist_submission,
     require_actor_admin,
 )
-from cloud_agent.ports.accounts import AdminActionResult, PasswordLogin
+from cloud_agent.ports.accounts import AdminActionResult, ErasureResult, PasswordLogin
 from cloud_agent.storage._sql.advisory import LOCK_KEY_SQL, finish_lock_cleanup
 from cloud_agent.storage._sql.local_accounts import (
     ACCESS_ENDED_SQL,
@@ -38,14 +40,19 @@ from cloud_agent.storage._sql.local_accounts import (
     record,
     write_audit,
 )
+from cloud_agent.storage.repositories.account_broadcasts import BroadcastsMixin
 from cloud_agent.storage.repositories.account_credentials import CredentialsMixin
+from cloud_agent.storage.repositories.account_erasure import (
+    ErasureBlocked,
+    erase_owner_rows,
+    retained_archives,
+)
 from cloud_agent.storage.repositories.account_policy import PolicyMixin
 from cloud_agent.storage.repositories.account_sessions import SessionsMixin
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
-    import asyncpg
+    from datetime import datetime
 
     from cloud_agent.domain.accounts import AdmissionEdit
     from cloud_agent.ports.accounts import IdentifierKind
@@ -129,6 +136,24 @@ async def _refuse_grant_while_cleanup_open(conn: Any, account_id: str) -> None:
         )
 
 
+async def _require_erasable(conn: Any, current: AccountRecord) -> None:
+    busy = await conn.fetchval(
+        """
+        SELECT EXISTS (SELECT 1 FROM agent_jobs WHERE user_id = $1
+                       AND state IN ('queued', 'running'))
+            OR EXISTS (SELECT 1 FROM agent_threads t
+                       JOIN agent_thread_sandbox_memberships sm ON sm.thread_id = t.id
+                       WHERE t.user_id = $1 AND sm.residency_status <> 'none')
+        """,
+        current.id,
+    )
+    if current.status != "deleted" or busy or await _cleanup_open(conn, current.id):
+        raise AccountTransitionRefused(
+            "Only a deleted account whose work has fully stopped can be erased.",
+            code="erase_blocked",
+        )
+
+
 def _audit_details(record_: AccountRecord, edit: AdmissionEdit, version: int) -> dict[str, Any]:
     # States and the version only: no email, password, hash or token.
     return {
@@ -169,7 +194,7 @@ async def _insert_identity(
         raise EmailTaken
 
 
-class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixin):
+class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixin, BroadcastsMixin):
     """Local accounts over the control plane's pool."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
@@ -345,9 +370,20 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
         offset: int,
         account_status: str | None = None,
         query: str | None = None,
+        sort: str = "created",
     ) -> tuple[list[AccountRecord], int]:
-        """Return one page of accounts, newest first, and the filtered total."""
+        """Return one page of accounts and the filtered total.
+
+        ``sort`` is ``created`` (newest first, the default) or ``last_login``
+        (most recently signed in first, never-signed-in last), as
+        HybridInference's account list sorts.
+        """
         term = _like_term(query)
+        order = (
+            "a.last_login_at DESC NULLS LAST, a.created_at DESC, a.id DESC"
+            if sort == "last_login"
+            else "a.created_at DESC, a.id DESC"
+        )
         where = (
             "WHERE ($1::text IS NULL OR m.status = $1) AND ($2::text IS NULL OR a.status = $2) "
             f"AND {_SEARCH_SQL}"
@@ -355,7 +391,7 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"SELECT {ACCOUNT_COLUMNS} {ACCOUNT_FROM} {where} "
-                "ORDER BY a.created_at DESC, a.id DESC LIMIT $4 OFFSET $5",
+                f"ORDER BY {order} LIMIT $4 OFFSET $5",
                 admission_status,
                 account_status,
                 term,
@@ -545,67 +581,77 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
         actor_id: str,
         actor_account_id: str | None,
         admin_ip: str,
-    ) -> AccountRecord:
-        """Erase a deleted account's identity for good; the account id stays as a tombstone.
+    ) -> ErasureResult:
+        """Erase a deleted account and all its Agent data; its id stays as a tombstone.
 
         Refused (``erase_blocked``) until the account is deleted, its
-        termination is acknowledged and none of its turns is queued, running
-        or resident: nothing the erase leaves can still be working. Its
-        identifiers (freed for new accounts), password, sessions, browsers,
-        links, codes and sign-in events go; its Agent records stay keyed to
-        the id, owned by an account that can never sign in or be resumed.
+        termination is acknowledged, none of its turns is queued, running or
+        resident and every sandbox it owns is deleted, or when erasing would
+        touch another owner's row. Then, in one transaction, every row of its
+        Agent data goes (:mod:`.account_erasure`), with its identifiers (freed
+        for new accounts), password, sessions, browsers, links, codes,
+        sign-in events, mail recipients and earlier audit rows. The account
+        row stays, erased: it signs in nowhere and cannot be resumed, and its
+        id never names anything again. A fresh audit row records the erasure.
 
         Raises:
             AccountTransitionRefused: ``erase_blocked``.
         """
-        async with self._pool.acquire() as conn, conn.transaction():
-            current = await _lock_target_and_actor(conn, account_id, actor_account_id)
-            busy = await conn.fetchval(
-                """
-                SELECT EXISTS (SELECT 1 FROM agent_jobs WHERE user_id = $1
-                               AND state IN ('queued', 'running'))
-                    OR EXISTS (SELECT 1 FROM agent_threads t
-                               JOIN agent_thread_sandbox_memberships sm ON sm.thread_id = t.id
-                               WHERE t.user_id = $1 AND sm.residency_status <> 'none')
-                """,
-                account_id,
-            )
-            if current.status != "deleted" or busy or await _cleanup_open(conn, account_id):
-                raise AccountTransitionRefused(
-                    "Only a deleted account whose work has fully stopped can be erased.",
-                    code="erase_blocked",
+        try:
+            async with self._pool.acquire() as conn, conn.transaction():
+                current = await _lock_target_and_actor(conn, account_id, actor_account_id)
+                await _require_erasable(conn, current)
+                retained = await retained_archives(conn, account_id)
+                deleted = await erase_owner_rows(conn, account_id)
+                await self._erase_identity(conn, account_id)
+                await write_audit(
+                    conn,
+                    action="agent.local_account.erase",
+                    actor_id=actor_id,
+                    admin_ip=admin_ip,
+                    account_id=account_id,
+                    details={
+                        "version": current.version + 1,
+                        "rows": deleted,
+                        "retained_archives": retained,
+                    },
                 )
-            for table in (
-                "agent_local_login_identities",
-                "agent_local_password_credentials",
-                "agent_local_sessions",
-                "agent_local_auth_tokens",
-                "agent_local_login_events",
-            ):
-                await conn.execute(f"DELETE FROM {table} WHERE account_id = $1", account_id)
-            await conn.execute(
-                "DELETE FROM agent_local_phone_codes WHERE account_key = $1", account_id
-            )
-            await conn.execute(
-                "UPDATE agent_local_accounts SET erased_at = coalesce(erased_at, NOW()), "
-                "user_name = NULL, admin_note = NULL, suspension_message = NULL, "
-                "tos_accepted_at = NULL, version = version + 1, updated_at = NOW() WHERE id = $1",
-                account_id,
-            )
-            await conn.execute(
-                "UPDATE agent_local_admissions SET purpose = '', review_reason = NULL "
-                "WHERE account_id = $1",
-                account_id,
-            )
-            await write_audit(
-                conn,
-                action="agent.local_account.erase",
-                actor_id=actor_id,
-                admin_ip=admin_ip,
-                account_id=account_id,
-                details={"version": current.version + 1},
-            )
-            return await read_account(conn, account_id)
+                return ErasureResult(
+                    account=await read_account(conn, account_id),
+                    deleted=deleted,
+                    retained_archives=retained,
+                )
+        except ErasureBlocked as exc:
+            raise AccountTransitionRefused(str(exc), code="erase_blocked") from None
+        except asyncpg.ForeignKeyViolationError:
+            raise AccountTransitionRefused(
+                "The account's data is still referenced elsewhere and cannot be erased.",
+                code="erase_blocked",
+            ) from None
+
+    async def _erase_identity(self, conn: Any, account_id: str) -> None:
+        for table in (
+            "agent_local_login_identities",
+            "agent_local_password_credentials",
+            "agent_local_sessions",
+            "agent_local_auth_tokens",
+            "agent_local_login_events",
+            "agent_local_broadcast_recipients",
+        ):
+            await conn.execute(f"DELETE FROM {table} WHERE account_id = $1", account_id)
+        await conn.execute("DELETE FROM agent_local_phone_codes WHERE account_key = $1", account_id)
+        await conn.execute(
+            "UPDATE agent_local_accounts SET erased_at = coalesce(erased_at, NOW()), "
+            "user_name = NULL, admin_note = NULL, suspension_message = NULL, "
+            "tos_accepted_at = NULL, locale = NULL, locale_chosen_at = NULL, "
+            "version = version + 1, updated_at = NOW() WHERE id = $1",
+            account_id,
+        )
+        await conn.execute(
+            "UPDATE agent_local_admissions SET purpose = '', review_reason = NULL "
+            "WHERE account_id = $1",
+            account_id,
+        )
 
     async def _open_termination(
         self, conn: Any, current: AccountRecord, edit: AdmissionEdit, action: str
@@ -664,6 +710,77 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
                 "WHERE account_id = $1 AND consumed_at IS NULL",
                 current.id,
             )
+            # Its open phone codes go too, as HybridInference forgets them.
+            await conn.execute(
+                "DELETE FROM agent_local_phone_codes WHERE account_key = $1", current.id
+            )
+
+    async def promote_listed_admin(self, *, account_id: str, actor_id: str) -> AccountRecord | None:
+        """Make an account whose verified email is a configured admin address an administrator.
+
+        HybridInference's ``ADMIN_EMAILS`` seed: the account is approved (when
+        it is not yet) and granted administration, each audited as
+        ``actor_id``, in one transaction. ``None`` when nothing changed: not
+        active, no verified email, already an administrator, or an earlier
+        revocation's cleanup is still open.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            try:
+                current = await locked_account(conn, account_id)
+            except AccountNotFound:
+                return None
+            if (
+                current.is_admin
+                or current.status != "active"
+                or not (current.email and current.email_verified and current.identity_verified)
+            ):
+                return None
+            try:
+                await _refuse_grant_while_cleanup_open(conn, account_id)
+            except AccountTransitionRefused:
+                return None
+            for action in (
+                ("grant_admin",)
+                if current.admission_status == "approved"
+                else ("approve", "grant_admin")
+            ):
+                edit = plan_admin_action(current, action, reason=None, actor_account_id=None)
+                await self._write_edit(conn, current, edit, actor_id=actor_id)
+                await write_audit(
+                    conn,
+                    action=f"agent.local_account.{action}",
+                    actor_id=actor_id,
+                    admin_ip="local",
+                    account_id=account_id,
+                    details=_audit_details(current, edit, current.version + 1),
+                )
+                current = await read_account(conn, account_id)
+            return current
+
+    async def set_locale(
+        self, *, account_id: str, locale: str, chosen_at: datetime
+    ) -> tuple[str | None, datetime | None]:
+        """Store the interface language if it is the most recent choice; the one kept.
+
+        A choice made earlier than the stored one (on another browser
+        meanwhile) is not written, in the same statement as the comparison,
+        so overlapping requests cannot leave the older choice.
+        """
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_local_accounts SET locale = $2, locale_chosen_at = $3 "
+                "WHERE id = $1 AND (locale_chosen_at IS NULL OR locale_chosen_at < $3)",
+                account_id,
+                locale,
+                chosen_at,
+            )
+            row = await conn.fetchrow(
+                "SELECT locale, locale_chosen_at FROM agent_local_accounts WHERE id = $1",
+                account_id,
+            )
+        if row is None:
+            raise AccountNotFound(account_id)
+        return row["locale"], row["locale_chosen_at"]
 
     # ── Abuse counters ───────────────────────────────────────────────────
 

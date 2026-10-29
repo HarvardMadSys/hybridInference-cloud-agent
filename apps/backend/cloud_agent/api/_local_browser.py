@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cloud_agent.accounts import tokens
-from cloud_agent.accounts.config import LOCAL_SESSION_TTL_S
+from cloud_agent.accounts.config import local_session_ttl_s
 from cloud_agent.accounts.device_cookie import remember_device
 from cloud_agent.accounts.session_cookie import (
     expire_local_session_cookies,
@@ -104,7 +104,7 @@ async def complete_sign_in(
                 session_id=signed_in.session_id,
                 max_accounts=MAX_ACCOUNTS_PER_BROWSER,
                 new_token_hash=tokens.browser_hash(new_token),
-                ttl_s=LOCAL_SESSION_TTL_S,
+                ttl_s=local_session_ttl_s(),
             )
         except BrowserFull:
             await accounts.revoke_session(
@@ -124,7 +124,7 @@ async def complete_sign_in(
         await accounts.create_browser(
             browser_id=browser_id,
             token_hash=tokens.browser_hash(new_token),
-            ttl_s=LOCAL_SESSION_TTL_S,
+            ttl_s=local_session_ttl_s(),
         )
         await accounts.attach_browser_account(
             browser_id=browser_id,
@@ -132,7 +132,7 @@ async def complete_sign_in(
             session_id=signed_in.session_id,
             max_accounts=MAX_ACCOUNTS_PER_BROWSER,
             new_token_hash=tokens.browser_hash(new_token),
-            ttl_s=LOCAL_SESSION_TTL_S,
+            ttl_s=local_session_ttl_s(),
         )
     set_local_session_cookie(response, new_token)
     if password_identifiers:

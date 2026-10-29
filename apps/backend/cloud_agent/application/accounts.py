@@ -31,9 +31,9 @@ from email_validator import EmailNotValidError, validate_email
 
 from cloud_agent.accounts import tokens
 from cloud_agent.accounts.config import (
-    LOCAL_SESSION_TTL_S,
     RESET_PASSWORD_TTL_S,
     VERIFY_EMAIL_TTL_S,
+    local_session_ttl_s,
 )
 from cloud_agent.accounts.mail import AccountMail
 from cloud_agent.accounts.passwords import (
@@ -44,6 +44,7 @@ from cloud_agent.accounts.passwords import (
 )
 from cloud_agent.accounts.policy import (
     POLICY_ACTOR,
+    admin_emails,
     approves_automatically,
     is_email_domain_blocked,
     require_email_verification,
@@ -369,13 +370,32 @@ class LocalAccountFlows:
             session_id=session_id,
             account_id=login.account.id,
             token_hash=tokens.session_hash(token),
-            ttl_s=LOCAL_SESSION_TTL_S,
+            ttl_s=local_session_ttl_s(),
             password_hash=stored_hash,
         )
         if account is None:
             # Suspended, or the password changed, between the check and now.
             raise InvalidCredentials(login.account.id)
-        return SignedIn(token=token, account=account, session_id=session_id)
+        return SignedIn(
+            token=token, account=await self.promote_if_listed(account), session_id=session_id
+        )
+
+    async def promote_if_listed(self, account: AccountRecord) -> AccountRecord:
+        """Make an account administrator when its verified email is a configured admin address.
+
+        HybridInference's ``ADMIN_EMAILS`` seed, applied when the account signs
+        in. Only a verified address counts, and an address is verified only by
+        a link sent to it, so listing one cannot hand the console to whoever
+        signs up with it first.
+        """
+        if not (account.email and account.email_verified) or account.is_admin:
+            return account
+        if account.email.lower() not in admin_emails():
+            return account
+        promoted = await self._accounts.promote_listed_admin(
+            account_id=account.id, actor_id="admin-emails"
+        )
+        return promoted or account
 
     async def _current_hash(self, login: PasswordLogin, password: str, stored_hash: str) -> str:
         """The hash to open the session against, upgrading an outdated one.
@@ -416,6 +436,9 @@ class LocalAccountFlows:
             return Redeemed(account_id=account_id, kind="verified")
         binding = await self._accounts.bind_email(token_hash=token_hash)
         if binding is None:
+            # A spent link is refused, never reported on: HybridInference
+            # answers "already verified", which says something about the
+            # account to whoever holds an old link.
             raise InvalidToken
         previous = binding.previous_email
         if previous and previous.lower() != binding.email.lower():

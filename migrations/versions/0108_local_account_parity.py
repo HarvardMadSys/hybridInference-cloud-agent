@@ -15,7 +15,8 @@ What changes, all within the local-account tables:
   opens the same termination record a suspension does. ``erased_at`` marks a
   deleted account whose identity an administrator erased for good.
 - **New state**: phone verification codes, browser sessions holding several
-  accounts, sign-in events, the signup domain allowlist and first-run setup.
+  accounts, sign-in events, the signup domain allowlist, first-run setup,
+  each account's interface language, and administrator mail to accounts.
 
 None of the new columns is named ``user_id`` or ``target_user_id``: the
 namespace guard discovers owner data by those names, and an account record is
@@ -119,6 +120,8 @@ _UPGRADE: tuple[str, ...] = (
         ADD COLUMN last_login_at TIMESTAMPTZ,
         ADD COLUMN deleted_at TIMESTAMPTZ,
         ADD COLUMN erased_at TIMESTAMPTZ,
+        ADD COLUMN locale TEXT CHECK (locale IS NULL OR locale IN ('en', 'zh-CN')),
+        ADD COLUMN locale_chosen_at TIMESTAMPTZ,
         ADD CONSTRAINT agent_local_accounts_deleted_at_check
             CHECK ((status = 'deleted') = (deleted_at IS NOT NULL)),
         ADD CONSTRAINT agent_local_accounts_erased_at_check
@@ -234,6 +237,50 @@ _UPGRADE: tuple[str, ...] = (
     """,
 )
 
+_BROADCAST: tuple[str, ...] = (
+    # Administrator mail to accounts: a snapshot of recipients taken when it is
+    # created, sent once (now or at ``scheduled_at``) by whichever process
+    # claims it. Each recipient row records its own outcome, so a send that
+    # was interrupted resumes with the recipients still pending.
+    """
+    CREATE TABLE agent_local_broadcasts (
+        id TEXT PRIMARY KEY,
+        subject TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 300),
+        body_html TEXT NOT NULL CHECK (length(body_html) <= 200000),
+        body_text TEXT NOT NULL CHECK (length(body_text) <= 100000),
+        template_key TEXT,
+        target_statuses TEXT[] NOT NULL,
+        target_admissions TEXT[] NOT NULL,
+        status TEXT NOT NULL DEFAULT 'scheduled'
+            CHECK (status IN ('scheduled', 'sending', 'sent', 'failed', 'cancelled')),
+        recipient_count INTEGER NOT NULL DEFAULT 0 CHECK (recipient_count >= 0),
+        scheduled_at TIMESTAMPTZ,
+        claimed_at TIMESTAMPTZ,
+        sent_at TIMESTAMPTZ,
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX idx_agent_local_broadcasts_due ON agent_local_broadcasts (scheduled_at) "
+    "WHERE status IN ('scheduled', 'sending')",
+    """
+    CREATE TABLE agent_local_broadcast_recipients (
+        broadcast_id TEXT NOT NULL REFERENCES agent_local_broadcasts (id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL REFERENCES agent_local_accounts (id) ON DELETE CASCADE,
+        email TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending', 'sent', 'failed', 'skipped')),
+        error TEXT CHECK (error IS NULL OR length(error) <= 500),
+        sent_at TIMESTAMPTZ,
+        PRIMARY KEY (broadcast_id, account_id)
+    )
+    """,
+    "CREATE INDEX idx_agent_local_broadcast_recipients_account "
+    "ON agent_local_broadcast_recipients (account_id)",
+)
+
+_UPGRADE = _UPGRADE + _BROADCAST
+
 _DOWNGRADE_GUARD = """
 DO $$
 BEGIN
@@ -257,6 +304,8 @@ $$
 
 _DOWNGRADE: tuple[str, ...] = (
     _DOWNGRADE_GUARD,
+    "DROP TABLE agent_local_broadcast_recipients",
+    "DROP TABLE agent_local_broadcasts",
     "DROP TABLE agent_local_setup",
     "DROP TABLE agent_local_signup_domains",
     "DROP TABLE agent_local_login_events",
@@ -283,6 +332,8 @@ _DOWNGRADE: tuple[str, ...] = (
     ALTER TABLE agent_local_accounts
         DROP CONSTRAINT agent_local_accounts_erased_at_check,
         DROP CONSTRAINT agent_local_accounts_deleted_at_check,
+        DROP COLUMN locale_chosen_at,
+        DROP COLUMN locale,
         DROP COLUMN erased_at,
         DROP COLUMN deleted_at,
         DROP COLUMN last_login_at,

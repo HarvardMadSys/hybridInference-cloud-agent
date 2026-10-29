@@ -67,6 +67,7 @@ MailKind = Literal[
     "password_changed",
     "email_changed",
     "account_deleted",
+    "broadcast",
 ]
 
 #: Kinds whose link is a credential: proof of the mailbox that receives it.
@@ -189,7 +190,14 @@ def _notice_lines(kind: str, link: str, details: Mapping[str, str]) -> tuple[str
 
 
 def render(mail: AccountMail) -> tuple[str, str, str]:
-    """Return ``(subject, text, html)`` for one message."""
+    """Return ``(subject, text, html)`` for one message.
+
+    Administrator mail (``broadcast``) arrives rendered: its details carry the
+    subject, the text and the HTML the administrator previewed.
+    """
+    if mail.kind == "broadcast":
+        details = mail.details
+        return details.get("subject", ""), details.get("text", ""), details.get("html", "")
     subject, lines = _lines(mail)
     link = mail.link
     text = "\n\n".join(lines) + "\n"

@@ -100,7 +100,124 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         description=_LOCAL
         + "Linked from the sign-up consent. Agreeing is required to sign up either way.",
     ),
+    Setting(
+        "accounts.terms_text",
+        "Terms of Service text",
+        CATEGORY,
+        "",
+        env="AGENT_LOCAL_TERMS_TEXT",
+        description=_LOCAL
+        + "Shown on the /terms page and in the sign-up consent step, when no Terms URL is "
+        "set. Plain text; blank lines separate paragraphs.",
+    ),
+    Setting(
+        "accounts.admin_emails",
+        "Administrator email addresses",
+        CATEGORY,
+        "",
+        env="AGENT_LOCAL_ADMIN_EMAILS",
+        check=_emails,
+        hint="Use comma-separated email addresses.",
+        description=_LOCAL
+        + "Comma-separated, as HybridInference's ADMIN_EMAILS: an account whose verified email "
+        "is listed is approved and made an administrator when it signs in. An address is "
+        "verified only by a link sent to it.",
+    ),
+    _numeric(
+        "accounts.session_ttl_days",
+        "Session lifetime (days)",
+        CATEGORY,
+        30,
+        1,
+        365,
+        env="AGENT_LOCAL_SESSION_TTL_DAYS",
+        description="How long a sign-in lasts. It is never extended by use.",
+    ),
+    # ── Abuse limits ─────────────────────────────────────────────────────
+    _numeric(
+        "accounts.login_per_15min",
+        "Sign-in attempts per account per address (15 min)",
+        CATEGORY,
+        5,
+        1,
+        1000,
+        env="AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_15MIN",
+        description="Also the window of a browser recognized by its device cookie.",
+    ),
+    _numeric(
+        "accounts.login_account_per_15min",
+        "Sign-in attempts per account from every address (15 min)",
+        CATEGORY,
+        50,
+        1,
+        10000,
+        env="AGENT_LOCAL_LOGIN_ACCOUNT_RATE_LIMIT_PER_15MIN",
+    ),
+    _numeric(
+        "accounts.login_ip_per_hour",
+        "Sign-in attempts per address (hour)",
+        CATEGORY,
+        20,
+        1,
+        10000,
+        env="AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_HOUR_PER_IP",
+    ),
+    _numeric(
+        "accounts.signup_per_hour",
+        "Sign-ups per address (hour)",
+        CATEGORY,
+        5,
+        1,
+        1000,
+        env="AGENT_LOCAL_SIGNUP_RATE_LIMIT_PER_HOUR",
+    ),
+    _numeric(
+        "accounts.signup_per_day",
+        "Sign-ups per address (day)",
+        CATEGORY,
+        10,
+        1,
+        10000,
+        env="AGENT_LOCAL_SIGNUP_RATE_LIMIT_PER_DAY",
+    ),
+    Setting(
+        "accounts.signup_require_resolved_ip",
+        "Refuse sign-up without a client address",
+        CATEGORY,
+        False,
+        kind="boolean",
+        env="AGENT_LOCAL_SIGNUP_REQUIRE_RESOLVED_CLIENT_IP",
+        description="When the client address cannot be told (behind an untrusted proxy), "
+        "refuse sign-up instead of counting it in the shared unresolved budget.",
+    ),
+    _numeric(
+        "accounts.unresolved_signup_per_hour",
+        "Sign-ups without a client address (hour, all together)",
+        CATEGORY,
+        5,
+        1,
+        1000,
+        env="AGENT_LOCAL_UNRESOLVED_SIGNUP_RATE_LIMIT_PER_HOUR",
+    ),
+    _numeric(
+        "accounts.unresolved_signup_per_day",
+        "Sign-ups without a client address (day, all together)",
+        CATEGORY,
+        10,
+        1,
+        10000,
+        env="AGENT_LOCAL_UNRESOLVED_SIGNUP_RATE_LIMIT_PER_DAY",
+    ),
     # ── Account email ────────────────────────────────────────────────────
+    Setting(
+        "accounts.email_provider",
+        "Email provider",
+        CATEGORY,
+        "smtp",
+        env="AGENT_LOCAL_EMAIL_PROVIDER",
+        description="smtp, tencent_ses, or the name of a registered provider. No fallback "
+        "between them.",
+    ),
     Setting("accounts.smtp_host", "SMTP host", CATEGORY, "", env="AGENT_SMTP_HOST"),
     _numeric(
         "accounts.smtp_port",
@@ -130,6 +247,48 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         env="AGENT_SMTP_SECURITY",
         description="starttls, tls (implicit) or none (a local relay). Anything else leaves "
         "mail unconfigured rather than falling back to plain SMTP.",
+    ),
+    Setting(
+        "accounts.tencent_ses_region",
+        "Tencent SES region",
+        CATEGORY,
+        "ap-guangzhou",
+        env="AGENT_TENCENT_SES_REGION",
+        choices=("ap-guangzhou", "ap-hongkong"),
+    ),
+    Setting(
+        "accounts.tencent_ses_from_email",
+        "Tencent SES sender address",
+        CATEGORY,
+        "",
+        env="AGENT_TENCENT_SES_FROM_EMAIL",
+    ),
+    Setting(
+        "accounts.tencent_ses_from_name",
+        "Tencent SES sender name",
+        CATEGORY,
+        "",
+        env="AGENT_TENCENT_SES_FROM_NAME",
+    ),
+    *(
+        _numeric(
+            f"accounts.tencent_ses_template_{template}",
+            f"Tencent SES {label} template ID",
+            CATEGORY,
+            0,
+            0,
+            2**31 - 1,
+            env=f"AGENT_TENCENT_SES_TEMPLATE_{template.upper()}",
+            description="0 means no template. Verification and password reset are required.",
+        )
+        for template, label in (
+            ("verification", "verification"),
+            ("password_reset", "password reset"),
+            ("approval", "approval"),
+            ("rejection", "rejection"),
+            ("admin_signup", "new application"),
+            ("notice", "plain notice"),
+        )
     ),
     # ── Phone sign-in ────────────────────────────────────────────────────
     Setting(

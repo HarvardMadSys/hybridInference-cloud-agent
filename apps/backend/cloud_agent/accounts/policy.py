@@ -110,6 +110,12 @@ def notify_recipients() -> list[str]:
     return list(dict.fromkeys(item.strip() for item in raw.split(",") if item.strip()))
 
 
+def admin_emails() -> set[str]:
+    """The configured administrator addresses, lowercased (``accounts.admin_emails``)."""
+    raw = text_setting("accounts.admin_emails")
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
 def terms_url() -> str:
     """Where the Terms of Service are published, or empty."""
     return text_setting("accounts.terms_url").strip()
@@ -126,6 +132,7 @@ async def approves_automatically(accounts: LocalAccountRepository, email: str | 
 __all__ = [
     "BLOCKED_EMAIL_DOMAINS",
     "POLICY_ACTOR",
+    "admin_emails",
     "admin_notify_enabled",
     "approval_policy",
     "approves_automatically",

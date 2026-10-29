@@ -41,6 +41,7 @@ dependencies = [
     # Local accounts (AGENT_AUTH_MODE=local) hash passwords with Argon2id.
     "argon2-cffi>=23.1.0",
     "pillow>=12.3.0",
+    "markdown-it-py>=4.0",
 ]
 
 [tool.setuptools]

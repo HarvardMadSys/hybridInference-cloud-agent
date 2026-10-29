@@ -56,6 +56,7 @@ class AuthOptionsResponse(BaseModel):
     phone: PhoneAuthConfig = Field(default_factory=lambda: PhoneAuthConfig(enabled=False))
     turnstile_site_key: str = ""
     terms_url: str = ""
+    terms_text: str = ""
     #: True while the first administrator has not been created.
     setup_required: bool = False
     max_accounts_per_browser: int = 5
@@ -182,6 +183,7 @@ class DeleteAccountRequest(_Request):
 class AccountIdentity(BaseModel):
     """How an account signs in. ``label`` is its email, else login name, else phone."""
 
+    locale: str | None = None
     email: str | None
     email_verified: bool
     login_name: str | None
@@ -268,6 +270,8 @@ class AccountEntry(BaseModel):
     suspension_message: str | None = None
     last_login_at: datetime | None = None
     deleted_at: datetime | None = None
+    erased_at: datetime | None = None
+    reviewed_by: str | None = None
 
 
 class AdminAccountsResponse(BaseModel):
@@ -349,6 +353,99 @@ class SignupDomainRequest(_Request):
     domain: str = Field(min_length=1, max_length=256)
 
 
+AccountState = Literal["active", "suspended", "deleted"]
+AdmissionState = Literal["not_applied", "pending", "approved", "rejected", "revoked"]
+
+
+class BroadcastPreviewRequest(_Request):
+    """A message (a template with its values, or a subject and Markdown) and its audience."""
+
+    template_key: Literal["maintenance", "announcement"] | None = None
+    template_vars: dict[str, str] = Field(default_factory=dict, max_length=20)
+    subject: str = Field(default="", max_length=300)
+    body_markdown: str = Field(default="", max_length=100_000)
+    target_statuses: list[AccountState] = Field(min_length=1, max_length=3)
+    target_admissions: list[AdmissionState] = Field(min_length=1, max_length=5)
+
+
+class BroadcastPreviewResponse(BaseModel):
+    """How many accounts it would reach, and the message as they would read it."""
+
+    recipient_count: int
+    subject: str
+    html: str
+    text: str
+
+
+class CreateBroadcastRequest(BroadcastPreviewRequest):
+    """Send now, or at ``scheduled_at``."""
+
+    scheduled_at: datetime | None = None
+
+
+class BroadcastEntry(BaseModel):
+    """One broadcast as the administration page lists it."""
+
+    id: str
+    subject: str
+    status: Literal["scheduled", "sending", "sent", "failed", "cancelled"]
+    recipient_count: int
+    scheduled_at: datetime | None
+    sent_at: datetime | None
+    created_by: str
+    created_at: datetime
+    template_key: str | None
+    target_statuses: list[str]
+    target_admissions: list[str]
+
+
+class BroadcastsResponse(BaseModel):
+    """A page of broadcasts, newest first, and how many there are."""
+
+    broadcasts: list[BroadcastEntry]
+    total: int
+
+
+class BroadcastRecipientEntry(BaseModel):
+    """One recipient's outcome."""
+
+    account_id: str
+    email: str
+    status: Literal["pending", "sent", "failed", "skipped"]
+    error: str | None
+    sent_at: datetime | None
+
+
+class BroadcastDetailResponse(BaseModel):
+    """One broadcast and a page of its recipients."""
+
+    broadcast: BroadcastEntry
+    recipients: list[BroadcastRecipientEntry]
+    total_recipients: int
+
+
+class EraseAccountResponse(BaseModel):
+    """An erased account, the Agent rows removed per table, and archives left in storage."""
+
+    account: AccountEntry
+    deleted: dict[str, int]
+    retained_archives: list[str]
+
+
+class LocaleRequest(_Request):
+    """The interface language the owner chose, and when (a choice made signed out)."""
+
+    locale: Literal["en", "zh-CN"]
+    chosen_at: datetime | None = None
+
+
+class LocaleResponse(BaseModel):
+    """The language the account keeps: the most recent choice wins."""
+
+    locale: str | None
+    chosen_at: datetime | None
+
+
 class EraseAccountRequest(_Request):
     """Permanently erase a deleted account: its id typed out again."""
 
@@ -365,13 +462,23 @@ __all__ = [
     "AuthOptionsResponse",
     "BindEmailRequest",
     "BindEmailResponse",
+    "BroadcastDetailResponse",
+    "BroadcastEntry",
+    "BroadcastPreviewRequest",
+    "BroadcastPreviewResponse",
+    "BroadcastRecipientEntry",
+    "BroadcastsResponse",
     "BrowserAccountEntry",
     "BrowserAccountsResponse",
     "ChangePasswordRequest",
+    "CreateBroadcastRequest",
     "DeleteAccountRequest",
     "EmailPasswordRequest",
     "EmailRequest",
     "EraseAccountRequest",
+    "EraseAccountResponse",
+    "LocaleRequest",
+    "LocaleResponse",
     "LoginEventEntry",
     "LoginEventsResponse",
     "LoginRequest",

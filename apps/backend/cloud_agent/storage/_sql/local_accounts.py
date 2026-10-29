@@ -26,7 +26,7 @@ ACCOUNT_COLUMNS = """
     x.identity_verified, a.status, a.is_admin, a.version, a.created_at,
     m.status AS admission_status, m.purpose, m.review_reason, m.submitted_at, m.reviewed_at,
     a.user_name, a.admin_note, a.suspension_message, a.last_login_at, a.deleted_at,
-    a.erased_at
+    a.erased_at, a.locale, a.locale_chosen_at, m.reviewed_by
 """
 
 ACCOUNT_FROM = """
@@ -88,6 +88,9 @@ def record(row: Any) -> AccountRecord:
         last_login_at=row["last_login_at"],
         deleted_at=row["deleted_at"],
         erased_at=row["erased_at"],
+        locale=row["locale"],
+        locale_chosen_at=row["locale_chosen_at"],
+        reviewed_by=row["reviewed_by"],
     )
 
 

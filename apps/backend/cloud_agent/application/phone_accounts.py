@@ -26,7 +26,7 @@ import secrets
 from typing import TYPE_CHECKING
 
 from cloud_agent.accounts import tokens
-from cloud_agent.accounts.config import LOCAL_SESSION_TTL_S
+from cloud_agent.accounts.config import local_session_ttl_s
 from cloud_agent.accounts.sms import sms_enabled
 from cloud_agent.application.accounts import (
     InvalidCredentials,
@@ -229,12 +229,16 @@ class PhoneFlows:
             session_id=session_id,
             account_id=login.account.id,
             token_hash=tokens.session_hash(token),
-            ttl_s=LOCAL_SESSION_TTL_S,
+            ttl_s=local_session_ttl_s(),
             phone=phone,
         )
         if account is None:
             raise InvalidCredentials
-        return SignedIn(token=token, account=account, session_id=session_id)
+        return SignedIn(
+            token=token,
+            account=await self._flows.promote_if_listed(account),
+            session_id=session_id,
+        )
 
     async def bind(self, account_id: str, phone: str, code: str) -> None:
         """Bind a number proven by a ``bind`` code.
