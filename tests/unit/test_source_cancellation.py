@@ -47,9 +47,12 @@ def test_archive_cancellation_stops_before_the_next_entry_or_chunk(tmp_path, mon
 
         def metadata(path, *args, **kwargs):
             result = lstat(path, *args, **kwargs)
-            if path == root / ".git":
+            if not stop.is_set():
+                # Cancel after whichever entry the filesystem yields first.
+                # os.scandir order is unspecified, so anchoring this to .git
+                # can stat payload before cancellation on some filesystems.
                 stop.set()
-            elif path == root / "payload":
+            else:
                 consumed.append("statted after cancellation")
             return result
 
