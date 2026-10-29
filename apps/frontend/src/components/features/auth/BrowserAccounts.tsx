@@ -2,7 +2,9 @@
 // The accounts signed in on this browser, adapted from HybridInference
 // components/auth/AccountChooser.tsx: switch without a password while an
 // account's own session lasts, sign one out, add another (up to the
-// deployment's limit), or sign this browser out of all of them.
+// deployment's limit), or sign this browser out of all of them. Another tab
+// signing in, switching or signing out announces it, and the list reloads, as
+// it does when the tab comes back into view.
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { useT } from '@/components/providers/LocaleProvider';
@@ -13,7 +15,7 @@ import {
   switchAccount,
   type BrowserAccounts as Accounts,
 } from '@/lib/api/accounts';
-import { announceSession } from '@/lib/auth/sessionSync';
+import { announceSession, listenForSession } from '@/lib/auth/sessionSync';
 import { basePath } from '@/config/env';
 import { getErrorMessage } from '@/lib/utils/errors';
 import { AccountFrame, AccountNotice } from './AccountFrame';
@@ -32,6 +34,16 @@ export function BrowserAccounts() {
   }, []);
   useEffect(() => {
     void load();
+    const reload = () => void load();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') reload();
+    };
+    const stop = listenForSession(reload);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [load]);
   async function run(action: () => Promise<unknown>, after: () => void) {
     setBusy(true);

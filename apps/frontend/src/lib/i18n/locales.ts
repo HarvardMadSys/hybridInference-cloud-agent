@@ -6,6 +6,8 @@
  */
 
 export const LOCALE_STORAGE_KEY = 'agents.locale';
+/** When this browser's language was chosen (ISO time), for an account to compare. */
+export const LOCALE_CHOSEN_AT_KEY = 'agents.locale.chosen_at';
 
 export const LOCALES = ['en', 'zh-CN'] as const;
 export type Locale = (typeof LOCALES)[number];
@@ -61,11 +63,35 @@ export function readStoredLocale(storage?: Pick<Storage, 'getItem'>): Locale | n
   }
 }
 
-export function writeStoredLocale(locale: Locale, storage?: Pick<Storage, 'setItem'>): void {
+export function writeStoredLocale(
+  locale: Locale,
+  storage?: Pick<Storage, 'setItem'>,
+  chosenAt: string = new Date().toISOString(),
+): void {
   try {
     const store = storage ?? window.localStorage;
     store.setItem(LOCALE_STORAGE_KEY, locale);
+    store.setItem(LOCALE_CHOSEN_AT_KEY, chosenAt);
   } catch {
     // Not persisting the choice still leaves it applied to this tab.
+  }
+}
+
+/** When the stored language was chosen, or null when it never was here. */
+export function readLocaleChosenAt(storage?: Pick<Storage, 'getItem'>): string | null {
+  try {
+    const raw = (storage ?? window.localStorage).getItem(LOCALE_CHOSEN_AT_KEY);
+    return raw && !Number.isNaN(Date.parse(raw)) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Record that the stored language is the one chosen at `chosenAt` (an account's). */
+export function writeLocaleChosenAt(chosenAt: string, storage?: Pick<Storage, 'setItem'>): void {
+  try {
+    (storage ?? window.localStorage).setItem(LOCALE_CHOSEN_AT_KEY, chosenAt);
+  } catch {
+    // Without it the next sign-in compares nothing and takes the account's.
   }
 }

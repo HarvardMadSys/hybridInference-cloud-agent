@@ -2,6 +2,7 @@
 import { cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as self from '@/lib/api/accountSelf';
+import { LOCALE_CHOSEN_AT_KEY } from '@/lib/i18n/locales';
 import { AccountLocaleSync } from './AccountLocaleSync';
 
 const state = vi.hoisted(() => ({
@@ -20,6 +21,7 @@ vi.mock('@/lib/api/accountSelf', () => ({ saveAccountLocale: vi.fn() }));
 afterEach(() => {
   cleanup();
   vi.resetAllMocks();
+  window.localStorage.clear();
 });
 
 describe('the language follows the account', () => {
@@ -33,5 +35,36 @@ describe('the language follows the account', () => {
     vi.mocked(self.saveAccountLocale).mockResolvedValue({ locale: 'en', chosen_at: null });
     render(<AccountLocaleSync />);
     await waitFor(() => expect(self.saveAccountLocale).toHaveBeenCalledWith('en'));
+  });
+  it('carries a language chosen signed out, after the account’s, into the account', async () => {
+    window.localStorage.setItem(LOCALE_CHOSEN_AT_KEY, '2026-10-29T10:00:05.000Z');
+    state.user = {
+      id: 'carried',
+      auth_mode: 'local',
+      identity: { locale: 'en', locale_chosen_at: '2026-10-29T10:00:00.000Z' },
+    };
+    state.locale = 'zh-CN';
+    vi.mocked(self.saveAccountLocale).mockResolvedValue({
+      locale: 'zh-CN',
+      chosen_at: '2026-10-29T10:00:05.000Z',
+    });
+    render(<AccountLocaleSync />);
+    await waitFor(() =>
+      expect(self.saveAccountLocale).toHaveBeenCalledWith('zh-CN', '2026-10-29T10:00:05.000Z'),
+    );
+    expect(state.setLocale).not.toHaveBeenCalled();
+  });
+  it('takes the account’s language over an older choice on this browser', () => {
+    window.localStorage.setItem(LOCALE_CHOSEN_AT_KEY, '2026-10-29T09:00:00.000Z');
+    state.user = {
+      id: 'older',
+      auth_mode: 'local',
+      identity: { locale: 'en', locale_chosen_at: '2026-10-29T10:00:00.000Z' },
+    };
+    state.locale = 'zh-CN';
+    render(<AccountLocaleSync />);
+    expect(state.setLocale).toHaveBeenCalledWith('en');
+    expect(self.saveAccountLocale).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem(LOCALE_CHOSEN_AT_KEY)).toBe('2026-10-29T10:00:00.000Z');
   });
 });

@@ -5,44 +5,43 @@
 import { useRef, useState } from 'react';
 import { Select } from '@/components/ui/Select';
 import { AccountNotice } from '@/components/features/auth/AccountFrame';
+import { useT } from '@/components/providers/LocaleProvider';
 import { updateAccount, type AccountAction, type AccountEntry } from '@/lib/api/accounts';
-import { eraseAccount } from '@/lib/api/accountAdmin';
+import { eraseAccount, type ErasureResult } from '@/lib/api/accountAdmin';
+import type { TranslationKey } from '@/lib/i18n/translate';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 import { OwnedTeams } from './OwnedTeams';
 
-export const LABELS: Record<AccountAction, string> = {
-  approve: 'Approve access',
-  reject: 'Decline application',
-  revoke: 'Withdraw access',
-  suspend: 'Suspend account',
-  restore: 'Restore account',
-  grant_admin: 'Grant administrator',
-  revoke_admin: 'Remove administrator',
-  delete: 'Delete account',
-  resume: 'Resume deleted account',
+export const LABELS: Record<AccountAction, TranslationKey> = {
+  approve: 'adminAccounts.action.approve',
+  reject: 'adminAccounts.action.reject',
+  revoke: 'adminAccounts.action.revoke',
+  suspend: 'adminAccounts.action.suspend',
+  restore: 'adminAccounts.action.restore',
+  grant_admin: 'adminAccounts.action.grantAdmin',
+  revoke_admin: 'adminAccounts.action.revokeAdmin',
+  delete: 'adminAccounts.action.delete',
+  resume: 'adminAccounts.action.resume',
+};
+
+const EXPLANATIONS: Partial<Record<AccountAction, TranslationKey>> = {
+  suspend: 'adminAccounts.explain.suspend',
+  revoke: 'adminAccounts.explain.revoke',
+  reject: 'adminAccounts.explain.reject',
+  revoke_admin: 'adminAccounts.explain.revokeAdmin',
+  grant_admin: 'adminAccounts.explain.grantAdmin',
+  delete: 'adminAccounts.explain.delete',
+  resume: 'adminAccounts.explain.resume',
 };
 
 // Administrator email addresses (Admin → Settings → Accounts) make a listed,
 // proven address administrator again at sign-in, so the service refuses to
 // withdraw what the list would hand back; the address leaves the list first.
-const LISTED =
-  ' If its email is in Administrator email addresses (Admin → Settings → Accounts), this is refused: remove the address there first, or suspend the account.';
-
-const EXPLANATIONS: Partial<Record<AccountAction, string>> = {
-  suspend:
-    'Signs this account out, withdraws Agent access, and stops its work. Restoring the account will not restore access automatically.',
-  revoke: `Stops this account’s Agent work. The user can still sign in to view the decision and reapply.${
-    LISTED
-  }`,
-  reject: `Declines the application; the user can reapply.${LISTED}`,
-  revoke_admin: `Removes platform administration; Agent access stays.${LISTED}`,
-  grant_admin:
-    'Grants platform administration, including account approvals and infrastructure management.',
-  delete:
-    'Signs the account out everywhere, takes it off every browser, stops its work and keeps its data. It can be resumed, but Agent access needs a new approval.',
-  resume:
-    'Lets the account sign in again. Agent access stays withdrawn until it is approved again.',
-};
+const UNDONE_BY_ADMIN_LIST: ReadonlySet<AccountAction> = new Set([
+  'revoke',
+  'reject',
+  'revoke_admin',
+]);
 
 function verified(account: AccountEntry): boolean {
   return account.identity?.identity_verified ?? account.email_verified;
@@ -60,15 +59,63 @@ export function actionsFor(account: AccountEntry): AccountAction[] {
   return actions;
 }
 
+export const SUMMARY = 'rounded-lg border border-border bg-surface-muted p-3 text-sm text-muted';
+
+/** What an erasure removed and what it left for the operator, archive keys included. */
+export function ErasureSummary({ result }: { result: ErasureResult }) {
+  const t = useT();
+  const rows = Object.values(result.deleted).reduce((sum, count) => sum + count, 0);
+  const teams = result.deleted_teams ?? [];
+  const environments = result.handed_environments ?? [];
+  const archives = result.retained_archives;
+  const parts = [
+    t('adminAccounts.erase.rows', { count: rows }),
+    archives.length ? t('adminAccounts.erase.archives', { count: archives.length }) : '',
+    teams.length ? t('adminAccounts.erase.teams', { count: teams.length }) : '',
+    environments.length
+      ? t('adminAccounts.erase.environments', { count: environments.length })
+      : '',
+  ].filter(Boolean);
+  return (
+    <div className="space-y-1">
+      <p>{parts.join(' ')}</p>
+      {archives.length > 0 && (
+        <ul
+          className="list-disc pl-5 font-mono text-xs"
+          aria-label={t('adminAccounts.erase.archiveList')}
+        >
+          {archives.map((key) => (
+            <li key={key} className="break-all">
+              {key}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function Explanation({ action }: { action: AccountAction }) {
+  const t = useT();
+  const key = EXPLANATIONS[action];
+  if (!key) return null;
+  const listed = UNDONE_BY_ADMIN_LIST.has(action) ? ` ${t('adminAccounts.explain.listed')}` : '';
+  return <p className="text-sm text-muted">{`${t(key)}${listed}`}</p>;
+}
+
 export function ActionEditor({
   account,
   onDone,
   onCancel,
+  onErased,
 }: {
   account: AccountEntry;
   onDone: () => void;
   onCancel: () => void;
+  /** Where an erasure's result goes; shown here when the page keeps none. */
+  onErased?: (result: ErasureResult) => void;
 }) {
+  const t = useT();
   const actions = actionsFor(account);
   const [action, setAction] = useState<AccountAction>(actions[0]);
   const [reason, setReason] = useState('');
@@ -87,9 +134,7 @@ export function ActionEditor({
     } catch (cause) {
       if (cause instanceof APIError && cause.code === 'version_conflict') {
         setStale(true);
-        setError(
-          'This account changed while you were reviewing it. Close this form and refresh the list before making another decision.',
-        );
+        setError(t('adminAccounts.stale'));
       } else setError(getErrorMessage(cause));
     } finally {
       submitting.current = false;
@@ -100,27 +145,27 @@ export function ActionEditor({
   return (
     <section
       className="mt-3 space-y-3 rounded-lg border border-border bg-surface-muted p-4"
-      aria-label={`Review ${label}`}
+      aria-label={t('adminAccounts.reviewOf', { label })}
     >
       <p className="text-sm font-medium break-all">{label}</p>
       {actions.length === 0 ? (
-        <p className="text-sm text-muted">This account was erased; nothing can be applied.</p>
+        <p className="text-sm text-muted">{t('adminAccounts.erasedNothing')}</p>
       ) : (
         <>
           <label className="block text-sm" htmlFor="account-action">
-            Action
+            {t('adminAccounts.actionLabel')}
           </label>
           <Select
             id="account-action"
             value={action}
             onValueChange={setAction}
-            options={actions.map((value) => ({ value, label: LABELS[value] }))}
+            options={actions.map((value) => ({ value, label: t(LABELS[value]) }))}
             disabled={busy || stale}
           />
           {(action === 'reject' || action === 'revoke') && (
             <>
               <label className="block text-sm" htmlFor="review-reason">
-                Reason shown to the applicant (optional)
+                {t('adminAccounts.reasonLabel')}
               </label>
               <textarea
                 id="review-reason"
@@ -133,7 +178,7 @@ export function ActionEditor({
               />
             </>
           )}
-          {EXPLANATIONS[action] && <p className="text-sm text-muted">{EXPLANATIONS[action]}</p>}
+          <Explanation action={action} />
         </>
       )}
       {error && <AccountNotice error>{error}</AccountNotice>}
@@ -144,25 +189,34 @@ export function ActionEditor({
             disabled={busy || stale}
             onClick={() => void apply()}
           >
-            {busy ? 'Applying…' : LABELS[action]}
+            {busy ? t('adminAccounts.applying') : t(LABELS[action])}
           </button>
         )}
         <button className="ui-button ui-button-secondary" disabled={busy} onClick={onCancel}>
-          Close
+          {t('adminAccounts.close')}
         </button>
       </div>
       {account.status === 'deleted' && !account.erased_at && (
-        <ErasePanel account={account} onDone={onDone} />
+        <ErasePanel account={account} onDone={onDone} onErased={onErased} />
       )}
     </section>
   );
 }
 
 /** Permanent erasure of a deleted account: its id typed out again confirms it. */
-function ErasePanel({ account, onDone }: { account: AccountEntry; onDone: () => void }) {
+function ErasePanel({
+  account,
+  onDone,
+  onErased,
+}: {
+  account: AccountEntry;
+  onDone: () => void;
+  onErased?: (result: ErasureResult) => void;
+}) {
+  const t = useT();
   const [confirm, setConfirm] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<string | null>(null);
+  const [result, setResult] = useState<ErasureResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [reload, setReload] = useState(0);
   async function erase() {
@@ -170,23 +224,12 @@ function ErasePanel({ account, onDone }: { account: AccountEntry; onDone: () => 
     setError(null);
     try {
       const erased = await eraseAccount(account.id, confirm.trim());
-      const rows = Object.values(erased.deleted).reduce((sum, count) => sum + count, 0);
-      const archives = erased.retained_archives.length;
-      const teams = erased.deleted_teams ?? [];
-      const environments = erased.handed_environments ?? [];
-      const kept = [
-        archives
-          ? `${archives} sandbox archive(s) remain in object storage under its retention policy.`
-          : '',
-        teams.length ? `${teams.length} team(s) it owned alone were deleted.` : '',
-        environments.length
-          ? `${environments.length} team environment(s) it made stay with their teams.`
-          : '',
-      ].filter(Boolean);
-      setResult([`Erased ${rows} rows of Agent data.`, ...kept].join(' '));
+      if (onErased) onErased(erased);
+      else setResult(erased);
       onDone();
     } catch (cause) {
       setError(getErrorMessage(cause));
+      // A refusal may name teams to hand over: show them as they are now.
       setReload((value) => value + 1);
     } finally {
       setBusy(false);
@@ -194,15 +237,11 @@ function ErasePanel({ account, onDone }: { account: AccountEntry; onDone: () => 
   }
   return (
     <div className="space-y-2 border-t border-border pt-3">
-      <p className="text-sm font-medium">Erase permanently</p>
-      <p className="text-xs text-muted">
-        Removes the account’s identity and all its Agent data. Only once its work has stopped, its
-        sandboxes are deleted, every host has cleaned up its environment runs, and each team other
-        members use has a new owner. This cannot be undone, and it cannot be resumed after.
-      </p>
+      <p className="text-sm font-medium">{t('adminAccounts.erase.title')}</p>
+      <p className="text-xs text-muted">{t('adminAccounts.erase.explain')}</p>
       <OwnedTeams accountId={account.id} reload={reload} />
       <label className="block text-sm" htmlFor="erase-confirm">
-        Type the account id to confirm
+        {t('adminAccounts.erase.confirm')}
       </label>
       <input
         id="erase-confirm"
@@ -211,13 +250,17 @@ function ErasePanel({ account, onDone }: { account: AccountEntry; onDone: () => 
         onChange={(e) => setConfirm(e.target.value)}
       />
       {error && <AccountNotice error>{error}</AccountNotice>}
-      {result && <AccountNotice>{result}</AccountNotice>}
+      {result && (
+        <div role="status" className={SUMMARY}>
+          <ErasureSummary result={result} />
+        </div>
+      )}
       <button
         className="ui-button ui-button-danger"
         disabled={busy || confirm.trim() !== account.id}
         onClick={() => void erase()}
       >
-        Erase account
+        {t('adminAccounts.erase.button')}
       </button>
     </div>
   );

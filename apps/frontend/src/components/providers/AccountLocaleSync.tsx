@@ -1,13 +1,19 @@
 'use client';
 // The interface language follows a local account from browser to browser, as
 // HybridInference keeps it with the account (`PUT /user/preferences/locale`).
-// Signing in applies the account's saved language; choosing another while
-// signed in saves it, and the account keeps the most recent choice.
+// At sign-in the most recent choice wins: a language chosen on this browser
+// while signed out, after the account's own choice, is carried into the
+// account with its time (the server keeps whichever is newer); otherwise the
+// account's language applies here. Choosing another while signed in saves it.
 import { useEffect, useRef } from 'react';
 import { saveAccountLocale } from '@/lib/api/accountSelf';
-import { isLocale } from '@/lib/i18n/locales';
+import { isLocale, readLocaleChosenAt, writeLocaleChosenAt } from '@/lib/i18n/locales';
 import { useAuth } from './AuthProvider';
 import { useLocale } from './LocaleProvider';
+
+function newer(mine: string | null, theirs: string | null | undefined): boolean {
+  return mine !== null && (!theirs || Date.parse(mine) > Date.parse(theirs));
+}
 
 export function AccountLocaleSync() {
   const { state } = useAuth();
@@ -20,22 +26,31 @@ export function AccountLocaleSync() {
       applied.current = null;
       return;
     }
+    let chosenAt: string | null = null;
     if (applied.current !== user.id) {
       applied.current = user.id;
       const kept = user.identity?.locale ?? null;
+      const keptAt = user.identity?.locale_chosen_at ?? null;
       saved.current = kept;
-      if (kept && isLocale(kept) && kept !== locale) {
-        setLocale(kept);
+      const mine = readLocaleChosenAt();
+      if (kept && isLocale(kept) && !(newer(mine, keptAt) && locale !== kept)) {
+        if (kept !== locale) setLocale(kept);
+        // This browser now shows the account's choice, made when the account says.
+        if (keptAt) writeLocaleChosenAt(keptAt);
         return;
       }
+      chosenAt = mine;
+    } else {
+      chosenAt = readLocaleChosenAt();
     }
     if (saved.current === locale) return;
     saved.current = locale;
-    void saveAccountLocale(locale)
+    void (chosenAt ? saveAccountLocale(locale, chosenAt) : saveAccountLocale(locale))
       .then((answer) => {
         saved.current = answer.locale;
         if (answer.locale && isLocale(answer.locale) && answer.locale !== locale)
           setLocale(answer.locale);
+        if (answer.chosen_at) writeLocaleChosenAt(answer.chosen_at);
       })
       .catch(() => undefined);
   }, [user, locale, setLocale]);

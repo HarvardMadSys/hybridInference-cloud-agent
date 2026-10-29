@@ -1,9 +1,11 @@
 'use client';
 // What an administrator keeps about an account beside its decisions: a private
 // note, the message a suspended account is shown at sign-in, and its recent
-// sign-in attempts (which can be purged), as HybridInference's user detail.
-import { useState } from 'react';
+// sign-in attempts (which can be purged, once confirmed), as HybridInference's
+// user detail.
+import { useState, type ReactNode } from 'react';
 import { AccountNotice } from '@/components/features/auth/AccountFrame';
+import { useT } from '@/components/providers/LocaleProvider';
 import type { AccountEntry } from '@/lib/api/accounts';
 import {
   listLoginEvents,
@@ -13,7 +15,34 @@ import {
 } from '@/lib/api/accountAdmin';
 import { getErrorMessage } from '@/lib/utils/errors';
 
+/** An irreversible step asked once more, with what it will do. */
+export function ConfirmBar({
+  children,
+  confirm,
+  onConfirm,
+  onCancel,
+}: {
+  children: ReactNode;
+  confirm: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const t = useT();
+  return (
+    <div className="flex flex-wrap items-center gap-2" role="alertdialog">
+      <span className="text-sm">{children}</span>
+      <button className="ui-button ui-button-danger" onClick={onConfirm}>
+        {confirm}
+      </button>
+      <button className="ui-button ui-button-secondary" onClick={onCancel}>
+        {t('adminAccounts.confirm.keep')}
+      </button>
+    </div>
+  );
+}
+
 export function AccountNotes({ account, onSaved }: { account: AccountEntry; onSaved: () => void }) {
+  const t = useT();
   const [note, setNote] = useState(account.admin_note ?? '');
   const [message, setMessage] = useState(account.suspension_message ?? '');
   const [error, setError] = useState<string | null>(null);
@@ -33,7 +62,7 @@ export function AccountNotes({ account, onSaved }: { account: AccountEntry; onSa
   return (
     <div className="space-y-2">
       <label className="block text-sm" htmlFor="admin-note">
-        Administrator note (never shown to the account)
+        {t('adminAccounts.notes.note')}
       </label>
       <textarea
         id="admin-note"
@@ -44,7 +73,7 @@ export function AccountNotes({ account, onSaved }: { account: AccountEntry; onSa
         onChange={(e) => setNote(e.target.value)}
       />
       <label className="block text-sm" htmlFor="suspension-message">
-        Message shown when a suspended account signs in
+        {t('adminAccounts.notes.message')}
       </label>
       <textarea
         id="suspension-message"
@@ -56,15 +85,17 @@ export function AccountNotes({ account, onSaved }: { account: AccountEntry; onSa
       />
       {error && <AccountNotice error>{error}</AccountNotice>}
       <button className="ui-button ui-button-secondary" disabled={busy} onClick={() => void save()}>
-        Save notes
+        {t('adminAccounts.notes.save')}
       </button>
     </div>
   );
 }
 
 export function SignInHistory({ accountId }: { accountId: string }) {
+  const t = useT();
   const [events, setEvents] = useState<LoginEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
   async function load() {
     setError(null);
     try {
@@ -75,6 +106,7 @@ export function SignInHistory({ accountId }: { accountId: string }) {
   }
   async function purge() {
     setError(null);
+    setConfirming(false);
     try {
       await purgeLoginEvents({ accountId });
       setEvents([]);
@@ -86,18 +118,27 @@ export function SignInHistory({ accountId }: { accountId: string }) {
     <div className="space-y-2">
       <div className="flex flex-wrap gap-2">
         <button className="ui-button ui-button-secondary" onClick={() => void load()}>
-          Show sign-in history
+          {t('adminAccounts.history.show')}
         </button>
-        {events && events.length > 0 && (
-          <button className="ui-button ui-button-ghost" onClick={() => void purge()}>
-            Purge this account’s history
+        {events && events.length > 0 && !confirming && (
+          <button className="ui-button ui-button-ghost" onClick={() => setConfirming(true)}>
+            {t('adminAccounts.history.purge')}
           </button>
         )}
       </div>
+      {confirming && (
+        <ConfirmBar
+          confirm={t('adminAccounts.confirm.delete')}
+          onConfirm={() => void purge()}
+          onCancel={() => setConfirming(false)}
+        >
+          {t('adminAccounts.history.confirm')}
+        </ConfirmBar>
+      )}
       {error && <AccountNotice error>{error}</AccountNotice>}
       {events && (
         <ul className="space-y-1 text-xs">
-          {events.length === 0 && <li className="text-muted">No sign-in attempts recorded.</li>}
+          {events.length === 0 && <li className="text-muted">{t('adminAccounts.history.none')}</li>}
           {events.map((event, index) => (
             <li key={index} className="break-all">
               {new Date(event.created_at).toLocaleString()} · {event.method} · {event.outcome}

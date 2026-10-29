@@ -233,6 +233,8 @@ const SETTING_GROUPS: SettingGroup[] = [
   {
     title: 'Sign-in and sign-up limits',
     keys: [
+      'accounts.login_per_15min',
+      'accounts.login_account_per_15min',
       'accounts.login_ip_per_hour',
       'accounts.signup_per_hour',
       'accounts.signup_per_day',
@@ -276,6 +278,7 @@ const SETTING_GROUPS: SettingGroup[] = [
       'accounts.sms_send_per_ip_hour',
       'accounts.sms_send_per_ip_day',
       'accounts.sms_max_attempts',
+      'accounts.sms_verify_per_phone_15min',
       'accounts.sms_verify_per_ip_hour',
       'accounts.tencent_sms_region',
       'accounts.tencent_sms_app_id',

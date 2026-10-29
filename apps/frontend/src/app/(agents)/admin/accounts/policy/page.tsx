@@ -7,6 +7,7 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useAuth } from '@/components/providers/AuthProvider';
+import { useT } from '@/components/providers/LocaleProvider';
 import { AccountNotice } from '@/components/features/auth/AccountFrame';
 import {
   addSignupDomain,
@@ -18,8 +19,10 @@ import {
 import { getErrorMessage } from '@/lib/utils/errors';
 import { AdminNavigation } from '../../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../../AdminPageHeader';
+import { ConfirmBar } from '../AccountDetails';
 
 function DomainList() {
+  const t = useT();
   const [domains, setDomains] = useState<SignupDomains | null>(null);
   const [entry, setEntry] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -53,26 +56,26 @@ function DomainList() {
   const empty = domains?.domains.length === 0;
   return (
     <section className="space-y-3 rounded-xl border border-border bg-surface p-4">
-      <h2 className="text-base font-semibold">Signup domain allowlist</h2>
+      <h2 className="text-base font-semibold">{t('adminAccounts.policy.domains')}</h2>
       <p className="text-sm text-muted">
         {domains?.approval_policy === 'domains'
           ? empty
-            ? 'Approval policy is “domains” and the list is empty: every verified account is approved automatically.'
-            : 'Approval policy is “domains”: verified accounts from these domains are approved automatically; others wait for review.'
-          : 'Approval policy is “manual”: every account waits for review. This list applies once the policy is “domains” (Admin → Settings → Accounts).'}
+            ? t('adminAccounts.policy.domainsEmpty')
+            : t('adminAccounts.policy.domainsListed')
+          : t('adminAccounts.policy.manual')}
       </p>
       {error && <AccountNotice error>{error}</AccountNotice>}
       <form className="flex flex-wrap gap-2" onSubmit={add}>
         <input
           className="ui-input min-w-[14rem] flex-1"
-          aria-label="Domain to add"
+          aria-label={t('adminAccounts.policy.domainToAdd')}
           placeholder="example.edu or *.example.edu"
           maxLength={256}
           value={entry}
           onChange={(e) => setEntry(e.target.value)}
         />
         <button className="ui-button ui-button-primary" disabled={busy || !entry.trim()}>
-          Add domain
+          {t('adminAccounts.policy.addDomain')}
         </button>
       </form>
       <ul className="space-y-1 text-sm">
@@ -85,10 +88,12 @@ function DomainList() {
             <button
               className="ui-button ui-button-ghost"
               disabled={busy}
-              aria-label={`Remove ${row.is_wildcard ? `*.${row.domain}` : row.domain}`}
+              aria-label={t('adminAccounts.policy.removeDomain', {
+                domain: row.is_wildcard ? `*.${row.domain}` : row.domain,
+              })}
               onClick={() => void change(() => removeSignupDomain(row))}
             >
-              Remove
+              {t('adminAccounts.policy.remove')}
             </button>
           </li>
         ))}
@@ -98,31 +103,35 @@ function DomainList() {
 }
 
 function SignInRetention() {
+  const t = useT();
   const [days, setDays] = useState('90');
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  async function purge(event: FormEvent) {
+  const [confirming, setConfirming] = useState(false);
+  function ask(event: FormEvent) {
     event.preventDefault();
+    setMessage(null);
+    setConfirming(true);
+  }
+  async function purge() {
+    setConfirming(false);
     setError(null);
     try {
       const result = await purgeLoginEvents({ olderThanDays: Number(days) });
-      setMessage(`Deleted ${result.deleted} sign-in records.`);
+      setMessage(t('adminAccounts.policy.purged', { count: result.deleted }));
     } catch (cause) {
       setError(getErrorMessage(cause));
     }
   }
   return (
     <section className="space-y-3 rounded-xl border border-border bg-surface p-4">
-      <h2 className="text-base font-semibold">Sign-in records</h2>
-      <p className="text-sm text-muted">
-        Every sign-in attempt is recorded with its outcome, address and browser. Delete the records
-        older than a number of days; an account’s own records can be purged from its review panel.
-      </p>
+      <h2 className="text-base font-semibold">{t('adminAccounts.policy.records')}</h2>
+      <p className="text-sm text-muted">{t('adminAccounts.policy.recordsExplain')}</p>
       {error && <AccountNotice error>{error}</AccountNotice>}
       {message && <AccountNotice>{message}</AccountNotice>}
-      <form className="flex flex-wrap items-center gap-2" onSubmit={purge}>
+      <form className="flex flex-wrap items-center gap-2" onSubmit={ask}>
         <label htmlFor="purge-days" className="text-sm">
-          Older than (days)
+          {t('adminAccounts.policy.olderThan')}
         </label>
         <input
           id="purge-days"
@@ -133,23 +142,38 @@ function SignInRetention() {
           value={days}
           onChange={(e) => setDays(e.target.value)}
         />
-        <button className="ui-button ui-button-secondary">Purge</button>
+        <button className="ui-button ui-button-secondary" disabled={confirming}>
+          {t('adminAccounts.policy.purge')}
+        </button>
       </form>
+      {confirming && (
+        <ConfirmBar
+          confirm={t('adminAccounts.confirm.delete')}
+          onConfirm={() => void purge()}
+          onCancel={() => setConfirming(false)}
+        >
+          {t('adminAccounts.policy.purgeConfirm', { days })}
+        </ConfirmBar>
+      )}
     </section>
   );
 }
 
 export default function AccountPolicyPage() {
   const { state } = useAuth();
+  const t = useT();
   const local = state.user?.auth_mode === 'local';
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
       <section className={ADMIN_PAGE}>
-        <AdminPageHeader section="Accounts" description="Sign-up policy and sign-in records." />
+        <AdminPageHeader
+          section={t('adminAccounts.section')}
+          description={t('adminAccounts.policy.description')}
+        />
         <AdminNavigation current="accounts" />
         <div className="mt-5 space-y-4">
           <Link className="text-sm text-accent underline" href="/admin/accounts">
-            Back to accounts
+            {t('adminAccounts.back')}
           </Link>
           {local ? (
             <>
@@ -157,9 +181,7 @@ export default function AccountPolicyPage() {
               <SignInRetention />
             </>
           ) : (
-            <p className="text-sm text-muted">
-              Independent accounts are not enabled on this deployment.
-            </p>
+            <p className="text-sm text-muted">{t('adminAccounts.notLocal')}</p>
           )}
         </div>
       </section>

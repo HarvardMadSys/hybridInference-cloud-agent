@@ -15,7 +15,17 @@ import { TermsConsent } from './TermsConsent';
 import { TurnstileWidget } from './TurnstileWidget';
 import { useAuthOptions } from './useAuthOptions';
 
-function PhoneSignup({ details, countryCode }: { details: SignupDetails; countryCode: string }) {
+function PhoneSignup({
+  details,
+  countryCode,
+  siteKey,
+  onCaptchaUsed,
+}: {
+  details: SignupDetails;
+  countryCode: string;
+  siteKey?: string | null;
+  onCaptchaUsed: () => void;
+}) {
   const t = useT();
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
@@ -59,7 +69,9 @@ function PhoneSignup({ details, countryCode }: { details: SignupDetails; country
         onCode={setCode}
         onError={setError}
         defaultCountryCode={countryCode}
-        captchaToken={details.turnstile_token}
+        siteKey={siteKey}
+        captchaToken={details.turnstile_token ?? null}
+        onCaptchaUsed={onCaptchaUsed}
       />
       <button className="ui-button ui-button-primary w-full" disabled={busy || code.length !== 6}>
         {busy ? t('account.saving') : t('account.signup')}
@@ -136,7 +148,13 @@ export function SignupPage() {
   const [captcha, setCaptcha] = useState<string | null>(null);
   const [method, setMethod] = useState<'email' | 'phone'>('email');
   const [sent, setSent] = useState(false);
+  const [captchaReset, setCaptchaReset] = useState(0);
   const onToken = useCallback((token: string | null) => setCaptcha(token), []);
+  // A token is good for one request: after each, a fresh challenge replaces it.
+  const resetCaptcha = useCallback(() => {
+    setCaptcha(null);
+    setCaptchaReset((value) => value + 1);
+  }, []);
   if (!options)
     return (
       <AccountFrame title={t('account.signup')}>
@@ -180,7 +198,13 @@ export function SignupPage() {
           />
         </AccountField>
         <TermsConsent options={options} accepted={accepted} onAccepted={setAccepted} />
-        {needsCaptcha && <TurnstileWidget siteKey={options.turnstile_site_key} onToken={onToken} />}
+        {needsCaptcha && (
+          <TurnstileWidget
+            siteKey={options.turnstile_site_key}
+            onToken={onToken}
+            resetKey={captchaReset}
+          />
+        )}
         {emailOpen && phoneOpen && <MethodTabs method={chosen} onMethod={setMethod} />}
       </div>
       {!ready && <p className="text-xs text-muted">{t('signup.agreeFirst')}</p>}
@@ -190,9 +214,18 @@ export function SignupPage() {
           verified={!options.require_email_verification}
           ready={ready}
           onDone={() => setSent(true)}
+          onAttempt={needsCaptcha ? resetCaptcha : undefined}
         />
       ) : (
-        ready && <PhoneSignup details={details} countryCode={options.phone.default_country_code} />
+        // The consent is what the form waits for; the code button waits for a token.
+        accepted && (
+          <PhoneSignup
+            details={details}
+            countryCode={options.phone.default_country_code}
+            siteKey={options.turnstile_site_key}
+            onCaptchaUsed={resetCaptcha}
+          />
+        )
       )}
       <p className="text-sm">
         <Link className="text-accent underline" href="/login">

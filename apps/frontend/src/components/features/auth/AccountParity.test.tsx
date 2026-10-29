@@ -12,7 +12,16 @@ import { AccountSecurity } from './AccountSecurity';
 import { FirstRunSetup } from './FirstRunSetup';
 
 vi.mock('next/navigation', () => ({ useSearchParams: () => new URLSearchParams() }));
-vi.mock('@/lib/auth/sessionSync', () => ({ announceSession: vi.fn() }));
+const sync = vi.hoisted(() => ({
+  handlers: [] as ((message: { userId: string | null }) => void)[],
+}));
+vi.mock('@/lib/auth/sessionSync', () => ({
+  announceSession: vi.fn(),
+  listenForSession: (handler: (message: { userId: string | null }) => void) => {
+    sync.handlers.push(handler);
+    return () => undefined;
+  },
+}));
 vi.mock('@/lib/api/accounts', () => ({
   getAuthOptions: vi.fn(),
   signupAccount: vi.fn(),
@@ -180,6 +189,19 @@ describe('the accounts on this browser', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Switch' }));
     await waitFor(() => expect(api.switchAccount).toHaveBeenCalledWith('b'));
     expect(assign).toHaveBeenCalledWith('/');
+  });
+  it('reloads the list when another tab changes the accounts (review F10)', async () => {
+    sync.handlers.length = 0;
+    vi.mocked(api.listBrowserAccounts).mockResolvedValue({
+      active_account_id: 'a',
+      max_accounts: 5,
+      accounts: [],
+    });
+    render(<BrowserAccounts />);
+    await waitFor(() => expect(api.listBrowserAccounts).toHaveBeenCalledTimes(1));
+    expect(sync.handlers).toHaveLength(1);
+    sync.handlers[0]({ userId: 'b' });
+    await waitFor(() => expect(api.listBrowserAccounts).toHaveBeenCalledTimes(2));
   });
 });
 

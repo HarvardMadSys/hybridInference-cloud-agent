@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as accounts from '@/lib/api/accounts';
 import * as admin from '@/lib/api/accountAdmin';
 import type { AccountEntry } from '@/lib/api/accounts';
+import { LocaleProvider } from '@/components/providers/LocaleProvider';
+import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { ActionEditor, actionsFor } from './AccountActions';
 import { AccountNotes } from './AccountDetails';
 import AccountPolicyPage from './policy/page';
@@ -159,6 +161,21 @@ describe('account decisions', () => {
     fireEvent.click(screen.getByRole('option', { name: 'Remove administrator' }));
     expect(screen.getByText(/Administrator email addresses .* this is refused/)).toBeVisible();
   });
+  it('follows the administrator’s language (review F11)', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
+    try {
+      render(
+        <LocaleProvider>
+          <ActionEditor account={base} onDone={vi.fn()} onCancel={vi.fn()} />
+        </LocaleProvider>,
+      );
+      expect(await screen.findByRole('button', { name: '撤销权限' })).toBeInTheDocument();
+      expect(screen.getByText(/停止该账号的 Agent 工作/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '关闭' })).toBeInTheDocument();
+    } finally {
+      window.localStorage.clear();
+    }
+  });
   it('deletes at the version the administrator read', async () => {
     vi.mocked(accounts.updateAccount).mockResolvedValue(base);
     render(
@@ -224,6 +241,10 @@ describe('sign-up policy', () => {
     render(<AccountPolicyPage />);
     fireEvent.change(screen.getByLabelText('Older than (days)'), { target: { value: '30' } });
     fireEvent.click(screen.getByRole('button', { name: 'Purge' }));
+    // Irreversible, so asked once more with its scope (review F6).
+    expect(screen.getByText(/older than 30 days\? This cannot be undone/)).toBeInTheDocument();
+    expect(admin.purgeLoginEvents).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete them' }));
     expect(await screen.findByText('Deleted 12 sign-in records.')).toBeInTheDocument();
     expect(admin.purgeLoginEvents).toHaveBeenCalledWith({ olderThanDays: 30 });
   });
@@ -247,6 +268,10 @@ describe('mail to accounts', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
     expect(await screen.findByText(/4 recipients/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    // Sending is confirmed with the count the preview showed.
+    expect(screen.getByText('Send this message to 4 accounts now?')).toBeInTheDocument();
+    expect(admin.createMail).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm send' }));
     await waitFor(() =>
       expect(admin.createMail).toHaveBeenCalledWith(
         {
@@ -277,6 +302,36 @@ describe('mail to accounts', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
     expect(await screen.findByText(/limited to 800 bytes/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(admin.createMail).not.toHaveBeenCalled();
+  });
+  it('asks for a new preview once the message or its audience changes (review R2)', async () => {
+    vi.mocked(admin.previewMail).mockResolvedValue({
+      recipient_count: 4,
+      subject: 'S',
+      html: '<p>x</p>',
+      text: 'x',
+    });
+    render(<MailComposer onSent={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'S' } });
+    fireEvent.change(screen.getByLabelText('Body (Markdown)'), { target: { value: 'x' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    expect(await screen.findByText(/4 recipients/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+    // Widen the audience and rewrite the body after the preview.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'pending' }));
+    fireEvent.change(screen.getByLabelText('Body (Markdown)'), {
+      target: { value: 'unreviewed text' },
+    });
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(screen.getByText(/changed since the preview/)).toBeInTheDocument();
+    expect(screen.queryByText(/4 recipients/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await waitFor(() => expect(admin.previewMail).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(admin.previewMail).mock.calls[1][0]).toMatchObject({
+      body_markdown: 'unreviewed text',
+      target_admissions: ['approved', 'pending'],
+    });
+    expect(await screen.findByRole('button', { name: 'Send' })).toBeEnabled();
     expect(admin.createMail).not.toHaveBeenCalled();
   });
   it('offers no deleted accounts as an audience', () => {

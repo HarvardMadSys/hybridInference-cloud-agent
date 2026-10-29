@@ -20,11 +20,14 @@ export function SignupEmailForm({
   verified = false,
   ready = true,
   onDone,
+  onAttempt,
 }: {
   details?: SignupDetails;
   verified?: boolean;
   ready?: boolean;
   onDone?: () => void;
+  /** Called after each request, answered or not: its captcha token is spent. */
+  onAttempt?: () => void;
 }) {
   const t = useT();
   const [email, setEmail] = useState('');
@@ -60,6 +63,7 @@ export function SignupEmailForm({
     } finally {
       submitting.current = false;
       setBusy(false);
+      onAttempt?.();
     }
   }
   if (done)

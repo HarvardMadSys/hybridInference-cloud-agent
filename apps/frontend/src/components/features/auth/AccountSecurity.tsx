@@ -44,12 +44,14 @@ function OwnerProofFields({
   proof,
   onProof,
   onError,
+  siteKey,
 }: {
   account: AccountIdentity;
   purpose: Purpose;
   proof: OwnerProof;
   onProof: (proof: OwnerProof) => void;
   onError: (message: string | null) => void;
+  siteKey?: string | null;
 }) {
   const t = useT();
   if (account.has_password)
@@ -76,6 +78,7 @@ function OwnerProofFields({
         onPhone={() => undefined}
         onCode={(code) => onProof({ phone_code: code })}
         onError={onError}
+        siteKey={siteKey}
       />
     );
   return <p className="text-sm text-muted">{t('security.noProof')}</p>;
@@ -102,9 +105,11 @@ function useAction() {
 
 function PasswordSection({
   account,
+  options,
   onChanged,
 }: {
   account: AccountIdentity;
+  options: AuthOptions | null;
   onChanged: () => void;
 }) {
   const t = useT();
@@ -143,6 +148,7 @@ function PasswordSection({
           proof={proof}
           onProof={setProof}
           onError={setError}
+          siteKey={options?.turnstile_site_key}
         />
         <NewPasswordFields
           password={password}
@@ -208,6 +214,7 @@ function EmailSection({
             proof={proof}
             onProof={setProof}
             onError={setError}
+            siteKey={options?.turnstile_site_key}
           />
           <button className="ui-button ui-button-primary" disabled={busy}>
             {t('security.sendLink')}
@@ -258,6 +265,7 @@ function PhoneSection({
             onCode={setCode}
             onError={setError}
             defaultCountryCode={options?.phone.default_country_code}
+            siteKey={options?.turnstile_site_key}
           />
           <button className="ui-button ui-button-primary" disabled={busy || code.length !== 6}>
             {t('security.bindPhone')}
@@ -268,7 +276,15 @@ function PhoneSection({
   );
 }
 
-function DeleteSection({ account, isAdmin }: { account: AccountIdentity; isAdmin: boolean }) {
+function DeleteSection({
+  account,
+  isAdmin,
+  siteKey,
+}: {
+  account: AccountIdentity;
+  isAdmin: boolean;
+  siteKey?: string | null;
+}) {
   const t = useT();
   const { error, setError, busy, run } = useAction();
   const [proof, setProof] = useState<OwnerProof>({});
@@ -309,6 +325,7 @@ function DeleteSection({ account, isAdmin }: { account: AccountIdentity; isAdmin
             proof={proof}
             onProof={setProof}
             onError={setError}
+            siteKey={siteKey}
           />
           <button
             className="ui-button ui-button-danger"
@@ -351,10 +368,10 @@ export function AccountSecurity({ isAdmin = false }: { isAdmin?: boolean }) {
           {t('accounts.title')}
         </Link>
       </Section>
-      <PasswordSection account={account} onChanged={() => void load()} />
+      <PasswordSection account={account} options={options} onChanged={() => void load()} />
       <EmailSection account={account} options={options} />
       <PhoneSection account={account} options={options} onChanged={() => void load()} />
-      <DeleteSection account={account} isAdmin={isAdmin} />
+      <DeleteSection account={account} isAdmin={isAdmin} siteKey={options?.turnstile_site_key} />
     </div>
   );
 }

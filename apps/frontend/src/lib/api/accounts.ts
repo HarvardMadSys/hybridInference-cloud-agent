@@ -18,6 +18,8 @@ export interface WaitlistEntry {
 }
 export interface AccountIdentity {
   locale: string | null;
+  /** When the account's language was chosen. */
+  locale_chosen_at?: string | null;
   email: string | null;
   email_verified: boolean;
   login_name: string | null;

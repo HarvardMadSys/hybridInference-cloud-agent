@@ -150,11 +150,17 @@ export const createMail = (message: MailMessage, scheduledAt: string | null) =>
     method: 'POST',
     body: JSON.stringify({ ...message, scheduled_at: scheduledAt }),
   });
-export const listMail = (signal?: AbortSignal) =>
-  admin<{ broadcasts: MailEntry[]; total: number }>('/v1/admin/account-mail', { signal });
-export const mailDetail = (id: string, signal?: AbortSignal) =>
+/** Messages per page, and recipients per page, as the API's defaults. */
+export const MAIL_PAGE = 50;
+export const RECIPIENT_PAGE = 100;
+export const listMail = (offset = 0, signal?: AbortSignal) =>
+  admin<{ broadcasts: MailEntry[]; total: number }>(
+    `/v1/admin/account-mail?limit=${MAIL_PAGE}&offset=${offset}`,
+    { signal },
+  );
+export const mailDetail = (id: string, offset = 0, signal?: AbortSignal) =>
   admin<{ broadcast: MailEntry; recipients: MailRecipient[]; total_recipients: number }>(
-    `/v1/admin/account-mail/${encodeURIComponent(id)}`,
+    `/v1/admin/account-mail/${encodeURIComponent(id)}?limit=${RECIPIENT_PAGE}&offset=${offset}`,
     { signal },
   );
 export const cancelMail = (id: string) =>

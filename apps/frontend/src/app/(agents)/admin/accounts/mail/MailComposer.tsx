@@ -2,9 +2,12 @@
 // Composing mail to accounts, adapted from HybridInference's broadcast email
 // tab: a ready-made message or a subject with a Markdown body, the account
 // states and application states it goes to, a preview with the recipient
-// count, a test to yourself, and sending now or at a chosen time.
+// count, a test to yourself, and sending now or at a chosen time. As upstream,
+// a preview belongs to the exact message and audience it showed: any change
+// asks for a new one, and sending is confirmed with the recipient count.
 import { useState } from 'react';
 import { AccountNotice } from '@/components/features/auth/AccountFrame';
+import { useT } from '@/components/providers/LocaleProvider';
 import type { WaitlistStatus } from '@/lib/api/accounts';
 import {
   createMail,
@@ -56,26 +59,197 @@ function Choices<T extends string>({
   );
 }
 
+function MessageFields({
+  message,
+  onMessage,
+}: {
+  message: MailMessage;
+  onMessage: (change: Partial<MailMessage>) => void;
+}) {
+  const t = useT();
+  const template = message.template_key;
+  return (
+    <>
+      <label className="block text-sm" htmlFor="mail-template">
+        {t('adminAccounts.mail.message')}
+      </label>
+      <select
+        id="mail-template"
+        className="ui-input"
+        value={template ?? ''}
+        onChange={(e) =>
+          onMessage({
+            template_key: (e.target.value || null) as MailMessage['template_key'],
+            template_vars: {},
+          })
+        }
+      >
+        <option value="">{t('adminAccounts.mail.custom')}</option>
+        <option value="maintenance">{t('adminAccounts.mail.maintenance')}</option>
+        <option value="announcement">{t('adminAccounts.mail.announcement')}</option>
+      </select>
+      {template ? (
+        TEMPLATE_FIELDS[template].map((field) => (
+          <input
+            key={field}
+            className="ui-input w-full"
+            aria-label={field.replaceAll('_', ' ')}
+            placeholder={field.replaceAll('_', ' ')}
+            value={message.template_vars[field] ?? ''}
+            onChange={(e) =>
+              onMessage({ template_vars: { ...message.template_vars, [field]: e.target.value } })
+            }
+          />
+        ))
+      ) : (
+        <>
+          <input
+            className="ui-input w-full"
+            aria-label={t('adminAccounts.mail.subject')}
+            placeholder={t('adminAccounts.mail.subject')}
+            maxLength={300}
+            value={message.subject}
+            onChange={(e) => onMessage({ subject: e.target.value })}
+          />
+          <textarea
+            className="ui-input w-full font-mono"
+            aria-label={t('adminAccounts.mail.body')}
+            placeholder={t('adminAccounts.mail.bodyPlaceholder')}
+            rows={8}
+            maxLength={100000}
+            value={message.body_markdown}
+            onChange={(e) => onMessage({ body_markdown: e.target.value })}
+          />
+        </>
+      )}
+      <Choices
+        legend={t('adminAccounts.mail.accountState')}
+        all={STATUSES}
+        chosen={message.target_statuses}
+        onChange={(target_statuses) => onMessage({ target_statuses })}
+      />
+      <Choices
+        legend={t('adminAccounts.mail.applicationState')}
+        all={ADMISSIONS}
+        chosen={message.target_admissions}
+        onChange={(target_admissions) => onMessage({ target_admissions })}
+      />
+    </>
+  );
+}
+
+function SendConfirmation({
+  count,
+  scheduledAt,
+  busy,
+  onConfirm,
+  onBack,
+}: {
+  count: number;
+  scheduledAt: Date | null;
+  busy: boolean;
+  onConfirm: () => void;
+  onBack: () => void;
+}) {
+  const t = useT();
+  const when = scheduledAt?.toLocaleString();
+  const question = when
+    ? t('adminAccounts.mail.confirmScheduleText', { count, when })
+    : t('adminAccounts.mail.confirmSendText', { count });
+  return (
+    <div className="space-y-2 rounded-lg border border-border p-3" role="alertdialog">
+      <p className="text-sm">{question}</p>
+      <div className="flex gap-2">
+        <button className="ui-button ui-button-primary" disabled={busy} onClick={onConfirm}>
+          {scheduledAt
+            ? t('adminAccounts.mail.confirmSchedule')
+            : t('adminAccounts.mail.confirmSend')}
+        </button>
+        <button className="ui-button ui-button-secondary" disabled={busy} onClick={onBack}>
+          {t('adminAccounts.mail.back')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PreviewPanel({ preview }: { preview: MailPreview }) {
+  const t = useT();
+  return (
+    <div className="space-y-2 rounded-lg border border-border p-3">
+      <p className="text-sm">
+        {t('adminAccounts.mail.recipients', {
+          count: preview.recipient_count,
+          subject: preview.subject,
+        })}
+      </p>
+      {preview.delivery_problem && <AccountNotice error>{preview.delivery_problem}</AccountNotice>}
+      <iframe
+        title={t('adminAccounts.mail.previewFrame')}
+        sandbox=""
+        className="h-64 w-full rounded border border-border bg-surface"
+        srcDoc={preview.html}
+      />
+    </div>
+  );
+}
+
+function ComposerActions({
+  busy,
+  ready,
+  sendable,
+  scheduled,
+  onPreview,
+  onTest,
+  onSend,
+}: {
+  busy: boolean;
+  ready: boolean;
+  sendable: boolean;
+  scheduled: boolean;
+  onPreview: () => void;
+  onTest: () => void;
+  onSend: () => void;
+}) {
+  const t = useT();
+  return (
+    <div className="flex flex-wrap gap-2">
+      <button
+        className="ui-button ui-button-secondary"
+        disabled={busy || !ready}
+        onClick={onPreview}
+      >
+        {t('adminAccounts.mail.preview')}
+      </button>
+      <button className="ui-button ui-button-secondary" disabled={busy || !ready} onClick={onTest}>
+        {t('adminAccounts.mail.test')}
+      </button>
+      <button className="ui-button ui-button-primary" disabled={busy || !sendable} onClick={onSend}>
+        {scheduled ? t('adminAccounts.mail.schedule') : t('adminAccounts.mail.send')}
+      </button>
+    </div>
+  );
+}
+
+const EMPTY: MailMessage = {
+  template_key: null,
+  template_vars: {},
+  subject: '',
+  body_markdown: '',
+  target_statuses: ['active'],
+  target_admissions: ['approved'],
+};
+
 export function MailComposer({ onSent }: { onSent: () => void }) {
-  const [template, setTemplate] = useState<MailMessage['template_key']>(null);
-  const [vars, setVars] = useState<Record<string, string>>({});
-  const [subject, setSubject] = useState('');
-  const [body, setBody] = useState('');
-  const [statuses, setStatuses] = useState<AccountStatus[]>(['active']);
-  const [admissions, setAdmissions] = useState<WaitlistStatus[]>(['approved']);
+  const t = useT();
+  const [message, setMessage] = useState<MailMessage>(EMPTY);
   const [when, setWhen] = useState('');
-  const [preview, setPreview] = useState<MailPreview | null>(null);
+  // A preview, and the exact message and audience it showed.
+  const [shown, setShown] = useState<{ preview: MailPreview; key: string } | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const message: MailMessage = {
-    template_key: template,
-    template_vars: vars,
-    subject,
-    body_markdown: body,
-    target_statuses: statuses,
-    target_admissions: admissions,
-  };
   async function run(action: () => Promise<string | null>) {
     setBusy(true);
     setError(null);
@@ -88,68 +262,20 @@ export function MailComposer({ onSent }: { onSent: () => void }) {
       setBusy(false);
     }
   }
-  const ready = statuses.length > 0 && admissions.length > 0;
-  const undeliverable = preview?.delivery_problem ?? null;
+  const ready = message.target_statuses.length > 0 && message.target_admissions.length > 0;
+  const key = JSON.stringify(message);
+  const current = shown?.key === key ? shown.preview : null;
+  const sendable = ready && current !== null && !current.delivery_problem;
+  const scheduledAt = when ? new Date(when) : null;
   return (
     <section className="space-y-3 rounded-xl border border-border bg-surface p-4">
-      <h2 className="text-base font-semibold">New message</h2>
-      <label className="block text-sm" htmlFor="mail-template">
-        Message
-      </label>
-      <select
-        id="mail-template"
-        className="ui-input"
-        value={template ?? ''}
-        onChange={(e) => {
-          setTemplate((e.target.value || null) as MailMessage['template_key']);
-          setVars({});
-        }}
-      >
-        <option value="">Custom (subject and Markdown)</option>
-        <option value="maintenance">Scheduled maintenance</option>
-        <option value="announcement">Announcement</option>
-      </select>
-      {template ? (
-        TEMPLATE_FIELDS[template].map((field) => (
-          <input
-            key={field}
-            className="ui-input w-full"
-            aria-label={field.replaceAll('_', ' ')}
-            placeholder={field.replaceAll('_', ' ')}
-            value={vars[field] ?? ''}
-            onChange={(e) => setVars({ ...vars, [field]: e.target.value })}
-          />
-        ))
-      ) : (
-        <>
-          <input
-            className="ui-input w-full"
-            aria-label="Subject"
-            placeholder="Subject"
-            maxLength={300}
-            value={subject}
-            onChange={(e) => setSubject(e.target.value)}
-          />
-          <textarea
-            className="ui-input w-full font-mono"
-            aria-label="Body (Markdown)"
-            placeholder="Body (Markdown; HTML is not allowed)"
-            rows={8}
-            maxLength={100000}
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-          />
-        </>
-      )}
-      <Choices legend="Account state" all={STATUSES} chosen={statuses} onChange={setStatuses} />
-      <Choices
-        legend="Application state"
-        all={ADMISSIONS}
-        chosen={admissions}
-        onChange={setAdmissions}
+      <h2 className="text-base font-semibold">{t('adminAccounts.mail.new')}</h2>
+      <MessageFields
+        message={message}
+        onMessage={(change) => setMessage((previous) => ({ ...previous, ...change }))}
       />
       <label className="block text-sm" htmlFor="mail-when">
-        Send at (leave empty to send now)
+        {t('adminAccounts.mail.when')}
       </label>
       <input
         id="mail-when"
@@ -160,59 +286,45 @@ export function MailComposer({ onSent }: { onSent: () => void }) {
       />
       {error && <AccountNotice error>{error}</AccountNotice>}
       {notice && <AccountNotice>{notice}</AccountNotice>}
-      <div className="flex flex-wrap gap-2">
-        <button
-          className="ui-button ui-button-secondary"
-          disabled={busy || !ready}
-          onClick={() =>
+      <ComposerActions
+        busy={busy}
+        ready={ready}
+        sendable={sendable && !confirming}
+        scheduled={Boolean(when)}
+        onPreview={() =>
+          void run(async () => {
+            setShown({ preview: await previewMail(message), key });
+            setConfirming(false);
+            return null;
+          })
+        }
+        onTest={() =>
+          void run(async () => {
+            await testMail(message);
+            return t('adminAccounts.mail.testSent');
+          })
+        }
+        onSend={() => setConfirming(true)}
+      />
+      {shown && !current && <AccountNotice>{t('adminAccounts.mail.stale')}</AccountNotice>}
+      {current && confirming && (
+        <SendConfirmation
+          count={current.recipient_count}
+          scheduledAt={scheduledAt}
+          busy={busy}
+          onBack={() => setConfirming(false)}
+          onConfirm={() =>
             void run(async () => {
-              setPreview(await previewMail(message));
-              return null;
-            })
-          }
-        >
-          Preview
-        </button>
-        <button
-          className="ui-button ui-button-secondary"
-          disabled={busy || !ready}
-          onClick={() =>
-            void run(async () => {
-              await testMail(message);
-              return 'A test was sent to your own verified address.';
-            })
-          }
-        >
-          Send me a test
-        </button>
-        <button
-          className="ui-button ui-button-primary"
-          disabled={busy || !ready || !preview || Boolean(undeliverable)}
-          onClick={() =>
-            void run(async () => {
-              const created = await createMail(message, when ? new Date(when).toISOString() : null);
+              const created = await createMail(message, scheduledAt?.toISOString() ?? null);
+              setConfirming(false);
+              setShown(null);
               onSent();
-              return `Queued for ${created.recipient_count} accounts.`;
+              return t('adminAccounts.mail.queued', { count: created.recipient_count });
             })
           }
-        >
-          {when ? 'Schedule' : 'Send'}
-        </button>
-      </div>
-      {preview && (
-        <div className="space-y-2 rounded-lg border border-border p-3">
-          <p className="text-sm">
-            {preview.recipient_count} recipients (verified addresses only) · {preview.subject}
-          </p>
-          {undeliverable && <AccountNotice error>{undeliverable}</AccountNotice>}
-          <iframe
-            title="Message preview"
-            sandbox=""
-            className="h-64 w-full rounded border border-border bg-surface"
-            srcDoc={preview.html}
-          />
-        </div>
+        />
       )}
+      {current && <PreviewPanel preview={current} />}
     </section>
   );
 }

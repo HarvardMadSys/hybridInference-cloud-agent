@@ -2,6 +2,7 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '@/components/providers/AuthProvider';
+import { useT } from '@/components/providers/LocaleProvider';
 import { Select } from '@/components/ui/Select';
 import { AccountNotice } from '@/components/features/auth/AccountFrame';
 import {
@@ -10,30 +11,40 @@ import {
   type AccountFilters,
   type WaitlistStatus,
 } from '@/lib/api/accounts';
+import type { ErasureResult } from '@/lib/api/accountAdmin';
+import type { TranslationKey, Translator } from '@/lib/i18n/translate';
 import { getErrorMessage } from '@/lib/utils/errors';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
-import { ActionEditor } from './AccountActions';
+import { ActionEditor, ErasureSummary, SUMMARY } from './AccountActions';
 import { AccountNotes, SignInHistory } from './AccountDetails';
 
 const FILTERS = [
-  { value: 'pending', label: 'Waiting for review' },
-  { value: 'approved', label: 'Approved' },
-  { value: 'rejected', label: 'Declined' },
-  { value: 'revoked', label: 'Access withdrawn' },
-  { value: 'not_applied', label: 'Not applied' },
-  { value: '', label: 'All accounts' },
+  { value: 'pending', label: 'adminAccounts.filter.pending' },
+  { value: 'approved', label: 'adminAccounts.filter.approved' },
+  { value: 'rejected', label: 'adminAccounts.filter.rejected' },
+  { value: 'revoked', label: 'adminAccounts.filter.revoked' },
+  { value: 'not_applied', label: 'adminAccounts.filter.notApplied' },
+  { value: '', label: 'adminAccounts.filter.all' },
 ] as const;
 const STATES = [
-  { value: '', label: 'Any state' },
-  { value: 'active', label: 'Active' },
-  { value: 'suspended', label: 'Suspended' },
-  { value: 'deleted', label: 'Deleted' },
+  { value: '', label: 'adminAccounts.state.any' },
+  { value: 'active', label: 'adminAccounts.state.active' },
+  { value: 'suspended', label: 'adminAccounts.state.suspended' },
+  { value: 'deleted', label: 'adminAccounts.state.deleted' },
 ] as const;
 const SORTS = [
-  { value: 'created', label: 'Newest first' },
-  { value: 'last_login', label: 'Recently signed in' },
+  { value: 'created', label: 'adminAccounts.sort.created' },
+  { value: 'last_login', label: 'adminAccounts.sort.lastLogin' },
 ] as const;
+
+/** The options with their labels in the administrator's language. */
+function translated<T extends { value: string; label: TranslationKey }>(
+  options: readonly T[],
+  t: Translator,
+): { value: T['value']; label: string }[] {
+  return options.map((option) => ({ value: option.value, label: t(option.label) }));
+}
 
 /** Wait until typing pauses before searching, as HybridInference's filter bar. */
 function useDebounced(value: string, delay = 300): string {
@@ -45,21 +56,26 @@ function useDebounced(value: string, delay = 300): string {
   return settled;
 }
 
-function identityLine(account: AccountEntry): string {
+function identityLine(account: AccountEntry, t: Translator): string {
   const identity = account.identity;
   const parts = [
     account.status,
     account.waitlist.status.replaceAll('_', ' '),
     (identity?.identity_verified ?? account.email_verified)
-      ? 'Identity verified'
-      : 'Email unverified',
+      ? t('adminAccounts.identityVerified')
+      : t('adminAccounts.emailUnverified'),
   ];
-  if (identity?.login_name) parts.push(`username ${identity.login_name}`);
+  if (identity?.login_name) parts.push(t('adminAccounts.username', { name: identity.login_name }));
   if (identity?.phone) parts.push(identity.phone);
-  if (account.is_admin) parts.push('Administrator');
+  if (account.is_admin) parts.push(t('adminAccounts.administrator'));
   if (account.last_login_at)
-    parts.push(`signed in ${new Date(account.last_login_at).toLocaleDateString()}`);
-  if (account.reviewed_by) parts.push(`reviewed by ${account.reviewed_by}`);
+    parts.push(
+      t('adminAccounts.signedInOn', {
+        date: new Date(account.last_login_at).toLocaleDateString(),
+      }),
+    );
+  if (account.reviewed_by)
+    parts.push(t('adminAccounts.reviewedBy', { actor: account.reviewed_by }));
   return parts.join(' · ');
 }
 
@@ -72,6 +88,7 @@ function AccountRow({
   onReview: () => void;
   selected: boolean;
 }) {
+  const t = useT();
   const label = account.identity?.label ?? account.email ?? account.id;
   return (
     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -80,18 +97,18 @@ function AccountRow({
           {account.identity?.user_name ? `${account.identity.user_name} · ` : ''}
           {label}
         </p>
-        <p className="mt-1 text-xs text-muted">{identityLine(account)}</p>
+        <p className="mt-1 text-xs text-muted">{identityLine(account, t)}</p>
         {account.waitlist.purpose && (
           <p className="mt-3 whitespace-pre-wrap break-words text-sm">{account.waitlist.purpose}</p>
         )}
         {account.waitlist.review_reason && (
           <p className="mt-2 whitespace-pre-wrap break-words text-sm text-muted">
-            Review reason: {account.waitlist.review_reason}
+            {t('adminAccounts.reviewReason', { reason: account.waitlist.review_reason })}
           </p>
         )}
         {account.admin_note && (
           <p className="mt-2 whitespace-pre-wrap break-words text-xs text-muted">
-            Note: {account.admin_note}
+            {t('adminAccounts.note', { note: account.admin_note })}
           </p>
         )}
       </div>
@@ -100,26 +117,28 @@ function AccountRow({
         disabled={selected}
         onClick={onReview}
       >
-        Review
+        {t('adminAccounts.review')}
       </button>
     </div>
   );
 }
 
+const COUNTS: [string, TranslationKey][] = [
+  ['all', 'adminAccounts.count.all'],
+  ['admission:pending', 'adminAccounts.count.waiting'],
+  ['admission:approved', 'adminAccounts.count.approved'],
+  ['status:suspended', 'adminAccounts.count.suspended'],
+  ['status:deleted', 'adminAccounts.count.deleted'],
+];
+
 function Counts({ counts }: { counts: Record<string, number> | undefined }) {
+  const t = useT();
   if (!counts) return null;
-  const shown: [string, string][] = [
-    ['all', 'All'],
-    ['admission:pending', 'Waiting'],
-    ['admission:approved', 'Approved'],
-    ['status:suspended', 'Suspended'],
-    ['status:deleted', 'Deleted'],
-  ];
   return (
-    <dl className="flex flex-wrap gap-3 text-xs text-muted" aria-label="Account counts">
-      {shown.map(([key, label]) => (
+    <dl className="flex flex-wrap gap-3 text-xs text-muted" aria-label={t('adminAccounts.counts')}>
+      {COUNTS.map(([key, label]) => (
         <div key={key} className="rounded-lg border border-border px-3 py-1">
-          <dt className="inline">{label}: </dt>
+          <dt className="inline">{t(label)}: </dt>
           <dd className="inline font-medium text-foreground">{counts[key] ?? 0}</dd>
         </div>
       ))}
@@ -170,6 +189,7 @@ function useAccounts(
 
 export default function AccountsPage() {
   const { state, refreshUser } = useAuth();
+  const t = useT();
   const [status, setStatus] = useState<WaitlistStatus | ''>('pending');
   const [accountStatus, setAccountStatus] = useState<AccountFilters['accountStatus']>('');
   const [sort, setSort] = useState<'created' | 'last_login'>('created');
@@ -178,6 +198,9 @@ export default function AccountsPage() {
   const [offset, setOffset] = useState(0);
   const [selected, setSelected] = useState<AccountEntry | null>(null);
   const [reload, setReload] = useState(0);
+  // Kept at the page: the list refreshes and closes the editor after an
+  // erasure, and the operator still needs its result and archive keys.
+  const [erasure, setErasure] = useState<{ label: string; result: ErasureResult } | null>(null);
   const local = state.user?.auth_mode === 'local';
   const { accounts, total, counts, error, loading } = useAccounts(
     local,
@@ -196,72 +219,84 @@ export default function AccountsPage() {
     <div className="min-w-0 flex-1 overflow-y-auto">
       <section className={ADMIN_PAGE}>
         <AdminPageHeader
-          section="Accounts"
-          description="Review Cloud Agent applications and manage independent accounts."
+          section={t('adminAccounts.section')}
+          description={t('adminAccounts.description')}
         />
         <AdminNavigation current="accounts" />
         {!local ? (
-          <p className="mt-6 text-sm text-muted">
-            Independent accounts are not enabled on this deployment.
-          </p>
+          <p className="mt-6 text-sm text-muted">{t('adminAccounts.notLocal')}</p>
         ) : (
           <div className="mt-5 space-y-4">
-            <nav className="flex flex-wrap gap-3 text-sm" aria-label="Account administration">
+            <nav
+              className="flex flex-wrap gap-3 text-sm"
+              aria-label={t('adminAccounts.navigation')}
+            >
               <Link className="text-accent underline" href="/admin/accounts/policy">
-                Sign-up policy and sign-in records
+                {t('adminAccounts.policyLink')}
               </Link>
               <Link className="text-accent underline" href="/admin/accounts/mail">
-                Mail to accounts
+                {t('adminAccounts.mailLink')}
               </Link>
             </nav>
+            {erasure && (
+              <div role="status" className={SUMMARY}>
+                <p className="font-medium break-all">{erasure.label}</p>
+                <ErasureSummary result={erasure.result} />
+                <button className="ui-button ui-button-ghost mt-2" onClick={() => setErasure(null)}>
+                  {t('adminAccounts.dismiss')}
+                </button>
+              </div>
+            )}
             <Counts counts={counts} />
             <div className="flex flex-wrap items-center gap-3">
               <input
                 className="ui-input min-w-[14rem] flex-1"
                 type="search"
-                aria-label="Search accounts"
-                placeholder="Email, username, phone, name or id"
+                aria-label={t('adminAccounts.search')}
+                placeholder={t('adminAccounts.searchPlaceholder')}
                 maxLength={320}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
               <Select
-                aria-label="Application status"
+                aria-label={t('adminAccounts.applicationStatus')}
                 value={status}
                 onValueChange={(value) => {
                   setStatus(value);
                   setOffset(0);
                 }}
-                options={FILTERS}
+                options={translated(FILTERS, t)}
               />
               <Select
-                aria-label="Account state"
+                aria-label={t('adminAccounts.accountState')}
                 value={accountStatus ?? ''}
                 onValueChange={(value) => setAccountStatus(value)}
-                options={STATES}
+                options={translated(STATES, t)}
               />
               <Select
-                aria-label="Sort"
+                aria-label={t('adminAccounts.sortLabel')}
                 value={sort}
                 onValueChange={(value) => setSort(value)}
-                options={SORTS}
+                options={translated(SORTS, t)}
               />
               <button
                 className="ui-button ui-button-secondary"
                 disabled={loading}
                 onClick={refresh}
               >
-                Refresh
+                {t('adminAccounts.refresh')}
               </button>
-              <span className="text-xs text-muted">{total} accounts</span>
+              <span className="text-xs text-muted">
+                {t('adminAccounts.total', { count: total })}
+              </span>
             </div>
             {error && <AccountNotice error>{error}</AccountNotice>}
             {loading ? (
               <p role="status" className="text-sm text-muted">
-                Loading accounts…
+                {t('adminAccounts.loading')}
               </p>
             ) : accounts.length === 0 ? (
-              <p className="text-sm text-muted">No accounts in this view.</p>
+              <p className="text-sm text-muted">{t('adminAccounts.empty')}</p>
             ) : (
               <ul className="space-y-3">
                 {accounts.map((account) => (
@@ -277,6 +312,12 @@ export default function AccountsPage() {
                           key={`${account.id}:${account.waitlist.version}`}
                           account={selected}
                           onCancel={() => setSelected(null)}
+                          onErased={(result) =>
+                            setErasure({
+                              label: account.identity?.label ?? account.email ?? account.id,
+                              result,
+                            })
+                          }
                           onDone={() => {
                             refresh();
                             if (account.id === state.user?.id) void refreshUser();
@@ -298,14 +339,14 @@ export default function AccountsPage() {
                 disabled={loading || offset === 0}
                 onClick={() => setOffset((v) => Math.max(0, v - 50))}
               >
-                Previous
+                {t('adminAccounts.previous')}
               </button>
               <button
                 className="ui-button ui-button-secondary"
                 disabled={loading || offset + 50 >= total}
                 onClick={() => setOffset((v) => v + 50)}
               >
-                Next
+                {t('adminAccounts.next')}
               </button>
             </div>
           </div>

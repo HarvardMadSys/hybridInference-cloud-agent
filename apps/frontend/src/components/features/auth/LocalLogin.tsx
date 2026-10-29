@@ -33,7 +33,7 @@ function useSignedIn() {
   };
 }
 
-function PhoneLogin({ countryCode }: { countryCode: string }) {
+function PhoneLogin({ countryCode, siteKey }: { countryCode: string; siteKey?: string | null }) {
   const t = useT();
   const signedIn = useSignedIn();
   const [phone, setPhone] = useState('');
@@ -62,6 +62,7 @@ function PhoneLogin({ countryCode }: { countryCode: string }) {
         onCode={setCode}
         onError={setError}
         defaultCountryCode={countryCode}
+        siteKey={siteKey}
       />
       <button className="ui-button ui-button-primary w-full" disabled={busy || code.length !== 6}>
         {busy ? t('account.signingIn') : t('account.login')}
@@ -203,7 +204,10 @@ export function LocalLogin({ signupEnabled }: { signupEnabled: boolean }) {
         </div>
       )}
       {phone && method === 'phone' ? (
-        <PhoneLogin countryCode={options?.phone.default_country_code ?? ''} />
+        <PhoneLogin
+          countryCode={options?.phone.default_country_code ?? ''}
+          siteKey={options?.turnstile_site_key}
+        />
       ) : (
         <PasswordLogin />
       )}

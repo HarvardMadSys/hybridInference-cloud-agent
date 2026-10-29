@@ -5,6 +5,7 @@
 // A team the account owns alone is deleted with it.
 import { useCallback, useEffect, useState } from 'react';
 import { AccountNotice } from '@/components/features/auth/AccountFrame';
+import { useT } from '@/components/providers/LocaleProvider';
 import { listOwnedTeams, transferOwnedTeam, type OwnedTeam } from '@/lib/api/accountAdmin';
 import { getErrorMessage } from '@/lib/utils/errors';
 
@@ -17,6 +18,7 @@ function TeamRow({
   team: OwnedTeam;
   onChanged: (teams: OwnedTeam[]) => void;
 }) {
+  const t = useT();
   const [member, setMember] = useState(team.members[0]?.user_id ?? '');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -37,11 +39,11 @@ function TeamRow({
         {team.name} <span className="font-mono text-xs text-muted">{team.id}</span>
       </p>
       {team.members.length === 0 ? (
-        <p className="text-xs text-muted">No other member: it is deleted with the account.</p>
+        <p className="text-xs text-muted">{t('adminAccounts.teams.alone')}</p>
       ) : (
         <div className="flex flex-wrap items-center gap-2">
           <label className="text-sm" htmlFor={`team-owner-${team.id}`}>
-            New owner
+            {t('adminAccounts.teams.newOwner')}
           </label>
           <select
             id={`team-owner-${team.id}`}
@@ -52,8 +54,9 @@ function TeamRow({
           >
             {team.members.map((m) => (
               <option key={m.user_id} value={m.user_id}>
-                {m.label ?? m.user_id}
-                {m.role === 'admin' ? ' (team admin)' : ''}
+                {m.role === 'admin'
+                  ? t('adminAccounts.teams.teamAdmin', { label: m.label ?? m.user_id })
+                  : (m.label ?? m.user_id)}
               </option>
             ))}
           </select>
@@ -62,7 +65,7 @@ function TeamRow({
             disabled={busy || !member}
             onClick={() => void handOver()}
           >
-            Hand over
+            {t('adminAccounts.teams.handOver')}
           </button>
         </div>
       )}
@@ -72,6 +75,7 @@ function TeamRow({
 }
 
 export function OwnedTeams({ accountId, reload }: { accountId: string; reload: number }) {
+  const t = useT();
   const [teams, setTeams] = useState<OwnedTeam[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(
@@ -93,11 +97,8 @@ export function OwnedTeams({ accountId, reload }: { accountId: string; reload: n
   if (!teams || teams.length === 0) return null;
   return (
     <div className="space-y-2">
-      <p className="text-sm font-medium">Teams it owns</p>
-      <p className="text-xs text-muted">
-        Hand each team other members use to one of them before erasing. The previous owner stays a
-        member until the account is erased; the team’s open invitations are closed.
-      </p>
+      <p className="text-sm font-medium">{t('adminAccounts.teams.title')}</p>
+      <p className="text-xs text-muted">{t('adminAccounts.teams.explain')}</p>
       <ul className="space-y-2">
         {teams.map((team) => (
           <TeamRow key={team.id} accountId={accountId} team={team} onChanged={setTeams} />
