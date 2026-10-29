@@ -226,7 +226,7 @@ export default function ComputeSetup({
           aria-pressed={manual}
           onClick={() => setManual(true)}
         >
-          Advanced manual setup
+          Manual setup
         </button>
       </div>
       <div hidden={manual}>

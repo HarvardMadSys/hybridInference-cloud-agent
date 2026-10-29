@@ -142,13 +142,11 @@ export function buildSettingsSearchItems({
   hostDefinitions,
   runtimes,
   archiveAvailable,
-  applicationTab,
 }: {
   snapshot: AgentAdminSettings | null;
   hostDefinitions: HostSettingDefinition[];
   runtimes: string[];
   archiveAvailable: boolean;
-  applicationTab: string;
 }): SettingsSearchItem[] {
   return [
     ...(snapshot?.definitions ?? []).map((definition) => {
@@ -166,15 +164,6 @@ export function buildSettingsSearchItems({
         keywords: [definition.key, definition.category, applicationSettingGroup(definition)],
       };
     }),
-    ...(snapshot?.bootstrap ?? []).map((definition) => ({
-      id: `bootstrap:${definition.key}`,
-      label: definition.label,
-      description: definition.description,
-      section: 'Deployment setup',
-      tab: applicationTab,
-      targetId: `application-bootstrap-${definition.key}`,
-      keywords: [definition.key],
-    })),
     ...hostDefinitions.map((definition) => ({
       id: `host:${definition.key}`,
       label: definition.label,

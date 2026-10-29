@@ -256,10 +256,6 @@ function organizedSnapshot(): AgentAdminSettings {
   });
 }
 
-function toggleAdvanced(field: HTMLElement) {
-  fireEvent.click(field.closest('details')!.querySelector('summary')!);
-}
-
 beforeEach(() => {
   window.history.replaceState(null, '', window.location.pathname);
   read.mockReset().mockResolvedValue(snapshot());
@@ -518,7 +514,7 @@ describe('application settings', () => {
     expect(screen.getByLabelText('Private pgAdmin URL')).toBeInTheDocument();
   });
 
-  it('keeps Important visible and preserves Advanced drafts when closed or switched to another category', async () => {
+  it('shows related fields together and preserves drafts across category changes', async () => {
     read.mockResolvedValue(organizedSnapshot());
     render(<ApplicationSettings />);
     await loadedField('Application name');
@@ -527,31 +523,25 @@ describe('application settings', () => {
     const timeout = editField('Publication Git timeout');
     expect(appId).toBeVisible();
     expect(editField('Default pull request base branch')).toBeVisible();
-    expect(timeout).not.toBeVisible();
-    expect(timeout.closest('details')).not.toHaveAttribute('open');
-    fireEvent.change(appId, { target: { value: '456' } });
-    toggleAdvanced(timeout);
     expect(timeout).toBeVisible();
+    fireEvent.change(appId, { target: { value: '456' } });
     fireEvent.change(timeout, { target: { value: '180' } });
-    toggleAdvanced(timeout);
-    expect(timeout).not.toBeVisible();
-    expect(appId).toHaveValue('456');
     selectCategory('Appearance');
     selectCategory('Source control');
-    toggleAdvanced(timeout);
     expect(editField('Publication Git timeout')).toBe(timeout);
     expect(timeout).toHaveValue(180);
     expect(appId).toHaveValue('456');
     expect(write).not.toHaveBeenCalled();
   });
 
-  it('opens Advanced and focuses an initial deep link from a merged original category', async () => {
+  it('focuses an initially linked field from a merged original category without a disclosure', async () => {
     read.mockResolvedValue(organizedSnapshot());
     window.history.replaceState(null, '', '#application-setting-publish_git_timeout_s');
     render(<ApplicationSettings />);
     const input = await screen.findByLabelText('Publication Git timeout');
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expect(input).toBeVisible();
+    expect(input.closest('details')).toBeNull();
     expect(screen.getByRole('region', { name: 'Source control' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Source control' })).toHaveAttribute(
       'aria-pressed',
@@ -559,7 +549,7 @@ describe('application settings', () => {
     );
   });
 
-  it('opens Advanced in the merged category when a missing setup field is selected', async () => {
+  it('focuses a missing setup field in its merged category without a disclosure', async () => {
     read.mockResolvedValue({
       ...organizedSnapshot(),
       setup: {
@@ -584,7 +574,7 @@ describe('application settings', () => {
     fireEvent.click(link);
     await waitFor(() => expect(input).toHaveFocus());
     expect(input).toBeVisible();
-    expect(input.closest('details')).toHaveAttribute('open');
+    expect(input.closest('details')).toBeNull();
     expect(screen.getByRole('region', { name: 'Identity & access' })).toBeVisible();
     expect(screen.getByLabelText('Sign-in authorization URL')).toBeVisible();
   });
@@ -844,7 +834,7 @@ describe('application settings', () => {
     expect(screen.getByLabelText('Registration')).toHaveTextContent('Enabled');
     expect(screen.queryByRole('textbox', { name: 'Product name' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Product name')).not.toBeVisible();
-    expect(screen.getByText('Deployment setup')).toBeVisible();
+    expect(screen.queryByText('Deployment setup')).not.toBeInTheDocument();
   });
 
   it('derives categories from definitions and groups uncategorized settings under General', async () => {
@@ -901,7 +891,7 @@ describe('application settings', () => {
     expect(
       screen.queryByRole('navigation', { name: 'Application setting categories' }),
     ).not.toBeInTheDocument();
-    expect(screen.getByText('Deployment setup')).toBeVisible();
+    expect(screen.queryByText('Deployment setup')).not.toBeInTheDocument();
   });
 
   it('opens and focuses an initial deep link after the definitions load', async () => {
@@ -1120,8 +1110,8 @@ describe('application settings', () => {
     editField('Service token');
     expect(editField('Service token')).toHaveValue('');
     expect(screen.getByRole('button', { name: 'Review Connections changes' })).toBeDisabled();
-    fireEvent.click(screen.getByText('Deployment setup'));
-    expect(screen.getByText('DATABASE_URL')).toBeInTheDocument();
+    expect(screen.queryByText('Deployment setup')).not.toBeInTheDocument();
+    expect(screen.queryByText('DATABASE_URL')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Database connection')).not.toBeInTheDocument();
   });
 

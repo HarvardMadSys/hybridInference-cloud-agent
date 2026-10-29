@@ -461,7 +461,7 @@ describe('server acquisition UI', () => {
     },
   );
 
-  it('keeps optional CloudLab values and defaults when advanced options are collapsed', async () => {
+  it('shows optional CloudLab values and retains them with defaults on submit', async () => {
     vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
     const withAdvancedFields: ComputeCatalog = {
       ...catalog,
@@ -498,13 +498,11 @@ describe('server acquisition UI', () => {
     fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
       target: { value: '/mnt/cloudlab-data' },
     });
-    const advanced = screen.getByText('Advanced options');
-    const details = advanced.closest('details')!;
-    expect(details).not.toHaveAttribute('open');
-    fireEvent.click(advanced);
+    expect(screen.getByText('Additional options')).toBeVisible();
+    expect(screen.getByLabelText('Project group')).toBeVisible();
+    expect(screen.getByLabelText('Profile parameters')).toBeVisible();
+    expect(screen.getByLabelText('Project group').closest('details')).toBeNull();
     fireEvent.change(screen.getByLabelText('Project group'), { target: { value: 'research' } });
-    fireEvent.click(advanced);
-    expect(details).not.toHaveAttribute('open');
     fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
     await waitFor(() =>
       expect(api.createComputeServer).toHaveBeenCalledWith(
@@ -580,12 +578,13 @@ describe('server acquisition UI', () => {
       'CloudLab experiment name must be 16 characters or fewer.',
     );
     expect(input).toHaveFocus();
-    expect(input.closest('details')).toHaveAttribute('open');
+    expect(input).toBeVisible();
+    expect(input.closest('details')).toBeNull();
     expect(api.createComputeServer).not.toHaveBeenCalled();
     expect(api.saveComputeConnection).not.toHaveBeenCalled();
   });
 
-  it('opens advanced options and focuses invalid JSON before saving credentials or creating a server', async () => {
+  it('focuses visible invalid JSON before saving credentials or creating a server', async () => {
     const withJson: ComputeCatalog = {
       ...catalog,
       providers: catalog.providers.map((provider) => ({
@@ -605,15 +604,13 @@ describe('server acquisition UI', () => {
     vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
     renderAdd(vi.fn(), withJson);
     fillSshForm();
-    const summary = screen.getByText('Advanced options');
-    fireEvent.click(summary);
+    expect(screen.getByLabelText('Profile parameters')).toBeVisible();
     fireEvent.change(screen.getByLabelText('Profile parameters'), { target: { value: '{broken' } });
-    fireEvent.click(summary);
     fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Profile parameters must contain valid JSON.',
     );
-    expect(summary.closest('details')).toHaveAttribute('open');
+    expect(screen.getByLabelText('Profile parameters')).toBeVisible();
     expect(screen.getByLabelText('Profile parameters')).toHaveFocus();
     expect(api.createComputeServer).not.toHaveBeenCalled();
     expect(api.saveComputeConnection).not.toHaveBeenCalled();
@@ -667,7 +664,6 @@ describe('server acquisition UI', () => {
     fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
       target: { value: '/mnt/unused-data' },
     });
-    fireEvent.click(screen.getByText('Advanced options'));
     fireEvent.click(
       screen.getByRole('checkbox', { name: 'Only track this resource (skip server setup)' }),
     );

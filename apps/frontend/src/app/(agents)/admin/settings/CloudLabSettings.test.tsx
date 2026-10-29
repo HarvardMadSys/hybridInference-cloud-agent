@@ -70,18 +70,17 @@ describe('admin CloudLab settings', () => {
       defaults.node_types.join('\n'),
     );
     expect(screen.getByLabelText('Node type profile parameter')).toHaveValue('phystype');
-    expect(
-      screen.getByLabelText('Preferred node types (top to bottom)').closest('details'),
-    ).toBeNull();
-    expect(screen.getByLabelText('CloudLab project').closest('details')).toBeNull();
-    expect(screen.getByLabelText('Initial duration (hours)').closest('details')).toBeNull();
-    const advanced = screen.getByText('Advanced').closest('details');
-    expect(advanced).not.toHaveAttribute('open');
-    expect(advanced).toContainElement(screen.getByLabelText('Template project'));
-    expect(advanced).toContainElement(screen.getByLabelText('Template name'));
-    expect(advanced).toContainElement(screen.getByLabelText('CloudLab SSH user'));
-    expect(advanced).toContainElement(screen.getByLabelText('CloudLab SSH public key'));
-    expect(advanced).toContainElement(screen.getByLabelText('Node type profile parameter'));
+    expect(screen.queryByText('Advanced')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Allocation defaults' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Machine template and access' })).toBeVisible();
+    expect(screen.getByLabelText('Preferred node types (top to bottom)')).toBeVisible();
+    expect(screen.getByLabelText('CloudLab project')).toBeVisible();
+    expect(screen.getByLabelText('Initial duration (hours)')).toBeVisible();
+    expect(screen.getByLabelText('Template project')).toBeVisible();
+    expect(screen.getByLabelText('Template name')).toBeVisible();
+    expect(screen.getByLabelText('CloudLab SSH user')).toBeVisible();
+    expect(screen.getByLabelText('CloudLab SSH public key')).toBeVisible();
+    expect(screen.getByLabelText('Node type profile parameter')).toBeVisible();
     expect(screen.getByLabelText('CloudLab SSH public key')).toHaveValue('');
     expect(screen.getByRole('button', { name: 'Save defaults' })).toBeDisabled();
   });
@@ -122,24 +121,19 @@ describe('admin CloudLab settings', () => {
     await waitFor(() => expect(saveDefaults).toHaveBeenCalledWith(updated));
   });
 
-  it('preserves advanced edits when collapsed and submits them with important defaults', async () => {
+  it('keeps template edits visible and submits them with the allocation defaults', async () => {
     const updated = { ...defaults, profile_name: 'new-template', ssh_username: 'new-user' };
     saveDefaults.mockResolvedValue({ defaults: updated });
     render(<CloudLabSettings />);
 
     await screen.findByLabelText('CloudLab project');
-    const advanced = screen.getByText('Advanced').closest('details')!;
-    const summary = advanced.querySelector('summary')!;
-    fireEvent.click(summary);
-    expect(advanced).toHaveAttribute('open');
     const template = screen.getByLabelText('Template name');
+    expect(template).toBeVisible();
     fireEvent.change(template, { target: { value: 'new-template' } });
     fireEvent.change(screen.getByLabelText('CloudLab SSH user'), {
       target: { value: 'new-user' },
     });
-    fireEvent.click(summary);
 
-    expect(advanced).not.toHaveAttribute('open');
     expect(screen.getByLabelText('Template name')).toBe(template);
     expect(template).toHaveValue('new-template');
     fireEvent.click(screen.getByRole('button', { name: 'Save defaults' }));
@@ -154,7 +148,6 @@ describe('admin CloudLab settings', () => {
     render(<CloudLabSettings />);
 
     await screen.findByLabelText('CloudLab project');
-    fireEvent.click(screen.getByText('Advanced').closest('details')!.querySelector('summary')!);
     fireEvent.change(screen.getByLabelText('CloudLab SSH public key'), {
       target: { value: publicKey },
     });
@@ -163,7 +156,7 @@ describe('admin CloudLab settings', () => {
     await waitFor(() => expect(saveDefaults).toHaveBeenCalledWith(updated));
   });
 
-  it('keeps an invalid SSH public key in the advanced section', async () => {
+  it('keeps an invalid SSH public key visible with its error', async () => {
     render(<CloudLabSettings />);
 
     const project = await screen.findByLabelText('CloudLab project');
@@ -176,7 +169,7 @@ describe('admin CloudLab settings', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'SSH public key must be one OpenSSH public key.',
     );
-    expect(screen.getByText('Advanced').closest('details')).toHaveAttribute('open');
+    expect(screen.getByLabelText('CloudLab SSH public key')).toBeVisible();
     expect(screen.getByLabelText('CloudLab SSH public key')).toHaveValue('not-a-key');
     expect(saveDefaults).not.toHaveBeenCalled();
   });
@@ -213,7 +206,7 @@ describe('admin CloudLab settings', () => {
     expect(screen.getByRole('button', { name: 'Save defaults' })).toBeEnabled();
   });
 
-  it('reveals advanced defaults when the server returns a validation error', async () => {
+  it('keeps template defaults editable after the server returns a validation error', async () => {
     saveDefaults.mockRejectedValue(new APIError('VALIDATION_ERROR', 'Invalid template', 422));
     render(<CloudLabSettings />);
 
@@ -222,19 +215,13 @@ describe('admin CloudLab settings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save defaults' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Invalid template');
-    const advanced = screen.getByText('Advanced').closest('details')!;
-    expect(advanced).toHaveAttribute('open');
+    expect(screen.getByLabelText('Template name')).toBeVisible();
     expect(screen.getByLabelText('Template name')).toHaveValue('kata-node');
 
-    const summary = advanced.querySelector('summary')!;
-    fireEvent.click(summary);
-    expect(advanced).not.toHaveAttribute('open');
     fireEvent.click(screen.getByRole('button', { name: 'Save defaults' }));
     await waitFor(() => expect(saveDefaults).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(advanced).toHaveAttribute('open'));
 
-    fireEvent.click(summary);
     fireEvent.change(project, { target: { value: 'another-project' } });
-    expect(advanced).not.toHaveAttribute('open');
+    expect(screen.getByLabelText('Template name')).toBeVisible();
   });
 });
