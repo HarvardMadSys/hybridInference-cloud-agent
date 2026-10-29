@@ -1,7 +1,8 @@
 """Every environment variable this repository names, and where each one belongs.
 
 ``tests/unit/test_env_classification.py`` holds the code to this table: a
-variable read by Python (``apps/backend``, ``deploy``, ``scripts``), named by a
+variable read by Python (``apps/backend``, ``deploy``, ``scripts``), consumed as
+an input by a shell script under ``deploy`` or ``scripts``, or named by a
 Compose file, an example env file, a Dockerfile ``ARG`` or the web app must
 have exactly one entry here, and an entry nothing names any more must go. The
 table lives with the tests, not in an image: nothing at runtime reads it.
@@ -471,6 +472,40 @@ FAMILIES: tuple[Family, ...] = (
             "UV_VERSION",
         ),
     ),
+    Family(
+        "deployment",
+        "Inputs of the deployment entry points (deploy/*/deploy.sh, sandbox_host.sh, "
+        "deploy/release/artifact_env.sh): what to deploy, from where, into which "
+        "directory, how long to wait, and the artifact release being installed.",
+        names=(
+            "DEPLOY_SHA",
+            "SOURCE_REPO",
+            "DEPLOY_ROOT",
+            "APP_DIR",
+            "ALLOW_DIRTY",
+            "ALLOW_STRAY_STACK",
+            "HEALTH_TIMEOUT",
+            "AGENT_DEPLOY_MODE",
+            "AGENT_DEPLOY_PYTHON",
+            "AGENT_DEPLOY_DRAINING_HOST",
+            "AGENT_RELEASE_MANIFEST",
+            "AGENT_WEB_VARIANT",
+        ),
+    ),
+    Family(
+        "deployment",
+        "The Kata runtime a host installs (setup_kata_runtime.sh overrides): the host's "
+        "isolation boundary, pinned and verified by digest.",
+        names=(
+            "KATA_VERSION",
+            "KATA_SHA256",
+            "KATA_DOWNLOAD_BASE",
+            "KATA_LINK_DIR",
+            "KATA_CONFIG_PATH",
+            "KATA_DEBUG_KERNEL_PATH",
+            "KATA_SETUP_SCRIPT",
+        ),
+    ),
     # -- operation --------------------------------------------------------
     Family(
         "operation",
@@ -533,7 +568,16 @@ FAMILIES: tuple[Family, ...] = (
             "TUNNEL_REVERSE_TARGET_PORT",
             "TUNNEL_SSH_DESTINATION",
             "TUNNEL_SSH_PORT",
+            "TUNNEL_SSH_KEY",
+            "TUNNEL_SSH_KNOWN_HOSTS",
         ),
+    ),
+    Family(
+        "internal",
+        "Set by a deploy script for a script or command it runs itself: host deploy.sh "
+        "defers sandbox_host.sh's shared-ready marker, and the control-plane deploy.sh "
+        "marks its own readiness run.",
+        names=("DEFER_SHARED_READY_MARKER", "WATCH_READINESS"),
     ),
     # -- platform ---------------------------------------------------------
     Family(
@@ -588,7 +632,19 @@ FAMILIES: tuple[Family, ...] = (
             "AGENT_BROKER_STOP_GRACE",
         ),
     ),
+    Family(
+        "retired",
+        "No longer read: sandbox_host.sh only warns that AGENT_RUNNER_REPLICAS is set and "
+        "should be removed from .env.",
+        names=("AGENT_RUNNER_REPLICAS",),
+    ),
     # -- tooling ----------------------------------------------------------
+    Family(
+        "tooling",
+        "Test seams of the host scripts: the tests point them at a temporary root, "
+        "CPU and KVM description and Docker daemon file.",
+        names=("KATA_EXTRACT_ROOT", "KATA_CPUINFO", "KATA_KVM_DEVICE", "DOCKER_DAEMON_JSON"),
+    ),
     Family(
         "tooling",
         "The local development stack (deploy/local).",
@@ -597,7 +653,8 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family(
         "tooling",
-        "Repository scripts, preflight checks, benchmarks, CI and browser tests.",
+        "Repository scripts, preflight checks, benchmarks, CI and browser tests; "
+        "DEPLOY_PEER_JOB is the deploy workflow's peer job, watched by deploy.sh.",
         names=(
             "TEST_DB_HOST",
             "TEST_DB_PORT",
@@ -610,6 +667,14 @@ FAMILIES: tuple[Family, ...] = (
             "CLOUD_AGENT_E2E_PORT",
             "CLOUD_AGENT_E2E_SKIP_BUILD",
             "CI",
+            "CI_LOG_DIR",
+            "DEPLOY_PEER_JOB",
+            "TEST_DB_LOCAL_CONTAINER",
+            "TEST_DB_LOCAL_IMAGE",
+            "TEST_DB_LOCAL_NAME",
+            "TEST_DB_LOCAL_PORT",
+            "TEST_DB_WORKERS",
+            "UV_RUN",
             "GITHUB_API_URL",
             "GITHUB_REPOSITORY",
             "GITHUB_RUN_ATTEMPT",
@@ -826,3 +891,27 @@ UNMIGRATED_ENV_SETTINGS: frozenset[str] = frozenset(
         "WEB_SEARCH_PROVIDER",
     }
 )
+
+
+#: Shell functions that read the configuration value their first argument
+#: names in a way the shell scan's patterns cannot see, by function name (the
+#: deploy scripts source the file that defines them), and why.
+SHELL_HELPERS: dict[str, str] = {
+    "artifact_env_value": (
+        "deploy/release/artifact_env.sh: looks the name up in the Compose environment "
+        "rendered for an artifact deployment (.env plus the process environment)"
+    ),
+}
+
+#: Shell reads the scan reports as inputs that are not, by (script, variable):
+#: a sourced library reading what the script sourcing it set.
+SHELL_NOT_INPUTS: dict[tuple[str, str], str] = {
+    ("deploy/release/artifact_env.sh", "SHA"): (
+        "both deploy.sh scripts set SHA (their argument or DEPLOY_SHA) before sourcing this file"
+    ),
+}
+
+#: Shell reads whose variable the script computes, by (script, function,
+#: construct), and why. None today: every indirect read resolves to a loop
+#: over literal names or sits inside a helper.
+SHELL_DYNAMIC_READS: dict[tuple[str, str, str], str] = {}
