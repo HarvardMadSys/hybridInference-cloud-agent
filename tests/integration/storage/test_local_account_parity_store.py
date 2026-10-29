@@ -1043,9 +1043,12 @@ async def test_concurrent_senders_claim_a_broadcast_once_and_a_stale_claim_resum
     broadcast_id = await _broadcast(storage)
     claims = await asyncio.gather(*(accounts.claim_due_broadcast() for _ in range(4)))
     assert [claim["id"] for claim in claims if claim] == [broadcast_id]
+    [claimed] = [claim for claim in claims if claim]
     first = await accounts.pending_broadcast_recipients(broadcast_id=broadcast_id, limit=1)
-    await accounts.record_broadcast_results(
-        broadcast_id=broadcast_id, outcomes=[(first[0]["account_id"], "sent", None)]
+    assert await accounts.record_broadcast_results(
+        broadcast_id=broadcast_id,
+        claim_token=claimed["claim_token"],
+        outcomes=[(first[0]["account_id"], "sent", None)],
     )
     # The sender dies here; once its claim is stale another resumes the rest.
     async with pool.acquire() as conn:

@@ -26,7 +26,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 
 from cloud_agent.accounts.mail import AccountMail
-from cloud_agent.accounts.policy import admin_emails, approval_policy, parse_signup_domain
+from cloud_agent.accounts.policy import approval_policy, parse_signup_domain
 from cloud_agent.api._local_auth import (
     LocalAuthRoute,
     account_entry,
@@ -44,7 +44,6 @@ from cloud_agent.api.deps import (
 )
 from cloud_agent.api.errors import typed_error
 from cloud_agent.application.owner_termination import terminate_owner_access
-from cloud_agent.domain.accounts import AccountTransitionRefused
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas.accounts import (
     AccountActionRequest,
@@ -72,9 +71,6 @@ router = APIRouter(
     route_class=LocalAuthRoute,
     dependencies=[Depends(require_local_mode)],
 )
-
-#: Actions the administrator address list undoes at the account's next sign-in.
-_UNDONE_BY_ADMIN_LIST = frozenset({"revoke_admin", "revoke", "reject"})
 
 AdmissionFilter = Literal["not_applied", "pending", "approved", "rejected", "revoked"]
 StatusFilter = Literal["active", "suspended", "deleted"]
@@ -223,29 +219,12 @@ async def change_account(
 ) -> AccountEntry:
     """Apply one action at the version the administrator read.
 
-    An account whose proven email is on **Administrator email addresses** is
-    made administrator again at its next sign-in, as HybridInference's
-    ``ADMIN_EMAILS`` does, so withdrawing its administration or access, or
-    declining it, is refused (``listed_admin_address``) rather than reported
-    done: the address comes off the list first, or the account is suspended.
+    What the administrator address list would grant back is refused in the
+    action's own transaction (``listed_admin_address``; see
+    :func:`cloud_agent.domain.accounts.refuse_undone_by_admin_list`).
     """
     reason = (body.reason or "").strip() or None
-    accounts = local_accounts(request)
-    if body.action in _UNDONE_BY_ADMIN_LIST:
-        current = await accounts.get_account(account_id)
-        if (
-            current is not None
-            and current.email_proven
-            and current.email
-            and current.email.lower() in admin_emails()
-        ):
-            raise AccountTransitionRefused(
-                "This account's email is in Administrator email addresses (Admin → Settings → "
-                "Accounts), which makes it an administrator again when it signs in. Remove the "
-                "address from that list first, or suspend the account.",
-                code="listed_admin_address",
-            )
-    result = await accounts.apply_admin_action(
+    result = await local_accounts(request).apply_admin_action(
         account_id=account_id,
         action=body.action,
         reason=reason,

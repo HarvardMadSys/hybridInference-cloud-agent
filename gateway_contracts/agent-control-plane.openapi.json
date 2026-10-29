@@ -31782,7 +31782,7 @@
     },
     "/v1/admin/accounts/{account_id}": {
       "patch": {
-        "description": "Apply one action at the version the administrator read.\n\nAn account whose proven email is on **Administrator email addresses** is\nmade administrator again at its next sign-in, as HybridInference's\n``ADMIN_EMAILS`` does, so withdrawing its administration or access, or\ndeclining it, is refused (``listed_admin_address``) rather than reported\ndone: the address comes off the list first, or the account is suspended.",
+        "description": "Apply one action at the version the administrator read.\n\nWhat the administrator address list would grant back is refused in the\naction's own transaction (``listed_admin_address``; see\n:func:`cloud_agent.domain.accounts.refuse_undone_by_admin_list`).",
         "operationId": "change_account_v1_admin_accounts__account_id__patch",
         "parameters": [
           {

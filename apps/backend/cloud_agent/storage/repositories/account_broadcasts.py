@@ -5,10 +5,13 @@ accounts whose state and application state the administrator chose and that
 have a verified email. One process at a time sends it: a claim moves it to
 ``sending`` with ``FOR UPDATE SKIP LOCKED``, and a claim older than
 :data:`STALE_CLAIM` (a process that died mid-send) can be taken over, which
-resumes with the recipients still pending. The sender records each
-recipient's outcome right after handing that message over (each record also
-refreshes the claim), so nobody is mailed twice except at most the one
-message in flight when that process died. A recipient whose
+resumes with the recipients still pending. Each claim carries a fresh
+token: the sender holds it before every message and records each
+recipient's outcome right after handing that message over, both only while
+the token is still the broadcast's (each also refreshes the claim). A
+sender that stalled past the stale bound and resumes finds its claim taken
+and stops, so nobody is mailed twice except at most the one message in
+flight when the claim changed hands. A recipient whose
 account was deleted, or whose address changed, before the send is skipped.
 """
 
@@ -33,6 +36,13 @@ JOIN agent_local_login_identities e ON e.account_id = a.id AND e.kind = 'email'
     AND e.verified_at IS NOT NULL
 WHERE a.status = ANY($1::text[]) AND a.status <> 'deleted' AND m.status = ANY($2::text[])
   AND a.erased_at IS NULL
+"""
+
+#: Refresh a claim that is still the given sender's.
+_HOLD_SQL = """
+UPDATE agent_local_broadcasts SET claimed_at = NOW()
+WHERE id = $1 AND claim_token = $2 AND status = 'sending'
+RETURNING 1
 """
 
 _ROW = (
@@ -179,7 +189,8 @@ class BroadcastsMixin:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                UPDATE agent_local_broadcasts SET status = 'sending', claimed_at = NOW()
+                UPDATE agent_local_broadcasts
+                SET status = 'sending', claimed_at = NOW(), claim_token = gen_random_uuid()::text
                 WHERE id = (
                     SELECT id FROM agent_local_broadcasts
                     WHERE (status = 'scheduled' AND (scheduled_at IS NULL OR scheduled_at <= NOW()))
@@ -187,7 +198,7 @@ class BroadcastsMixin:
                     ORDER BY coalesce(scheduled_at, created_at), id
                     FOR UPDATE SKIP LOCKED LIMIT 1
                 )
-                RETURNING id, subject, body_html, body_text
+                RETURNING id, subject, body_html, body_text, claim_token
                 """
             )
         return dict(row) if row is not None else None
@@ -214,11 +225,26 @@ class BroadcastsMixin:
             )
         return [dict(row) for row in rows]
 
+    async def hold_broadcast_claim(self, *, broadcast_id: str, claim_token: str) -> bool:
+        """Refresh the claim if it is still this sender's; ``False`` once another took it."""
+        async with self._pool.acquire() as conn:
+            return bool(await conn.fetchval(_HOLD_SQL, broadcast_id, claim_token))
+
     async def record_broadcast_results(
-        self, *, broadcast_id: str, outcomes: list[tuple[str, str, str | None]]
-    ) -> None:
-        """Record ``(account_id, status, error)`` for recipients just handled; refresh the claim."""
+        self,
+        *,
+        broadcast_id: str,
+        claim_token: str,
+        outcomes: list[tuple[str, str, str | None]],
+    ) -> bool:
+        """Record ``(account_id, status, error)`` for recipients just handled.
+
+        Only while the claim is still this sender's, which it refreshes;
+        ``False`` (nothing recorded) once another sender took it over.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
+            if not await conn.fetchval(_HOLD_SQL, broadcast_id, claim_token):
+                return False
             await conn.execute(
                 """
                 UPDATE agent_local_broadcast_recipients AS r
@@ -232,28 +258,29 @@ class BroadcastsMixin:
                 [outcome[1] for outcome in outcomes],
                 [outcome[2] for outcome in outcomes],
             )
-            await conn.execute(
-                "UPDATE agent_local_broadcasts SET claimed_at = NOW() WHERE id = $1", broadcast_id
-            )
+            return True
 
-    async def finish_broadcast(self, *, broadcast_id: str) -> str:
-        """Close a fully handled broadcast: ``failed`` if nothing was sent and something failed."""
+    async def finish_broadcast(self, *, broadcast_id: str, claim_token: str) -> str | None:
+        """Close a fully handled broadcast: ``failed`` if nothing was sent and something failed.
+
+        ``None`` when the claim is no longer this sender's: its new holder closes it.
+        """
         async with self._pool.acquire() as conn:
-            return str(
-                await conn.fetchval(
-                    """
+            status = await conn.fetchval(
+                """
                     UPDATE agent_local_broadcasts SET sent_at = NOW(), status = CASE
                         WHEN NOT EXISTS (SELECT 1 FROM agent_local_broadcast_recipients
                                          WHERE broadcast_id = $1 AND status = 'sent')
                          AND EXISTS (SELECT 1 FROM agent_local_broadcast_recipients
                                      WHERE broadcast_id = $1 AND status = 'failed')
                         THEN 'failed' ELSE 'sent' END
-                    WHERE id = $1 AND status = 'sending'
+                    WHERE id = $1 AND status = 'sending' AND claim_token = $2
                     RETURNING status
                     """,
-                    broadcast_id,
-                )
+                broadcast_id,
+                claim_token,
             )
+        return None if status is None else str(status)
 
 
 __all__ = ["STALE_CLAIM", "BroadcastsMixin"]

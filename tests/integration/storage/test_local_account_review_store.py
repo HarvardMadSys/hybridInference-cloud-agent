@@ -258,6 +258,99 @@ async def test_the_database_refuses_a_verification_without_its_source(storage, p
             )
 
 
+async def test_reclaiming_an_address_drops_what_its_claimant_wrote(storage, pool, monkeypatch):
+    """Review R3: the holder's reset takes the account back without the claimant's details."""
+    monkeypatch.setenv("AGENT_LOCAL_SIGNUP_REQUIRE_EMAIL_VERIFICATION", "false")
+    recorder = _Flows(storage)
+    outcome = await recorder.flows.sign_up(
+        "claimed@lab.edu",
+        PASSWORD,
+        user_name="Not the holder",
+        use_case="Written by whoever signed up first",
+        tos_accepted=True,
+    )
+    assert outcome.account is not None and outcome.account.admission_status == "pending"
+    account_id = outcome.account.id
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_local_accounts SET locale = 'zh-CN', locale_chosen_at = NOW() "
+            "WHERE id = $1",
+            account_id,
+        )
+    token = tokens.new_email_token()
+    await storage.local_accounts.issue_email_token(
+        account_id=account_id,
+        purpose="reset_password",
+        token_hash=tokens.email_token_hash(token),
+        ttl_s=3600,
+    )
+    reset = await storage.local_accounts.reset_password(
+        token_hash=tokens.email_token_hash(token), password_hash=await hash_password("Holder1Pass")
+    )
+    assert reset is not None and reset.reclaimed
+    record = await storage.local_accounts.get_account(account_id)
+    assert record is not None
+    assert (record.user_name, record.locale, record.purpose, record.admission_status) == (
+        None,
+        None,
+        "",
+        "not_applied",
+    )
+    assert record.email_proven
+    async with pool.acquire() as conn:
+        tos = await conn.fetchval(
+            "SELECT tos_accepted_at FROM agent_local_accounts WHERE id = $1", account_id
+        )
+        audit = await conn.fetchval(
+            "SELECT details->>'admission_before' FROM agent_admin_audit_log "
+            "WHERE target_user_id = $1 AND action = 'agent.local_account.reclaim'",
+            account_id,
+        )
+    assert (tos, audit) == (None, "pending")
+    # A proven address is the holder's own: a later reset reclaims nothing.
+    await _reset(storage, recorder.flows, account_id, "Holder2Pass")
+    again = await storage.local_accounts.get_account(account_id)
+    assert again is not None and again.admission_status == "not_applied"
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM agent_admin_audit_log "
+                "WHERE target_user_id = $1 AND action = 'agent.local_account.reclaim'",
+                account_id,
+            )
+            == 1
+        )
+
+
+async def test_the_store_refuses_withdrawing_what_the_admin_list_grants_back(storage, monkeypatch):
+    """Review R2: held to every caller of the action, in its own transaction."""
+    monkeypatch.setenv("AGENT_LOCAL_ADMIN_EMAILS", "lead@example.edu, accepted@example.edu")
+    lead = await make_account(storage, "lead@example.edu", admission="approved")
+    promoted = await storage.local_accounts.promote_listed_admin(
+        account_id=lead, actor_id="admin-emails"
+    )
+    assert promoted is not None and promoted.is_admin
+    for action in ("revoke_admin", "revoke"):
+        with pytest.raises(AccountTransitionRefused) as refused:
+            await act(storage, lead, action)
+        assert refused.value.code == "listed_admin_address"
+    # An unproven listed address is not promoted, so nothing is held back for it.
+    accepted = tokens.new_account_id()
+    assert await storage.local_accounts.create_account(
+        account_id=accepted,
+        email="accepted@example.edu",
+        email_normalized="accepted@example.edu",
+        password_hash=await hash_password(PASSWORD),
+        email_verified_by="policy",
+        purpose="research",
+    )
+    rejected = await act(storage, accepted, "reject")
+    assert rejected.account.admission_status == "rejected"
+    monkeypatch.setenv("AGENT_LOCAL_ADMIN_EMAILS", "")
+    withdrawn = await act(storage, lead, "revoke_admin")
+    assert not withdrawn.account.is_admin
+
+
 # ── N2: hosts finish their cleanup first ─────────────────────────────────
 
 
@@ -499,6 +592,45 @@ async def test_a_sender_that_dies_mid_batch_resends_nothing_it_handed_over(stora
     # Every reader exactly once: what the first sender handed over was recorded.
     assert len(dying.sent) == 2 and len(takeover.sent) == 2
     assert sorted(dying.sent + takeover.sent) == [f"reader{i}@example.edu" for i in range(4)]
+
+
+async def test_a_stalled_sender_stops_once_another_took_its_claim(storage, pool):
+    """Review R1: the first sender resumes after a takeover and sends nothing more."""
+    from cloud_agent.application.account_broadcasts import send_broadcast
+
+    for index in range(3):
+        await make_account(storage, f"stalled{index}@example.edu", admission="approved")
+    accounts = storage.local_accounts
+    broadcast_id = await _broadcast(storage)
+    stalled = await accounts.claim_due_broadcast()
+    assert stalled is not None
+    # The first sender stalls past the stale bound; another takes the broadcast over.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_local_broadcasts SET claimed_at = NOW() - INTERVAL '1 hour' "
+            "WHERE id = $1",
+            broadcast_id,
+        )
+    current = await accounts.claim_due_broadcast()
+    assert current is not None and current["claim_token"] != stalled["claim_token"]
+    late = _CrashingMailer()
+    assert await send_broadcast(accounts, late, stalled) == "claim_lost"
+    assert late.sent == []
+    pending = await accounts.pending_broadcast_recipients(broadcast_id=broadcast_id, limit=5)
+    assert not await accounts.record_broadcast_results(
+        broadcast_id=broadcast_id,
+        claim_token=stalled["claim_token"],
+        outcomes=[(pending[0]["account_id"], "sent", None)],
+    )
+    assert (
+        await accounts.finish_broadcast(
+            broadcast_id=broadcast_id, claim_token=stalled["claim_token"]
+        )
+        is None
+    )
+    holder = _CrashingMailer()
+    assert await send_broadcast(accounts, holder, current) == "sent"
+    assert sorted(holder.sent) == [f"stalled{i}@example.edu" for i in range(3)]
 
 
 async def test_a_message_tencent_ses_cannot_take_is_recorded_with_why(storage, monkeypatch):

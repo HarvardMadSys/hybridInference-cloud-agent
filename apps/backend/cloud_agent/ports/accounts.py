@@ -98,6 +98,9 @@ class PasswordReset:
 
     account_id: str
     verified_identity: bool
+    #: The reset proved an address accepted unproven while verification was
+    #: off: its holder took the account back from whoever claimed it.
+    reclaimed: bool = False
 
 
 @dataclass(frozen=True)
@@ -173,14 +176,22 @@ class AccountBroadcasts(Protocol):
         """The next pending recipients, with whether each may still be mailed."""
         ...
 
-    async def record_broadcast_results(
-        self, *, broadcast_id: str, outcomes: list[tuple[str, str, str | None]]
-    ) -> None:
-        """Record each handled recipient's outcome."""
+    async def hold_broadcast_claim(self, *, broadcast_id: str, claim_token: str) -> bool:
+        """Refresh the claim if it is still this sender's; ``False`` once another took it."""
         ...
 
-    async def finish_broadcast(self, *, broadcast_id: str) -> str:
-        """Close a fully handled broadcast; its final status."""
+    async def record_broadcast_results(
+        self,
+        *,
+        broadcast_id: str,
+        claim_token: str,
+        outcomes: list[tuple[str, str, str | None]],
+    ) -> bool:
+        """Record each handled recipient's outcome while the claim is this sender's."""
+        ...
+
+    async def finish_broadcast(self, *, broadcast_id: str, claim_token: str) -> str | None:
+        """Close a fully handled broadcast; its final status, or ``None`` if the claim was lost."""
         ...
 
 

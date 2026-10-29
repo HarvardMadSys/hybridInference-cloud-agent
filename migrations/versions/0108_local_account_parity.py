@@ -267,6 +267,7 @@ _BROADCAST: tuple[str, ...] = (
         recipient_count INTEGER NOT NULL DEFAULT 0 CHECK (recipient_count >= 0),
         scheduled_at TIMESTAMPTZ,
         claimed_at TIMESTAMPTZ,
+        claim_token TEXT,
         sent_at TIMESTAMPTZ,
         created_by TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

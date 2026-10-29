@@ -23,6 +23,7 @@ from cloud_agent.storage._sql.local_accounts import (
     NotBindable,
     lock_account_row,
     locked_account,
+    write_audit,
 )
 
 if TYPE_CHECKING:
@@ -44,6 +45,31 @@ async def _upsert_password(conn: Any, account_id: str, password_hash: str) -> No
         """,
         account_id,
         password_hash,
+    )
+
+
+async def _clear_claimants_details(conn: Any, account_id: str) -> None:
+    """Drop what whoever claimed an unproven address wrote, as its holder takes it back."""
+    await conn.execute(
+        "UPDATE agent_local_accounts SET user_name = NULL, tos_accepted_at = NULL, "
+        "locale = NULL, locale_chosen_at = NULL WHERE id = $1",
+        account_id,
+    )
+    previous = await conn.fetchval(
+        "UPDATE agent_local_admissions a SET purpose = '', "
+        "status = CASE WHEN a.status = 'pending' THEN 'not_applied' ELSE a.status END, "
+        "submitted_at = CASE WHEN a.status = 'pending' THEN NULL ELSE a.submitted_at END "
+        "FROM agent_local_admissions old WHERE a.account_id = $1 AND old.account_id = $1 "
+        "RETURNING old.status",
+        account_id,
+    )
+    await write_audit(
+        conn,
+        action="agent.local_account.reclaim",
+        actor_id="password-reset",
+        admin_ip="local",
+        account_id=account_id,
+        details={"admission_before": previous},
     )
 
 
@@ -200,6 +226,15 @@ class CredentialsMixin:
         The link proves control of the mailbox, so it verifies the email too;
         :attr:`PasswordReset.verified_identity` says whether that made the
         identity verified only now.
+
+        An email accepted unproven while verification was off may have been
+        claimed by someone other than its holder. The reset is the holder
+        taking the account back (:attr:`PasswordReset.reclaimed`): what the
+        claimant wrote goes with the claimant's password and sessions (the
+        display name, language, Terms acceptance and application text), a
+        pending application returns to not applied for the holder to make,
+        and the reclaim is audited. Decisions an administrator already made
+        stay, as does the sign-in history, which records the claimant.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             consumed = await self._consume_token(conn, token_hash, "reset_password")
@@ -211,6 +246,16 @@ class CredentialsMixin:
                 "SELECT identity_verified FROM agent_local_account_access WHERE account_id = $1",
                 account_id,
             )
+            reclaimed = (
+                await conn.fetchval(
+                    "SELECT verified_by FROM agent_local_login_identities "
+                    "WHERE account_id = $1 AND kind = 'email' FOR UPDATE",
+                    account_id,
+                )
+                == "policy"
+            )
+            if reclaimed:
+                await _clear_claimants_details(conn, account_id)
             await conn.execute(
                 "UPDATE agent_local_login_identities "
                 "SET verified_at = coalesce(verified_at, NOW()), verified_by = 'link' "
@@ -224,7 +269,9 @@ class CredentialsMixin:
             )
             await conn.execute(REVOKE_SESSIONS_SQL, account_id, "password_reset")
             await conn.execute(BUMP_VERSION_SQL, account_id)
-            return PasswordReset(account_id=account_id, verified_identity=not was_verified)
+            return PasswordReset(
+                account_id=account_id, verified_identity=not was_verified, reclaimed=reclaimed
+            )
 
     async def rehash_password(self, *, account_id: str, old_hash: str, new_hash: str) -> bool:
         """Replace a hash made with older parameters, if it is still the stored one.

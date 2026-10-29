@@ -5,7 +5,9 @@ pending recipients through the configured account mail transport, and
 records each recipient's outcome as soon as that one message is handed over,
 before the next is sent, so a sender that dies mid-run leaves at most the one
 message in flight unrecorded: the pass that takes over resends only that
-one. It closes the broadcast once none is pending, and runs in the process
+one. Each claim has a token, held before every message: a sender that
+stalled until another took its claim over stops at its next message rather
+than finishing its batch beside the new holder. It closes the broadcast once none is pending, and runs in the process
 that owns background work, in local mode, every :data:`BROADCAST_INTERVAL_S`;
 see :mod:`cloud_agent.storage.repositories.account_broadcasts`.
 
@@ -39,8 +41,12 @@ BATCH_DELAY_S = 1.0
 async def send_broadcast(
     accounts: AccountBroadcasts, mailer: AccountMailer, broadcast: dict[str, object]
 ) -> str:
-    """Mail every pending recipient of a claimed broadcast; its final status."""
+    """Mail every pending recipient of a claimed broadcast.
+
+    Its final status, or ``claim_lost`` when another sender took it over.
+    """
     broadcast_id = str(broadcast["id"])
+    claim = str(broadcast["claim_token"])
     details = {
         "subject": str(broadcast["subject"]),
         "html": str(broadcast["body_html"]),
@@ -50,17 +56,35 @@ async def send_broadcast(
         broadcast_id=broadcast_id, limit=BATCH_SIZE
     ):
         for recipient in batch:
+            if not await accounts.hold_broadcast_claim(
+                broadcast_id=broadcast_id, claim_token=claim
+            ):
+                return _claim_lost(broadcast_id)
             outcome = await _deliver(mailer, recipient, details)
             # Recorded before the next message goes: a takeover never resends it.
-            await accounts.record_broadcast_results(broadcast_id=broadcast_id, outcomes=[outcome])
+            if not await accounts.record_broadcast_results(
+                broadcast_id=broadcast_id, claim_token=claim, outcomes=[outcome]
+            ):
+                return _claim_lost(broadcast_id)
         if len(batch) == BATCH_SIZE:
             await asyncio.sleep(BATCH_DELAY_S)
-    status = await accounts.finish_broadcast(broadcast_id=broadcast_id)
+    status = await accounts.finish_broadcast(broadcast_id=broadcast_id, claim_token=claim)
+    if status is None:
+        return _claim_lost(broadcast_id)
     logger.info(
         "agent_local_broadcast_sent",
         extra={"event": "agent_local_broadcast_sent", "broadcast_id": broadcast_id},
     )
     return status
+
+
+def _claim_lost(broadcast_id: str) -> str:
+    """Another sender took this broadcast over; it continues, this one stops."""
+    logger.warning(
+        "agent_local_broadcast_claim_lost",
+        extra={"event": "agent_local_broadcast_claim_lost", "broadcast_id": broadcast_id},
+    )
+    return "claim_lost"
 
 
 async def _deliver(

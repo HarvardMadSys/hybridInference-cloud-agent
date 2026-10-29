@@ -335,6 +335,36 @@ def plan_waitlist_submission(record: AccountRecord) -> bool:
     return record.admission_status != "pending"
 
 
+#: Actions the administrator address list would undo at the account's next sign-in.
+UNDONE_BY_ADMIN_LIST = frozenset({"revoke_admin", "revoke", "reject"})
+
+
+def refuse_undone_by_admin_list(record: AccountRecord, action: str, listed: set[str]) -> None:
+    """Refuse withdrawing what the administrator address list would grant back.
+
+    An account whose proven email is listed is made administrator again when
+    it signs in, as HybridInference's ``ADMIN_EMAILS``, so withdrawing its
+    administration or access, or declining it, is refused rather than
+    reported done: the address comes off the list first, or the account is
+    suspended.
+
+    Raises:
+        AccountTransitionRefused: ``listed_admin_address``.
+    """
+    if (
+        action in UNDONE_BY_ADMIN_LIST
+        and record.email_proven
+        and record.email
+        and record.email.lower() in listed
+    ):
+        raise AccountTransitionRefused(
+            "This account's email is in Administrator email addresses (Admin → Settings → "
+            "Accounts), which makes it an administrator again when it signs in. Remove the "
+            "address from that list first, or suspend the account.",
+            code="listed_admin_address",
+        )
+
+
 __all__ = [
     "ACCESS_ENDING_ACTIONS",
     "ACCESS_GRANTING_ACTIONS",
@@ -342,6 +372,7 @@ __all__ = [
     "ADMISSION_STATUSES",
     "MAX_PURPOSE_CHARS",
     "MAX_REASON_CHARS",
+    "UNDONE_BY_ADMIN_LIST",
     "AccountNotFound",
     "AccountRecord",
     "AccountStatus",
@@ -360,5 +391,6 @@ __all__ = [
     "plan_admin_action",
     "plan_self_deletion",
     "plan_waitlist_submission",
+    "refuse_undone_by_admin_list",
     "require_actor_admin",
 ]

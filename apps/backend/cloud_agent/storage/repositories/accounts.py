@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
+from cloud_agent.accounts.policy import admin_emails
 from cloud_agent.domain.accounts import (
     ACCESS_GRANTING_ACTIONS,
     AccountNotFound,
@@ -25,6 +26,7 @@ from cloud_agent.domain.accounts import (
     plan_admin_action,
     plan_self_deletion,
     plan_waitlist_submission,
+    refuse_undone_by_admin_list,
     require_actor_admin,
 )
 from cloud_agent.ports.accounts import (
@@ -465,11 +467,17 @@ class PostgresLocalAccountRepository(
         actor_account_id: str | None,
         admin_ip: str,
     ) -> AdminActionResult:
-        """Apply one administrator action and audit it, at the version the admin read."""
+        """Apply one administrator action and audit it, at the version the admin read.
+
+        Refused (``listed_admin_address``) for what the configured
+        administrator address list would grant back, checked on the locked
+        account, so every caller is held to it.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             current = await _lock_target_and_actor(conn, account_id, actor_account_id)
             if current.version != expected_version:
                 raise AccountVersionConflict(current.version)
+            refuse_undone_by_admin_list(current, action, admin_emails())
             if action in ACCESS_GRANTING_ACTIONS:
                 await _refuse_grant_while_cleanup_open(conn, account_id)
             if action == "resume" and await _cleanup_open(conn, account_id):
