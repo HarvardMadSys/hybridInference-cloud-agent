@@ -32,6 +32,18 @@ import { APIError, httpStatusToErrorCode } from '@/lib/utils/errors';
  * listens and drops the user, which sends the app back through sign-in.
  */
 export const AUTH_EXPIRED_EVENT = 'cloud-agent:auth-expired';
+/** Fired when the API refuses a request pinned to an account the browser left. */
+export const ACCOUNT_SWITCHED_EVENT = 'cloud-agent:account-switched';
+
+// The local account this tab shows. Every request names it, and the API
+// refuses (409 account_switched) once the browser's active account is another,
+// so a tab left on one account never acts as the next one.
+let pinnedAccount: string | null = null;
+
+/** Name the local account this tab shows on every request, or stop naming one. */
+export function pinAccount(accountId: string | null): void {
+  pinnedAccount = accountId;
+}
 
 // Wrap fetch so a genuine connectivity failure (DNS, offline, connection
 // refused/reset) — which rejects with a TypeError before any response exists —
@@ -62,9 +74,10 @@ function notifyAuthExpired(): void {
  * Issue an authenticated request.
  *
  * The name is kept from the source so the moved API client reads the same, but
- * the mechanism is the session cookie: nothing is added to the headers, and
- * `credentials: 'include'` is not optional — omitting it on a cross-origin
- * deployment silently produces an anonymous request that 401s.
+ * the mechanism is the session cookie, and `credentials: 'include'` is not
+ * optional — omitting it on a cross-origin deployment silently produces an
+ * anonymous request that 401s. The only header added is `X-Agent-Account`, the
+ * local account this tab shows (see `pinAccount`); it carries no authority.
  *
  * A 401 is reported to the app once, as an event, and then returned. It is not
  * retried: there is no refresh token here, so a second attempt would fail the
@@ -75,12 +88,27 @@ export async function fetchWithAuth(
   input: string,
   init: RequestInit = {},
 ): Promise<Response> {
+  let headers = init.headers;
+  if (pinnedAccount) {
+    const pinned = new Headers(init.headers);
+    if (!pinned.has('X-Agent-Account')) pinned.set('X-Agent-Account', pinnedAccount);
+    headers = pinned;
+  }
   const resp = await safeFetch(`${apiBase}${input}`, {
     ...init,
+    ...(headers === undefined ? {} : { headers }),
     credentials: 'include',
   });
 
   if (resp.status === 401) notifyAuthExpired();
+  if (resp.status === 409 && typeof window !== 'undefined') {
+    const code = await resp
+      .clone()
+      .json()
+      .then((body) => body?.detail?.error?.type)
+      .catch(() => undefined);
+    if (code === 'account_switched') window.dispatchEvent(new Event(ACCOUNT_SWITCHED_EVENT));
+  }
 
   return resp;
 }

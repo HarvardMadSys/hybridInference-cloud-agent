@@ -10,7 +10,7 @@
 
 import { agentApiBase } from '@/config/env';
 import { jsonOrThrow, safeFetch } from './client';
-import type { WaitlistEntry } from './accounts';
+import type { AccountIdentity, WaitlistEntry } from './accounts';
 import { APIError } from '@/lib/utils/errors';
 
 export type AgentPermission = 'agent.use' | 'agent.admin';
@@ -26,6 +26,10 @@ export interface SessionUserApi {
   email?: string;
   waitlist?: WaitlistEntry;
   agent_access?: AgentAccessApi;
+  /** Local accounts: how the account signs in. */
+  identity?: AccountIdentity;
+  /** Local accounts: whether it holds administration. */
+  is_local_admin?: boolean;
 }
 
 /** Who the cookie says we are. A 401 here means "not signed in", not an error. */

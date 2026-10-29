@@ -50,6 +50,8 @@ class AuthOptionsResponse(BaseModel):
     """What a local deployment's account pages offer. Public; carries no secret."""
 
     signup_enabled: bool
+    #: Phone sign-up: sign-up is open and phone sign-in can deliver codes.
+    phone_signup_enabled: bool = False
     #: Whether account mail can be sent: password reset and email binding need it.
     email_delivery: bool = False
     require_email_verification: bool = True

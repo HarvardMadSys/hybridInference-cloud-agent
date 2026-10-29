@@ -134,6 +134,9 @@ export function WaitlistPanel() {
         >
           {t('waitlist.refresh')}
         </button>
+        <Link className="ui-button ui-button-ghost" href="/account">
+          {t('security.title')}
+        </Link>
         <button
           className="ui-button ui-button-ghost"
           disabled={busy}

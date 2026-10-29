@@ -9,7 +9,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { clearSideChatDrafts } from '@/components/features/agents/sideChatStorage';
 import { clearAccountResources } from '@/components/features/profile/accountResource';
-import { AUTH_EXPIRED_EVENT } from '@/lib/api/client';
+import { ACCOUNT_SWITCHED_EVENT, AUTH_EXPIRED_EVENT, pinAccount } from '@/lib/api/client';
 import { announceSession, listenForSession } from '@/lib/auth/sessionSync';
 import { APIError } from '@/lib/utils/errors';
 import {
@@ -29,6 +29,8 @@ function sessionIdentity(me: SessionUserApi): User {
     user.auth_mode = 'local';
     user.email = me.email;
     user.waitlist = me.waitlist;
+    user.identity = me.identity;
+    user.is_local_admin = me.is_local_admin;
   } else if (me.auth_mode === 'gateway') user.auth_mode = 'gateway';
   return user;
 }
@@ -115,6 +117,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (previous !== undefined) setSessionSwitched(true);
       }
       accountId.current = me.id;
+      pinAccount(me.auth_mode === 'local' ? me.id : null);
       setState({
         isAuthenticated: true,
         loading: false,
@@ -202,6 +205,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
   }, [state.user?.id]);
+
+  // The API refused a request of this tab's account because the browser
+  // switched to another: read the session again, which notices the switch.
+  useEffect(() => {
+    const handleSwitched = () => void refreshUser();
+    window.addEventListener(ACCOUNT_SWITCHED_EVENT, handleSwitched);
+    return () => window.removeEventListener(ACCOUNT_SWITCHED_EVENT, handleSwitched);
+  }, [refreshUser]);
 
   const logout = useCallback(async () => {
     // Signed out once the server has dropped the cookie, and not before. A

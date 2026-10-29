@@ -1,4 +1,7 @@
+import { accountParityEn, accountParityZh } from './accountParity';
+
 export const accountsEn = {
+  ...accountParityEn,
   'common.loading': 'Loading…',
   'common.retry': 'Retry',
   'common.refreshFailed': 'Refresh failed — showing the last successful read.',
@@ -68,6 +71,7 @@ export const accountsEn = {
 } as const;
 
 export const accountsZh: Record<keyof typeof accountsEn, string> = {
+  ...accountParityZh,
   'common.loading': '加载中…',
   'common.retry': '重试',
   'common.refreshFailed': '刷新失败，正在显示上次成功读取的内容。',

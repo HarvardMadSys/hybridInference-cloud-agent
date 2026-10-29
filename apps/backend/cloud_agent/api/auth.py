@@ -25,7 +25,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 
 from cloud_agent.accounts import tokens
 from cloud_agent.accounts.captcha import site_key, verify_captcha
-from cloud_agent.accounts.config import auth_mode, local_session_ttl_s
+from cloud_agent.accounts.config import auth_mode, local_session_ttl_s, signup_flag_enabled
 from cloud_agent.accounts.device_cookie import recognized_device
 from cloud_agent.accounts.passwords import hash_password
 from cloud_agent.accounts.policy import require_email_verification, terms_url
@@ -216,6 +216,7 @@ async def auth_options(request: Request) -> AuthOptionsResponse:
     ]
     return AuthOptionsResponse(
         signup_enabled=signup_enabled(request),
+        phone_signup_enabled=phone_on and signup_flag_enabled(),
         email_delivery=mail_available(request),
         require_email_verification=require_email_verification(),
         phone=PhoneAuthConfig(

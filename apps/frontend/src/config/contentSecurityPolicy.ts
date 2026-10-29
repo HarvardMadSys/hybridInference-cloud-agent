@@ -86,6 +86,9 @@ export function contentSecurityPolicy({
     ['style-src', ["'self'", "'unsafe-inline'"]],
     ['img-src', ["'self'", 'data:', 'blob:', 'https:']],
     ['connect-src', ["'self'", ...(apiOrigin ? [apiOrigin] : [])]],
+    // The Turnstile challenge on the sign-up and phone-code forms is an iframe
+    // from Cloudflare; nothing else may be framed in.
+    ['frame-src', ["'self'", 'https://challenges.cloudflare.com']],
     ['object-src', ["'none'"]],
     ['base-uri', ["'none'"]],
     ['form-action', ["'self'"]],

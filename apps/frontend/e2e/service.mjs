@@ -155,6 +155,9 @@ export function createFixture() {
         github_connected: true,
         github_install_url: null,
       });
+    else if (api === '/v1/auth/account/locale' && req.method === 'PUT')
+      // A local account's language: keep whatever the page chose.
+      json(res, { locale: null, chosen_at: null });
     else if (api === '/v1/agent/branches')
       json(res, { branches: ['main'], default_branch: 'main' });
     else if (api === '/v1/agent/profile')

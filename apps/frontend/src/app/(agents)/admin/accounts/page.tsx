@@ -1,18 +1,20 @@
 'use client';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
+import { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '@/components/providers/AuthProvider';
 import { Select } from '@/components/ui/Select';
 import { AccountNotice } from '@/components/features/auth/AccountFrame';
 import {
   listAccounts,
-  updateAccount,
   type AccountEntry,
-  type AccountAction,
+  type AccountFilters,
   type WaitlistStatus,
 } from '@/lib/api/accounts';
-import { APIError, getErrorMessage } from '@/lib/utils/errors';
+import { getErrorMessage } from '@/lib/utils/errors';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
+import { ActionEditor } from './AccountActions';
+import { AccountNotes, SignInHistory } from './AccountDetails';
 
 const FILTERS = [
   { value: 'pending', label: 'Waiting for review' },
@@ -22,126 +24,45 @@ const FILTERS = [
   { value: 'not_applied', label: 'Not applied' },
   { value: '', label: 'All accounts' },
 ] as const;
-const LABELS: Record<AccountAction, string> = {
-  approve: 'Approve access',
-  reject: 'Decline application',
-  revoke: 'Withdraw access',
-  suspend: 'Suspend account',
-  restore: 'Restore account',
-  grant_admin: 'Grant administrator',
-  revoke_admin: 'Remove administrator',
-};
-function actionsFor(account: AccountEntry): AccountAction[] {
-  const actions: AccountAction[] = [];
-  if (account.status === 'suspended') return ['restore'];
-  if (account.email_verified && account.waitlist.status !== 'approved') actions.push('approve');
-  if (account.waitlist.status === 'pending') actions.push('reject');
-  if (account.waitlist.status === 'approved')
-    actions.push('revoke', account.is_admin ? 'revoke_admin' : 'grant_admin');
-  actions.push('suspend');
-  return actions;
+const STATES = [
+  { value: '', label: 'Any state' },
+  { value: 'active', label: 'Active' },
+  { value: 'suspended', label: 'Suspended' },
+  { value: 'deleted', label: 'Deleted' },
+] as const;
+const SORTS = [
+  { value: 'created', label: 'Newest first' },
+  { value: 'last_login', label: 'Recently signed in' },
+] as const;
+
+/** Wait until typing pauses before searching, as HybridInference's filter bar. */
+function useDebounced(value: string, delay = 300): string {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettled(value), delay);
+    return () => window.clearTimeout(timer);
+  }, [value, delay]);
+  return settled;
 }
-function ActionEditor({
-  account,
-  onDone,
-  onCancel,
-}: {
-  account: AccountEntry;
-  onDone: () => void;
-  onCancel: () => void;
-}) {
-  const actions = actionsFor(account);
-  const [action, setAction] = useState<AccountAction>(actions[0]);
-  const [reason, setReason] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [stale, setStale] = useState(false);
-  const submitting = useRef(false);
-  async function apply() {
-    if (submitting.current || stale) return;
-    submitting.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      await updateAccount(account, action, reason.trim());
-      onDone();
-    } catch (cause) {
-      if (cause instanceof APIError && cause.code === 'version_conflict') {
-        setStale(true);
-        setError(
-          'This account changed while you were reviewing it. Close this form and refresh the list before making another decision.',
-        );
-      } else setError(getErrorMessage(cause));
-    } finally {
-      submitting.current = false;
-      setBusy(false);
-    }
-  }
-  return (
-    <section
-      className="mt-3 space-y-3 rounded-lg border border-border bg-surface-muted p-4"
-      aria-label={`Review ${account.email}`}
-    >
-      <p className="text-sm font-medium break-all">{account.email}</p>
-      <label className="block text-sm" htmlFor="account-action">
-        Action
-      </label>
-      <Select
-        id="account-action"
-        value={action}
-        onValueChange={setAction}
-        options={actions.map((value) => ({ value, label: LABELS[value] }))}
-        disabled={busy || stale}
-      />
-      {(action === 'reject' || action === 'revoke') && (
-        <>
-          <label className="block text-sm" htmlFor="review-reason">
-            Reason shown to the applicant (optional)
-          </label>
-          <textarea
-            id="review-reason"
-            className="ui-input w-full"
-            rows={3}
-            maxLength={2000}
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            disabled={busy || stale}
-          />
-        </>
-      )}
-      {action === 'suspend' && (
-        <p className="text-sm text-muted">
-          Signs this account out, withdraws Agent access, and stops its work. Restoring the account
-          will not restore access automatically.
-        </p>
-      )}
-      {action === 'revoke' && (
-        <p className="text-sm text-muted">
-          Stops this account’s Agent work. The user can still sign in to view the decision and
-          reapply.
-        </p>
-      )}
-      {action === 'grant_admin' && (
-        <p className="text-sm text-muted">
-          Grants platform administration, including account approvals and infrastructure management.
-        </p>
-      )}
-      {error && <AccountNotice error>{error}</AccountNotice>}
-      <div className="flex flex-wrap gap-2">
-        <button
-          className="ui-button ui-button-primary"
-          disabled={busy || stale}
-          onClick={() => void apply()}
-        >
-          {busy ? 'Applying…' : LABELS[action]}
-        </button>
-        <button className="ui-button ui-button-secondary" disabled={busy} onClick={onCancel}>
-          Close
-        </button>
-      </div>
-    </section>
-  );
+
+function identityLine(account: AccountEntry): string {
+  const identity = account.identity;
+  const parts = [
+    account.status,
+    account.waitlist.status.replaceAll('_', ' '),
+    (identity?.identity_verified ?? account.email_verified)
+      ? 'Identity verified'
+      : 'Email unverified',
+  ];
+  if (identity?.login_name) parts.push(`username ${identity.login_name}`);
+  if (identity?.phone) parts.push(identity.phone);
+  if (account.is_admin) parts.push('Administrator');
+  if (account.last_login_at)
+    parts.push(`signed in ${new Date(account.last_login_at).toLocaleDateString()}`);
+  if (account.reviewed_by) parts.push(`reviewed by ${account.reviewed_by}`);
+  return parts.join(' · ');
 }
+
 function AccountRow({
   account,
   onReview,
@@ -151,21 +72,26 @@ function AccountRow({
   onReview: () => void;
   selected: boolean;
 }) {
+  const label = account.identity?.label ?? account.email ?? account.id;
   return (
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0 flex-1">
-        <p className="break-all font-medium">{account.email}</p>
-        <p className="mt-1 text-xs text-muted">
-          {account.status} · {account.waitlist.status.replaceAll('_', ' ')} ·{' '}
-          {account.email_verified ? 'Email verified' : 'Email unverified'}
-          {account.is_admin ? ' · Administrator' : ''}
+        <p className="break-all font-medium">
+          {account.identity?.user_name ? `${account.identity.user_name} · ` : ''}
+          {label}
         </p>
+        <p className="mt-1 text-xs text-muted">{identityLine(account)}</p>
         {account.waitlist.purpose && (
           <p className="mt-3 whitespace-pre-wrap break-words text-sm">{account.waitlist.purpose}</p>
         )}
         {account.waitlist.review_reason && (
           <p className="mt-2 whitespace-pre-wrap break-words text-sm text-muted">
             Review reason: {account.waitlist.review_reason}
+          </p>
+        )}
+        {account.admin_note && (
+          <p className="mt-2 whitespace-pre-wrap break-words text-xs text-muted">
+            Note: {account.admin_note}
           </p>
         )}
       </div>
@@ -179,21 +105,42 @@ function AccountRow({
     </div>
   );
 }
-export default function AccountsPage() {
-  const { state, refreshUser } = useAuth();
-  const [status, setStatus] = useState<WaitlistStatus | ''>('pending');
-  const [offset, setOffset] = useState(0);
+
+function Counts({ counts }: { counts: Record<string, number> | undefined }) {
+  if (!counts) return null;
+  const shown: [string, string][] = [
+    ['all', 'All'],
+    ['admission:pending', 'Waiting'],
+    ['admission:approved', 'Approved'],
+    ['status:suspended', 'Suspended'],
+    ['status:deleted', 'Deleted'],
+  ];
+  return (
+    <dl className="flex flex-wrap gap-3 text-xs text-muted" aria-label="Account counts">
+      {shown.map(([key, label]) => (
+        <div key={key} className="rounded-lg border border-border px-3 py-1">
+          <dt className="inline">{label}: </dt>
+          <dd className="inline font-medium text-foreground">{counts[key] ?? 0}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function useAccounts(
+  local: boolean,
+  status: WaitlistStatus | '',
+  offset: number,
+  filters: AccountFilters,
+  reload: number,
+  userId?: string,
+) {
   const [accounts, setAccounts] = useState<AccountEntry[]>([]);
   const [total, setTotal] = useState(0);
-  const [selected, setSelected] = useState<AccountEntry | null>(null);
+  const [counts, setCounts] = useState<Record<string, number> | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [reload, setReload] = useState(0);
-  const local = state.user?.auth_mode === 'local';
-  const refresh = useCallback(() => {
-    setSelected(null);
-    setReload((v) => v + 1);
-  }, []);
+  const { accountStatus, q, sort } = filters;
   useEffect(() => {
     if (!local) {
       setLoading(false);
@@ -203,12 +150,12 @@ export default function AccountsPage() {
     setLoading(true);
     setError(null);
     setAccounts([]);
-    setSelected(null);
-    void listAccounts(status, offset, controller.signal)
+    void listAccounts(status, offset, controller.signal, { accountStatus, q, sort })
       .then((result) => {
         if (controller.signal.aborted) return;
         setAccounts(result.accounts);
         setTotal(result.total);
+        setCounts(result.counts);
       })
       .catch((cause) => {
         if (!controller.signal.aborted) setError(getErrorMessage(cause));
@@ -217,7 +164,34 @@ export default function AccountsPage() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [local, status, offset, reload, state.user?.id]);
+  }, [local, status, offset, accountStatus, q, sort, reload, userId]);
+  return { accounts, total, counts, error, loading };
+}
+
+export default function AccountsPage() {
+  const { state, refreshUser } = useAuth();
+  const [status, setStatus] = useState<WaitlistStatus | ''>('pending');
+  const [accountStatus, setAccountStatus] = useState<AccountFilters['accountStatus']>('');
+  const [sort, setSort] = useState<'created' | 'last_login'>('created');
+  const [search, setSearch] = useState('');
+  const q = useDebounced(search);
+  const [offset, setOffset] = useState(0);
+  const [selected, setSelected] = useState<AccountEntry | null>(null);
+  const [reload, setReload] = useState(0);
+  const local = state.user?.auth_mode === 'local';
+  const { accounts, total, counts, error, loading } = useAccounts(
+    local,
+    status,
+    offset,
+    { accountStatus, q, sort },
+    reload,
+    state.user?.id,
+  );
+  const refresh = useCallback(() => {
+    setSelected(null);
+    setReload((v) => v + 1);
+  }, []);
+  useEffect(() => setOffset(0), [q, accountStatus, sort]);
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
       <section className={ADMIN_PAGE}>
@@ -232,7 +206,25 @@ export default function AccountsPage() {
           </p>
         ) : (
           <div className="mt-5 space-y-4">
+            <nav className="flex flex-wrap gap-3 text-sm" aria-label="Account administration">
+              <Link className="text-accent underline" href="/admin/accounts/policy">
+                Sign-up policy and sign-in records
+              </Link>
+              <Link className="text-accent underline" href="/admin/accounts/mail">
+                Mail to accounts
+              </Link>
+            </nav>
+            <Counts counts={counts} />
             <div className="flex flex-wrap items-center gap-3">
+              <input
+                className="ui-input min-w-[14rem] flex-1"
+                type="search"
+                aria-label="Search accounts"
+                placeholder="Email, username, phone, name or id"
+                maxLength={320}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
               <Select
                 aria-label="Application status"
                 value={status}
@@ -241,6 +233,18 @@ export default function AccountsPage() {
                   setOffset(0);
                 }}
                 options={FILTERS}
+              />
+              <Select
+                aria-label="Account state"
+                value={accountStatus ?? ''}
+                onValueChange={(value) => setAccountStatus(value)}
+                options={STATES}
+              />
+              <Select
+                aria-label="Sort"
+                value={sort}
+                onValueChange={(value) => setSort(value)}
+                options={SORTS}
               />
               <button
                 className="ui-button ui-button-secondary"
@@ -268,15 +272,21 @@ export default function AccountsPage() {
                       onReview={() => setSelected(account)}
                     />
                     {selected?.id === account.id && (
-                      <ActionEditor
-                        key={`${account.id}:${account.waitlist.version}`}
-                        account={selected}
-                        onCancel={() => setSelected(null)}
-                        onDone={() => {
-                          refresh();
-                          if (account.id === state.user?.id) void refreshUser();
-                        }}
-                      />
+                      <>
+                        <ActionEditor
+                          key={`${account.id}:${account.waitlist.version}`}
+                          account={selected}
+                          onCancel={() => setSelected(null)}
+                          onDone={() => {
+                            refresh();
+                            if (account.id === state.user?.id) void refreshUser();
+                          }}
+                        />
+                        <div className="mt-3 space-y-3 rounded-lg border border-border p-4">
+                          <AccountNotes account={selected} onSaved={refresh} />
+                          <SignInHistory accountId={selected.id} />
+                        </div>
+                      </>
                     )}
                   </li>
                 ))}

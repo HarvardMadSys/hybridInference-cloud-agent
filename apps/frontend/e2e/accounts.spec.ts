@@ -61,11 +61,27 @@ test('independent login reaches the waiting list without mounting protected Agen
   await page.screenshot({ path: info.outputPath('waiting-list-mobile.png'), fullPage: true });
 });
 
-test('signup validates the reused password policy and explains the email/approval steps', async ({
+test('signup asks for the Terms, validates the reused password policy and explains the email step', async ({
   page,
 }, info) => {
   await page.route('**/api/v1/session/me', (route) =>
     route.fulfill({ status: 401, json: { detail: 'Not signed in' } }),
+  );
+  await page.route('**/api/v1/auth/options', (route) =>
+    route.fulfill({
+      json: {
+        signup_enabled: true,
+        phone_signup_enabled: false,
+        email_delivery: true,
+        require_email_verification: true,
+        phone: { enabled: false, default_country_code: '', allowed_prefixes: [] },
+        turnstile_site_key: '',
+        terms_url: '',
+        terms_text: 'Be kind.',
+        setup_required: false,
+        max_accounts_per_browser: 5,
+      },
+    }),
   );
   const sent: unknown[] = [];
   await page.route('**/api/v1/auth/signup', (route) => {
@@ -73,6 +89,10 @@ test('signup validates the reused password policy and explains the email/approva
     return route.fulfill({ json: { ok: true } });
   });
   await page.goto('/signup');
+  // Nothing can be sent before the Terms of Service are agreed to.
+  await expect(page.getByRole('button', { name: 'Create account', exact: true })).toBeDisabled();
+  await page.getByLabel('How will you use Cloud Agent?').fill('Research tooling');
+  await page.getByRole('checkbox').check();
   await page.getByLabel('Email', { exact: true }).fill('new@example.test');
   await page.getByLabel('Password', { exact: true }).fill('Example123');
   await page.getByLabel('Confirm password', { exact: true }).fill('Different123');
@@ -85,7 +105,14 @@ test('signup validates the reused password policy and explains the email/approva
   await page.screenshot({ path: info.outputPath('signup-desktop.png'), fullPage: true });
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Check your email' })).toBeVisible();
-  expect(sent).toEqual([{ email: 'new@example.test', password: 'Example123' }]);
+  expect(sent).toEqual([
+    {
+      email: 'new@example.test',
+      password: 'Example123',
+      use_case: 'Research tooling',
+      accepted_tos: true,
+    },
+  ]);
 });
 
 test('verification waits for a click and keeps its token out of network URLs', async ({ page }) => {

@@ -9864,6 +9864,11 @@
           "phone": {
             "$ref": "#/components/schemas/PhoneAuthConfig"
           },
+          "phone_signup_enabled": {
+            "default": false,
+            "title": "Phone Signup Enabled",
+            "type": "boolean"
+          },
           "require_email_verification": {
             "default": true,
             "title": "Require Email Verification",
