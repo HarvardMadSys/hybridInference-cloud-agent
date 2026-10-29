@@ -33,6 +33,7 @@ from cloud_agent.api._local_auth import (
 )
 from cloud_agent.api.deps import bearer_token, get_gateway_client, resolve_agent_access
 from cloud_agent.api.errors import typed_error
+from cloud_agent.application.accounts import InvalidEmail, normalize_email
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas.accounts import (
     AuthConfigResponse,
@@ -62,6 +63,41 @@ def _email_key(email: str) -> str:
     # Counted by the address as typed, case-folded: an attacker gains nothing
     # by spelling it differently, and no lookup decides the key.
     return email.strip().lower()
+
+
+def _login_key(email: str) -> str:
+    # Counted by the account the address would sign in to, so every spelling
+    # of one mailbox shares its windows. An address that cannot sign in to
+    # any account is counted as typed, apart from every real one.
+    try:
+        _display, normalized = normalize_email(email)
+    except InvalidEmail:
+        return f"raw:{_email_key(email)}"
+    return normalized
+
+
+async def enforce_login_limits(request: Request, email: str) -> None:
+    """Count one sign-in attempt; 429 if it is over.
+
+    Both per-address windows count every attempt, refused or not, and only
+    an attempt they both let through counts in the account's own window. One
+    address therefore adds at most its own allowance to the account's, so
+    whoever guesses from it is refused there without locking the owner out
+    everywhere else; filling the account's window takes ten addresses.
+
+    Each window's count is one atomic statement, but the two stages are not
+    one transaction (see ``docs/developer/local-accounts.md``).
+    """
+    key = _login_key(email)
+    address = client_bucket(request)
+    await enforce_rate_limits(
+        request,
+        [
+            ("login_email_ip", f"{key}\x00{address}", _FIFTEEN_MIN, 5),
+            ("login_ip", address, _HOUR, 20),
+        ],
+    )
+    await enforce_rate_limits(request, [("login_email", key, _FIFTEEN_MIN, 50)])
 
 
 def _mail_rules(request: Request, email: str) -> list[RateRule]:
@@ -108,15 +144,7 @@ async def sign_in(
     gateway: Any = Depends(get_gateway_client),
 ) -> SessionUserResponse:
     """Check the password and set the session cookie."""
-    email = _email_key(body.email)
-    await enforce_rate_limits(
-        request,
-        [
-            ("login_email_ip", f"{email}\x00{client_bucket(request)}", _FIFTEEN_MIN, 5),
-            ("login_email", email, _FIFTEEN_MIN, 50),
-            ("login_ip", client_bucket(request), _HOUR, 20),
-        ],
-    )
+    await enforce_login_limits(request, body.email)
     flows = local_flows(request)
     signed_in = await flows.sign_in(body.email, body.password)
     # A session this browser already held is ended rather than left behind.
