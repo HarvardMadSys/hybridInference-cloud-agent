@@ -6,6 +6,13 @@ application is pending, rejected or revoked still signs in and reads its
 status; only an approved one is granted ``agent.use``, and only an account an
 administrator explicitly marked is granted ``agent.admin`` on top of it.
 
+An account's identity is *verified* when it has no unverified email and at
+least one verified sign-in identity: a confirmed email, a login name (created
+by the operator, so verified by construction) or a phone number confirmed by
+a code. The database computes the same rule in ``agent_local_account_access``;
+:attr:`AccountRecord.identity_verified` is read from there, never derived
+again from one identity kind.
+
 Everything here is pure: the storage layer applies a transition inside the
 transaction that read the row it judges, and the routes only translate.
 """
@@ -18,10 +25,18 @@ from typing import TYPE_CHECKING, Literal, get_args
 if TYPE_CHECKING:
     from datetime import datetime
 
-AccountStatus = Literal["active", "suspended"]
+AccountStatus = Literal["active", "suspended", "deleted"]
 AdmissionStatus = Literal["not_applied", "pending", "approved", "rejected", "revoked"]
 AdminAction = Literal[
-    "approve", "reject", "revoke", "suspend", "restore", "grant_admin", "revoke_admin"
+    "approve",
+    "reject",
+    "revoke",
+    "suspend",
+    "restore",
+    "grant_admin",
+    "revoke_admin",
+    "delete",
+    "resume",
 ]
 
 ADMISSION_STATUSES: tuple[str, ...] = get_args(AdmissionStatus)
@@ -32,7 +47,7 @@ MAX_PURPOSE_CHARS = 2000
 MAX_REASON_CHARS = 2000
 
 #: Actions that take Agent use away and therefore stop the owner's work.
-ACCESS_ENDING_ACTIONS = frozenset({"revoke", "suspend"})
+ACCESS_ENDING_ACTIONS = frozenset({"revoke", "suspend", "delete"})
 #: Actions that give Agent use or administration, refused while an earlier
 #: revocation's cleanup is still open.
 ACCESS_GRANTING_ACTIONS = frozenset({"approve", "grant_admin"})
@@ -68,12 +83,20 @@ class WaitlistNotResubmittable(Exception):
     """An approved account has nothing to apply for."""
 
 
+class IdentifierTaken(Exception):
+    """An email, login name or phone number already signs in to another account."""
+
+
+class SelfDeleteRefused(Exception):
+    """The account may not delete itself (an administrator), or changed meanwhile."""
+
+
 @dataclass(frozen=True)
 class AccountRecord:
     """One local account with its sign-in and admission state, never its hash."""
 
     id: str
-    email: str
+    email: str | None
     email_verified: bool
     status: AccountStatus
     is_admin: bool
@@ -84,6 +107,21 @@ class AccountRecord:
     review_reason: str | None
     submitted_at: datetime | None
     reviewed_at: datetime | None
+    identity_verified: bool = False
+    login_name: str | None = None
+    phone: str | None = None
+    has_password: bool = False
+    user_name: str | None = None
+    admin_note: str | None = None
+    suspension_message: str | None = None
+    last_login_at: datetime | None = None
+    deleted_at: datetime | None = None
+    erased_at: datetime | None = None
+
+    @property
+    def label(self) -> str:
+        """The name the account signs in with: its email, else login name, else phone."""
+        return self.email or self.login_name or self.phone or self.id
 
 
 @dataclass(frozen=True)
@@ -107,7 +145,7 @@ def permissions_for(record: AccountRecord) -> list[str]:
     the console with everything else.
     """
     if not (
-        record.email_verified
+        record.identity_verified
         and record.status == "active"
         and record.admission_status == "approved"
     ):
@@ -116,8 +154,8 @@ def permissions_for(record: AccountRecord) -> list[str]:
 
 
 def may_sign_in(record: AccountRecord) -> bool:
-    """Whether the account may hold a session: verified and not suspended."""
-    return record.email_verified and record.status == "active"
+    """Whether the account may hold a session: verified, and neither suspended nor deleted."""
+    return record.identity_verified and record.status == "active"
 
 
 def _refuse(message: str, code: str = "invalid_transition") -> AccountTransitionRefused:
@@ -125,8 +163,8 @@ def _refuse(message: str, code: str = "invalid_transition") -> AccountTransition
 
 
 def _approve(record: AccountRecord, _reason: str | None) -> AdmissionEdit:
-    if not record.email_verified:
-        raise _refuse("Only an account with a verified email can be approved.")
+    if not record.identity_verified:
+        raise _refuse("Only an account with a verified sign-in identity can be approved.")
     if record.status != "active":
         raise _refuse("Restore the account before approving it.")
     if record.admission_status == "approved":
@@ -150,6 +188,8 @@ def _suspend(record: AccountRecord, reason: str | None) -> AdmissionEdit:
     # Suspension withdraws Agent use and administration for good: approved
     # access becomes revoked, so restoring the account later lets it sign in
     # and reapply, never use Agent again without a fresh approval.
+    if record.status == "deleted":
+        raise _refuse("A deleted account cannot be suspended.")
     if record.status != "active":
         raise _refuse("The account is already suspended.")
     if record.admission_status == "approved":
@@ -167,7 +207,7 @@ def _grant_admin(record: AccountRecord, _reason: str | None) -> AdmissionEdit:
     if record.is_admin:
         raise _refuse("The account is already an administrator.")
     if not (
-        record.email_verified
+        record.identity_verified
         and record.status == "active"
         and record.admission_status == "approved"
     ):
@@ -181,6 +221,33 @@ def _revoke_admin(record: AccountRecord, _reason: str | None) -> AdmissionEdit:
     return AdmissionEdit(record.status, False, record.admission_status, None, False, False)
 
 
+def deletion_edit(record: AccountRecord) -> AdmissionEdit:
+    """What deleting an active or suspended account writes, by its owner or an admin.
+
+    As HybridInference's soft delete: the account keeps its data and can be
+    resumed by an administrator, but it signs in nowhere, holds no session
+    and no administration, and approved access becomes revoked, so resuming
+    it never brings Agent use back without a fresh approval.
+    """
+    if record.status == "deleted":
+        raise _refuse("The account is already deleted.")
+    admission = "revoked" if record.admission_status == "approved" else record.admission_status
+    reviewed = record.admission_status == "approved"
+    return AdmissionEdit("deleted", False, admission, None, reviewed, True)
+
+
+def _delete(record: AccountRecord, _reason: str | None) -> AdmissionEdit:
+    return deletion_edit(record)
+
+
+def _resume(record: AccountRecord, _reason: str | None) -> AdmissionEdit:
+    if record.status != "deleted":
+        raise _refuse("Only a deleted account can be resumed.")
+    if record.erased_at is not None:
+        raise _refuse("An erased account cannot be resumed. Create a new account instead.")
+    return AdmissionEdit("active", False, record.admission_status, None, False, False)
+
+
 _TRANSITIONS = {
     "approve": _approve,
     "reject": _reject,
@@ -189,11 +256,13 @@ _TRANSITIONS = {
     "restore": _restore,
     "grant_admin": _grant_admin,
     "revoke_admin": _revoke_admin,
+    "delete": _delete,
+    "resume": _resume,
 }
 
 #: What an administrator may not do to their own account: each would leave the
 #: console without the person using it, and the deployment's ADMIN_TOKEN can.
-_SELF_LOCKOUT = frozenset({"suspend", "revoke", "revoke_admin"})
+_SELF_LOCKOUT = frozenset({"suspend", "revoke", "revoke_admin", "delete"})
 
 
 def require_actor_admin(actor: AccountRecord | None) -> None:
@@ -233,6 +302,22 @@ def plan_admin_action(
     return transition(record, reason)
 
 
+def plan_self_deletion(record: AccountRecord) -> AdmissionEdit:
+    """What an owner deleting their own account writes, or the refusal.
+
+    An administrator cannot delete itself, as in HybridInference: the
+    deployment must not lose its last administrator this way.
+
+    Raises:
+        SelfDeleteRefused: The account is an administrator or not active.
+    """
+    if record.is_admin:
+        raise SelfDeleteRefused("An administrator account cannot delete itself.")
+    if record.status != "active":
+        raise SelfDeleteRefused("Only an active account can be deleted by its owner.")
+    return deletion_edit(record)
+
+
 def plan_waitlist_submission(record: AccountRecord) -> bool:
     """Whether submitting changes the application; ``False`` for an idempotent repeat.
 
@@ -260,10 +345,14 @@ __all__ = [
     "AdmissionEdit",
     "AdmissionStatus",
     "EmailTaken",
+    "IdentifierTaken",
+    "SelfDeleteRefused",
     "WaitlistNotResubmittable",
+    "deletion_edit",
     "may_sign_in",
     "permissions_for",
     "plan_admin_action",
+    "plan_self_deletion",
     "plan_waitlist_submission",
     "require_actor_admin",
 ]

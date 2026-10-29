@@ -67,15 +67,8 @@ async def _lock_admitted_local_owner(conn: asyncpg.Connection, user_id: str) -> 
             raise ModelConnectionAccessEnded
         return
     admitted = await conn.fetchval(
-        """
-        SELECT EXISTS (
-            SELECT 1 FROM agent_local_accounts a
-            JOIN agent_local_admissions m ON m.account_id = a.id
-            JOIN agent_local_password_logins l ON l.account_id = a.id
-            WHERE a.id = $1 AND a.status = 'active' AND m.status = 'approved'
-              AND l.email_verified_at IS NOT NULL
-        )
-        """,
+        "SELECT coalesce((SELECT has_use FROM agent_local_account_access WHERE account_id = $1), "
+        "FALSE)",
         user_id,
     )
     if not admitted:

@@ -22,6 +22,9 @@ _NOW = datetime(2026, 10, 28, tzinfo=UTC)
 
 
 def _account(**changes) -> AccountRecord:
+    # An email account's identity is verified exactly when its email is: the
+    # rule ``agent_local_account_access`` computes and the record carries.
+    changes.setdefault("identity_verified", changes.get("email_verified", True))
     base = AccountRecord(
         id="01J0000000000000000000000A",
         email="person@example.org",
@@ -153,8 +156,9 @@ def test_an_actor_whose_administration_ended_is_refused():
 
 
 def test_an_unknown_action_is_refused():
+    # "delete" became a real action (account deletion); any other name is still refused.
     with pytest.raises(AccountTransitionRefused):
-        plan_admin_action(_account(), "delete", reason=None, actor_account_id=None)
+        plan_admin_action(_account(), "purge", reason=None, actor_account_id=None)
 
 
 def test_applying_is_idempotent_while_pending_and_explicit_after_a_refusal():

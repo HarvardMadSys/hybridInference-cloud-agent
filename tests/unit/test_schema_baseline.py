@@ -156,12 +156,16 @@ def _tables_created_by_every_revision() -> set[str]:
     ``IF NOT EXISTS`` is matched too. It is how a revision that may run against
     a database which already has the table is written, and a table created that
     way is no less created -- missing it here would report the store's own
-    queries as naming a table no revision makes.
+    queries as naming a table no revision makes. So is ``CREATE VIEW``: the
+    store reads a view exactly as it reads a table, and one no revision
+    creates fails the same way.
     """
     created: set[str] = set()
     for path in sorted(VERSIONS.glob("*.py")):
         created.update(
-            re.findall(r"CREATE TABLE (?:IF NOT EXISTS )?(\w+)", path.read_text(encoding="utf-8"))
+            re.findall(
+                r"CREATE (?:TABLE|VIEW) (?:IF NOT EXISTS )?(\w+)", path.read_text(encoding="utf-8")
+            )
         )
     return created
 

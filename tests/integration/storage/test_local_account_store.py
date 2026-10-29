@@ -235,7 +235,7 @@ async def test_a_sign_in_waiting_on_a_reset_does_not_open_an_old_password_sessio
         await asyncio.sleep(0.3)
         assert not signing_in.done()
         await conn.execute(
-            "UPDATE agent_local_password_logins SET password_hash = $2 WHERE account_id = $1",
+            "UPDATE agent_local_password_credentials SET password_hash = $2 WHERE account_id = $1",
             account_id,
             new_hash,
         )
