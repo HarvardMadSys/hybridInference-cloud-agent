@@ -367,3 +367,75 @@ async def test_message_request_does_not_select_arbitrary_or_unavailable_rows(
     assert response.json()["status"] == expected
     assert response.json()["request"] is None
     assert "private diagnostics" not in response.text
+
+
+THREAD_TTFT_PATH = "/v1/agent/jobs/ajob_1/thread/model-ttft"
+
+
+@pytest.fixture
+def ttft_grants(app, store):
+    """A thread with one attributed execution whose gateway measured 10.4 s."""
+    from tests.unit.test_grant_usage_requests import page_payload, request_row
+    from tests.unit.test_model_ttft import BINDING, source
+
+    from cloud_agent.api.deps import get_grant_client
+    from cloud_agent.grant_usage import GrantUsageRequestPage
+
+    store.thread_request_sources = AsyncMock(return_value=([source()], False))
+    client = SimpleNamespace(
+        binding_id=BINDING,
+        usage_requests=AsyncMock(
+            return_value=GrantUsageRequestPage.model_validate(
+                page_payload(rows=[request_row(ttft_ms=10_400)])
+            )
+        ),
+    )
+    app.dependency_overrides[get_grant_client] = lambda: client
+    return client
+
+
+@pytest.mark.asyncio
+async def test_thread_model_ttft_is_the_gateway_measurement_for_the_owner(app, store, ttft_grants):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(THREAD_TTFT_PATH)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["source"] == "gateway_request_log"
+    assert body["mean_ttft_ms"] == 10_400
+    assert body["samples"] == 1
+    assert body["complete"] is True
+    assert "grant_id" not in response.text
+    assert "binding_id" not in response.text
+    store.thread_request_sources.assert_awaited_once_with(
+        job_id="ajob_1", user_id="owner", limit=usage.THREAD_TTFT_SOURCES
+    )
+    assert (
+        ttft_grants.usage_requests.await_args.kwargs["external_job_id"] == "thread:athr_requests_1"
+    )
+    store.queue_job_ledger_refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_thread_model_ttft_refuses_another_owners_thread(app, store, ttft_grants):
+    # The source read is owner-scoped and answers None for anything else.
+    store.thread_request_sources.return_value = None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/v1/agent/jobs/ajob_other/thread/model-ttft")
+    assert response.status_code == 404
+    ttft_grants.usage_requests.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_thread_model_ttft_without_gateway_timing_is_null(app, store, ttft_grants):
+    from cloud_agent.gateway import GatewayError
+
+    ttft_grants.usage_requests.side_effect = GatewayError(
+        "private diagnostics", error_type="request_details_unsupported"
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(THREAD_TTFT_PATH)
+    assert response.status_code == 200
+    assert response.json()["mean_ttft_ms"] is None
+    assert response.json()["status"] == "unavailable"
+    assert "private diagnostics" not in response.text

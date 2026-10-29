@@ -1120,13 +1120,14 @@ def test_a_kata_guest_is_given_its_relays_and_the_one_resolver(monkeypatch):
     manager._network_lifecycle._sync_kata_guest_network(spec, manager._require(spec))
 
     argv = captured[0]
+    assert argv[:3] == ["python3", "-I", "-c"]
     endpoints = docker.network(name)["endpoints"]
-    assert json.loads(argv[3]) == {
+    assert json.loads(argv[4]) == {
         "agent-gateway": endpoints["relay-gateway"]["ip"],
         "agent-mcp": endpoints["relay-mcp"]["ip"],
     }
-    assert argv[4] == "1.1.1.1"
-    assert "/etc/resolv.conf" in argv[2] and "O_NOFOLLOW" in argv[2]
+    assert argv[5] == "1.1.1.1"
+    assert "/etc/resolv.conf" in argv[3] and "O_NOFOLLOW" in argv[3]
 
 
 def _running_kata_group(monkeypatch):
@@ -1142,7 +1143,7 @@ def _running_kata_group(monkeypatch):
         manager,
         "_kata_privileged_exec",
         lambda _spec, argv, **_kwargs: (
-            synced.append(json.loads(argv[3])) or subprocess.CompletedProcess(argv, 0, "", "")
+            synced.append(json.loads(argv[4])) or subprocess.CompletedProcess(argv, 0, "", "")
         ),
     )
     docker.calls.clear()
@@ -1337,7 +1338,7 @@ def test_attach_discards_network_evidence_from_before_connection(monkeypatch, ra
         manager,
         "_kata_privileged_exec",
         lambda _spec, argv, **_kwargs: (
-            synced.append(json.loads(argv[3])) or subprocess.CompletedProcess(argv, 0, "", "")
+            synced.append(json.loads(argv[4])) or subprocess.CompletedProcess(argv, 0, "", "")
         ),
     )
     if race == "bridge_replacement":
@@ -1379,9 +1380,9 @@ def test_guest_network_snapshot_still_checks_files_and_skips_unchanged_writes(
     )
 
     def run_script(_spec, argv, **_kwargs):
-        monkeypatch.setattr(sys, "argv", ["-c", *argv[3:]])
+        monkeypatch.setattr(sys, "argv", ["-c", *argv[4:]])
         try:
-            exec(compile(argv[2], "<guest-network>", "exec"), {})
+            exec(compile(argv[3], "<guest-network>", "exec"), {})
         except (RuntimeError, OSError) as exc:
             return subprocess.CompletedProcess(argv, 1, "", str(exc))
         return subprocess.CompletedProcess(argv, 0, "", "")

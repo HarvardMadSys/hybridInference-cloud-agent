@@ -2709,7 +2709,7 @@ def test_claude_member_launch_shares_only_native_projects(monkeypatch, tmp_path)
         # after sandbox manager/container restart would do, against legacy state.
         for _ in range(2):
             subprocess.run(
-                ["python3", "-c", calls[slot][0][2], str(config), str(projects)], check=True
+                ["python3", "-I", "-c", calls[slot][0][3], str(config), str(projects)], check=True
             )
         assert home.stat().st_mode & 0o777 == 0o700
         assert config.stat().st_mode & 0o777 == 0o700
@@ -2744,7 +2744,7 @@ def test_claude_reassigned_slot_gets_fresh_member_settings(monkeypatch, tmp_path
     projects = shared / "projects"
     for launch, call in zip((old, new), calls, strict=True):
         config = home / ".claude-members" / call[-2].rsplit("/", 1)[-1]
-        subprocess.run(["python3", "-c", call[2], str(config), str(projects)], check=True)
+        subprocess.run(["python3", "-I", "-c", call[3], str(config), str(projects)], check=True)
         if launch == old:
             (config / "settings.json").write_text('{"env":{"ANTHROPIC_BASE_URL":"old"}}')
         else:
@@ -2814,10 +2814,10 @@ def test_claude_member_preparation_rejects_symlinked_state(monkeypatch, tmp_path
     (config if target == "config" else projects).symlink_to(attacker, target_is_directory=True)
 
     result = subprocess.run(
-        ["python3", "-c", calls[0][2], str(config), str(projects)], capture_output=True
+        ["python3", "-I", "-c", calls[0][3], str(config), str(projects)], capture_output=True
     )
 
-    assert result.returncode != 0
+    assert result.returncode != 0 and b"RuntimeError" in result.stderr, result.stderr
     assert not list(attacker.iterdir())
 
 

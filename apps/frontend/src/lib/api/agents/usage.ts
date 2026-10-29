@@ -60,6 +60,11 @@ export interface AgentJobUsageApi {
     normalized_input_tokens?: number | null;
   };
   /**
+   * The turn ran on its owner's own model connection: that provider bills it,
+   * and an empty or zero Gateway ledger says nothing about its cost.
+   */
+  external_provider?: boolean;
+  /**
    * Orders two reads of this job's usage, asked for or pushed: the one whose
    * version compares greater saw everything the other did. Opaque.
    */
@@ -74,6 +79,8 @@ export interface AgentJobUsageApi {
     refreshing: boolean;
     next_refresh_at?: string | null;
     active?: boolean;
+    /** Some turn ran on the owner's own connection: `totals` is the Gateway's share only. */
+    external_provider?: boolean;
   } | null;
 }
 
@@ -107,6 +114,39 @@ export async function getAgentMessageRequest(
     { signal },
   );
   return jsonOrThrow<AgentMessageRequestApi>(resp);
+}
+
+/**
+ * Mean gateway time to first token over the requests that measured one.
+ *
+ * Read from the gateway's own request log, so sandbox, workspace and CLI
+ * startup are never in it. `mean_ttft_ms` is null whenever no request was
+ * measured; `complete` is false when only part of the scope could be read.
+ */
+export interface ModelTtftApi {
+  source: 'gateway_request_log';
+  status: 'available' | 'not_recorded' | 'unavailable';
+  mean_ttft_ms: number | null;
+  samples: number;
+  requests_read: number;
+  sources_read: number;
+  sources_total: number;
+  complete: boolean;
+  reason: string | null;
+}
+
+/** A thread's model TTFT; null for a thread this caller cannot read. */
+export async function getAgentThreadModelTtft(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<ModelTtftApi | null> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread/model-ttft`,
+    { signal },
+  );
+  if (resp.status === 404) return null;
+  return jsonOrThrow<ModelTtftApi>(resp);
 }
 
 /** Read cached snapshots; a pre-ledger control plane returns null, never zero usage. */

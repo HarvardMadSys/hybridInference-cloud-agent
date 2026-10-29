@@ -10,8 +10,10 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from cloud_agent.domain.execution import ATTEMPT_ABORTED
 from cloud_agent.storage._sql.ledger import (
     LEDGER_WINDOW_UNTIL_SQL,
+    REQUEST_SOURCE_COLUMNS_SQL,
     fetch_job_usage_inputs,
     fetch_ledger_rows_for_conversation,
     fetch_ledger_rows_for_job,
@@ -37,6 +39,46 @@ class PostgresLedgerRepository:
         async with self._pool.acquire() as conn:
             return await fetch_ledger_rows_for_job(conn, job_id)
 
+    async def thread_request_sources(
+        self, *, job_id: str, user_id: str, limit: int
+    ) -> tuple[list[dict[str, Any]], bool] | None:
+        """The newest started executions of an owner's thread, with their references.
+
+        One row per attempt and stored reference, newest turn first; an attempt
+        without a reference keeps a row, so the reader can tell it was never
+        attributed. Aborted attempts never started an agent and are left out.
+
+        Returns:
+            The page and whether older rows exist, or ``None`` when the job is
+            not this owner's or its conversation was deleted.
+        """
+        async with self._pool.acquire() as conn:
+            thread_id = await conn.fetchval(
+                "SELECT j.thread_id FROM agent_jobs j "
+                "JOIN agent_threads t ON t.id = j.thread_id "
+                "WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL",
+                job_id,
+                user_id,
+            )
+            if thread_id is None:
+                return None
+            rows = await conn.fetch(
+                f"""
+                SELECT {REQUEST_SOURCE_COLUMNS_SQL}
+                FROM agent_jobs j
+                JOIN agent_attempts a ON a.job_id = j.id
+                LEFT JOIN agent_attempt_ledger l ON l.attempt_id = a.id
+                WHERE j.thread_id = $1 AND j.user_id = $2 AND a.status <> $3
+                ORDER BY j.turn_no DESC, a.attempt_no DESC, a.id DESC, l.id DESC
+                LIMIT $4
+                """,
+                thread_id,
+                user_id,
+                ATTEMPT_ABORTED,
+                limit + 1,
+            )
+        return [dict(row) for row in rows[:limit]], len(rows) > limit
+
     async def job_usage_reads(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         """Everything an owner's read of a job's usage is made of, from one snapshot.
 
@@ -51,7 +93,7 @@ class PostgresLedgerRepository:
         ):
             job = await conn.fetchrow(
                 """
-                SELECT j.id, j.user_id, j.state, j.runtime
+                SELECT j.id, j.user_id, j.state, j.runtime, j.model_connection_id
                 FROM agent_jobs j
                 LEFT JOIN agent_threads t ON t.id = j.thread_id
                 WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL

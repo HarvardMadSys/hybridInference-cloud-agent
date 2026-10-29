@@ -505,11 +505,9 @@ class ChatSandboxNetwork:
             " if f.read(len(desired)+1) != desired:\n"
             "  f.seek(0); f.write(desired); f.truncate()\n"
         )
-        result = self._containers._kata_privileged_exec(
-            spec,
-            ["python3", "-c", script, json.dumps(addresses), str(self._network().dns_server)],
-            timeout_s=30,
-        )
+        resolver = str(self._network().dns_server)
+        argv = ["python3", "-I", "-c", script, json.dumps(addresses), resolver]
+        result = self._containers._kata_privileged_exec(spec, argv, timeout_s=30)
         if result.returncode != 0:
             raise SandboxError("Kata guest network sync failed: " + result.stderr[:300])
 

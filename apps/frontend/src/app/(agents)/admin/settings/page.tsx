@@ -17,7 +17,6 @@ import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import AgentVersions, { agentName } from './AgentVersions';
 import {
-  ApplicationDeploymentSetup,
   ApplicationSettingsCategory,
   ApplicationSettingsFeedback,
   ApplicationSettingsHeader,
@@ -29,6 +28,7 @@ import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
 import { SettingsSearch } from './SettingsSearchPanel';
 import { useRuntimeUpgrades } from './useRuntimeUpgrades';
 import { useRuntimeVersions } from './useRuntimeVersions';
+import { isLegacyDeploymentHash, legacyDeploymentSetting } from './legacyDeploymentLinks';
 import { applicationCategoryName } from './settingsOrganization';
 import { buildSettingsSearchItems, type SettingsSearchItem } from './settingsSearchIndex';
 import { AdminNavigation } from '../AdminNavigation';
@@ -265,9 +265,6 @@ function SettingsView() {
       ]),
     ],
     archiveAvailable: archiveSettings !== null,
-    applicationTab: applicationCategories.length
-      ? categoryTabId(applicationCategories[0])
-      : 'application',
   });
 
   const selectSearchResult = (item: SettingsSearchItem) => {
@@ -281,14 +278,32 @@ function SettingsView() {
   };
 
   useEffect(() => {
+    // Deployment setup is no longer a settings section. A link into it opens the
+    // setting that manages that item, or the page itself when no setting does.
+    const replaceLegacyHash = () => {
+      const hash = window.location.hash;
+      const snapshot = applicationSettings.snapshot;
+      // Whether the managing setting exists is known once definitions load.
+      if (!isLegacyDeploymentHash(hash) || !snapshot) return;
+      const key = legacyDeploymentSetting(hash);
+      const editable = key !== null && snapshot.definitions.some((field) => field.key === key);
+      const url = new URL(window.location.href);
+      url.hash = editable ? `application-setting-${encodeURIComponent(key)}` : '';
+      window.history.replaceState(window.history.state, '', url);
+      // replaceState fires no hashchange; announce the field link to the settings hook.
+      if (editable) window.dispatchEvent(new HashChangeEvent('hashchange'));
+    };
+    replaceLegacyHash();
+    window.addEventListener('hashchange', replaceLegacyHash);
+    return () => window.removeEventListener('hashchange', replaceLegacyHash);
+  }, [applicationSettings.snapshot]);
+
+  useEffect(() => {
     if (!searchTarget || !content.current || denied) return;
     const root = content.current;
     const focusTarget = () => {
       const target = document.getElementById(searchTarget);
       if (!target || !root.contains(target) || target.closest('[hidden]')) return false;
-      for (let ancestor = target.parentElement; ancestor; ancestor = ancestor.parentElement) {
-        if (ancestor instanceof HTMLDetailsElement) ancestor.open = true;
-      }
       let control = target.matches('input, select, textarea, button, [tabindex]')
         ? target
         : target.querySelector<HTMLElement>('input, select, textarea, button');
@@ -450,7 +465,6 @@ function SettingsView() {
                 No application settings are available.
               </p>
             )}
-            <ApplicationDeploymentSetup settings={applicationSettings} />
           </section>
           <div
             role="tabpanel"

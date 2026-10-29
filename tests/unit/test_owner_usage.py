@@ -5,9 +5,12 @@ from datetime import UTC, date, datetime, timedelta, timezone
 import pytest
 
 from cloud_agent.owner_usage import (
+    MAX_ALL_TIME_DAYS,
     MAX_SAMPLE_GAP_SECONDS,
+    all_time_window,
     container_state,
     cpu_limit_cores,
+    days_period,
     history_window,
     measured_interval,
     memory_limit_bytes,
@@ -144,3 +147,63 @@ def test_a_history_window_is_whole_utc_days_up_to_now():
 def test_a_history_window_is_bounded(days):
     with pytest.raises(ValueError, match="between 1 and 90"):
         history_window(days, now=NOW)
+
+
+def test_a_days_period_names_its_kind_and_reads_no_first_activity():
+    period = days_period(30, now=NOW)
+    assert period.kind == "days"
+    assert (period.since, period.until) == history_window(30, now=NOW)
+    assert period.first_activity_at is None and period.limited_by is None
+
+
+def test_all_time_without_any_run_is_today():
+    period = all_time_window(earliest=None, overflow=None, now=NOW)
+    assert period.kind == "all"
+    assert (period.since, period.until) == (MIDNIGHT, NOW)
+    assert period.first_activity_at is None and period.limited_by is None
+
+
+def test_all_time_starts_on_the_first_runs_utc_day():
+    # 01:30 in UTC+8 is the evening before in UTC: that UTC day is the first.
+    first = datetime(2026, 9, 2, 1, 30, tzinfo=timezone(timedelta(hours=8)))
+    period = all_time_window(earliest=first, overflow=None, now=NOW)
+    assert period.since == datetime(2026, 9, 1, tzinfo=UTC)
+    assert period.until == NOW
+    assert period.first_activity_at == first and period.limited_by is None
+
+
+def test_all_time_leaves_out_the_whole_day_the_run_budget_ends_in():
+    first = datetime(2026, 8, 7, 9, tzinfo=UTC)
+    overflow = datetime(2026, 10, 3, 17, 45, tzinfo=UTC)
+    period = all_time_window(earliest=first, overflow=overflow, now=NOW)
+    # Not 2026-10-03: only part of that day's runs fit, so none of it is shown.
+    assert period.since == datetime(2026, 10, 4, tzinfo=UTC)
+    assert period.first_activity_at == first and period.limited_by == "runs"
+
+
+def test_a_run_budget_that_ends_today_still_reads_today():
+    """The read is then refused as too large rather than given no days at all."""
+    first = datetime(2026, 10, 1, tzinfo=UTC)
+    period = all_time_window(earliest=first, overflow=NOW - timedelta(minutes=5), now=NOW)
+    assert (period.since, period.until) == (MIDNIGHT, NOW)
+    assert period.limited_by == "runs"
+
+
+def test_all_time_spans_at_most_its_bound():
+    first = MIDNIGHT - timedelta(days=MAX_ALL_TIME_DAYS + 40)
+    period = all_time_window(earliest=first, overflow=None, now=NOW)
+    assert period.since == MIDNIGHT - timedelta(days=MAX_ALL_TIME_DAYS - 1)
+    assert period.limited_by == "days"
+    # The first day inside the bound is still the owner's own first day.
+    inside = MIDNIGHT - timedelta(days=MAX_ALL_TIME_DAYS - 1)
+    assert all_time_window(earliest=inside, overflow=None, now=NOW).limited_by is None
+
+
+def test_the_later_of_two_limits_names_the_reason():
+    first = MIDNIGHT - timedelta(days=MAX_ALL_TIME_DAYS + 40)
+    older = MIDNIGHT - timedelta(days=MAX_ALL_TIME_DAYS + 10)
+    newer = MIDNIGHT - timedelta(days=20, hours=-3)
+    assert all_time_window(earliest=first, overflow=older, now=NOW).limited_by == "days"
+    period = all_time_window(earliest=first, overflow=newer, now=NOW)
+    assert period.limited_by == "runs"
+    assert period.since == MIDNIGHT - timedelta(days=19)

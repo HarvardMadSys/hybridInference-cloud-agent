@@ -34,6 +34,7 @@ from cloud_agent.ports.host_pool import HostPoolRepository
 from cloud_agent.ports.ledger import LedgerRepository
 from cloud_agent.ports.mcp import McpConnectionRepository
 from cloud_agent.ports.mcp_catalog import McpCatalogRepository
+from cloud_agent.ports.model_connections import ModelConnectionRepository
 from cloud_agent.ports.model_preferences import ModelPreferenceRepository
 from cloud_agent.ports.notification_maintenance import NotificationMaintenanceRepository
 from cloud_agent.ports.operation_measurements import (
@@ -91,6 +92,7 @@ __all__ = [
     "McpCatalogRepository",
     "McpConnectionRepository",
     "MeasurementWriteResult",
+    "ModelConnectionRepository",
     "ModelPreferenceRepository",
     "NotificationMaintenanceRepository",
     "OperationMeasurements",

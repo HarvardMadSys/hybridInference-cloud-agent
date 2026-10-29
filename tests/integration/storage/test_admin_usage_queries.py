@@ -618,3 +618,63 @@ async def test_event_volume_does_not_change_the_result(db, store, admin_token):
     body = response.json()
     assert body["summary"]["totals"]["spent_usd"] == "1.00"
     assert body["summary"]["attempt_count"] == 1
+
+
+async def _run_at(db, store, created_at: datetime, *, user_id: str = "owner-one") -> dict:
+    job = await _create_job(store, user_id=user_id, model="model-a")
+    await _backdate(db, store, [job["id"]], created_at, state="succeeded")
+    return job
+
+
+async def test_an_owners_run_bounds_read_the_runs_the_cohort_selects(db, store):
+    """The bounds an all-time period starts from count exactly the cohort's runs.
+
+    A run the cohort leaves out but the bounds counted would move the period's
+    start later than it needs to be; one the bounds missed would let the cohort
+    that follows exceed the budget the bounds were meant to keep it inside.
+    """
+    day = datetime(2026, 9, 1, tzinfo=UTC)
+    until = day + timedelta(days=3, hours=18)
+    first = await _run_at(db, store, day + timedelta(hours=10))
+    await _run_at(db, store, day + timedelta(days=1, hours=8))
+    await _run_at(db, store, day + timedelta(days=1, hours=9))
+    await _run_at(db, store, day + timedelta(days=2, hours=12))
+    # None of these is one of owner-one's runs before ``until``.
+    copy = await _run_at(db, store, day - timedelta(days=5))
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET fork_source_job_id = $2 WHERE id = $1", copy["id"], first["id"]
+        )
+    await _run_at(db, store, day - timedelta(days=9), user_id="owner-two")
+    await _run_at(db, store, until)
+
+    bounds = store.admin_usage.owner_run_bounds
+    assert await bounds("owner-one", until=until, max_runs=10) == (day + timedelta(hours=10), None)
+    assert await bounds("nobody", until=until, max_runs=10) == (None, None)
+    # Two runs fit: the newest one past them was created at 08:00 on day two.
+    earliest, overflow = await bounds("owner-one", until=until, max_runs=2)
+    assert earliest == day + timedelta(hours=10)
+    assert overflow == day + timedelta(days=1, hours=8)
+
+    async def cohort(since: datetime, max_runs: int) -> list[dict]:
+        rows, _ = await store.admin_usage.selection(
+            since=since,
+            until=until,
+            user_id="owner-one",
+            model=None,
+            runtime=None,
+            repo=None,
+            max_runs=max_runs,
+            max_rows=MAX_USAGE_LEDGER_ROWS,
+            max_snapshot_bytes=MAX_USAGE_SNAPSHOT_BYTES,
+        )
+        return rows
+
+    # Day two holds both an 08:00 run past the budget and a 09:00 run inside
+    # it; from its midnight the cohort is too large, from the next one it fits.
+    with pytest.raises(admin_usage_queries.UsageQueryTooLarge):
+        await cohort(day + timedelta(days=1), 2)
+    assert len(await cohort(day + timedelta(days=2), 2)) == 1
+    # Three fit: day two is whole, so the period starts there and fits exactly.
+    assert (await bounds("owner-one", until=until, max_runs=3))[1] == day + timedelta(hours=10)
+    assert len(await cohort(day + timedelta(days=1), 3)) == 3

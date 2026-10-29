@@ -19,6 +19,8 @@ from cloud_agent.api.deps import (
     get_github_app_state,
     get_storage,
 )
+from cloud_agent.application.model_connection_status import usable_runtimes
+from cloud_agent.application.model_connections import model_connections_enabled
 from cloud_agent.entitlement import repos_for_user
 from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
@@ -26,9 +28,10 @@ from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.model_preference import (
     ModelPreferenceView,
     deployment_default_model,
+    resolve_connection_default,
     resolve_model,
 )
-from cloud_agent.schemas import AgentConfigResponse, McpConnectionSummary
+from cloud_agent.schemas import AgentConfigResponse, McpConnectionSummary, ModelConnectionOption
 from cloud_agent.source_control import github_connect_configured
 from cloud_agent.source_control_runtime import GitHubAppState  # noqa: TC001 — FastAPI resolves it.
 from cloud_agent_shared.plugins import supported_plugin_runtimes
@@ -43,6 +46,7 @@ if TYPE_CHECKING:
         ConversationCommands,
         ConversationQueries,
         McpConnectionRepository,
+        ModelConnectionRepository,
         ModelPreferenceRepository,
         SourceControlRepository as SourceControlPort,
     )
@@ -62,6 +66,7 @@ class _ConfigStorage(Protocol):
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
     mcp: McpConnectionRepository
+    model_connections: ModelConnectionRepository
     model_preferences: ModelPreferenceRepository
     source_control: SourceControlPort
 
@@ -99,12 +104,19 @@ async def get_agent_config(
         (models, model_efforts),
         mcp_connections,
         preference,
+        model_connections,
     ) = await asyncio.gather(
         _repositories_and_account(store, github, user["user_id"]),
         _model_configuration_for_user(gateway, user["user_id"]),
         _mcp_connections_for_user(store, user["user_id"]),
         _model_preference_for_user(store, user["user_id"]),
+        _model_connections_for_user(store, user["user_id"]),
     )
+    if not model_connections_enabled():
+        # Offered nothing, and a model last run on one is still not replaced
+        # by its Gateway namesake: the control stays empty until a choice.
+        model_connections = []
+    connection_default = resolve_connection_default(models, preference, model_connections)
     if github.load_status == "unavailable":
         # The create endpoint answers 503 until the App is back, so a form that
         # looked ready would only fail on submit — whatever else is true.
@@ -149,7 +161,18 @@ async def get_agent_config(
         # accept. Read in the same request as `models` because it is only
         # meaningful against that list: a stored choice the catalog no longer
         # offers must not pre-select anything.
-        default_model=resolve_model(models, preference, deployment_default_model()),
+        default_model=(
+            connection_default[0]
+            if connection_default
+            else resolve_model(models, preference, deployment_default_model())
+        ),
+        default_model_connection_id=connection_default[1] if connection_default else None,
+        model_connections_enabled=model_connections_enabled(),
+        # The owner's own enabled connections, offered beside the Gateway's
+        # models whether or not the Gateway catalog answered.
+        model_connections=[
+            _connection_option(row) for row in model_connections if row.get("enabled")
+        ],
         mcp_runtimes=runtimes_supporting_mcp(),
         github_connected=github_connected,
         # OAuth must start on the authenticated integrations page so the
@@ -208,6 +231,25 @@ async def _model_preference_for_user(
     if store is None:
         return ModelPreferenceView()
     return await store.model_preferences.get_model_preference(user_id)
+
+
+def _connection_option(row: dict[str, Any]) -> ModelConnectionOption:
+    """One enabled connection as the composer offers it, with each model's usable agents."""
+    return ModelConnectionOption(
+        id=row["id"],
+        name=row["name"],
+        models=list(row["models"]),
+        model_runtimes=usable_runtimes(row),
+    )
+
+
+async def _model_connections_for_user(
+    store: _ConfigStorage | None, user_id: str
+) -> list[dict[str, Any]]:
+    """The owner's live connections; none without a store, like the other reads."""
+    if store is None:
+        return []
+    return await store.model_connections.list_model_connections(user_id=user_id)
 
 
 async def _mcp_connections_for_user(

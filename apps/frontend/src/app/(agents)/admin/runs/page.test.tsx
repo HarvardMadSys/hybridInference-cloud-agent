@@ -50,6 +50,7 @@ vi.mock('@/lib/api/adminRuns', () => ({
   getAdminAttemptResources: vi.fn(),
   getAdminLlmRequestSources: vi.fn(),
   getAdminLlmRequests: vi.fn(),
+  getAdminRunModelTtft: vi.fn(),
 }));
 // The Startup line reads the measurement surface, a different client. Mocked
 // for the same reason the run client is: jsdom has no control plane to answer,
@@ -69,6 +70,7 @@ import {
   getAdminAttemptResources,
   getAdminLlmRequestSources,
   getAdminLlmRequests,
+  getAdminRunModelTtft,
 } from '@/lib/api/adminRuns';
 import { listMeasurements } from '@/lib/api/adminMeasurements';
 import AdminRunPage from './[jobId]/page';
@@ -170,7 +172,8 @@ function detail(overrides: Partial<AdminRunDetail> = {}): AdminRunDetail {
     session_statistics: {
       model_seconds: 1667,
       tool_seconds: 6490,
-      ttft_seconds: 2.9,
+      // Startup-inclusive; the page must never call this TTFT.
+      first_output_seconds: 96,
       output_tokens_per_second: 257,
       timing_source: 'message_events',
     },
@@ -340,11 +343,23 @@ beforeEach(() => {
     getAdminAttemptResources,
     getAdminLlmRequestSources,
     getAdminLlmRequests,
+    getAdminRunModelTtft,
     listMeasurements,
     measurements.getMeasurement,
   ]) {
     vi.mocked(read).mockReset();
   }
+  vi.mocked(getAdminRunModelTtft).mockResolvedValue({
+    source: 'gateway_request_log',
+    status: 'available',
+    mean_ttft_ms: 10_400,
+    samples: 3,
+    requests_read: 3,
+    sources_read: 1,
+    sources_total: 1,
+    complete: true,
+    reason: null,
+  });
   auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
   auth.id = 'admin-1';
   route.jobId = 'job-1';
@@ -580,6 +595,15 @@ describe('admin run observation', () => {
     expect(await screen.findByRole('heading', { name: 'Turn statistics' })).toBeVisible();
     expect(screen.getByRole('heading', { name: 'Token usage' })).toBeVisible();
     expect(screen.getByText('27m 47s')).toBeVisible();
+    const statistics = within(screen.getByRole('region', { name: 'Turn statistics' }));
+    // Gateway TTFT and startup-inclusive first output are separate rows.
+    expect(await statistics.findByText('10.4s')).toBeVisible();
+    expect(statistics.getByText('Avg model time to first token (TTFT)')).toHaveAttribute(
+      'title',
+      expect.stringContaining('startup are not included'),
+    );
+    expect(statistics.getByText('1m 36s')).toBeVisible();
+    expect(getAdminRunModelTtft).toHaveBeenCalledWith('job-1', expect.any(AbortSignal));
     const totals = within(screen.getByRole('table', { name: 'Token usage totals' }));
     expect(totals.getByRole('row', { name: 'Model calls 2' })).toBeVisible();
     expect(totals.getByText('$0.0097')).toHaveAttribute('title', '0.00978569');
@@ -635,6 +659,19 @@ describe('admin run observation', () => {
     expect(screen.getByText('Gateway totals are missing for part of this turn.')).toBeVisible();
     expect(screen.getByText('2 calls contain estimated usage.')).toBeVisible();
     expect(screen.queryByText('Usage details')).not.toBeInTheDocument();
+  });
+
+  it('says the owner\u2019s provider bills a turn on their connection, with no cost figure', async () => {
+    const external = { ...usage(), external_provider: true };
+    vi.mocked(getAdminRun).mockResolvedValue(detail({ usage: external }));
+
+    render(<AdminRunPage />);
+    await screen.findByRole('heading', { name: 'Token usage' });
+    const totals = within(screen.getByRole('table', { name: 'Token usage totals' }));
+    expect(
+      totals.getByRole('row', { name: "Cost (USD) Billed by the owner's provider" }),
+    ).toBeVisible();
+    expect(screen.getByText(/ran on its owner.s own model connection/)).toBeVisible();
   });
 
   it('keeps zero-coverage totals unavailable and exposes timing provenance and incomplete process evidence', async () => {

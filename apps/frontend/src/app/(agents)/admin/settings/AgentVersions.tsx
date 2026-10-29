@@ -404,7 +404,7 @@ export default function AgentVersions({
         Default versions for new sandboxes. Existing sessions and their forks keep their version.
       </p>
       <SettingsSection
-        title="Important"
+        title="Default versions"
         description="Update an agent, or pick any release for new sandboxes."
       >
         {updateError && (
@@ -439,7 +439,10 @@ export default function AgentVersions({
           </div>
         )}
       </SettingsSection>
-      <SettingsSection title="Advanced" description="Review the versions installed on each server.">
+      <SettingsSection
+        title="Installed versions"
+        description="Review the versions installed on each server."
+      >
         {servers.length === 0 ? (
           <p className="py-4 text-sm text-muted">No active servers have reported versions yet.</p>
         ) : (

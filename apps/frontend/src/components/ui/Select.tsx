@@ -11,13 +11,25 @@ import {
   type KeyboardEvent,
   type ReactElement,
   type ReactNode,
+  type CSSProperties,
   type Ref,
   type RefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useT } from '@/components/providers/LocaleProvider';
+import { keepInView, useAnchoredPopover } from './anchoredPopover';
+import { useTopLayerEscape } from './useTopLayerEscape';
+import {
+  MENU_EMPTY,
+  MENU_HEADING,
+  MENU_POSITIONED,
+  MENU_SCROLL,
+  MENU_SEARCH,
+  MENU_SEARCH_INPUT,
+  MENU_SURFACE,
+  menuOptionClass,
+} from './menuStyles';
 import { MODAL_POPUP } from './useModalDialog';
-import { keepInView, useSelectPlacement } from './useSelectPlacement';
 
 export interface SelectOption<T extends string = string> {
   value: T;
@@ -158,22 +170,11 @@ export function Check() {
   );
 }
 
-/** The panel of a portalled menu, positioned by `useSelectPlacement`. */
-export const POPUP_CLASS =
-  'ui-popover fixed z-[100] m-0 flex w-max flex-col overflow-hidden rounded-lg border border-border bg-surface-raised text-foreground shadow-card';
+/** The panel of a portalled menu, positioned by the shared anchored popover. */
+export const POPUP_CLASS = `${MENU_SURFACE} ${MENU_POSITIONED} w-max`;
 
 export function optionClass(selected: boolean, active: boolean, disabled: boolean) {
-  const tone = disabled
-    ? 'cursor-not-allowed text-muted opacity-60'
-    : selected
-      ? 'cursor-pointer bg-accent-subtle font-medium text-accent'
-      : 'cursor-pointer text-foreground';
-  const highlight = active
-    ? selected
-      ? 'ring-1 ring-inset ring-accent/30'
-      : 'bg-surface-hover'
-    : '';
-  return `flex min-h-8 items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] leading-5 [@media(pointer:coarse)]:min-h-11 ${tone} ${highlight}`;
+  return menuOptionClass(selected, active, disabled);
 }
 
 /** The trigger's content: the chosen label, sized like a native select to its longest option. */
@@ -230,7 +231,7 @@ function SearchField({
 }) {
   const t = useT();
   return (
-    <div className="m-1.5 mb-1 flex shrink-0 items-center gap-2 rounded-md border border-border bg-surface-muted px-2.5 focus-within:border-accent/50">
+    <div className={MENU_SEARCH}>
       <svg
         aria-hidden
         viewBox="0 0 20 20"
@@ -255,7 +256,7 @@ function SearchField({
         placeholder={t('picker.search')}
         value={query}
         onChange={(event) => onQuery(event.target.value)}
-        className="h-8 min-w-0 flex-1 bg-transparent text-base text-foreground outline-none placeholder:text-muted sm:text-[13px]"
+        className={MENU_SEARCH_INPUT}
       />
     </div>
   );
@@ -278,6 +279,7 @@ interface MenuProps<T extends string> {
   onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   onActive: (value: T) => void;
   onChoose: (entry: Entry<T>) => void;
+  style?: CSSProperties;
 }
 
 function SelectMenu<T extends string>({
@@ -293,6 +295,7 @@ function SelectMenu<T extends string>({
   onKeyDown,
   onActive,
   onChoose,
+  style,
 }: MenuProps<T>) {
   const t = useT();
   const activeId = current ? `${ids.base}option-${current.index}` : undefined;
@@ -300,6 +303,7 @@ function SelectMenu<T extends string>({
     <div
       ref={refs.popup}
       {...{ [MODAL_POPUP]: ids.trigger }}
+      style={style}
       className={POPUP_CLASS}
       onKeyDown={onKeyDown}
       onPointerDown={(event) => {
@@ -325,7 +329,7 @@ function SelectMenu<T extends string>({
         aria-labelledby={listName.label ? undefined : listName.labelledBy}
         tabIndex={searchable ? undefined : 0}
         aria-activedescendant={searchable ? undefined : activeId}
-        className="min-h-0 overflow-y-auto overscroll-contain p-1 outline-none"
+        className={MENU_SCROLL}
       >
         {sections(matches).map((section, sectionIndex) => {
           const rows = section.entries.map((entry) => (
@@ -349,11 +353,7 @@ function SelectMenu<T extends string>({
           const headingId = `${ids.base}group-${sectionIndex}`;
           return (
             <div key={`group-${sectionIndex}`} role="group" aria-labelledby={headingId}>
-              <div
-                id={headingId}
-                role="presentation"
-                className="px-2.5 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wide text-muted"
-              >
+              <div id={headingId} role="presentation" className={MENU_HEADING}>
                 {section.group}
               </div>
               {rows}
@@ -361,7 +361,7 @@ function SelectMenu<T extends string>({
           );
         })}
         {!matches.length ? (
-          <p role="status" className="px-2.5 py-5 text-center text-[13px] text-muted">
+          <p role="status" className={MENU_EMPTY}>
             {t('picker.noResults')}
           </p>
         ) : null}
@@ -376,6 +376,7 @@ function SelectMenu<T extends string>({
  */
 function useMenuBehaviour(
   visible: boolean,
+  placed: boolean,
   refs: {
     trigger: RefObject<HTMLButtonElement>;
     popup: RefObject<HTMLDivElement>;
@@ -390,8 +391,9 @@ function useMenuBehaviour(
   onDismiss.current = dismiss;
 
   useLayoutEffect(() => {
-    if (visible) (search.current ?? list.current)?.focus({ preventScroll: true });
-  }, [visible, search, list]);
+    // A hidden popup cannot take focus; only focus it once placement has run.
+    if (visible && placed) (search.current ?? list.current)?.focus({ preventScroll: true });
+  }, [visible, placed, search, list]);
 
   useLayoutEffect(() => {
     if (visible && activeId) keepInView(list.current, document.getElementById(activeId));
@@ -522,8 +524,15 @@ function SelectImpl<T extends string>(
   const activeId = view.current ? `${generated}option-${view.current.index}` : undefined;
   const visible = open && !disabled && container !== null;
 
-  useSelectPlacement(visible, trigger, popup, view.matches.length);
-  useMenuBehaviour(visible, { trigger, popup, list, search }, activeId, () => setOpen(false));
+  const popoverStyle = useAnchoredPopover(visible, trigger, popup);
+  useMenuBehaviour(
+    visible,
+    popoverStyle.visibility !== 'hidden',
+    { trigger, popup, list, search },
+    activeId,
+    () => setOpen(false),
+  );
+  useTopLayerEscape(visible, () => close(true), trigger);
 
   useEffect(() => {
     if (disabled) setOpen(false);
@@ -616,6 +625,7 @@ function SelectImpl<T extends string>(
       <SelectMenu
         ids={ids}
         refs={{ popup, list, search }}
+        style={popoverStyle}
         searchable={searchable}
         query={query}
         onQuery={(next) => {

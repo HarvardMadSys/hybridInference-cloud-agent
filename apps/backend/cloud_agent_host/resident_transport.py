@@ -29,6 +29,7 @@ from cloud_agent_host.chat_sandbox import (
     member_inference_env_path,
 )
 from cloud_agent_host.codex_plugins import install_codex_plugins
+from cloud_agent_host.compat_helper import compat_token_env, install_compat_helper
 from cloud_agent_host.drivers import (
     DialectRuntime,
     DriverError,
@@ -41,16 +42,16 @@ from cloud_agent_host.drivers import (
     get_driver,
 )
 from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION
+from cloud_agent_host.member_preparation import MemberPreparation, MemberStep, run_member_steps
 from cloud_agent_host.other_plugins import install_other_runtime_plugins
 from cloud_agent_host.plugins import install_claude_plugins
-from cloud_agent_host.runtimes import RuntimeMCPConfig
+from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
 from cloud_agent_shared.environment import inference_handoff
 from cloud_agent_shared.plugins import validate_sandbox_plugins
 from cloud_agent_shared.shared_protocol import is_residency_mcp_credential
 
 if TYPE_CHECKING:
-    import subprocess
     from collections.abc import Iterator
 
     from cloud_agent_shared.environment import BoundEnvironment
@@ -174,10 +175,11 @@ class ResidentLaunch:
     model: str
     reasoning_effort: str | None
     gateway_base_url: str
-    credential: str | None
+    # Never in a repr: a Gateway grant, or an owner connection's own key.
+    credential: str | None = field(repr=False)
     mcp_server_ids: tuple[str, ...] = ()
     mcp_base_url: str = ""
-    mcp_credential: str = ""
+    mcp_credential: str = field(default="", repr=False)
     slot_id: int = 0
     residency_generation: int = 0
     plugins: tuple[dict[str, str], ...] = ()
@@ -186,10 +188,31 @@ class ResidentLaunch:
     github_token: str | None = field(default=None, repr=False)
     github_repo: str = ""
     environment: BoundEnvironment | None = field(default=None, repr=False)
+    # An owner model connection, when the member runs on one instead of the
+    # Gateway: its exact Base URL, protocol, and ``<connection>@<revision>``.
+    # ``credential`` is then that connection's key. All three are fixed at
+    # process start; the source is what tells a rotated key's process apart.
+    inference_base_url: str = ""
+    inference_protocol: str = ""
+    inference_source: str = ""
+    # The CLI's own protocol when the member reaches the connection through
+    # its compatibility helper; empty is direct. Fixed at process start, like
+    # the source: a plan change restarts the member.
+    inference_client_protocol: str = ""
+    # Its loopback token on a translated plan (``ModelConnectionAccess.local_token``):
+    # fixed at process start and part of reuse identity, so a process never
+    # holds a token the turn's redactor does not mask.
+    inference_local_token: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
         if not self.thread_id or not self.runtime_id or not self.model:
             raise ValueError("resident launch identity, runtime, and model are required")
+        if bool(self.inference_source) != bool(self.inference_base_url and self.inference_protocol):
+            raise ValueError("a model connection launch needs its URL, protocol and source")
+        if self.inference_client_protocol and not self.inference_source:
+            raise ValueError("a translated launch needs its model connection")
+        if bool(self.inference_client_protocol) != bool(self.inference_local_token):
+            raise ValueError("a translated launch, and only one, carries its member's token")
         if not self.gateway_base_url:
             raise ValueError("resident launch gateway is required")
         if self.slot_id < 0:
@@ -328,9 +351,11 @@ class ResidentTransport(Generic[_RuntimeT_co]):
         residency, which the supervisor checks beside this, so a probe that
         carries none may borrow the process holding one. Everything else the
         CLI fixes at process start still participates, including model,
-        effort, the MCP servers and relay, a per-attempt MCP token and the
-        non-renewable GitHub token. A fresh GitHub token requires native
-        resume in a replacement process.
+        effort, the MCP servers and relay, a per-attempt MCP token, the
+        non-renewable GitHub token and the model connection's source. A fresh
+        GitHub token requires native resume in a replacement process, and so
+        does a connection whose key, endpoint or protocols changed: its source
+        names the credential revision, so the old key never serves a new turn.
         """
         held_mcp = self.launch.mcp_credential
         same_mcp = self.launch.mcp_server_ids == launch.mcp_server_ids and (
@@ -351,6 +376,11 @@ class ResidentTransport(Generic[_RuntimeT_co]):
             and self.launch.reasoning_effort == launch.reasoning_effort
             and self.launch.plugins == launch.plugins
             and self.launch.gateway_base_url == launch.gateway_base_url
+            and self.launch.inference_source == launch.inference_source
+            and self.launch.inference_base_url == launch.inference_base_url
+            and self.launch.inference_protocol == launch.inference_protocol
+            and self.launch.inference_client_protocol == launch.inference_client_protocol
+            and self.launch.inference_local_token == launch.inference_local_token
             and same_mcp
             and self.launch.github_token == launch.github_token
             and self.launch.github_repo == launch.github_repo
@@ -398,28 +428,18 @@ class ResidentTransportFactory:
         runtime_id = launch.runtime_id
         driver = get_driver(runtime_id)
         state_dir = self._member_state_dir(launch)
-        member_processes_reaped = runtime_id == "claude-code" or bool(launch.plugins)
-        if member_processes_reaped:
-            # A failed Fork can release a reserved slot. Reap that slot before
-            # preparing its next member's launch state, so an old same-UID
-            # process cannot race creation of the new private settings.
-            self._manager.reap_member_processes(
-                spec,
-                slot_id=launch.slot_id,
-                user_uid=MEMBER_UID_BASE + launch.slot_id,
-                user_gid=self._manager.backend.gid,
-            )
-        if runtime_id == "claude-code":
-            self._prepare_claude_member_state(spec, launch)
-        elif runtime_id in PRIVATE_MEMBER_STATE_ROOTS:
-            self._prepare_member_state(spec, launch, state_dir)
+        preparation, member_processes_reaped = self._member_preparation(spec, launch, state_dir)
         context = self._launch_context(
             spec,
             launch,
             credential=launch.credential,
             state_dir=state_dir,
             member_processes_reaped=member_processes_reaped,
+            preparation=preparation,
         )
+        if launch.plugins:
+            # Every installer finds its slot reaped and its home prepared.
+            preparation.run()
         if runtime_id == "claude-code" and launch.plugins:
             install_claude_plugins(
                 self._manager,
@@ -463,6 +483,37 @@ class ResidentTransportFactory:
                 session.close()
             raise
 
+    def _member_preparation(
+        self, spec: ChatSandboxSpec, launch: ResidentLaunch, state_dir: str
+    ) -> tuple[MemberPreparation, bool]:
+        """Queue what the member's own UID does before its CLI starts, in that order.
+
+        The queue runs in one exec (:mod:`cloud_agent_host.member_preparation`):
+        before the first plugin installer, or otherwise at the spawn, with
+        Claude's hook merge. Returns it, and whether it holds the slot's reap.
+        """
+        uid = MEMBER_UID_BASE + launch.slot_id
+        preparation = MemberPreparation(
+            self._manager, spec, user_uid=uid, user_gid=self._manager.backend.gid
+        )
+        reaped = launch.runtime_id == "claude-code" or bool(launch.plugins)
+        if reaped:
+            # A failed Fork can release a reserved slot. Reap that slot before
+            # preparing its next member's launch state, so an old same-UID
+            # process cannot race creation of the new private settings.
+            self._manager.reap_member_processes(
+                spec,
+                slot_id=launch.slot_id,
+                user_uid=uid,
+                user_gid=self._manager.backend.gid,
+                batch=preparation,
+            )
+        if launch.runtime_id == "claude-code":
+            self._prepare_claude_member_state(spec, launch, preparation)
+        elif launch.runtime_id in PRIVATE_MEMBER_STATE_ROOTS:
+            self._prepare_member_state(spec, launch, state_dir, preparation)
+        return preparation, reaped
+
     @staticmethod
     def _member_state_dir(launch: ResidentLaunch) -> str:
         root = PRIVATE_MEMBER_STATE_ROOTS.get(launch.runtime_id)
@@ -482,33 +533,52 @@ class ResidentTransportFactory:
         spec: ChatSandboxSpec,
         launch: ResidentLaunch,
         state_dir: str,
+        batch: MemberPreparation | None = None,
     ) -> None:
-        """Create the member-owned provider home used by this shared group."""
-        prepare = (
-            self._prepare_codex_member_state
-            if launch.runtime_id == "codex"
-            else self._prepare_http_member_state
-        )
-        result = prepare(spec, launch, state_dir)
-        if result.returncode == _UNTRUSTED_COLLECTION_EXIT:
+        """Create the member-owned provider home used by this shared group.
+
+        Queued on ``batch`` when one is given, and run now otherwise.
+        """
+        runtime_id = launch.runtime_id
+        step = MemberStep(
+            (
+                self._codex_member_state_argv(launch, state_dir)
+                if runtime_id == "codex"
+                else self._http_member_state_argv(launch, state_dir)
+            ),
+            timeout_s=120,
+            failure=lambda stderr: DriverError(
+                f"{runtime_id} member state could not be prepared: "
+                + stderr.decode("utf-8", "replace")[-300:]
+            ),
             # A group created by an earlier release, or a collection name a
             # member squatted on before the sandbox user secured it.
-            self._manager.ensure_private_member_collections(spec)
-            result = prepare(spec, launch, state_dir)
-        if result.returncode != 0:
-            raise DriverError(
-                f"{launch.runtime_id} member state could not be prepared: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
+            retry_status=_UNTRUSTED_COLLECTION_EXIT,
+            before_retry=lambda: self._manager.ensure_private_member_collections(spec),
+        )
+        run_member_steps(
+            self._manager,
+            spec,
+            step,
+            user_uid=MEMBER_UID_BASE + launch.slot_id,
+            user_gid=self._manager.backend.gid,
+            batch=batch,
+        )
 
-    def _prepare_claude_member_state(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> None:
+    def _prepare_claude_member_state(
+        self,
+        spec: ChatSandboxSpec,
+        launch: ResidentLaunch,
+        batch: MemberPreparation | None = None,
+    ) -> None:
         """Share Claude native history while keeping launch input slot-private.
 
         Old retained containers already have projects under the shared Claude
         root. Link only that credential-free native history; never import its
         settings, environment overrides, credentials, or process registry.
         Member homes are image-created beneath root-owned /home, outside every
-        shared-state permission-normalization traversal.
+        shared-state permission-normalization traversal. Queued on ``batch``
+        when one is given, and run now otherwise.
         """
         script = (
             "import os, pathlib, stat, sys\n"
@@ -540,37 +610,35 @@ class ResidentTransportFactory:
             "    if not projects.is_symlink() or os.readlink(projects) != str(shared):\n"
             "        raise RuntimeError('Claude member history link is invalid')\n"
         )
-        result = self._manager.exec_capture(
-            spec,
-            [
+        step = MemberStep(
+            (
                 "python3",
+                "-I",
                 "-c",
                 script,
                 claude_member_config_dir(launch.slot_id, launch.thread_id),
                 CLAUDE_SHARED_PROJECTS_DIR,
-            ],
-            workdir="/",
+            ),
             timeout_s=30,
+            failure=lambda stderr: DriverError(
+                "Claude member state could not be prepared: "
+                + stderr.decode("utf-8", "replace")[-300:]
+            ),
+        )
+        run_member_steps(
+            self._manager,
+            spec,
+            step,
             user_uid=MEMBER_UID_BASE + launch.slot_id,
             user_gid=self._manager.backend.gid,
+            batch=batch,
         )
-        if result.returncode != 0:
-            raise DriverError(
-                "Claude member state could not be prepared: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
 
-    def _prepare_http_member_state(
-        self,
-        spec: ChatSandboxSpec,
-        launch: ResidentLaunch,
-        state_dir: str,
-    ) -> subprocess.CompletedProcess[bytes]:
-        """Create an isolated OpenCode/Kilo XDG root for one membership."""
+    def _http_member_state_argv(self, launch: ResidentLaunch, state_dir: str) -> tuple[str, ...]:
+        """The member command that creates an isolated OpenCode/Kilo XDG root."""
         runtime_id = launch.runtime_id
         if runtime_id not in {"opencode", "kilo"}:
             raise DriverError(f"runtime {runtime_id!r} has no private HTTP state home")
-        uid = MEMBER_UID_BASE + launch.slot_id
         script = (
             'set -eu; target="$1"; runtime="$2"; legacy="$3"; trusted="$4"; '
             'marker="$target/.freeinference-member-state-v1"; '
@@ -580,32 +648,19 @@ class ResidentTransportFactory:
             '  : > "$marker"; '
             "fi"
         )
-        return self._manager.exec_capture(
-            spec,
-            [
-                "/bin/sh",
-                "-c",
-                script,
-                "sh",
-                state_dir,
-                runtime_id,
-                self._legacy_member_state_dir(launch),
-                str(self._manager.backend.uid),
-            ],
-            workdir="/",
-            timeout_s=120,
-            user_uid=uid,
-            user_gid=self._manager.backend.gid,
+        return (
+            "/bin/sh",
+            "-c",
+            script,
+            "sh",
+            state_dir,
+            runtime_id,
+            self._legacy_member_state_dir(launch),
+            str(self._manager.backend.uid),
         )
 
-    def _prepare_codex_member_state(
-        self,
-        spec: ChatSandboxSpec,
-        launch: ResidentLaunch,
-        state_dir: str,
-    ) -> subprocess.CompletedProcess[bytes]:
-        """Create one UID-owned Codex home from the image bootstrap config."""
-        uid = MEMBER_UID_BASE + launch.slot_id
+    def _codex_member_state_argv(self, launch: ResidentLaunch, state_dir: str) -> tuple[str, ...]:
+        """The member command that creates its Codex home from the image's bootstrap config."""
         script = (
             'set -eu; source="$1"; target="$2"; legacy="$3"; trusted="$4"; '
             'marker="$target/.freeinference-member-state-v1"; '
@@ -617,22 +672,15 @@ class ResidentTransportFactory:
             '  mkdir -p -- "$target/tmp" "$target/.tmp"; : > "$marker"; '
             "fi"
         )
-        return self._manager.exec_capture(
-            spec,
-            [
-                "/bin/sh",
-                "-c",
-                script,
-                "sh",
-                CHAT_STATE_DIR,
-                state_dir,
-                self._legacy_member_state_dir(launch),
-                str(self._manager.backend.uid),
-            ],
-            workdir="/",
-            timeout_s=120,
-            user_uid=uid,
-            user_gid=self._manager.backend.gid,
+        return (
+            "/bin/sh",
+            "-c",
+            script,
+            "sh",
+            CHAT_STATE_DIR,
+            state_dir,
+            self._legacy_member_state_dir(launch),
+            str(self._manager.backend.uid),
         )
 
     def _clone_private_member_state(
@@ -740,19 +788,15 @@ class ResidentTransportFactory:
                 + result.stderr.decode("utf-8", "replace")[-300:]
             )
 
-    def _launch_context(
-        self,
-        spec: ChatSandboxSpec,
-        launch: ResidentLaunch,
-        *,
-        credential: str,
-        state_dir: str | None = None,
-        member_processes_reaped: bool = False,
-    ) -> LaunchContext:
-        """Build one member-isolated launch seam used by live and fork probes."""
-        uid = MEMBER_UID_BASE + launch.slot_id
+    def _member_env(self, launch: ResidentLaunch) -> tuple[dict[str, str], str]:
+        """The environment one member's CLI starts with, and its inference script.
+
+        Exactly this member's own credentials: its private home and state, the
+        platform inference credential, an owner connection's token or an owner
+        environment's hand-off script, and the claim's repository-scoped GitHub
+        token. Nothing another member of the group could read.
+        """
         runtime_id = launch.runtime_id
-        activation_dir = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/{runtime_id}"
         home = f"/home/agent-member-{launch.slot_id}"
         base_env = dict(self._manager.backend.base_env())
         inference_script = ""
@@ -778,6 +822,7 @@ class ResidentTransportFactory:
                 "GIT_CONFIG_VALUE_0": CHAT_WORKDIR,
             }
         )
+        base_env.update(compat_token_env(launch.inference_local_token))
         # Only the claim's repository-scoped token may authenticate gh. Do not
         # fall back to a credential inherited from a custom host backend.
         base_env.pop("GH_TOKEN", None)
@@ -805,6 +850,31 @@ class ResidentTransportFactory:
             base_env["PATH"] = (
                 f"{runtime_bin_dir(runtime_id, launch.runtime_version)}:{base_env['PATH']}"
             )
+        return base_env, inference_script
+
+    def _launch_context(
+        self,
+        spec: ChatSandboxSpec,
+        launch: ResidentLaunch,
+        *,
+        credential: str,
+        state_dir: str | None = None,
+        member_processes_reaped: bool = False,
+        preparation: MemberPreparation | None = None,
+    ) -> LaunchContext:
+        """Build one member-isolated launch seam used by live and fork probes.
+
+        ``preparation`` holds what the member's UID still has to do before its
+        CLI starts; the first spawn adds its own steps and runs them all.
+        """
+        uid = MEMBER_UID_BASE + launch.slot_id
+        runtime_id = launch.runtime_id
+        if preparation is None:
+            preparation = MemberPreparation(
+                self._manager, spec, user_uid=uid, user_gid=self._manager.backend.gid
+            )
+        activation_dir = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/{runtime_id}"
+        base_env, inference_script = self._member_env(launch)
 
         reaped = False
 
@@ -820,8 +890,13 @@ class ResidentTransportFactory:
                         slot_id=launch.slot_id,
                         user_uid=uid,
                         user_gid=self._manager.backend.gid,
+                        batch=preparation,
                     )
+                preparation.run()
                 if inference_script:
+                    # An exec of its own, after the reap has run: a process an
+                    # earlier launch left as this UID could read it from the
+                    # exec that reaps (cloud_agent_host.member_preparation).
                     self._manager.write_member_inference_env(
                         spec,
                         inference_script,
@@ -829,17 +904,18 @@ class ResidentTransportFactory:
                         user_uid=uid,
                         user_gid=self._manager.backend.gid,
                     )
-                # HTTP dialects always use the trusted live bridge, including
-                # turns without MCP. Refresh it from the host when resuming a
-                # retained container so new native-question commands are
-                # available without replacing its persisted session state.
+                # HTTP dialects always use the trusted live bridge, and pi its
+                # wrapper and MCP bridge, including turns without MCP. Refresh
+                # them from the host when resuming a retained container so new
+                # native-question commands, and an older image's wrappers'
+                # replacements, arrive without replacing its session state.
                 if launch.runtime_version:
                     # A version an admin updated to after the image was built
                     # is copied in the first time; one the image has is not.
                     self._manager.ensure_downloaded_runtime(
                         spec, runtime_id, launch.runtime_version
                     )
-                if launch.mcp_server_ids or runtime_id in {"opencode", "kilo"}:
+                if launch.mcp_server_ids or runtime_id in {"pi", "opencode", "kilo"}:
                     self._manager.ensure_mcp_helpers(spec, runtime_id)
                 if runtime_id == "kilo":
                     self._manager.ensure_kilo_mcp_runtime(
@@ -847,6 +923,9 @@ class ResidentTransportFactory:
                     )
                 if runtime_id == "codex" and launch.mcp_server_ids:
                     self._manager.ensure_codex_mcp_policy(spec, launch.mcp_base_url)
+                if launch.inference_client_protocol:
+                    # A retained container gets this host's helper, not its image's.
+                    install_compat_helper(self._manager, spec)
                 reaped = True
             pidfile = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/resident-{secrets.token_hex(16)}.pid"
             return self._manager.spawn(
@@ -863,7 +942,18 @@ class ResidentTransportFactory:
         mcp_enabled = bool(launch.mcp_server_ids)
         return LaunchContext(
             workdir=CHAT_WORKDIR,
-            gateway_base_url=launch.gateway_base_url,
+            # An owner connection's URL is used exactly as written, never
+            # normalized like the Gateway relay's (``ExactBaseUrl``).
+            # Typed by its protocol, so only the adapter that speaks it accepts it.
+            gateway_base_url=(
+                connection_base_url(
+                    launch.inference_base_url,
+                    launch.inference_protocol,
+                    launch.inference_client_protocol,
+                )
+                if launch.inference_source
+                else launch.gateway_base_url
+            ),
             credential=credential,
             provides_isolation=True,
             spawn_live=spawn_live,
@@ -877,7 +967,7 @@ class ResidentTransportFactory:
             session_state_dir=state_dir or CHAT_STATE_DIR,
             activation_dir=activation_dir,
             install_tool_hooks=lambda update: self._manager.install_tool_hooks(
-                spec, update, slot_id=launch.slot_id, thread_id=launch.thread_id
+                spec, update, slot_id=launch.slot_id, thread_id=launch.thread_id, batch=preparation
             ),
             claude_config_dir=(
                 claude_member_config_dir(launch.slot_id, launch.thread_id)
@@ -1131,7 +1221,7 @@ print(json.dumps(sorted(children), separators=(",", ":")))
 """
         result = self._manager.exec_capture(
             spec,
-            ["python3", "-c", script, state_dir, source_id],
+            ["python3", "-I", "-c", script, state_dir, source_id],
             workdir="/",
             timeout_s=30,
             user_uid=MEMBER_UID_BASE + source_launch.slot_id,
@@ -1184,6 +1274,9 @@ print(json.dumps(sorted(children), separators=(",", ":")))
                     source_launch.slot_id, source_launch.thread_id
                 ),
                 "PATH": SANDBOX_PATH,
+                # Its interpreter is the image's Claude SDK venv, so the flag is
+                # passed here: nothing in the member's home may load into it.
+                "PYTHONNOUSERSITE": "1",
             },
             workdir=CHAT_WORKDIR,
             timeout_s=60,

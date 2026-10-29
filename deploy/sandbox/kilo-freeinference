@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """Point Kilo Code at this deployment's gateway, then run it.
 
 Kilo's CLI is an OpenCode fork and inherits its two gaps: it does not honour

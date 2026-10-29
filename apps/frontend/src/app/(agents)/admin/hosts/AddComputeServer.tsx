@@ -162,7 +162,6 @@ export default function AddComputeServer({
   const [accountError, setAccountError] = useState<string | null>(null);
   const [sshError, setSshError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [observeOnly, setObserveOnly] = useState(false);
   // Retained after an ambiguous network result; repeated submits use the same intent.
   const requestIds = useRef<Partial<Record<'deploy' | 'import', string>>>({});
@@ -277,7 +276,6 @@ export default function AddComputeServer({
       const message = getErrorMessage(error);
       if (stage === 'fields' && error instanceof ProviderFieldError) {
         setFieldErrors({ [error.field]: message });
-        if (advancedFields.some((field) => field.key === error.field)) setAdvancedOpen(true);
       } else if (stage === 'account') setAccountError(message);
       else if (stage === 'ssh') setSshError(message);
       else setError(message);
@@ -291,14 +289,6 @@ export default function AddComputeServer({
       ref={form}
       className="space-y-5"
       onChange={changed}
-      onInvalidCapture={(event) => {
-        const details = (event.target as HTMLElement).closest('details');
-        if (details) {
-          // Reveal native-validation failures before the browser focuses them.
-          details.open = true;
-          setAdvancedOpen(true);
-        }
-      }}
       onSubmit={(event) => {
         event.preventDefault();
         void submit();
@@ -320,7 +310,6 @@ export default function AddComputeServer({
                     setProviderId(item.id);
                     setMode(item.modes.includes('provision') ? 'provision' : 'attach');
                     setObserveOnly(false);
-                    setAdvancedOpen(false);
                     setValues(initialFields(item.fields));
                     setAccount(initialCredential(item, availableConnections));
                     setSsh(initialCredential(sshProvider, availableConnections));
@@ -352,7 +341,6 @@ export default function AddComputeServer({
                   onChange={() => {
                     setMode(item);
                     setObserveOnly(false);
-                    setAdvancedOpen(false);
                   }}
                 />
                 {item === 'attach' ? 'Connect existing' : 'Create new'}
@@ -498,14 +486,8 @@ export default function AddComputeServer({
           </Section>
         )}
         {(advancedFields.length > 0 || canObserve) && (
-          <details
-            open={advancedOpen}
-            onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
-          >
-            <summary className="cursor-pointer text-sm text-gray-600 dark:text-gray-300">
-              Advanced options
-            </summary>
-            <div className="mt-3 space-y-4">
+          <Section title="Additional options">
+            <div className="space-y-4">
               <ProviderFields
                 fields={advancedFields}
                 values={values}
@@ -523,7 +505,7 @@ export default function AddComputeServer({
                 </label>
               )}
             </div>
-          </details>
+          </Section>
         )}
         {!deploymentConfigured && !observeOnly && (
           <div

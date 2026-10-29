@@ -202,7 +202,7 @@ def test_readiness_requires_events_and_member_isolation_and_cleans_up(monkeypatc
         return SimpleNamespace(returncode=0, stdout="probe-id", stderr="")
 
     def capture(spec, argv, **kwargs):
-        if argv[0] == MEMBER_REAPER_TARGET:
+        if MEMBER_REAPER_TARGET in argv:
             cleanup_calls.append((argv, kwargs))
             return SimpleNamespace(
                 returncode=int(failure == "member_cleanup"), stdout=b"", stderr=b"cleanup failed"
@@ -289,7 +289,8 @@ def test_readiness_requires_events_and_member_isolation_and_cleans_up(monkeypatc
         "status_type",
     }
     if not early_failure:
-        assert cleanup_calls[0][0] == [MEMBER_REAPER_TARGET, "reap", str(MEMBER_UID_BASE)]
+        reap = ["python3", "-I", MEMBER_REAPER_TARGET, "reap", str(MEMBER_UID_BASE)]
+        assert cleanup_calls[0][0] == reap
         assert cleanup_calls[0][1]["input_bytes"] == b""
         assert cleanup_calls[0][1]["user_uid"] == MEMBER_UID_BASE
     if early_failure or failure == "member_cleanup":
@@ -441,8 +442,8 @@ def test_guest_network_sync_replaces_relays_and_resolver_and_is_idempotent(monke
     )
 
     def run(spec, argv, **kwargs):
-        monkeypatch.setattr("sys.argv", ["-c", *argv[3:]])
-        exec(compile(argv[2], "<guest-network>", "exec"), {})
+        monkeypatch.setattr("sys.argv", ["-c", *argv[4:]])
+        exec(compile(argv[3], "<guest-network>", "exec"), {})
         return SimpleNamespace(returncode=0, stderr="")
 
     monkeypatch.setattr(manager, "_kata_privileged_exec", run)
@@ -494,9 +495,9 @@ def test_guest_network_sync_refuses_a_file_the_guest_user_could_rewrite(monkeypa
     )
 
     def run(spec, argv, **kwargs):
-        monkeypatch.setattr("sys.argv", ["-c", *argv[3:]])
+        monkeypatch.setattr("sys.argv", ["-c", *argv[4:]])
         try:
-            exec(compile(argv[2], "<guest-network>", "exec"), {})
+            exec(compile(argv[3], "<guest-network>", "exec"), {})
         except RuntimeError as exc:
             return SimpleNamespace(returncode=1, stderr=str(exc))
         return SimpleNamespace(returncode=0, stderr="")
@@ -589,7 +590,7 @@ def _probe_stubs(monkeypatch, manager, *, cursor, observations):
         return SimpleNamespace(returncode=0, stdout="probe-id", stderr="")
 
     def capture(spec, argv, **kwargs):
-        if argv[0] == MEMBER_REAPER_TARGET:
+        if MEMBER_REAPER_TARGET in argv:
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         if argv[0] == "python3":
             status = {

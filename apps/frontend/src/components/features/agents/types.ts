@@ -347,6 +347,8 @@ export interface AgentJob {
   runtime: string;
   runtimeVersion?: string;
   model: string;
+  /** The owner's connection `model` runs on; undefined is the Gateway. */
+  modelConnectionId?: string;
   /**
    * How hard this turn asked the model to think. Undefined is Auto — nobody
    * chose — which is every turn created before the control existed.

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """Private stdio bridge for OpenCode/Kilo's authenticated loopback server.
 
 The host supervisor deliberately owns only one Docker-exec stdin/stdout pipe.

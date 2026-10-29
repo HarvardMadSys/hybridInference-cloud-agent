@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import pathlib
 import subprocess
 import sys
@@ -36,27 +37,31 @@ def test_archive_cancellation_stops_before_the_next_entry_or_chunk(tmp_path, mon
     if stage == "traversal":
 
         def entries(_root, **kwargs):
-            yield root / ".git"
+            yield str(root / ".git")
             stop.set()
-            yield root / "payload"
+            yield str(root / "payload")
             consumed.append("walked after cancellation")
 
         monkeypatch.setattr(source_archive, "_entries", entries)
     elif stage == "metadata":
-        lstat = pathlib.Path.lstat
+        # The builder stats each walked path with os.lstat. Whichever of the
+        # two top-level entries the directory lists first is cancelled after;
+        # a stat of the other one is the violation, in either listing order.
+        lstat = source_archive.os.lstat
+        first: list[pathlib.Path] = []
 
         def metadata(path, *args, **kwargs):
             result = lstat(path, *args, **kwargs)
-            if not stop.is_set():
-                # Cancel after whichever entry the filesystem yields first.
-                # os.scandir order is unspecified, so anchoring this to .git
-                # can stat payload before cancellation on some filesystems.
-                stop.set()
-            else:
-                consumed.append("statted after cancellation")
+            entry = pathlib.Path(os.fsdecode(path))
+            if entry.parent == root and entry.name in {".git", "payload"}:
+                if not first:
+                    first.append(entry)
+                    stop.set()
+                elif entry != first[0]:
+                    consumed.append("statted after cancellation")
             return result
 
-        monkeypatch.setattr(pathlib.Path, "lstat", metadata)
+        monkeypatch.setattr(source_archive.os, "lstat", metadata)
     else:
 
         class StopOnContent(io.BytesIO):
@@ -133,9 +138,9 @@ def test_cancellable_walk_streams_every_entry_and_never_follows_symlinks(tmp_pat
     (root / "directory-link").symlink_to(root / "z", target_is_directory=True)
     expected = set()
     for directory, directories, files in source_cancellation.os.walk(root, followlinks=False):
-        expected.update(pathlib.Path(directory) / name for name in directories)
-        expected.update(pathlib.Path(directory) / name for name in files)
-    assert set(source_archive._entries(root, stop=threading.Event())) == expected
+        expected.update(os.path.join(directory, name) for name in directories)
+        expected.update(os.path.join(directory, name) for name in files)
+    assert set(source_archive._entries(str(root), stop=threading.Event())) == expected
 
 
 @pytest.mark.parametrize("stage", ["clone", "branch", "lockfiles"])

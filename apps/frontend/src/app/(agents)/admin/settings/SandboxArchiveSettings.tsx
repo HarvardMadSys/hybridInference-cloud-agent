@@ -386,16 +386,10 @@ export default function SandboxArchiveSettingsCard({
         )}
 
         <SettingsSection
-          title="Important"
+          title="Archive storage"
           description="Enable archives and configure their destination, ownership, and encryption."
         >
-          <div className="space-y-4" aria-labelledby="archive-storage-heading">
-            <h3
-              id="archive-storage-heading"
-              className="text-sm font-semibold text-gray-900 dark:text-gray-50"
-            >
-              Archive storage
-            </h3>
+          <div className="space-y-4">
             <label className="flex items-start gap-3 text-sm text-gray-800 dark:text-gray-200">
               <input
                 id="archive-setting-enabled"
@@ -592,22 +586,10 @@ export default function SandboxArchiveSettingsCard({
         </SettingsSection>
 
         <SettingsSection
-          title="Advanced"
+          title="Upload limits"
           description="Tune archive size limits and multipart uploads."
-          open={Boolean(
-            errors.maxArchiveBytes ||
-            errors.multipartThresholdBytes ||
-            errors.multipartPartBytes ||
-            errors.form,
-          )}
         >
-          <div className="space-y-4" aria-labelledby="archive-upload-heading">
-            <h3
-              id="archive-upload-heading"
-              className="text-sm font-semibold text-gray-900 dark:text-gray-50"
-            >
-              Upload limits
-            </h3>
+          <div className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-2">
               {numericFields.map(({ key, targetId, label, description }) => (
                 <label key={key} className="text-sm font-medium text-gray-800 dark:text-gray-200">

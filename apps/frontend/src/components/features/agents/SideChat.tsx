@@ -10,18 +10,14 @@ import { hasLostContext, latestAttempt, latestJob, ownerRunNote } from './conver
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
 import { sideChatKeys } from './sideChatStorage';
-import {
-  composerModels,
-  composerOverrides,
-  ComposerTextarea,
-  ComposerSendButton,
-} from './ConversationComposer';
+import { composerOverrides, ComposerTextarea, ComposerSendButton } from './ConversationComposer';
 import { HistoryTurn } from './ChatMessages';
 import { ThreadHistoryButton } from './ThreadHistoryButton';
 import { codeReviewFixPrompt } from './codeReview';
 import { LiveAgentStatus } from './LiveAgentStatus';
 import { describeConversationTurns } from './conversationTurnNavigation';
 import { highestEffort, offeredEfforts } from './effort';
+import { choiceLabel, turnChoice, turnModelPicker } from './modelSource';
 import { McpApprovalNotice } from './mcp/McpApprovalNotice';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
 import { NativeQuestionPrompt } from './NativeQuestionPrompt';
@@ -37,7 +33,8 @@ import { useSideChatSession, type SideChatSource } from './useSideChatSession';
 import type { SideChatTab } from './useWorkspaceTabs';
 
 interface SideChatProps {
-  sourceJob: SideChatSource & Pick<AgentJob, 'model' | 'reasoningEffort' | 'runtime'>;
+  sourceJob: SideChatSource &
+    Pick<AgentJob, 'model' | 'modelConnectionId' | 'reasoningEffort' | 'runtime'>;
   sourceJobs: AgentJobApi[];
   userId?: string;
   config: AgentConfigApi | null;
@@ -109,7 +106,8 @@ function SideChatContent({
       return '';
     }
   });
-  const [model, setModel] = useState(sourceJob.model);
+  // The model with its source; the same name elsewhere is another choice.
+  const [model, setModel] = useState(() => turnChoice(sourceJob));
   const [effort, setEffort] = useState(sourceJob.reasoningEffort ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -164,22 +162,22 @@ function SideChatContent({
   useEffect(() => {
     if (!current || modelInitialized.current) return;
     modelInitialized.current = true;
-    if (!pickedModel.current) setModel(current.model);
+    if (!pickedModel.current) setModel(turnChoice(current));
     if (!pickedEffort.current && !pickedModel.current) setEffort(current.reasoningEffort ?? '');
   }, [current]);
 
+  const runtime = current?.runtime ?? sourceJob.runtime;
   const efforts = useMemo(
-    () => offeredEfforts(config, current?.runtime ?? sourceJob.runtime, model || sourceJob.model),
-    [config, current?.runtime, model, sourceJob.runtime, sourceJob.model],
+    () => offeredEfforts(config, runtime, model.model, model.connectionId),
+    [config, runtime, model],
   );
   useEffect(() => {
     if (config && !efforts.includes(effort)) {
       setEffort(highestEffort(efforts));
     }
   }, [config, effort, efforts]);
-  const models = config?.models?.length
-    ? composerModels(config.models, current?.model ?? sourceJob.model)
-    : [];
+  const inheritedTurn = current ?? sourceJob;
+  const picker = turnModelPicker(config, runtime, model, setModel, t, turnChoice(inheritedTurn));
 
   useEffect(() => {
     if (running) return;
@@ -491,15 +489,14 @@ function SideChatContent({
                 disabled={unavailable || submitting}
               />
               <div className="flex flex-wrap items-center gap-0.5 px-2.5 pb-1.5">
-                {models.length ? (
+                {picker ? (
                   <>
                     <Picker
                       label={t('sideChat.model')}
-                      value={model}
-                      options={models}
+                      {...picker}
                       onChange={(value) => {
                         pickedModel.current = true;
-                        setModel(value);
+                        picker.onChange(value);
                       }}
                     />
                     <Picker
@@ -514,7 +511,7 @@ function SideChatContent({
                   </>
                 ) : (
                   <span className="min-w-0 flex-1 truncate text-xs text-gray-500 dark:text-gray-400">
-                    {model}
+                    {choiceLabel(config, model, t, { runtime })}
                   </span>
                 )}
                 {running ? (

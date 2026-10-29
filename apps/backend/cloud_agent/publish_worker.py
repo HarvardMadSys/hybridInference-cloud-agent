@@ -50,6 +50,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from cloud_agent.application.model_connections import trusted_scan_secrets
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import EnvironmentEncryptionError
 from cloud_agent.github_app import rate_limit_wait
@@ -76,6 +77,7 @@ if TYPE_CHECKING:
     from cloud_agent.grants import GrantClient
     from cloud_agent.ports import (
         HostPoolRepository,
+        ModelConnectionRepository,
         SnapshotPublishWorkerRepository,
         SourceControlRepository,
     )
@@ -100,6 +102,7 @@ class PublishStorage(Protocol):
 
     host_pool: HostPoolRepository
     source_control: SourceControlRepository
+    model_connections: ModelConnectionRepository
 
     @property
     def environments(self) -> EnvironmentBindingRepository:
@@ -1198,6 +1201,7 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
         await fail("cannot publish: the job has no base_sha to apply the patch onto")
         return None
 
+    known: dict[str, str] = {}
     try:
         # Blocking git work: keep it off the event loop so a slow clone cannot
         # stall the gateway's request handling.
@@ -1205,6 +1209,10 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
             await store.environments.get_job_environment(job_id)
             if getattr(store, "environments", None)
             else None
+        )
+        # Its Secrets, and every connection key revision this group was handed.
+        known = await trusted_scan_secrets(
+            store.model_connections, environment, sandbox_id=job.get("sandbox_id")
         )
         loop = asyncio.get_running_loop()
 
@@ -1243,7 +1251,7 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
                 allow_workflow_changes=allow_workflow_changes,
                 include_base_bundle=True,
                 auth_env=credential.git_auth_env(),
-                **({"known_secrets": environment.secrets()} if environment else {}),
+                **({"known_secrets": known} if known else {}),
             )
             try:
                 fallback_title = _pr_title(job, result.changed_files)
@@ -1332,10 +1340,10 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
         )
     except Exception as exc:
         detail = str(exc) if isinstance(exc, PublishError) else f"publish failed: {exc}"
-        if environment is not None:
+        if known:
             from cloud_agent_shared.secret_redaction import SecretRedactor
 
-            detail = SecretRedactor(environment.secrets()).text(detail)
+            detail = SecretRedactor(known).text(detail)
         if _is_retryable_publication_failure(exc):
             await retry(detail, delay_s=_provider_wait(exc))
             return None
@@ -1345,7 +1353,7 @@ async def _publish_claimed_owned(  # noqa: C901, PLR0912, PLR0915 complexity bas
                 extra={"event": "agent_job_publish_rejected", "job_id": job_id},
             )
         else:
-            if environment is not None and environment.secrets():
+            if known:
                 logger.error("agent job publish failed unexpectedly (%s)", type(exc).__name__)
             else:
                 logger.exception("agent job publish failed unexpectedly")

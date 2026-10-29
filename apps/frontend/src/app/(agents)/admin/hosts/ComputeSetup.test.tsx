@@ -166,6 +166,23 @@ describe('Server setup', () => {
     expect(api.saveComputeDeploymentProfile).not.toHaveBeenCalled();
   });
 
+  it('offers automatic and manual setup as two named alternatives', async () => {
+    render(<ComputeSetup connections={connections} onSaved={vi.fn()} />);
+    const automatic = screen.getByRole('button', { name: 'Automatic setup' });
+    const manual = screen.getByRole('button', { name: 'Manual setup' });
+    expect(screen.getByLabelText('Server setup method')).toContainElement(manual);
+    expect(screen.queryByText(/Advanced/)).not.toBeInTheDocument();
+    expect(automatic).toHaveAttribute('aria-pressed', 'true');
+    expect(manual).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByLabelText('Release bundle')).not.toBeInTheDocument();
+    fireEvent.click(manual);
+    expect(manual).toHaveAttribute('aria-pressed', 'true');
+    expect(automatic).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByLabelText('Release bundle')).toBeVisible();
+    expect(screen.getByLabelText('Gateway host address')).not.toBeVisible();
+    await waitFor(() => expect(api.getComputeAutomaticSetup).toHaveBeenCalled());
+  });
+
   it('shows the deployment blocker and keeps manual setup available', async () => {
     vi.mocked(api.getComputeAutomaticSetup).mockResolvedValue({
       available: false,
@@ -182,7 +199,7 @@ describe('Server setup', () => {
       'Redeploy the control plane with a Host release bundle.',
     );
     expect(screen.getByRole('button', { name: 'Configure automatically' })).toBeDisabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Advanced manual setup' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manual setup' }));
     expect(screen.getByLabelText('Release bundle')).toBeInTheDocument();
     expect(screen.getByLabelText('Host environment')).toBeInTheDocument();
     expect(api.createAutomaticComputeSetup).not.toHaveBeenCalled();
@@ -199,7 +216,7 @@ describe('Server setup', () => {
     fireEvent.click(configure);
     expect(await screen.findByRole('alert')).toHaveTextContent('Connection timed out.');
     const firstId = vi.mocked(api.createAutomaticComputeSetup).mock.calls[0][0].request_id;
-    fireEvent.click(screen.getByRole('button', { name: 'Advanced manual setup' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manual setup' }));
     fireEvent.click(screen.getByRole('button', { name: 'Automatic setup' }));
     expect(screen.getByLabelText('Gateway host address')).toHaveValue('gateway.example.org');
     fireEvent.click(configure);
@@ -232,7 +249,7 @@ describe('Server setup', () => {
     fillAutomaticSetup();
     fireEvent.click(screen.getByRole('button', { name: 'Configure automatically' }));
     expect(screen.getByRole('button', { name: 'Configuring server setup…' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Advanced manual setup' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Manual setup' })).toBeDisabled();
     rejectRequest(new Error('The selected SSH account needs passwordless sudo.'));
     expect(await screen.findByRole('alert')).toHaveTextContent('needs passwordless sudo');
     expect(saved).not.toHaveBeenCalled();

@@ -451,6 +451,22 @@ describe('archived session management', () => {
     expect(screen.getByRole('button', { name: 'Actions for owner/alpha' })).toHaveFocus();
   });
 
+  it('opens the project menu with ArrowDown on its first action and Escape returns focus', async () => {
+    sessions = [session('one')];
+    render(<ArchivedTasksView />);
+    const trigger = await screen.findByRole('button', { name: 'Actions for owner/alpha' });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    const menu = screen.getByRole('menu', { name: 'Actions for owner/alpha' });
+    expect(within(menu).getByRole('menuitem', { name: /Unarchive group/ })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'End' });
+    expect(within(menu).getByRole('menuitem', { name: /Permanently delete group/ })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
   it('names the Start from scratch group as people see it when confirming its deletion', async () => {
     sessions = [session('one', {}, { repo: ':temporary', published_pr_url: null })];
     render(<ArchivedTasksView />);

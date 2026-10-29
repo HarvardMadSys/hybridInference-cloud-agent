@@ -41,6 +41,12 @@ vi.mock('@/lib/api/modelPreference', () => ({
   getModelPreference: vi.fn(),
   saveModelPreference: vi.fn(),
 }));
+// My Settings also lists personal model connections; this deployment offers none.
+vi.mock('@/lib/api/modelConnections', () => ({
+  MAX_MODELS: 8,
+  listModelConnections: () =>
+    Promise.resolve({ configured: true, enabled: false, connections: [] }),
+}));
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentConfig: vi.fn(),
@@ -468,7 +474,8 @@ describe('IntegrationsView', () => {
     expect(await screen.findByText('HarvardMadSys · Temporarily unavailable')).toBeInTheDocument();
     expect(screen.queryByText(/Connected as/)).not.toBeInTheDocument();
     expect(screen.queryByText('Reauthorize GitHub')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Disconnect GitHub' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
+    expect(screen.getByRole('menuitem', { name: 'Disconnect GitHub' })).toBeInTheDocument();
   });
 
   it('looks again while GitHub is unavailable, and stops once it is back', async () => {
@@ -530,7 +537,8 @@ describe('IntegrationsView', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(30_000); // the re-check goes out, unanswered
       });
-      fireEvent.click(screen.getByRole('button', { name: 'Disconnect GitHub' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Disconnect GitHub' }));
       await act(async () => {
         fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
         await vi.advanceTimersByTimeAsync(0);
@@ -603,7 +611,7 @@ describe('IntegrationsView', () => {
     render(<IntegrationsView />);
 
     await screen.findByText('Connected as HarvardMadSys · 2 repositories');
-    expect(screen.getByText('Manage')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Manage' })).toBeInTheDocument();
     // Was 1, from the GitLab row this response omits — that row now reads
     // "Coming soon" instead, and GitHub's is the connected one.
     expect(screen.queryAllByText('Admin setup required')).toHaveLength(0);
@@ -638,7 +646,7 @@ describe('IntegrationsView', () => {
     render(<IntegrationsView />);
 
     await screen.findByText('Connected as HarvardMadSys · 2 repositories');
-    fireEvent.click(screen.getByText('Manage'));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
 
     expect(screen.queryByRole('link', { name: 'Configure repositories' })).not.toBeInTheDocument();
   });
@@ -646,6 +654,23 @@ describe('IntegrationsView', () => {
   // One way out for GitHub. Removing an installation lasted only until the
   // next connection, and reauthorizing only mattered for an installation made
   // outside this page — both covered by disconnecting and connecting again.
+  it('opens the Manage menu with arrows, closes it on Escape, and returns focus', async () => {
+    mockedGetIntegrations.mockResolvedValue(integrations);
+    render(<IntegrationsView />);
+    await screen.findByText('Connected as HarvardMadSys · 2 repositories');
+    const trigger = screen.getByRole('button', { name: 'Manage' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    const menu = screen.getByRole('menu', { name: 'Manage GitHub' });
+    expect(within(menu).getByRole('menuitem', { name: 'Disconnect GitHub' })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    fireEvent.click(trigger);
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
   it('offers GitHub only its one way out', async () => {
     mockedGetIntegrations.mockResolvedValue({
       providers: [
@@ -662,14 +687,14 @@ describe('IntegrationsView', () => {
 
     render(<IntegrationsView />);
     await screen.findByText('Connected as HarvardMadSys, realtmxi · 2 repositories');
-    fireEvent.click(screen.getByText('Manage'));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
 
-    expect(screen.getByRole('button', { name: 'Disconnect GitHub' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Disconnect GitHub' })).toBeInTheDocument();
     expect(screen.queryByText('Reauthorize GitHub')).not.toBeInTheDocument();
     expect(
-      screen.queryByRole('button', { name: /Disconnect HarvardMadSys/ }),
+      screen.queryByRole('menuitem', { name: /Disconnect HarvardMadSys/ }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Disconnect realtmxi/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /Disconnect realtmxi/ })).not.toBeInTheDocument();
   });
 
   // The user's token is kept for GitHub to be asked as them; removing
@@ -685,8 +710,8 @@ describe('IntegrationsView', () => {
 
     render(<IntegrationsView />);
     await screen.findByText('Connected as HarvardMadSys · 2 repositories');
-    fireEvent.click(screen.getByText('Manage'));
-    fireEvent.click(screen.getByRole('button', { name: 'Disconnect GitHub' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Disconnect GitHub' }));
     fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
 
     expect(await screen.findByRole('status')).toHaveTextContent('GitHub disconnected.');
@@ -707,16 +732,16 @@ describe('IntegrationsView', () => {
 
     render(<IntegrationsView />);
     await screen.findByText('Connected as HarvardMadSys · 2 repositories');
-    const [githubMenu, gitlabMenu] = screen.getAllByText('Manage');
+    const [githubMenu, gitlabMenu] = screen.getAllByRole('button', { name: 'Manage' });
     fireEvent.click(githubMenu);
-    fireEvent.click(screen.getByRole('button', { name: 'Disconnect GitHub' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Disconnect GitHub' }));
     expect(screen.getByText(/^Disconnect GitHub\?/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByText(/^Disconnect GitHub\?/)).not.toBeInTheDocument();
     expect(disconnectGitHubAccount).not.toHaveBeenCalled();
 
     fireEvent.click(gitlabMenu);
-    fireEvent.click(screen.getByRole('button', { name: 'Disconnect murphy' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Disconnect murphy' }));
     expect(screen.getByText(/^Disconnect murphy\?/)).toBeInTheDocument();
     expect(mockedDisconnect).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));

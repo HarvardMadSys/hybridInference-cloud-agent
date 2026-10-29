@@ -98,8 +98,7 @@
     {
       "files": [
         "src/components/features/agents/AgentNotifications.tsx",
-        "src/components/features/agents/environment/EnvironmentManager.tsx",
-        "src/components/features/settings/UsageSettings.tsx"
+        "src/components/features/agents/environment/EnvironmentManager.tsx"
       ],
       "rules": {
         "complexity": ["error", 21]
@@ -270,7 +269,7 @@
     {
       "files": ["src/components/features/agents/LedgerUsage.tsx"],
       "rules": {
-        "complexity": ["error", 47]
+        "complexity": ["error", 46]
       }
     },
     {
@@ -357,7 +356,7 @@
     {
       "files": ["src/components/features/agents/JobDetail.tsx"],
       "rules": {
-        "complexity": ["error", 98]
+        "complexity": ["error", 96]
       }
     },
     {
@@ -449,7 +448,7 @@
         "max-lines": [
           "error",
           {
-            "max": 942
+            "max": 939
           }
         ]
       }
@@ -460,7 +459,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1087
+            "max": 1080
           }
         ]
       }
@@ -548,7 +547,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1401
+            "max": 1326
           }
         ]
       }
@@ -559,7 +558,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1303
+            "max": 1230
           }
         ]
       }

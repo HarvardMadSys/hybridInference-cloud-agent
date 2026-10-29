@@ -10,12 +10,18 @@ function modelStatusText(
   t: ReturnType<typeof useT>,
   status: 'loading' | 'ready' | 'error',
   pending: boolean,
-  effective: string | null,
+  preference: ModelPreference | null,
   catalogRead: boolean,
 ) {
   if (status === 'loading') return t('settings.model.loading');
   if (pending) return t('settings.model.saving');
+  const effective = preference?.effective_model;
   if (effective) return t('settings.model.effective', { model: effective });
+  // Remembered from the owner's own connection, not a Gateway default: the
+  // composer offers it again, and this card's pin would replace it.
+  const personal = !preference?.default_model && preference?.last_model_connection_id;
+  if (personal && preference?.last_model)
+    return t('settings.model.lastPersonal', { model: preference.last_model });
   return t(catalogRead ? 'settings.model.noneApplies' : 'settings.model.noModels');
 }
 
@@ -123,7 +129,7 @@ export function ModelSettings() {
             />
             <div className="mt-2 flex items-start justify-between gap-3">
               <p aria-live="polite" className="min-w-0 text-xs leading-5 text-muted">
-                {modelStatusText(t, status, pending, effective, catalogRead)}
+                {modelStatusText(t, status, pending, preference, catalogRead)}
               </p>
               {pinned !== null ? (
                 <button
