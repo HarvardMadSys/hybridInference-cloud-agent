@@ -488,8 +488,12 @@ class LocalAccountFlows:
         if login is not None and login.account.status != "deleted" and login.account.email:
             await self.mail_token(login.account.id, login.account.email, "reset_password")
 
-    async def reset_password(self, token: str, password: str) -> None:
+    async def reset_password(self, token: str, password: str) -> bool:
         """Set a new password from a reset link and end every session.
+
+        Whether the reset was the address's holder taking the account back
+        (see ``PasswordReset.reclaimed``): the holder is then told, here and
+        by mail, what was cleared and to apply again.
 
         Raises:
             WeakPassword: The new password breaks the policy.
@@ -509,6 +513,11 @@ class LocalAccountFlows:
         # application only when this reset is what verified the identity: an
         # applicant resetting again tells them nothing new.
         await self.after_verified_identity(reset.account_id, applied=reset.verified_identity)
+        if reset.reclaimed:
+            account = await self._accounts.get_account(reset.account_id)
+            if account is not None and account.email:
+                self._send(AccountMail(kind="account_reclaimed", to=account.email))
+        return reset.reclaimed
 
     async def session_owner(self, token: str | None) -> SessionOwner | None:
         """The live session behind a presented value, or ``None``."""

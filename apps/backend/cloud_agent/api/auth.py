@@ -73,6 +73,7 @@ from cloud_agent.schemas.accounts import (
     OkResponse,
     PhoneAuthConfig,
     ResetPasswordRequest,
+    ResetPasswordResponse,
     SetupAdminRequest,
     SignupRequest,
     TokenRequest,
@@ -400,12 +401,24 @@ async def forgot_password(
     return OkResponse()
 
 
-@router.post("/reset-password", response_model=OkResponse, dependencies=_LOCAL_WRITE)
-async def reset_password(body: ResetPasswordRequest, request: Request) -> OkResponse:
-    """Set a new password from a reset link; every session of the account ends."""
+@router.post(
+    "/reset-password",
+    response_model=ResetPasswordResponse,
+    response_model_exclude_none=True,
+    dependencies=_LOCAL_WRITE,
+)
+async def reset_password(
+    body: ResetPasswordRequest, request: Request, background: BackgroundTasks
+) -> ResetPasswordResponse:
+    """Set a new password from a reset link; every session of the account ends.
+
+    ``reclaimed`` tells the holder of an address accepted unproven while
+    verification was off that what was entered at sign-up was cleared (a
+    mail says the same).
+    """
     await enforce_rate_limits(request, [("token_ip", client_bucket(request), FIFTEEN_MIN, 30)])
-    await local_flows(request).reset_password(body.token, body.password)
-    return OkResponse()
+    reclaimed = await local_flows(request, background).reset_password(body.token, body.password)
+    return ResetPasswordResponse(reclaimed=True if reclaimed else None)
 
 
 # ── First-run setup ──────────────────────────────────────────────────────

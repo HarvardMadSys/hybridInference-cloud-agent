@@ -244,6 +244,15 @@ class OkResponse(BaseModel):
     ok: Literal[True] = True
 
 
+class ResetPasswordResponse(OkResponse):
+    """The new password is set; ``reclaimed`` when it took an unproven address back.
+
+    Present only then, so an ordinary reset answers exactly ``{ok: true}``.
+    """
+
+    reclaimed: Literal[True] | None = None
+
+
 class WaitlistEntry(BaseModel):
     """An account's Agent application and its review.
 
@@ -537,6 +546,7 @@ __all__ = [
     "PhoneVerifyRequest",
     "PurgedResponse",
     "ResetPasswordRequest",
+    "ResetPasswordResponse",
     "SetupAdminRequest",
     "SignupDomainEntry",
     "SignupDomainRequest",

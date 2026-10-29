@@ -664,6 +664,7 @@ async def test_an_unreachable_captcha_refuses(monkeypatch):
         ("password_changed", {"first_password": "true"}, "was set"),
         ("email_changed", {"new_email": "n@example.edu"}, "n@example.edu"),
         ("account_deleted", {}, "deleted"),
+        ("account_reclaimed", {}, "apply again from the waiting list"),
         ("bind_email", {}, "Confirm your new"),
     ],
 )

@@ -67,6 +67,7 @@ MailKind = Literal[
     "password_changed",
     "email_changed",
     "account_deleted",
+    "account_reclaimed",
     "broadcast",
 ]
 
@@ -182,6 +183,15 @@ def _notice_lines(kind: str, link: str, details: Mapping[str, str]) -> tuple[str
             f"Your {SITE_NAME} account now signs in with {details.get('new_email', '')} instead "
             "of this address, which no longer receives its password resets.",
             "If this wasn't you, contact the administrator at once.",
+        ]
+    if kind == "account_reclaimed":
+        return f"Your {SITE_NAME} account is yours again", [
+            f"Your new password is set. This address joined {SITE_NAME} while email "
+            "verification was off, so anyone could have signed it up; what was entered at "
+            "sign-up (the name, the Terms acceptance, the language and the application text) "
+            "has been cleared, and any session is signed out.",
+            "If you were waiting for Agent access, apply again from the waiting list. Agent "
+            "work already in the account stays; if it is not yours, contact the administrator.",
         ]
     return f"Your {SITE_NAME} account has been deleted", [
         f"Your {SITE_NAME} account was deleted at your request, and it can no longer sign in.",

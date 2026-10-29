@@ -491,6 +491,27 @@ async def test_without_smtp_sign_up_works_once_verification_is_off(env, monkeypa
         assert forgot.status_code == 503
 
 
+async def test_a_reset_that_reclaims_an_address_says_so_and_an_ordinary_one_does_not(
+    env, monkeypatch
+):
+    """Review T2: the reset page and a mail tell the holder; an ordinary reset stays {ok: true}."""
+    mailer = env.state.account_mailer
+    monkeypatch.setenv("AGENT_LOCAL_SIGNUP_REQUIRE_EMAIL_VERIFICATION", "false")
+    async with _client(env) as http:
+        assert (await _sign_up(http, "taken@example.edu")).status_code == 200
+        for expected in ({"ok": True, "reclaimed": True}, {"ok": True}):
+            forgot = await http.post(
+                "/v1/auth/forgot-password", json={"email": "taken@example.edu"}
+            )
+            assert forgot.status_code == 200
+            reset = await http.post(
+                "/v1/auth/reset-password",
+                json={"token": mailer.token("reset_password"), "password": "Holder1Pass"},
+            )
+            assert reset.json() == expected
+    assert [mail.kind for mail in mailer.sent].count("account_reclaimed") == 1
+
+
 async def test_a_listed_administrator_address_is_promoted_when_it_signs_in(env, monkeypatch):
     monkeypatch.setenv("AGENT_LOCAL_ADMIN_EMAILS", "Lead@Example.edu")
     await make_account(env.state.storage, "lead@example.edu")

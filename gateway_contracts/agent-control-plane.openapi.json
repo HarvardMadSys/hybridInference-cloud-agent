@@ -17651,6 +17651,31 @@
         "title": "ResetPasswordRequest",
         "type": "object"
       },
+      "ResetPasswordResponse": {
+        "description": "The new password is set; ``reclaimed`` when it took an unproven address back.\n\nPresent only then, so an ordinary reset answers exactly ``{ok: true}``.",
+        "properties": {
+          "ok": {
+            "const": true,
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "reclaimed": {
+            "anyOf": [
+              {
+                "const": true,
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reclaimed"
+          }
+        },
+        "title": "ResetPasswordResponse",
+        "type": "object"
+      },
       "ResidencyBeat": {
         "description": "One hot sandbox a host reports alive.",
         "properties": {
@@ -46371,7 +46396,7 @@
     },
     "/v1/auth/reset-password": {
       "post": {
-        "description": "Set a new password from a reset link; every session of the account ends.",
+        "description": "Set a new password from a reset link; every session of the account ends.\n\n``reclaimed`` tells the holder of an address accepted unproven while\nverification was off that what was entered at sign-up was cleared (a\nmail says the same).",
         "operationId": "reset_password_v1_auth_reset_password_post",
         "requestBody": {
           "content": {
@@ -46388,7 +46413,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OkResponse"
+                  "$ref": "#/components/schemas/ResetPasswordResponse"
                 }
               }
             },

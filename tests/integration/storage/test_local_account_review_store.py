@@ -284,10 +284,11 @@ async def test_reclaiming_an_address_drops_what_its_claimant_wrote(storage, pool
         token_hash=tokens.email_token_hash(token),
         ttl_s=3600,
     )
-    reset = await storage.local_accounts.reset_password(
-        token_hash=tokens.email_token_hash(token), password_hash=await hash_password("Holder1Pass")
-    )
-    assert reset is not None and reset.reclaimed
+    assert await recorder.flows.reset_password(token, "Holder1Pass")
+    # Review T2: the holder is told what was cleared and to apply again.
+    assert [mail.kind for mail in recorder.mail if mail.to == "claimed@lab.edu"] == [
+        "account_reclaimed"
+    ]
     record = await storage.local_accounts.get_account(account_id)
     assert record is not None
     assert (record.user_name, record.locale, record.purpose, record.admission_status) == (
@@ -309,6 +310,7 @@ async def test_reclaiming_an_address_drops_what_its_claimant_wrote(storage, pool
     assert (tos, audit) == (None, "pending")
     # A proven address is the holder's own: a later reset reclaims nothing.
     await _reset(storage, recorder.flows, account_id, "Holder2Pass")
+    assert [mail.kind for mail in recorder.mail].count("account_reclaimed") == 1
     again = await storage.local_accounts.get_account(account_id)
     assert again is not None and again.admission_status == "not_applied"
     async with pool.acquire() as conn:
