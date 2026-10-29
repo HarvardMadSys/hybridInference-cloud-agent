@@ -26,7 +26,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 
 from cloud_agent.accounts.mail import AccountMail
-from cloud_agent.accounts.policy import approval_policy, parse_signup_domain
+from cloud_agent.accounts.policy import admin_emails, approval_policy, parse_signup_domain
 from cloud_agent.api._local_auth import (
     LocalAuthRoute,
     account_entry,
@@ -44,6 +44,7 @@ from cloud_agent.api.deps import (
 )
 from cloud_agent.api.errors import typed_error
 from cloud_agent.application.owner_termination import terminate_owner_access
+from cloud_agent.domain.accounts import AccountTransitionRefused
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas.accounts import (
     AccountActionRequest,
@@ -54,10 +55,13 @@ from cloud_agent.schemas.accounts import (
     EraseAccountResponse,
     LoginEventEntry,
     LoginEventsResponse,
+    OwnedTeamEntry,
+    OwnedTeamsResponse,
     PurgedResponse,
     SignupDomainEntry,
     SignupDomainRequest,
     SignupDomainsResponse,
+    TransferTeamRequest,
 )
 
 logger = get_logger(__name__)
@@ -68,6 +72,9 @@ router = APIRouter(
     route_class=LocalAuthRoute,
     dependencies=[Depends(require_local_mode)],
 )
+
+#: Actions the administrator address list undoes at the account's next sign-in.
+_UNDONE_BY_ADMIN_LIST = frozenset({"revoke_admin", "revoke", "reject"})
 
 AdmissionFilter = Literal["not_applied", "pending", "approved", "rejected", "revoked"]
 StatusFilter = Literal["active", "suspended", "deleted"]
@@ -214,9 +221,31 @@ async def change_account(
     admin: str = Depends(verify_admin_access),
     grants: Any = Depends(get_grant_client),
 ) -> AccountEntry:
-    """Apply one action at the version the administrator read."""
+    """Apply one action at the version the administrator read.
+
+    An account whose proven email is on **Administrator email addresses** is
+    made administrator again at its next sign-in, as HybridInference's
+    ``ADMIN_EMAILS`` does, so withdrawing its administration or access, or
+    declining it, is refused (``listed_admin_address``) rather than reported
+    done: the address comes off the list first, or the account is suspended.
+    """
     reason = (body.reason or "").strip() or None
-    result = await local_accounts(request).apply_admin_action(
+    accounts = local_accounts(request)
+    if body.action in _UNDONE_BY_ADMIN_LIST:
+        current = await accounts.get_account(account_id)
+        if (
+            current is not None
+            and current.email_proven
+            and current.email
+            and current.email.lower() in admin_emails()
+        ):
+            raise AccountTransitionRefused(
+                "This account's email is in Administrator email addresses (Admin → Settings → "
+                "Accounts), which makes it an administrator again when it signs in. Remove the "
+                "address from that list first, or suspend the account.",
+                code="listed_admin_address",
+            )
+    result = await accounts.apply_admin_action(
         account_id=account_id,
         action=body.action,
         reason=reason,
@@ -322,7 +351,45 @@ async def erase_account(
         account=account_entry(result.account),
         deleted=result.deleted,
         retained_archives=result.retained_archives,
+        deleted_teams=result.deleted_teams,
+        handed_environments=result.handed_environments,
     )
+
+
+@router.get("/{account_id}/teams", response_model=OwnedTeamsResponse)
+async def owned_teams(
+    account_id: str, request: Request, _admin: str = Depends(verify_admin_access)
+) -> OwnedTeamsResponse:
+    """The active teams the account owns, each with the members it can be handed to."""
+    teams = await local_accounts(request).owned_teams(account_id)
+    return OwnedTeamsResponse(teams=[OwnedTeamEntry(**team) for team in teams])
+
+
+@router.post(
+    "/{account_id}/teams/{team_id}/transfer",
+    response_model=OwnedTeamsResponse,
+    dependencies=[Depends(require_json)],
+)
+async def transfer_team(
+    account_id: str,
+    team_id: str,
+    body: TransferTeamRequest,
+    request: Request,
+    admin: str = Depends(verify_admin_access),
+) -> OwnedTeamsResponse:
+    """Hand a deleted account's team to one of its members, so erasure leaves the team intact.
+
+    A deleted owner cannot sign in to transfer its teams, and erasure refuses
+    (``team_transfer_required``) while it owns one that others use.
+    """
+    teams = await local_accounts(request).transfer_owned_team(
+        account_id=account_id,
+        team_id=team_id,
+        user_id=body.user_id,
+        actor_id=admin,
+        admin_ip=get_client_ip(request),
+    )
+    return OwnedTeamsResponse(teams=[OwnedTeamEntry(**team) for team in teams])
 
 
 async def _terminate(storage: Any, grants: Any, account_id: str, generation: int) -> None:

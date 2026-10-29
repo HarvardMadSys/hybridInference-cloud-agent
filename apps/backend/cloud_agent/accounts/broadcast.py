@@ -23,10 +23,12 @@ from dataclasses import dataclass
 
 from markdown_it import MarkdownIt
 
-from cloud_agent.accounts.mail import SITE_NAME
+from cloud_agent.accounts.mail import SITE_NAME, AccountMail
 
-#: Account states and application states an audience may name.
-ACCOUNT_STATES = ("active", "suspended", "deleted")
+#: Account states and application states an audience may name. A deleted
+#: account is never mailed (and skipped if deleted after the message was
+#: created), so it is no audience: the preview counts only who receives it.
+ACCOUNT_STATES = ("active", "suspended")
 ADMISSION_STATES = ("not_applied", "pending", "approved", "rejected", "revoked")
 
 _md = MarkdownIt("commonmark", {"html": False, "breaks": True}).enable(["table", "strikethrough"])
@@ -112,10 +114,26 @@ def render_broadcast(
     )
 
 
+def broadcast_mail(
+    rendered: RenderedBroadcast, *, to: str, subject: str | None = None
+) -> AccountMail:
+    """The account mail that delivers a rendered broadcast to one address."""
+    return AccountMail(
+        kind="broadcast",
+        to=to,
+        details={
+            "subject": subject if subject is not None else rendered.subject,
+            "html": rendered.html,
+            "text": rendered.text,
+        },
+    )
+
+
 __all__ = [
     "ACCOUNT_STATES",
     "ADMISSION_STATES",
     "TEMPLATES",
     "RenderedBroadcast",
+    "broadcast_mail",
     "render_broadcast",
 ]

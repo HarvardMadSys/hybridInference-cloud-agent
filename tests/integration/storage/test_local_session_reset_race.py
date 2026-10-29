@@ -124,7 +124,7 @@ async def test_old_password_cannot_open_a_session_while_reset_commits(
             session_pid = await _wait_for_session_select(db, reset_pid, opening)
             assert session_pid != reset_pid and not resetting.done()
             continue_reset.set()
-            reset_account_id, opened_account = await asyncio.gather(resetting, opening)
+            reset, opened_account = await asyncio.gather(resetting, opening)
     finally:
         # A failed assertion or lock timeout must not strand a transaction in
         # the shared test pool and block the fixture's schema cleanup.
@@ -135,7 +135,7 @@ async def test_old_password_cannot_open_a_session_while_reset_commits(
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    assert reset_account_id == _ACCOUNT_ID
+    assert reset is not None and reset.account_id == _ACCOUNT_ID
     login = await accounts.password_login("session-race@example.org")
     assert login is not None and login.password_hash == _NEW_HASH
     assert await accounts.session_owner(_EXISTING_SESSION) is None
@@ -155,10 +155,8 @@ async def test_old_password_cannot_open_a_session_while_reset_commits(
 async def test_new_password_can_open_a_session_after_reset(store: Storage):
     """Refusing a stale password must not refuse the newly committed password."""
     accounts = await _verified_account(store)
-    assert (
-        await accounts.reset_password(token_hash=_RESET_TOKEN, password_hash=_NEW_HASH)
-        == _ACCOUNT_ID
-    )
+    reset = await accounts.reset_password(token_hash=_RESET_TOKEN, password_hash=_NEW_HASH)
+    assert reset is not None and reset.account_id == _ACCOUNT_ID
     assert await _session(accounts, _RACING_SESSION, _OLD_HASH) is None
     opened = await _session(accounts, _NEW_SESSION, _NEW_HASH)
     assert opened is not None and opened.id == _ACCOUNT_ID

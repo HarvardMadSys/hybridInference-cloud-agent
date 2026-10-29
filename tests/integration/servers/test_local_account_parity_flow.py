@@ -500,6 +500,40 @@ async def test_a_listed_administrator_address_is_promoted_when_it_signs_in(env, 
         assert signed_in.json()["agent_access"]["permissions"] == ["agent.use", "agent.admin"]
 
 
+async def test_with_verification_off_a_listed_address_signed_up_by_anyone_stays_unprivileged(
+    env, monkeypatch
+):
+    """Review N1: the no-SMTP setup and the administrator list together hand out nothing."""
+    env.state.account_mailer.configured = False
+    monkeypatch.setenv("AGENT_LOCAL_SIGNUP_REQUIRE_EMAIL_VERIFICATION", "false")
+    monkeypatch.setenv("AGENT_LOCAL_ADMIN_EMAILS", "boss@example.edu")
+    async with _client(env) as http:
+        assert (await _sign_up(http, "boss@example.edu")).status_code == 200
+        signed_in = await _login(http, "boss@example.edu")
+        assert signed_in.status_code == 200
+        assert signed_in.json()["agent_access"]["permissions"] == []
+
+
+async def test_a_listed_administrator_keeps_administration_until_its_address_leaves_the_list(
+    env, monkeypatch
+):
+    """Review N10: the list is authoritative, so withdrawing it while listed is refused."""
+    monkeypatch.setenv("AGENT_LOCAL_ADMIN_EMAILS", "lead@example.edu")
+    lead = await make_account(env.state.storage, "lead@example.edu")
+    async with _client(env) as http:
+        assert (await _login(http, "lead@example.edu")).status_code == 200
+        for action in ("revoke_admin", "revoke"):
+            refused = await _admin(http, env, lead, action)
+            assert refused.status_code == 409, refused.text
+            error = refused.json()["detail"]["error"]
+            assert error["type"] == "listed_admin_address"
+            assert "Remove the address from that list first" in error["message"]
+        monkeypatch.setenv("AGENT_LOCAL_ADMIN_EMAILS", "")
+        assert (await _admin(http, env, lead, "revoke_admin")).status_code == 200
+        again = await _login(http, "lead@example.edu")
+        assert again.json()["agent_access"]["permissions"] == ["agent.use"]
+
+
 # ── Administration ───────────────────────────────────────────────────────
 
 
@@ -583,6 +617,91 @@ async def test_administrator_mail_previews_tests_and_sends_to_its_audience(env):
         assert detail.json()["broadcast"]["status"] == "sent"
         cancel = await http.delete(f"/v1/admin/account-mail/{created.json()['id']}", headers=_ADMIN)
         assert cancel.status_code == 409
+
+
+async def test_teams_of_a_deleted_owner_are_handed_over_before_it_is_erased(env, pool):
+    """Review N3: the refusal names the team, and the administrator can act on it."""
+    storage = env.state.storage
+    owner = await make_account(storage, "team-owner@example.edu", admission="approved")
+    member = await make_account(storage, "team-member@example.edu", admission="approved")
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "INSERT INTO agent_teams (id, name, owner_user_id, created_by_user_id, "
+            "create_request_key) VALUES ('team-lab', 'Lab', $1, $1, 'k')",
+            owner,
+        )
+        await conn.execute(
+            "INSERT INTO agent_team_members (team_id, user_id, role) VALUES "
+            "('team-lab', $1, 'admin'), ('team-lab', $2, 'member')",
+            owner,
+            member,
+        )
+    async with _client(env) as http:
+        assert (await _admin(http, env, owner, "delete")).status_code == 200
+        await enforce_ended_access(storage, LocalModeGrantClient())
+        blocked = await http.post(
+            f"/v1/admin/accounts/{owner}/erase", json={"confirm": owner}, headers=_ADMIN
+        )
+        assert blocked.status_code == 409
+        assert blocked.json()["detail"]["error"]["type"] == "team_transfer_required"
+        assert "Lab (team-lab)" in blocked.json()["detail"]["error"]["message"]
+        teams = await http.get(f"/v1/admin/accounts/{owner}/teams", headers=_ADMIN)
+        assert teams.json() == {
+            "teams": [
+                {
+                    "id": "team-lab",
+                    "name": "Lab",
+                    "revision": 1,
+                    "members": [
+                        {"user_id": member, "role": "member", "label": "team-member@example.edu"}
+                    ],
+                }
+            ]
+        }
+        handed = await http.post(
+            f"/v1/admin/accounts/{owner}/teams/team-lab/transfer",
+            json={"user_id": member},
+            headers=_ADMIN,
+        )
+        assert handed.status_code == 200 and handed.json() == {"teams": []}
+        erased = await http.post(
+            f"/v1/admin/accounts/{owner}/erase", json={"confirm": owner}, headers=_ADMIN
+        )
+        assert erased.status_code == 200, erased.text
+    team = await storage.teams.get_team(member, "team-lab")
+    assert team.owner_user_id == member
+
+
+async def test_mail_the_transport_would_refuse_is_refused_before_it_is_queued(env, monkeypatch):
+    """Review N8: a Tencent SES template bound is reported at preview, not by every recipient."""
+    await make_account(env.state.storage, "reader@example.edu", admission="approved")
+    monkeypatch.setenv("AGENT_LOCAL_EMAIL_PROVIDER", "tencent_ses")
+    monkeypatch.setenv("AGENT_TENCENT_SES_TEMPLATE_NOTICE", "7")
+    short = {
+        "subject": "Short",
+        "body_markdown": "Back soon.",
+        "target_statuses": ["active"],
+        "target_admissions": ["approved"],
+    }
+    long = short | {"body_markdown": "A long update. " * 80}
+    async with _client(env) as http:
+        fits = await http.post("/v1/admin/account-mail/preview", json=short, headers=_ADMIN)
+        assert fits.json()["delivery_problem"] is None
+        preview = await http.post("/v1/admin/account-mail/preview", json=long, headers=_ADMIN)
+        assert preview.status_code == 200 and preview.json()["recipient_count"] == 1
+        assert "800 bytes" in preview.json()["delivery_problem"]
+        created = await http.post("/v1/admin/account-mail", json=long, headers=_ADMIN)
+        assert created.status_code == 422
+        assert created.json()["detail"]["error"]["type"] == "undeliverable_message"
+        listed = await http.get("/v1/admin/account-mail", headers=_ADMIN)
+        assert listed.json()["total"] == 0
+        # Review N7: a deleted account is no audience at all.
+        deleted = await http.post(
+            "/v1/admin/account-mail/preview",
+            json=short | {"target_statuses": ["deleted"]},
+            headers=_ADMIN,
+        )
+        assert deleted.status_code == 422
 
 
 async def test_the_interface_language_follows_the_account(env):

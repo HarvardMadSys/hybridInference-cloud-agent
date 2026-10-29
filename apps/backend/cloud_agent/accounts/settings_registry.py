@@ -56,8 +56,10 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         env="AGENT_LOCAL_SIGNUP_REQUIRE_EMAIL_VERIFICATION",
         description=_LOCAL
         + "When off, a new email account is treated as verified at sign-up and no verification "
-        "mail is sent, so sign-up works without SMTP. Accounts created while it was on still "
-        "verify their address.",
+        "mail is sent, so sign-up works without SMTP. Such an address is accepted, not proven: "
+        "it neither matches the signup domain list nor the administrator addresses until a "
+        "link sent to it is followed. Accounts created while it was on still verify their "
+        "address.",
     ),
     Setting(
         "accounts.approval_policy",
@@ -120,9 +122,13 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         check=_emails,
         hint="Use comma-separated email addresses.",
         description=_LOCAL
-        + "Comma-separated, as HybridInference's ADMIN_EMAILS: an account whose verified email "
-        "is listed is approved and made an administrator when it signs in. An address is "
-        "verified only by a link sent to it.",
+        + "Comma-separated, as HybridInference's ADMIN_EMAILS: an account whose email is listed "
+        "and proven is approved and made an administrator when it signs in. Proven means a "
+        "link sent to the address was followed (verification, address change or password "
+        "reset) or the operator created the account; an address accepted while email "
+        "verification is off is not proven until its owner resets the password. The list "
+        "stays in charge: withdrawing a listed account's administration or access is refused "
+        "until its address is removed here, since it would be granted again at sign-in.",
     ),
     _numeric(
         "accounts.session_ttl_days",

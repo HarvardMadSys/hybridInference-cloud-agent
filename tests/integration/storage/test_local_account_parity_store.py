@@ -137,6 +137,17 @@ async def test_the_migration_carries_accounts_over_and_refuses_a_lossy_downgrade
             True,
         )
         assert permissions_for(kept) == ["agent.use"]
+        # 0107 verified an email only by its link, so a carried-over one is proven.
+        assert (kept.email_proven, waiting.email_proven) == (True, False)
+        async with pool.acquire() as conn:
+            sources = await conn.fetch(
+                "SELECT account_id, verified_by FROM agent_local_login_identities "
+                "ORDER BY account_id"
+            )
+        assert [(r["account_id"], r["verified_by"]) for r in sources] == [
+            (_ULID_A, "link"),
+            (_ULID_B, None),
+        ]
         # An approved row whose email never verified still holds nothing.
         assert (waiting.identity_verified, permissions_for(waiting)) == (False, [])
         assert await accounts.stored_password_hash(_ULID_A) == "$argon2id$kept"
@@ -145,8 +156,8 @@ async def test_the_migration_carries_accounts_over_and_refuses_a_lossy_downgrade
         async with pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO agent_local_login_identities "
-                "(account_id, kind, value, value_normalized, verified_at) "
-                "VALUES ($1, 'phone', '+8613800138000', '+8613800138000', NOW())",
+                "(account_id, kind, value, value_normalized, verified_at, verified_by) "
+                "VALUES ($1, 'phone', '+8613800138000', '+8613800138000', NOW(), 'code')",
                 _ULID_A,
             )
         with pytest.raises(Exception, match="refusing to downgrade"):

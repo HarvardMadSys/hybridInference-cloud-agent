@@ -120,6 +120,9 @@ class AccountRecord:
     locale: str | None = None
     locale_chosen_at: datetime | None = None
     reviewed_by: str | None = None
+    #: The email was proven by a link sent to it, or set by the operator, not
+    #: merely accepted because email verification is off.
+    email_proven: bool = False
 
     @property
     def label(self) -> str:

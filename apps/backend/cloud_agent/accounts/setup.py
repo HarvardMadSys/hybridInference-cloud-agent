@@ -46,7 +46,7 @@ async def announce_setup_code(accounts: LocalAccountRepository) -> None:
     code = await accounts.setup_code(new_setup_code())
     if code is not None:
         logger.warning(
-            "agent_local_setup_pending: create the first administrator at /setup "
+            "agent_local_setup_pending: create the first administrator at /setup/administrator "
             "with this one-time setup code: %s",
             code,
             extra={"event": "agent_local_setup_pending"},

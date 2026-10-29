@@ -313,7 +313,7 @@ class LocalAccountFlows:
             email_normalized=normalized,
             password_hash=hashed,
             user_name=user_name,
-            email_verified=verified_now,
+            email_verified_by="policy" if verified_now else None,
             tos_accepted=tos_accepted,
             purpose=None if use_case is None else use_case.strip(),
         )
@@ -344,7 +344,7 @@ class LocalAccountFlows:
         if account is None:
             return SignUpOutcome(account=None, waits_for_approval=False)
         if account.identity_verified and await approves_automatically(
-            self._accounts, account.email
+            self._accounts, account.email, proven=account.email_proven
         ):
             approved = await self._accounts.approve_by_policy(
                 account_id=account_id, actor_id=POLICY_ACTOR
@@ -393,14 +393,16 @@ class LocalAccountFlows:
         )
 
     async def promote_if_listed(self, account: AccountRecord) -> AccountRecord:
-        """Make an account administrator when its verified email is a configured admin address.
+        """Make an account administrator when its proven email is a configured admin address.
 
         HybridInference's ``ADMIN_EMAILS`` seed, applied when the account signs
-        in. Only a verified address counts, and an address is verified only by
-        a link sent to it, so listing one cannot hand the console to whoever
-        signs up with it first.
+        in. Only a **proven** address counts: one whose link was followed (to
+        verify it, bind it or reset the password) or that the operator set.
+        An address accepted unproven because email verification is off does
+        not, so listing one cannot hand the console to whoever signs up with
+        it first; its real owner proves it with a password reset.
         """
-        if not (account.email and account.email_verified) or account.is_admin:
+        if not (account.email and account.email_proven) or account.is_admin:
             return account
         if account.email.lower() not in admin_emails():
             return account
@@ -497,15 +499,16 @@ class LocalAccountFlows:
         if not tokens.looks_like_email_token(token):
             raise InvalidToken
         hashed = await hash_password(password)
-        account_id = await self._accounts.reset_password(
+        reset = await self._accounts.reset_password(
             token_hash=tokens.email_token_hash(token), password_hash=hashed
         )
-        if account_id is None:
+        if reset is None:
             raise InvalidToken
         # A reset link proves the mailbox as a verification link does, so the
-        # approval policy applies here too (and the administrators hear of an
-        # application that only now can be approved).
-        await self.after_verified_identity(account_id, applied=True)
+        # approval policy applies here too. The administrators hear of an
+        # application only when this reset is what verified the identity: an
+        # applicant resetting again tells them nothing new.
+        await self.after_verified_identity(reset.account_id, applied=reset.verified_identity)
 
     async def session_owner(self, token: str | None) -> SessionOwner | None:
         """The live session behind a presented value, or ``None``."""

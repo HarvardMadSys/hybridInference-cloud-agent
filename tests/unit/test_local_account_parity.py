@@ -328,7 +328,21 @@ async def test_approval_follows_hybridinference_under_the_domain_policy(
 ):
     monkeypatch.setenv("AGENT_LOCAL_SIGNUP_APPROVAL", approval)
     domains = _Domains(empty, {"x.edu"})
-    assert await policy.approves_automatically(domains, email) is approves  # type: ignore[arg-type]
+    assert (
+        await policy.approves_automatically(domains, email, proven=True)  # type: ignore[arg-type]
+        is approves
+    )
+
+
+@pytest.mark.parametrize(("empty", "approves"), [(False, False), (True, True)])
+async def test_a_listed_domain_approves_only_a_proven_address(monkeypatch, empty, approves):
+    """With verification off an address is accepted unproven; a domain match then counts not."""
+    monkeypatch.setenv("AGENT_LOCAL_SIGNUP_APPROVAL", "domains")
+    domains = _Domains(empty, {"x.edu"})
+    assert (
+        await policy.approves_automatically(domains, "a@x.edu", proven=False)  # type: ignore[arg-type]
+        is approves
+    )
 
 
 # ── Device cookies ───────────────────────────────────────────────────────

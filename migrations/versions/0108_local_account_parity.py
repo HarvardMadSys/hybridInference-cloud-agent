@@ -7,6 +7,14 @@ What changes, all within the local-account tables:
   login name and a phone number, each optional, one row per kind) and an
   optional ``agent_local_password_credentials`` row. Every existing row is
   carried over: its email keeps its verification time and its password hash.
+- **How an identity was verified.** ``verified_by`` says what proved it:
+  ``link`` (a link sent to the address was followed), ``code`` (a phone
+  code), ``operator`` (made by the deployment's operator: a login name, the
+  command line) or ``policy`` (accepted unproven because email verification
+  is off). Only ``link`` and ``operator`` prove a mailbox, which promotion by
+  the administrator address list and the signup domain list require. A
+  carried-over verified email was verified by a link, the only way
+  ``0107_local_accounts`` had.
 - **One access rule.** The view ``agent_local_account_access`` answers whether
   an account's identity is verified, whether it may sign in and whether it may
   use Agent. Every SQL gate reads it, and it is built from ``LEFT JOIN`` and
@@ -74,9 +82,11 @@ _UPGRADE: tuple[str, ...] = (
         value TEXT NOT NULL CHECK (length(value) BETWEEN 1 AND 320),
         value_normalized TEXT NOT NULL,
         verified_at TIMESTAMPTZ,
+        verified_by TEXT CHECK (verified_by IN ('link', 'code', 'operator', 'policy')),
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         PRIMARY KEY (account_id, kind),
         UNIQUE (kind, value_normalized),
+        CHECK ((verified_at IS NULL) = (verified_by IS NULL)),
         CHECK (
             (kind = 'email' AND position('@' IN value_normalized) > 1
                 AND value_normalized = lower(value_normalized)
@@ -97,8 +107,9 @@ _UPGRADE: tuple[str, ...] = (
     """,
     """
     INSERT INTO agent_local_login_identities
-        (account_id, kind, value, value_normalized, verified_at, created_at)
-    SELECT account_id, 'email', email, email_normalized, email_verified_at, created_at
+        (account_id, kind, value, value_normalized, verified_at, verified_by, created_at)
+    SELECT account_id, 'email', email, email_normalized, email_verified_at,
+           CASE WHEN email_verified_at IS NOT NULL THEN 'link' END, created_at
     FROM agent_local_password_logins
     """,
     """

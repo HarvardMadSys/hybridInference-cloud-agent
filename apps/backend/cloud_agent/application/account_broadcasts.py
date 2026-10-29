@@ -1,12 +1,18 @@
 """Sending administrator mail to accounts, one claimed broadcast at a time.
 
 The pass claims a broadcast that is due (or whose sender stopped), mails its
-pending recipients in batches through the configured account mail transport,
-records each outcome, and closes it once none is pending. It runs in the
-process that owns background work, in local mode, every
-:data:`BROADCAST_INTERVAL_S`; see
-:mod:`cloud_agent.storage.repositories.account_broadcasts` for why a message
-is never sent twice.
+pending recipients through the configured account mail transport, and
+records each recipient's outcome as soon as that one message is handed over,
+before the next is sent, so a sender that dies mid-run leaves at most the one
+message in flight unrecorded: the pass that takes over resends only that
+one. It closes the broadcast once none is pending, and runs in the process
+that owns background work, in local mode, every :data:`BROADCAST_INTERVAL_S`;
+see :mod:`cloud_agent.storage.repositories.account_broadcasts`.
+
+A message the selected transport refuses by shape (a Tencent SES template
+bound, after the transport was changed since the message was created) is
+recorded failed for each recipient with that reason, rather than as a
+generic delivery failure.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from cloud_agent.accounts.delivery import delivery_refusal
 from cloud_agent.accounts.mail import AccountMail
 from cloud_agent.logging_utils import get_logger
 
@@ -24,7 +31,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 BROADCAST_INTERVAL_S = 30.0
-#: Recipients per batch, and the pause between batches, as HybridInference.
+#: Recipients read per batch, and the pause between batches, as HybridInference.
 BATCH_SIZE = 50
 BATCH_DELAY_S = 1.0
 
@@ -42,20 +49,10 @@ async def send_broadcast(
     while batch := await accounts.pending_broadcast_recipients(
         broadcast_id=broadcast_id, limit=BATCH_SIZE
     ):
-        outcomes: list[tuple[str, str, str | None]] = []
         for recipient in batch:
-            if not recipient["deliverable"]:
-                outcomes.append((recipient["account_id"], "skipped", "address no longer usable"))
-                continue
-            sent = await mailer.send(
-                AccountMail(kind="broadcast", to=recipient["email"], details=details)
-            )
-            outcomes.append(
-                (recipient["account_id"], "sent", None)
-                if sent
-                else (recipient["account_id"], "failed", "delivery was not accepted")
-            )
-        await accounts.record_broadcast_results(broadcast_id=broadcast_id, outcomes=outcomes)
+            outcome = await _deliver(mailer, recipient, details)
+            # Recorded before the next message goes: a takeover never resends it.
+            await accounts.record_broadcast_results(broadcast_id=broadcast_id, outcomes=[outcome])
         if len(batch) == BATCH_SIZE:
             await asyncio.sleep(BATCH_DELAY_S)
     status = await accounts.finish_broadcast(broadcast_id=broadcast_id)
@@ -64,6 +61,21 @@ async def send_broadcast(
         extra={"event": "agent_local_broadcast_sent", "broadcast_id": broadcast_id},
     )
     return status
+
+
+async def _deliver(
+    mailer: AccountMailer, recipient: dict[str, object], details: dict[str, str]
+) -> tuple[str, str, str | None]:
+    account_id = str(recipient["account_id"])
+    if not recipient["deliverable"]:
+        return account_id, "skipped", "address no longer usable"
+    mail = AccountMail(kind="broadcast", to=str(recipient["email"]), details=details)
+    refused = delivery_refusal(mail)
+    if refused is not None:
+        return account_id, "failed", refused[:500]
+    if await mailer.send(mail):
+        return account_id, "sent", None
+    return account_id, "failed", "delivery was not accepted"
 
 
 async def send_due_broadcasts(accounts: AccountBroadcasts, mailer: AccountMailer) -> int:

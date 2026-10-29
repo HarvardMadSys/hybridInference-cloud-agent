@@ -61,6 +61,40 @@ def _data(mail: AccountMail, template: str) -> dict[str, str]:
     return data
 
 
+def _template_data(mail: AccountMail, template: str) -> str:
+    return json.dumps(
+        {key: html.escape(value, quote=True) for key, value in _data(mail, template).items()},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def template_refusal(mail: AccountMail) -> str | None:
+    """Why SES would refuse this message before sending it, or ``None``.
+
+    SES sends only approved templates: a message of a kind without its own
+    goes through the ``notice`` template with its whole text as one
+    variable, and Tencent bounds the variables at
+    :data:`TEMPLATE_DATA_LIMIT_BYTES`. Administrator mail is told this when
+    it is previewed and created, not by every recipient failing later.
+    """
+    template = TEMPLATE_FOR_KIND.get(mail.kind, "notice")
+    if not _template_id(template):
+        return (
+            f"Tencent SES has no approved {template} template configured "
+            f"(accounts.tencent_ses_template_{template}) to send this message through."
+        )
+    size = len(_template_data(mail, template).encode("utf-8"))
+    if size > TEMPLATE_DATA_LIMIT_BYTES:
+        return (
+            f"Tencent SES sends this message through its {template} template, whose variables "
+            f"are limited to {TEMPLATE_DATA_LIMIT_BYTES} bytes; this one needs {size}. Shorten "
+            "it, or deliver account mail by SMTP (Admin → Settings → Accounts → Email "
+            "transport)."
+        )
+    return None
+
+
 class TencentSesMailer:
     """``SendEmail`` with one approved template per kind of account mail."""
 
@@ -89,11 +123,7 @@ class TencentSesMailer:
                 extra={"event": "agent_ses_template_unavailable"},
             )
             return False
-        data = json.dumps(
-            {key: html.escape(value, quote=True) for key, value in _data(mail, template).items()},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+        data = _template_data(mail, template)
         name = text_setting("accounts.tencent_ses_from_name").strip()
         if len(data.encode("utf-8")) > TEMPLATE_DATA_LIMIT_BYTES or any(
             char in name for char in "\r\n:<>"
@@ -124,4 +154,4 @@ class TencentSesMailer:
         return bool(result.get("MessageId"))
 
 
-__all__ = ["TEMPLATE_FOR_KIND", "TencentSesMailer"]
+__all__ = ["TEMPLATE_FOR_KIND", "TencentSesMailer", "template_refusal"]

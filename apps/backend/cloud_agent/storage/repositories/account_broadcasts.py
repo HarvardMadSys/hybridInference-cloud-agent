@@ -5,8 +5,10 @@ accounts whose state and application state the administrator chose and that
 have a verified email. One process at a time sends it: a claim moves it to
 ``sending`` with ``FOR UPDATE SKIP LOCKED``, and a claim older than
 :data:`STALE_CLAIM` (a process that died mid-send) can be taken over, which
-resumes with the recipients still pending, so nobody is mailed twice except
-at most the one message in flight when that process died. A recipient whose
+resumes with the recipients still pending. The sender records each
+recipient's outcome right after handing that message over (each record also
+refreshes the claim), so nobody is mailed twice except at most the one
+message in flight when that process died. A recipient whose
 account was deleted, or whose address changed, before the send is skipped.
 """
 
@@ -29,7 +31,8 @@ FROM agent_local_accounts a
 JOIN agent_local_admissions m ON m.account_id = a.id
 JOIN agent_local_login_identities e ON e.account_id = a.id AND e.kind = 'email'
     AND e.verified_at IS NOT NULL
-WHERE a.status = ANY($1::text[]) AND m.status = ANY($2::text[]) AND a.erased_at IS NULL
+WHERE a.status = ANY($1::text[]) AND a.status <> 'deleted' AND m.status = ANY($2::text[])
+  AND a.erased_at IS NULL
 """
 
 _ROW = (

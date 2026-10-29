@@ -22,6 +22,7 @@ from cloud_agent.domain.accounts import AccountNotFound, AccountRecord
 
 ACCOUNT_COLUMNS = """
     a.id, e.value AS email, (e.verified_at IS NOT NULL) AS email_verified,
+    coalesce(e.verified_by IN ('link', 'operator'), FALSE) AS email_proven,
     n.value AS login_name, p.value AS phone, (c.account_id IS NOT NULL) AS has_password,
     x.identity_verified, a.status, a.is_admin, a.version, a.created_at,
     m.status AS admission_status, m.purpose, m.review_reason, m.submitted_at, m.reviewed_at,
@@ -73,6 +74,7 @@ def record(row: Any) -> AccountRecord:
         id=row["id"],
         email=row["email"],
         email_verified=bool(row["email_verified"]),
+        email_proven=bool(row["email_proven"]),
         status=row["status"],
         is_admin=row["is_admin"],
         version=int(row["version"]),

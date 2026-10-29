@@ -10435,12 +10435,11 @@
             "items": {
               "enum": [
                 "active",
-                "suspended",
-                "deleted"
+                "suspended"
               ],
               "type": "string"
             },
-            "maxItems": 3,
+            "maxItems": 2,
             "minItems": 1,
             "title": "Target Statuses",
             "type": "array"
@@ -10479,6 +10478,17 @@
       "BroadcastPreviewResponse": {
         "description": "How many accounts it would reach, and the message as they would read it.",
         "properties": {
+          "delivery_problem": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivery Problem"
+          },
           "html": {
             "title": "Html",
             "type": "string"
@@ -11415,12 +11425,11 @@
             "items": {
               "enum": [
                 "active",
-                "suspended",
-                "deleted"
+                "suspended"
               ],
               "type": "string"
             },
-            "maxItems": 3,
+            "maxItems": 2,
             "minItems": 1,
             "title": "Target Statuses",
             "type": "array"
@@ -12303,6 +12312,22 @@
             },
             "title": "Deleted",
             "type": "object"
+          },
+          "deleted_teams": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Deleted Teams",
+            "type": "array"
+          },
+          "handed_environments": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Handed Environments",
+            "type": "array"
           },
           "retained_archives": {
             "items": {
@@ -16230,6 +16255,85 @@
           "expires_at"
         ],
         "title": "OwnJoinRequestResponse",
+        "type": "object"
+      },
+      "OwnedTeamEntry": {
+        "description": "A team the account owns, with its other active members.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/OwnedTeamMember"
+            },
+            "title": "Members",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "revision",
+          "members"
+        ],
+        "title": "OwnedTeamEntry",
+        "type": "object"
+      },
+      "OwnedTeamMember": {
+        "description": "An active member a deleted owner's team can be handed to.",
+        "properties": {
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "role"
+        ],
+        "title": "OwnedTeamMember",
+        "type": "object"
+      },
+      "OwnedTeamsResponse": {
+        "description": "The active teams an account owns.",
+        "properties": {
+          "teams": {
+            "items": {
+              "$ref": "#/components/schemas/OwnedTeamEntry"
+            },
+            "title": "Teams",
+            "type": "array"
+          }
+        },
+        "required": [
+          "teams"
+        ],
+        "title": "OwnedTeamsResponse",
         "type": "object"
       },
       "OwnerContainer": {
@@ -21307,6 +21411,23 @@
           "expected_revision"
         ],
         "title": "TransferOwnershipRequest",
+        "type": "object"
+      },
+      "TransferTeamRequest": {
+        "additionalProperties": false,
+        "description": "The member who takes the team.",
+        "properties": {
+          "user_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "title": "TransferTeamRequest",
         "type": "object"
       },
       "TurnCpuResources": {
@@ -31649,7 +31770,7 @@
     },
     "/v1/admin/accounts/{account_id}": {
       "patch": {
-        "description": "Apply one action at the version the administrator read.",
+        "description": "Apply one action at the version the administrator read.\n\nAn account whose proven email is on **Administrator email addresses** is\nmade administrator again at its next sign-in, as HybridInference's\n``ADMIN_EMAILS`` does, so withdrawing its administration or access, or\ndeclining it, is refused (``listed_admin_address``) rather than reported\ndone: the address comes off the list first, or the account is suspended.",
         "operationId": "change_account_v1_admin_accounts__account_id__patch",
         "parameters": [
           {
@@ -31920,6 +32041,143 @@
           }
         },
         "summary": "Annotate Account",
+        "tags": [
+          "admin-accounts"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account_id}/teams": {
+      "get": {
+        "description": "The active teams the account owns, each with the members it can be handed to.",
+        "operationId": "owned_teams_v1_admin_accounts__account_id__teams_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnedTeamsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Owned Teams",
+        "tags": [
+          "admin-accounts"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account_id}/teams/{team_id}/transfer": {
+      "post": {
+        "description": "Hand a deleted account's team to one of its members, so erasure leaves the team intact.\n\nA deleted owner cannot sign in to transfer its teams, and erasure refuses\n(``team_transfer_required``) while it owns one that others use.",
+        "operationId": "transfer_team_v1_admin_accounts__account_id__teams__team_id__transfer_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferTeamRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnedTeamsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Transfer Team",
         "tags": [
           "admin-accounts"
         ]

@@ -10,9 +10,11 @@ Approval differs in one way that keeps this service's waiting list: the
 ``manual`` policy (the default) approves nobody automatically. Under the
 ``domains`` policy HybridInference's rule applies exactly: an empty list
 approves every account, otherwise only an email whose domain is listed
-(exactly, or as a subdomain of a ``*.`` entry). Approval happens once the
-account's identity is verified, never before, and a phone account has no
-domain, so it is approved automatically only while the list is empty.
+(exactly, or as a subdomain of a ``*.`` entry), and only once a link sent to
+it was followed: an address accepted unproven because email verification is
+off waits for an administrator. Approval happens once the account's identity
+is verified, never before, and a phone account has no domain, so it is
+approved automatically only while the list is empty.
 """
 
 from __future__ import annotations
@@ -121,12 +123,19 @@ def terms_url() -> str:
     return text_setting("accounts.terms_url").strip()
 
 
-async def approves_automatically(accounts: LocalAccountRepository, email: str | None) -> bool:
-    """Whether the policy approves an account with this email (or none) once verified."""
+async def approves_automatically(
+    accounts: LocalAccountRepository, email: str | None, *, proven: bool
+) -> bool:
+    """Whether the policy approves an account with this email (or none) once verified.
+
+    A listed domain approves only a ``proven`` email (a link sent to it was
+    followed, or the operator set it): one accepted unproven because email
+    verification is off says nothing about who holds the mailbox.
+    """
     if approval_policy() != "domains":
         return False
     empty, allowed = await accounts.signup_domain_policy(email_domain(email or ""))
-    return empty or (bool(email) and allowed)
+    return empty or (bool(email) and proven and allowed)
 
 
 __all__ = [

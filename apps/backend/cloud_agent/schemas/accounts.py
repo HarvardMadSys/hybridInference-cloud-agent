@@ -361,7 +361,8 @@ class SignupDomainRequest(_Request):
     domain: str = Field(min_length=1, max_length=256)
 
 
-AccountState = Literal["active", "suspended", "deleted"]
+#: A deleted account receives no mail, so it is no audience.
+AudienceState = Literal["active", "suspended"]
 AdmissionState = Literal["not_applied", "pending", "approved", "rejected", "revoked"]
 
 
@@ -372,7 +373,7 @@ class BroadcastPreviewRequest(_Request):
     template_vars: dict[str, str] = Field(default_factory=dict, max_length=20)
     subject: str = Field(default="", max_length=300)
     body_markdown: str = Field(default="", max_length=100_000)
-    target_statuses: list[AccountState] = Field(min_length=1, max_length=3)
+    target_statuses: list[AudienceState] = Field(min_length=1, max_length=2)
     target_admissions: list[AdmissionState] = Field(min_length=1, max_length=5)
 
 
@@ -383,6 +384,8 @@ class BroadcastPreviewResponse(BaseModel):
     subject: str
     html: str
     text: str
+    #: Why the selected mail transport would refuse it (sending is refused too).
+    delivery_problem: str | None = None
 
 
 class CreateBroadcastRequest(BroadcastPreviewRequest):
@@ -438,6 +441,37 @@ class EraseAccountResponse(BaseModel):
     account: AccountEntry
     deleted: dict[str, int]
     retained_archives: list[str]
+    deleted_teams: list[str] = []
+    handed_environments: list[str] = []
+
+
+class OwnedTeamMember(BaseModel):
+    """An active member a deleted owner's team can be handed to."""
+
+    user_id: str
+    role: str
+    label: str | None = None
+
+
+class OwnedTeamEntry(BaseModel):
+    """A team the account owns, with its other active members."""
+
+    id: str
+    name: str
+    revision: int
+    members: list[OwnedTeamMember]
+
+
+class OwnedTeamsResponse(BaseModel):
+    """The active teams an account owns."""
+
+    teams: list[OwnedTeamEntry]
+
+
+class TransferTeamRequest(_Request):
+    """The member who takes the team."""
+
+    user_id: str = Field(min_length=1, max_length=128)
 
 
 class LocaleRequest(_Request):
@@ -491,6 +525,9 @@ __all__ = [
     "LoginEventsResponse",
     "LoginRequest",
     "OkResponse",
+    "OwnedTeamEntry",
+    "OwnedTeamMember",
+    "OwnedTeamsResponse",
     "PhoneAuthConfig",
     "PhoneCodeRequest",
     "PhoneCodeResponse",
@@ -506,6 +543,7 @@ __all__ = [
     "SignupResponse",
     "SwitchAccountRequest",
     "TokenRequest",
+    "TransferTeamRequest",
     "WaitlistEntry",
     "WaitlistSubmitRequest",
 ]

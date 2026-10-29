@@ -58,6 +58,19 @@ def _provider() -> str:
     return text_setting("accounts.email_provider").strip() or "smtp"
 
 
+def delivery_refusal(mail: AccountMail) -> str | None:
+    """Why the selected transport would refuse this message outright, or ``None``.
+
+    Only Tencent SES refuses by shape (its approved templates and their size
+    bound); SMTP and registered transports take any message.
+    """
+    if _provider() != "tencent_ses":
+        return None
+    from cloud_agent.accounts.ses_tencent import template_refusal
+
+    return template_refusal(mail)
+
+
 class DeliveryMailer:
     """The account mailer the settings select, chosen again for every message."""
 
@@ -101,4 +114,4 @@ class DeliveryMailer:
             return False
 
 
-__all__ = ["DeliveryMailer", "register_email_provider"]
+__all__ = ["DeliveryMailer", "delivery_refusal", "register_email_provider"]

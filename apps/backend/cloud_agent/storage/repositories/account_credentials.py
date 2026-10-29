@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 
 from cloud_agent.domain.accounts import IdentifierTaken
-from cloud_agent.ports.accounts import EmailBinding
+from cloud_agent.ports.accounts import EmailBinding, PasswordReset
 from cloud_agent.storage._sql.local_accounts import (
     BUMP_VERSION_SQL,
     REVOKE_OTHER_SESSIONS_SQL,
@@ -127,9 +127,13 @@ class CredentialsMixin:
             if consumed is None:
                 return None
             account_id = str(consumed)
+            # A link proves the mailbox, also of an address accepted unproven
+            # while verification was off.
             changed = await conn.fetchval(
-                "UPDATE agent_local_login_identities SET verified_at = NOW() "
-                "WHERE account_id = $1 AND kind = 'email' AND verified_at IS NULL RETURNING 1",
+                "UPDATE agent_local_login_identities "
+                "SET verified_at = coalesce(verified_at, NOW()), verified_by = 'link' "
+                "WHERE account_id = $1 AND kind = 'email' "
+                "AND (verified_at IS NULL OR verified_by = 'policy') RETURNING 1",
                 account_id,
             )
             if changed:
@@ -167,11 +171,11 @@ class CredentialsMixin:
                 await conn.execute(
                     """
                     INSERT INTO agent_local_login_identities
-                        (account_id, kind, value, value_normalized, verified_at)
-                    VALUES ($1, 'email', $2, $3, NOW())
+                        (account_id, kind, value, value_normalized, verified_at, verified_by)
+                    VALUES ($1, 'email', $2, $3, NOW(), 'link')
                     ON CONFLICT (account_id, kind) DO UPDATE
                     SET value = EXCLUDED.value, value_normalized = EXCLUDED.value_normalized,
-                        verified_at = NOW()
+                        verified_at = NOW(), verified_by = 'link'
                     """,
                     account_id,
                     row["pending_email"],
@@ -188,17 +192,28 @@ class CredentialsMixin:
         except NotBindable:
             return None
 
-    async def reset_password(self, *, token_hash: bytes, password_hash: str) -> str | None:
-        """Consume a reset token, set the password and end every session; its account id."""
+    async def reset_password(
+        self, *, token_hash: bytes, password_hash: str
+    ) -> PasswordReset | None:
+        """Consume a reset token, set the password and end every session.
+
+        The link proves control of the mailbox, so it verifies the email too;
+        :attr:`PasswordReset.verified_identity` says whether that made the
+        identity verified only now.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             consumed = await self._consume_token(conn, token_hash, "reset_password")
             if consumed is None:
                 return None
             account_id = str(consumed)
             await _upsert_password(conn, account_id, password_hash)
-            # The link proves control of the mailbox, so it verifies the email too.
+            was_verified = await conn.fetchval(
+                "SELECT identity_verified FROM agent_local_account_access WHERE account_id = $1",
+                account_id,
+            )
             await conn.execute(
-                "UPDATE agent_local_login_identities SET verified_at = coalesce(verified_at, NOW()) "
+                "UPDATE agent_local_login_identities "
+                "SET verified_at = coalesce(verified_at, NOW()), verified_by = 'link' "
                 "WHERE account_id = $1 AND kind = 'email'",
                 account_id,
             )
@@ -209,7 +224,7 @@ class CredentialsMixin:
             )
             await conn.execute(REVOKE_SESSIONS_SQL, account_id, "password_reset")
             await conn.execute(BUMP_VERSION_SQL, account_id)
-            return account_id
+            return PasswordReset(account_id=account_id, verified_identity=not was_verified)
 
     async def rehash_password(self, *, account_id: str, old_hash: str, new_hash: str) -> bool:
         """Replace a hash made with older parameters, if it is still the stored one.
@@ -289,8 +304,8 @@ class CredentialsMixin:
                     return current.phone == phone
                 await conn.execute(
                     "INSERT INTO agent_local_login_identities "
-                    "(account_id, kind, value, value_normalized, verified_at) "
-                    "VALUES ($1, 'phone', $2, $2, NOW())",
+                    "(account_id, kind, value, value_normalized, verified_at, verified_by) "
+                    "VALUES ($1, 'phone', $2, $2, NOW(), 'code')",
                     account_id,
                     phone,
                 )

@@ -423,8 +423,8 @@ class PolicyMixin:
             )
             await conn.execute(
                 "INSERT INTO agent_local_login_identities "
-                "(account_id, kind, value, value_normalized, verified_at) "
-                "VALUES ($1, 'login_name', $2, $2, NOW())",
+                "(account_id, kind, value, value_normalized, verified_at, verified_by) "
+                "VALUES ($1, 'login_name', $2, $2, NOW(), 'operator')",
                 account_id,
                 login_name,
             )

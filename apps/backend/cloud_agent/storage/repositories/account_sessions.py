@@ -294,8 +294,16 @@ class SessionsMixin:
             return remaining
 
     async def revoke_browser(self, *, browser_id: str) -> None:
-        """Sign every account out of a browser and end it."""
+        """Sign every account out of a browser and end it.
+
+        The browser row first, then its sessions: the order a sign-in and a
+        deletion take (each after its account row, which this never waits
+        for), so signing out everywhere cannot deadlock against either.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "SELECT 1 FROM agent_local_browser_sessions WHERE id = $1 FOR UPDATE", browser_id
+            )
             await conn.execute(
                 "UPDATE agent_local_sessions SET revoked_at = NOW(), revoke_reason = 'signed_out' "
                 "WHERE revoked_at IS NULL AND id IN (SELECT session_id FROM "

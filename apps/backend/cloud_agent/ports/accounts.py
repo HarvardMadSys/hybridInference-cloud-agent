@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 
 EmailTokenPurpose = Literal["verify_email", "reset_password", "bind_email"]
 IdentifierKind = Literal["email", "login_name", "phone"]
+#: How a new account's email counts as verified without a link: accepted
+#: because verification is off, or set by the deployment's operator.
+EmailVerifiedBy = Literal["policy", "operator"]
 
 
 @dataclass(frozen=True)
@@ -90,12 +93,24 @@ class EmailBinding:
 
 
 @dataclass(frozen=True)
+class PasswordReset:
+    """A password set from a reset link, and whether the link first verified the identity."""
+
+    account_id: str
+    verified_identity: bool
+
+
+@dataclass(frozen=True)
 class ErasureResult:
     """An erased account, the Agent rows deleted per table, and archives left in the bucket."""
 
     account: AccountRecord
     deleted: dict[str, int]
     retained_archives: list[str]
+    #: Teams it owned alone, deleted with it, and team environments it made,
+    #: now its team owner's.
+    deleted_teams: list[str] = field(default_factory=list)
+    handed_environments: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -169,7 +184,21 @@ class AccountBroadcasts(Protocol):
         ...
 
 
-class LocalAccountRepository(AccountBroadcasts, Protocol):
+class AccountTeams(Protocol):
+    """The teams a deleted account still owns, handed to their members before erasure."""
+
+    async def owned_teams(self, account_id: str) -> list[dict[str, Any]]:
+        """The active teams the account owns, each with its other active members."""
+        ...
+
+    async def transfer_owned_team(
+        self, *, account_id: str, team_id: str, user_id: str, actor_id: str, admin_ip: str
+    ) -> list[dict[str, Any]]:
+        """Hand a deleted account's team to one of its active members; the teams it still owns."""
+        ...
+
+
+class LocalAccountRepository(AccountBroadcasts, AccountTeams, Protocol):
     """Accounts, sign-in credentials, sessions, browsers and the waiting list."""
 
     async def create_account(
@@ -180,7 +209,7 @@ class LocalAccountRepository(AccountBroadcasts, Protocol):
         email_normalized: str,
         password_hash: str,
         user_name: str | None = None,
-        email_verified: bool = False,
+        email_verified_by: EmailVerifiedBy | None = None,
         tos_accepted: bool = False,
         purpose: str | None = None,
     ) -> bool:
@@ -269,8 +298,10 @@ class LocalAccountRepository(AccountBroadcasts, Protocol):
         """Consume a binding token and make its address the account's email."""
         ...
 
-    async def reset_password(self, *, token_hash: bytes, password_hash: str) -> str | None:
-        """Consume a reset token, set the password and end every session; its account id."""
+    async def reset_password(
+        self, *, token_hash: bytes, password_hash: str
+    ) -> PasswordReset | None:
+        """Consume a reset token, set the password and end every session."""
         ...
 
     async def rehash_password(self, *, account_id: str, old_hash: str, new_hash: str) -> bool:

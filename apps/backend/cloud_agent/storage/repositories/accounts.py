@@ -27,7 +27,12 @@ from cloud_agent.domain.accounts import (
     plan_waitlist_submission,
     require_actor_admin,
 )
-from cloud_agent.ports.accounts import AdminActionResult, ErasureResult, PasswordLogin
+from cloud_agent.ports.accounts import (
+    AdminActionResult,
+    EmailVerifiedBy,
+    ErasureResult,
+    PasswordLogin,
+)
 from cloud_agent.storage._sql.advisory import LOCK_KEY_SQL, finish_lock_cleanup
 from cloud_agent.storage._sql.local_accounts import (
     ACCESS_ENDED_SQL,
@@ -43,12 +48,15 @@ from cloud_agent.storage._sql.local_accounts import (
 from cloud_agent.storage._sql.local_erasure import (
     ErasureBlocked,
     erase_owner_rows,
+    require_hosts_clean,
     retained_archives,
+    settle_teams,
 )
 from cloud_agent.storage.repositories.account_broadcasts import BroadcastsMixin
 from cloud_agent.storage.repositories.account_credentials import CredentialsMixin
 from cloud_agent.storage.repositories.account_policy import PolicyMixin
 from cloud_agent.storage.repositories.account_sessions import SessionsMixin
+from cloud_agent.storage.repositories.account_teams import TeamsMixin
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -173,14 +181,17 @@ def _audit_details(record_: AccountRecord, edit: AdmissionEdit, version: int) ->
 
 
 async def _insert_identity(
-    conn: Any, account_id: str, kind: str, value: str, normalized: str, *, verified: bool
+    conn: Any, account_id: str, kind: str, value: str, normalized: str, *, verified_by: str | None
 ) -> None:
-    """Add one identity; :class:`EmailTaken` rolls the caller's transaction back if it is taken."""
+    """Add one identity, verified by ``verified_by`` or not yet.
+
+    :class:`EmailTaken` rolls the caller's transaction back if it is taken.
+    """
     inserted = await conn.fetchval(
         """
         INSERT INTO agent_local_login_identities
-            (account_id, kind, value, value_normalized, verified_at)
-        VALUES ($1, $2, $3, $4, CASE WHEN $5 THEN NOW() END)
+            (account_id, kind, value, value_normalized, verified_at, verified_by)
+        VALUES ($1, $2, $3, $4, CASE WHEN $5::text IS NOT NULL THEN NOW() END, $5)
         ON CONFLICT (kind, value_normalized) DO NOTHING
         RETURNING 1
         """,
@@ -188,13 +199,15 @@ async def _insert_identity(
         kind,
         value,
         normalized,
-        verified,
+        verified_by,
     )
     if inserted is None:
         raise EmailTaken
 
 
-class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixin, BroadcastsMixin):
+class PostgresLocalAccountRepository(
+    SessionsMixin, CredentialsMixin, PolicyMixin, BroadcastsMixin, TeamsMixin
+):
     """Local accounts over the control plane's pool."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
@@ -212,18 +225,21 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
         email_normalized: str,
         password_hash: str,
         user_name: str | None = None,
-        email_verified: bool = False,
+        email_verified_by: EmailVerifiedBy | None = None,
         tos_accepted: bool = False,
         purpose: str | None = None,
     ) -> bool:
         """Create an email-and-password account; ``False`` if the email is taken.
 
-        ``purpose`` submits the Agent application at once, as a signup that
-        waits for approval does; otherwise the account has not applied yet.
+        The email starts unverified, or verified by ``policy`` (verification
+        is off: accepted, not proven) or ``operator`` (made on the command
+        line). ``purpose`` submits the Agent application at once, as a
+        signup that waits for approval does; otherwise the account has not
+        applied yet.
         """
         return await self._create(
             account_id,
-            [("email", email, email_normalized, email_verified)],
+            [("email", email, email_normalized, email_verified_by)],
             password_hash=password_hash,
             user_name=user_name,
             tos_accepted=tos_accepted,
@@ -241,7 +257,7 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
         """Create an account that signs in by login name; ``False`` if the name is taken."""
         return await self._create(
             account_id,
-            [("login_name", login_name, login_name, True)],
+            [("login_name", login_name, login_name, "operator")],
             password_hash=password_hash,
             user_name=user_name,
             tos_accepted=False,
@@ -260,7 +276,7 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
         """Create an account proven by a phone code, without a password; ``False`` if taken."""
         return await self._create(
             account_id,
-            [("phone", phone, phone, True)],
+            [("phone", phone, phone, "code")],
             password_hash=None,
             user_name=user_name,
             tos_accepted=tos_accepted,
@@ -270,7 +286,7 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
     async def _create(
         self,
         account_id: str,
-        identities: list[tuple[str, str, str, bool]],
+        identities: list[tuple[str, str, str, str | None]],
         *,
         password_hash: str | None,
         user_name: str | None,
@@ -294,11 +310,11 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
                     user_name,
                     tos_accepted,
                 )
-                for kind, value, normalized, verified in identities:
+                for kind, value, normalized, verified_by in identities:
                     # A concurrent sign-up that took the identifier after the
                     # check above rolls this account back with the transaction.
                     await _insert_identity(
-                        conn, account_id, kind, value, normalized, verified=verified
+                        conn, account_id, kind, value, normalized, verified_by=verified_by
                     )
                 if password_hash is not None:
                     await conn.execute(
@@ -587,20 +603,26 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
         Refused (``erase_blocked``) until the account is deleted, its
         termination is acknowledged, none of its turns is queued, running or
         resident and every sandbox it owns is deleted, or when erasing would
-        touch another owner's row. Then, in one transaction, every row of its
-        Agent data goes (:mod:`cloud_agent.storage._sql.local_erasure`), with its identifiers (freed
-        for new accounts), password, sessions, browsers, links, codes,
-        sign-in events, mail recipients and earlier audit rows. The account
-        row stays, erased: it signs in nowhere and cannot be resumed, and its
-        id never names anything again. A fresh audit row records the erasure.
+        touch another owner's row; (``host_cleanup_pending``) while a host
+        still has to clean up one of its environment runs; and
+        (``team_transfer_required``) while it owns a team other members use.
+        Then, in one transaction, its teams are settled and every row of its
+        Agent data goes (:mod:`cloud_agent.storage._sql.local_erasure`), with
+        its identifiers (freed for new accounts), password, sessions,
+        browsers, links, codes, sign-in events, mail recipients and earlier
+        audit rows. The account row stays, erased: it signs in nowhere and
+        cannot be resumed, and its id never names anything again. A fresh
+        audit row records the erasure.
 
         Raises:
-            AccountTransitionRefused: ``erase_blocked``.
+            AccountTransitionRefused: The codes above.
         """
         try:
             async with self._pool.acquire() as conn, conn.transaction():
                 current = await _lock_target_and_actor(conn, account_id, actor_account_id)
                 await _require_erasable(conn, current)
+                await require_hosts_clean(conn, account_id)
+                teams = await settle_teams(conn, account_id)
                 retained = await retained_archives(conn, account_id)
                 deleted = await erase_owner_rows(conn, account_id)
                 await self._erase_identity(conn, account_id)
@@ -614,18 +636,24 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
                         "version": current.version + 1,
                         "rows": deleted,
                         "retained_archives": retained,
+                        **teams,
                     },
                 )
                 return ErasureResult(
                     account=await read_account(conn, account_id),
                     deleted=deleted,
                     retained_archives=retained,
+                    deleted_teams=teams["deleted_teams"],
+                    handed_environments=teams["handed_environments"],
                 )
         except ErasureBlocked as exc:
-            raise AccountTransitionRefused(str(exc), code="erase_blocked") from None
-        except asyncpg.ForeignKeyViolationError:
+            raise AccountTransitionRefused(str(exc), code=exc.code) from None
+        except asyncpg.ForeignKeyViolationError as exc:
+            where = getattr(exc, "table_name", None)
             raise AccountTransitionRefused(
-                "The account's data is still referenced elsewhere and cannot be erased.",
+                "The account's data is still referenced"
+                + (f" by {where}" if where else " elsewhere")
+                + " and cannot be erased.",
                 code="erase_blocked",
             ) from None
 
@@ -729,7 +757,8 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
         HybridInference's ``ADMIN_EMAILS`` seed: the account is approved (when
         it is not yet) and granted administration, each audited as
         ``actor_id``, in one transaction. ``None`` when nothing changed: not
-        active, no verified email, already an administrator, or an earlier
+        active, no proven email (one accepted because verification is off
+        does not count), already an administrator, or an earlier
         revocation's cleanup is still open.
         """
         async with self._pool.acquire() as conn, conn.transaction():
@@ -740,7 +769,7 @@ class PostgresLocalAccountRepository(SessionsMixin, CredentialsMixin, PolicyMixi
             if (
                 current.is_admin
                 or current.status != "active"
-                or not (current.email and current.email_verified and current.identity_verified)
+                or not (current.email and current.email_proven and current.identity_verified)
             ):
                 return None
             try:

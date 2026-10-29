@@ -15,8 +15,8 @@ import secrets
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 
-from cloud_agent.accounts.broadcast import RenderedBroadcast, render_broadcast
-from cloud_agent.accounts.mail import AccountMail
+from cloud_agent.accounts.broadcast import RenderedBroadcast, broadcast_mail, render_broadcast
+from cloud_agent.accounts.delivery import delivery_refusal
 from cloud_agent.api._local_auth import (
     LocalAuthRoute,
     account_mailer,
@@ -62,6 +62,13 @@ def _require_mail(request: Request) -> None:
         raise typed_error(503, "email_unavailable", "Account mail is not configured.")
 
 
+def _require_deliverable(rendered: RenderedBroadcast) -> None:
+    """Refuse what the selected transport would refuse for every recipient."""
+    problem = delivery_refusal(broadcast_mail(rendered, to="preview@invalid"))
+    if problem is not None:
+        raise typed_error(422, "undeliverable_message", problem)
+
+
 @router.post(
     "/preview", response_model=BroadcastPreviewResponse, dependencies=[Depends(require_json)]
 )
@@ -74,7 +81,11 @@ async def preview(
         statuses=list(body.target_statuses), admissions=list(body.target_admissions)
     )
     return BroadcastPreviewResponse(
-        recipient_count=count, subject=rendered.subject, html=rendered.html, text=rendered.text
+        recipient_count=count,
+        subject=rendered.subject,
+        html=rendered.html,
+        text=rendered.text,
+        delivery_problem=delivery_refusal(broadcast_mail(rendered, to="preview@invalid")),
     )
 
 
@@ -87,6 +98,7 @@ async def send_test(
     """Send the message to the requesting administrator's own verified address only."""
     _require_mail(request)
     rendered = _render(body)
+    _require_deliverable(rendered)
     account_id = admin.removeprefix("admin:") if admin.startswith("admin:") else None
     account = await local_accounts(request).get_account(account_id) if account_id else None
     if account is None or not (account.email and account.email_verified):
@@ -96,15 +108,7 @@ async def send_test(
             "Your account has no verified email address to send a test to.",
         )
     sent = await account_mailer(request).send(
-        AccountMail(
-            kind="broadcast",
-            to=account.email,
-            details={
-                "subject": f"[TEST] {rendered.subject}",
-                "html": rendered.html,
-                "text": rendered.text,
-            },
-        )
+        broadcast_mail(rendered, to=account.email, subject=f"[TEST] {rendered.subject}")
     )
     if not sent:
         raise typed_error(502, "send_failed", "The test message was not accepted for delivery.")
@@ -123,6 +127,7 @@ async def create(
     """Fix the recipients now and send at ``scheduled_at``, or within the next pass."""
     _require_mail(request)
     rendered = _render(body)
+    _require_deliverable(rendered)
     accounts = local_accounts(request)
     broadcast_id = secrets.token_hex(16)
     await accounts.create_broadcast(

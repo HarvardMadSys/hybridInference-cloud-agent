@@ -140,7 +140,7 @@ async def create_account(
                 email=display,
                 email_normalized=normalized,
                 password_hash=hashed,
-                email_verified=True,
+                email_verified_by="operator",
             )
         else:
             created = await accounts.create_login_name_account(
