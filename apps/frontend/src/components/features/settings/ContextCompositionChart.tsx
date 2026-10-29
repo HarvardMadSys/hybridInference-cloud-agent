@@ -144,7 +144,7 @@ export function Bar({ parts, label }: { parts: CompositionSlice[]; label: string
 function Legend({ parts, estimated = false }: { parts: CompositionSlice[]; estimated?: boolean }) {
   const { t } = useLocale();
   return (
-    <ul className="mt-2 grid grid-cols-1 gap-x-3 gap-y-0.5 text-xs sm:grid-cols-2">
+    <ul className="mt-2 grid grid-cols-1 gap-y-0.5 text-xs">
       {parts.map((part) => (
         <li key={part.key} className="flex items-center justify-between gap-2">
           <span className="flex min-w-0 items-center gap-1.5 text-muted">

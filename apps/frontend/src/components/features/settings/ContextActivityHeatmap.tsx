@@ -9,7 +9,12 @@
 import { useState } from 'react';
 import { useLocale } from '@/components/providers';
 import type { ContextActivityDay } from '@/lib/api/ownerUsage';
-import { heatmapWeeks, heatmapWindow, type HeatmapCell } from './contextInsightsPresent';
+import {
+  heatmapWeeks,
+  heatmapWindow,
+  type HeatmapCell,
+  type HeatmapWeek,
+} from './contextInsightsPresent';
 
 const LEVEL_CLASS = [
   'bg-surface-muted',
@@ -32,7 +37,7 @@ export function ContextActivityHeatmap({
   selected: string | null;
   onSelect: (day: string | null) => void;
 }) {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const [page, setPage] = useState(0);
   const weeks = heatmapWeeks(since, until, activity);
   const view = heatmapWindow(weeks, page);
@@ -44,8 +49,15 @@ export function ContextActivityHeatmap({
       <h4 className="text-xs font-semibold text-foreground">{t('contextInsights.heatmap')}</h4>
       <p className="mt-0.5 text-xs text-muted">{t('contextInsights.heatmap.note')}</p>
       <div className="mt-2 flex items-start gap-1 overflow-x-auto pb-1">
-        {view.weeks.map((week) => (
+        <WeekdayLabels />
+        {view.weeks.map((week, index) => (
           <div key={week.start} className="flex shrink-0 flex-col gap-1">
+            <span
+              aria-hidden="true"
+              className="h-3 whitespace-nowrap text-[10px] leading-3 text-muted"
+            >
+              {monthLabel(week, view.weeks[index - 1], locale)}
+            </span>
             {week.cells.map((cell) => (
               <Cell
                 key={cell.day}
@@ -96,6 +108,46 @@ export function ContextActivityHeatmap({
   );
 }
 
+const CELL = 'h-3.5 w-3.5 rounded-sm [@media(pointer:coarse)]:h-5 [@media(pointer:coarse)]:w-5';
+/** 2026-10-26 was a Monday: the rows' weekdays, named in the reader's language. */
+const WEEK_OF = [
+  '2026-10-26',
+  '2026-10-27',
+  '2026-10-28',
+  '2026-10-29',
+  '2026-10-30',
+  '2026-10-31',
+  '2026-11-01',
+];
+
+/** Monday, Wednesday and Friday named beside their rows (UTC days). */
+function WeekdayLabels() {
+  const { locale } = useLocale();
+  const format = new Intl.DateTimeFormat(locale, { weekday: 'short', timeZone: 'UTC' });
+  return (
+    <div aria-hidden="true" className="flex shrink-0 flex-col gap-1 pr-1 text-[10px] text-muted">
+      <span className="h-3" />
+      {WEEK_OF.map((day, index) => (
+        <span key={day} className={`${CELL} flex items-center whitespace-nowrap leading-none`}>
+          {index % 2 === 0 && index < 6 ? format.format(new Date(`${day}T00:00:00Z`)) : ''}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** The month a week column starts, written where the month changes. */
+function monthLabel(week: HeatmapWeek, previous: HeatmapWeek | undefined, locale: string): string {
+  const first = week.cells.find((cell) => cell.inRange) ?? week.cells[0];
+  const before = previous
+    ? (previous.cells.find((cell) => cell.inRange) ?? previous.cells[0])
+    : null;
+  if (before && before.day.slice(0, 7) === first.day.slice(0, 7)) return '';
+  return new Intl.DateTimeFormat(locale, { month: 'short', timeZone: 'UTC' }).format(
+    new Date(`${first.day}T00:00:00Z`),
+  );
+}
+
 function Cell({
   cell,
   selected,
@@ -106,7 +158,7 @@ function Cell({
   onSelect: (day: string | null) => void;
 }) {
   const { t, locale } = useLocale();
-  const base = 'h-3.5 w-3.5 rounded-sm [@media(pointer:coarse)]:h-5 [@media(pointer:coarse)]:w-5';
+  const base = CELL;
   if (!cell.inRange) return <span aria-hidden="true" className={`${base} opacity-0`} />;
   const entry = cell.activity;
   if (!entry || entry.turns === 0) {

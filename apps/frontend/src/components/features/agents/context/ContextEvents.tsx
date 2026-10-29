@@ -31,6 +31,15 @@ const KIND_LABEL: Record<ContextEventKind, TranslationKey> = {
   mode: 'context.events.kind.mode',
 };
 
+/** One event's kind, as its row names it. */
+const ONE_KIND: Record<ContextEventKind, TranslationKey> = {
+  injection: 'context.events.one.injection',
+  compaction: 'context.events.one.compaction',
+  prune: 'context.events.one.prune',
+  model_switch: 'context.events.one.model_switch',
+  mode: 'context.events.one.mode',
+};
+
 const KIND_MARK: Record<ContextEventKind, string> = {
   injection: 'bg-yellow-500/70',
   compaction: 'bg-rose-400/80',
@@ -155,6 +164,8 @@ function EventRow({
 }) {
   const { t, locale } = useLocale();
   const source = eventSourceKey(event.source);
+  // What the platform added at claim is no step of the trajectory: its turn opens.
+  const step = event.source.startsWith('platform_') ? null : event.event_id;
   return (
     <li
       className={`flex flex-wrap items-start gap-2 px-3 py-2 ${event.superseded ? 'opacity-70' : ''}`}
@@ -165,7 +176,7 @@ function EventRow({
       />
       <div className="min-w-0 flex-1">
         <p className="text-foreground">
-          <span className="font-medium">{t(KIND_LABEL[event.kind])}</span>
+          <span className="font-medium">{t(ONE_KIND[event.kind])}</span>
           <span className="text-muted">
             {' · '}
             {source ? t(source) : event.source}
@@ -184,12 +195,10 @@ function EventRow({
       </div>
       <button
         type="button"
-        onClick={() =>
-          onOpenPoint({ jobId: event.job_id, turnNo: event.turn_no, eventId: event.event_id })
-        }
+        onClick={() => onOpenPoint({ jobId: event.job_id, turnNo: event.turn_no, eventId: step })}
         className="ui-button ui-button-ghost min-h-9 shrink-0 px-2.5 text-xs [@media(pointer:coarse)]:min-h-11"
       >
-        {t(event.event_id === null ? 'context.openTurn' : 'context.openStep')}
+        {t(step === null ? 'context.openTurn' : 'context.openStep')}
       </button>
     </li>
   );

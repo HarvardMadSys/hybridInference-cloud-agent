@@ -139,8 +139,11 @@ it('marks estimates, retried attempts, and changes, and opens the step or turn',
   expect(modelSwitch).toHaveTextContent('m1 → m2');
   expect(mode).toHaveTextContent('Now Entered plan mode');
 
-  fireEvent.click(within(injection).getByRole('button', { name: 'Open step' }));
-  expect(onOpenPoint).toHaveBeenLastCalledWith({ jobId: 'j1', turnNo: 1, eventId: 11 });
+  // What the platform added at claim is no trajectory step: it opens the turn.
+  fireEvent.click(within(injection).getByRole('button', { name: 'Open turn' }));
+  expect(onOpenPoint).toHaveBeenLastCalledWith({ jobId: 'j1', turnNo: 1, eventId: null });
+  fireEvent.click(within(mode).getByRole('button', { name: 'Open step' }));
+  expect(onOpenPoint).toHaveBeenLastCalledWith({ jobId: 'j2', turnNo: 2, eventId: 23 });
   // A turn-level change has no stored event: it opens the turn.
   fireEvent.click(within(modelSwitch).getByRole('button', { name: 'Open turn' }));
   expect(onOpenPoint).toHaveBeenLastCalledWith({ jobId: 'j2', turnNo: 2, eventId: null });
