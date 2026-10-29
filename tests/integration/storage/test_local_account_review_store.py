@@ -386,6 +386,38 @@ async def test_erasing_waits_until_the_host_has_cleaned_up_the_environment_runs(
     assert result.deleted.get("agent_environment_runs") == 1
 
 
+async def test_deleting_an_account_forgets_its_phone_codes(storage, pool):
+    """Scope review G17: as HybridInference's soft delete forgets the account's challenges."""
+    account_id = tokens.new_account_id()
+    phone = "+8613800138001"
+    assert await storage.local_accounts.create_phone_account(
+        account_id=account_id, phone=phone, user_name=None, tos_accepted=True, purpose=None
+    )
+    for purpose in ("set_password", "delete_account"):
+        assert (
+            await storage.local_accounts.reserve_phone_code(
+                phone_hash=tokens.phone_hash(phone),
+                purpose=purpose,
+                account_id=account_id,
+                challenge_id=tokens.new_session_id(),
+                code_hash=tokens.phone_code_hash(phone, purpose, account_id, "123456"),
+                expire_s=300,
+                cooldown_s=0,
+            )
+            == 0
+        )
+    async with pool.acquire() as conn:
+        held = await conn.fetchval(
+            "SELECT count(*) FROM agent_local_phone_codes WHERE account_key = $1", account_id
+        )
+    assert held == 2
+    await act(storage, account_id, "delete")
+    async with pool.acquire() as conn:
+        assert not await conn.fetchval(
+            "SELECT count(*) FROM agent_local_phone_codes WHERE account_key = $1", account_id
+        )
+
+
 # ── N3: teams ────────────────────────────────────────────────────────────
 
 
