@@ -84,6 +84,14 @@ def test_the_bundle_is_read_once_per_file_state(release_dir: Path, monkeypatch):
 def test_a_changed_bundle_stat_reloads_and_revalidates(release_dir: Path, monkeypatch):
     """Validation still runs whenever the archive on disk moves."""
     calls = _counting_load(monkeypatch)
+    validations: list[bytes] = []
+    original_validate = compute_setup.validate_host_bundle
+
+    def counting_validate(bundle: bytes) -> None:
+        validations.append(bundle)
+        original_validate(bundle)
+
+    monkeypatch.setattr(compute_setup, "validate_host_bundle", counting_validate)
     assert load_control_plane_host_release(release_dir) is not None
 
     import os
@@ -92,6 +100,7 @@ def test_a_changed_bundle_stat_reloads_and_revalidates(release_dir: Path, monkey
     os.utime(path, ns=(0, 0))  # stat change, same bytes
     assert load_control_plane_host_release(release_dir) is not None
     assert len(calls) == 2
+    assert len(validations) == 2
 
 
 def test_a_failed_load_stays_none_and_retries_after_a_change(

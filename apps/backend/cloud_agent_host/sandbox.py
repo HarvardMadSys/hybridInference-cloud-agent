@@ -64,7 +64,7 @@ if command -v curl >/dev/null 2>&1; then
     exit 0
 fi
 if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import socket, sys, urllib.error, urllib.request
+    python3 -I -c 'import socket, sys, urllib.error, urllib.request
 try:
     urllib.request.urlopen(sys.argv[1], timeout=15)
 except urllib.error.HTTPError:

@@ -144,6 +144,14 @@ class PiRuntime(AgentRuntime):
         # the activation tmpfs; only the session JSONL belongs in durable chat
         # state. The wrapper creates this directory before exec.
         env["PI_CODING_AGENT_DIR"] = activation_dir or "/run/agent-activation/pi"
+        # pi compiles its extensions with jiti, whose default file cache is one
+        # directory under /tmp that every member's UID shares, and which reuses
+        # a cached file found by its name and a hash of the (public) source.
+        # Without the cache no member's pi runs code another member compiled;
+        # compiling the bridge costs about 0.2 s per CLI start instead. pi 1.x
+        # also turns on Node's compile cache, by default in /tmp as well.
+        env["JITI_FS_CACHE"] = "false"
+        env["NODE_DISABLE_COMPILE_CACHE"] = "1"
         argv = [
             self.binary,
             "--provider",

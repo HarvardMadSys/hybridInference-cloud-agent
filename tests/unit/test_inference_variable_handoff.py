@@ -236,6 +236,8 @@ def test_a_launch_without_them_leaves_no_earlier_credentials_in_the_slot(tmp_pat
     """
     root = tmp_path / "members"
     (root / "1").mkdir(parents=True)
+    reaper = tmp_path / "reaper.py"
+    reaper.write_text("")
 
     def exec_capture(spec, argv, *, input_bytes=None, **kwargs):
         # The member tmpfs, here a directory: run the container command locally.
@@ -243,7 +245,7 @@ def test_a_launch_without_them_leaves_no_earlier_credentials_in_the_slot(tmp_pat
         # itself is the reaper's own tests' to exercise.
         local = [part.replace(MEMBER_TMPFS_ROOT, str(root)) for part in argv]
         stdin = (input_bytes or b"").replace(MEMBER_TMPFS_ROOT.encode(), str(root).encode())
-        stdin = stdin.replace(MEMBER_REAPER_TARGET.encode(), b"/bin/true")
+        stdin = stdin.replace(MEMBER_REAPER_TARGET.encode(), str(reaper).encode())
         return subprocess.run(local, input=stdin, capture_output=True, check=False)
 
     manager = SimpleNamespace(

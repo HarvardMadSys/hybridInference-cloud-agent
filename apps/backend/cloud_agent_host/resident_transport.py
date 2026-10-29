@@ -609,6 +609,7 @@ class ResidentTransportFactory:
         step = MemberStep(
             (
                 "python3",
+                "-I",
                 "-c",
                 script,
                 claude_member_config_dir(launch.slot_id, launch.thread_id),
@@ -786,15 +787,16 @@ class ResidentTransportFactory:
     def _prepare_runtime_helpers(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> None:
         """Install the selected runtime and trusted adapters before its first spawn."""
         runtime_id = launch.runtime_id
-        # HTTP dialects always use the trusted live bridge, including
-        # turns without MCP. Refresh it from the host when resuming a
-        # retained container so new native-question commands are
-        # available without replacing its persisted session state.
+        # HTTP dialects always use the trusted live bridge, and pi its
+        # wrapper and MCP bridge, including turns without MCP. Refresh
+        # them from the host when resuming a retained container so new
+        # native-question commands, and an older image's wrappers'
+        # replacements, arrive without replacing its session state.
         if launch.runtime_version:
             # A version an admin updated to after the image was built
             # is copied in the first time; one the image has is not.
             self._manager.ensure_downloaded_runtime(spec, runtime_id, launch.runtime_version)
-        if launch.mcp_server_ids or runtime_id in {"opencode", "kilo"}:
+        if launch.mcp_server_ids or runtime_id in {"pi", "opencode", "kilo"}:
             self._manager.ensure_mcp_helpers(spec, runtime_id)
         if runtime_id == "kilo":
             self._manager.ensure_kilo_mcp_runtime(spec, launch.runtime_version or KILO_MCP_VERSION)
@@ -1204,7 +1206,7 @@ print(json.dumps(sorted(children), separators=(",", ":")))
 """
         result = self._manager.exec_capture(
             spec,
-            ["python3", "-c", script, state_dir, source_id],
+            ["python3", "-I", "-c", script, state_dir, source_id],
             workdir="/",
             timeout_s=30,
             user_uid=MEMBER_UID_BASE + source_launch.slot_id,
@@ -1257,6 +1259,9 @@ print(json.dumps(sorted(children), separators=(",", ":")))
                     source_launch.slot_id, source_launch.thread_id
                 ),
                 "PATH": SANDBOX_PATH,
+                # Its interpreter is the image's Claude SDK venv, so the flag is
+                # passed here: nothing in the member's home may load into it.
+                "PYTHONNOUSERSITE": "1",
             },
             workdir=CHAT_WORKDIR,
             timeout_s=60,
