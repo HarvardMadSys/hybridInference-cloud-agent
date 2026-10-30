@@ -197,6 +197,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         admin_conversations,
         admin_database,
         admin_database_browser,
+        admin_deployments,
         admin_hosts,
         admin_llm_requests,
         admin_management,
@@ -211,6 +212,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         admin_usage,
         agent_memory,
         compute_registration,
+        deploy_agents,
         environments,
         host_profiling,
         hosts,
@@ -318,6 +320,8 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     app.include_router(admin_sandboxes.router)
     app.include_router(admin_settings.router)
     app.include_router(admin_management.router)
+    app.include_router(admin_deployments.router)
+    app.include_router(deploy_agents.router)
     app.include_router(admin_usage.router)
     app.include_router(admin_measurements.router)
     # Start/Stop for the same feature, in its own module so the write path's

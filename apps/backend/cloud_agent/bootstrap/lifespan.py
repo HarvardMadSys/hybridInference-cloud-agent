@@ -151,6 +151,7 @@ def _forget_background_task(task: asyncio.Task[Any]) -> None:
 _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "settings_task",
     "instance_report_task",
+    "workflow_task",
     "mcp_maintenance_task",
     "mcp_catalog_task",
     "reaper_task",
@@ -515,6 +516,11 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 http=http,
             )
             _spawn(app, "compute_resource_task", compute_worker.run())
+            from cloud_agent.application.key_rotation import register_advancers
+            from cloud_agent.application.workflows import run_workflows_forever
+
+            register_advancers()
+            _spawn(app, "workflow_task", run_workflows_forever(storage))
             app.state.mcp_catalog = McpCatalog(storage.mcp_catalog, http)
             _spawn(app, "mcp_catalog_task", app.state.mcp_catalog.run())
             _spawn(

@@ -36,6 +36,7 @@ for these names before then:
 | Current name | Previous name |
 | --- | --- |
 | `AGENT_SANDBOX_MANAGER_TOKEN` | `AGENT_WORKSPACE_BROKER_TOKEN` |
+| `AGENT_SANDBOX_MANAGER_TOKEN_NEXT` | **NEW.** *Set by the deployment agent (or the control plane's SSH executor on a managed server) during a sandbox manager credential rotation; leave unset otherwise.* The sandbox manager accepts this credential as well as `AGENT_SANDBOX_MANAGER_TOKEN` until the rotation promotes it. |
 | `AGENT_SANDBOX_MANAGER_URL` | `AGENT_WORKSPACE_BROKER_URL` |
 | `AGENT_SANDBOX_MANAGER_ADVERTISE_URL` | `AGENT_WORKSPACE_BROKER_ADVERTISE_URL` |
 | `AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS` | `AGENT_BROKER_URL_ALLOWED_HOSTS` |
@@ -81,7 +82,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0108_control_plane_instances`) before
+Run `alembic upgrade head` (through `0109_deployment_agents`) before
 starting this release; the [upgrade notes](docs/developer/upgrade-notes.md)
 say what each recent migration changes. The main control-plane listener then
 initializes the settings document once from its existing environment. The

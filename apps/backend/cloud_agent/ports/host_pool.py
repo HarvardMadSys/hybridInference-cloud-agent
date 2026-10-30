@@ -224,6 +224,8 @@ class HostPoolRepository(Protocol):
                 stays.
             runtime_downloads: This host's progress on each agent version it
                 was asked to hold, already validated. ``None`` leaves it.
+            config_reports: Non-numeric configuration the host says it uses
+                now, such as its npm registry. ``None`` leaves the report.
 
         Returns:
             The updated host row, or ``None`` when the host no longer exists.

@@ -63,6 +63,7 @@ from cloud_agent.storage.repositories import (
     PostgresWebSearchRepository,
     PostgresWorkInsightsRepository,
 )
+from cloud_agent.storage.repositories.deployments import PostgresDeploymentAgentRepository
 from cloud_agent.storage.repositories.environment_snapshots import (
     PostgresEnvironmentSnapshotRepository,
 )
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
         ConversationCommands,
         ConversationQueries,
         CredentialQueries,
+        DeploymentAgentRepository,
         ExecutionQueries,
         GoalRepository,
         GoalWakeupRepository,
@@ -128,6 +130,7 @@ class Storage:
         #: stop reaching into another object's pool to build one.
         self.admin_conversations = AdminConversationQueries(pool)
         self.instances: InstanceReports = InstanceRepository(pool)
+        self.deployments: DeploymentAgentRepository = PostgresDeploymentAgentRepository(pool)
         self.admin_database = AdminDatabaseQueries(pool)
         self.admin_runs = AdminRunQueries(pool)
         self.admin_sandboxes = AdminSandboxQueries(pool)

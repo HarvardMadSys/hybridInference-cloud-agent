@@ -17,6 +17,7 @@ from cloud_agent.ports.compute_resources import ComputeResourceRepository
 from cloud_agent.ports.conversation_commands import ConversationCommands
 from cloud_agent.ports.conversation_queries import ConversationQueries
 from cloud_agent.ports.credential_queries import CredentialQueries
+from cloud_agent.ports.deployments import DeploymentAgentRepository
 from cloud_agent.ports.environments import (
     EnvironmentBindingRepository,
     EnvironmentConfigurationRepository,
@@ -77,6 +78,7 @@ __all__ = [
     "ConversationCommands",
     "ConversationQueries",
     "CredentialQueries",
+    "DeploymentAgentRepository",
     "EnvironmentBindingRepository",
     "EnvironmentConfigurationRepository",
     "EnvironmentExecutionRepository",

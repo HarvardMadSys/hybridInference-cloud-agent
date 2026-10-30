@@ -1,0 +1,9 @@
+# What the deployment agent imports on a deploy host, besides the standard library.
+#
+# `cryptography` opens the values the browser sealed to this agent's key.
+# `psycopg` runs the database identity probe, password rotation and the
+# migration fence; `jsonschema` checks a release manifest before it is imported.
+cryptography>=48.0.1
+psycopg[binary]>=3.2.0
+jsonschema>=4.21
+PyYAML>=6.0
