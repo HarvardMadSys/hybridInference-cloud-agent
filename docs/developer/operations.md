@@ -169,19 +169,19 @@ appear on the page with hidden values. See [the environment inventory](../../ENV
 **Admin → Deployment** rotates every key the deployment holds. Each rotation
 keeps the old material working until every process and server has moved, and
 says which ones it is waiting for; new values are generated in the browser and
-are not shown, except `ADMIN_TOKEN`, once. A rotation that stops says what state
+are not shown, except the recovery administrator token, once. A rotation that stops says what state
 it left and keeps the old material; continue it from the same page, from the
-step that stopped. An `ADMIN_TOKEN` rotation and a database workflow are started
+step that stopped. A recovery-token rotation and a database workflow are started
 again instead.
 
 | Material | What happens | What it waits for |
 |---|---|---|
-| `ADMIN_TOKEN` | Each control-plane machine's agent writes it and restarts the API and MCP listeners. | Every process reports the new identifier. |
+| Recovery administrator token (`ADMIN_TOKEN`) | Each control-plane machine's agent writes it and restarts the API and MCP listeners. | Every process reports the new identifier. |
 | Settings root key | Separated from `AGENT_SESSION_SECRET` with the same bytes, then replaced, with saved secrets re-encrypted. | Every process holds both keys before re-encryption, and drops the old one after. |
 | User and compute credential keys | Both keys decrypt while every stored value is re-encrypted; the user key's environment fingerprints are then rebuilt. | Every process declares it can do this and adopts each step. |
-| Host and worker signing key | The new key signs; each server receives a renewed credential at its next heartbeat. | Every enrolled server holds a renewed credential, and every turn and resident session that started earlier has finished. |
+| Server signing key | The new key signs; each server receives a renewed credential at its next heartbeat. | Every enrolled server holds a renewed credential, and every turn and resident session that started earlier has finished. |
 | Sandbox manager credential | Servers accept both, then the control plane switches, then servers drop the old one. Managed compute servers change over SSH, others through their deployment agent. | Each server answers an authenticated check with the new credential. |
-| Tunnel SSH keys | New keys are authorized beside the old ones, the server switches, then the old keys are revoked. | A heartbeat over the new tunnel. |
+| Tunnel keys | New keys are authorized beside the old ones, the server switches, then the old keys are revoked. | A heartbeat over the new tunnel. |
 
 The last two restart services, one server at a time, and each server finishes
 its running turns first, so a long turn makes the rotation take as long as that

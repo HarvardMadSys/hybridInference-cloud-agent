@@ -8918,12 +8918,12 @@ msgid ""
 "**Admin → Deployment** rotates every key the deployment holds. Each "
 "rotation keeps the old material working until every process and server "
 "has moved, and says which ones it is waiting for; new values are "
-"generated in the browser and are not shown, except `ADMIN_TOKEN`, once. "
-"A rotation that stops says what state it left and keeps the old "
-"material; continue it from the same page, from the step that stopped. An"
-" `ADMIN_TOKEN` rotation and a database workflow are started again "
-"instead."
-msgstr "部署持有的每一把密钥，都可以在 **Admin → Deployment** 里轮换。轮换期间旧材料一直可用，直到所有进程和服务器都换完；页面会写明还在等谁。新值在浏览器里生成，不会显示出来，只有 `ADMIN_TOKEN` 例外，它会显示一次。轮换停下时，会说明停在了什么状态，并保留旧材料；可以在同一页面从停下的那一步继续。`ADMIN_TOKEN` 轮换和数据库操作则要重新开始。"
+"generated in the browser and are not shown, except the recovery "
+"administrator token, once. A rotation that stops says what state it left "
+"and keeps the old material; continue it from the same page, from the step"
+" that stopped. A recovery-token rotation and a database workflow are "
+"started again instead."
+msgstr "部署持有的每一把密钥，都可以在 **Admin → Deployment** 里轮换。轮换期间旧材料一直可用，直到所有进程和服务器都换完；页面会写明还在等谁。新值在浏览器里生成，不会显示出来，只有恢复用管理员令牌例外，它会显示一次。轮换停下时，会说明停在了什么状态，并保留旧材料；可以在同一页面从停下的那一步继续。恢复令牌的轮换和数据库操作则要重新开始。"
 
 #: ../developer/operations.md
 msgid "Material"
@@ -8938,8 +8938,8 @@ msgid "What it waits for"
 msgstr "等什么"
 
 #: ../developer/operations.md
-msgid "`ADMIN_TOKEN`"
-msgstr ""
+msgid "Recovery administrator token (`ADMIN_TOKEN`)"
+msgstr "恢复用管理员令牌（`ADMIN_TOKEN`）"
 
 #: ../developer/operations.md
 msgid ""
@@ -8982,8 +8982,8 @@ msgid "Every process declares it can do this and adopts each step."
 msgstr "所有进程都声明支持这项操作，并采纳了每一步。"
 
 #: ../developer/operations.md
-msgid "Host and worker signing key"
-msgstr "主机和 worker 签名密钥"
+msgid "Server signing key"
+msgstr "服务器签名密钥"
 
 #: ../developer/operations.md
 msgid ""
@@ -9013,8 +9013,8 @@ msgid "Each server answers an authenticated check with the new credential."
 msgstr "每台服务器都通过了用新凭据发起的认证检查。"
 
 #: ../developer/operations.md
-msgid "Tunnel SSH keys"
-msgstr "隧道 SSH 密钥"
+msgid "Tunnel keys"
+msgstr "隧道密钥"
 
 #: ../developer/operations.md
 msgid ""
