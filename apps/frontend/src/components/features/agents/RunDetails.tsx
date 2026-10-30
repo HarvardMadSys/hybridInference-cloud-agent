@@ -8,7 +8,7 @@
 // its own ledger snapshot.
 
 import { apiRepo, projectKey } from '@/lib/temporaryWorkspace';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSignedInAccount, useT } from '@/components/providers';
 import type { TranslationKey } from '@/lib/i18n/dictionaries/en';

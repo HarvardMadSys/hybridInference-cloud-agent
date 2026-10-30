@@ -147,9 +147,7 @@ export type {
   AgentJobUsageApi,
 } from './agents/usage';
 
-export {
-  getAgentJobUsage,
-} from './agents/usage';
+export { getAgentJobUsage } from './agents/usage';
 
 export type {
   AgentJobFileStatus,

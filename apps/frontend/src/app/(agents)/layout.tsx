@@ -227,8 +227,6 @@ function AgentsShell({
   settingsNavigation?: { backHref: string };
 }) {
   const { state } = useAuth();
-  const { branding } = useSiteConfig();
-  const t = useT();
 
   // Current admission decides access; without it the account applies or waits.
   if (!hasAgentPermission(state.user?.agent_access, 'agent.use') && state.user) {

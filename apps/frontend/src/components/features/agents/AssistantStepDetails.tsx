@@ -17,10 +17,8 @@ import {
   TabPanel,
   TruncationNote,
   copyText,
-  recordedAt,
   recordedCount,
 } from './StepDetailParts';
-import { formatDuration } from './TurnFooter';
 import { STATUS_LABEL, type TrajectoryStep } from './trajectorySteps';
 
 import type { AssistantTab } from './trajectoryInspectorTabs';

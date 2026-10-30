@@ -404,9 +404,7 @@ export function JobDetail({
     setInspector(null);
   }
   const selectedAttemptIsCurrent = attemptNo === 0 || attemptNo === liveAttempt;
-  const usageFooter = selectedAttemptIsCurrent ? (
-    <LedgerUsage usage={usage} />
-  ) : undefined;
+  const usageFooter = selectedAttemptIsCurrent ? <LedgerUsage usage={usage} /> : undefined;
 
   const conversation = useJobConversation({ job, panels, attemptNo, liveAttempt, setAttemptNo });
   const {

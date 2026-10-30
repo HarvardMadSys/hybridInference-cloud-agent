@@ -172,8 +172,8 @@ export default function AccountPolicyPage() {
           <Link className="text-sm text-accent underline" href="/admin/accounts">
             {t('adminAccounts.back')}
           </Link>
-              <DomainList />
-              <SignInRetention />
+          <DomainList />
+          <SignInRetention />
         </div>
       </section>
     </div>

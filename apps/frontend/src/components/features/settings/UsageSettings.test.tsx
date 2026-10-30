@@ -3,7 +3,6 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import * as authState from '@/components/providers/AuthProvider';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
 import { NEUTRAL_SITE_CONFIG } from '@/config/site';
@@ -178,12 +177,7 @@ async function tile(label: string): Promise<string> {
 
 function section() {
   return render(
-    <SiteConfigProvider
-      config={{
-        ...NEUTRAL_SITE_CONFIG,
-        branding: { ...NEUTRAL_SITE_CONFIG.branding, gatewayUrl: 'https://gateway.example' },
-      }}
-    >
+    <SiteConfigProvider config={NEUTRAL_SITE_CONFIG}>
       <LocaleProvider>
         <UsageSettings />
       </LocaleProvider>
@@ -284,13 +278,13 @@ describe('UsageSettings', () => {
     expect(getOwnerContainers).toHaveBeenLastCalledWith({ limit: 50 });
   });
 
-  it('shows the period’s cost, tokens and container time, and how much was measured', async () => {
+  it('shows the period’s tokens and container time, and leaves cost to the provider', async () => {
     section();
-    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
-    expect(screen.getByText('Estimate, not a bill')).toBeInTheDocument();
-    expect(
-      screen.getByText(/^Days start at 00:00 UTC.*when the daily limit resets/),
-    ).toBeInTheDocument();
+    await waitFor(async () => expect(await tile('Model cost')).toBe('Your provider'));
+    expect(screen.getByText(/bills and limits its use/)).toBeInTheDocument();
+    expect(screen.queryByText(/\$/)).toBeNull();
+    expect(screen.getByText(/^Days start at 00:00 UTC/)).toBeInTheDocument();
+    expect(screen.queryByText(/daily limit/)).toBeNull();
     expect(await tile('Tokens')).toBe('150K');
     expect(screen.getByText('120K in · 30K out')).toBeInTheDocument();
     expect(screen.getByText('10 h')).toBeInTheDocument();
@@ -304,20 +298,7 @@ describe('UsageSettings', () => {
     const table = screen.getByRole('table', { name: 'By model' });
     expect(within(table).getByText('glm-5.1')).toBeInTheDocument();
     expect(within(table).getByText('Unknown model')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Daily limit and account usage' })).toHaveAttribute(
-      'href',
-      'https://gateway.example/dashboard',
-    );
-  });
-
-  it('does not link an independent account to Gateway quota or account usage', async () => {
-    vi.spyOn(authState, 'useSignedInAuthMode').mockReturnValue('local');
-    section();
-    await screen.findByRole('table', { name: 'By model' });
-    expect(
-      screen.queryByRole('link', { name: 'Daily limit and account usage' }),
-    ).not.toBeInTheDocument();
-    expect(document.querySelector('a[href^="https://gateway.example"]')).toBeNull();
+    expect(screen.queryByRole('link', { name: /Daily limit/ })).toBeNull();
   });
 
   it('shows the cache hit rate, and reasoning tokens as a part of output', async () => {
@@ -344,7 +325,7 @@ describe('UsageSettings', () => {
     };
     vi.mocked(getOwnerTokens).mockResolvedValue(usage);
     section();
-    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
+    await waitFor(async () => expect(await tile('Model cost')).toBe('Your provider'));
     expect(await tile('Cache hit rate')).toBe('—');
     expect(await tile('Reasoning tokens')).toBe('—');
   });
@@ -371,7 +352,7 @@ describe('UsageSettings', () => {
 
   it('reads both histories again for another period', async () => {
     section();
-    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
+    await waitFor(async () => expect(await tile('Model cost')).toBe('Your provider'));
     expect(getOwnerTokens).toHaveBeenLastCalledWith({ days: 7 }, expect.anything());
     const periods = screen.getByRole('group', { name: 'Period' });
     expect(
@@ -407,7 +388,7 @@ describe('UsageSettings', () => {
       days: [{ ...resources().days[0], ...yesterday }, ...resources().days],
     });
     section();
-    expect(await screen.findByRole('region', { name: 'Cost by day' })).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Tokens by day' })).toBeInTheDocument();
     vi.mocked(getOwnerTokens).mockResolvedValue(tokens());
     vi.mocked(getOwnerResources).mockResolvedValue(resources());
     fireEvent.click(screen.getByRole('button', { name: 'Today' }));
@@ -415,9 +396,9 @@ describe('UsageSettings', () => {
       expect(getOwnerTokens).toHaveBeenLastCalledWith({ days: 1 }, expect.anything()),
     );
     await waitFor(() =>
-      expect(screen.queryByRole('region', { name: 'Cost by day' })).not.toBeInTheDocument(),
+      expect(screen.queryByRole('region', { name: 'Tokens by day' })).not.toBeInTheDocument(),
     );
-    expect(await tile('Model cost')).toBe('$12.35');
+    expect(await tile('Model cost')).toBe('Your provider');
   });
 
   it('says where a narrowed all-time period starts, and sums weeks', async () => {
@@ -450,7 +431,7 @@ describe('UsageSettings', () => {
     expect(note).toHaveTextContent(
       'Since 2026-08-10 · Earlier usage is more than one summary can add up and is not included.',
     );
-    const chart = await screen.findByRole('region', { name: 'Cost by week' });
+    const chart = await screen.findByRole('region', { name: 'Tokens by week' });
     // Monday 2026-08-10 to Thursday 2026-10-15: nine whole weeks and a partial one.
     expect(within(chart).getAllByRole('row')).toHaveLength(10);
   });
@@ -469,7 +450,7 @@ describe('UsageSettings', () => {
     expect(await screen.findByText('10 h')).toBeInTheDocument();
     vi.mocked(getOwnerTokens).mockResolvedValue(tokens());
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
+    await waitFor(async () => expect(await tile('Model cost')).toBe('Your provider'));
   });
 
   it('answers in Chinese', async () => {
@@ -479,13 +460,11 @@ describe('UsageSettings', () => {
     expect(screen.getByRole('heading', { name: '历史用量' })).toBeInTheDocument();
     expect(await screen.findByText('1 个运行中 · 1 个已停止')).toBeInTheDocument();
     expect(screen.getByText('最后使用：3小时前')).toBeInTheDocument();
-    expect(await screen.findByText('估算，不是账单')).toBeInTheDocument();
+    expect(await screen.findByText('由服务商计费')).toBeInTheDocument();
     expect(await tile('缓存命中率')).toBe('0%');
     expect(await tile('推理 Token')).toBe('—');
-    expect(screen.getByText('已计入输出 Token')).toBeInTheDocument();
-    expect(
-      await screen.findByText(/^每天从 UTC 零点开始算.*和每日额度重置的时间一致/),
-    ).toBeInTheDocument();
+    expect(screen.getByText('智能体不上报此项')).toBeInTheDocument();
+    expect(await screen.findByText(/^每天从 UTC 零点开始算/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '今天' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '全部' })).toBeInTheDocument();
   });

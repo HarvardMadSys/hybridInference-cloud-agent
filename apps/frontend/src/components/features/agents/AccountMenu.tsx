@@ -20,7 +20,6 @@ import {
   GearIcon,
   GlobeIcon,
   HelpIcon,
-  HomeIcon,
   LogOutIcon,
   MailIcon,
   RefreshIcon,

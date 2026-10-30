@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { offering, TEST_CONNECTION } from '@/test/connectionConfig';
+import { offering } from '@/test/connectionConfig';
 import '@testing-library/jest-dom/vitest';
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';

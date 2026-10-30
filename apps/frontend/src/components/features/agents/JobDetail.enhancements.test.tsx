@@ -83,6 +83,7 @@ function job(threadId = 'thread-first', overrides: Partial<AgentJob> = {}): Agen
     branch: 'agent/task',
     runtime: 'claude-code',
     model: 'qwen-test',
+    modelConnectionId: TEST_CONNECTION,
     spentUsd: 0,
     hasLedger: false,
     timeoutLabel: '',
@@ -433,13 +434,13 @@ describe('visible send modes', () => {
     vi.mocked(getAgentConfig).mockResolvedValue({
       repos: ['owner/repository'],
       runtimes: ['claude-code'],
-      ...offering(['qwen-test']),
       model_connections_enabled: true,
       model_connections: [
+        ...(offering(['qwen-test']).model_connections ?? []),
         {
           id: mine,
-          name: 'Mine',
-          ...offering(['qwen-test']),
+          name: 'Other',
+          models: ['qwen-test'],
           model_runtimes: { 'qwen-test': ['claude-code'] },
         },
       ],
@@ -452,9 +453,9 @@ describe('visible send modes', () => {
     });
     render(<JobDetail job={job()} userId="alice" />);
     await screen.findByRole('button', { name: 'Steer now' });
-    // The same model ID on a personal connection is another source, billed elsewhere.
+    // The same model ID on another connection is another source, billed elsewhere.
     fireEvent.click(screen.getByLabelText('Model for this turn'));
-    fireEvent.click(screen.getByRole('option', { name: 'qwen-test · Mine' }));
+    fireEvent.click(screen.getByRole('option', { name: 'qwen-test · Other' }));
     expect(screen.queryByRole('button', { name: 'Steer now' })).not.toBeInTheDocument();
     expect(
       screen.getByText(/runs as the next turn instead of joining the running one/),

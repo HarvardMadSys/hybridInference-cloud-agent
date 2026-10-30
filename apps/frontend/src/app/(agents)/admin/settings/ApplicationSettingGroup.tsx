@@ -318,9 +318,7 @@ function describedBy(id: string, error: string | undefined): string {
 
 /** A model id is one token, so the free-text line toggle stays off it. */
 function offersMultiline(field: AdminSettingDefinition, showInput: boolean): boolean {
-  return (
-    showInput && field.kind === 'string' && !field.choices?.length
-  );
+  return showInput && field.kind === 'string' && !field.choices?.length;
 }
 
 export function ApplicationSettingGroup({

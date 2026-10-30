@@ -12,7 +12,6 @@ const auth = vi.hoisted(() => ({
 }));
 vi.mock('@/components/providers/AuthProvider', () => ({
   useAuth: () => auth,
-  useSignedInAuthMode: () => auth.state.user.auth_mode,
 }));
 vi.mock('@/lib/api/accounts', () => ({ listAccounts: vi.fn(), updateAccount: vi.fn() }));
 vi.mock('@/lib/api/adminSettings', () => ({
@@ -36,7 +35,6 @@ const account: AccountEntry = {
 };
 beforeEach(() => {
   vi.resetAllMocks();
-  auth.state.user.auth_mode = 'local';
   vi.mocked(api.listAccounts).mockResolvedValue({ accounts: [account], total: 1 });
   auth.refreshUser.mockResolvedValue(undefined);
 });
@@ -90,12 +88,5 @@ describe('independent account review', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Review' }));
     fireEvent.click(screen.getByRole('combobox', { name: 'Action' }));
     expect(within(screen.getByRole('listbox')).queryByText('Approve access')).toBeNull();
-  });
-  it('Gateway deployments do not query local account records', () => {
-    auth.state.user.auth_mode = 'gateway';
-    render(<AccountsPage />);
-    expect(screen.getByText(/Independent accounts are not enabled/)).toBeInTheDocument();
-    expect(api.listAccounts).not.toHaveBeenCalled();
-    expect(screen.queryByRole('link', { name: 'Accounts' })).toBeNull();
   });
 });

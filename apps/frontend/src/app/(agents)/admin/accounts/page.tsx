@@ -226,130 +226,121 @@ export default function AccountsPage() {
           description={t('adminAccounts.description')}
         />
         <AdminNavigation current="accounts" />
-          <div className="mt-5 space-y-4">
-            <nav
-              className="flex flex-wrap gap-3 text-sm"
-              aria-label={t('adminAccounts.navigation')}
-            >
-              <Link className="text-accent underline" href="/admin/accounts/policy">
-                {t('adminAccounts.policyLink')}
-              </Link>
-              <Link className="text-accent underline" href="/admin/accounts/mail">
-                {t('adminAccounts.mailLink')}
-              </Link>
-            </nav>
-            {erasure && (
-              <div role="status" className={SUMMARY}>
-                <p className="font-medium break-all">{erasure.label}</p>
-                <ErasureSummary result={erasure.result} />
-                <button className="ui-button ui-button-ghost mt-2" onClick={() => setErasure(null)}>
-                  {t('adminAccounts.dismiss')}
-                </button>
-              </div>
-            )}
-            <Counts counts={counts} />
-            <div className="flex flex-wrap items-center gap-3">
-              <input
-                className="ui-input min-w-[14rem] flex-1"
-                type="search"
-                aria-label={t('adminAccounts.search')}
-                placeholder={t('adminAccounts.searchPlaceholder')}
-                maxLength={320}
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-              <Select
-                aria-label={t('adminAccounts.applicationStatus')}
-                value={status}
-                onValueChange={(value) => {
-                  setStatus(value);
-                  setOffset(0);
-                }}
-                options={translated(FILTERS, t)}
-              />
-              <Select
-                aria-label={t('adminAccounts.accountState')}
-                value={accountStatus ?? ''}
-                onValueChange={(value) => setAccountStatus(value)}
-                options={translated(STATES, t)}
-              />
-              <Select
-                aria-label={t('adminAccounts.sortLabel')}
-                value={sort}
-                onValueChange={(value) => setSort(value)}
-                options={translated(SORTS, t)}
-              />
-              <button
-                className="ui-button ui-button-secondary"
-                disabled={loading}
-                onClick={refresh}
-              >
-                {t('adminAccounts.refresh')}
-              </button>
-              <span className="text-xs text-muted">
-                {t('adminAccounts.total', { count: total })}
-              </span>
-            </div>
-            {error && <AccountNotice error>{error}</AccountNotice>}
-            {loading ? (
-              <p role="status" className="text-sm text-muted">
-                {t('adminAccounts.loading')}
-              </p>
-            ) : accounts.length === 0 ? (
-              <p className="text-sm text-muted">{t('adminAccounts.empty')}</p>
-            ) : (
-              <ul className="space-y-3">
-                {accounts.map((account) => (
-                  <li key={account.id} className="rounded-xl border border-border bg-surface p-4">
-                    <AccountRow
-                      account={account}
-                      selected={selected?.id === account.id}
-                      onReview={() => setSelected(account)}
-                    />
-                    {selected?.id === account.id && (
-                      <>
-                        <ActionEditor
-                          key={`${account.id}:${account.waitlist.version}`}
-                          account={selected}
-                          onCancel={() => setSelected(null)}
-                          onErased={(result) =>
-                            setErasure({
-                              label: account.identity?.label ?? account.email ?? account.id,
-                              result,
-                            })
-                          }
-                          onDone={() => {
-                            refresh();
-                            if (account.id === state.user?.id) void refreshUser();
-                          }}
-                        />
-                        <div className="mt-3 space-y-3 rounded-lg border border-border p-4">
-                          <AccountNotes account={selected} onSaved={refresh} />
-                          <SignInHistory accountId={selected.id} />
-                        </div>
-                      </>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="flex gap-2">
-              <button
-                className="ui-button ui-button-secondary"
-                disabled={loading || offset === 0}
-                onClick={() => setOffset((v) => Math.max(0, v - 50))}
-              >
-                {t('adminAccounts.previous')}
-              </button>
-              <button
-                className="ui-button ui-button-secondary"
-                disabled={loading || offset + 50 >= total}
-                onClick={() => setOffset((v) => v + 50)}
-              >
-                {t('adminAccounts.next')}
+        <div className="mt-5 space-y-4">
+          <nav className="flex flex-wrap gap-3 text-sm" aria-label={t('adminAccounts.navigation')}>
+            <Link className="text-accent underline" href="/admin/accounts/policy">
+              {t('adminAccounts.policyLink')}
+            </Link>
+            <Link className="text-accent underline" href="/admin/accounts/mail">
+              {t('adminAccounts.mailLink')}
+            </Link>
+          </nav>
+          {erasure && (
+            <div role="status" className={SUMMARY}>
+              <p className="font-medium break-all">{erasure.label}</p>
+              <ErasureSummary result={erasure.result} />
+              <button className="ui-button ui-button-ghost mt-2" onClick={() => setErasure(null)}>
+                {t('adminAccounts.dismiss')}
               </button>
             </div>
+          )}
+          <Counts counts={counts} />
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              className="ui-input min-w-[14rem] flex-1"
+              type="search"
+              aria-label={t('adminAccounts.search')}
+              placeholder={t('adminAccounts.searchPlaceholder')}
+              maxLength={320}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            <Select
+              aria-label={t('adminAccounts.applicationStatus')}
+              value={status}
+              onValueChange={(value) => {
+                setStatus(value);
+                setOffset(0);
+              }}
+              options={translated(FILTERS, t)}
+            />
+            <Select
+              aria-label={t('adminAccounts.accountState')}
+              value={accountStatus ?? ''}
+              onValueChange={(value) => setAccountStatus(value)}
+              options={translated(STATES, t)}
+            />
+            <Select
+              aria-label={t('adminAccounts.sortLabel')}
+              value={sort}
+              onValueChange={(value) => setSort(value)}
+              options={translated(SORTS, t)}
+            />
+            <button className="ui-button ui-button-secondary" disabled={loading} onClick={refresh}>
+              {t('adminAccounts.refresh')}
+            </button>
+            <span className="text-xs text-muted">{t('adminAccounts.total', { count: total })}</span>
           </div>
+          {error && <AccountNotice error>{error}</AccountNotice>}
+          {loading ? (
+            <p role="status" className="text-sm text-muted">
+              {t('adminAccounts.loading')}
+            </p>
+          ) : accounts.length === 0 ? (
+            <p className="text-sm text-muted">{t('adminAccounts.empty')}</p>
+          ) : (
+            <ul className="space-y-3">
+              {accounts.map((account) => (
+                <li key={account.id} className="rounded-xl border border-border bg-surface p-4">
+                  <AccountRow
+                    account={account}
+                    selected={selected?.id === account.id}
+                    onReview={() => setSelected(account)}
+                  />
+                  {selected?.id === account.id && (
+                    <>
+                      <ActionEditor
+                        key={`${account.id}:${account.waitlist.version}`}
+                        account={selected}
+                        onCancel={() => setSelected(null)}
+                        onErased={(result) =>
+                          setErasure({
+                            label: account.identity?.label ?? account.email ?? account.id,
+                            result,
+                          })
+                        }
+                        onDone={() => {
+                          refresh();
+                          if (account.id === state.user?.id) void refreshUser();
+                        }}
+                      />
+                      <div className="mt-3 space-y-3 rounded-lg border border-border p-4">
+                        <AccountNotes account={selected} onSaved={refresh} />
+                        <SignInHistory accountId={selected.id} />
+                      </div>
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="flex gap-2">
+            <button
+              className="ui-button ui-button-secondary"
+              disabled={loading || offset === 0}
+              onClick={() => setOffset((v) => Math.max(0, v - 50))}
+            >
+              {t('adminAccounts.previous')}
+            </button>
+            <button
+              className="ui-button ui-button-secondary"
+              disabled={loading || offset + 50 >= total}
+              onClick={() => setOffset((v) => v + 50)}
+            >
+              {t('adminAccounts.next')}
+            </button>
+          </div>
+        </div>
       </section>
     </div>
   );

@@ -389,8 +389,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // Connected, and GitHub has given the App no repository yet: a step still to
   // take, not a connection to make again.
   const noRepositories = config?.github_connected === true && config.repos.length === 0;
-  const busy =
-    submitting || goalCommand.busy || Boolean(repo && environmentStatus === 'loading');
+  const busy = submitting || goalCommand.busy || Boolean(repo && environmentStatus === 'loading');
   const missingRepository = config?.github_connected === true && !repo;
   const canRun =
     canRunInRepository(config, repo, configRefreshing) &&

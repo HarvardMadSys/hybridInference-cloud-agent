@@ -15,7 +15,6 @@ import { MailComposer } from './mail/MailComposer';
 const auth = vi.hoisted(() => ({ state: { user: { id: 'admin' } } }));
 vi.mock('@/components/providers/AuthProvider', () => ({
   useAuth: () => auth,
-  useSignedInAuthMode: () => 'local',
 }));
 vi.mock('@/lib/api/adminSettings', () => ({
   getAgentAdminSettings: async () => ({ setup: { required: false, groups: [] } }),

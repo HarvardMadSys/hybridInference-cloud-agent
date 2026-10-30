@@ -136,4 +136,3 @@ export function getAdminAttemptResources(
 ): Promise<AgentAttemptTelemetryApi> {
   return read(`${runPath(jobId)}/attempts/${attemptId}/resources`, signal);
 }
-

@@ -36,11 +36,7 @@ const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     title: 'Signing and encryption keys',
-    keys: [
-      'control_signing_secret',
-      'source_control_encryption_key',
-      'compute_encryption_key',
-    ],
+    keys: ['control_signing_secret', 'source_control_encryption_key', 'compute_encryption_key'],
   },
   {
     title: 'Session security',
@@ -184,9 +180,7 @@ const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     title: 'Task titles',
-    keys: [
-      'task_titles.max_chars',
-    ],
+    keys: ['task_titles.max_chars'],
   },
   {
     title: 'Sign-up and approval',

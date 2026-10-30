@@ -94,4 +94,3 @@ export async function getAgentJobUsage(
   if (resp.status === 404) return null;
   return jsonOrThrow<AgentJobUsageApi>(resp);
 }
-

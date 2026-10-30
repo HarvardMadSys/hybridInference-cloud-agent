@@ -30,11 +30,7 @@ type SavedAutomaticSetup = {
   parameters: AutomaticSetupParameters;
 };
 
-function AutomaticSetupIntro({
-  hasConnections,
-}: {
-  hasConnections: boolean;
-}) {
+function AutomaticSetupIntro({ hasConnections }: { hasConnections: boolean }) {
   const machines = 'control-plane machine';
   return (
     <>
@@ -50,7 +46,9 @@ function AutomaticSetupIntro({
       )}
       <p className="text-sm text-gray-600 dark:text-gray-300">
         Use SSH accounts with passwordless sudo on the stable machines.{' '}
-        {'The control plane runs the main API and MCP listener. Owners provide their own inference connections.'}
+        {
+          'The control plane runs the main API and MCP listener. Owners provide their own inference connections.'
+        }
       </p>
     </>
   );
@@ -306,65 +304,60 @@ function AutomaticComputeSetup({
       )}
       <fieldset className="space-y-4" disabled={busy || !status?.available}>
         <div className="grid gap-4 sm:grid-cols-2">
-          {(
-            [
-              ['Control-plane', control, setControl],
-            ] as const
-          )
-            .map(([name, value, update]) => (
-              <fieldset className="space-y-3" key={name}>
-                <legend className="mb-2 text-sm font-semibold">{name} machine</legend>
-                <label className="block text-sm">
-                  <span className="mb-1 block font-medium">{name} host address</span>
+          {([['Control-plane', control, setControl]] as const).map(([name, value, update]) => (
+            <fieldset className="space-y-3" key={name}>
+              <legend className="mb-2 text-sm font-semibold">{name} machine</legend>
+              <label className="block text-sm">
+                <span className="mb-1 block font-medium">{name} host address</span>
+                <input
+                  className={inputClass}
+                  required
+                  value={value.address}
+                  onChange={(event) => update({ ...value, address: event.target.value })}
+                />
+              </label>
+              <label className="block text-sm">
+                <span className="mb-1 block font-medium">{name} SSH username</span>
+                <input
+                  className={inputClass}
+                  required
+                  value={value.username}
+                  onChange={(event) => update({ ...value, username: event.target.value })}
+                />
+              </label>
+              <label className="block text-sm">
+                <span className="mb-1 block font-medium">{name} SSH connection</span>
+                <Select
+                  className={inputClass}
+                  required
+                  value={value.connection_id}
+                  onValueChange={(next) => update({ ...value, connection_id: next })}
+                  options={[
+                    { value: '', label: 'Select an administrative SSH key' },
+                    ...sshConnections.map((connection) => ({
+                      value: connection.id,
+                      label: connection.name,
+                    })),
+                  ]}
+                />
+              </label>
+              <details>
+                <summary className="cursor-pointer text-sm">Custom SSH port</summary>
+                <label className="mt-3 block text-sm">
+                  <span className="mb-1 block font-medium">{name} SSH port</span>
                   <input
                     className={inputClass}
+                    type="number"
+                    min={1}
+                    max={65535}
                     required
-                    value={value.address}
-                    onChange={(event) => update({ ...value, address: event.target.value })}
+                    value={value.port}
+                    onChange={(event) => update({ ...value, port: event.target.value })}
                   />
                 </label>
-                <label className="block text-sm">
-                  <span className="mb-1 block font-medium">{name} SSH username</span>
-                  <input
-                    className={inputClass}
-                    required
-                    value={value.username}
-                    onChange={(event) => update({ ...value, username: event.target.value })}
-                  />
-                </label>
-                <label className="block text-sm">
-                  <span className="mb-1 block font-medium">{name} SSH connection</span>
-                  <Select
-                    className={inputClass}
-                    required
-                    value={value.connection_id}
-                    onValueChange={(next) => update({ ...value, connection_id: next })}
-                    options={[
-                      { value: '', label: 'Select an administrative SSH key' },
-                      ...sshConnections.map((connection) => ({
-                        value: connection.id,
-                        label: connection.name,
-                      })),
-                    ]}
-                  />
-                </label>
-                <details>
-                  <summary className="cursor-pointer text-sm">Custom SSH port</summary>
-                  <label className="mt-3 block text-sm">
-                    <span className="mb-1 block font-medium">{name} SSH port</span>
-                    <input
-                      className={inputClass}
-                      type="number"
-                      min={1}
-                      max={65535}
-                      required
-                      value={value.port}
-                      onChange={(event) => update({ ...value, port: event.target.value })}
-                    />
-                  </label>
-                </details>
-              </fieldset>
-            ))}
+              </details>
+            </fieldset>
+          ))}
         </div>
         <div className="grid gap-4 sm:grid-cols-2">
           <label className="text-sm">

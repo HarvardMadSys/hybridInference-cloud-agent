@@ -60,6 +60,10 @@ export const usageEn = {
   'settings.usage.error.unavailable': 'Usage cannot be read right now. Try again in a moment.',
   'settings.usage.cost': 'Model cost',
   'settings.usage.costEstimate': 'Estimate, not a bill',
+  'settings.usage.costProvider': 'Your provider',
+  'settings.usage.costProviderDetail': 'Each connection’s provider bills and limits its use',
+  'settings.usage.tokensReported': 'As your agents reported them',
+  'settings.usage.reasoningNotReported': 'Agents do not report them',
   'settings.usage.tokens': 'Tokens',
   'settings.usage.tokensInOut': '{in} in · {out} out',
   'settings.usage.cacheHitRate': 'Cache hit rate',
@@ -97,10 +101,9 @@ export const usageEn = {
   'settings.usage.otherModels': 'Other models',
   'settings.usage.noData': 'No turns in this period.',
   'settings.usage.utcNote':
-    'Days start at 00:00 UTC, when the daily limit resets. A turn counts on the day it started; CPU and memory count when they were used.',
+    'Days start at 00:00 UTC. A turn counts on the day it started; CPU and memory count when they were used.',
   'settings.usage.utcNoteLocal':
-    'Days start at 00:00 UTC ({time} your time), when the daily limit resets. A turn counts on the day it started; CPU and memory count when they were used.',
-  'settings.usage.dashboardLink': 'Daily limit and account usage',
+    'Days start at 00:00 UTC ({time} your time). A turn counts on the day it started; CPU and memory count when they were used.',
 } as const;
 
 export const usageZhCN: Record<keyof typeof usageEn, string> = {
@@ -156,6 +159,10 @@ export const usageZhCN: Record<keyof typeof usageEn, string> = {
   'settings.usage.error.unavailable': '暂时无法读取用量，请稍后再试。',
   'settings.usage.cost': '模型费用',
   'settings.usage.costEstimate': '估算，不是账单',
+  'settings.usage.costProvider': '由服务商计费',
+  'settings.usage.costProviderDetail': '每个连接的服务商负责计费和额度',
+  'settings.usage.tokensReported': '由智能体上报',
+  'settings.usage.reasoningNotReported': '智能体不上报此项',
   'settings.usage.tokens': 'Token',
   'settings.usage.tokensInOut': '输入 {in} · 输出 {out}',
   'settings.usage.cacheHitRate': '缓存命中率',
@@ -193,8 +200,7 @@ export const usageZhCN: Record<keyof typeof usageEn, string> = {
   'settings.usage.otherModels': '其他模型',
   'settings.usage.noData': '这段时间没有对话轮次。',
   'settings.usage.utcNote':
-    '每天从 UTC 零点开始算，和每日额度重置的时间一致。一轮对话计入它开始的那一天；CPU 和内存计入实际使用的那一天。',
+    '每天从 UTC 零点开始算。一轮对话计入它开始的那一天；CPU 和内存计入实际使用的那一天。',
   'settings.usage.utcNoteLocal':
-    '每天从 UTC 零点开始算（你这里的 {time}），和每日额度重置的时间一致。一轮对话计入它开始的那一天；CPU 和内存计入实际使用的那一天。',
-  'settings.usage.dashboardLink': '每日额度和账户用量',
+    '每天从 UTC 零点开始算（你这里的 {time}）。一轮对话计入它开始的那一天；CPU 和内存计入实际使用的那一天。',
 };

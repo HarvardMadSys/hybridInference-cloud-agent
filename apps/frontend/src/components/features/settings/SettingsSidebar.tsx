@@ -110,28 +110,26 @@ export function SettingsSidebar({
             {t('settings.navigation')}
           </p>
           <div className="space-y-1">
-            {ITEMS.map(
-              ({ href, label, icon }) => (
-                <Link
-                  key={href}
-                  href={href}
-                  aria-current={pathname === href ? 'page' : undefined}
-                  className={`${itemClass(pathname === href)} ${href === SETTINGS_PATHS.plugins ? '!mt-5' : ''}`}
+            {ITEMS.map(({ href, label, icon }) => (
+              <Link
+                key={href}
+                href={href}
+                aria-current={pathname === href ? 'page' : undefined}
+                className={`${itemClass(pathname === href)} ${href === SETTINGS_PATHS.plugins ? '!mt-5' : ''}`}
+              >
+                <svg
+                  aria-hidden="true"
+                  className="h-[18px] w-[18px] shrink-0"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={1.6}
                 >
-                  <svg
-                    aria-hidden="true"
-                    className="h-[18px] w-[18px] shrink-0"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={1.6}
-                  >
-                    <path d={icon} strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                  {t(label)}
-                </Link>
-              ),
-            )}
+                  <path d={icon} strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                {t(label)}
+              </Link>
+            ))}
           </div>
         </nav>
         <div className="shrink-0 px-3 pb-3">

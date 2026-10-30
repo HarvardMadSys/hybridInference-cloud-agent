@@ -16,7 +16,6 @@ const auth = vi.hoisted(() => ({
 }));
 vi.mock('@/components/providers/AuthProvider', () => ({
   useAuth: () => auth,
-  useSignedInAuthMode: () => 'local',
 }));
 vi.mock('@/lib/api/adminSettings', () => ({
   getAgentAdminSettings: async () => ({ setup: { required: false, groups: [] } }),

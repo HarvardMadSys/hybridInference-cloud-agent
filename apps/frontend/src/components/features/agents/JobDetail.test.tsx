@@ -39,7 +39,6 @@ import {
   setAgentGoal,
   resumeAgentGoal,
   resizeAgentTerminal,
-  refreshAgentJobUsage,
   restoreAgentJob,
   renameAgentJob,
   pinAgentJob,
@@ -77,9 +76,6 @@ import { useKeyboardShortcuts } from '@/components/features/settings/keyboardSho
 import { DEFAULT_KEYBOARD_SHORTCUTS } from '@/lib/keyboardShortcuts';
 import { onPlatform } from '@/lib/platformTestSupport';
 import { listThreadQuestions } from '@/lib/api/questions';
-import { rewritePrompt } from '@/lib/api/promptRewrite';
-
-vi.mock('@/lib/api/promptRewrite', () => ({ rewritePrompt: vi.fn() }));
 
 vi.mock('@/lib/api/questions', () => ({
   listThreadQuestions: vi
@@ -215,7 +211,6 @@ vi.mock('@/lib/api/agents', () => ({
   listAgentConversations: vi.fn(),
   listAgentTerminals: vi.fn(),
   resizeAgentTerminal: vi.fn(),
-  refreshAgentJobUsage: vi.fn(),
   restoreAgentJob: vi.fn(),
   renameAgentJob: vi.fn(),
   pinAgentJob: vi.fn(),
@@ -425,9 +420,10 @@ function measuredUsage(): AgentJobUsageApi {
     },
     runtime: {
       source: 'runtime',
-      input_tokens: null,
-      output_tokens: null,
+      input_tokens: 1200,
+      output_tokens: 80,
       cache_read_tokens: null,
+      normalized_input_tokens: 1200,
     },
   };
 }
@@ -1435,7 +1431,7 @@ describe('JobDetail', () => {
       expect(submitThreadMessage).toHaveBeenLastCalledWith('original-thread', {
         prompt: 'Use this spec next',
         model: 'glm-test',
-        modelConnectionId: TEST_CONNECTION,
+        model_connection_id: TEST_CONNECTION,
         skill_ids: [],
         attachment_ids: [42],
       }),
@@ -1741,7 +1737,6 @@ describe('JobDetail', () => {
     // predates it. The bar's own file covers what it renders when present.
     vi.mocked(getAgentThreadStats).mockReset().mockResolvedValue(null);
     vi.mocked(getAgentJobUsage).mockReset().mockResolvedValue(null);
-    vi.mocked(refreshAgentJobUsage).mockReset().mockResolvedValue(null);
     vi.mocked(createAgentTerminal).mockReset();
     vi.mocked(deleteAgentTerminal).mockReset();
     vi.mocked(listAgentTerminals).mockReset().mockResolvedValue([]);
@@ -1853,7 +1848,7 @@ describe('JobDetail', () => {
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'Back to the first model',
         model: 'qwen-test',
-        modelConnectionId: TEST_CONNECTION,
+        model_connection_id: TEST_CONNECTION,
       }),
     );
   });
@@ -3403,22 +3398,21 @@ describe('JobDetail', () => {
     render(<JobDetail job={makeJob({ state: 'failed', events: [], stateNote: undefined })} />);
     expect(screen.getByText(/No failure details were recorded/)).toBeInTheDocument();
     expect(screen.getByText(/send a follow-up to try again/)).toBeInTheDocument();
-    expect(await screen.findByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    expect(await screen.findByLabelText('Run usage')).toHaveTextContent('80 output tokens');
     expect(screen.getAllByRole('region', { name: 'Usage' })).toHaveLength(1);
   });
 
-  it('moves usage to the newest assistant reply without restarting accounting requests', async () => {
+  it('moves usage to the newest assistant reply without reading it again', async () => {
     const data = measuredUsage();
     vi.mocked(getAgentJobUsage).mockResolvedValue(data);
-    vi.mocked(refreshAgentJobUsage).mockResolvedValue(data);
     const job = makeJob({
       threadMessages: HISTORY,
       events: [{ kind: 'message', text: 'Inspecting the source.', attemptNo: 1 }],
     });
     const { rerender } = render(<JobDetail job={job} />);
-    await waitFor(() => expect(refreshAgentJobUsage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(getAgentJobUsage).toHaveBeenCalledTimes(1));
     const firstReply = screen.getByText('Inspecting the source.').closest<HTMLElement>('.group')!;
-    expect(within(firstReply).getByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    expect(within(firstReply).getByLabelText('Run usage')).toHaveTextContent('80 output tokens');
     const historyReply = screen.getByText('Earlier answer').closest<HTMLElement>('.group')!;
     expect(within(historyReply).queryByLabelText('Run usage')).not.toBeInTheDocument();
 
@@ -3433,11 +3427,10 @@ describe('JobDetail', () => {
       );
     });
     const latestReply = screen.getByText('The fix is ready.').closest<HTMLElement>('.group')!;
-    expect(within(latestReply).getByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    expect(within(latestReply).getByLabelText('Run usage')).toHaveTextContent('80 output tokens');
     expect(within(firstReply).queryByLabelText('Run usage')).not.toBeInTheDocument();
     expect(screen.getAllByRole('region', { name: 'Usage' })).toHaveLength(1);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
-    expect(refreshAgentJobUsage).toHaveBeenCalledTimes(1);
   });
 
   it('attaches usage to the current durable reply when event history is unavailable', async () => {
@@ -3463,7 +3456,7 @@ describe('JobDetail', () => {
     await screen.findByLabelText('Run usage');
     const currentReply = screen.getByText('Current answer').closest<HTMLElement>('.group')!;
     const historyReply = screen.getByText('Earlier answer').closest<HTMLElement>('.group')!;
-    expect(within(currentReply).getByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    expect(within(currentReply).getByLabelText('Run usage')).toHaveTextContent('80 output tokens');
     expect(within(historyReply).queryByLabelText('Run usage')).not.toBeInTheDocument();
     expect(screen.getAllByRole('region', { name: 'Usage' })).toHaveLength(1);
   });
@@ -3486,7 +3479,7 @@ describe('JobDetail', () => {
         })}
       />,
     );
-    expect(await screen.findByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    expect(await screen.findByLabelText('Run usage')).toHaveTextContent('80 output tokens');
     const history = screen.getByText('Execution history (2)').closest('details');
     expect(history).not.toHaveAttribute('open');
     expect(screen.getByText('Final answer')).toBeVisible();
@@ -3505,9 +3498,8 @@ describe('JobDetail', () => {
     await waitFor(() => expect(screen.getByText('Final answer')).toBeVisible());
     expect(history).not.toHaveAttribute('open');
     expect(screen.queryByText(/Viewing execution 1/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('80 output tokens');
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
     expect(cancelAgentJob).not.toHaveBeenCalled();
     expect(submitThreadMessage).not.toHaveBeenCalled();
   });
@@ -6060,7 +6052,6 @@ describe('the trajectory tab', () => {
       commits: [],
     });
     vi.mocked(getAgentJobUsage).mockReset().mockResolvedValue(null);
-    vi.mocked(refreshAgentJobUsage).mockReset().mockResolvedValue(null);
     vi.mocked(getAgentThreadStats).mockReset().mockResolvedValue(null);
     vi.mocked(getAgentAttemptTelemetry).mockReset().mockResolvedValue({
       attempt_id: 1,

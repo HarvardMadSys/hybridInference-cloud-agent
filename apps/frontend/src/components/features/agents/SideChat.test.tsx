@@ -671,28 +671,19 @@ describe('Side Chat', () => {
 });
 
 describe('Side Chat review regressions', () => {
-  it('preserves model and effort choices made while the native fork is preparing', async () => {
+  it('preserves a model choice made while the native fork is preparing', async () => {
     let resolve!: (row: AgentJobApi) => void;
     vi.mocked(forkAgentJob).mockReturnValueOnce(
       new Promise((r) => {
         resolve = r;
       }),
     );
-    render(
-      <SideChat
-        {...props()}
-        config={{
-          ...config,
-          runtime_reasoning_efforts: { codex: ['low', 'medium', 'high'] },
-          model_reasoning_efforts: { 'model-a': ['high'], 'model-b': ['high'] },
-        }}
-      />,
-    );
+    render(<SideChat {...props()} />);
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole('button', { name: 'Side chat model' }));
     fireEvent.click(screen.getByRole('option', { name: 'model-b' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Side chat reasoning' }));
-    fireEvent.click(screen.getByRole('option', { name: 'low' }));
+    // A connection turn runs at its provider's default: there is no reasoning control.
+    expect(screen.queryByRole('button', { name: 'Side chat reasoning' })).not.toBeInTheDocument();
     await act(async () => {
       resolve(copied);
     });
@@ -703,7 +694,6 @@ describe('Side Chat review regressions', () => {
         prompt: 'Why keep the files?',
         model: 'model-b',
         model_connection_id: TEST_CONNECTION,
-        reasoning_effort: 'low',
       }),
     );
   });
@@ -1006,7 +996,7 @@ describe('fixing completed side chat reviews', () => {
   });
 });
 
-it('an open side chat keeps a deleted personal source unavailable instead of sending to its Gateway namesake', async () => {
+it('an open side chat keeps a deleted source unavailable instead of sending to a namesake on another connection', async () => {
   const source = 'mconn_0123456789abcdef0123456789abcdef';
   const personal = { ...anchor, model_connection_id: source };
   jobs = jobs.map((job) => ({ ...job, model_connection_id: source }));
@@ -1020,7 +1010,7 @@ it('an open side chat keeps a deleted personal source unavailable instead of sen
           {
             id: source,
             name: 'Mine',
-            ...offering(['model-a']),
+            models: ['model-a'],
             model_runtimes: { 'model-a': ['codex'] },
           },
         ],
@@ -1028,7 +1018,8 @@ it('an open side chat keeps a deleted personal source unavailable instead of sen
     />,
   );
   await ready();
-  view.rerender(<SideChat {...sourceProps} config={{ ...config, model_connections: [] }} />);
+  // The connection is deleted; another one lists a model of the same name.
+  view.rerender(<SideChat {...sourceProps} config={{ ...config, ...offering(['model-a']) }} />);
   expect(screen.getByRole('button', { name: 'Side chat model' })).toHaveAccessibleDescription(
     'model-a · personal connection (unavailable)',
   );

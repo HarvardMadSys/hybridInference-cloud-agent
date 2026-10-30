@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getAgentConfig, type AgentConfigApi, type AgentJobApi } from '@/lib/api/agents';
 import { submitThreadMessage } from '@/lib/api/pendingMessages';
-import { rewritePrompt } from '@/lib/api/promptRewrite';
 import { JobDetail } from './JobDetail';
 import { announceModelConnectionsChanged } from './modelConnectionEvents';
 import type { AgentJob } from './types';
@@ -38,7 +37,6 @@ vi.mock('@/lib/api/questions', () => ({
   answerThreadQuestion: vi.fn(),
 }));
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn().mockResolvedValue([]) }));
-vi.mock('@/lib/api/promptRewrite', () => ({ rewritePrompt: vi.fn() }));
 vi.mock('@/lib/api/pendingMessages', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/pendingMessages')>()),
   submitThreadMessage: vi.fn(),
@@ -58,8 +56,6 @@ const OTHER = 'mconn_fedcba9876543210fedcba9876543210';
 const CONFIG: AgentConfigApi = {
   repos: ['owner/repository'],
   runtimes: ['codex'],
-  models: ['shared'],
-  model_reasoning_efforts: { shared: ['high'] },
   runtime_reasoning_efforts: { codex: ['high'] },
   model_connections_enabled: true,
   model_connections: [
@@ -68,6 +64,12 @@ const CONFIG: AgentConfigApi = {
       name: 'My provider',
       models: ['shared', 'mine'],
       model_runtimes: { shared: ['codex'], mine: ['codex'] },
+    },
+    {
+      id: OTHER,
+      name: 'Other provider',
+      models: ['shared'],
+      model_runtimes: { shared: ['codex'] },
     },
   ],
   github_connected: true,
@@ -86,6 +88,7 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     branch: 'agent/ajob_1',
     runtime: 'codex',
     model: 'shared',
+    modelConnectionId: OTHER,
     spentUsd: 0,
     hasLedger: false,
     timeoutLabel: '',
@@ -131,12 +134,10 @@ async function send(prompt: string) {
   fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
 }
 
-/** The one message sent, checked to name no personal source: that is the Gateway. */
-function gatewayCall() {
+/** The one message sent. */
+function sentBody() {
   expect(submitThreadMessage).toHaveBeenCalledTimes(1);
-  const body = vi.mocked(submitThreadMessage).mock.calls[0][1];
-  expect(body).not.toHaveProperty('model_connection_id');
-  return body;
+  return vi.mocked(submitThreadMessage).mock.calls[0][1];
 }
 
 function chooseModel(name: string) {
@@ -149,13 +150,13 @@ beforeEach(() => {
   vi.mocked(submitThreadMessage)
     .mockReset()
     .mockResolvedValue({ pending: null, job: { id: 'ajob_child' } } as never);
-  vi.mocked(rewritePrompt).mockReset();
 });
 afterEach(() => cleanup());
 
 describe('follow-up model sources', () => {
-  it('inherits a personal source without naming it again', async () => {
+  it('inherits its source without naming it again', async () => {
     render(<JobDetail job={makeJob({ modelConnectionId: CONNECTION })} />);
+    // Two connections list `shared`, so the label names the one it is on.
     await waitFor(() =>
       expect(screen.getByLabelText('Model for this turn')).toHaveAccessibleDescription(
         'shared · My provider',
@@ -167,19 +168,23 @@ describe('follow-up model sources', () => {
     );
   });
 
-  it('switches from a personal source to the Gateway model of the same name', async () => {
+  it("switches to another connection's model of the same name", async () => {
     render(<JobDetail job={makeJob({ modelConnectionId: CONNECTION })} />);
     await screen.findByLabelText('Model for this turn');
     await waitFor(() => expect(getAgentConfig).toHaveBeenCalled());
-    chooseModel('shared');
-    await send('Use the platform now');
-    // The model goes even though its name is unchanged; no source is the Gateway.
+    chooseModel('shared · Other provider');
+    await send('Use the other key');
+    // The model goes even though its name is unchanged: the source changed.
     await waitFor(() =>
-      expect(gatewayCall()).toMatchObject({ prompt: 'Use the platform now', model: 'shared' }),
+      expect(sentBody()).toEqual({
+        prompt: 'Use the other key',
+        model: 'shared',
+        model_connection_id: OTHER,
+      }),
     );
   });
 
-  it('switches from the Gateway onto a personal source of the same name, without effort', async () => {
+  it('switches source without carrying an effort the connection does not take', async () => {
     render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
     await waitFor(() => expect(getAgentConfig).toHaveBeenCalled());
     chooseModel('shared · My provider');
@@ -201,20 +206,24 @@ describe('follow-up model sources', () => {
       />,
     );
     await waitFor(() =>
-      expect(screen.getByLabelText('Model for this turn')).toHaveAccessibleDescription(
-        'mine · My provider',
-      ),
+      expect(screen.getByLabelText('Model for this turn')).toHaveAccessibleDescription('mine'),
     );
-    // Choosing the viewed turn's Gateway model is a change from the newest one.
-    chooseModel('shared');
-    await send('Back to the platform');
+    // Choosing the viewed turn's pair is a change from the newest one.
+    chooseModel('shared · Other provider');
+    await send('Back to the other key');
     await waitFor(() =>
-      expect(gatewayCall()).toMatchObject({ prompt: 'Back to the platform', model: 'shared' }),
+      expect(sentBody()).toMatchObject({
+        prompt: 'Back to the other key',
+        model: 'shared',
+        model_connection_id: OTHER,
+      }),
     );
   });
 
-  it('holds Send while the inherited source is gone, rather than sending it to the Gateway', async () => {
-    render(<JobDetail job={makeJob({ modelConnectionId: OTHER })} />);
+  it('holds Send while the inherited source is gone, rather than sending to a namesake', async () => {
+    render(
+      <JobDetail job={makeJob({ modelConnectionId: 'mconn_ffffffffffffffffffffffffffffffff' })} />,
+    );
     expect(
       await screen.findByText(/shared · personal connection \(unavailable\), which is unavailable/),
     ).toBeVisible();
@@ -223,18 +232,15 @@ describe('follow-up model sources', () => {
     fireEvent.keyDown(screen.getByLabelText('Add a follow-up'), { key: 'Enter' });
     await waitFor(() => expect(screen.getByLabelText('Add a follow-up')).toBeEnabled());
     expect(submitThreadMessage).not.toHaveBeenCalled();
-    chooseModel('shared');
+    chooseModel('shared · My provider');
     await send('Go on');
-    await waitFor(() => expect(gatewayCall()).toMatchObject({ prompt: 'Go on', model: 'shared' }));
-  });
-
-  it('keeps the Gateway rewriter off for a personal source', async () => {
-    render(<JobDetail job={makeJob({ modelConnectionId: CONNECTION })} />);
-    await waitFor(() => expect(getAgentConfig).toHaveBeenCalled());
-    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'Tidy' } });
-    expect(screen.getByRole('button', { name: 'Rewrite prompt' })).toBeDisabled();
-    chooseModel('shared');
-    expect(screen.getByRole('button', { name: 'Rewrite prompt' })).toBeEnabled();
+    await waitFor(() =>
+      expect(sentBody()).toMatchObject({
+        prompt: 'Go on',
+        model: 'shared',
+        model_connection_id: CONNECTION,
+      }),
+    );
   });
 });
 
@@ -245,7 +251,10 @@ it('refreshes an explicitly switched personal source and blocks click, Enter and
   fireEvent.change(screen.getByLabelText('Add a follow-up'), {
     target: { value: 'Keep this draft' },
   });
-  vi.mocked(getAgentConfig).mockResolvedValue({ ...CONFIG, model_connections: [] });
+  vi.mocked(getAgentConfig).mockResolvedValue({
+    ...CONFIG,
+    model_connections: CONFIG.model_connections!.filter((entry) => entry.id !== CONNECTION),
+  });
   act(() => announceModelConnectionsChanged());
   await waitFor(() =>
     expect(screen.getByLabelText('Model for this turn')).toHaveAccessibleDescription(
@@ -262,22 +271,18 @@ it('refreshes an explicitly switched personal source and blocks click, Enter and
   expect(submitThreadMessage).not.toHaveBeenCalled();
   chooseModel('shared');
   await waitFor(() => expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeEnabled());
-  await send('Explicitly use Gateway');
-  // This is the original turn's Gateway pair, so inheritance needs no override.
-  await waitFor(() => expect(gatewayCall()).toMatchObject({ prompt: 'Explicitly use Gateway' }));
-  expect(gatewayCall()).not.toHaveProperty('model');
+  await send('Back to the original');
+  // This is the original turn's pair, so inheritance needs no override.
+  await waitFor(() => expect(sentBody()).toEqual({ prompt: 'Back to the original' }));
 });
 
-it('hides Rewrite and gives local account setup guidance when its connection is gone', async () => {
+it('gives setup guidance when no connection is left', async () => {
   vi.mocked(getAgentConfig).mockResolvedValue({
     ...CONFIG,
-    gateway_inference: false,
     model_connection_required: true,
-    models: [],
     model_connections: [],
   });
   render(<JobDetail job={makeJob({ modelConnectionId: CONNECTION })} />);
   await screen.findByRole('link', { name: 'Set up a model connection' });
-  expect(screen.queryByRole('button', { name: 'Rewrite prompt' })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeDisabled();
 });

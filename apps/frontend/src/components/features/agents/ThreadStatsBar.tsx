@@ -26,10 +26,7 @@ import { useEffect, useState } from 'react';
 import { formatDuration } from './TurnFooter';
 import { isActiveConversationState, isActiveJobState } from './conversationJob';
 import type { AgentJob } from './types';
-import {
-  getAgentThreadStats,
-  type AgentThreadStatsApi,
-} from '@/lib/api/agents';
+import { getAgentThreadStats, type AgentThreadStatsApi } from '@/lib/api/agents';
 
 /** Compact count: 5_800_000 → "5.8M", 89_700 → "89.7k". */
 export function formatCount(value: number | null | undefined): string | null {

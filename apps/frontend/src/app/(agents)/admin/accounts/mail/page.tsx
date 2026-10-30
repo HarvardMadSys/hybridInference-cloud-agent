@@ -213,8 +213,8 @@ export default function AccountMailPage() {
           <Link className="text-sm text-accent underline" href="/admin/accounts">
             {t('adminAccounts.back')}
           </Link>
-              <MailComposer onSent={() => setReload((v) => v + 1)} />
-              <MailList reload={reload} />
+          <MailComposer onSent={() => setReload((v) => v + 1)} />
+          <MailList reload={reload} />
         </div>
       </section>
     </div>

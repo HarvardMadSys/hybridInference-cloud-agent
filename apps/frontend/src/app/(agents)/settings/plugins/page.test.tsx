@@ -94,7 +94,6 @@ beforeEach(() => {
   vi.mocked(listSkills).mockResolvedValue([]);
   navigation.search = '';
   vi.mocked(getAgentConfig).mockResolvedValue({
-    models: ['model-a'],
     repos: [],
     runtimes: ['codex'],
     github_connected: false,

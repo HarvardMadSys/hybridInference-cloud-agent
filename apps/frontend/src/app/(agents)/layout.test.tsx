@@ -17,9 +17,6 @@ import { onPlatform } from '@/lib/platformTestSupport';
 
 let access: AgentAccessApi | undefined;
 let role = 'internal';
-let authMode: 'local' | 'gateway' | undefined;
-let gatewayUrl = '';
-let ragEnabled = false;
 let userId: string | undefined;
 const router = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn() }));
 const logout = vi.hoisted(() => vi.fn());
@@ -27,9 +24,6 @@ const logout = vi.hoisted(() => vi.fn());
 beforeEach(() => {
   access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
   role = 'internal';
-  authMode = undefined;
-  gatewayUrl = '';
-  ragEnabled = false;
   userId = undefined;
   pathname = '/';
   sessionStorage.clear();
@@ -59,6 +53,11 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(window.location.search),
 }));
 
+// Without access an account waits for approval in its own panel.
+vi.mock('@/components/features/auth/WaitlistPanel', () => ({
+  WaitlistPanel: () => <section data-testid="waitlist-panel" />,
+}));
+
 vi.mock('@/components/features/auth/ProtectedRoute', () => ({
   ProtectedRoute: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
@@ -82,7 +81,6 @@ vi.mock('@/components/providers', async () => {
           email: 'ada@example.com',
           role,
           agent_access: access,
-          auth_mode: authMode,
         },
       },
       logout,
@@ -101,8 +99,7 @@ vi.mock('@/components/providers/AuthProvider', async () => {
 
 vi.mock('@/components/providers/SiteConfigProvider', () => ({
   useSiteConfig: () => ({
-    branding: { appName: 'FreeInference', orgName: '', orgUrl: '', statusUrl, gatewayUrl },
-    features: { rag: ragEnabled },
+    branding: { appName: 'FreeInference', orgName: '', orgUrl: '', statusUrl },
   }),
 }));
 
@@ -838,6 +835,7 @@ describe('AgentsLayout permissions', () => {
       );
       expect(screen.queryByText('private workspace')).not.toBeInTheDocument();
       expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(screen.getByTestId('waitlist-panel')).toBeInTheDocument();
     },
   );
 });
@@ -923,31 +921,4 @@ describe('AgentsLayout sign-out', () => {
     expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
     expect(screen.getByRole('banner')).toContainElement(screen.getByTestId('account-menu-header'));
   });
-});
-
-describe('Gateway-only header navigation', () => {
-  afterEach(cleanup);
-  it.each(['local', 'gateway'] as const)(
-    'renders Docs Assistant only for Gateway accounts (%s)',
-    (mode) => {
-      authMode = mode;
-      gatewayUrl = 'https://gateway.example';
-      ragEnabled = true;
-      render(
-        <AgentsLayout>
-          <p>job</p>
-        </AgentsLayout>,
-      );
-      if (mode === 'local') {
-        expect(screen.queryByRole('link', { name: 'Docs Assistant' })).not.toBeInTheDocument();
-        expect(document.querySelector('header a[href^="https://gateway.example"]')).toBeNull();
-      } else {
-        expect(screen.getByRole('link', { name: 'Docs Assistant' })).toHaveAttribute(
-          'href',
-          'https://gateway.example/chat',
-        );
-      }
-      expect(screen.getByRole('link', { name: 'Agents' })).toBeInTheDocument();
-    },
-  );
 });

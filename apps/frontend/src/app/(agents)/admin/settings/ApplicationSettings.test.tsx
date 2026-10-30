@@ -10,7 +10,6 @@ import {
   type AdminSettingDefinition,
   type AgentAdminSettings,
 } from '@/lib/api/adminSettings';
-import { getModelPreference } from '@/lib/api/modelPreference';
 import { APIError } from '@/lib/utils/errors';
 
 import ApplicationSettings from './ApplicationSettings';
@@ -20,8 +19,6 @@ vi.mock('@/lib/api/adminSettings', () => ({
   getAgentAdminSettings: vi.fn(),
   setAgentAdminSettings: vi.fn(),
 }));
-
-vi.mock('@/lib/api/modelPreference', () => ({ getModelPreference: vi.fn() }));
 
 const read = vi.mocked(getAgentAdminSettings);
 const write = vi.mocked(setAgentAdminSettings);
@@ -144,25 +141,6 @@ function archiveSnapshot(over: Partial<AgentAdminSettings> = {}): AgentAdminSett
   };
 }
 
-function modelSnapshot(value: string): AgentAdminSettings {
-  return snapshot({
-    definitions: [
-      {
-        key: 'default_model',
-        label: 'Default model for new tasks',
-        description: 'The model a new task starts on.',
-        category: 'Execution',
-        kind: 'string',
-        default: 'deepseek-v4-flash',
-        secret: false,
-      },
-    ],
-    values: { default_model: value },
-    secret_configured: {},
-    bootstrap: [],
-  });
-}
-
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -260,15 +238,6 @@ beforeEach(() => {
   window.history.replaceState(null, '', window.location.pathname);
   read.mockReset().mockResolvedValue(snapshot());
   write.mockReset();
-  vi.mocked(getModelPreference)
-    .mockReset()
-    .mockResolvedValue({
-      default_model: null,
-      last_model: null,
-      effective_model: 'deepseek-v4-flash',
-      deployment_default: 'deepseek-v4-flash',
-      models: ['deepseek-v4-flash', 'glm-5.1'],
-    });
 });
 
 afterEach(() => {
@@ -577,62 +546,6 @@ describe('application settings', () => {
     expect(input.closest('details')).toBeNull();
     expect(screen.getByRole('region', { name: 'Identity & access' })).toBeVisible();
     expect(screen.getByLabelText('Sign-in authorization URL')).toBeVisible();
-  });
-
-  it('suggests the models this account is offered for the default model', async () => {
-    read.mockResolvedValue(modelSnapshot('deepseek-v4-flash'));
-    render(<ApplicationSettings />);
-    const field = await loadedField('Default model for new tasks');
-    fireEvent.keyDown(field, { key: 'ArrowDown' });
-    const names = screen.getAllByRole('option').map((option) => option.textContent);
-    expect(names).toEqual(['deepseek-v4-flash', 'glm-5.1']);
-    fireEvent.click(screen.getByRole('option', { name: 'glm-5.1' }));
-    expect(field).toHaveValue('glm-5.1');
-    // A model id is one line; the generic multi-line toggle does not apply.
-    expect(screen.queryByLabelText(/Use multiple lines/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/not offered this model/)).not.toBeInTheDocument();
-  });
-
-  it('flags a default model this account is not offered, without refusing it', async () => {
-    read.mockResolvedValue(modelSnapshot('deepseek-v4-flash'));
-    write.mockResolvedValue(modelSnapshot('deepseek-v4-flsh'));
-    render(<ApplicationSettings />);
-    const field = await loadedField('Default model for new tasks');
-    fireEvent.change(field, { target: { value: ' deepseek-v4-flsh\n' } });
-    expect(screen.getByText(/Your account is not offered this model/)).toBeInTheDocument();
-    expect(field.getAttribute('aria-describedby')).toContain('-note');
-    // Another user's catalog may differ, so this is a warning, not a block;
-    // the stray whitespace is trimmed so the value can match someone's model.
-    saveField('Default model for new tasks');
-    await waitFor(() =>
-      expect(write).toHaveBeenCalledExactlyOnceWith(
-        { default_model: 'deepseek-v4-flsh' },
-        1,
-        expect.any(AbortSignal),
-      ),
-    );
-  });
-
-  it('explains an empty default model and refuses one with spaces inside', async () => {
-    read.mockResolvedValue(modelSnapshot('deepseek-v4-flash'));
-    render(<ApplicationSettings />);
-    const field = await loadedField('Default model for new tasks');
-    fireEvent.change(field, { target: { value: '' } });
-    expect(screen.getByText(/Empty: every user without a model of their own/)).toBeVisible();
-    fireEvent.change(field, { target: { value: 'two models' } });
-    fireEvent.click(reviewButton('Default model for new tasks'));
-    expect(await screen.findByText('Enter one model id, without spaces.')).toBeVisible();
-    expect(write).not.toHaveBeenCalled();
-  });
-
-  it('suggests and flags nothing when this account has no readable catalog', async () => {
-    vi.mocked(getModelPreference).mockRejectedValue(new Error('forbidden'));
-    read.mockResolvedValue(modelSnapshot('anything'));
-    render(<ApplicationSettings />);
-    const field = await loadedField('Default model for new tasks');
-    await waitFor(() => expect(getModelPreference).toHaveBeenCalled());
-    expect(field).not.toHaveAttribute('role');
-    expect(screen.queryByText(/not offered this model/)).not.toBeInTheDocument();
   });
 
   it('saves an archive URI as an atomic bucket and prefix patch and resets both drafts', async () => {

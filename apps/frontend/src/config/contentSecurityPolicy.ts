@@ -1,9 +1,10 @@
 // The Content-Security-Policy on every document this app serves.
 //
-// The line that matters is the one `Markdown.untrusted.test.tsx` pins: model output and repository content never
-// become script. The policy is the second line behind it. A page whose markup
-// someone else managed to influence still runs only the scripts this
-// deployment served, and cannot be framed into a page that tricks a click.
+// The line that matters is the one `Markdown.untrusted.test.tsx` pins: model
+// output and repository content never become script. The policy is the second
+// line behind it. A page whose markup someone else managed to influence still
+// runs only the scripts this deployment served, and cannot be framed into a
+// page that tricks a click.
 //
 // **Scripts are allowed by nonce, not by origin.** Next renders inline
 // bootstrap scripts of its own (the RSC payload pushes), so `'self'` alone

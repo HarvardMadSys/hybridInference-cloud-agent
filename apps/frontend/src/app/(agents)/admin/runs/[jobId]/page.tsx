@@ -7,11 +7,7 @@ import { Suspense, useCallback, useEffect, useState, type ReactNode } from 'reac
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { listMeasurements, type MeasurementSummary } from '@/lib/api/adminMeasurements';
-import {
-  getAdminRun,
-  type AdminAttempt,
-  type AdminRunDetail,
-} from '@/lib/api/adminRuns';
+import { getAdminRun, type AdminAttempt, type AdminRunDetail } from '@/lib/api/adminRuns';
 import { conversationHref } from '@/lib/api/adminConversations';
 import { conversationLink } from '../../conversations/filters';
 import { getErrorMessage } from '@/lib/utils/errors';
@@ -51,7 +47,7 @@ function earlierRun(attempt: AdminAttempt): string {
 
 /** Which sections describe the latest run and which the whole turn. */
 const RESTART_SCOPE =
-  'Resources and startup show the latest run; turn statistics, token usage and LLM requests cover every run.';
+  'Resources and startup show the latest run; turn statistics and token usage cover every run.';
 
 /**
  * Said only when the turn ran more than once.

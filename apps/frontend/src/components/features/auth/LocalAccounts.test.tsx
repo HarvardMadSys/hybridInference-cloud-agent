@@ -8,7 +8,6 @@ import { SignupForm } from './SignupForm';
 import { MailTokenForm } from './MailTokenForm';
 import { EmailRequestForm } from './EmailRequestForm';
 import { LocalLogin } from './LocalLogin';
-import { LocalAccountGate } from './LocalAccountGate';
 
 vi.mock('next/navigation', () => ({ useSearchParams: () => new URLSearchParams() }));
 vi.mock('@/lib/api/accounts', () => ({

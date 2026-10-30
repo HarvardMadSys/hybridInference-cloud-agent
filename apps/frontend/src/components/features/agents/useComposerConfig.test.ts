@@ -19,11 +19,11 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+/** A config told apart by its one repository. */
 function snapshot(model: string): AgentConfigApi {
   return {
-    repos: [],
+    repos: [model],
     runtimes: ['codex'],
-    models: [model],
     github_connected: false,
     github_install_url: null,
   };
@@ -58,9 +58,9 @@ it('a saved connection refresh supersedes the mount response, even when the moun
   const { result } = renderHook(useScreen);
   act(() => window.dispatchEvent(new Event(MODEL_CONNECTIONS_CHANGED)));
   await act(async () => saved.resolve(snapshot('new-model')));
-  expect(result.current.config?.models).toEqual(['new-model']);
+  expect(result.current.config?.repos).toEqual(['new-model']);
   await act(async () => old.resolve(snapshot('removed-model')));
-  expect(result.current.config?.models).toEqual(['new-model']);
+  expect(result.current.config?.repos).toEqual(['new-model']);
   expect(result.current.loading).toBe(false);
 });
 
@@ -71,10 +71,10 @@ it('a late failure cannot erase a newer config from another tab', async () => {
     .mockResolvedValue(snapshot('new-model'));
   const { result } = renderHook(useScreen);
   act(() => window.dispatchEvent(new StorageEvent('storage', { key: MODEL_CONNECTIONS_CHANGED })));
-  await waitFor(() => expect(result.current.config?.models).toEqual(['new-model']));
+  await waitFor(() => expect(result.current.config?.repos).toEqual(['new-model']));
   await act(async () => old.reject(new Error('old outage')));
   expect(result.current.error).toBeNull();
-  expect(result.current.config?.models).toEqual(['new-model']);
+  expect(result.current.config?.repos).toEqual(['new-model']);
 });
 
 it('returning from provider setup refreshes choices and unmount fences a pending read', async () => {
@@ -107,7 +107,7 @@ it('waits for a slow recovery poll across timer ticks and applies its successful
   expect(getAgentConfig).toHaveBeenCalledTimes(2);
   expect(result.current.refreshing).toBe(true);
   await act(async () => slow.resolve(snapshot('recovered')));
-  expect(result.current.config?.models).toEqual(['recovered']);
+  expect(result.current.config?.repos).toEqual(['recovered']);
   expect(result.current.refreshing).toBe(false);
   await act(async () => vi.advanceTimersByTimeAsync(SOURCE_CONTROL_RECHECK_MS));
   expect(getAgentConfig).toHaveBeenCalledTimes(3);
@@ -138,10 +138,10 @@ it.each(['connection change', 'manual refresh'] as const)(
     await act(async () => slow.resolve(snapshot('stale-model')));
     await act(async () => vi.advanceTimersByTimeAsync(SOURCE_CONTROL_RECHECK_MS * 2));
     expect(getAgentConfig).toHaveBeenCalledTimes(3);
-    expect(result.current.config?.models).toEqual(['before-change']);
+    expect(result.current.config?.repos).toEqual(['before-change']);
     expect(result.current.refreshing).toBe(true);
     await act(async () => changed.resolve(snapshot('changed-model')));
-    expect(result.current.config?.models).toEqual(['changed-model']);
+    expect(result.current.config?.repos).toEqual(['changed-model']);
     expect(result.current.refreshing).toBe(false);
   },
 );

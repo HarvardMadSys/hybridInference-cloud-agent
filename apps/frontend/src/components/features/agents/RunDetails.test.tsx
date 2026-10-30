@@ -654,5 +654,4 @@ describe('RunDetails', () => {
     await waitFor(() => expect(screen.getByText('2,222')).toBeInTheDocument());
     expect(screen.queryByText('1,111')).toBeNull();
   });
-
 });

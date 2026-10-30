@@ -27,10 +27,6 @@ vi.mock('@/lib/api/insights', () => ({ getInsights: vi.fn() }));
 import { getUserProfile } from '@/lib/api/userProfile';
 vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn() }));
 
-import { rewritePrompt, type RewritePromptResult } from '@/lib/api/promptRewrite';
-
-vi.mock('@/lib/api/promptRewrite', () => ({ rewritePrompt: vi.fn() }));
-
 import { FirstRunProvider } from './firstRun';
 import { requestGitHubAccess } from './githubReturn';
 import { TaskComposer } from './TaskComposer';
@@ -663,29 +659,6 @@ describe('TaskComposer source-control onboarding', () => {
     expect(getInsights).toHaveBeenCalledTimes(3);
   });
 
-  it('keeps Enter from starting a task while clarification is open', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(config());
-    vi.mocked(rewritePrompt).mockResolvedValue({
-      kind: 'questions',
-      questions: ['Which export format?', 'Which records should be included?'],
-    });
-    render(<TaskComposer initialRepo="owner/repository" />);
-    const box = await screen.findByRole('textbox', { name: 'What should the agent do?' });
-    fireEvent.change(box, { target: { value: 'Add export' } });
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Ask clarification questions first' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Rewrite prompt' }));
-    await screen.findByText('Which export format?');
-    fireEvent.click(await repositoryButton());
-    expect(screen.getByRole('button', { name: 'Create repository' })).toBeDisabled();
-    fireEvent.keyDown(box, { key: 'Enter' });
-    expect(createAgentJob).not.toHaveBeenCalled();
-    expect(box).toHaveValue('Add export');
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: /^Run/ })).toBeEnabled());
-    fireEvent.click(await repositoryButton());
-    expect(screen.getByRole('button', { name: 'Create repository' })).toBeEnabled();
-  });
-
   // Someone arriving for the first time has nothing connected, and needs
   // nothing: the task runs in a temporary workspace, and connecting GitHub is
   // one optional line beside the box.
@@ -1063,6 +1036,7 @@ describe('TaskComposer source-control onboarding', () => {
           repo: 'owner/new',
           runtime: 'codex',
           chosenModel: 'model-b',
+          chosenModelConnectionId: TEST_CONNECTION,
         },
         savedAt: Date.now(),
       }),
@@ -1354,9 +1328,10 @@ describe('TaskComposer source-control onboarding', () => {
     render(<TaskComposer />);
 
     await chooseRepository();
-    // An empty control, not a guess: it reads as the placeholder in italic.
-    expect(screen.getByLabelText('Model')).toHaveValue('');
-    expect(screen.getByLabelText('Model')).toHaveTextContent('Choose model');
+    // Not a guess: the resolved model stays named, marked unavailable, and Run waits.
+    expect(screen.getByLabelText('Model')).toHaveTextContent('retired-model (unavailable)');
+    expect(screen.getByLabelText('Model')).not.toHaveTextContent('model-a');
+    expect(screen.getByRole('button', { name: 'Run' })).toBeDisabled();
   });
 
   it('waits for a model instead of choosing the first one in the list', async () => {
@@ -2519,27 +2494,21 @@ describe('durable new-task drafts', () => {
     await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-b'));
   });
 
-  it('never saves the fallback for a retired pick as a pick of its own', async () => {
+  it('never saves the resolved model as a pick of its own', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(
       config({ ...offering(['model-a', 'model-b', 'model-c']), default_model: 'model-a' }),
     );
     const first = render(<TaskComposer />);
     await chooseRepository();
-    fireEvent.click(screen.getByLabelText('Model'));
-    fireEvent.click(screen.getByRole('option', { name: 'model-b' }));
+    expect(screen.getByLabelText('Model')).toHaveValue('model-a');
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep this text' } });
     first.unmount();
-    // model-b is withdrawn: the control falls back to what the server resolved.
-    vi.mocked(getAgentConfig).mockResolvedValue(
-      config({ ...offering(['model-a', 'model-c']), default_model: 'model-a' }),
-    );
-    const second = render(<TaskComposer />);
-    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-a'));
-    second.unmount();
-    // The owner then pins model-c in Settings.
+    // The owner then pins model-c in Settings: the draft kept no model of its own.
     vi.mocked(getAgentConfig).mockResolvedValue(
       config({ ...offering(['model-a', 'model-c']), default_model: 'model-c' }),
     );
     render(<TaskComposer />);
+    expect(await screen.findByRole('textbox')).toHaveValue('Keep this text');
     await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('model-c'));
   });
 

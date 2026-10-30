@@ -6,10 +6,7 @@ import { LOCALE_CHOSEN_AT_KEY } from '@/lib/i18n/locales';
 import { AccountLocaleSync } from './AccountLocaleSync';
 
 const state = vi.hoisted(() => ({
-  user: { id: 'acct', identity: { locale: 'zh-CN' } } as Record<
-    string,
-    unknown
-  > | null,
+  user: { id: 'acct', identity: { locale: 'zh-CN' } } as Record<string, unknown> | null,
   locale: 'en',
   setLocale: vi.fn(),
 }));

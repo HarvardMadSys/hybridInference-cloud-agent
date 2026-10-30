@@ -3,7 +3,6 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
-import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import type { TranslationKey } from '@/lib/i18n/translate';
 import {
   getOwnerContainers,
@@ -26,7 +25,6 @@ import {
   coreHours,
   decimal,
   duration,
-  formatCost,
   formatMemory,
   formatShare,
   gibHours,
@@ -461,15 +459,16 @@ function HistoryTotals({
         aria-busy={loading}
         className={`mt-3 grid grid-cols-2 gap-2 lg:grid-cols-4 ${loading ? 'opacity-60' : ''}`}
       >
+        {/* What each agent reported: its provider keeps the bill and the limits. */}
         <Tile
           label={t('settings.usage.cost')}
-          value={summary ? formatCost(summary.totals?.spent_usd) : '—'}
-          detail={t('settings.usage.costEstimate')}
+          value={t('settings.usage.costProvider')}
+          detail={t('settings.usage.costProviderDetail')}
         />
         <Tile
           label={t('settings.usage.tokens')}
           value={summary ? compactCount(tokenTotal(summary)) : '—'}
-          detail={tokenDetail}
+          detail={tokenDetail ?? t('settings.usage.tokensReported')}
         />
         <CacheTile usage={summary} />
         <ReasoningTile usage={summary} />
@@ -523,11 +522,18 @@ function CacheTile({ usage }: { usage: AdminUsageAggregate | undefined }) {
 function ReasoningTile({ usage }: { usage: AdminUsageAggregate | undefined }) {
   const { t } = useLocale();
   const partly = usage ? reasoningPartly(usage) : false;
+  const reported = usage?.totals?.reasoning != null;
   return (
     <Tile
       label={t('settings.usage.reasoning')}
       value={compactCount(usage?.totals?.reasoning)}
-      detail={t(partly ? 'settings.usage.reasoningPartly' : 'settings.usage.reasoningInOutput')}
+      detail={t(
+        !reported
+          ? 'settings.usage.reasoningNotReported'
+          : partly
+            ? 'settings.usage.reasoningPartly'
+            : 'settings.usage.reasoningInOutput',
+      )}
     />
   );
 }
@@ -584,9 +590,6 @@ function ByModel({ usage }: { usage: OwnerTokenUsage }) {
               {t('settings.usage.model')}
             </th>
             <th scope="col" className="py-1.5 pr-3 text-right font-medium">
-              {t('settings.usage.cost')}
-            </th>
-            <th scope="col" className="py-1.5 pr-3 text-right font-medium">
               {t('settings.usage.tokensIn')}
             </th>
             <th scope="col" className="py-1.5 pr-3 text-right font-medium">
@@ -611,9 +614,6 @@ function ByModel({ usage }: { usage: OwnerTokenUsage }) {
                   ? t('settings.usage.otherModels')
                   : (group.key ?? t('settings.usage.unknownModel'))}
               </th>
-              <td className="py-1.5 pr-3 text-right">
-                {formatCost(group.usage.totals?.spent_usd)}
-              </td>
               <td className="py-1.5 pr-3 text-right">
                 {compactCount(group.usage.totals?.tokens_in)}
               </td>

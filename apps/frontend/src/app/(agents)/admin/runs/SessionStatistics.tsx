@@ -8,11 +8,7 @@ function duration(seconds: number | null | undefined): string {
 }
 
 /** Turn-scoped presentation only: the totals cover every run of the turn. */
-export function SessionStatistics({
-  statistics,
-}: {
-  statistics?: AdminSessionStatistics | null;
-}) {
+export function SessionStatistics({ statistics }: { statistics?: AdminSessionStatistics | null }) {
   const rate = statistics?.output_tokens_per_second;
   const rows = [
     {

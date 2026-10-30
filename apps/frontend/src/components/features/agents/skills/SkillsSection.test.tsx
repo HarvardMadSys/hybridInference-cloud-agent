@@ -36,7 +36,6 @@ beforeEach(() => {
   vi.mocked(getAgentConfig).mockResolvedValue({
     repos: [],
     runtimes: [],
-    models: [],
     github_connected: false,
     github_install_url: null,
     skill_limits: DEFAULT_SKILL_LIMITS,
@@ -49,7 +48,6 @@ it('advertises and checks the current server skill size in the editor', async ()
   vi.mocked(getAgentConfig).mockResolvedValue({
     repos: [],
     runtimes: [],
-    models: [],
     github_connected: false,
     github_install_url: null,
     skill_limits: { ...DEFAULT_SKILL_LIMITS, max_skill_bytes: 8 },
@@ -71,7 +69,6 @@ it('checks the current server upload limit before reading a skill document', asy
   vi.mocked(getAgentConfig).mockResolvedValue({
     repos: [],
     runtimes: [],
-    models: [],
     github_connected: false,
     github_install_url: null,
     skill_limits: { ...DEFAULT_SKILL_LIMITS, max_skill_bytes: 4 },
