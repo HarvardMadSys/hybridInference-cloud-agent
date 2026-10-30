@@ -63,15 +63,23 @@ GIB: Final = 1024 * 1024 * 1024
 DEFAULT_ARCHIVE_SPOOL_BUDGET_BYTES: Final = 8 * GIB
 DEFAULT_ARCHIVE_OPERATION_TIMEOUT_S: Final = 12 * 60.0
 INITIAL_ARCHIVE_MARKER_FORMAT_VERSION: Final = 2
-# Every gzip level an initial bundle has been written at, newest first. A new
-# capture uses the first; hosts before #760 wrote 9. The marker names its
-# bundle's exact size and SHA-256, not the level, so a probe that has to
-# rebuild writes its one fetch of the workspace at each level until one
-# reproduces those bytes. Recording the level instead would take a new marker
-# version, which a host rolled back across it cannot decode: it would fail
-# every first turn holding such a marker, even one whose object is stored. Put
-# a new level first, and never drop one that a retained marker may still name.
-INITIAL_ARCHIVE_COMPRESSION_LEVELS: Final = (6, 9)
+# Every gzip level an initial bundle has been written at, newest first, then
+# the level the next release writes. A new capture uses the first; hosts before
+# #760 wrote 9. The marker names its bundle's exact size and SHA-256, not the
+# level, so a probe that has to rebuild writes its one fetch of the workspace
+# at each level until one reproduces those bytes. Recording the level instead
+# would take a new marker version, which a host rolled back across it cannot
+# decode: it would fail every first turn holding such a marker, even one whose
+# object is stored. So a level is rebuilt here one release before it is
+# written, and one a retained marker may still name is never dropped.
+#
+# Level 1 is about 2.4 times as fast as 6 for 10-14% more bytes (a 598 MB
+# checkout: 18.5 s at 6, 7.6 s at 1; #760), and a new chat's first prompt
+# waits for this archive. A host rolled back to this release rebuilds what the
+# next one writes at 1.
+# COMPAT(remove-after=2026-12-31): write at 1, as (1, 6, 9), once every
+# supported release rebuilds level 1.
+INITIAL_ARCHIVE_COMPRESSION_LEVELS: Final = (6, 9, 1)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _GIT_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _ERROR_TYPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")

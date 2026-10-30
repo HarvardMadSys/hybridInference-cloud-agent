@@ -922,7 +922,7 @@ def _record_write_levels(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
 
 def _gzip_xfl(payload: bytes) -> int:
-    """RFC 1952 XFL, byte 8: 2 for level 9, 0 for the levels between 1 and 9."""
+    """RFC 1952 XFL, byte 8: 2 for level 9, 4 for level 1, 0 for the levels between."""
     return payload[8]
 
 
@@ -1055,7 +1055,36 @@ def test_a_marker_from_before_level_6_is_still_rebuilt_at_level_9(
     assert service.status()["phases"]["initial"] == {"pending": 0, "uploaded": 1, "failed": 1}
 
 
-@pytest.mark.parametrize("marker_level", [6, 9])
+def test_a_bundle_the_next_release_writes_at_level_1_is_rebuilt_here(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host rolled back to this release still proves what the next one stored."""
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _lost_upload()
+    service = _service(manager, uploader)
+    service.start()
+    try:
+        marker = _marked_without_upload(service, manager, spec, levels=(1,))
+        levels = _record_write_levels(monkeypatch)
+        status = service.probe_initial(
+            RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            members=(),
+        )
+    finally:
+        service.close()
+
+    original, retried = uploader.calls
+    assert _gzip_xfl(original["payload"]) == 4, "RFC 1952 XFL 4: the fastest level"
+    assert levels == [6, 9, 1]
+    assert (retried["size"], retried["sha256"]) == (original["size"], original["sha256"])
+    assert status["stored"] is True
+    assert manager.marker == marker
+
+
+@pytest.mark.parametrize("marker_level", [6, 9, 1])
 def test_a_changed_workspace_fails_the_probe_at_every_level(
     monkeypatch: pytest.MonkeyPatch, marker_level: int
 ) -> None:
@@ -1078,7 +1107,7 @@ def test_a_changed_workspace_fails_the_probe_at_every_level(
     finally:
         service.close()
 
-    assert levels == [6, 9]
+    assert levels == [6, 9, 1]
     assert manager.marker == marker
     assert len(uploader.calls) == 1
     assert [call["path"] for call in manager.export_calls] == ["/workspace", "/workspace"]
