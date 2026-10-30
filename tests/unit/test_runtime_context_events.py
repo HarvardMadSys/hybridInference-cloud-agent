@@ -179,3 +179,27 @@ def test_a_claim_carries_bounded_injection_records_and_drops_the_rest():
     assert (
         ClaimedJob.from_response({**_PAYLOAD, "context_injections": "x"}).context_injections == ()
     )
+
+
+def test_claude_blocks_carry_how_long_they_streamed_and_subagents_do_not(monkeypatch):
+    from cloud_agent_host.runtimes import claude as claude_module
+
+    clock = iter([100.0, 102.5, 200.0])
+    monkeypatch.setattr(claude_module.time, "monotonic", lambda: next(clock))
+    runtime = ClaudeCodeRuntime()
+
+    def stream(kind: str, **extra) -> str:
+        return json.dumps({"type": "stream_event", "event": {"type": kind, **extra}})
+
+    def assistant(**extra) -> str:
+        message = {"id": "msg_1", "content": [{"type": "text", "text": "hi"}]}
+        return json.dumps({"type": "assistant", "message": message, **extra})
+
+    runtime.parse_event(stream("content_block_start", index=0, content_block={"type": "text"}))
+    event = runtime.parse_event(assistant())
+    assert event is not None and event.payload["block_ms"] == 2500
+    # Without a block start of its own, nothing is guessed.
+    assert "block_ms" not in runtime.parse_event(assistant()).payload
+    runtime.parse_event(stream("content_block_start", index=1, content_block={"type": "text"}))
+    child = runtime.parse_event(assistant(parent_tool_use_id="toolu_task"))
+    assert "block_ms" not in child.payload

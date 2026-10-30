@@ -71,6 +71,16 @@ END
 CJK_CLASS = r"[^぀-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]"
 ASCII_CLASS = r"[^\x01-\x7f]"
 
+
+def token_estimate_sql(text: str) -> str:
+    """The ``chars_cjk_v1`` estimate of ``text``, computed in Postgres."""
+    return f"""(CEIL(length(regexp_replace({text}, '{ASCII_CLASS}', '', 'g')) / 4.0)
+        + length(regexp_replace({text}, '{CJK_CLASS}', '', 'g'))
+        + CEIL(GREATEST(length({text})
+                        - length(regexp_replace({text}, '{ASCII_CLASS}', '', 'g'))
+                        - length(regexp_replace({text}, '{CJK_CLASS}', '', 'g')), 0) / 2.0))"""
+
+
 #: The stored text whose size a profile counts: conversation content, and the
 #: compaction summaries and injected messages the CLI carries forward.
 _COUNTED_TEXT_SQL = """
@@ -143,7 +153,13 @@ jsonb_strip_nulls(jsonb_build_object(
     'permission_mode', CASE WHEN e.event_type = 'lifecycle' AND e.payload->>'phase' = 'init'
                             THEN e.payload->'harness'->'permission_mode' END,
     'tool_name', CASE WHEN e.event_type = 'tool_use'
-                           AND e.payload->>'name' IN ('EnterPlanMode', 'ExitPlanMode')
-                      THEN e.payload->'name' END
+                           AND e.payload->>'name' IN ('EnterPlanMode', 'ExitPlanMode', 'Skill')
+                      THEN e.payload->'name' END,
+    -- Timing (cloud_agent.context_running): a call's id and its result's
+    -- reference pair them; a Claude block's streaming duration on the host.
+    'tool_id', CASE e.event_type WHEN 'tool_use' THEN e.payload->'id'
+                                 WHEN 'tool_result' THEN e.payload->'tool_use_id' END,
+    'block_ms', CASE WHEN jsonb_typeof(e.payload->'block_ms') = 'number'
+                     THEN e.payload->'block_ms' END
 ))
 """

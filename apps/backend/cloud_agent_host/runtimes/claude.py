@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_shared.model_connections import anthropic_base_url
@@ -80,6 +81,8 @@ class ClaudeCodeRuntime(AgentRuntime):
         #: The synthetic user message a ``compact_boundary`` names as its
         #: summary (``preserved_segment.anchor_uuid``), until it arrives.
         self._summary_anchor: str | None = None
+        #: When the main agent's current content block started streaming.
+        self._block_started: float | None = None
 
     def prepare_live(
         self,
@@ -357,6 +360,8 @@ class ClaudeCodeRuntime(AgentRuntime):
             self._text_block = None
             return None
         if kind == "content_block_start":
+            # When the block began streaming, for its duration (``block_ms``).
+            self._block_started = time.monotonic()
             block = stream.get("content_block")
             is_text = isinstance(block, dict) and block.get("type") == "text"
             self._text_block = (
@@ -391,6 +396,12 @@ class ClaudeCodeRuntime(AgentRuntime):
             # recorded relationship so the UI can distinguish a child agent's
             # activity and reply from the conversation's own answer.
             usage_fields["parent_tool_use_id"] = parent_tool_use_id
+        elif self._block_started is not None:
+            # The pinned 2.1.220 writes a block's complete line as the block
+            # ends: the time since its start is how long it streamed to this
+            # host. Passive (no request of its own), one number per block.
+            usage_fields["block_ms"] = int((time.monotonic() - self._block_started) * 1000)
+            self._block_started = None
         for block in blocks:
             if not isinstance(block, dict):
                 continue

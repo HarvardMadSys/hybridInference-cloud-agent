@@ -17,6 +17,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from cloud_agent.context_dashboard import (  # Pydantic resolves the models.
+    CategoryCarry,
+    SessionTokens,
+    session_tokens,
+    step_durations,
+)
 from cloud_agent.context_events import (  # Pydantic resolves the models.
     ContextEvent,
     EventCapability,
@@ -27,6 +33,7 @@ from cloud_agent.context_profile import (
     POINT_FIELDS,
     profile_is_current,
 )
+from cloud_agent.context_running import POINT_CATEGORIES
 
 #: Request points one conversation's view returns. A longer conversation keeps
 #: its latest points and says how many earlier ones it left out; its peak,
@@ -90,6 +97,15 @@ class ContextPoint(BaseModel):
     delta_tokens: int | None = None
     #: A reported compaction lies between the previous request and this one.
     after_compaction: bool = False
+    #: Recorded content before this request by ``category_keys`` (estimate);
+    #: None when its attempt's profile kept none.
+    categories: list[int] | None = None
+    #: Event-derived step time: this request's usage event to the next one's in
+    #: the same attempt (or the attempt's last event), as the platform received them.
+    step_ms: int | None = None
+    #: The provider's id for this response where the CLI reported it (Claude
+    #: Code): the key the Gateway's request timing joins on.
+    usage_id: str | None = None
 
 
 class LatestContext(BaseModel):
@@ -206,6 +222,10 @@ class ThreadContextView(BaseModel):
     #: Injections, compactions, prunes, model switches and mode changes, in
     #: conversation order (``cloud_agent.context_events``), with every kind's
     #: count, what was left out of the list, and what each runtime can show.
+    #: The order of every point's ``categories``.
+    category_keys: list[str] = Field(default_factory=lambda: list(POINT_CATEGORIES))
+    #: The conversation's tokens: recorded content and provider actuals apart.
+    tokens: SessionTokens | None = None
     events: list[ContextEvent] = Field(default_factory=list)
     event_counts: dict[str, int] = Field(default_factory=dict)
     events_omitted: int = Field(default=0, ge=0)
@@ -313,6 +333,9 @@ class _Assembly:
         self.last_compaction_index = -1
         self._pending_compaction = False
         self._awaiting_after: list[ContextCompaction] = []
+        self.carry = CategoryCarry()
+        #: Each attempt's last event (ms), for its last request's step time.
+        self.attempt_ends: dict[int, int] = {}
 
     def add_job(self, job: Mapping[str, Any], attempts: Sequence[Mapping[str, Any]]) -> None:
         turn = ContextTurn(
@@ -328,8 +351,10 @@ class _Assembly:
             subagent_requests=0,
             compactions=0,
         )
+        self.carry.start_job(job)
         for attempt in attempts:
             self._add_attempt(turn, attempt)
+        self.carry.end_job(attempts[-1] if attempts else None)
         if turn.context_window is not None and turn.runtime:
             self.window_turns[turn.runtime] = self.window_turns.get(turn.runtime, 0) + 1
         if turn.runtime and any(_has_snapshot(attempt) for attempt in attempts):
@@ -354,7 +379,16 @@ class _Assembly:
         turn.subagent_requests += subagent
         self.coverage.subagent_requests += subagent
         compactions = sorted(profile.get("compactions") or [], key=lambda c: int(c.get("seq") or 0))
-        requests = [_point(raw) for raw in profile.get("requests") or []]
+        base = self.carry.attempt_base(profile)
+        requests = []
+        for raw in profile.get("requests") or []:
+            point = _point(raw)
+            point["categories"] = CategoryCarry.point(base, point)
+            point.pop("compacted_in_attempt", None)
+            requests.append(point)
+        span = (profile.get("timing") or {}).get("span")
+        if isinstance(span, list) and len(span) == 2 and isinstance(span[1], int):
+            self.attempt_ends[attempt_id] = span[1]
         self._merge(turn, attempt_id, requests, compactions)
 
     def _merge(
@@ -494,6 +528,8 @@ def assemble_thread_context(
         runtime = str(job.get("runtime") or "unknown")
         runtimes[runtime] = runtimes.get(runtime, 0) + 1
     events, event_counts, events_omitted = assemble_context_events(jobs=jobs, by_job=by_job)
+    for index, step in step_durations(points, assembly.attempt_ends).items():
+        points[index].step_ms = step
     omitted_here = max(0, len(points) - MAX_VIEW_POINTS)
     coverage = assembly.coverage
     coverage.points_omitted += omitted_here
@@ -520,4 +556,5 @@ def assemble_thread_context(
         event_counts=event_counts,
         events_omitted=events_omitted,
         event_capabilities=event_capabilities(list(runtimes)),
+        tokens=session_tokens(jobs, by_job),
     )

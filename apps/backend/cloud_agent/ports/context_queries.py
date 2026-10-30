@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from cloud_agent.context_dna import DnaBands
     from cloud_agent.context_insights import ContextInsightsCursor, ContextSort, InsightsFilters
     from cloud_agent.context_request import RequestComposition
 
@@ -39,6 +40,12 @@ class ContextQueries(Protocol):
         self, *, job_id: str, user_id: str, event_id: int
     ) -> RequestComposition | None:
         """What one request carried, in the caller's conversation holding ``job_id``."""
+        ...
+
+    async def dna_bands(
+        self, *, job_id: str, user_id: str, first: int, last: int
+    ) -> DnaBands | None:
+        """The items of a window of requests, in the caller's conversation."""
         ...
 
     async def event_content(

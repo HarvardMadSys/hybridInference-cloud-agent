@@ -300,3 +300,30 @@ async def test_repeated_reads_stay_planned_for_their_filters(db, store):
         # Nothing is left on the pooled connection for the next caller.
         assert await conn.fetchval("SHOW plan_cache_mode") == "auto"
         assert await conn.fetchval("SHOW statement_timeout") == "0"
+
+
+async def test_dna_bands_are_the_items_each_request_carried(db, store):
+    [job] = await _thread(db, store, "athr_dna")
+    await _events(
+        db,
+        job,
+        [
+            _claude("d1", 1_000, text="a" * 400),
+            ("tool_use", {"name": "Read", "id": "t1", "input": {"p": "x"}}),
+            ("tool_result", {"tool_use_id": "t1", "content": "r" * 800}),
+            _claude("d2", 2_000, text="b" * 40),
+        ],
+    )
+    view = await store.context_queries.thread_context(job_id=job, user_id=OWNER)
+    assert view is not None
+    bands = await store.context_queries.dna_bands(job_id=job, user_id=OWNER, first=0, last=1)
+    assert bands is not None and [r.index for r in bands.requests] == [0, 1]
+    first, second = bands.requests
+    assert [item[1] for item in first.items] == ["user_messages"]  # its own answer is not in it
+    keys = [item[0] for item in second.items]
+    # Item identity is the stored event: the earlier answer and the tool pair.
+    assert keys[0] == f"p{job}" and len(keys) == 4
+    assert set(keys[1:]).isdisjoint(item[0] for item in first.items)
+    assert {item[1] for item in second.items} >= {"assistant", "tool_calls", "tool_results"}
+    stranger = await store.context_queries.dna_bands(job_id=job, user_id=OTHER, first=0, last=1)
+    assert stranger is None

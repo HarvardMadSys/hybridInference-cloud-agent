@@ -47,11 +47,17 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+from cloud_agent.context_running import (
+    POINT_CATEGORIES,
+    RunningContent,
+    RunningTiming,
+    event_tokens,
+)
 from cloud_agent_shared.text_tokens import ESTIMATE_BASIS, estimate_from_counts
 
 #: Rollups name their reducer; a semantic change bumps it so every stored
 #: profile is rebuilt from the ledger instead of being served stale.
-CONTEXT_PROFILE_VERSION = 4
+CONTEXT_PROFILE_VERSION = 5
 #: Request points one attempt keeps. Past it, the first and last halves are
 #: kept and the number left out is recorded; peaks and counts still see every
 #: request.
@@ -75,6 +81,7 @@ ContentCategory = Literal[
     "tool_results",
     "compaction_summary",
     "injected",
+    "skills",
 ]
 CONTENT_CATEGORIES: tuple[ContentCategory, ...] = (
     "user_messages",
@@ -84,7 +91,10 @@ CONTENT_CATEGORIES: tuple[ContentCategory, ...] = (
     "tool_results",
     "compaction_summary",
     "injected",
+    "skills",
 )
+#: A Claude block's kind, for its streaming time (``block_ms``).
+_BLOCK_KIND = {"thinking": "reasoning", "message": "text", "tool_use": "toolarg"}
 #: Lifecycle phases whose stored text the conversation carries forward.
 _CARRIED_PHASES: dict[str, ContentCategory] = {
     "compaction_summary": "compaction_summary",
@@ -155,6 +165,12 @@ class _Request:
     output: int | None
     window: int | None = None
     model: str | None = None
+    #: Recorded content before this request, by ``POINT_CATEGORIES`` (estimate).
+    categories: list[int] | None = None
+    #: A completed compaction happened earlier in this attempt.
+    compacted: bool = False
+    #: The provider's id for this response, where the CLI reports it (Claude).
+    usage_id: str | None = None
 
     def point(self) -> list[Any]:
         """The compact array a stored profile holds per request."""
@@ -169,6 +185,9 @@ class _Request:
             self.output,
             self.window,
             self.model,
+            self.categories,
+            self.compacted,
+            self.usage_id,
         ]
 
 
@@ -184,6 +203,9 @@ POINT_FIELDS = (
     "output_tokens",
     "context_window",
     "model",
+    "categories",
+    "compacted_in_attempt",
+    "usage_id",
 )
 
 
@@ -277,6 +299,13 @@ class ContextProfileAccumulator:
         #: Recorded content per category: chars, its ASCII and CJK counts, items.
         self._content = {category: [0, 0, 0, 0] for category in CONTENT_CATEGORIES}
         self.truncated = False
+        #: Content before each request, and the attempt's timing.
+        self._running = RunningContent()
+        self._timing = RunningTiming()
+        #: Streaming time of the main agent's Claude blocks, by kind: ms, blocks.
+        self._blocks = {"reasoning": [0, 0], "text": [0, 0], "toolarg": [0, 0]}
+        #: The main agent's last call was ``Skill``: injected text is its body.
+        self._after_skill = False
         #: Context events found so far (see ``cloud_agent.context_events``).
         self._events: list[dict[str, Any]] = []
         self._events_seen = 0
@@ -298,6 +327,9 @@ class ContextProfileAccumulator:
         event_type = str(event.get("event_type") or "")
         meta = (int(event.get("seq") or 0), _count(event.get("id")), _iso(event.get("created_at")))
         subagent = bool(payload.get("parent_tool_use_id") or payload.get("agent_thread_id"))
+        self._timing.event(event_type, event.get("created_at"), payload.get("tool_id"))
+        if not subagent:
+            self._block(event_type, payload.get("block_ms"))
         if event_type == "lifecycle":
             if not (subagent and payload.get("phase") in {"context_injection", "context_prune"}):
                 # A delegated agent's own context is not the conversation's.
@@ -306,6 +338,8 @@ class ContextProfileAccumulator:
             if carried is None and payload.get("phase") == "compact_boundary":
                 # pi's completed compaction carries its summary on the event.
                 carried = "compaction_summary" if payload.get("text_chars") else None
+            if carried == "injected" and self._after_skill:
+                carried = "skills"  # the body of the skill just called
             if carried is not None and not subagent:
                 self._add_content(carried, payload, chars_key="text_chars")
         elif event_type == "error":
@@ -318,19 +352,29 @@ class ContextProfileAccumulator:
             self._claude_usage(payload, meta, subagent=subagent)
             if not subagent:
                 self._add_content(_CONTENT_EVENT[event_type], payload)
-        tool = payload.get("tool_name")
-        if event_type == "tool_use" and tool in _PLAN_TOOLS and not subagent:
+        if not subagent:
+            self._main_tool(event_type, payload.get("tool_name"), meta)
+
+    def _main_tool(
+        self, event_type: str, tool: Any, meta: tuple[int, int | None, str | None]
+    ) -> None:
+        """Plan-mode calls are mode events; text after a ``Skill`` call is its body."""
+        if event_type in {"tool_use", "message", "thinking", "user_message"}:
+            self._after_skill = event_type == "tool_use" and tool == "Skill"
+        if event_type == "tool_use" and tool in _PLAN_TOOLS:
             self._event(meta, kind="mode", source="claude_plan_tool", mode=_PLAN_TOOLS[tool])
 
     # -- requests ----------------------------------------------------------
 
-    def _record(self, request: _Request, *, subagent: bool) -> None:
+    def _record(self, request: _Request, *, subagent: bool, after_output: bool = True) -> None:
         if subagent:
             self.subagent_requests += 1
             peak = self.subagent_peak
             self.subagent_peak = request.prompt if peak is None else max(peak, request.prompt)
             self._subagent_list.append(request)
             return
+        request.categories = self._running.point(output_after_usage=after_output)
+        request.compacted = self._running.compacted
         self._requests.append(request)
 
     def _claude_usage(
@@ -361,7 +405,10 @@ class ContextProfileAccumulator:
         request = _Request(meta[0], meta[1], meta[2], prompt, read, write, uncached, output)
         if key:
             self._by_usage_id[key] = request
-        self._record(request, subagent=subagent)
+        if isinstance(usage_id, str) and usage_id:
+            request.usage_id = usage_id[:128]
+        # Claude reports usage on the first block of the answer, before it.
+        self._record(request, subagent=subagent, after_output=False)
 
     def _pi_usage(
         self, payload: Mapping[str, Any], meta: tuple[int, int | None, str | None]
@@ -471,6 +518,9 @@ class ContextProfileAccumulator:
 
     def _compacted(self, compaction: _Compaction) -> None:
         self._compactions.append(compaction)
+        if compaction.completed is not False:
+            # The next request carries the summary, not what came before.
+            self._running.compact()
 
     def _windows(self, value: Any) -> None:
         if not isinstance(value, Mapping):
@@ -726,12 +776,20 @@ class ContextProfileAccumulator:
         ascii_chars, cjk = _count(payload.get("ascii")) or 0, _count(payload.get("cjk")) or 0
         return estimate_from_counts(ascii_chars, cjk, chars - ascii_chars - cjk)
 
+    def _block(self, event_type: str, block_ms: Any) -> None:
+        kind = _BLOCK_KIND.get(event_type)
+        value = _count(block_ms)
+        if kind is not None and value is not None:
+            self._blocks[kind][0] += value
+            self._blocks[kind][1] += 1
+
     # -- content -------------------------------------------------------------
 
     def _add_content(
         self, category: ContentCategory, payload: Mapping[str, Any], *, chars_key: str = "chars"
     ) -> None:
         chars = _count(payload.get(chars_key))
+        self._running.add(category, event_tokens(payload, chars_key=chars_key))
         if chars:
             known = self._content[category]
             known[0] += chars
@@ -779,6 +837,12 @@ class ContextProfileAccumulator:
                 },
                 "truncated": self.truncated,
             },
+            # What the next turn starts from (``cloud_agent.context_dashboard``).
+            "content_tail": {
+                "categories": dict(zip(POINT_CATEGORIES, self._running.local, strict=True)),
+                "compacted": self._running.compacted,
+            },
+            "timing": self._timing_record(),
             "events": self._events,
             "events_omitted": max(0, self._events_seen - len(self._events)),
             "unparsed_raw": self.unparsed_raw,
@@ -801,6 +865,16 @@ class ContextProfileAccumulator:
                 "subagent": _totals(self._subagent_list),
             },
         }
+
+    def _timing_record(self) -> dict[str, Any] | None:
+        timing = self._timing.finish()
+        if timing is not None:
+            timing["blocks"] = {
+                kind: {"ms": ms, "blocks": blocks}
+                for kind, (ms, blocks) in self._blocks.items()
+                if blocks
+            }
+        return timing
 
     def _main_window(self) -> int | None:
         """The window the conversation's own model ran under, when reported."""

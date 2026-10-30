@@ -97,6 +97,7 @@ RecordedCategory = Literal[
     "tool_results",
     "compaction_summary",
     "injected",
+    "skills",
 ]
 RECORDED_CATEGORIES: tuple[RecordedCategory, ...] = (
     "turn_prompts",

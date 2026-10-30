@@ -15,6 +15,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.context_dna import MAX_DNA_REQUESTS, DnaBands, bands_for
 from cloud_agent.context_insights import InsightsFilters
 from cloud_agent.context_profile import (
     CONTENT_CATEGORIES,
@@ -29,7 +30,12 @@ from cloud_agent.context_request import (
     locate_request,
 )
 from cloud_agent.context_view import assemble_thread_context
-from cloud_agent.storage._sql.context import ASCII_CLASS, CJK_CLASS, CONTEXT_EVENT_PAYLOAD_SQL
+from cloud_agent.storage._sql.context import (
+    ASCII_CLASS,
+    CJK_CLASS,
+    CONTEXT_EVENT_PAYLOAD_SQL,
+    token_estimate_sql,
+)
 from cloud_agent.storage._sql.rows import load_json
 
 if TYPE_CHECKING:
@@ -41,7 +47,7 @@ if TYPE_CHECKING:
 #: Events one page of a profile refresh reads.
 CONTEXT_EVENT_PAGE_SIZE = 1_000
 
-_THREAD_ROWS_SQL = """
+_THREAD_ROWS_SQL = f"""
     /* thread_context_rows */
     WITH owned AS MATERIALIZED (
         SELECT j.thread_id
@@ -53,6 +59,7 @@ _THREAD_ROWS_SQL = """
            j.id AS job_id, j.turn_no, j.created_at, j.runtime, j.model, j.state,
            (j.fork_source_job_id IS NOT NULL) AS copied,
            length(j.task_prompt) AS prompt_chars,
+           {token_estimate_sql("COALESCE(j.task_prompt, '')")}::bigint AS prompt_tokens,
            a.id AS attempt_id, a.attempt_no,
            latest.event_seq,
            p.event_seq AS profile_seq, p.reducer_version, p.profile
@@ -769,6 +776,62 @@ class PostgresContextQueries:
             events_capped=len(events) >= MAX_REQUEST_EVENTS,
         )
 
+    async def dna_bands(
+        self, *, job_id: str, user_id: str, first: int, last: int
+    ) -> DnaBands | None:
+        """The items of requests ``first``..``last`` (view indexes), from one read.
+
+        None when the conversation is not the caller's or is deleted.
+        """
+        thread = await self.thread_context(job_id=job_id, user_id=user_id)
+        if thread is None:
+            return None
+        view = assemble_thread_context(
+            thread_id=thread["thread_id"],
+            generated_at=datetime.now(UTC),
+            jobs=thread["jobs"],
+            attempts=thread["attempts"],
+        )
+        wanted = [
+            point
+            for point in view.requests
+            if first <= point.index <= last and point.event_id is not None
+        ][:MAX_DNA_REQUESTS]
+        located = [
+            found
+            for point in wanted
+            if (
+                found := locate_request(
+                    view_points=view.requests,
+                    jobs=thread["jobs"],
+                    attempts=thread["attempts"],
+                    event_id=int(point.event_id or 0),
+                )
+            )
+            is not None
+        ]
+        if not located:
+            return DnaBands(requests=[])
+        attempts = sorted({key for item in located for key in item.carried_attempts})
+        jobs = sorted({job for item in located for job in item.carried_jobs})
+        end = located[-1].point
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            await conn.execute("SET LOCAL statement_timeout = '10s'")
+            events = [
+                dict(row)
+                for row in await conn.fetch(
+                    _REQUEST_EVENTS_SQL, attempts, end.attempt_id, end.seq, MAX_REQUEST_EVENTS
+                )
+            ]
+            prompts = [dict(row) for row in await conn.fetch(_REQUEST_PROMPTS_SQL, jobs)]
+        return DnaBands(
+            requests=[bands_for(item, prompts=prompts, events=events) for item in located],
+            events_capped=len(events) >= MAX_REQUEST_EVENTS,
+        )
+
     async def event_content(
         self, *, job_id: str, user_id: str, event_id: int, offset: int, limit: int
     ) -> dict[str, Any] | None:
@@ -795,6 +858,7 @@ def _thread_result(
                 "state": row["state"],
                 "copied": row["copied"],
                 "prompt_chars": row["prompt_chars"],
+                "prompt_tokens": row["prompt_tokens"],
             },
         )
         if row["attempt_id"] is None:
