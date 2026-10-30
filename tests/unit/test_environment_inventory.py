@@ -86,6 +86,10 @@ _PYTHON_SOURCES = (
 _HOST_ENV_WRITERS = (
     "apps/backend/cloud_agent/application/compute_setup.py",
     "apps/backend/cloud_agent/providers/compute/host_bootstrap.py",
+    # The semantic configuration catalog names every variable an Admin item
+    # covers, so the page can say which deployment inputs it manages. It
+    # reads none of them; each still needs its row in ENVIRONMENT.md.
+    "apps/backend/cloud_agent/management_catalog.py",
 )
 
 #: An actual read: `os.environ.get(...)`, `os.environ[...]`, `getenv(...)` or

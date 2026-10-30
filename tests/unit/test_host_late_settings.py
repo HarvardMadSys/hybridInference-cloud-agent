@@ -20,6 +20,7 @@ from tests.unit.test_agent_runner import (  # noqa: F401 - the autouse pytest fi
 from cloud_agent import runtime_upgrades, settings
 from cloud_agent.schemas.hosts import HostHeartbeatRequest
 from cloud_agent_host import runner as runner_mod
+from cloud_agent_host.local_settings import local_shared_resident_capacity
 from cloud_agent_host.runtime_downloads import RuntimeDownloads
 from cloud_agent_host.runtime_settings import RuntimeSettings
 from cloud_agent_host.sandbox import ContainerBackend
@@ -73,12 +74,12 @@ def test_a_handed_over_turn_keeps_the_lease_it_was_claimed_with() -> None:
 @pytest.mark.parametrize("raw", ["1", "500", "eight", "-4"])
 def test_an_unusable_local_capacity_is_the_default(monkeypatch, raw) -> None:
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", raw)
-    assert runner_mod._local_shared_resident_capacity() == 8
+    assert local_shared_resident_capacity() == 8
 
 
 def test_a_usable_local_capacity_is_kept(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "16")
-    assert runner_mod._local_shared_resident_capacity() == 16
+    assert local_shared_resident_capacity() == 16
 
 
 def test_an_out_of_range_local_capacity_no_longer_withholds_shared_live(monkeypatch) -> None:

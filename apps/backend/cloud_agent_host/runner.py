@@ -106,6 +106,7 @@ from cloud_agent_host.host_runtime import (
     requested_slots,
     write_handover,
 )
+from cloud_agent_host.local_settings import local_shared_resident_capacity
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
 from cloud_agent_host.measurement_delivery import (
     DELIVERY_ATTEMPTS_MAX,
@@ -1127,10 +1128,8 @@ def _shared_live_host_capabilities(  # noqa: PLR0912 complexity baseline, #771
         default_slots()
     except ValueError:
         return []
-    # Sessions per sandbox is no longer checked here: the local value is only
-    # a bootstrap, an unusable one falls back to the default
-    # (_local_shared_resident_capacity), and an admin's value is validated
-    # before it is saved and again when it arrives.
+    # Sessions per sandbox is not checked: an unusable local value is the
+    # default (local_shared_resident_capacity), and admin values are validated.
     if not (manager_env("AGENT_SANDBOX_MANAGER_URL") or "").strip():
         return []
     if not (manager_env("AGENT_SANDBOX_MANAGER_TOKEN") or "").strip():
@@ -2065,7 +2064,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
     capacity = int(
         existing.get("resident_slot_capacity")
         or settings.get("shared_resident_capacity")
-        or _local_shared_resident_capacity()
+        or local_shared_resident_capacity()
     )
     if not 2 <= capacity <= 128:
         finish_attempt("failed", "shared resident capacity must be between 2 and 128")
@@ -3567,8 +3566,7 @@ def _serve_turn(
         base_url=base_url,
         gateway_url=gateway_url,
         worker_id=handed_worker_id(payload, worker_id),
-        # The lease the parent claimed this turn with, so its renewals ask for
-        # the same length the claim did.
+        # Renew with the lease the parent's claim asked for.
         lease_ttl=host_settings.get("lease_ttl_s", lease_ttl),
         agent_timeout_s=host_settings.get("agent_timeout_s", agent_timeout_s),
         backend=backend,
@@ -4023,8 +4021,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                         base_url=base_url,
                         host_credential=pool.credential,
                         worker_id=turn_worker_id,
-                        # The lease an admin set, adopted from the latest
-                        # heartbeat answer; this host's own until then.
+                        # The adopted lease; this host's own until an answer.
                         lease_ttl=runtime_settings.turn_settings().get("lease_ttl_s", lease_ttl),
                         attestation=attestation,
                         client=host_client,
@@ -4512,37 +4509,12 @@ def _runner_local_settings(
             "AGENT_STORAGE_MIN_AVAILABLE_MIB",
             float(HOST_SETTINGS_BY_KEY["storage_min_available_mib"].default),
         ),
-        "shared_resident_capacity": _local_shared_resident_capacity(),
+        "shared_resident_capacity": local_shared_resident_capacity(),
         **{
             key: _sandbox_resource_setting(key, {})
             for key in ("sandbox_cpu_millicores", "sandbox_memory_mib", "sandbox_disk_mib")
         },
     }
-
-
-def _local_shared_resident_capacity() -> int:
-    """This host's own sessions-per-sandbox value, or the default for one it cannot use.
-
-    Only a bootstrap value: an admin's value replaces it on the first answer.
-    An unusable local value therefore falls back to the default rather than
-    keeping this host from advertising shared-live sandboxes at all.
-    """
-    setting = HOST_SETTINGS_BY_KEY["shared_resident_capacity"]
-    raw = (os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY") or "").strip()
-    if not raw:
-        return setting.default
-    try:
-        value = int(raw)
-    except ValueError:
-        value = -1
-    if not setting.accepts(value):
-        print(
-            f"ignoring {setting.env}={raw!r}: not a whole number from "
-            f"{setting.minimum} through {setting.maximum}",
-            file=sys.stderr,
-        )
-        return setting.default
-    return value
 
 
 def _sandbox_resource_setting(key: str, settings: Mapping[str, float]) -> int:

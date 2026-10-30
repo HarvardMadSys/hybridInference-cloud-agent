@@ -67,6 +67,26 @@ async def read_settings(
         ) from None
 
 
+async def _require_fleet_support(storage: Any, capability: str) -> None:
+    """Refuse a mixed-version switch unless every participant is shown to support it."""
+    from cloud_agent.instances import fleet_supports
+
+    instances = getattr(storage, "instances", None)
+    if instances is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This control plane cannot show which processes are running.",
+        )
+    verdict = await fleet_supports(instances, capability)
+    if not verdict.supported:
+        raise HTTPException(
+            status_code=409,
+            detail="Owners' own model connections cannot be turned on yet: "
+            + verdict.reason()
+            + ".",
+        )
+
+
 @router.put("")
 async def update_settings(
     payload: UpdateSettingsRequest,
@@ -76,6 +96,10 @@ async def update_settings(
 ) -> dict[str, Any]:
     """Validate and atomically persist the submitted settings, recording safe changes."""
     storage = require_store(store)
+    if payload.settings.get("model_connections_enabled") is True and not settings.boolean_setting(
+        "model_connections_enabled"
+    ):
+        await _require_fleet_support(storage, "model-connections-v1")
     try:
         changes = settings.encode_changes(payload.settings)
         revision, encoded, previous = await storage.settings.update_settings(

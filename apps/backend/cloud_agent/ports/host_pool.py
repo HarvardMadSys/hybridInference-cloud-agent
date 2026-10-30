@@ -162,6 +162,7 @@ class HostPoolRepository(Protocol):
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
         runtime_downloads: Sequence[Mapping[str, Any]] | None = None,
+        config_reports: Mapping[str, str] | None = None,
     ) -> dict[str, Any] | None:
         """Record a heartbeat, promoting the host to ``online`` when it may.
 

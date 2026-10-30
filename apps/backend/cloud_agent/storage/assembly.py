@@ -67,6 +67,7 @@ from cloud_agent.storage.repositories.environment_snapshots import (
     PostgresEnvironmentSnapshotRepository,
 )
 from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
+from cloud_agent.storage.repositories.instances import InstanceRepository
 
 if TYPE_CHECKING:
     import asyncpg
@@ -87,6 +88,7 @@ if TYPE_CHECKING:
         GrantRepository,
         HostCapacityRepository,
         HostPoolRepository,
+        InstanceReports,
         LedgerRepository,
         McpCatalogRepository,
         McpConnectionRepository,
@@ -125,6 +127,7 @@ class Storage:
         #: have no port yet. Named here so that the routes which need them
         #: stop reaching into another object's pool to build one.
         self.admin_conversations = AdminConversationQueries(pool)
+        self.instances: InstanceReports = InstanceRepository(pool)
         self.admin_database = AdminDatabaseQueries(pool)
         self.admin_runs = AdminRunQueries(pool)
         self.admin_sandboxes = AdminSandboxQueries(pool)

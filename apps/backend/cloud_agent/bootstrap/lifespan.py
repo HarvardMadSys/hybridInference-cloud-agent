@@ -88,15 +88,22 @@ async def _release_as_is(_connection: asyncpg.Connection) -> None:
     """
 
 
-async def create_database_pool(dsn: str) -> asyncpg.Pool:
-    """Open the control plane's connection pool."""
+async def create_database_pool(dsn: str, application_name: str = "") -> asyncpg.Pool:
+    """Open the control plane's connection pool.
+
+    ``application_name`` names every session for the instance report
+    (``cloud_agent.instances``): a session without it is not this release's.
+    """
     import asyncpg
 
     pool: asyncpg.Pool = await asyncpg.create_pool(
         dsn,
         min_size=DATABASE_POOL_SIZE,
         max_size=DATABASE_POOL_SIZE,
-        server_settings=DATABASE_SESSION_SETTINGS,
+        server_settings={
+            **DATABASE_SESSION_SETTINGS,
+            **({"application_name": application_name} if application_name else {}),
+        },
         reset=_release_as_is,
     )
     return pool
@@ -143,6 +150,7 @@ def _forget_background_task(task: asyncio.Task[Any]) -> None:
 #: started under a name listed here, so shutdown stops all of them.
 _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "settings_task",
+    "instance_report_task",
     "mcp_maintenance_task",
     "mcp_catalog_task",
     "reaper_task",
@@ -421,7 +429,10 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
 
     # One region after the pool exists: any later failure still releases what
     # startup opened, and a cleanup error must not replace that failure.
-    pool = await create_database_pool(dsn)
+    from cloud_agent.instances import process_identity, report_forever
+
+    identity = process_identity("api" if background else "mcp")
+    pool = await create_database_pool(dsn, identity.application_name)
     http = None
     local_measurement_writer = None
     writer_installed = False
@@ -445,6 +456,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         for name in _SHUTDOWN_TASK_ATTRS:
             setattr(app.state, name, None)
         _spawn(app, "settings_task", synchronize_settings(storage.settings))
+        _spawn(app, "instance_report_task", report_forever(storage.instances, identity.role))
         # One pool, shared by both gateway clients. Each call used to build its own
         # client and pay a connect — and a TLS handshake, where the gateway is
         # behind TLS — and admission is not an occasional call: `require_agent_owner`

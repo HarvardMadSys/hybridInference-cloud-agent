@@ -31,6 +31,7 @@ from cloud_agent.ports.goals import GoalRepository
 from cloud_agent.ports.grants import GrantRepository
 from cloud_agent.ports.host_capacity import HostCapacityRepository
 from cloud_agent.ports.host_pool import HostPoolRepository
+from cloud_agent.ports.instances import InstanceReports
 from cloud_agent.ports.ledger import LedgerRepository
 from cloud_agent.ports.mcp import McpConnectionRepository
 from cloud_agent.ports.mcp_catalog import McpCatalogRepository
@@ -88,6 +89,7 @@ __all__ = [
     "GrantRepository",
     "HostCapacityRepository",
     "HostPoolRepository",
+    "InstanceReports",
     "LedgerRepository",
     "McpCatalogRepository",
     "McpConnectionRepository",

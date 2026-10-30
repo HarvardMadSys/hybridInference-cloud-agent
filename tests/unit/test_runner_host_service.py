@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from tests.support.runner_fakes import NoRuntimeDownloads as _NoRuntimeDownloads
 
 from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.enrollment import HostIdentity
@@ -114,28 +115,6 @@ class FakeHeartbeat:
 
     def wake(self) -> None:
         self.wakes += 1
-
-
-class _NoRuntimeDownloads:
-    """A download worker with nothing to hold and no thread."""
-
-    def __init__(self, **_kwargs: Any) -> None:
-        pass
-
-    def start(self) -> None:
-        pass
-
-    def stop(self) -> None:
-        pass
-
-    def apply(self, _targets: object) -> None:
-        pass
-
-    def report(self) -> list[dict[str, object]]:
-        return []
-
-    def targets(self) -> frozenset[tuple[str, str]]:
-        return frozenset()
 
 
 def _no_wait_endpoint(**_kwargs: Any) -> str:

@@ -12353,6 +12353,22 @@
             ],
             "description": "Optional host CPU / memory / retained-container observation, taken on the runner's own clock within the last five minutes. A runner that does not collect it simply omits the field, and one whose block is unusable has the block dropped rather than the heartbeat refused."
           },
+          "config_reports": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "maxProperties": 8,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Non-numeric configuration this host uses now, by name: runtime_registry_url is the npm registry its next agent download uses (empty for the public registry). Unknown names are dropped.",
+            "title": "Config Reports"
+          },
           "launch_error": {
             "anyOf": [
               {
@@ -12621,6 +12637,19 @@
             },
             "title": "Runtime Downloads",
             "type": "array"
+          },
+          "runtime_registry_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The npm registry this deployment downloads agent versions from; empty is the public registry. Absent from a control plane that does not manage it, in which case the host keeps its own environment value.",
+            "title": "Runtime Registry Url"
           },
           "sandbox_archive_settings": {
             "anyOf": [
@@ -25132,6 +25161,104 @@
           }
         },
         "summary": "Set Agent Host Settings"
+      }
+    },
+    "/admin/agent/management/catalog": {
+      "get": {
+        "description": "Every configuration item and operation, without values.",
+        "operationId": "read_catalog_admin_agent_management_catalog_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Catalog Admin Agent Management Catalog Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Catalog"
+      }
+    },
+    "/admin/agent/management/status": {
+      "get": {
+        "description": "Saved versus adopted state, from the reports of every process and host.\n\n``adopted`` counts only current reports at or past the saved revision;\na stale, stopped or unreporting participant is never counted, and the\ndatabase sessions no reporting process opened are listed beside them.",
+        "operationId": "read_status_admin_agent_management_status_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Status Admin Agent Management Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Status"
       }
     },
     "/admin/agent/measurement-writer": {

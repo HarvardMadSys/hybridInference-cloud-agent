@@ -102,6 +102,10 @@ services:
       # through administrator setup; no service uses a default signing secret.
       AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
       AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
+      # Decrypt-only during a root key rotation; written by the deployment agent.
+      AGENT_SETTINGS_ENCRYPTION_KEY_PREVIOUS: ${AGENT_SETTINGS_ENCRYPTION_KEY_PREVIOUS:-}
+      # This machine's name in the processes' instance reports.
+      AGENT_CONTROL_PLANE_MACHINE: ${AGENT_CONTROL_PLANE_MACHINE:-}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
       # The blocks the hosts add to the sandbox's protected space. Checking an
@@ -320,6 +324,8 @@ services:
       # Both listeners decrypt the shared admin settings using the same key.
       AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
       AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
+      AGENT_SETTINGS_ENCRYPTION_KEY_PREVIOUS: ${AGENT_SETTINGS_ENCRYPTION_KEY_PREVIOUS:-}
+      AGENT_CONTROL_PLANE_MACHINE: ${AGENT_CONTROL_PLANE_MACHINE:-}
       GATEWAY_ISSUER: ${GATEWAY_ISSUER:-}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
       # The relay resolves each owner's stored MCP connection and therefore

@@ -613,7 +613,7 @@ class HostHeartbeat:
         runtime_downloads_report: Callable[[], list[dict[str, Any]]] | None = None,
         on_runtime_downloads: Callable[[list[dict[str, Any]] | None], None] | None = None,
         config_reports: Callable[[], dict[str, str]] | None = None,
-        on_runtime_registry: Callable[[str | None], None] | None = None,
+        on_runtime_registry: Callable[[str | None], object] | None = None,
         on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
         on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:

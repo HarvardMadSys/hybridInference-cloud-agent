@@ -220,6 +220,14 @@ FAMILIES: tuple[Family, ...] = (
         "before its first answer, or under a control plane that does not send one.",
         names=("AGENT_RUNTIME_REGISTRY_URL",),
     ),
+    Family(
+        "admin",
+        "Owners' own model connections (MIGRATED_SETTINGS). Turning it on is refused "
+        "unless every current control-plane instance report declares model-connections-v1, "
+        "none went stale without stopping, and no database session was opened by a "
+        "process that does not report (cloud_agent.instances.fleet_supports).",
+        names=("AGENT_MODEL_CONNECTIONS_ENABLED",),
+    ),
     # -- host_admin: heartbeat-delivered host settings --------------------
     Family(
         "host_admin",
@@ -266,13 +274,6 @@ FAMILIES: tuple[Family, ...] = (
         names=("AGENT_HOST_SLOTS",),
     ),
     # -- design: needs a design of its own --------------------------------
-    Family(
-        "design",
-        "Read through setting_env but not registered, so each replica follows its own "
-        "environment. Safe enablement depends on every control-plane replica in the "
-        "cluster understanding model connections, which nothing records yet.",
-        names=("AGENT_MODEL_CONNECTIONS_ENABLED",),
-    ),
     # -- deployment -------------------------------------------------------
     Family(
         "deployment",
@@ -325,6 +326,12 @@ FAMILIES: tuple[Family, ...] = (
         "Machine addresses the deployer knows, used only to prefill the automatic compute "
         "setup form; a saved request wins.",
         names=("AGENT_GATEWAY_SSH_HOST", "AGENT_CONTROL_PLANE_SSH_HOST"),
+    ),
+    Family(
+        "deployment",
+        "The control-plane machine's name in its processes' instance reports; the "
+        "container's host name when unset. Stated by the deployment about itself.",
+        names=("AGENT_CONTROL_PLANE_MACHINE",),
     ),
     Family(
         "deployment",
@@ -507,8 +514,8 @@ FAMILIES: tuple[Family, ...] = (
         "operation",
         "The settings root key: needed to decrypt the settings row itself. Without it, "
         "the environment's AGENT_SESSION_SECRET is the fallback root; changing the root in "
-        "use is a re-encryption procedure.",
-        names=("AGENT_SETTINGS_ENCRYPTION_KEY",),
+        "use is a re-encryption procedure, during which _PREVIOUS still decrypts.",
+        names=("AGENT_SETTINGS_ENCRYPTION_KEY", "AGENT_SETTINGS_ENCRYPTION_KEY_PREVIOUS"),
     ),
     # -- internal ---------------------------------------------------------
     Family(
@@ -709,6 +716,14 @@ RAW_SETTING_READS: dict[tuple[str, str, str], str] = {
         "_root_key_state",
         "AGENT_SESSION_SECRET",
     ): "reports whether the root key in use is that fallback",
+    (
+        "apps/backend/cloud_agent/instances.py",
+        "root_key_state",
+        "AGENT_SESSION_SECRET",
+    ): (
+        "the instance report's one-way identifier of the root key this process decrypts "
+        "with, which is that fallback when no dedicated key is set"
+    ),
     **{
         ("apps/backend/cloud_agent/logging_utils.py", "configure_process_logging", name): (
             "process logging starts before the first snapshot; apply_settings replaces it "
@@ -779,7 +794,7 @@ HOST_BOOTSTRAP_READS: dict[tuple[str, str], str] = {
     ("apps/backend/cloud_agent_host/runner.py", "_sandbox_resource_setting"): (
         "a sandbox resource limit when the turn carries no settings"
     ),
-    ("apps/backend/cloud_agent_host/runner.py", "_local_shared_resident_capacity"): (
+    ("apps/backend/cloud_agent_host/local_settings.py", "local_shared_resident_capacity"): (
         "sessions per sandbox before the first settings heartbeat; an unusable local "
         "value is the default, so it cannot withhold the shared-live capabilities"
     ),

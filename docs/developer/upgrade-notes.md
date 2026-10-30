@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0106_user_model_connections`. The supported deployment scripts run migrations
+`0108_control_plane_instances`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -54,6 +54,8 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0108_control_plane_instances` | Adds `agent_control_plane_instances`: every API and MCP listener process reports its build, capabilities, adopted settings revision and restart-required settings every few seconds. Nothing reads it to schedule work; the Admin pages use it to show whether a saved change is adopted, and switching on owners' model connections is refused until every process reports that it supports them. |
+| `0107_host_late_settings` | Adds `settings_late_imported` and `config_reports` to `agent_runner_hosts`. A host imports a setting registered after its first import (the runner lease, `AGENT_LEASE_TTL`) once from its next report; `config_reports` keeps the npm registry each host says it downloads from. |
 | `0106_user_model_connections` | Adds `agent_model_connections`, `agent_model_connection_checks` and `agent_model_connection_scan_keys` tables for owners' own inference endpoints (Chat Completions, Responses or Anthropic Messages), nullable source columns `agent_jobs.model_connection_id` and `agent_pending_messages.model_connection_id`, and a separate `agent_model_connection_residencies` table binding a resident member's process to one connection revision for one residency generation (a separate table, so a running previous release's prepared statements over the membership table keep working). Nothing is rewritten, and every existing turn reads as the Gateway's (NULL). The feature stays off until `AGENT_MODEL_CONNECTIONS_ENABLED` is set, which needs every host and control-plane replica on this release first. A downgrade refuses while any connection exists, or any turn, waiting message or resident member names one, finished conversations included, because without the columns they would continue on the Gateway ([owner model connections](operations.md#owner-model-connections)). |
 | `0105_job_event_usage_summary` | Adds a nullable `usage_summary` column to `agent_job_events`. Adding it rewrites no rows and holds its lock only for the catalog change. New events store the projection of their payload that usage reads need, and those reads take it from there; events stored before the column existed are projected when read, as before. A downgrade drops the column, and usage reads project every payload again. |
 | `0104_notification_change_keyset` | Builds a `(user_id, kind, change_xid, entity_id)` index concurrently before dropping the preceding owner/XID index, so notification delta continuation pages seek directly instead of scanning the whole snapshot interval. It changes no row and does not block foreground writes. Existing v1 continuations finish in their previous kind/identity order before advancing to v2. The previous API remains functionally compatible during migration, although its delta reads may use a less selective index until it is replaced. A downgrade restores the preceding index concurrently. |

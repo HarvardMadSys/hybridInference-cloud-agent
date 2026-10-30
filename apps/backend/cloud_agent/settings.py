@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
@@ -31,6 +32,11 @@ from cloud_agent.setting_definition import (
     _s3_bucket,
     _s3_prefix,
     _s3_region,
+)
+from cloud_agent.setting_registrations import (
+    IMPORTED_AFTER_REGISTRATION,
+    LATER_MIGRATED_DEFINITIONS,
+    VERIFIED_APPLY,
 )
 from cloud_agent_shared.sandbox_manager_compat import (
     manager_env,
@@ -892,81 +898,28 @@ _MIGRATED_DEFINITIONS: tuple[Setting, ...] = (
             "this deployment offers no default at all."
         ),
     ),
-    _numeric(
-        "streams.max_per_user",
-        "Live streams per account",
-        "Operations",
-        24,
-        1,
-        1_000_000,
-        env="AGENT_MAX_STREAMS_PER_USER",
-        description=(
-            "How many live-update streams (the change stream and job event streams) one "
-            "account may hold open on one control-plane process; one more answers 429 with "
-            "Retry-After, which the web app backs off on. A browser tab holds one change "
-            "stream and one stream per conversation it is watching."
-        ),
-        apply_mode="next_operation",
-        apply_description="Checked each time a stream opens; open streams are not closed.",
-        invalid_env_uses_default=True,
-    ),
-    Setting(
-        "runtime_registry_url",
-        "Agent package registry",
-        "Agent versions",
-        "",
-        env="AGENT_RUNTIME_REGISTRY_URL",
-        url=True,
-        https_unless_private=True,
-        description=(
-            "The npm registry agent versions are listed from here and downloaded from on "
-            "every server. Empty is the public registry (https://registry.npmjs.org). "
-            "Servers receive it on their next heartbeat; updates are refused until every "
-            "online server reports using it."
-        ),
-        apply_mode="next_operation",
-        apply_description=(
-            "Version lists use it at once; each server uses it for downloads it starts "
-            "after its next heartbeat."
-        ),
-    ),
-    Setting(
-        "api_docs",
-        "Serve API documentation",
-        "Operations",
-        False,
-        kind="boolean",
-        env="AGENT_API_DOCS",
-        description=(
-            "Serves /docs, /redoc and /openapi.json on the main API. Keep off in production: "
-            "the schema is unauthenticated, and the two pages load scripts from a CDN at a "
-            "floating version. The MCP-only listener never serves them."
-        ),
-        apply_mode="next_operation",
-        apply_description="Checked on each documentation request; no restart.",
-        invalid_env_uses_default=True,
-    ),
-)
-#: Registered after settings rows existed, but only in SETTINGS, so a database
-#: created before their registration never imported their environment value
-#: (P1 section 5.1). Listed here, an existing row missing them imports them once.
-_IMPORTED_AFTER_REGISTRATION = frozenset(
-    {
-        "web_search_provider",
-        "serper_api_key",
-        "brave_search_api_key",
-        "parallel_api_key",
-        "mcp_github_client_id",
-        "mcp_github_client_secret",
-        "site.docs_url",
-        "site.contact_url",
-    }
+    *LATER_MIGRATED_DEFINITIONS,
 )
 SETTINGS += _MIGRATED_DEFINITIONS
+
+SETTINGS = tuple(
+    replace(
+        setting,
+        apply_mode=VERIFIED_APPLY[setting.key][0],
+        apply_description=VERIFIED_APPLY[setting.key][1],
+    )
+    if setting.key in VERIFIED_APPLY
+    else setting
+    for setting in SETTINGS
+)
+_MIGRATED_DEFINITIONS = tuple(
+    next(candidate for candidate in SETTINGS if candidate.key == setting.key)
+    for setting in _MIGRATED_DEFINITIONS
+)
 #: Settings an existing database imports from the environment when its row
 #: lacks them. Every registration with an environment name belongs here.
 MIGRATED_SETTINGS: tuple[Setting, ...] = _MIGRATED_DEFINITIONS + tuple(
-    setting for setting in SETTINGS if setting.key in _IMPORTED_AFTER_REGISTRATION
+    setting for setting in SETTINGS if setting.key in IMPORTED_AFTER_REGISTRATION
 )
 SETTINGS_BY_KEY = {setting.key: setting for setting in SETTINGS}
 SETTINGS_BY_STORAGE_KEY = {setting.storage_key: setting for setting in SETTINGS}
@@ -1498,6 +1451,12 @@ async def synchronize_settings(repository: SettingsRepository) -> None:
             logger.warning("settings synchronization failed (%s: %s)", type(exc).__name__, exc)
         except Exception as exc:
             logger.warning("settings synchronization failed (%s)", type(exc).__name__)
+
+
+def adopted_revision() -> int:
+    """The settings revision this process uses now; ``-1`` before the first adoption."""
+    with _lock:
+        return _revision
 
 
 def reset_settings() -> None:
