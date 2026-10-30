@@ -215,7 +215,7 @@ describe('deployment management', () => {
       .mockResolvedValue(workflow({ kind: 'tunnel_keys' }));
     render(<DeploymentManagement />);
     expect(await screen.findByText(key)).toBeTruthy();
-    expect(screen.getByText(/gpu-1: Accepted on the far end/)).toBeTruthy();
+    expect(screen.getByText(/gpu-1: waiting for the far end to accept them/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'I added these keys' }));
     await waitFor(() => expect(confirm).toHaveBeenCalledWith('b'.repeat(32), 'gpu-1:add'));
   });

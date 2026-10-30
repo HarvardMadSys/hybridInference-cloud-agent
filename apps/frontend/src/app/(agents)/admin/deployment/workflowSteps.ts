@@ -86,12 +86,12 @@ export const WORKFLOWS: Record<string, WorkflowDefinition> = {
 
 /** The steps of a server's tunnel key change, in order. */
 export const TUNNEL_PHASES = [
-  { id: 'generate', label: 'New keys' },
-  { id: 'authorize', label: 'Accepted on the far end' },
-  { id: 'switch', label: 'Server switched' },
-  { id: 'confirm', label: 'Heartbeat over the new tunnel' },
-  { id: 'record', label: 'Recorded' },
-  { id: 'revoke', label: 'Old keys revoked' },
+  { id: 'generate', label: 'making new keys' },
+  { id: 'authorize', label: 'waiting for the far end to accept them' },
+  { id: 'switch', label: 'switching the server' },
+  { id: 'confirm', label: 'waiting for a heartbeat over the new tunnel' },
+  { id: 'record', label: 'recording the new keys' },
+  { id: 'revoke', label: 'revoking the old keys' },
 ];
 
 export const WORKFLOW_STATES: Record<DeploymentWorkflow['state'], string> = {
