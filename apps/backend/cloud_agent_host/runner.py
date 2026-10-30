@@ -3695,7 +3695,9 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     from cloud_agent_host.environment_tests import EnvironmentTestWorker
 
     environment_tests = (
-        EnvironmentTestWorker(base_url, backend) if isinstance(backend, ContainerBackend) else None
+        EnvironmentTestWorker(base_url, backend, on_idle=turns.slot_freed)
+        if isinstance(backend, ContainerBackend)
+        else None
     )
     # The limit this host is willing to serve right now. Held across beats so
     # a control plane that is briefly unreachable leaves the host running what
@@ -3949,10 +3951,9 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                 continue
             test_slots = int(environment_tests is not None and environment_tests.busy)
             if not turns.may_claim(max(0, limit - test_slots)):
-                # A freed local slot should be noticed promptly. This does
-                # not increase empty-queue polls or retry traffic to the API.
-                slot_wait = min(tick_s, 1.0) if turns.running() >= limit else tick_s
-                time.sleep(slot_wait)
+                # A turn's child exiting or an environment test ending ends this wait at once,
+                # and nothing else does; the tick is the fallback. No API poll or retry is added.
+                turns.wait_for_slot(min(tick_s, 1.0) if turns.running() >= limit else tick_s)
                 continue
             if qualification is not None:
                 try:
