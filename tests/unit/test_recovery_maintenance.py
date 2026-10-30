@@ -90,13 +90,12 @@ async def test_blocked_recovery_does_not_delay_attempt_reaping(
 async def test_a_hanging_queue_sweep_does_not_hold_up_the_reaper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Grant revocation and the next lease pass never wait on a waiting queue."""
+    """The next lease pass never waits on a waiting queue."""
     monkeypatch.setattr(attempts, "_reap_offline_hosts", _noop)
     monkeypatch.setattr(attempts, "_reap_lapsed_residencies", _noop)
     monkeypatch.setattr(attempts, "_cleanup_reaped_shared_residencies", _noop)
     passes = 0
     second_pass = asyncio.Event()
-    revoked = asyncio.Event()
 
     async def reap_expired(*, max_attempts: int) -> list[object]:
         nonlocal passes
@@ -105,24 +104,18 @@ async def test_a_hanging_queue_sweep_does_not_hold_up_the_reaper(
             second_pass.set()
         return []
 
-    async def take_revocable_grants() -> list[object]:
-        revoked.set()
-        return []
-
     async def hang(**_kwargs: object) -> list[str]:
         await asyncio.Event().wait()
         return []
 
     store = _reaper_store(asyncio.Event())
     store.attempt_commands = SimpleNamespace(reap_expired=reap_expired)
-    store.grants = SimpleNamespace(take_revocable_grants=take_revocable_grants)
     store.pending_messages = SimpleNamespace(threads_to_settle=hang)
 
     reaper_task = asyncio.create_task(
         attempts._run_attempt_reaper(store, interval_seconds=0.001)
     )
     try:
-        await asyncio.wait_for(revoked.wait(), timeout=1)
         await asyncio.wait_for(second_pass.wait(), timeout=1)
     finally:
         reaper_task.cancel()
@@ -143,7 +136,7 @@ async def test_the_queue_sweep_resumes_from_its_cursor_after_a_deadline(
         return [thread for thread in threads if after is None or thread > after][:limit]
 
     async def settle(
-        _store: object, *, thread_id: str, gateway: object, app_credentials: object
+        _store: object, *, thread_id: str, owners: object, app_credentials: object
     ) -> None:
         visited.append(thread_id)
         if visited == ["thread-a", "thread-b"]:

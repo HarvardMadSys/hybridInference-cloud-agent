@@ -51,6 +51,10 @@ KNOWN_NUMBER_COLLISIONS: dict[str, tuple[str, ...]] = {
 #: Tables the chain leaves standing that no Python code reads. Each needs a
 #: reason, because "nobody got to it" is how the next one gets added.
 KNOWN_ORPHANS: dict[str, str] = {
+    "agent_user_model_preferences": (
+        "held the Gateway catalog's model pin; the remembered default is derived from "
+        "an owner's newest turn now. Dropping it is a one-line migration."
+    ),
     "agent_pr_archive_checks": (
         "created by 0040_pr_merge_archive; the feature was removed in #736 and "
         "the table was left behind. Dropping it is a one-line migration."

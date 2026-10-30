@@ -9,7 +9,7 @@ Three properties the R3 split established and nothing would notice breaking:
   §6.4), so a new pattern that could match a sibling's URL has to fail here
   rather than change which handler answers;
 * the OpenAPI document the app produces is the one committed as
-  `gateway_contracts/agent-control-plane.openapi.json`, so that a change to
+  `api_contracts/agent-control-plane.openapi.json`, so that a change to
   the published shape is a diff somebody chose rather than a drift.
 
 What this file deliberately does **not** pin: absolute route positions, the
@@ -31,7 +31,7 @@ from cloud_agent.api import routes
 from cloud_agent.app import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CONTRACT_FILE = REPO_ROOT / "gateway_contracts" / "agent-control-plane.openapi.json"
+CONTRACT_FILE = REPO_ROOT / "api_contracts" / "agent-control-plane.openapi.json"
 
 #: The prefix every surface router carries, and this test's scope.
 AGENT_PREFIX = "/v1/agent"

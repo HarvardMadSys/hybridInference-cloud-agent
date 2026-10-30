@@ -67,7 +67,7 @@ def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path:
     shutil.copy2(_LOCAL_DEV_SCRIPT, script)
     dotenv = script.parent / ".env.local"
     dotenv.write_text(
-        "AGENT_SESSION_SECRET=keep-this-secret\n"
+        "AGENT_LOCAL_SESSION_SECRET=keep-this-secret\n"
         "AGENT_SANDBOX_MANAGER_TOKEN=keep-this-sandbox-manager-token\n"
         "AGENT_DEPLOYMENT_SHA=local-freeinference-local\n"
         "LOCAL_EDGE_PORT=23002\n"
@@ -85,8 +85,8 @@ def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path:
     compose_env = tmp_path / "compose-env"
     fake_compose.write_text(
         "#!/bin/sh\n"
-        'printf \'%s\\n\' "$GATEWAY_AUTHORIZE_URL" "$AGENT_SESSION_REDIRECT_URI" '
-        '"$AGENT_WEB_BASE_URL" "$AGENT_DEPLOYMENT_SHA" >"$COMPOSE_ENV_LOG"\n'
+        'printf \'%s\\n\' "$AGENT_WEB_BASE_URL" "$AGENT_PUBLIC_API_URL" '
+        '"$AGENT_DEPLOYMENT_SHA" >"$COMPOSE_ENV_LOG"\n'
     )
     fake_compose.chmod(0o755)
 
@@ -111,23 +111,19 @@ def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path:
         for line in dotenv.read_text().splitlines()
         if line and not line.startswith("#")
     )
-    assert values["AGENT_SESSION_SECRET"] == "keep-this-secret"
+    assert values["AGENT_LOCAL_SESSION_SECRET"] == "keep-this-secret"
     assert values["AGENT_SANDBOX_MANAGER_TOKEN"] == "keep-this-sandbox-manager-token"
     assert values["LOCAL_PROJECT_NAME"] == "freeinference-local"
     assert values["LOCAL_RELAY_NETWORK"] == "freeinference-local-agent-relays"
     assert values["LOCAL_CHAT_NETWORK_POOL"] == "10.240.0.0/16"
     # This docker answers nothing, so no engine resolver was found.
     assert values["LOCAL_EGRESS_DNS_SERVER"] == "1.1.1.1"
-    assert values["GATEWAY_AUTHORIZE_URL"] == "http://127.0.0.1:23002/authorize"
-    assert values["AGENT_SESSION_REDIRECT_URI"] == (
-        "http://127.0.0.1:23002/api/v1/session/callback"
-    )
     assert values["AGENT_WEB_BASE_URL"] == "http://127.0.0.1:23002"
-    assert values["AGENT_WEB_GATEWAY_URL"] == ""
+    assert values["AGENT_PUBLIC_API_URL"] == "http://127.0.0.1:23002/api"
+    assert values["AGENT_SETTINGS_ENCRYPTION_KEY"]
     assert compose_env.read_text().splitlines() == [
-        "http://127.0.0.1:24002/authorize",
-        "http://127.0.0.1:24002/api/v1/session/callback",
         "http://127.0.0.1:24002",
+        "http://127.0.0.1:24002/api",
         "unknown",
     ]
 
@@ -252,10 +248,7 @@ def test_local_up_stops_before_full_stack_when_retained_database_auth_fails(
         "LOCAL_CHAT_NETWORK_POOL=10.240.0.0/16\n"
         "LOCAL_EGRESS_DNS_SERVER=192.168.5.1\n"
         "LOCAL_EDGE_PORT=13002\n"
-        "GATEWAY_AUTHORIZE_URL=http://127.0.0.1:13002/authorize\n"
-        "AGENT_SESSION_REDIRECT_URI=http://127.0.0.1:13002/api/v1/session/callback\n"
         "AGENT_WEB_BASE_URL=http://127.0.0.1:13002\n"
-        "AGENT_WEB_GATEWAY_URL=\n"
     )
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -296,18 +289,39 @@ def test_local_up_stops_before_full_stack_when_retained_database_auth_fails(
     assert "cannot authenticate to the existing Postgres volume" in result.stderr
 
 
+def test_a_stack_from_before_the_account_system_stops_with_directions(tmp_path: Path) -> None:
+    script = tmp_path / "repo/deploy/local/dev.sh"
+    script.parent.mkdir(parents=True)
+    shutil.copy2(_LOCAL_DEV_SCRIPT, script)
+    dotenv = script.parent / ".env.local"
+    dotenv.write_text("GATEWAY_ISSUER=freeinference-local\nAGENT_POSTGRES_PASSWORD=keep\n")
+    before = dotenv.read_text()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name in ("docker", "docker-compose"):
+        (fake_bin / name).write_text("#!/bin/sh\nexit 1\n" if name == "docker" else "#!/bin/sh\n")
+        (fake_bin / name).chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script), "config"],
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "GATEWAY_ISSUER" in result.stderr
+    assert "Nothing was deleted" in result.stderr
+    assert dotenv.read_text() == before
+
+
 def test_complete_local_stack_exposes_only_its_loopback_edge(local_compose: dict):
     services = local_compose["services"]
 
     assert services["local-edge"]["ports"] == ["127.0.0.1:${LOCAL_EDGE_PORT:-13002}:8088"]
     assert "edge" not in services
-    assert services["local-gateway"]["environment"]["LOCAL_EDGE_PORT"] == (
-        "${LOCAL_EDGE_PORT:-13002}"
-    )
-    assert services["local-gateway"]["environment"]["LOCAL_IDENTITY_ALLOWED_REDIRECTS"] == (
-        "${LOCAL_IDENTITY_ALLOWED_REDIRECTS:-}"
-    )
-    assert "ports" not in services["local-gateway"]
+    assert "local-gateway" not in services
     assert "ports" not in services["local-repo"]
 
 
@@ -352,7 +366,7 @@ def test_complete_local_sandbox_network_has_only_narrow_relays(local_compose: di
     }
 
     assert local_compose["networks"]["agent-relays"]["internal"] is True
-    assert on_relays == {"local-gateway", "mcp-relay"}
+    assert on_relays == {"mcp-relay"}
 
 
 def test_complete_local_stack_uses_the_one_network(local_compose: dict):
@@ -410,14 +424,14 @@ def test_complete_local_edge_reresolves_recreated_services():
 
     assert "FROM nginx:1.27.5-alpine" in _LOCAL_EDGE_DOCKERFILE.read_text()
     assert "resolver 127.0.0.11" in config
-    for upstream in ("control-plane:8000", "web:3000", "local-gateway:8080"):
+    for upstream in ("control-plane:8000", "web:3000"):
         assert f"server {upstream} resolve;" in config
 
 
 def test_the_standalone_edge_is_opt_in_and_loopback():
     """The edge exists only for a deployment that owns its hostname.
 
-    Under the gateway's hostname the console already splits `/agents/*`
+    Under a parent site's hostname that site already splits `/agents/*`
     between the two services, so an edge that started unconditionally would
     be a second, unused listener on every deployment — and one that dropped
     its profile by accident would appear on the next deploy of all of them.
@@ -673,41 +687,40 @@ def test_the_relay_network_name_is_pinned(compose: dict):
         assert compose["services"][service]["environment"]["AGENT_RELAY_NETWORK"] == name
 
 
-def test_exactly_the_two_relays_are_discoverable(compose: dict):
+def test_exactly_the_one_relay_is_discoverable(compose: dict):
     """A relay found here is attached to every group bridge, so the set is narrow.
 
-    Model calls go to the gateway tunnel and tool calls to the MCP tunnel; if
-    nothing here can carry them, the sandbox fails at its first request.
+    Tool calls go to the MCP tunnel; model calls leave for the owner's provider
+    over public egress and need no relay.
     """
     on_relays = {
         name
         for name, svc in compose["services"].items()
         if "agent-relays" in (svc.get("networks") or {})
     }
-    # **Exactly these two, named.** Loosening it to "at least one" or "a
+    # **Exactly this one, named.** Loosening it to "at least one" or "a
     # non-empty set" is the natural way to make it pass after adding a
     # service, and it would let the next addition be attached to every group
     # bridge without a word.
-    assert on_relays == {"gateway-tunnel", "mcp-tunnel"}
+    assert on_relays == {"mcp-tunnel"}
 
 
-def test_the_gateway_name_resolves_on_every_network_that_is_given_it(compose: dict):
+def test_the_mcp_name_resolves_on_every_network_that_is_given_it(compose: dict):
     """**The name is handed to two services on two different networks.**
 
     The runner sits on `internal`, and group lifecycle finds the relay by the
     same name on `agent-relays` before attaching it, under that name, to a
-    group bridge. Both are handed the same `AGENT_GATEWAY_URL`. A Docker
+    group bridge. Both are handed the same `AGENT_SANDBOX_MCP_URL`. A Docker
     network alias is per-network, so declaring it on one resolves for one of
-    them and NXDOMAINs for the other — the runner claims a job and then cannot
-    reach the gateway to report a single event.
+    them and NXDOMAINs for the other.
 
     Caught in review: the alias was on the sandbox side only, while the
     comment above it already claimed both. Nothing here compared the name a
     service is *given* against the networks it can resolve it on, so both
     halves looked right in isolation.
     """
-    tunnel = compose["services"]["gateway-tunnel"]
-    hostname = "${AGENT_GATEWAY_HOSTNAME:-agent-gateway}"
+    tunnel = compose["services"]["mcp-tunnel"]
+    hostname = "${AGENT_MCP_HOSTNAME:-agent-mcp}"
 
     # Which networks can resolve the name.
     resolves_on = {
@@ -815,15 +828,12 @@ def test_only_the_control_tunnel_key_may_listen_and_only_where_it_must(compose: 
 
     So a documented key line without `permitlisten` lets its key open
     listeners on the far machine. The control-plane key needs exactly one, for
-    the sandbox manager's way back, and must name it; the two relay keys need none and
-    are refused remote forwarding by their accounts' Match blocks instead
+    the sandbox manager's way back, and must name it; the relay key needs none and
+    is refused remote forwarding by their accounts' Match blocks instead
     (`permitlisten="none"` is not something OpenSSH accepts on a key line).
     """
     control = _tunnel_remote_port(compose, "control-plane-tunnel")
-    relays = {
-        _tunnel_remote_port(compose, "gateway-tunnel"),
-        _tunnel_remote_port(compose, "mcp-tunnel"),
-    }
+    relays = {_tunnel_remote_port(compose, "mcp-tunnel")}
     documented_controls = set()
     for path in _KEY_LINE_DOCS:
         rel = path.relative_to(REPO_ROOT)
@@ -880,10 +890,9 @@ def test_the_reference_sshd_policy_is_what_automatic_setup_writes(compose: dict)
         else:
             reverse[port] = listen
 
-    assert relay_ports == {
-        _tunnel_remote_port(compose, "gateway-tunnel"),
-        _tunnel_remote_port(compose, "mcp-tunnel"),
-    }, "each relay account needs its own block refusing remote forwards"
+    assert relay_ports == {_tunnel_remote_port(compose, "mcp-tunnel")}, (
+        "the relay account needs its own block refusing remote forwards"
+    )
     control = _tunnel_remote_port(compose, "control-plane-tunnel")
     assert list(reverse) == [control], "exactly one account, the control one, may listen"
     key_listens = {
@@ -1187,7 +1196,6 @@ def test_runner_and_sandbox_manager_build_group_networks_from_the_same_settings(
         "AGENT_EGRESS_CHAT_NETWORK_POOL",
         "AGENT_EGRESS_DNS_SERVER",
         "AGENT_EGRESS_PROTECTED_CIDRS",
-        "AGENT_GATEWAY_URL",
         "AGENT_SANDBOX_MCP_URL",
     ):
         assert runner[name] == sandbox_manager[name], name
@@ -1242,14 +1250,6 @@ def test_the_runner_reads_the_bounds_the_overlay_configures(monkeypatch, compose
 
     assert args.lease_ttl == 45.0
     assert args.agent_timeout == 600.0
-
-
-def test_the_runner_reads_the_neutral_gateway_variable(monkeypatch):
-    """The self-hosted runner uses the same gateway variable as compose."""
-
-    args = build_parser().parse_args([])
-
-    assert args.base_url == "https://gateway.example.com"
 
 
 def test_an_unparsable_bound_falls_back_rather_than_crash_looping(monkeypatch):
@@ -1937,7 +1937,7 @@ def test_runner_derives_a_distinct_worker_id_per_container(monkeypatch):
 # ── Remote runner host (no gateway on this machine) ────────────────────
 
 _REMOTE_COMPOSE = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
-_TUNNEL_ENTRYPOINT = Path(__file__).resolve().parents[2] / "deploy/host/agent-gateway-tunnel.sh"
+_TUNNEL_ENTRYPOINT = Path(__file__).resolve().parents[2] / "deploy/host/agent-ssh-tunnel.sh"
 
 
 @pytest.fixture(scope="module")
@@ -1946,19 +1946,13 @@ def remote_compose() -> dict:
     return yaml.safe_load(_REMOTE_COMPOSE.read_text())
 
 
-def test_remote_compose_starts_no_gateway(remote_compose: dict):
-    """The whole reason this file exists separately from the overlay.
-
-    `docker-compose.agent-runner.yml` layers on the main stack and its runner
-    declares `depends_on: backend`, so aiming it at a machine with no gateway
-    starts one there — on a box meant only to run jobs.
-    """
+def test_remote_compose_starts_only_the_host_stack(remote_compose: dict):
+    """A runner host runs jobs and nothing else."""
     assert set(remote_compose["services"]) == {
-        # Three tunnels, one per destination: the gateway for model calls, the
-        # MCP relay for tools, the control plane for claims. Splitting them is
-        # what keeps "may call models" and "may create jobs" separate
-        # permissions; see `test_deploy_security.py` for which reaches what.
-        "gateway-tunnel",
+        # Two tunnels, one per destination: the MCP relay for tools, the control
+        # plane for claims. Splitting them is what keeps "may call tools" and
+        # "may create jobs" separate permissions; see `test_deploy_security.py`
+        # for which reaches what.
         "mcp-tunnel",
         "control-plane-tunnel",
         "sandbox-manager",
@@ -1969,25 +1963,20 @@ def test_remote_compose_starts_no_gateway(remote_compose: dict):
 
 
 def test_runner_and_sandbox_are_pointed_at_the_same_name(remote_compose: dict):
-    """They share one AGENT_GATEWAY_URL, so one name has to serve both.
-
-    The runner claims over it and the sandbox is handed the same value; a URL
-    that only the runner can resolve means jobs are claimed and then die at
-    their first model call.
-    """
-    alias = remote_compose["services"]["gateway-tunnel"]["networks"]["agent-relays"]["aliases"]
-    assert alias == ["${AGENT_GATEWAY_HOSTNAME:-agent-gateway}"]
-    url = remote_compose["services"]["runner"]["environment"]["AGENT_GATEWAY_URL"]
-    assert "${AGENT_GATEWAY_HOSTNAME:-agent-gateway}" in url
+    """They share one AGENT_SANDBOX_MCP_URL, so one name has to serve both."""
+    alias = remote_compose["services"]["mcp-tunnel"]["networks"]["agent-relays"]["aliases"]
+    assert alias == ["${AGENT_MCP_HOSTNAME:-agent-mcp}"]
+    url = remote_compose["services"]["runner"]["environment"]["AGENT_SANDBOX_MCP_URL"]
+    assert "${AGENT_MCP_HOSTNAME:-agent-mcp}" in url
 
 
 def test_the_tunnel_credential_is_mounted_read_only(remote_compose: dict):
-    volumes = remote_compose["services"]["gateway-tunnel"]["volumes"]
+    volumes = remote_compose["services"]["mcp-tunnel"]["volumes"]
     assert all(volume.endswith(":ro") for volume in volumes), volumes
 
 
 def test_the_tunnel_refuses_to_skip_host_verification():
-    """Encrypting the hop is pointless if anything may answer for the gateway.
+    """Encrypting the hop is pointless if anything may answer for the far side.
 
     The credentials this tunnel exists to protect — the enrolled-host token and
     every job capability — would go straight to an impostor.

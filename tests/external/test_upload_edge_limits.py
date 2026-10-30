@@ -2,7 +2,7 @@
 
 Pull nginx:1.27.5-alpine before selecting this external tier, or set
 AGENT_UPLOAD_TEST_NGINX_IMAGE to an already available nginx image. No live
-deployment, gateway credential, or external HTTP endpoint is used.
+deployment, credential, or external HTTP endpoint is used.
 """
 
 from __future__ import annotations
@@ -41,7 +41,6 @@ server {
 }
 server { listen 3000; return 200 'web'; }
 server { listen 3002; return 200 'web'; }
-server { listen 8080; return 200 'gateway'; }
 """
 
 
@@ -80,7 +79,7 @@ def nginx_network():
         docker("network", "rm", network, check=False)
 
 
-@pytest.fixture(params=CASES, ids=["standalone", "local", "gateway-reference"])
+@pytest.fixture(params=CASES, ids=["standalone", "local", "parent-site-reference"])
 def edge(request, tmp_path: Path, nginx_network):
     source, prefix, port = request.param
     configuration = (REPO_ROOT / source).read_text()
@@ -103,8 +102,6 @@ def edge(request, tmp_path: Path, nginx_network):
             "control-plane",
             "--network-alias",
             "web",
-            "--network-alias",
-            "local-gateway",
             "--mount",
             f"type=bind,src={config},dst=/etc/nginx/nginx.conf,readonly",
             "-p",

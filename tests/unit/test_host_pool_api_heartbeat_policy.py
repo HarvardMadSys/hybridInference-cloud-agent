@@ -105,7 +105,7 @@ async def test_a_policy_that_does_not_decode_fails_only_the_answer(
     still tries to switch one, which reads the updates itself, as every beat
     did then.
     """
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
     setattr(store, f"{part}_undecodable", True)
     store.beat_answers = {("th-1", 1): ""}
