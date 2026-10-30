@@ -36,6 +36,7 @@ from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
 )
+from cloud_agent.runtime_upgrades import configured_registry_url
 from cloud_agent.sandbox_manager_routing import (
     SandboxManagerUrlRefused,
     probe_error_for_host,
@@ -329,6 +330,7 @@ async def heartbeat_host(
             "sandbox_archive_settings_applied_revision" in body.model_fields_set
         ),
         runtime_downloads=body.runtime_downloads,
+        config_reports=body.config_reports,
     )
     if updated is None:
         # The row vanished, or its credential changed, between authentication
@@ -410,6 +412,9 @@ async def heartbeat_host(
             updated.get("capabilities") or body.capabilities or [],
         ),
         runtime_downloads=runtime_downloads,
+        # The saved registry, so every host downloads from the one the
+        # Settings page lists versions from (runtime_upgrades.registry_url).
+        runtime_registry_url=configured_registry_url(),
         residencies_lost=lost,
         retained_sandboxes_stop=retained_stops,
         heartbeat_interval_seconds=HEARTBEAT_INTERVAL_S,

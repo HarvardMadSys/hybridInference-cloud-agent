@@ -211,6 +211,15 @@ FAMILIES: tuple[Family, ...] = (
         "value imports the default, as the readers they replaced did.",
         names=("AGENT_MAX_STREAMS_PER_USER", "AGENT_API_DOCS"),
     ),
+    Family(
+        "admin",
+        "The npm registry for agent versions (MIGRATED_SETTINGS). The control plane lists "
+        "versions from the saved value and sends it on every heartbeat answer; each host "
+        "reports the registry its next download uses, and an update is refused until every "
+        "online host reports the saved one. A host's environment value applies only "
+        "before its first answer, or under a control plane that does not send one.",
+        names=("AGENT_RUNTIME_REGISTRY_URL",),
+    ),
     # -- host_admin: heartbeat-delivered host settings --------------------
     Family(
         "host_admin",
@@ -225,6 +234,7 @@ FAMILIES: tuple[Family, ...] = (
             "AGENT_CHAT_IDLE_TIMEOUT_S",
             "AGENT_STORAGE_MIN_AVAILABLE_MIB",
             "AGENT_SHARED_RESIDENT_CAPACITY",
+            "AGENT_LEASE_TTL",
         ),
     ),
     Family(
@@ -255,21 +265,7 @@ FAMILIES: tuple[Family, ...] = (
         "environment is the host's default until then. Not part of HOST_SETTINGS.",
         names=("AGENT_HOST_SLOTS",),
     ),
-    # -- candidate: could move with existing machinery --------------------
-    Family(
-        "candidate",
-        "The lease the runner asks for on each claim (the control plane caps it at 900 s). "
-        "Read once into an argparse default; HOST_SETTINGS can carry it once each claim "
-        "uses the effective value and the bound stays above one heartbeat plus a request.",
-        names=("AGENT_LEASE_TTL",),
-    ),
     # -- design: needs a design of its own --------------------------------
-    Family(
-        "design",
-        "Read by both the control plane (version listing) and every runner (download); "
-        "the two must name the same registry, and no channel keeps them equal yet.",
-        names=("AGENT_RUNTIME_REGISTRY_URL",),
-    ),
     Family(
         "design",
         "Read through setting_env but not registered, so each replica follows its own "
@@ -754,6 +750,10 @@ RAW_SETTING_READS: dict[tuple[str, str, str], str] = {
         "create_app",
         "AGENT_SANDBOX_MANAGER_TOKEN",
     ): "the credential the sandbox manager checks callers against",
+    ("apps/backend/cloud_agent_host/runner.py", "run_forever", "AGENT_RUNTIME_REGISTRY_URL"): (
+        "the host's registry until the first heartbeat answer names the saved one; the "
+        "host image has no settings registry"
+    ),
 }
 
 #: Where a host process reads a HOST_SETTINGS variable from its own
@@ -779,13 +779,13 @@ HOST_BOOTSTRAP_READS: dict[tuple[str, str], str] = {
     ("apps/backend/cloud_agent_host/runner.py", "_sandbox_resource_setting"): (
         "a sandbox resource limit when the turn carries no settings"
     ),
-    ("apps/backend/cloud_agent_host/runner.py", "_run_shared_live_attempt"): (
-        "a new group's capacity when the turn carries no settings value"
+    ("apps/backend/cloud_agent_host/runner.py", "_local_shared_resident_capacity"): (
+        "sessions per sandbox before the first settings heartbeat; an unusable local "
+        "value is the default, so it cannot withhold the shared-live capabilities"
     ),
-    ("apps/backend/cloud_agent_host/runner.py", "_shared_live_host_capabilities"): (
-        "known debt: the capability check validates the local AGENT_SHARED_RESIDENT_CAPACITY "
-        "and does not consult the admin value, so an out-of-range local value withholds "
-        "the shared-live capabilities even after an admin value arrives"
+    ("apps/backend/cloud_agent_host/runner.py", "_env_lease_ttl"): (
+        "AGENT_LEASE_TTL as the --lease-ttl default, the claim lease until a settings "
+        "answer replaces it"
     ),
     ("apps/backend/cloud_agent_host/sandbox_manager.py", "_chat_idle_timeout_from_env"): (
         "the sandbox manager's idle clock until the runner pushes settings"

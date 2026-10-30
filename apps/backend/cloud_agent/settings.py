@@ -911,6 +911,26 @@ _MIGRATED_DEFINITIONS: tuple[Setting, ...] = (
         invalid_env_uses_default=True,
     ),
     Setting(
+        "runtime_registry_url",
+        "Agent package registry",
+        "Agent versions",
+        "",
+        env="AGENT_RUNTIME_REGISTRY_URL",
+        url=True,
+        https_unless_private=True,
+        description=(
+            "The npm registry agent versions are listed from here and downloaded from on "
+            "every server. Empty is the public registry (https://registry.npmjs.org). "
+            "Servers receive it on their next heartbeat; updates are refused until every "
+            "online server reports using it."
+        ),
+        apply_mode="next_operation",
+        apply_description=(
+            "Version lists use it at once; each server uses it for downloads it starts "
+            "after its next heartbeat."
+        ),
+    ),
+    Setting(
         "api_docs",
         "Serve API documentation",
         "Operations",

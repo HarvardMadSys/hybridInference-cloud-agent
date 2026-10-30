@@ -189,6 +189,24 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         scope="runner",
     ),
     HostSetting(
+        key="lease_ttl_s",
+        env="AGENT_LEASE_TTL",
+        label="Turn lease",
+        description=(
+            "How long the control plane holds a claimed turn for this server between "
+            "renewals before giving it to another server. Applies to turns claimed after "
+            "the server picks the value up; a running turn keeps the lease it claimed with."
+        ),
+        unit="seconds",
+        default=120,
+        # Longer than one heartbeat interval plus one request timeout (30 + 10
+        # seconds): a shorter lease expires before its first renewal lands.
+        minimum=41,
+        # The control plane caps a requested lease at 900 seconds.
+        maximum=900,
+        scope="runner",
+    ),
+    HostSetting(
         key="terminal_idle_ttl_s",
         env="AGENT_TERMINAL_IDLE_TTL_SECONDS",
         label="Terminal idle timeout",
@@ -385,6 +403,11 @@ SANDBOX_MANAGER_SETTING_KEYS = frozenset(
     setting.key for setting in HOST_SETTINGS if setting.scope in ("sandbox_manager", "both")
 )
 
+#: Settings registered after hosts first imported their legacy environment.
+#: A host imports each of these from its own report once, on the first
+#: heartbeat that carries it, even when its first import is long complete.
+LATE_IMPORT_KEYS = frozenset({"lease_ttl_s"})
+
 #: The most keys a stored or reported settings map may carry.
 MAX_SETTINGS_KEYS = 32
 #: A reported value larger than this is not one any setting here could hold.
@@ -483,6 +506,7 @@ def reported_values(raw: Any) -> dict[str, int | float] | None:
 __all__ = [
     "HOST_SETTINGS",
     "HOST_SETTINGS_BY_KEY",
+    "LATE_IMPORT_KEYS",
     "MAX_SETTINGS_KEYS",
     "RUNNER_SETTING_KEYS",
     "SANDBOX_MANAGER_SETTING_KEYS",

@@ -1105,7 +1105,7 @@ def _shared_live_ready_file() -> str:
     return (os.environ.get("AGENT_SHARED_LIVE_READY_FILE") or "").strip()
 
 
-def _shared_live_host_capabilities(  # noqa: C901, PLR0912 complexity baseline, #771
+def _shared_live_host_capabilities(  # noqa: PLR0912 complexity baseline, #771
     backend: SandboxBackend,
     stamp: dict[str, Any],
 ) -> list[str]:
@@ -1127,12 +1127,10 @@ def _shared_live_host_capabilities(  # noqa: C901, PLR0912 complexity baseline, 
         default_slots()
     except ValueError:
         return []
-    try:
-        resident_capacity = int(os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY") or 8)
-    except ValueError:
-        return []
-    if not 2 <= resident_capacity <= 128:
-        return []
+    # Sessions per sandbox is no longer checked here: the local value is only
+    # a bootstrap, an unusable one falls back to the default
+    # (_local_shared_resident_capacity), and an admin's value is validated
+    # before it is saved and again when it arrives.
     if not (manager_env("AGENT_SANDBOX_MANAGER_URL") or "").strip():
         return []
     if not (manager_env("AGENT_SANDBOX_MANAGER_TOKEN") or "").strip():
@@ -2067,8 +2065,7 @@ def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baselin
     capacity = int(
         existing.get("resident_slot_capacity")
         or settings.get("shared_resident_capacity")
-        or os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY")
-        or HOST_SETTINGS_BY_KEY["shared_resident_capacity"].default
+        or _local_shared_resident_capacity()
     )
     if not 2 <= capacity <= 128:
         finish_attempt("failed", "shared resident capacity must be between 2 and 128")
@@ -3570,7 +3567,9 @@ def _serve_turn(
         base_url=base_url,
         gateway_url=gateway_url,
         worker_id=handed_worker_id(payload, worker_id),
-        lease_ttl=lease_ttl,
+        # The lease the parent claimed this turn with, so its renewals ask for
+        # the same length the claim did.
+        lease_ttl=host_settings.get("lease_ttl_s", lease_ttl),
         agent_timeout_s=host_settings.get("agent_timeout_s", agent_timeout_s),
         backend=backend,
         host=host,
@@ -3712,7 +3711,7 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     except Exception:
         settings_sandbox_manager = None
     runtime_settings = RuntimeSettings(
-        _runner_local_settings(agent_timeout_s),
+        _runner_local_settings(agent_timeout_s, lease_ttl),
         sandbox_manager=None
         if settings_sandbox_manager is None
         else settings_sandbox_manager.apply_host_settings,
@@ -3823,6 +3822,8 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         ),
         runtime_downloads_report=None if downloads is None else downloads.report,
         on_runtime_downloads=None if downloads is None else downloads.apply,
+        config_reports=None if downloads is None else downloads.registry_report,
+        on_runtime_registry=None if downloads is None else downloads.set_registry,
         readiness_marker=_shared_live_ready_file(),
         retained_sandbox_beats=_retained_sandbox_heartbeat_rows,
         # Read per beat, so the age it carries is the age it had when the beat
@@ -4022,7 +4023,9 @@ def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
                         base_url=base_url,
                         host_credential=pool.credential,
                         worker_id=turn_worker_id,
-                        lease_ttl=lease_ttl,
+                        # The lease an admin set, adopted from the latest
+                        # heartbeat answer; this host's own until then.
+                        lease_ttl=runtime_settings.turn_settings().get("lease_ttl_s", lease_ttl),
                         attestation=attestation,
                         client=host_client,
                     )
@@ -4490,30 +4493,56 @@ def _new_sandbox_storage_error(job: ClaimedJob, settings: Mapping[str, float] | 
     return new_sandbox_storage_error(minimum_mib=minimum)
 
 
-def _runner_local_settings(agent_timeout_s: float) -> dict[str, float]:
+def _runner_local_settings(
+    agent_timeout_s: float, lease_ttl: float = DEFAULT_LEASE_TTL_S
+) -> dict[str, float]:
     """This host's own value for each setting the runner applies.
 
     Legacy bootstrap values, used only before the first settings heartbeat.
-    ``agent_timeout_s`` was already read from ``AGENT_TIMEOUT_S`` or its flag.
-    The admin settings replace every value, including defaults, once adopted.
+    ``agent_timeout_s`` and ``lease_ttl`` were already read from
+    ``AGENT_TIMEOUT_S`` and ``AGENT_LEASE_TTL`` or their flags. The admin
+    settings replace every value, including defaults, once adopted.
     """
     return {
         "agent_timeout_s": agent_timeout_s,
+        "lease_ttl_s": lease_ttl,
         "chat_idle_timeout_s": _chat_idle_timeout_s(),
         "source_import_max_mib": source_import_max_bytes() // (1024 * 1024),
         "storage_min_available_mib": _env_float(
             "AGENT_STORAGE_MIN_AVAILABLE_MIB",
             float(HOST_SETTINGS_BY_KEY["storage_min_available_mib"].default),
         ),
-        "shared_resident_capacity": int(
-            os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY")
-            or HOST_SETTINGS_BY_KEY["shared_resident_capacity"].default
-        ),
+        "shared_resident_capacity": _local_shared_resident_capacity(),
         **{
             key: _sandbox_resource_setting(key, {})
             for key in ("sandbox_cpu_millicores", "sandbox_memory_mib", "sandbox_disk_mib")
         },
     }
+
+
+def _local_shared_resident_capacity() -> int:
+    """This host's own sessions-per-sandbox value, or the default for one it cannot use.
+
+    Only a bootstrap value: an admin's value replaces it on the first answer.
+    An unusable local value therefore falls back to the default rather than
+    keeping this host from advertising shared-live sandboxes at all.
+    """
+    setting = HOST_SETTINGS_BY_KEY["shared_resident_capacity"]
+    raw = (os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY") or "").strip()
+    if not raw:
+        return setting.default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if not setting.accepts(value):
+        print(
+            f"ignoring {setting.env}={raw!r}: not a whole number from "
+            f"{setting.minimum} through {setting.maximum}",
+            file=sys.stderr,
+        )
+        return setting.default
+    return value
 
 
 def _sandbox_resource_setting(key: str, settings: Mapping[str, float]) -> int:

@@ -205,6 +205,27 @@ class RuntimeDownloads:
 
     # ── heartbeat side ──────────────────────────────────────────────────
 
+    def set_registry(self, registry: str | None) -> bool:
+        """Adopt the control plane's registry for every download that starts later.
+
+        ``None`` is a control plane that does not manage the registry, so the
+        environment value this host started with stays. ``""`` is the public
+        registry. A download already running finishes from where it started.
+        Returns whether the registry changed.
+        """
+        if registry is None:
+            return False
+        adopted = registry.strip().rstrip("/") or None
+        with self._lock:
+            changed = adopted != self._registry
+            self._registry = adopted
+        return changed
+
+    def registry_report(self) -> dict[str, str]:
+        """The registry the next download uses, as the heartbeat reports it."""
+        with self._lock:
+            return {"runtime_registry_url": self._registry or ""}
+
     def apply(self, targets: object) -> None:
         """Adopt the targets from one heartbeat answer.
 

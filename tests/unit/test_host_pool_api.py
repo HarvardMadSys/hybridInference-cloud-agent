@@ -229,10 +229,13 @@ class FakeHostPoolStore(AllCapabilities):
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
         runtime_downloads: list[dict[str, Any]] | None = None,
+        config_reports: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         row = self.rows.get(host)
         if row is None:
             return None
+        if config_reports is not None:
+            row["config_reports"] = dict(config_reports)
         if runtime_downloads is not None:
             row["runtime_downloads"] = [dict(report) for report in runtime_downloads]
         if row["status"] in (HOST_ENROLLING, HOST_OFFLINE):
@@ -3525,3 +3528,21 @@ async def test_a_due_stop_is_fenced_to_the_activation_the_beat_reported(residenc
     assert response.json()["retained_sandboxes_stop"] == [
         {**store.sandbox_stop_due, "activation_generation": 3, "shared_live": True}
     ]
+
+
+async def test_a_heartbeat_names_the_saved_registry_and_keeps_the_hosts_report(client, monkeypatch):
+    """Every host is told the one registry, and says which one it uses (WP2)."""
+    from cloud_agent import settings
+
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    monkeypatch.setenv("AGENT_RUNTIME_REGISTRY_URL", "https://npm.example.org/")
+    settings.reset_settings()
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"config_reports": {"runtime_registry_url": "", "unknown": "x"}},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["runtime_registry_url"] == "https://npm.example.org"
+    assert store.rows["runner-a"]["config_reports"] == {"runtime_registry_url": ""}

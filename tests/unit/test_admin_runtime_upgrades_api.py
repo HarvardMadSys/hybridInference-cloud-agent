@@ -61,6 +61,9 @@ class FakeHostPool:
         ]
         self.requests: list[dict[str, str]] = []
 
+    async def list_runner_hosts(self):
+        return list(self.hosts)
+
     async def runtime_upgrade_snapshot(self):
         return dict(self.upgrades), dict(self.selection), list(self.hosts)
 
@@ -353,3 +356,34 @@ async def test_an_older_release_can_be_chosen_too(api):
         "agent.runtime_version.upgrade",
         {"runtime": "claude-code", "version": "2.1.250", "previous_version": None},
     )
+
+
+async def test_no_update_starts_while_an_online_server_uses_another_registry(api, monkeypatch):
+    """A version listed from the saved registry might not download elsewhere (WP2)."""
+    from cloud_agent import settings
+
+    client, store, audited, _registry = api
+    row = settings.initial_settings()
+    row.update(settings.encode_changes({"runtime_registry_url": "https://npm.example.org"}))
+    settings.apply_settings(10**9, row)
+    try:
+        store.host_pool.hosts[0]["config_reports"] = {
+            "runtime_registry_url": "https://registry.npmjs.org"
+        }
+        refused = await client.post(
+            "/admin/agent/runtime-upgrades", json={"runtime": "claude-code", "version": "2.1.300"}
+        )
+        assert refused.status_code == 409
+        assert "runner-a" in refused.json()["detail"]
+        assert store.host_pool.requests == []
+        assert audited == []
+
+        store.host_pool.hosts[0]["config_reports"] = {
+            "runtime_registry_url": "https://npm.example.org"
+        }
+        accepted = await client.post(
+            "/admin/agent/runtime-upgrades", json={"runtime": "claude-code", "version": "2.1.300"}
+        )
+        assert accepted.status_code == 200
+    finally:
+        settings.reset_settings()
