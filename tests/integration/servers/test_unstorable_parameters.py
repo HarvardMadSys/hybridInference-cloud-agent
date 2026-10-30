@@ -8,8 +8,6 @@ and only the gateway and the caller's identity stand in.
 
 from __future__ import annotations
 
-from tests.support.owners import on_connection
-
 from typing import Any
 
 import pytest
@@ -21,6 +19,7 @@ from tests.integration.servers.test_pending_message_queue import (
     _Gateway,
     pool as pool,
 )
+from tests.support.owners import on_connection
 
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
@@ -63,7 +62,9 @@ async def http(pool, monkeypatch):
         assert environment.status_code == 201, environment.text
         job = await client.post(
             "/v1/agent/jobs",
-            json=on_connection({"repo": _REPO, "task_prompt": "fix it", "model": "glm-5.1", "base_sha": "a" * 40}),
+            json=on_connection(
+                {"repo": _REPO, "task_prompt": "fix it", "model": "glm-5.1", "base_sha": "a" * 40}
+            ),
         )
         assert job.status_code == 201, job.text
         yield client, {"team": team.id, "env": environment.json()["id"], "job": job.json()["id"]}

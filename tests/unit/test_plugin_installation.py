@@ -13,6 +13,7 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from tests.support.owners import launch_connection
 
 from cloud_agent_host import resident_transport
 from cloud_agent_host.bounded_output import text_chunks
@@ -58,11 +59,11 @@ def _launch(**updates) -> ResidentLaunch:
             native_session_id=None,
             model="model",
             reasoning_effort=None,
-            gateway_base_url="http://gateway",
             credential="scoped-inference-secret",
             mcp_credential="scoped-mcp-secret",
             slot_id=1,
             plugins=_PLUGINS,
+            **launch_connection("claude-code"),
         ),
         **updates,
     )

@@ -234,9 +234,8 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     worker_task = asyncio.create_task(worker.run())
     await asyncio.sleep(0)
 
-    from tests.integration.servers.test_measurement_acceptance_db import USER_ID
-
     from cloud_agent.identity import SESSION_COOKIE, mint_session
+    from tests.integration.servers.test_measurement_acceptance_db import USER_ID
 
     chain = _ControlChain(
         pool=pool,

@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
 from cloud_agent.api import catalog
 from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.app import create_app, create_mcp_app
@@ -20,8 +20,7 @@ PATH = "/v1/agent/notifications/state"
 
 @pytest.fixture
 def app(monkeypatch):
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "notification-test-secret-long-enough")
+    use_session_secret(monkeypatch)
     application = FastAPI()
     application.include_router(catalog.router)
     queries = AsyncMock()
@@ -59,14 +58,14 @@ def app(monkeypatch):
     }
     application.dependency_overrides[get_owner_directory] = lambda: gateway
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        conversation_queries=queries
+        local_accounts=SESSIONS, conversation_queries=queries
     )
     application.state.queries = queries
     return application
 
 
 def headers(owner: str = "alice") -> dict[str, str]:
-    return {"Authorization": f"Bearer {identity.mint_session(user_id=owner)}"}
+    return {"Authorization": f"Bearer {SESSIONS.sign_in(owner)}"}
 
 
 async def test_reads_an_owner_scoped_delta_without_caching(app):

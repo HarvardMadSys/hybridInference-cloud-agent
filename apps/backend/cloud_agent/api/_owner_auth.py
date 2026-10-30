@@ -30,6 +30,7 @@ from cloud_agent.api.deps import (
     bearer_token,
     get_current_user,
     get_owner_directory,
+    get_storage,
     local_session_owner,
     looks_like_agent_token,
     require_agent_access,
@@ -87,6 +88,7 @@ def owner_stream_guard(request: Request, user_id: str) -> Callable[[], Awaitable
 async def authenticate_agent_owner(
     request: Request,
     authorization: str | None = Header(None),
+    storage: Any = Depends(get_storage),
 ) -> dict[str, Any]:
     """Authenticate an Agent owner from their account session.
 
@@ -114,7 +116,7 @@ async def authenticate_agent_owner(
             },
         )
 
-    return await get_current_user(request=request, authorization=authorization)
+    return await get_current_user(request=request, authorization=authorization, storage=storage)
 
 
 async def require_agent_owner(

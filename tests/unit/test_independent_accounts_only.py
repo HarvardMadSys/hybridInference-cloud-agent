@@ -246,9 +246,12 @@ async def test_owner_directory_is_built_over_the_store_when_the_lifespan_did_not
 
 
 async def test_owner_directory_without_a_store_refuses():
-    from cloud_agent.api.deps import get_owner_directory
+    from cloud_agent.api.deps import get_owner_directory, require_agent_access
 
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    owners = get_owner_directory(request)
     with pytest.raises(HTTPException) as refused:
-        get_owner_directory(request)
+        await require_agent_access(owners, "anyone")
     assert refused.value.status_code == 503
+    with pytest.raises(OwnerDirectoryError):
+        await owners.user_email("anyone")

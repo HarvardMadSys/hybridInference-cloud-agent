@@ -175,7 +175,7 @@ def _launch(**changes: object) -> ResidentLaunch:
         "native_session_id": "native-1",
         "model": "gemini-2.5-pro",
         "reasoning_effort": None,
-        "gateway_base_url": "http://relay.local:8080",
+        "model_base_url": "http://relay.local:8080",
         "credential": None,
         **_ACCESS.launch_fields(),
     }
@@ -210,7 +210,6 @@ def test_a_connection_launch_names_all_of_its_identity_or_none():
 
 
 def test_the_sandbox_manager_keeps_the_connection_url_and_replaces_only_the_relays(monkeypatch):
-    monkeypatch.setenv("AGENT_GATEWAY_URL", "http://10.0.0.1:8080")
     body = SharedResidentLaunchConfig(
         runtime_id="opencode",
         model="gemini-2.5-pro",
@@ -220,7 +219,7 @@ def test_the_sandbox_manager_keeps_the_connection_url_and_replaces_only_the_rela
     )
     launch = resident_launch("athr_1", body)
 
-    assert launch.gateway_base_url == "http://10.0.0.1:8080"
+    assert launch.model_base_url == "http://10.0.0.1:8080"
     assert launch.inference_base_url == _ACCESS.base_url
     assert launch.inference_source == _ACCESS.source
     assert _KEY not in repr(body)
@@ -241,7 +240,7 @@ def test_chat_completions_runtimes_get_the_exact_url_and_key_in_their_environmen
     argv, env = runtime.prepare_live(
         workdir="/workspace",
         model="gemini-2.5-pro",
-        gateway_base_url=ExactBaseUrl(_ACCESS.base_url),
+        model_base_url=ExactBaseUrl(_ACCESS.base_url),
         credential=_KEY,
     )
     # Not normalized to ``/v1`` the way the Gateway relay's address is.
@@ -256,7 +255,7 @@ def test_the_gateway_relay_is_still_normalized_and_given_both_spellings(runtime)
     _argv, env = runtime.prepare_live(
         workdir="/workspace",
         model="glm-5.1",
-        gateway_base_url="http://relay.local:8080",
+        model_base_url="http://relay.local:8080",
         credential="grant",
     )
     assert env["OPENAI_BASE_URL"] == "http://relay.local:8080/v1"
@@ -267,7 +266,7 @@ def test_codex_points_its_provider_at_the_exact_url_with_the_key_in_the_environm
     argv, env = CodexRuntime().prepare_live(
         workdir="/workspace",
         model="gpt-5.1-codex",
-        gateway_base_url=ExactBaseUrl("https://api.example.com/openai/v1"),
+        model_base_url=ExactBaseUrl("https://api.example.com/openai/v1"),
         credential=_KEY,
     )
     joined = " ".join(argv)
@@ -283,6 +282,6 @@ def test_claude_code_refuses_a_connection_that_does_not_speak_anthropic_messages
         ClaudeCodeRuntime().prepare_live(
             workdir="/workspace",
             model="claude-sonnet",
-            gateway_base_url=ExactBaseUrl("https://openai-compatible.example/v1"),
+            model_base_url=ExactBaseUrl("https://openai-compatible.example/v1"),
             credential=_KEY,
         )

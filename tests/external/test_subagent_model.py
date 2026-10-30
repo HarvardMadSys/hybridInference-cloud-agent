@@ -222,7 +222,7 @@ def _run_delegation(tmp_path, monkeypatch, model, setting, tool_model=None):
     _argv, runtime_env = ClaudeCodeRuntime().prepare_live(
         workdir=str(workdir),
         model=model,
-        gateway_base_url=f"http://127.0.0.1:{gateway.port}",
+        model_base_url=f"http://127.0.0.1:{gateway.port}",
         credential="one-model-grant",
     )
     if setting == "unset":

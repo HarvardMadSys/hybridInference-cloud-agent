@@ -16,8 +16,6 @@ database that is not there is a failure to report, never a reason to skip.
 
 from __future__ import annotations
 
-from tests.support.owners import on_connection
-
 import asyncio
 import hashlib
 import json
@@ -33,14 +31,15 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
+from tests.support.owners import on_connection
 from tests.support.uploads import thread_uploads
 
 from cloud_agent.api import routes, uploads, worker
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_owner_directory,
     get_grant_client,
+    get_owner_directory,
     get_storage,
 )
 from cloud_agent.api.worker import verify_claiming_host
@@ -560,7 +559,7 @@ async def test_two_replicas_settling_at_once_create_one_turn(api: Api):
                 settle_queue(
                     replica,
                     thread_id=thread_id,
-                    gateway=api.gateway,
+                    owners=api.gateway,
                     app_credentials=None,
                 )
                 for replica in replicas
@@ -680,7 +679,7 @@ async def test_a_turn_the_reaper_fails_is_paused_by_the_periodic_sweep(api: Api)
     assert [action["action"] for action in actions] == ["failed"]
     assert (await api.queue(thread_id))["queue_paused_reason"] is None
 
-    settled = await settle_waiting_queues(api.store, gateway=api.gateway, github_app=None)
+    settled = await settle_waiting_queues(api.store, owners=api.gateway, github_app=None)
 
     assert settled == 1
     queue = await api.queue(thread_id)
@@ -734,7 +733,7 @@ async def test_the_maintenance_loops_run_queue_and_staged_attachment_sweeps(api:
             reap_expired_attempts(api.store, interval_seconds=0.05, max_attempts=1)
         ),
         asyncio.create_task(
-            run_pending_message_maintenance(api.store, gateway=api.gateway, interval_seconds=0.05)
+            run_pending_message_maintenance(api.store, owners=api.gateway, interval_seconds=0.05)
         ),
     ]
     try:
@@ -810,11 +809,11 @@ async def test_a_github_app_that_cannot_load_holds_a_message_back_without_refusi
     assert [(row["state"], row["last_error"]) for row in queue["messages"]] == [("queued", None)]
     assert (queue["queue_paused_reason"], queue["queue_settled_job_id"]) == (None, job["id"])
     assert thread_id in await api.store.pending_messages.threads_to_settle()
-    await settle_waiting_queues(api.store, gateway=api.gateway, github_app=app)
+    await settle_waiting_queues(api.store, owners=api.gateway, github_app=app)
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
 
     app.loaded = True
-    await settle_waiting_queues(api.store, gateway=api.gateway, github_app=app)
+    await settle_waiting_queues(api.store, owners=api.gateway, github_app=app)
 
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it", "next step"]
     assert (await api.queue(thread_id))["messages"] == []
@@ -868,7 +867,7 @@ async def test_a_github_app_that_cannot_load_does_not_stop_an_owner_withdrawing_
     # runs: nothing the owner withdrew or held is sent.
     await api.finish(running)
     app.loaded = True
-    await settle_waiting_queues(api.store, gateway=api.gateway, github_app=app)
+    await settle_waiting_queues(api.store, owners=api.gateway, github_app=app)
 
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
     queue = await api.queue(thread_id)
@@ -1952,13 +1951,15 @@ async def test_a_new_task_cannot_take_an_upload_a_waiting_message_holds(api: Api
 
     taken = await api.client.post(
         "/v1/agent/jobs",
-        json=on_connection({
-            "repo": _REPO,
-            "task_prompt": "take the spec",
-            "model": "glm-5.1",
-            "base_sha": "a" * 40,
-            "attachment_ids": [upload["id"]],
-        }),
+        json=on_connection(
+            {
+                "repo": _REPO,
+                "task_prompt": "take the spec",
+                "model": "glm-5.1",
+                "base_sha": "a" * 40,
+                "attachment_ids": [upload["id"]],
+            }
+        ),
     )
 
     assert taken.status_code == 400, taken.text
@@ -2187,8 +2188,8 @@ async def test_a_round_the_goal_withdraws_lets_the_owners_waiting_message_go_nex
     )
     assert written.status_code == 200, written.text
 
-    await run_goal_wakeups(store=api.store, gateway=api.gateway)
-    await settle_waiting_queues(api.store, gateway=api.gateway, github_app=None)
+    await run_goal_wakeups(store=api.store, owners=api.gateway)
+    await settle_waiting_queues(api.store, owners=api.gateway, github_app=None)
 
     turns = await api.turns(thread_id)
     assert [(turn["turn_source"], turn["state"]) for turn in turns] == [

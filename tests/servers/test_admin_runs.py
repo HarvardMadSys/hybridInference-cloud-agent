@@ -10,10 +10,11 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.servers.test_owner_revalidation import _AccessGateway
+from tests.support.owners import SESSIONS, use_session_secret
 from tests.support.storage import OneFake
 from tests.unit.test_ledger_snapshots import END, START, ledger_row
 
-from cloud_agent import identity
+from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 from cloud_agent.admin_observability import (
     AdminRun,
     AdminRunList,
@@ -60,8 +61,7 @@ def _admin_run_row() -> dict:
 @pytest.fixture
 def setup(monkeypatch):
     monkeypatch.setenv("ADMIN_TOKEN", "admin-observations-test")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "admin-observations-session-test-long-secret")
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
+    use_session_secret(monkeypatch)
     run = _admin_run_row()
     events = [
         {
@@ -158,8 +158,8 @@ async def test_every_read_requires_current_admin_permission(setup, method, path,
             headers = {"Authorization": "Bearer not-an-admin-token"}
         elif auth == "revoked":
             client.cookies.set(
-                identity.SESSION_COOKIE,
-                identity.mint_session(user_id="admin-person"),
+                LOCAL_SESSION_COOKIE,
+                SESSIONS.sign_in("admin-person"),
             )
         response = await client.request(method, path, headers=headers)
     assert response.status_code == (403 if auth == "revoked" else 401)

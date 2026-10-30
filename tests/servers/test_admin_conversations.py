@@ -6,9 +6,10 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 from tests.servers.test_admin_runs import ADMIN, _admin_run_row, setup as run_setup  # noqa: F401
+from tests.support.owners import SESSIONS
 from tests.unit.test_ledger_snapshots import END, START
 
-from cloud_agent import identity
+from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 from cloud_agent.admin_conversations import ConversationCursor, ConversationTurnsCursor
 from cloud_agent.admin_observability import RunFilters, cursor_scope, encode_cursor
 from cloud_agent.api import admin_conversations
@@ -72,7 +73,7 @@ async def test_conversation_reads_require_current_admin_access(setup, path, auth
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         headers = {"Authorization": "Bearer wrong"} if auth == "invalid" else {}
         if auth == "revoked":
-            client.cookies.set(identity.SESSION_COOKIE, identity.mint_session(user_id="admin"))
+            client.cookies.set(LOCAL_SESSION_COOKIE, SESSIONS.sign_in("admin"))
         response = await client.get(path, headers=headers)
     assert response.status_code == (403 if auth == "revoked" else 401)
     queries.list_conversations.assert_not_awaited()

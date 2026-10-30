@@ -4,10 +4,10 @@ from unittest.mock import AsyncMock
 
 import asyncpg
 import pytest
+from cloud_agent.identity import IdentityNotConfigured
 from fastapi import FastAPI
 
 from cloud_agent.app import lifespan
-from cloud_agent.identity import IdentityNotConfigured
 from cloud_agent.identity_namespace import IdentityNamespaceError
 from cloud_agent.settings import apply_settings
 
@@ -54,6 +54,7 @@ async def test_incomplete_gateway_keeps_setup_available_but_requires_an_issuer_f
     app = FastAPI()
     async with lifespan(app, background=False):
         from cloud_agent.identity import gateway_issuer
+
         from cloud_agent.settings import settings_response
 
         assert app.state.storage is not None

@@ -9,8 +9,6 @@ through the application ``create_app`` builds, over the real store.
 
 from __future__ import annotations
 
-from tests.support.owners import on_connection
-
 import json
 from typing import Any
 
@@ -28,13 +26,14 @@ from tests.integration.servers.test_pending_message_queue import (
     _Grants,
     pool as pool,
 )
+from tests.support.owners import on_connection
 
 from cloud_agent.api import worker
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_owner_directory,
     get_grant_client,
+    get_owner_directory,
     get_storage,
 )
 from cloud_agent.api.worker import verify_claiming_host
@@ -96,7 +95,9 @@ async def http(pool, monkeypatch):
         assert environment.status_code == 201, environment.text
         job = await client.post(
             "/v1/agent/jobs",
-            json=on_connection({"repo": _REPO, "task_prompt": "fix it", "model": "glm-5.1", "base_sha": "a" * 40}),
+            json=on_connection(
+                {"repo": _REPO, "task_prompt": "fix it", "model": "glm-5.1", "base_sha": "a" * 40}
+            ),
         )
         assert job.status_code == 201, job.text
         yield (

@@ -14,8 +14,6 @@ override the source wrote.
 
 from __future__ import annotations
 
-from tests.support.owners import on_connection
-
 import asyncio
 import contextlib
 import os
@@ -27,13 +25,14 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.db import assert_pool_idle, reset_agent_tables
 from tests.support.migrations import apply_migrations
+from tests.support.owners import on_connection
 
 from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_owner_directory,
     get_grant_client,
+    get_owner_directory,
     get_storage,
 )
 from cloud_agent.api.worker import verify_claiming_host
@@ -253,7 +252,9 @@ async def test_a_runners_batch_is_stored_in_order_through_the_real_endpoint(api)
     client, _store, pool = api
     created = await client.post(
         "/v1/agent/jobs",
-        json=on_connection({"repo": "owner/name", "task_prompt": "batched task", "model": "glm-5.1"}),
+        json=on_connection(
+            {"repo": "owner/name", "task_prompt": "batched task", "model": "glm-5.1"}
+        ),
     )
     job_id = created.json()["id"]
     claim = await client.post("/v1/agent/worker/claim", json=_claim_body("w1"))
@@ -298,7 +299,9 @@ async def test_environment_maintenance_lock_does_not_delay_attempt_reaper(api, m
     client, store, pool = api
     created = await client.post(
         "/v1/agent/jobs",
-        json=on_connection({"repo": "owner/name", "task_prompt": "lock test", "model": _TEST_MODEL}),
+        json=on_connection(
+            {"repo": "owner/name", "task_prompt": "lock test", "model": _TEST_MODEL}
+        ),
     )
     assert created.status_code == 201
     claim = await client.post("/v1/agent/worker/claim", json=_claim_body("lock-test"))

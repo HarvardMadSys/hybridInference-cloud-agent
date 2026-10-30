@@ -26,8 +26,9 @@ import pytest
 import pytest_asyncio
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
+from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 
 pytestmark = pytest.mark.asyncio
@@ -39,7 +40,7 @@ _API_KEY = "hyi-programmatic-client"
 
 @pytest.fixture(autouse=True)
 def _session_env(monkeypatch):
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, _SESSION_SECRET)
+    use_session_secret(monkeypatch)
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
     yield
 
@@ -69,8 +70,8 @@ def _worker_token() -> str:
 async def test_the_session_cookie_authenticates_the_owner(client: AsyncClient) -> None:
     """The one owner credential this service has."""
     client.cookies.set(
-        identity.SESSION_COOKIE,
-        identity.mint_session(user_id=_USER),
+        LOCAL_SESSION_COOKIE,
+        SESSIONS.sign_in(_USER),
     )
 
     response = await client.get("/owner")
@@ -81,7 +82,7 @@ async def test_the_session_cookie_authenticates_the_owner(client: AsyncClient) -
 
 async def test_a_session_bearer_authenticates_the_owner(client: AsyncClient) -> None:
     """Same credential, carried the way a programmatic caller carries it."""
-    token = identity.mint_session(user_id=_USER)
+    token = SESSIONS.sign_in(_USER)
 
     response = await client.get("/owner", headers={"Authorization": f"Bearer {token}"})
 
@@ -133,8 +134,8 @@ async def test_the_cookie_wins_when_a_worker_bearer_rides_along(client: AsyncCli
     whose answer changed are the ones that used to reach a store.
     """
     client.cookies.set(
-        identity.SESSION_COOKIE,
-        identity.mint_session(user_id=_USER),
+        LOCAL_SESSION_COOKIE,
+        SESSIONS.sign_in(_USER),
     )
 
     response = await client.get("/owner", headers={"Authorization": f"Bearer {_worker_token()}"})

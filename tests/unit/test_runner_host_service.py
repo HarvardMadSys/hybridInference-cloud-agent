@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from tests.support.owners import connection_access
 
 from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.enrollment import HostIdentity
@@ -161,8 +162,6 @@ def service(monkeypatch):
     runner_mod._STOPPING.clear()
     monkeypatch.setenv("AGENT_DEPLOYMENT_SHA", "sha")
     monkeypatch.setenv("AGENT_HOST_SLOTS", "3")
-    monkeypatch.setenv("AGENT_AUTH_MODE", "gateway")
-    monkeypatch.setenv("AGENT_GATEWAY_URL", "http://gateway")
     identity = HostIdentity(
         host="host-a",
         credential="host-cred",
@@ -214,7 +213,6 @@ def _serve(backend, *, launch: Callable[[dict], LaunchResult]) -> int:
     """Run the host service against a scripted queue and scripted launches."""
     return runner_mod.run_forever(
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         backend=backend,
         host="host-a",
@@ -275,7 +273,6 @@ def test_the_deployment_canary_always_runs_the_full_probe(monkeypatch, raw):
             runner_mod._serve_turn(
                 handover_fd=write_fd,
                 base_url="http://control",
-                gateway_url="http://gateway",
                 worker_id="runner-a",
                 lease_ttl=120.0,
                 agent_timeout_s=3600.0,
@@ -313,7 +310,6 @@ def test_a_handover_read_error_keeps_the_spawned_child_tracked(monkeypatch):
     result = runner_mod._spawn_turn(
         _delivered_job(),
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -337,7 +333,6 @@ def test_a_handover_pipe_failure_is_not_started(monkeypatch):
     result = runner_mod._spawn_turn(
         _delivered_job(),
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -377,7 +372,6 @@ def test_handover_eof_keeps_the_spawned_child_tracked(monkeypatch):
     result = runner_mod._spawn_turn(
         _delivered_job(),
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -420,7 +414,6 @@ def test_ctrl_c_during_handover_kills_and_reaps_the_untracked_child(monkeypatch)
         runner_mod._spawn_turn(
             _delivered_job(),
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -462,7 +455,6 @@ def _qualified_backend(monkeypatch, events: list[str]):
     monkeypatch.setattr(backend, "preflight", lambda: events.append("full"))
     monkeypatch.setattr(backend, "check_network", lambda: events.append("network"))
     monkeypatch.setattr(backend, "version_stamp", lambda: {})
-    monkeypatch.setattr(backend, "check_gateway_reachable", lambda _url: None)
     return backend
 
 
@@ -1207,7 +1199,6 @@ def test_an_empty_claims_proof_is_the_one_its_environment_poll_presents(service,
     _identity, _process_backend, _released = service
     backend = runner_mod.ContainerBackend(image="img")
     monkeypatch.setattr(backend, "preflight", lambda **_kw: None)
-    monkeypatch.setattr(backend, "check_gateway_reachable", lambda _url: None)
     monkeypatch.setattr(
         backend, "version_stamp", lambda: {"sandbox_image_digest": "sha256:" + "a" * 64}
     )
@@ -1365,7 +1356,6 @@ def test_a_turn_process_declines_an_empty_delivery_and_runs_nothing(monkeypatch,
     code = runner_mod._serve_turn(
         handover_fd=write_fd,
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -1415,7 +1405,6 @@ def test_a_turn_process_accepts_before_it_runs_the_turn(monkeypatch):
         runner_mod._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -1475,7 +1464,6 @@ def test_a_turn_process_declines_when_its_backend_is_not_usable(monkeypatch, emp
         runner_mod._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -1507,7 +1495,6 @@ def test_a_turn_process_declines_a_payload_it_cannot_use(monkeypatch):
         runner_mod._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -1529,7 +1516,6 @@ def test_the_cli_routes_turn_mode_and_hides_its_flags(monkeypatch):
 
     calls: dict[str, Any] = {}
     monkeypatch.setenv("AGENT_CONTROL_PLANE_URL", "http://control")
-    monkeypatch.setenv("AGENT_GATEWAY_URL", "http://gateway")
     monkeypatch.setattr(runner_mod, "configure_process_logging", lambda: None)
     monkeypatch.setattr(runner_mod, "_serve_turn", lambda **kw: calls.setdefault("turn", kw) and 0)
     monkeypatch.setattr(
@@ -1545,7 +1531,6 @@ def test_the_cli_routes_turn_mode_and_hides_its_flags(monkeypatch):
 def test_turn_mode_without_a_handover_descriptor_is_refused(monkeypatch):
     """The host service supplies both flags; one alone is a hand-built command."""
     monkeypatch.setenv("AGENT_CONTROL_PLANE_URL", "http://control")
-    monkeypatch.setenv("AGENT_GATEWAY_URL", "http://gateway")
     monkeypatch.setattr(runner_mod, "configure_process_logging", lambda: None)
     with pytest.raises(SystemExit):
         runner_mod.main(["--turn", "--host", "host-a"])
@@ -1921,7 +1906,6 @@ def test_a_turn_process_reattaches_the_selection_it_was_handed(monkeypatch):
     code = runner_mod._serve_turn(
         handover_fd=write_fd,
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -1997,7 +1981,6 @@ def test_a_child_never_refuses_a_turn_over_an_unusable_selection(monkeypatch, se
     code = runner_mod._serve_turn(
         handover_fd=write_fd,
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -2072,7 +2055,6 @@ def test_a_declining_child_does_not_emit_or_refund_the_parent_selection(monkeypa
     code = runner_mod._serve_turn(
         handover_fd=write_fd,
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -2334,6 +2316,7 @@ def _claimed(job_id: str = "ajob_1") -> Any:
     from cloud_agent_host.runner import ClaimedJob
 
     return ClaimedJob(
+        model_connection=connection_access("claude-code"),
         job_id=job_id,
         thread_id="athr_1",
         attempt_id=7,

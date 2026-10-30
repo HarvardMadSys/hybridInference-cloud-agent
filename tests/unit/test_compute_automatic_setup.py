@@ -748,7 +748,6 @@ async def test_hosts_pull_the_release_s_published_sandbox_image_when_there_is_on
 async def test_local_setup_only_uses_control_and_mcp_and_never_records_gateway_inputs(
     harness: Harness, monkeypatch: pytest.MonkeyPatch, sent_gateway: bool
 ) -> None:
-    monkeypatch.setenv("AGENT_AUTH_MODE", "local")
     # Removing its connection makes any accidental Gateway lookup fail, even
     # before the tunnel provider could be called.
     harness.repository.connections.pop("gateway-key")
@@ -790,7 +789,6 @@ async def test_gateway_setup_still_requires_its_machine_before_any_effect(harnes
 async def test_local_setup_status_does_not_suggest_a_gateway(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("AGENT_AUTH_MODE", "local")
     status = await harness.restart().read_status()
     assert set(status["machine_defaults"]) == {"control"}
     await harness.restart().create(request(gateway=None))

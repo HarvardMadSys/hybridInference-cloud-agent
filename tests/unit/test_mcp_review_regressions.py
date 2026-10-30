@@ -124,7 +124,7 @@ class TestTheRuntimeRelayEntry:
         argv, _env = ClaudeCodeRuntime().prepare_live(
             workdir="/w",
             model="glm-5.1",
-            gateway_base_url="http://backend:8080",
+            model_base_url="http://backend:8080",
             credential="agr-credential",
             mcp_config=self._config(("github", "docs")),
         )
@@ -147,7 +147,7 @@ class TestTheRuntimeRelayEntry:
         _argv, env = runtime.prepare_live(
             workdir="/w",
             model="glm-5.1",
-            gateway_base_url="http://backend:8080",
+            model_base_url="http://backend:8080",
             credential="agr-credential",
             mcp_config=self._config(("github", "docs")),
         )
@@ -162,7 +162,7 @@ class TestTheRuntimeRelayEntry:
         argv, _env = ClaudeCodeRuntime().prepare_live(
             workdir="/w",
             model="glm-5.1",
-            gateway_base_url="http://backend:8080",
+            model_base_url="http://backend:8080",
             credential="agr-credential",
             mcp_config=self._config(()),
         )

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
+from tests.support.owners import connection_access
 from tests.support.ssh_keys import host_key, private_key
 
 from cloud_agent_host import runner as runner_mod
@@ -43,6 +44,7 @@ _ACCESS = SshAccess(
     ],
 )
 _JOB = ClaimedJob(
+    model_connection=connection_access("claude-code"),
     job_id="ajob_1",
     attempt_id=7,
     attempt_no=1,
@@ -120,7 +122,6 @@ def _run(monkeypatch, job: ClaimedJob) -> Mock:
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=Mock(),
     )

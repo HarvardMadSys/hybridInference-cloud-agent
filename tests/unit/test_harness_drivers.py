@@ -47,7 +47,7 @@ def test_claude_live_transport_installs_passive_hooks_in_retained_state():
     updates: list[dict] = []
     context = LaunchContext(
         workdir="/workspace",
-        gateway_base_url="http://gateway/v1",
+        model_base_url="http://gateway/v1",
         credential="resident-grant",
         provides_isolation=True,
         state_dir="/agent-state",

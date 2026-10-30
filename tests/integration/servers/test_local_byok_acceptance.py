@@ -19,6 +19,8 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
+from cloud_agent.gateway import GatewayClient
+from cloud_agent.grants import GrantClient
 from tests.integration.storage.test_independent_accounts_acceptance import (
     _ADMIN as ADMIN_TOKEN,
     _mail_token,
@@ -31,8 +33,6 @@ from cloud_agent.app import create_app
 from cloud_agent.application import model_connection_check
 from cloud_agent.application.model_connections import model_connection_cipher
 from cloud_agent.bootstrap.identity import attach_local_identity, bind_identity_source
-from cloud_agent.gateway import GatewayClient
-from cloud_agent.grants import GrantClient
 from cloud_agent.settings import reset_settings
 from cloud_agent.storage.assembly import Storage
 

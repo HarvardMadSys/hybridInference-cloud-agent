@@ -24,6 +24,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import launch_connection
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient
 from cloud_agent.schemas import RetainedSandboxStop
@@ -526,10 +527,10 @@ def _launch() -> dict[str, object]:
         "runtime_version": "2.1.220",
         "native_session_id": "native-source",
         "model": "glm-5.1",
-        "gateway_base_url": "http://gateway",
-        "credential": "grant",
+        "credential": "provider-key",
         "slot_id": 0,
         "residency_generation": 1,
+        **launch_connection("claude-code"),
     }
 
 

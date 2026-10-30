@@ -27,8 +27,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
+from tests.support.owners import SESSIONS, use_session_secret
 from tests.support.storage import AllCapabilities, OneFake
 
+from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 from cloud_agent.api import mcp_connections
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
@@ -1545,11 +1547,9 @@ class TestAuthorization:
         usable session, are both refused before the code is exchanged, and the
         flow is left for the account that started it, which can still finish.
         """
-        from cloud_agent import identity
         from cloud_agent.mcp import oauth
 
-        monkeypatch.setenv(identity.ENV_SESSION_SECRET, "mcp-callback-session-secret-for-tests")
-        monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
+        use_session_secret(monkeypatch)
         monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", "https://example.com/agents/api")
         monkeypatch.setenv("AGENT_WEB_BASE_URL", "https://example.com/agents")
         metadata = oauth.AuthorizationServerMetadata(
@@ -1585,7 +1585,7 @@ class TestAuthorization:
             def finish(session: str | None) -> httpx.Response:
                 client.cookies.clear()
                 if session is not None:
-                    client.cookies.set(identity.SESSION_COOKIE, session)
+                    client.cookies.set(LOCAL_SESSION_COOKIE, session)
                 return client.get(
                     f"/v1/agent/mcp/oauth/callback/{connection_id}",
                     params={"state": state, "code": "consented-code"},
@@ -1593,7 +1593,7 @@ class TestAuthorization:
                 )
 
             for session, reason in (
-                (identity.mint_session(user_id=_OTHER), "started by another account"),
+                (SESSIONS.sign_in(_OTHER), "started by another account"),
                 (None, "sign in to the account that started this authorization"),
                 ("not-a-session", "sign in to the account that started this authorization"),
             ):
@@ -1610,7 +1610,7 @@ class TestAuthorization:
                 assert store.credential_writes == []
                 assert store.oauth_flow is not None
 
-            completed = finish(identity.mint_session(user_id=_OWNER))
+            completed = finish(SESSIONS.sign_in(_OWNER))
         assert parse_qs(urlsplit(completed.headers["location"]).query)["mcp_authorized"] == ["1"]
         exchange.assert_awaited_once()
         assert store.oauth_flow is None

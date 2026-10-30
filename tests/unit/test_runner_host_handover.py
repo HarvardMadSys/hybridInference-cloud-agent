@@ -101,7 +101,6 @@ def test_a_child_with_the_hosts_verdict_checks_only_the_network(monkeypatch, ver
         code = runner_mod._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -165,7 +164,6 @@ def _serve_child(monkeypatch, backend, payload: dict[str, Any]) -> tuple[int, st
         code = runner_mod._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -359,7 +357,6 @@ def test_only_this_host_can_hand_a_child_a_runtime_verdict(monkeypatch):
         runner_mod._spawn_turn(
             forged,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -411,7 +408,6 @@ def test_only_this_host_can_hand_a_child_its_verification_of_the_rules(monkeypat
         runner_mod._spawn_turn(
             forged,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -432,7 +428,6 @@ def test_the_host_hands_each_turn_the_guard_its_startup_check_verified(service, 
     backend = ContainerBackend(image="sandbox", sandbox_network=_NETWORK)
     monkeypatch.setattr(backend, "preflight", lambda: events.append("full"))
     monkeypatch.setattr(backend, "version_stamp", lambda: {})
-    monkeypatch.setattr(backend, "check_gateway_reachable", lambda _url: None)
     monkeypatch.setattr(
         runner_mod, "HostQualification", lambda actual: FakeQualification(actual, [False], events)
     )

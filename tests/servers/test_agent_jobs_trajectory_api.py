@@ -12,7 +12,6 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     AsyncMock,
     FakeStorage,
     _api_key_secret,
-    _configured_identity_issuer,
     _create_job,
     client,
     datetime,

@@ -15,8 +15,6 @@ end-to-end acceptance: no real provider, mail server or Kata host is used.
 
 from __future__ import annotations
 
-from tests.support.owners import on_connection
-
 import json
 import os
 import re
@@ -28,19 +26,20 @@ import asyncpg
 import httpx
 import pytest
 import pytest_asyncio
+from cloud_agent.gateway import GatewayClient
+from cloud_agent.grants import GrantClient
 from httpx import ASGITransport, AsyncClient
 from tests.integration.servers.test_pending_message_queue import _claim_body as _shared_claim
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 from tests.support.model_connections import with_connection_capability
+from tests.support.owners import on_connection
 
 from cloud_agent.api import worker
 from cloud_agent.api.deps import get_agent_app_credentials
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.application import model_connection_check
 from cloud_agent.bootstrap.identity import attach_local_identity, bind_identity_source
-from cloud_agent.gateway import GatewayClient
-from cloud_agent.grants import GrantClient
 from cloud_agent.settings import reset_settings
 from cloud_agent.storage.assembly import Storage
 from cloud_agent_shared.shared_protocol import SHARED_SANDBOX_CAPABILITY
@@ -238,7 +237,9 @@ async def test_an_approved_account_sets_up_its_own_model_and_runs_a_task_on_it(e
     assert config["default_model"] is None and config["default_model_connection_id"] is None
     refused = await client.post(
         "/v1/agent/jobs",
-        json=on_connection({"repo": None, "task_prompt": "fix it", "model": _MODEL, "runtime": "opencode"}),
+        json=on_connection(
+            {"repo": None, "task_prompt": "fix it", "model": _MODEL, "runtime": "opencode"}
+        ),
     )
     assert refused.status_code == 409
     assert refused.json()["detail"]["error"]["type"] == "model_connection_required"
@@ -413,7 +414,9 @@ async def test_follow_ups_keep_their_personal_source_and_never_fall_back(env):
     source = {"model": _MODEL, "model_connection_id": connection_id}
     job = await client.post(
         "/v1/agent/jobs",
-        json=on_connection({"repo": None, "task_prompt": "fix it", "runtime": "opencode", **source}),
+        json=on_connection(
+            {"repo": None, "task_prompt": "fix it", "runtime": "opencode", **source}
+        ),
     )
     assert job.status_code == 201, job.text
     thread_id = job.json()["thread_id"]
@@ -421,7 +424,8 @@ async def test_follow_ups_keep_their_personal_source_and_never_fall_back(env):
 
     # The same model id without its connection names the Gateway, which has none.
     gateway = await client.post(
-        f"/v1/agent/threads/{thread_id}/messages", json=on_connection({"prompt": "next", "model": _MODEL})
+        f"/v1/agent/threads/{thread_id}/messages",
+        json=on_connection({"prompt": "next", "model": _MODEL}),
     )
     assert gateway.status_code == 409, gateway.text
     assert gateway.json()["detail"]["error"]["type"] == "model_connection_required"

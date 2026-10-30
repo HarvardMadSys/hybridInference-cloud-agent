@@ -8,11 +8,14 @@ import textwrap
 from typing import Any
 
 import pytest
+from cloud_agent.api.service_jobs import verify_oncall_dispatch
 from fastapi import Depends, FastAPI, Header
 from httpx import ASGITransport, AsyncClient
 from tests.servers.test_admin_surface_guards import _flatten
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
+from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
+from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.api._owner_auth import (
     authenticate_agent_owner,
     require_agent_owner,
@@ -24,9 +27,7 @@ from cloud_agent.api.deps import (
     verify_admin_access,
 )
 from cloud_agent.api.hosts import authenticate_host
-from cloud_agent.api.service_jobs import verify_oncall_dispatch
 from cloud_agent.api.worker import _worker_claims, verify_claiming_host
-from cloud_agent.accounts.directory import OwnerDirectoryError
 
 pytestmark = pytest.mark.asyncio
 _OWNER = "user_1"
@@ -47,7 +48,9 @@ class _AccessGateway:
     async def agent_access(self, user_id: str) -> dict[str, Any]:
         self.asked.append(user_id)
         if self.error is not None:
-            raise OwnerDirectoryError("unavailable", status_code=self.error, error_type=self.error_type)
+            raise OwnerDirectoryError(
+                "unavailable", status_code=self.error, error_type=self.error_type
+            )
         return {
             "user_id": user_id,
             "allowed": "agent.use" in self.permissions,
@@ -203,7 +206,7 @@ async def test_the_admin_surface_asks_the_gateway_on_every_request(admin_env):
     async with AsyncClient(
         transport=ASGITransport(app=_app(gateway)), base_url="https://test"
     ) as client:
-        client.cookies.set(identity.SESSION_COOKIE, identity.mint_session(user_id=_OWNER))
+        client.cookies.set(LOCAL_SESSION_COOKIE, SESSIONS.sign_in(_OWNER))
         assert (await client.get("/probe")).status_code == 200
         assert (await client.get("/admin/probe")).status_code == 200
         gateway.permissions = ["agent.use"]
@@ -427,7 +430,7 @@ async def test_the_walk_sees_a_read_a_name_and_a_mention_for_what_they_are():
 
 @pytest.fixture()
 def admin_env(monkeypatch):
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "admin-test-secret-long-enough-for-hs256")
+    use_session_secret(monkeypatch)
     monkeypatch.setenv("ADMIN_TOKEN", "the-machine-token")
 
 
@@ -443,7 +446,7 @@ async def test_admin_permission_is_scoped_separately(
     async with AsyncClient(
         transport=ASGITransport(app=_app(gateway)), base_url="https://test"
     ) as client:
-        client.cookies.set(identity.SESSION_COOKIE, identity.mint_session(user_id=_OWNER))
+        client.cookies.set(LOCAL_SESSION_COOKIE, SESSIONS.sign_in(_OWNER))
         response = await client.request(method, "/admin/probe")
     assert response.status_code == expected
     assert gateway.asked == [_OWNER]

@@ -56,6 +56,10 @@ class AllCapabilities:
         """The owner's one connection (:data:`~tests.support.owners.CONNECTION_ID`); any other is missing."""
         return connection_row(user_id) if connection_id == CONNECTION_ID else None
 
+    async def bind_residency(self, **_kwargs: Any) -> bool:
+        """The connection is unchanged, so a residency binds at its current revision."""
+        return True
+
     async def scan_key_ciphertexts(self, *, sandbox_id: str, limit: int) -> list[str]:
         """Legacy fixtures' sandbox groups were never handed a model connection key."""
         return []

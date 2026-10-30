@@ -1512,7 +1512,7 @@ def test_every_runtime_credential_reaches_a_resident_exec_by_name_only(monkeypat
     arguments = {
         "workdir": CHAT_WORKDIR,
         "model": "glm-5.1",
-        "gateway_base_url": "http://agent-gateway:8080",
+        "model_base_url": "http://agent-gateway:8080",
         "credential": grant,
         "provides_isolation": True,
         "mcp_config": RuntimeMCPConfig(

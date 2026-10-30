@@ -19,6 +19,7 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from tests.support.owners import connection_access
 
 from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.member_resources import CheckpointSchedule
@@ -27,6 +28,7 @@ from cloud_agent_host.runtimes import get_runtime
 from cloud_agent_host.sandbox import ContainerBackend
 
 _JOB = ClaimedJob(
+    model_connection=connection_access("claude-code"),
     job_id="ajob_1",
     attempt_id=7,
     attempt_no=1,
@@ -173,7 +175,6 @@ def _run_terminal_turn(
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
     )

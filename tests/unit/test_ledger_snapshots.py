@@ -1,33 +1,23 @@
-"""Snapshot aggregation and failure isolation without a Gateway dependency."""
+"""Summaries of the usage snapshots earlier releases stored: exact, partial when they must be."""
 
 from __future__ import annotations
 
-import asyncio
-from collections import deque
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
-
-import pytest
 
 from cloud_agent import ledger
 from cloud_agent.admin_usage import MAX_USAGE_LEDGER_ROWS
-from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.grant_usage import (
     DECIMAL_DIGITS,
     DERIVED_AMOUNT_CHARS,
     USAGE_METRICS,
-    GrantUsageReport,
 )
 from cloud_agent.ledger import (
     _sum_amounts,
     _sum_reports,
-    collect_usage_snapshots,
-    refresh_ledger_entry,
     summarize_ledger,
 )
-from cloud_agent.workers.background_wake import LEDGER, BackgroundWake
 
 START = datetime(2026, 9, 9, 10, tzinfo=UTC)
 END = START + timedelta(minutes=1)
@@ -420,169 +410,3 @@ def test_a_job_whose_sum_is_refused_reads_as_partial_with_why(monkeypatch):
     assert summary.unknown_rows is None
     assert summary.status == "partial"
     assert [attempt.status for attempt in summary.attempts] == ["available"] * 8
-
-
-@pytest.mark.asyncio
-async def test_collector_uses_the_saved_grant_and_fixed_window():
-    store = SimpleNamespace(complete_ledger_refresh=AsyncMock(return_value=True))
-    grants = SimpleNamespace(
-        binding_id="gw_one",
-        usage=AsyncMock(return_value=GrantUsageReport.model_validate(report_payload())),
-    )
-    await refresh_ledger_entry(store, grants, ledger_row())
-    grants.usage.assert_awaited_once_with("agr_actual", since=START, until=END)
-    saved = store.complete_ledger_refresh.await_args.kwargs
-    assert saved["refresh_generation"] == 5
-    assert saved["terminal"] is True
-    assert saved["error_code"] is None
-    assert saved["report"]["grant_id"] == "agr_actual"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure",
-    [OwnerDirectoryError("Bearer SECRET", error_type="usage_unavailable"), RuntimeError("SECRET")],
-)
-async def test_collector_records_only_a_safe_failure_and_no_replacement_snapshot(failure):
-    store = SimpleNamespace(complete_ledger_refresh=AsyncMock(return_value=True))
-    grants = SimpleNamespace(binding_id="gw_one", usage=AsyncMock(side_effect=failure))
-    await refresh_ledger_entry(store, grants, ledger_row())
-    saved = store.complete_ledger_refresh.await_args.kwargs
-    assert saved["report"] is None
-    assert saved["error_code"] in {"usage_unavailable", "refresh_failed"}
-    assert "SECRET" not in str(saved)
-
-
-@pytest.mark.asyncio
-async def test_rebinding_never_queries_the_new_gateway_with_an_old_reference():
-    store = SimpleNamespace(complete_ledger_refresh=AsyncMock(return_value=True))
-    grants = SimpleNamespace(binding_id="gw_new", usage=AsyncMock())
-    await refresh_ledger_entry(store, grants, ledger_row())
-    grants.usage.assert_not_awaited()
-    assert store.complete_ledger_refresh.await_args.kwargs["error_code"] == "binding_changed"
-
-
-@pytest.mark.asyncio
-async def test_background_collector_limits_inflight_queries_and_propagates_cancellation():
-    entered = 0
-    started = asyncio.Event()
-    blocker = asyncio.Event()
-
-    async def fetch(*args, **kwargs):
-        nonlocal entered
-        entered += 1
-        if entered == 4:
-            started.set()
-        await blocker.wait()
-
-    store = SimpleNamespace(
-        claim_due_ledger_refresh=AsyncMock(side_effect=lambda: ledger_row()),
-        complete_ledger_refresh=AsyncMock(),
-    )
-    grants = SimpleNamespace(binding_id="gw_one", usage=fetch)
-    task = asyncio.create_task(collect_usage_snapshots(store, grants))
-    try:
-        await asyncio.wait_for(started.wait(), timeout=1)
-        assert entered == 4
-        assert store.claim_due_ledger_refresh.await_count == 4
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    store.complete_ledger_refresh.assert_not_awaited()
-
-
-@pytest.mark.parametrize("save_fails", [False, True])
-async def test_collector_reuses_a_free_slot_while_other_queries_are_slow(
-    monkeypatch, caplog, save_fails
-):
-    rows = deque(ledger_row(id=index) for index in range(1, 6))
-    entered = [asyncio.Event() for _ in range(5)]
-    release_fast = asyncio.Event()
-    release_slow = asyncio.Event()
-    active = 0
-    peak = 0
-    cancelled = set()
-
-    async def refresh(store, grants, row):
-        nonlocal active, peak
-        active += 1
-        peak = max(peak, active)
-        entered[row["id"] - 1].set()
-        try:
-            await (release_fast if row["id"] == 2 else release_slow).wait()
-            if save_fails:
-                raise RuntimeError("snapshot save failed")
-        except asyncio.CancelledError:
-            cancelled.add(row["id"])
-            raise
-        finally:
-            active -= 1
-
-    monkeypatch.setattr(ledger, "refresh_ledger_entry", refresh)
-    store = SimpleNamespace(
-        claim_due_ledger_refresh=AsyncMock(side_effect=lambda: rows.popleft() if rows else None)
-    )
-    task = asyncio.create_task(collect_usage_snapshots(store, SimpleNamespace()))
-    try:
-        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered[:4])), 1)
-        assert active == 4
-        release_fast.set()
-        # The fifth job must start without waiting for the three slow queries.
-        await asyncio.wait_for(entered[4].wait(), 1)
-        assert active == peak == 4
-        assert not release_slow.is_set()
-        if save_fails:
-            assert "agent_ledger_snapshot_save_failed" in caplog.text
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    assert active == 0
-    assert cancelled == {1, 3, 4, 5}
-
-
-@pytest.mark.parametrize("arrival", ["notification", "scheduled", "poll"])
-async def test_collector_uses_spare_capacity_for_new_work_during_a_slow_query(monkeypatch, arrival):
-    rows = deque([ledger_row(id=1)])
-    first_empty = asyncio.Event()
-    started = [asyncio.Event(), asyncio.Event()]
-    blocker = asyncio.Event()
-    monkeypatch.setattr(ledger, "REFRESH_POLL_SECONDS", 0.01)
-
-    async def claim():
-        if rows:
-            return rows.popleft()
-        first_empty.set()
-        return None
-
-    async def refresh(store, grants, row):
-        started[row["id"] - 1].set()
-        await blocker.wait()
-
-    monkeypatch.setattr(ledger, "refresh_ledger_entry", refresh)
-    wake = None if arrival == "poll" else BackgroundWake()
-    if wake is not None:
-        wake.listening = True
-    store = SimpleNamespace(
-        claim_due_ledger_refresh=claim,
-        next_ledger_refresh_due=AsyncMock(
-            side_effect=lambda: (
-                datetime.now(UTC) + timedelta(seconds=0.05) if arrival == "scheduled" else None
-            )
-        ),
-    )
-    task = asyncio.create_task(collect_usage_snapshots(store, SimpleNamespace(), wake=wake))
-    try:
-        await asyncio.wait_for(first_empty.wait(), 1)
-        await asyncio.wait_for(started[0].wait(), 1)
-        rows.append(ledger_row(id=2))
-        if arrival == "notification":
-            wake.notified(LEDGER)
-        # Arrival is observed while the first query still owns its slot.
-        await asyncio.wait_for(started[1].wait(), 1)
-        assert not blocker.is_set()
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task

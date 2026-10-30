@@ -50,13 +50,13 @@ import asyncpg
 import httpx
 import pytest
 import pytest_asyncio
+from cloud_agent.identity import SESSION_COOKIE, mint_session
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
 from cloud_agent import measurement_writer, operation_measurement, sandbox_manager_routing
 from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory
 from cloud_agent.app import create_app
-from cloud_agent.identity import SESSION_COOKIE, mint_session
 from cloud_agent.operation_measurement import INTERACTION_HEADER
 from cloud_agent.sandbox_manager_client import SandboxManagerError, SandboxManagerStream
 from cloud_agent.storage.assembly import Storage

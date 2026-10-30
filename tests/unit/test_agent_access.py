@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import httpx
 import pytest
-
 from cloud_agent.gateway import GatewayClient, OwnerDirectoryError
 
 

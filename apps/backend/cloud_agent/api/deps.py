@@ -31,7 +31,11 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from fastapi import Depends, Header, HTTPException, Request
 
-from cloud_agent.accounts.directory import LocalOwnerDirectory, OwnerDirectoryError
+from cloud_agent.accounts.directory import (
+    LocalDirectoryUnavailable,
+    LocalOwnerDirectory,
+    OwnerDirectoryError,
+)
 from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.api.errors import AgentConfigurationError
 from cloud_agent.logging_utils import get_logger
@@ -83,21 +87,38 @@ def get_storage(request: Request) -> Storage | None:
     return getattr(request.app.state, "storage", None)
 
 
-def get_owner_directory(request: Request) -> LocalOwnerDirectory:
+class _NoDirectory:
+    """The directory of an application with no store: every question is refused.
+
+    Not a verdict on anyone: :class:`LocalDirectoryUnavailable` reads as 503,
+    so a request that needed an account is refused and one admitted by
+    ``ADMIN_TOKEN`` never asks.
+    """
+
+    async def agent_access(self, user_id: str) -> AgentAccessDecision:
+        raise LocalDirectoryUnavailable("no account store is configured")
+
+    async def user_email(self, user_id: str) -> str:
+        raise LocalDirectoryUnavailable("no account store is configured")
+
+
+def get_owner_directory(request: Request) -> LocalOwnerDirectory | _NoDirectory:
     """Dependency to obtain the account directory every owner check reads.
 
     The lifespan installs it as ``app.state.owners``. An application that
     did not (a test application with only a store) gets one over its store,
-    built once; with no store there is no account to admit, so it refuses
-    with 503 rather than admitting anyone.
+    built once. With no store there is no account to admit: the directory it
+    gets refuses every question with 503 rather than admitting anyone.
     """
     owners = getattr(request.app.state, "owners", None)
-    if owners is None:
-        storage = get_storage(request)
-        if storage is None:
-            raise AgentConfigurationError()
-        owners = LocalOwnerDirectory(storage.local_accounts)
-        request.app.state.owners = owners
+    if owners is not None:
+        return owners
+    storage = get_storage(request)
+    accounts = getattr(storage, "local_accounts", None) if storage is not None else None
+    if accounts is None:
+        return _NoDirectory()
+    owners = LocalOwnerDirectory(accounts)
+    request.app.state.owners = owners
     return owners
 
 
@@ -339,19 +360,22 @@ def bearer_token(authorization: str | None) -> str | None:
 async def get_current_user(
     request: Request,
     authorization: str | None = Header(None),
+    storage: Any = Depends(get_storage),
 ) -> dict[str, Any]:
     """Verify the account session a request presents.
 
     Agent permissions are resolved separately on every protected request; see
-    :func:`local_session_owner` for the session itself.
+    :func:`local_session_owner` for the session itself. ``storage`` is the
+    store the session is read from; a direct caller passes the request's own.
     """
-    return await _local_current_user(request, authorization)
+    return await _local_current_user(request, authorization, storage)
 
 
 async def verify_admin_access(
     request: Request,
     authorization: str | None = Header(None),
     owners: Any = Depends(get_owner_directory),
+    storage: Any = Depends(get_storage),
 ) -> str:
     """Authenticate an infrastructure token or a current Agent administrator.
 
@@ -364,7 +388,7 @@ async def verify_admin_access(
     # header value is whatever latin-1 the caller sent. A refusal, not a 500.
     if configured and presented and hmac.compare_digest(presented.encode(), configured.encode()):
         return "admin-token"
-    return await _local_admin(request, authorization, owners)
+    return await _local_admin(request, authorization, owners, storage)
 
 
 # ── Account sessions ───────────────────────────────────────────────────
@@ -389,7 +413,9 @@ def pinned_local_account(request: Request) -> str | None:
     return value.strip() or None
 
 
-async def local_session_owner(request: Request, authorization: str | None) -> SessionOwner | None:
+async def local_session_owner(
+    request: Request, authorization: str | None, storage: Any = None
+) -> SessionOwner | None:
     """The live account session a request presents, read from this database.
 
     The session cookie, or a bearer of the session's shape; anything else
@@ -410,7 +436,7 @@ async def local_session_owner(request: Request, authorization: str | None) -> Se
     kept = getattr(request.state, "local_session", None)
     if kept is not None and kept[0] == token:
         return kept[1]
-    owner = await _read_local_session(request, token)
+    owner = await _read_local_session(request, token, storage)
     request.state.local_session = (token, owner)
     return owner
 
@@ -427,13 +453,15 @@ def _account_switched() -> HTTPException:
     )
 
 
-async def _read_local_session(request: Request, token: str) -> SessionOwner | None:
+async def _read_local_session(
+    request: Request, token: str, storage: Any = None
+) -> SessionOwner | None:
     from cloud_agent.accounts.config import LocalAuthNotConfigured
     from cloud_agent.accounts.tokens import browser_hash, looks_like_browser_token, session_hash
     from cloud_agent.domain.accounts import may_sign_in
     from cloud_agent.ports.accounts import SessionOwner
 
-    storage = require_store(get_storage(request))
+    storage = require_store(storage if storage is not None else get_storage(request))
     try:
         browser = None
         if looks_like_browser_token(token):
@@ -467,8 +495,10 @@ async def _read_local_session(request: Request, token: str) -> SessionOwner | No
     return owner
 
 
-async def _local_current_user(request: Request, authorization: str | None) -> dict[str, Any]:
-    owner = await local_session_owner(request, authorization)
+async def _local_current_user(
+    request: Request, authorization: str | None, storage: Any = None
+) -> dict[str, Any]:
+    owner = await local_session_owner(request, authorization, storage)
     if owner is not None:
         return {"user_id": owner.account.id, "authenticated": True}
     from cloud_agent.accounts.session_cookie import presented_local_token
@@ -483,9 +513,11 @@ async def require_local_admission(request: Request, user_id: str) -> None:
     await require_agent_access(get_owner_directory(request), user_id)
 
 
-async def _local_admin(request: Request, authorization: str | None, owners: Any) -> str:
+async def _local_admin(
+    request: Request, authorization: str | None, owners: Any, storage: Any = None
+) -> str:
     """Admit a session whose account currently holds ``agent.admin``."""
-    user = await _local_current_user(request, authorization)
+    user = await _local_current_user(request, authorization, storage)
     await require_agent_access(owners, user["user_id"], "agent.admin")
     return f"admin:{user['user_id']}"
 

@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from tests.support.owners import launch_connection
 
 from cloud_agent_host import resident_transport
 from cloud_agent_host.chat_sandbox import (
@@ -380,9 +381,9 @@ def _launch(runtime_id: str, *, slot: int = 1, **changes: Any) -> ResidentLaunch
             native_session_id="native-member",
             model="model",
             reasoning_effort=None,
-            gateway_base_url="http://gateway",
             credential="residency-grant",
             slot_id=slot,
+            **launch_connection(runtime_id),
         ),
         **changes,
     )

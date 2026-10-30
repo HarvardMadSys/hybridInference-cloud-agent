@@ -10,8 +10,9 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
+from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.api import teams
 from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.domain.teams import (
@@ -25,7 +26,6 @@ from cloud_agent.domain.teams import (
     TeamNotFound,
     TeamRecord,
 )
-from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.user_avatar import generate_user_avatar
 
 NOW = datetime(2026, 10, 15, tzinfo=UTC)
@@ -72,8 +72,7 @@ OWN_REQUEST = OwnJoinRequestRecord(
 
 @pytest.fixture
 def app(monkeypatch):
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "teams-test-session-secret-long-enough")
+    use_session_secret(monkeypatch)
     application = FastAPI()
     application.include_router(teams.router)
     repository = AsyncMock()
@@ -87,15 +86,17 @@ def app(monkeypatch):
     }
     gateway.user_email.side_effect = lambda user_id: f"{user_id}@example.com"
     application.dependency_overrides[get_owner_directory] = lambda: gateway
-    application.dependency_overrides[get_storage] = lambda: SimpleNamespace(teams=repository)
+    application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        local_accounts=SESSIONS, teams=repository
+    )
     application.state.repository = repository
-    application.state.gateway = gateway
+    application.state.owners = gateway
     application.state.admitted = admitted
     return application
 
 
 def headers(user="alice"):
-    return {"Authorization": f"Bearer {identity.mint_session(user_id=user)}"}
+    return {"Authorization": f"Bearer {SESSIONS.sign_in(user)}"}
 
 
 async def call(app, method, path, user="alice", **kwargs):

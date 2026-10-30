@@ -82,9 +82,10 @@ async def test_saved_gateway_dispatch_credential_needs_no_environment_default(
     control_plane_env: dict, monkeypatch
 ) -> None:
     """An empty import disables grants; a saved credential configures the live client."""
+    from cloud_agent.grants import GrantClient
+
     from cloud_agent import settings
     from cloud_agent.accounts.directory import OwnerDirectoryError
-    from cloud_agent.grants import GrantClient
 
     assert control_plane_env["GATEWAY_GRANT_DISPATCH_TOKEN"] == (
         "${GATEWAY_GRANT_DISPATCH_TOKEN:-}"

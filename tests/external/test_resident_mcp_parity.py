@@ -437,7 +437,7 @@ for directory in (".kilo", ".kilocode"):
 
     context = LaunchContext(
         workdir="/workspace",
-        gateway_base_url=f"http://{host}:{model_port}",
+        model_base_url=f"http://{host}:{model_port}",
         credential="test-model-key",
         provides_isolation=True,
         state_dir="/agent-state/mcp-test",
@@ -501,7 +501,7 @@ for directory in (".kilo", ".kilocode"):
             live_argv, env = get_runtime(runtime).prepare_live(
                 workdir=context.workdir,
                 model="test-model",
-                gateway_base_url=context.gateway_base_url,
+                model_base_url=context.model_base_url,
                 credential=context.credential,
                 provides_isolation=True,
                 mcp_config=replace(context.mcp_config, credential=rotate()),

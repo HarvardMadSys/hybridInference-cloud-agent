@@ -1246,7 +1246,6 @@ def test_the_runner_reads_the_bounds_the_overlay_configures(monkeypatch, compose
 
 def test_the_runner_reads_the_neutral_gateway_variable(monkeypatch):
     """The self-hosted runner uses the same gateway variable as compose."""
-    monkeypatch.setenv("AGENT_GATEWAY_URL", "https://gateway.example.com")
 
     args = build_parser().parse_args([])
 

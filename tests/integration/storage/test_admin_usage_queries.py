@@ -17,9 +17,9 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.integration.storage.test_agent_job_store import _claim, _create_job
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db
+from tests.support.owners import use_session_secret
 from tests.unit.test_ledger_snapshots import END, START, report_payload
 
-from cloud_agent import identity
 from cloud_agent.admin_usage import (
     MAX_USAGE_LEDGER_ROWS,
     MAX_USAGE_RUNS,
@@ -118,8 +118,7 @@ async def store(db):
 @pytest.fixture
 def admin_token(monkeypatch):
     monkeypatch.setenv("ADMIN_TOKEN", "admin-usage-integration-test")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "admin-usage-integration-long-secret")
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
+    use_session_secret(monkeypatch)
     return ADMIN
 
 

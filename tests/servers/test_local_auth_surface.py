@@ -12,9 +12,10 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
 from cloud_agent.accounts import config
+from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 
 pytestmark = pytest.mark.asyncio
 
@@ -31,8 +32,7 @@ class _NoGateway:
 
 @pytest_asyncio.fixture()
 async def client(monkeypatch):
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "gateway-session-secret-0123456789abcdef")
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
+    use_session_secret(monkeypatch)
     monkeypatch.setenv(config.ENV_WEB_BASE_URL, "https://agents.example/agents")
     monkeypatch.setenv("ADMIN_TOKEN", "admin-token-for-tests-0123456789abcdef")
     from cloud_agent.app import create_app
@@ -140,8 +140,8 @@ async def test_gateway_sign_in_is_closed_in_local_mode(client, local):
 
 
 async def test_a_gateway_session_signs_nobody_in_locally(client, local):
-    gateway_session = identity.mint_session(user_id="01J0000000000000000000000A")
-    client.cookies.set(identity.SESSION_COOKIE, gateway_session)
+    gateway_session = SESSIONS.sign_in("01J0000000000000000000000A")
+    client.cookies.set(LOCAL_SESSION_COOKIE, gateway_session)
     assert (await client.get("/v1/session/me")).status_code == 401
     client.cookies.clear()
     response = await client.get(

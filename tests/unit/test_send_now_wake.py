@@ -50,7 +50,7 @@ async def test_the_claim_hands_the_message_over_at_once(monkeypatch):
             thread_id="athr_1",
             job_id=JOB,
             message=MESSAGE,
-            gateway=None,
+            owners=None,
             app_credentials=None,
             signal=signal,
         )
@@ -81,7 +81,7 @@ async def test_without_a_signal_it_still_looks_on_its_clock(monkeypatch):
             thread_id="athr_1",
             job_id=JOB,
             message=MESSAGE,
-            gateway=None,
+            owners=None,
             app_credentials=None,
         )
     )
@@ -105,7 +105,7 @@ async def test_a_turn_that_ends_first_stops_the_wait(monkeypatch, state):
             thread_id="athr_1",
             job_id=JOB,
             message=MESSAGE,
-            gateway=None,
+            owners=None,
             app_credentials=None,
             signal=signal,
         )

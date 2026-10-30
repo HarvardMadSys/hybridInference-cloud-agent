@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from starlette.datastructures import Headers
+from tests.support.owners import SESSIONS
 
 from cloud_agent import identity, settings, tokens
 from cloud_agent.api.deps import get_client_ip
@@ -44,7 +45,7 @@ def test_sessions_and_worker_tokens_use_saved_keys_and_ignore_stale_environment(
     monkeypatch.setenv("GATEWAY_ISSUER", "https://stale.example")
     monkeypatch.setenv("AGENT_SESSION_SECRET", "stale-session-secret")
     assert identity.gateway_issuer() == "https://identity.example"
-    assert identity.verify_session(identity.mint_session(user_id="owner"))["sub"] == "owner"
+    assert identity.verify_session(SESSIONS.sign_in("owner"))["sub"] == "owner"
     assert tokens._signing_key()
     old_key = tokens._signing_key()
     settings.apply_settings(

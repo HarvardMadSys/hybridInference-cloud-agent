@@ -28,7 +28,12 @@ from cloud_agent.application.model_connections import model_connection_cipher
 from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.domain.accounts import AccountRecord
 from cloud_agent.ports.accounts import SessionOwner
-from cloud_agent_shared.model_connections import PROTOCOLS
+from cloud_agent_shared.model_connections import (
+    MODEL_CONNECTION_CAPABILITY,
+    PROTOCOLS,
+    ModelConnectionAccess,
+    runtime_protocol,
+)
 
 #: The account key session hashes are derived under in these tests.
 SESSION_SECRET = "owner-session-secret-for-tests-0123456789"
@@ -132,6 +137,11 @@ class SessionAccounts:
         self.accounts: dict[str, AccountRecord] = {}
         self._sessions: dict[bytes, str] = {}
 
+    def add(self, user_id: str, **record: Any) -> AccountRecord:
+        """Create (or replace) ``user_id``'s account without signing it in."""
+        self.accounts[user_id] = account_record(user_id, **record)
+        return self.accounts[user_id]
+
     def sign_in(self, user_id: str, **record: Any) -> str:
         """Create (or replace) ``user_id``'s account and return a live session for it."""
         self.accounts[user_id] = account_record(user_id, **record)
@@ -157,6 +167,17 @@ class SessionAccounts:
     async def get_account(self, user_id: str) -> AccountRecord | None:
         """The account as it is now."""
         return self.accounts.get(user_id)
+
+
+#: One in-memory account store per test process, for tests whose fake storage
+#: is assembled inline: they add ``local_accounts=SESSIONS`` and sign in with
+#: :meth:`SessionAccounts.sign_in`. Tokens are random, so tests never share one.
+SESSIONS = SessionAccounts()
+
+
+def bearer(user_id: str, **record: Any) -> dict[str, str]:
+    """An ``Authorization`` header carrying a live session for ``user_id``."""
+    return {"Authorization": f"Bearer {SESSIONS.sign_in(user_id, **record)}"}
 
 
 def connection_row(
@@ -230,27 +251,68 @@ class FakeConnections:
 def on_connection(body: dict[str, Any]) -> dict[str, Any]:
     """A job or message body that names the owner's verified connection.
 
-    Its model is kept when the connection lists it, else the connection's own.
+    The body's model is kept, so a case about the model still tests it; a body
+    naming none gets the connection's own.
     """
-    model = body.get("model")
-    return {
-        **body,
-        "model": model if model in CONNECTION_MODELS else CONNECTION_MODEL,
-        "model_connection_id": CONNECTION_ID,
+    return {"model": CONNECTION_MODEL, **body, "model_connection_id": CONNECTION_ID}
+
+
+def connection_access(runtime: str = "claude-code", **changes: Any) -> ModelConnectionAccess:
+    """What a claim hands a host for a turn on the owner's connection, speaking ``runtime``'s API."""
+    fields: dict[str, Any] = {
+        "connection_id": CONNECTION_ID,
+        "revision": 1,
+        "base_url": "https://provider.example/v1",
+        "protocol": runtime_protocol(runtime) or "chat_completions",
+        "api_key": TEST_PROVIDER_KEY,
     }
+    return ModelConnectionAccess(**{**fields, **changes})
+
+
+def launch_connection(runtime: str = "claude-code") -> dict[str, str]:
+    """A member launch's connection fields, as ``model_connection_launch`` gives them."""
+    return connection_access(runtime).launch_fields()
+
+
+def residency_connection(runtime: str = "claude-code") -> dict[str, Any]:
+    """What a residency answer carries for a turn on :func:`connection_access`."""
+    access = connection_access(runtime)
+    return {
+        "model_connection_revision": access.revision,
+        "model_connection_plan": access.plan.identity,
+    }
+
+
+def connection_claim(body: dict[str, Any]) -> dict[str, Any]:
+    """A claim request from a host that can launch members on owner connections.
+
+    Every turn runs on one now, so a claim from a host that cannot is handed
+    back; a test about something else claims as a capable host.
+    """
+    attestation = dict(body.get("attestation") or {})
+    capabilities = list(attestation.get("runner_capabilities") or [])
+    if MODEL_CONNECTION_CAPABILITY not in capabilities:
+        capabilities.append(MODEL_CONNECTION_CAPABILITY)
+    return {**body, "attestation": {**attestation, "runner_capabilities": capabilities}}
 
 
 __all__ = [
     "CONNECTION_ID",
     "CONNECTION_MODEL",
     "CONNECTION_MODELS",
+    "SESSIONS",
     "SESSION_SECRET",
     "TEST_PROVIDER_KEY",
     "FakeConnections",
     "FakeOwners",
     "SessionAccounts",
     "account_record",
+    "bearer",
+    "connection_access",
+    "connection_claim",
     "connection_row",
+    "launch_connection",
     "on_connection",
+    "residency_connection",
     "use_session_secret",
 ]

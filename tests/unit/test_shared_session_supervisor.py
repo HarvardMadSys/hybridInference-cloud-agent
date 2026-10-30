@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import launch_connection
 
 from cloud_agent_host.chat_sandbox import (
     MEMBER_UID_BASE,
@@ -417,10 +418,10 @@ def _launch(thread_id: str, *, native_session_id: str | None, slot: int) -> Resi
         native_session_id=native_session_id,
         model="glm-5.1",
         reasoning_effort=None,
-        gateway_base_url="http://gateway",
-        credential="grant",
+        credential="provider-key",
         slot_id=slot,
         residency_generation=slot + 1,
+        **launch_connection("claude-code"),
     )
 
 

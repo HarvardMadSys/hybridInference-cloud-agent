@@ -1419,7 +1419,6 @@ async def test_a_template_can_name_the_sandbox_image_published_for_the_deployed_
 async def test_local_bootstrap_stamps_the_control_plane_mode_without_gateway_secrets(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("AGENT_AUTH_MODE", "local")
     bootstrap, profile, _transport, secrets = setup(tmp_path)
     secrets["deployment:env"] = "\n".join(
         line
@@ -1448,7 +1447,6 @@ async def test_local_bootstrap_stamps_the_control_plane_mode_without_gateway_sec
 async def test_profile_cannot_override_the_control_plane_account_mode(
     tmp_path, monkeypatch, mode, declared
 ):
-    monkeypatch.setenv("AGENT_AUTH_MODE", mode)
     bootstrap, profile, transport, secrets = setup(tmp_path)
     secrets["deployment:env"] += f"\nAGENT_AUTH_MODE={declared}"
     with pytest.raises(ProviderError, match="must match"):
@@ -1458,7 +1456,6 @@ async def test_profile_cannot_override_the_control_plane_account_mode(
 
 @pytest.mark.asyncio
 async def test_local_profile_refuses_a_leftover_platform_inference_relay(tmp_path, monkeypatch):
-    monkeypatch.setenv("AGENT_AUTH_MODE", "local")
     bootstrap, profile, transport, _secrets = setup(tmp_path)
     with pytest.raises(ProviderError, match="must not configure"):
         await bootstrap._archive(profile, INTENT, None)

@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from cloud_agent.api.deps import (
     get_current_user,
     get_owner_directory,
+    get_storage,
     resolve_agent_access,
 )
 from cloud_agent.logging_utils import get_logger
@@ -97,12 +98,14 @@ async def _end_local_session(request: Request, response: Response) -> None:
     expire_local_session_cookies(response)
 
 
-async def _local_me(request: Request, owners: Any, user_id: str) -> SessionUserResponse:
+async def _local_me(
+    request: Request, owners: Any, user_id: str, storage: Any = None
+) -> SessionUserResponse:
     """The account, its current access and its application, all read just now."""
     from cloud_agent.api._local_auth import local_session_user
     from cloud_agent.api.deps import local_session_owner
 
-    owner = await local_session_owner(request, request.headers.get("authorization"))
+    owner = await local_session_owner(request, request.headers.get("authorization"), storage)
     if owner is None or owner.account.id != user_id:
         raise HTTPException(status_code=401, detail="Invalid authentication token.")
     decision = await resolve_agent_access(owners, user_id)
@@ -111,7 +114,9 @@ async def _local_me(request: Request, owners: Any, user_id: str) -> SessionUserR
 
 @router.get("/me", response_model=SessionUserResponse, response_model_exclude_none=True)
 async def session_me(
-    request: Request, owners: Any = Depends(get_owner_directory)
+    request: Request,
+    owners: Any = Depends(get_owner_directory),
+    storage: Any = Depends(get_storage),
 ) -> SessionUserResponse:
     """Return session identity and a fresh Agent access decision.
 
@@ -120,6 +125,6 @@ async def session_me(
     An unreadable account store returns 503, never cached permission.
     """
     user = await get_current_user(
-        request=request, authorization=request.headers.get("authorization")
+        request=request, authorization=request.headers.get("authorization"), storage=storage
     )
-    return await _local_me(request, owners, user["user_id"])
+    return await _local_me(request, owners, user["user_id"], storage)

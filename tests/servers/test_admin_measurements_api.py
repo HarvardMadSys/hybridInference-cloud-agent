@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI  # noqa: TC002 — used in a runtime annotation.
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
 from cloud_agent.api.deps import get_storage
 from cloud_agent.app import create_app
 
@@ -74,11 +74,10 @@ def capability():
 @pytest.fixture
 def setup(monkeypatch, capability):
     monkeypatch.setenv("ADMIN_TOKEN", "admin-measurements-test")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "admin-measurements-session-secret")
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
+    use_session_secret(monkeypatch)
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        operation_measurements=capability
+        local_accounts=SESSIONS, operation_measurements=capability
     )
     return app, capability
 

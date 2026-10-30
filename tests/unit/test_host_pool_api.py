@@ -27,6 +27,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import connection_claim
 from tests.support.storage import AllCapabilities
 
 from cloud_agent import sandbox_manager_routing
@@ -1764,10 +1765,12 @@ async def test_request_body_host_identity_is_rejected(claim_client):
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={
-            "worker_id": "w1",
-            "host": "runner-b",
-        },
+        json=connection_claim(
+            {
+                "worker_id": "w1",
+                "host": "runner-b",
+            }
+        ),
         headers={"Authorization": f"Bearer {credential}"},
     )
 
@@ -1781,7 +1784,7 @@ async def test_pool_wide_token_is_not_a_claim_credential(claim_client):
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={"worker_id": "w1"},
+        json=connection_claim({"worker_id": "w1"}),
         headers={"Authorization": "Bearer pool-wide-token"},
     )
 
@@ -1799,7 +1802,7 @@ async def test_a_revoked_host_credential_cannot_claim(claim_client):
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={"worker_id": "w1"},
+        json=connection_claim({"worker_id": "w1"}),
         headers={"Authorization": f"Bearer {credential}"},
     )
 
@@ -1814,7 +1817,7 @@ async def test_a_host_credential_for_an_unknown_host_cannot_claim(claim_client):
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={"worker_id": "w1"},
+        json=connection_claim({"worker_id": "w1"}),
         headers={"Authorization": f"Bearer {mint_host_token(host='ghost')}"},
     )
 

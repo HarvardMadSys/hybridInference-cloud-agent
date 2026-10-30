@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI  # noqa: TC002 — used in a runtime annotation.
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import use_session_secret
 from tests.unit.test_ledger_snapshots import START, ledger_row, report_payload
 
-from cloud_agent import identity
 from cloud_agent.admin_usage import MAX_USAGE_RESPONSE_BYTES, MAX_USAGE_RUNS
 from cloud_agent.api import admin_usage
 from cloud_agent.api.deps import get_storage
@@ -73,8 +73,7 @@ def queries():
 @pytest.fixture
 def setup(monkeypatch, queries):
     monkeypatch.setenv("ADMIN_TOKEN", "admin-usage-test")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "admin-usage-session-test-long-secret")
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
+    use_session_secret(monkeypatch)
     app = create_app()
     app.dependency_overrides[admin_usage.get_admin_usage_queries] = lambda: queries
     app.dependency_overrides[get_storage] = lambda: None

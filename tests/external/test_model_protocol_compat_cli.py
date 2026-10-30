@@ -225,7 +225,7 @@ def test_pinned_codex_app_server_runs_a_tool_on_a_chat_upstream(tmp_path: Path) 
     argv, env = CodexRuntime().prepare_live(
         workdir=str(tmp_path / "work"),
         model=_MODEL,
-        gateway_base_url=ResponsesViaChatUrl(_UPSTREAM),
+        model_base_url=ResponsesViaChatUrl(_UPSTREAM),
         credential=_KEY,
         session_state_dir=str(codex_home),
     )
@@ -308,7 +308,7 @@ def test_pinned_claude_code_runs_a_tool_on_a_chat_upstream(tmp_path: Path) -> No
     argv, env = runtime.prepare_live(
         workdir=str(tmp_path / "work"),
         model="",
-        gateway_base_url=MessagesViaChatUrl(_UPSTREAM),
+        model_base_url=MessagesViaChatUrl(_UPSTREAM),
         credential=_KEY,
         config_dir=str(config),
     )
@@ -355,7 +355,7 @@ def test_pinned_codex_runs_a_namespaced_tool_under_its_own_name(tmp_path: Path) 
     argv, env = CodexRuntime().prepare_live(
         workdir=str(tmp_path / "work"),
         model=_MODEL,
-        gateway_base_url=ResponsesViaChatUrl(_UPSTREAM),
+        model_base_url=ResponsesViaChatUrl(_UPSTREAM),
         credential=_KEY,
         session_state_dir=str(codex_home),
     )

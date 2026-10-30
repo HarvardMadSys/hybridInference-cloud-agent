@@ -81,10 +81,10 @@ def test_retained_http_launch_refreshes_the_trusted_bridge_without_mcp(
         native_session_id="native-retained",
         model="model",
         reasoning_effort=None,
-        gateway_base_url="http://gateway",
         credential="grant",
         mcp_server_ids=("tool",) if has_mcp else (),
         mcp_base_url="http://mcp" if has_mcp else "",
+        **launch_connection(runtime_id),
     )
     context = ResidentTransportFactory(manager)._launch_context(
         spec, launch, credential="grant", state_dir="/agent-state/persisted-member"

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from cloud_agent.grants import GATEWAY_RENEWAL_STEP_S, RENEWAL_DUE_WITHIN_S, RenewalSchedule
 from httpx import ASGITransport, AsyncClient
 
 # Imported pytest fixtures are intentionally named by test parameters.
@@ -28,7 +29,6 @@ from tests.unit.test_host_pool_api import (  # noqa: F401 - shared pytest fixtur
 
 from cloud_agent.api import admin_hosts, hosts
 from cloud_agent.api.deps import get_grant_client
-from cloud_agent.grants import GATEWAY_RENEWAL_STEP_S, RENEWAL_DUE_WITHIN_S, RenewalSchedule
 from cloud_agent.host_pool import HEARTBEAT_INTERVAL_S
 
 

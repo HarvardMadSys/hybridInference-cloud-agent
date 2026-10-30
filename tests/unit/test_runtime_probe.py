@@ -18,8 +18,6 @@ not run that file, so this one pins each part without Docker:
 
 from __future__ import annotations
 
-from tests.support.owners import on_connection
-
 import json
 import socket
 import subprocess
@@ -33,6 +31,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import httpx
 import pytest
+from tests.support.owners import on_connection
 
 from cloud_agent_host import runtime_probe
 from cloud_agent_host.drivers import TurnResult
@@ -280,7 +279,7 @@ def test_the_member_is_started_without_its_values_on_the_command_line(
     monkeypatch.setattr(runtime_probe.subprocess, "Popen", popen)
     box = SimpleNamespace(docker="docker", id="container-id")
     context = runtime_probe._context(box, "claude-code", VERSION)
-    assert context.gateway_base_url == f"http://127.0.0.1:{PROBE_MODEL_PORT}"
+    assert context.model_base_url == f"http://127.0.0.1:{PROBE_MODEL_PORT}"
     assert context.spawn_live is not None
     context.spawn_live(["claude", "--print"], {"ANTHROPIC_API_KEY": context.credential})
 

@@ -1327,7 +1327,7 @@ async def _callback_session_user(request: Request) -> str | None:
     local account must also still hold ``agent.use``.
     """
     try:
-        user = await get_current_user(request, authorization=None)
+        user = await get_current_user(request, authorization=None, storage=get_storage(request))
         await require_local_admission(request, str(user["user_id"]))
     except HTTPException:
         return None

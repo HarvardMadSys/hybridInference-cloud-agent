@@ -12,8 +12,6 @@ cannot serve it.
 
 from __future__ import annotations
 
-from tests.support.owners import on_connection
-
 import asyncio
 import copy
 from datetime import UTC, datetime
@@ -27,14 +25,14 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 -- autouse fixture
     FakeStorage,
     _api_key_secret,
     _build_app,
-    _configured_identity_issuer,
     _FakeOwners,
 )
 from tests.servers.test_grant_at_claim import _app as _claim_app, _ClaimStore, _Grants
+from tests.support.owners import on_connection
 
 from cloud_agent.api import model_connections as api
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_owner_directory, get_grant_client, get_storage
+from cloud_agent.api.deps import get_grant_client, get_owner_directory, get_storage
 from cloud_agent.application import (
     model_connection_check as check,
     model_connection_save as save,
@@ -1234,7 +1232,7 @@ async def _follow_up(connections, parent, **request):
         reasoning_effort=request.get("reasoning_effort"),
         store=_FollowUpStore(connections),
         app_credentials=None,
-        gateway=_NoCatalogGateway(),
+        owners=_NoCatalogGateway(),
     )
 
 
@@ -1316,7 +1314,7 @@ async def test_a_waiting_message_on_a_deleted_connection_is_held_with_the_reason
             "model_connection_id": None,
         },
         parent_job_id="ajob_1",
-        gateway=_NoCatalogGateway(),
+        owners=_NoCatalogGateway(),
         app_credentials=None,
     )
     assert held is not None

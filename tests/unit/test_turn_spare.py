@@ -43,7 +43,6 @@ from cloud_agent_host.sandbox import ProcessBackend
 #: This host's configuration, which every child's command line carries.
 _CONFIG: dict[str, Any] = {
     "base_url": "http://control",
-    "gateway_url": "http://gateway",
     "lease_ttl": 120.0,
     "agent_timeout_s": 3600.0,
     "host": "host-a",
@@ -61,8 +60,6 @@ def _argv(handover_fd: str, worker_id: str) -> list[str]:
         handover_fd,
         "--base-url",
         "http://control",
-        "--gateway-url",
-        "http://gateway",
         "--worker-id",
         worker_id,
         "--host",
@@ -417,7 +414,6 @@ def _serve(monkeypatch, raw: str, *, spare: bool) -> tuple[int, bytes]:
         code = runner_mod._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -530,9 +526,7 @@ def test_the_cli_starts_a_spare_only_as_a_turn_process(monkeypatch):
     assert "--spare" not in parser.format_help()
 
     served: list[dict[str, Any]] = []
-    monkeypatch.setenv("AGENT_AUTH_MODE", "gateway")
     monkeypatch.setenv("AGENT_CONTROL_PLANE_URL", "http://control")
-    monkeypatch.setenv("AGENT_GATEWAY_URL", "http://gateway")
     monkeypatch.setattr(runner_mod, "configure_process_logging", lambda: None)
     monkeypatch.setattr(runner_mod, "_serve_turn", lambda **kwargs: served.append(kwargs) or 0)
     monkeypatch.setattr(
@@ -563,19 +557,14 @@ class _RecordedSpare:
 
 
 @pytest.mark.parametrize("stop", ["drain", "ctrl-c"])
-@pytest.mark.parametrize("mode,gateway_url", [("gateway", "http://gateway"), ("local", "")])
-def test_the_service_hands_its_spare_to_each_launch_and_retires_it(
-    service, monkeypatch, stop, mode, gateway_url
-):
+def test_the_service_hands_its_spare_to_each_launch_and_retires_it(service, monkeypatch, stop):
     _identity, backend, _released = service
-    monkeypatch.setenv("AGENT_AUTH_MODE", mode)
-    monkeypatch.delenv("AGENT_GATEWAY_URL", raising=False)
     made: list[_RecordedSpare] = []
     monkeypatch.setattr(runner_mod, "TurnSpare", lambda **kwargs: _RecordedSpare(made, **kwargs))
     handed: list[Any] = []
 
     def spawn(_payload: dict[str, Any], **kwargs: Any) -> LaunchResult:
-        assert kwargs["gateway_url"] == gateway_url
+        assert "gateway_url" not in kwargs
         handed.append(kwargs["spare"])
         return LaunchResult(LAUNCH_STARTED, FakeHandle())
 
@@ -593,7 +582,6 @@ def test_the_service_hands_its_spare_to_each_launch_and_retires_it(
     assert (
         runner_mod.run_forever(
             base_url="http://control",
-            gateway_url=gateway_url,
             worker_id="runner-a",
             backend=backend,
             host="host-a",
@@ -602,7 +590,7 @@ def test_the_service_hands_its_spare_to_each_launch_and_retires_it(
     )
 
     (spare,) = made
-    assert spare.kwargs == {**_CONFIG, "gateway_url": gateway_url, "worker_id": "runner-a"}
+    assert spare.kwargs == {**_CONFIG, "worker_id": "runner-a"}
     assert handed == [spare]
     assert spare.closed == [stop == "ctrl-c"]
 

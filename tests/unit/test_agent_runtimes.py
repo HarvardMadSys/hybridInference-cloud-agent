@@ -488,7 +488,7 @@ def test_claude_asks_for_the_answer_while_it_is_written():
     live, _ = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="https://gateway.example.com/v1",
+        model_base_url="https://gateway.example.com/v1",
         credential="ajt.a.b",
     )
     assert "--include-partial-messages" in live
@@ -902,7 +902,7 @@ def test_claude_points_at_the_gateway_and_disables_telemetry():
     argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="https://gateway.example.com/v1",
+        model_base_url="https://gateway.example.com/v1",
         credential="ajt.a.b",
     )
     # Prompts arrive on stdin, as stream-json, and each is echoed when read.
@@ -922,7 +922,7 @@ def test_claude_native_requests_use_bounded_extended_retries():
     _argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/w",
         model="kimi-k3",
-        gateway_base_url="http://gateway",
+        model_base_url="http://gateway",
         credential="inference-credential",
     )
     assert env["CLAUDE_CODE_MAX_RETRIES"] == "15"
@@ -938,7 +938,7 @@ def test_codex_config_targets_the_gateway():
     argv, env = CodexRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://localhost:8000",
+        model_base_url="http://localhost:8000",
         credential="ajt.a.b",
     )
     assert argv[0] == "codex"
@@ -960,7 +960,7 @@ def test_codex_keeps_its_native_state_in_the_state_root():
     argv, env = CodexRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
         provides_isolation=True,
         session_state_dir="/agent-state",
@@ -994,7 +994,7 @@ def test_pi_runtime_targets_the_gateway_through_its_wrapper():
     argv, env = runtime.prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
     )
 
@@ -1025,7 +1025,7 @@ def test_pi_native_session_is_persisted_and_resumed_explicitly():
     argv, env = runtime.prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
         session_state_dir="/agent-state",
         resume_session_id="pi-session-123",
@@ -1043,10 +1043,10 @@ class _Unmediated(AgentRuntime):
     name = "unmediated"
 
     def prepare_live(
-        self, *, mcp_config: RuntimeMCPConfig, gateway_base_url: str, **_: object
+        self, *, mcp_config: RuntimeMCPConfig, model_base_url: str, **_: object
     ) -> tuple[list[str], dict[str, str]]:
         env: dict[str, str] = {}
-        self._accept_mcp(mcp_config, gateway_base_url=gateway_base_url, env=env)
+        self._accept_mcp(mcp_config, model_base_url=model_base_url, env=env)
         return ["unmediated"], env
 
 
@@ -1068,7 +1068,7 @@ def test_mcp_config_fails_closed_without_an_isolated_relay(runtime):
         runtime.prepare_live(
             workdir="/tmp/x",
             model="glm-5.1",
-            gateway_base_url="http://backend:8080",
+            model_base_url="http://backend:8080",
             credential="mcp-secret-must-not-leak",
             mcp_config=config,
         )
@@ -1093,7 +1093,7 @@ def test_a_sandbox_managered_runtime_emits_only_relay_endpoints_and_no_credentia
     argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="agr-inference-grant-must-not-leak",
         mcp_config=RuntimeMCPConfig(
             server_ids=("github",),
@@ -1120,7 +1120,7 @@ def test_claude_idle_timeout_covers_owner_approval_and_returns_its_outcome():
     argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="test-grant",
         mcp_config=RuntimeMCPConfig(
             server_ids=("github",), base_url="http://agent-mcp:8000", credential="test-mcp-token"
@@ -1144,7 +1144,7 @@ def test_runtime_credentials_stay_out_of_process_arguments(runtime):
     argv, _env = runtime.prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential=credential,
         mcp_config=RuntimeMCPConfig(),
     )
@@ -1164,7 +1164,7 @@ def test_opencode_runtime_targets_the_gateway_through_its_wrapper():
     argv, env = runtime.prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
     )
 
@@ -1181,7 +1181,7 @@ def test_opencode_native_session_id_and_xdg_state_are_explicit():
     _argv, env = OpencodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
         session_state_dir="/agent-state",
         resume_session_id="ses_open_123",
@@ -1204,7 +1204,7 @@ def test_kilo_runtime_targets_the_gateway_through_its_wrapper():
     argv, env = runtime.prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
     )
 
@@ -1221,7 +1221,7 @@ def test_kilo_native_session_id_and_xdg_state_are_explicit():
     _argv, env = KiloRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
         session_state_dir="/agent-state",
         resume_session_id="ses_kilo_123",
@@ -1394,7 +1394,7 @@ def _mcp_argv(*server_ids: str) -> list[str]:
     argv, _env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url=_MCP_GATEWAY,
+        model_base_url=_MCP_GATEWAY,
         credential="mcp-secret-must-not-leak",
         mcp_config=RuntimeMCPConfig(server_ids=server_ids),
     )
@@ -1426,7 +1426,7 @@ def test_the_relay_base_url_is_normalized_once():
     argv, _env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url=_MCP_GATEWAY,
+        model_base_url=_MCP_GATEWAY,
         credential="inference-credential",
         mcp_config=RuntimeMCPConfig(
             server_ids=("github",),
@@ -1449,7 +1449,7 @@ def test_requesting_mcp_with_no_relay_address_refuses_rather_than_guessing():
         ClaudeCodeRuntime().prepare_live(
             workdir="/tmp/x",
             model="glm-5.1",
-            gateway_base_url=_MCP_GATEWAY,
+            model_base_url=_MCP_GATEWAY,
             credential="inference-credential",
             mcp_config=RuntimeMCPConfig(server_ids=("github",)),
         )
@@ -1483,7 +1483,7 @@ def test_pi_loads_the_images_bridge_and_nothing_else():
     argv, env = PiRuntime().prepare_live(
         workdir="/w",
         model="glm-5.1",
-        gateway_base_url=_MCP_GATEWAY,
+        model_base_url=_MCP_GATEWAY,
         credential="inference-credential",
         mcp_config=RuntimeMCPConfig(
             server_ids=("github",),
@@ -1507,7 +1507,7 @@ def test_codex_and_kilo_carry_one_relay_and_a_separate_mcp_token(runtime):
     settings = {
         "workdir": "/w",
         "model": "glm-5.1",
-        "gateway_base_url": _MCP_GATEWAY,
+        "model_base_url": _MCP_GATEWAY,
         "credential": "inference-token",
         "mcp_config": RuntimeMCPConfig(
             server_ids=("github", "docs"),
@@ -1544,7 +1544,7 @@ def test_a_wrapper_runtime_publishes_the_relay_urls_and_the_token_reference():
     argv, env = OpencodeRuntime().prepare_live(
         workdir="/w",
         model="glm-5.1",
-        gateway_base_url=_MCP_GATEWAY,
+        model_base_url=_MCP_GATEWAY,
         credential="inference-credential",
         mcp_config=RuntimeMCPConfig(
             server_ids=("github", "docs"),
@@ -1573,7 +1573,7 @@ def test_a_wrapper_runtime_refuses_connections_it_has_no_credential_for():
         OpencodeRuntime().prepare_live(
             workdir="/w",
             model="glm-5.1",
-            gateway_base_url=_MCP_GATEWAY,
+            model_base_url=_MCP_GATEWAY,
             credential="inference-credential",
             mcp_config=RuntimeMCPConfig(server_ids=("github",), base_url=_MCP_GATEWAY),
         )
@@ -1583,7 +1583,7 @@ def _prepare(runtime, **kwargs):
     return runtime.prepare_live(
         workdir="/w",
         model="glm-5.3",
-        gateway_base_url="https://gw.test/v1",
+        model_base_url="https://gw.test/v1",
         credential="tok",
         **kwargs,
     )
