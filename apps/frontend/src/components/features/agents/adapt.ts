@@ -509,13 +509,6 @@ export function sandboxDisplayLabel(backend: string, runtime?: string): string {
   return backend;
 }
 
-/** Render a token count compactly, or empty when there is no ledger. */
-function formatTokens(value: number | null): string {
-  if (value === null || value === undefined) return '';
-  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
-  return String(value);
-}
-
 export interface AdaptOptions extends WorkspaceGitOptions {
   events?: AgentJobEventApi[];
   threadEvents?: AgentThreadEventApi[];
@@ -1477,12 +1470,6 @@ function adaptJob(
     // written out inline, every job got a `goalTurn` — including the ones whose
     // conversation has no goal at all — and "absent" stopped meaning anything.
     ...(storedGoalTurn(job) ? { goalTurn: storedGoalTurn(job) } : {}),
-    // Summed server-side from the grant ledger (issue #823: the same
-    // accounting the usage surface uses). Null there means no snapshot has
-    // answered yet; 0 is the honest display for that, but the panel below
-    // reads `hasLedger` so it can say so rather than imply the job was free.
-    spentUsd: job.spent_usd ?? 0,
-    hasLedger: job.spent_usd !== null,
     ...(job.continuity_mode ? { continuityMode: job.continuity_mode } : {}),
     ...(job.context_status ? { contextStatus: job.context_status } : {}),
     ...(job.resident_state ? { residentState: job.resident_state } : {}),
@@ -1513,12 +1500,6 @@ function adaptJob(
     diffFileDetails: parsed.details,
     diffStat: parsed.stat,
     gates: [],
-    usage: {
-      tokensIn: formatTokens(job.tokens_in),
-      tokensOut: formatTokens(job.tokens_out),
-      cachePct: 0,
-      turns: job.model_calls,
-    },
     prLabel: publishedPrUrl ? `draft PR ${publishedPrUrl.split('/').pop()}` : undefined,
     prUrl: publishedPrUrl ?? undefined,
     threadId: job.thread_id ?? options.thread?.thread_id ?? undefined,

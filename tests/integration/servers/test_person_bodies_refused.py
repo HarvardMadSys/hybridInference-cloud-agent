@@ -25,7 +25,8 @@ from tests.integration.servers.test_pending_message_queue import (
     _Gateway,
     pool as pool,
 )
-from tests.support.owners import on_connection
+from tests.support.model_connections import verified_connection
+from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, on_connection
 
 from cloud_agent.api import worker
 from cloud_agent.api._owner_auth import authenticate_agent_owner
@@ -52,7 +53,10 @@ async def http(pool, monkeypatch):
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", _REPO)
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "person-bodies-secret")
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "person-bodies-sandbox-manager")
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "true")
     store = Storage(pool)
+    # The owner's verified connection, the one `on_connection` names.
+    await verified_connection(store, _OWNER, connection_id=CONNECTION_ID, models=CONNECTION_MODELS)
     await store.host_pool.register_host(
         host=_HOST,
         credential_hash=_HOST_CREDENTIAL,

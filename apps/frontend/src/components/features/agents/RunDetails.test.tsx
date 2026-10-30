@@ -82,49 +82,8 @@ const CURRENT_JOB = {
   turnNo: 7,
 } as AgentJob;
 
-function usage(overrides: Partial<AgentJobUsageApi['ledger']> = {}): AgentJobUsageApi {
+function usage(): AgentJobUsageApi {
   return {
-    ledger: {
-      status: 'available',
-      source: 'gateway_api_logs',
-      attribution: 'grant_time_window',
-      finalized: false,
-      totals: {
-        calls: 3,
-        tokens_in: 1000,
-        tokens_out: 200,
-        cache_read: null,
-        cache_write: null,
-        reasoning: null,
-        spent_usd: '0.42',
-      },
-      unknown_rows: null,
-      estimated_calls: 0,
-      queried_at: null,
-      missing_attempts: 0,
-      attempts: [
-        {
-          attempt_id: 4,
-          attempt_no: 1,
-          status: 'available',
-          reason: null,
-          totals: {
-            calls: 3,
-            tokens_in: 1000,
-            tokens_out: 200,
-            cache_read: null,
-            cache_write: null,
-            reasoning: null,
-            spent_usd: '0.42',
-          },
-          unknown_rows: null,
-          estimated_calls: 0,
-          queried_at: null,
-          windows: [],
-        },
-      ],
-      ...overrides,
-    },
     runtime: { source: 'runtime', input_tokens: 1000, output_tokens: 200, cache_read_tokens: null },
   };
 }
@@ -412,11 +371,7 @@ describe('RunDetails', () => {
 
   it('says a turn on an owner connection is billed by that provider, and stops polling', async () => {
     vi.useFakeTimers();
-    // No grant, so no Gateway attempt rows: the ledger only ever says pending.
-    vi.mocked(getAgentJobUsage).mockResolvedValue({
-      ...usage({ status: 'pending', totals: null, attempts: [] }),
-      external_provider: true,
-    });
+    vi.mocked(getAgentJobUsage).mockResolvedValue({ ...usage(), external_provider: true });
     renderPanel(
       <RunDetails
         jobId="ajob_0"

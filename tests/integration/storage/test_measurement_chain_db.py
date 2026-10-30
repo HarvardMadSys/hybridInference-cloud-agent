@@ -156,8 +156,11 @@ async def chain(monkeypatch, tmp_path, expires_at):
     )
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "chain-test-control-secret-of-32-bytes")
     monkeypatch.setenv("ADMIN_TOKEN", "admin-chain-test")
-    monkeypatch.setenv("AGENT_SESSION_SECRET", "chain-session-secret-32-bytes-min")
-    monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
+    monkeypatch.setenv("AGENT_LOCAL_SESSION_SECRET", "chain-local-session-secret-of-32-bytes")
+    monkeypatch.setenv("AGENT_SETTINGS_ENCRYPTION_KEY", "chain-settings-key-of-at-least-32-bytes")
+    monkeypatch.setenv(
+        "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "acceptance-credential-key-of-32-bytes"
+    )
     sink = tmp_path / "records.jsonl"
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))

@@ -31,7 +31,7 @@ import {
 import {
   cachedShare,
   change,
-  costDisplay,
+  compactCount,
   formatMetric,
   IDENTITY_LABELS,
   isPartialDay,
@@ -40,6 +40,7 @@ import {
   notFinal,
   previousLabel,
   previousWindow,
+  reportedTokens,
   share,
   shortDay,
   tickIndexes,
@@ -59,29 +60,26 @@ import {
 
 //: What a Usage selection is, said once as the window control's tooltip.
 const BASIS =
-  'Turns created in this window, with all the usage they recorded. Days are UTC. Usage is read from a cache, so a running turn may not be fully counted yet.';
+  'Turns created in this window, with the tokens their agents reported. Days are UTC. A running turn may not be fully counted yet.';
 
 const HEADLINE: { metric: UsageMetric; label: string; hint: string }[] = [
-  {
-    metric: 'cost',
-    label: 'Cost',
-    hint: 'What the gateway recorded for the model calls of these turns.',
-  },
   { metric: 'turns', label: 'Turns', hint: 'Turns created in this window, from every session.' },
-  { metric: 'calls', label: 'Model calls', hint: 'Model requests these turns made.' },
   {
     metric: 'tokens_in',
     label: 'Input tokens',
-    hint: 'Input tokens of those requests, cache reads included.',
+    hint: 'Input tokens these turns’ agents reported, cache reads included.',
   },
-  { metric: 'tokens_out', label: 'Output tokens', hint: 'Output tokens of those requests.' },
+  {
+    metric: 'tokens_out',
+    label: 'Output tokens',
+    hint: 'Output tokens these turns’ agents reported, reasoning included.',
+  },
 ];
 
 const CHART_METRICS: { metric: UsageMetric; label: string }[] = [
-  { metric: 'cost', label: 'Cost' },
-  { metric: 'turns', label: 'Turns' },
-  { metric: 'calls', label: 'Model calls' },
   { metric: 'tokens_in', label: 'Input tokens' },
+  { metric: 'tokens_out', label: 'Output tokens' },
+  { metric: 'turns', label: 'Turns' },
 ];
 
 type IdentityKey = (typeof IDENTITY_KEYS)[number];
@@ -239,7 +237,7 @@ function UsageView({
       <section className={ADMIN_PAGE}>
         <AdminPageHeader
           section="Usage"
-          description="Review token usage and costs across users, sessions, and agent turns."
+          description="Review the token usage agents reported across users, sessions, and agent turns. Each owner’s model provider bills its own connection; costs are not tracked here."
         />
         <AdminNavigation current="usage" />
 
@@ -441,7 +439,7 @@ function Headline({
 }
 
 function DailyChart({ days, filters }: { days: AdminUsageDay[]; filters: AdminUsageFilters }) {
-  const [metric, setMetric] = useState<UsageMetric>('cost');
+  const [metric, setMetric] = useState<UsageMetric>('tokens_in');
   const [pointed, setPointed] = useState<number | null>(null);
   if (days.length === 0) return null;
   const values = days.map((day) => metricValue(day.usage, metric));
@@ -481,7 +479,7 @@ function DailyChart({ days, filters }: { days: AdminUsageDay[]; filters: AdminUs
       <div className="relative mt-4 h-44 border-b border-gray-200 dark:border-white/10">
         <div className="absolute inset-x-0 top-0 border-t border-dashed border-gray-200 dark:border-white/10" />
         <span className="absolute left-0 top-1 text-[11px] tabular-nums text-gray-400 dark:text-gray-500">
-          {formatMetric(metric, peak)}
+          {formatMetric(peak)}
         </span>
         <div className="flex h-full items-end gap-[3px] pt-6">
           {days.map((day, index) => {
@@ -548,7 +546,7 @@ function tickPosition(index: number, total: number): React.CSSProperties {
   return { left: `${((index + 0.5) / total) * 100}%`, transform: 'translateX(-50%)' };
 }
 
-/** One day as the chart reads it out: `Sep 23 · $3.42 · 17 turns`. */
+/** One day as the chart reads it out: `Sep 23 · 1.2M · 17 turns`. */
 function dayReading(day: AdminUsageDay, metric: UsageMetric): string {
   const name = `${shortDay(day.date)}${isPartialDay(day) ? ' (part of the day)' : ''}`;
   const turns = day.usage.run_count;
@@ -556,8 +554,8 @@ function dayReading(day: AdminUsageDay, metric: UsageMetric): string {
   const value = metricValue(day.usage, metric);
   const turnText = `${number(turns)} turn${turns === 1 ? '' : 's'}`;
   if (metric === 'turns') return `${name} · ${turnText}`;
-  if (value === null) return `${name} · ${turnText}, no usage recorded yet`;
-  return `${name} · ${formatMetric(metric, value)} · ${turnText}`;
+  if (value === null) return `${name} · ${turnText}, no usage reported yet`;
+  return `${name} · ${formatMetric(value)} · ${turnText}`;
 }
 
 function Ranking({
@@ -587,7 +585,7 @@ function Ranking({
         </h3>
         <span className="hidden w-20 shrink-0 sm:block" />
         <span className="w-12 shrink-0 text-right">Turns</span>
-        <span className="w-20 shrink-0 text-right">Cost</span>
+        <span className="w-20 shrink-0 text-right">Tokens</span>
         <span className="w-5 shrink-0" />
       </div>
       <ul>
@@ -657,11 +655,11 @@ function RankRow({
   onNarrow: (key: string) => void;
   muted?: boolean;
 }) {
-  const cost = costDisplay(usage.totals?.spent_usd);
+  const tokens = reportedTokens(usage);
   const part = share(usage, whole);
   const detail = [
     `${number(usage.run_count)} turn${usage.run_count === 1 ? '' : 's'}`,
-    usage.totals ? `${number(usage.totals.calls)} model calls` : 'no usage recorded yet',
+    tokens === null ? 'no usage reported yet' : `${number(tokens)} tokens reported`,
     `${Math.round(part * 100)}% of the selection`,
   ].join(' · ');
   const text = `min-w-0 flex-1 truncate text-left text-[13px] ${
@@ -695,9 +693,9 @@ function RankRow({
       </span>
       <span
         className="w-20 shrink-0 text-right text-[13px] tabular-nums text-gray-900 dark:text-gray-100"
-        title={cost.exact ?? undefined}
+        title={tokens === null ? undefined : number(tokens)}
       >
-        {cost.display}
+        {compactCount(tokens)}
       </span>
       <span className="flex w-5 shrink-0 justify-end">
         {href && !muted && (

@@ -47,12 +47,6 @@ async def client(monkeypatch):
         yield http
 
 
-@pytest.fixture()
-def local(monkeypatch):
-    monkeypatch.setenv(config.ENV_AUTH_MODE, "local")
-    monkeypatch.setenv(config.ENV_LOCAL_SESSION_SECRET, _SECRET)
-
-
 async def test_sign_up_closes_without_mail(client, monkeypatch):
     monkeypatch.delenv("AGENT_SMTP_HOST", raising=False)
     response = await client.get("/v1/auth/config")

@@ -69,13 +69,13 @@ function aggregate(overrides: Partial<AdminUsageAggregate> = {}): AdminUsageAggr
     run_count: 4,
     attempt_count: 4,
     totals: {
-      calls: 30,
+      calls: null,
       tokens_in: 40_086,
       tokens_out: 413,
       cache_read: 19_712,
       cache_write: null,
       reasoning: null,
-      spent_usd: '1.23456',
+      spent_usd: null,
     },
     unknown_rows: {
       tokens_in: 0,
@@ -83,21 +83,21 @@ function aggregate(overrides: Partial<AdminUsageAggregate> = {}): AdminUsageAggr
       cache_read: 0,
       cache_write: 2,
       reasoning: 4,
-      spent_usd: 0,
+      spent_usd: 4,
     },
     estimated_calls: 0,
     oldest_queried_at: '2026-09-09T10:01:00Z',
     runs_with_snapshot: 4,
     missing_attempts: 0,
-    status_counts: { available: 4, partial: 0, stale: 0, pending: 0, unavailable: 0 },
+    status_counts: { available: 4, partial: 0, pending: 0, unavailable: 0 },
     active_runs: 0,
     refreshing_runs: 0,
     ...overrides,
   };
 }
 
-function costing(spent: string, overrides: Partial<AdminUsageAggregate> = {}) {
-  return aggregate({ totals: { ...aggregate().totals!, spent_usd: spent }, ...overrides });
+function reporting(input: number, overrides: Partial<AdminUsageAggregate> = {}) {
+  return aggregate({ totals: { ...aggregate().totals!, tokens_in: input }, ...overrides });
 }
 
 function breakdown(
@@ -116,9 +116,8 @@ function breakdown(
 
 function usage(overrides: Partial<AdminUsage> = {}): AdminUsage {
   return {
-    schema_version: 1,
-    source: 'gateway_api_logs',
-    attribution: 'grant_time_window',
+    schema_version: 2,
+    source: 'runtime_reported',
     finalized: false,
     selection: {
       since: '2026-09-03T00:00:00Z',
@@ -148,15 +147,15 @@ function usage(overrides: Partial<AdminUsage> = {}): AdminUsage {
       },
     ],
     by_user: breakdown([
-      { key: 'owner-one', usage: costing('1', { run_count: 3 }) },
-      { key: 'owner-two', usage: costing('0.23456', { run_count: 1 }) },
+      { key: 'owner-one', usage: reporting(30_000, { run_count: 3 }) },
+      { key: 'owner-two', usage: reporting(10_086, { run_count: 1 }) },
     ]),
     by_model: breakdown(
       [
-        { key: 'model-a', usage: costing('1.2', { run_count: 2 }) },
+        { key: 'model-a', usage: reporting(32_000, { run_count: 2 }) },
         { key: null, usage: aggregate({ run_count: 1, totals: null, runs_with_snapshot: 0 }) },
       ],
-      costing('0.03456', { run_count: 1 }),
+      reporting(8_086, { run_count: 1 }),
       22,
     ),
     ...overrides,
@@ -243,22 +242,24 @@ describe('admin usage page', () => {
   it('shows the headline numbers, shortened, with the exact figures in tooltips', async () => {
     render(<AdminUsagePageComponent />);
     await loaded();
-    expect(headline('Cost')).toHaveTextContent('$1.23');
-    expect(headline('Cost')).toHaveAttribute('title', '1.23456');
     expect(headline('Turns')).toHaveTextContent('4');
-    expect(headline('Model calls')).toHaveTextContent('30');
     expect(headline('Input tokens')).toHaveTextContent('40.1K');
     expect(headline('Input tokens')).toHaveAttribute('title', '40,086');
     expect(headline('Output tokens')).toHaveTextContent('413');
     expect(screen.getByText('49% cached')).toBeInTheDocument();
+    // Agents report neither a cost nor model calls; their providers bill them.
+    expect(screen.queryByText('Cost')).not.toBeInTheDocument();
+    expect(screen.queryByText('Model calls')).not.toBeInTheDocument();
+    expect(screen.getByText(/model provider bills its own connection/)).toBeInTheDocument();
+    expect(screen.queryByText(/\$/)).not.toBeInTheDocument();
   });
 
   it('states the change from the previous window', async () => {
-    answer(usage(), usage({ summary: costing('1', { run_count: 2 }) }));
+    answer(usage(), usage({ summary: reporting(32_069, { run_count: 2 }) }));
     render(<AdminUsagePageComponent />);
-    const cost = await screen.findByText('+23%');
-    expect(cost).toHaveAttribute('title', 'Previous 7 days: $1.00');
-    expect(cost).toHaveTextContent('from the previous 7 days');
+    const input = await screen.findByText('+25%');
+    expect(input).toHaveAttribute('title', 'Previous 7 days: 32.1K');
+    expect(input).toHaveTextContent('from the previous 7 days');
     expect(screen.getByText('+100%')).toBeInTheDocument();
   });
 
@@ -267,7 +268,7 @@ describe('admin usage page', () => {
     render(<AdminUsagePageComponent />);
     await loaded();
     await waitFor(() => expect(getAdminUsage).toHaveBeenCalledTimes(2));
-    expect(headline('Cost')).toHaveTextContent('$1.23');
+    expect(headline('Input tokens')).toHaveTextContent('40.1K');
     expect(screen.queryByText(/%$/, { selector: 'span[title]' })).not.toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
@@ -279,7 +280,7 @@ describe('admin usage page', () => {
           totals: null,
           unknown_rows: null,
           runs_with_snapshot: 0,
-          status_counts: { available: 0, partial: 0, stale: 0, pending: 4, unavailable: 0 },
+          status_counts: { available: 0, partial: 0, pending: 4, unavailable: 0 },
         }),
         days: [
           {
@@ -293,12 +294,12 @@ describe('admin usage page', () => {
     );
     render(<AdminUsagePageComponent />);
     await loaded();
-    // The day is marked as unknown, and read out as such, not drawn as $0.
+    // The day is marked as unknown, and read out as such, not drawn as 0.
     expect(
-      screen.getByRole('link', { name: 'Sep 3 · 4 turns, no usage recorded yet' }),
+      screen.getByRole('link', { name: 'Sep 3 · 4 turns, no usage reported yet' }),
     ).toBeInTheDocument();
-    expect(headline('Cost')).toHaveTextContent('—');
-    expect(headline('Model calls')).toHaveTextContent('—');
+    expect(headline('Input tokens')).toHaveTextContent('—');
+    expect(headline('Output tokens')).toHaveTextContent('—');
     // Turns come from the database and are known either way.
     expect(headline('Turns')).toHaveTextContent('4');
     expect(screen.getByText(/4 turns not fully counted/)).toBeInTheDocument();
@@ -311,7 +312,7 @@ describe('admin usage page', () => {
           run_count: 0,
           attempt_count: 0,
           runs_with_snapshot: 0,
-          status_counts: { available: 0, partial: 0, stale: 0, pending: 0, unavailable: 0 },
+          status_counts: { available: 0, partial: 0, pending: 0, unavailable: 0 },
           totals: null,
           unknown_rows: null,
         }),
@@ -335,16 +336,14 @@ describe('admin usage page', () => {
       usage({
         summary: aggregate({
           active_runs: 1,
-          status_counts: { available: 2, partial: 1, stale: 0, pending: 1, unavailable: 0 },
-          unknown_rows: { ...aggregate().unknown_rows!, spent_usd: 3 },
+          status_counts: { available: 2, partial: 1, pending: 1, unavailable: 0 },
         }),
       }),
     );
     render(<AdminUsagePageComponent />);
     const line = await screen.findByText(/Not final/);
-    expect(line).toHaveTextContent(
-      'Not final: 1 turn still running · 2 turns not fully counted · 3 model calls without a recorded cost.',
-    );
+    // A cost no agent reports is not a gap in the numbers.
+    expect(line).toHaveTextContent('Not final: 1 turn still running · 2 turns not fully counted.');
     expect(line.getAttribute('title')).toContain('1 turn without usage yet');
     expect(line.getAttribute('title')).toContain('1 turn partly counted');
   });
@@ -353,7 +352,7 @@ describe('admin usage page', () => {
     render(<AdminUsagePageComponent />);
     await loaded();
     const [selection] = reads();
-    const day = screen.getByRole('link', { name: 'Sep 3 · $1.23 · 4 turns' });
+    const day = screen.getByRole('link', { name: 'Sep 3 · 40.1K · 4 turns' });
     expect(params(day.getAttribute('href'))).toEqual({
       since: '2026-09-03T00:00:00Z',
       until: '2026-09-04T00:00:00Z',
@@ -370,12 +369,12 @@ describe('admin usage page', () => {
     render(<AdminUsagePageComponent />);
     await loaded();
     const chart = screen.getByRole('group', { name: 'Chart' });
-    fireEvent.click(within(chart).getByRole('button', { name: 'Input tokens' }));
-    expect(within(chart).getByRole('button', { name: 'Input tokens' })).toHaveAttribute(
+    fireEvent.click(within(chart).getByRole('button', { name: 'Output tokens' }));
+    expect(within(chart).getByRole('button', { name: 'Output tokens' })).toHaveAttribute(
       'aria-pressed',
       'true',
     );
-    expect(screen.getByRole('link', { name: 'Sep 3 · 40.1K · 4 turns' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Sep 3 · 413 · 4 turns' })).toBeInTheDocument();
   });
 
   it('narrows the whole page to a user and keeps the window', async () => {
@@ -472,7 +471,7 @@ describe('admin usage page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('The numbers below are from the previous read.');
-    expect(headline('Cost')).toHaveTextContent('$1.23');
+    expect(headline('Input tokens')).toHaveTextContent('40.1K');
   });
 
   it('clears the numbers and shows the permission state when access is revoked', async () => {
@@ -482,7 +481,7 @@ describe('admin usage page', () => {
     vi.mocked(getAdminUsage).mockRejectedValue(new APIError('INVALID_TOKEN', 'no', 403));
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await screen.findByText('Admin access required');
-    expect(screen.queryByText('$1.23')).not.toBeInTheDocument();
+    expect(screen.queryByText('40.1K')).not.toBeInTheDocument();
   });
 
   it('discards a response for a selection that is no longer applied', async () => {

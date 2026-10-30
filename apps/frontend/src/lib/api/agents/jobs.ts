@@ -74,12 +74,6 @@ export interface AgentJobApi {
   updated_at: string | null;
   pinned_at?: string | null;
   archived_at?: string | null;
-  // Read server-side from the billing ledger, never from the agent's own
-  // report. Null means "no ledger configured", which is not the same as zero.
-  spent_usd: number | null;
-  tokens_in: number | null;
-  tokens_out: number | null;
-  model_calls: number | null;
   /** Attempt whose continuity and resource telemetry is attached below. */
   telemetry_attempt_id?: number | null;
   /** Which continuity rung this turn ran on. Null on turns that predate it. */

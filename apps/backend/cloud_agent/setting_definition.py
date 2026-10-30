@@ -6,7 +6,6 @@ setting and owns the stored snapshot, and re-exported from it.
 
 from __future__ import annotations
 
-import ipaddress
 import math
 import re
 from dataclasses import dataclass
@@ -161,21 +160,6 @@ class Setting:
         if self.minimum_bytes:
             result["minimum_bytes"] = self.minimum_bytes
         return result
-
-
-def _private_host(host: str) -> bool:
-    """Whether plain HTTP to ``host`` stays on this machine or a private network.
-
-    Loopback addresses and ``localhost`` names, and a single-label name such
-    as a Compose service (``local-gateway``), which public DNS cannot answer.
-    """
-    host = host.lower().rstrip(".")
-    if host == "localhost" or host.endswith(".localhost"):
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return bool(host) and "." not in host
 
 
 def _web_url(value: str) -> SplitResult | None:

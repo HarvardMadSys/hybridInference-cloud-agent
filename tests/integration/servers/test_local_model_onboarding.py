@@ -119,7 +119,6 @@ async def env(monkeypatch):
     async with pool.acquire() as connection:
         await reset_agent_tables(connection)
     for key, value in {
-        "AGENT_AUTH_MODE": "local",
         "AGENT_LOCAL_SESSION_SECRET": "onboarding-test-session-secret-over-32-bytes",
         "AGENT_WEB_BASE_URL": "https://agents.example",
         "AGENT_LOCAL_SIGNUP_ENABLED": "true",
@@ -230,9 +229,7 @@ async def test_an_approved_account_sets_up_its_own_model_and_runs_a_task_on_it(e
     assert config["default_model"] is None and config["default_model_connection_id"] is None
     refused = await client.post(
         "/v1/agent/jobs",
-        json=on_connection(
-            {"repo": None, "task_prompt": "fix it", "model": _MODEL, "runtime": "opencode"}
-        ),
+        json={"repo": None, "task_prompt": "fix it", "model": _MODEL, "runtime": "opencode"},
     )
     assert refused.status_code == 409
     assert refused.json()["detail"]["error"]["type"] == "model_connection_required"
@@ -414,13 +411,12 @@ async def test_follow_ups_keep_their_personal_source_and_never_fall_back(env):
     thread_id = job.json()["thread_id"]
     assert (await _claim(env))["job_id"] == job.json()["id"]
 
-    # The same model id without its connection names the Gateway, which has none.
-    gateway = await client.post(
-        f"/v1/agent/threads/{thread_id}/messages",
-        json=on_connection({"prompt": "next", "model": _MODEL}),
+    # The same model id without its connection names no source, and nothing runs it.
+    sourceless = await client.post(
+        f"/v1/agent/threads/{thread_id}/messages", json={"prompt": "next", "model": _MODEL}
     )
-    assert gateway.status_code == 409, gateway.text
-    assert gateway.json()["detail"]["error"]["type"] == "model_connection_required"
+    assert sourceless.status_code == 409, sourceless.text
+    assert sourceless.json()["detail"]["error"]["type"] == "model_connection_required"
     # Waiting behind the running turn, with the source it was sent with.
     waiting = await client.post(
         f"/v1/agent/threads/{thread_id}/messages", json={"prompt": "next", **source}

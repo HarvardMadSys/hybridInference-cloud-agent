@@ -105,10 +105,6 @@ const anchor = {
   current_attempt_id: null,
   metadata: null,
   detail: null,
-  spent_usd: null,
-  tokens_in: null,
-  tokens_out: null,
-  model_calls: null,
 } as AgentJobApi;
 const copied: AgentJobApi = {
   ...anchor,

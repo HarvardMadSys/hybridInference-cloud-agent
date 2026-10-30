@@ -97,8 +97,8 @@ async def test_an_api_key_authenticates_nobody(client: AsyncClient) -> None:
     """The tripwire. 401, and specifically **not** 503.
 
     503 is what a reinstated API-key branch answers when no store is
-    configured — which is every deployment, since the gateway kept ``api_keys``
-    and ``GatewayClient`` has no method that resolves a key to a user. So this
+    configured — which is every deployment: this service stores no API keys
+    and has no method that resolves a key to a user. So this
     assertion fails the day someone restores the branch without also adding the
     contract that would make it work.
     """

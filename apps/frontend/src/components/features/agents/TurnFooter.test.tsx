@@ -37,14 +37,12 @@ function job(overrides: Partial<AgentJob> = {}): AgentJob {
     branch: 'agent/t',
     runtime: 'claude-code',
     model: 'glm-4.6',
-    spentUsd: 0,
     timeoutLabel: '',
     sandbox: '',
     attempts: [],
     events: [],
     diffFiles: [],
     gates: [],
-    usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 0 },
     ...overrides,
   };
 }
@@ -347,10 +345,6 @@ describe('the per-tool table on real data', () => {
     telemetry_attempt_id: 7,
     published_pr_url: null,
     detail: null,
-    spent_usd: null,
-    tokens_in: null,
-    tokens_out: null,
-    model_calls: null,
     created_at: '2026-08-19T10:00:00.000Z',
     updated_at: '2026-08-19T10:01:00.000Z',
   } as never;
@@ -409,10 +403,6 @@ describe('per-call resources, through both real adapters', () => {
     current_attempt_id: 7,
     published_pr_url: null,
     detail: null,
-    spent_usd: null,
-    tokens_in: null,
-    tokens_out: null,
-    model_calls: null,
     created_at: '2026-08-19T10:00:00.000Z',
     updated_at: '2026-08-19T10:01:00.000Z',
   } as never;

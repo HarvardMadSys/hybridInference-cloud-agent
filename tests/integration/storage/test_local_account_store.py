@@ -520,10 +520,7 @@ async def test_passes_for_many_accounts_cannot_exhaust_a_small_pool():
             await act(storage, account_id, "revoke")
         results = await asyncio.wait_for(
             asyncio.gather(
-                *(
-                    terminate_owner_access(storage, None, account_id, None)
-                    for account_id in accounts
-                )
+                *(terminate_owner_access(storage, account_id, None) for account_id in accounts)
             ),
             timeout=30,
         )

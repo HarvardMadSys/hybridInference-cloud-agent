@@ -37,6 +37,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
 from cloud_agent_host.bounded_output import OutputPump
+from cloud_agent_host.codex_app_server import CodexTurnUsage, codex_error_text, codex_tool_output
 from cloud_agent_host.runtimes import (
     DIFF,
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -279,34 +280,6 @@ def _record_text(record: dict[str, Any]) -> str:
         for block in content
         if isinstance(block, dict) and block.get("type") == "text"
     )
-
-
-def _codex_error_text(message: str) -> str:
-    """Codex's error message without the request diagnostics it appends.
-
-    0.145.0 appends ``, url: <address>`` and then cf-ray, request id and auth
-    details to an HTTP error's message. The address is the sandbox's gateway
-    relay, which means nothing to the owner; the full error stays in the event.
-    """
-    return message.split(", url: ", 1)[0][:2000]
-
-
-def _codex_tool_output(item: dict[str, Any]) -> str:
-    """What a command or an MCP call returned, as the text the owner reads.
-
-    A command's ``aggregatedOutput`` is text already. An MCP call's ``result``
-    is an object of the tool's content blocks and structured content, and its
-    ``error`` an object naming a message (0.145.0); ``str`` of either is a
-    Python rendering. So the result is stored as JSON, as the other runtimes
-    store theirs, and the error as its message.
-    """
-    output = item.get("aggregatedOutput") or item.get("result")
-    if not output:
-        error = item.get("error")
-        output = (error.get("message") or error) if isinstance(error, dict) else error
-    if output is None or isinstance(output, str):
-        return output or ""
-    return json.dumps(output, ensure_ascii=False, default=str)
 
 
 def _http_agent_error_text(error: Any) -> str:
@@ -788,11 +761,6 @@ def _with_delta(value: dict[str, Any], path: tuple[str, ...], delta: str) -> dic
 def _escaped_chars(text: str) -> int:
     """How many characters ``text`` takes inside a JSON string."""
     return len(json.dumps(text)) - 2
-
-
-def _count_value(value: Any) -> bool:
-    """Whether a protocol counter is a token count: a non-negative integer."""
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _codex_raw_row(
@@ -1315,9 +1283,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
         # Each subagent thread's spawning call, as the spawn items name it.
         # Kept for the process, whose threads outlive any one turn.
         self._agent_calls: dict[str, str] = {}
-        # The turn each subagent thread was spawned in: its model calls are
-        # that turn's usage, and only while that turn is the one running.
-        self._agent_turns: dict[str, str] = {}
+        self._usage = CodexTurnUsage()
 
     def _thread_owner(self, params: dict[str, Any]) -> dict[str, str]:
         """Mark a notification from another thread as that subagent's.
@@ -1515,17 +1481,12 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             for receiver in item.get("receiverThreadIds") or []:
                 if isinstance(receiver, str) and receiver:
                     self._agent_calls.setdefault(receiver, str(item["id"]))
-                    if turn.protocol_turn_id:
-                        self._agent_turns.setdefault(receiver, turn.protocol_turn_id)
+                    self._usage.spawned(receiver, turn.protocol_turn_id)
         owner = self._thread_owner(params)
         raw_notification = _codex_raw_row(value, line, owner)
         if method == "thread/tokenUsage/updated":
-            usage = self._turn_usage(params, turn, owner)
-            return (
-                HarnessEvent(USAGE, {**usage, **owner}, raw_line=line)
-                if usage
-                else raw_notification
-            )
+            usage = self._usage.counted(params, turn.protocol_turn_id, owner)
+            return HarnessEvent(USAGE, usage, raw_line=line) if usage else raw_notification
         if method == "error" and params.get("willRetry") is not True and not owner:
             # The error that fails the turn (0.145.0 sends it before the failed
             # turn/completed); a retried one says ``willRetry`` and stays raw.
@@ -1534,7 +1495,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             if message:
                 return HarnessEvent(
                     ERROR,
-                    {"text": _codex_error_text(str(message)), "error": error},
+                    {"text": codex_error_text(str(message)), "error": error},
                     raw_line=line,
                 )
         if method == "item/tool/requestUserInput":
@@ -1636,7 +1597,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                     "tool_use_id": item.get("id"),
                     "is_error": (isinstance(exit_code, int) and exit_code != 0)
                     or bool(item.get("error")),
-                    "content": _codex_tool_output(item)[:4000],
+                    "content": codex_tool_output(item)[:4000],
                     "exit_code": exit_code,
                     **owner,
                 },
@@ -1647,9 +1608,8 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                 DIFF, {"text": str(params.get("diff") or "")[:4000], **owner}, raw_line=line
             )
         if method == "turn/completed":
-            # A subagent's turn ending is not this turn's result, so it stays
-            # a marked lifecycle record. The pinned Turn carries no usage:
-            # that arrives in thread/tokenUsage/updated.
+            # A subagent's turn ending is not this turn's result, so it stays a
+            # marked lifecycle record; its usage came in tokenUsage notifications.
             completed = params.get("turn")
             return HarnessEvent(
                 LIFECYCLE,
@@ -1661,63 +1621,6 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                 raw_line=line,
             )
         return raw_notification
-
-    def _turn_usage(
-        self,
-        params: dict[str, Any],
-        turn: _JsonResidentTurn[CodexRuntime],
-        owner: dict[str, str],
-    ) -> dict[str, Any] | None:
-        """One model call's usage from ``thread/tokenUsage/updated``, if this turn's.
-
-        The pinned notification carries ``last``, the thread's latest model
-        call, and ``total``, the thread's running sum. A call is counted as its
-        ``last``, under an identity made of its thread and the ``total`` it
-        brought the thread to: Codex repeats a notification without a new call
-        (a rate-limit refresh), and a repeat names the same total, so it is
-        counted once. No earlier turn's total is needed, so a resumed or
-        resident thread counts only this turn's calls.
-
-        A notification is this turn's when the conversation's thread names this
-        turn, or a subagent thread was spawned in it. Anything else -- a late
-        notification for a turn that has settled, one replayed at resume, a
-        subagent spawned in another turn or before this process -- has no turn
-        it can be proven to belong to, and stays a raw row that counts nowhere.
-
-        ``reasoningOutputTokens`` is part of ``outputTokens``, kept beside it,
-        never added to it. ``inputTokens`` already includes cached input.
-        """
-        thread_id = params.get("threadId")
-        usage = params.get("tokenUsage")
-        if not isinstance(thread_id, str) or not thread_id or not isinstance(usage, dict):
-            return None
-        active = turn.protocol_turn_id
-        if not active:
-            return None
-        if owner:
-            if self._agent_turns.get(thread_id) != active:
-                return None
-        elif params.get("turnId") != active:
-            return None
-        last, total = usage.get("last"), usage.get("total")
-        if not isinstance(last, dict) or not isinstance(total, dict):
-            return None
-        counters = {
-            "input_tokens": last.get("inputTokens"),
-            "output_tokens": last.get("outputTokens"),
-            "cache_read_tokens": last.get("cachedInputTokens"),
-            # The pinned schema defaults an absent cache-write counter to zero.
-            "cache_write_tokens": last.get("cacheWriteInputTokens", 0),
-            "reasoning_output_tokens": last.get("reasoningOutputTokens"),
-        }
-        thread_total = total.get("totalTokens")
-        if not all(_count_value(value) for value in (*counters.values(), thread_total)):
-            return None
-        return {
-            **counters,
-            "usage_id": f"codex:{thread_id}:{thread_total}",
-            "text": f"{counters['input_tokens']} in / {counters['output_tokens']} out tokens",
-        }
 
     def inject_input(
         self, turn: _JsonResidentTurn[CodexRuntime], pending: PendingInput

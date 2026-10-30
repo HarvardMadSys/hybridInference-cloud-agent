@@ -34,10 +34,10 @@ def use_test_cipher(monkeypatch: pytest.MonkeyPatch) -> None:
 def with_connection_capability(body: dict[str, Any]) -> dict[str, Any]:
     """A claim body whose host can launch a member on an owner connection."""
     attestation = dict(body["attestation"])
-    attestation["runner_capabilities"] = [
-        *attestation["runner_capabilities"],
-        MODEL_CONNECTION_CAPABILITY,
-    ]
+    capabilities = list(attestation["runner_capabilities"])
+    if MODEL_CONNECTION_CAPABILITY not in capabilities:
+        capabilities.append(MODEL_CONNECTION_CAPABILITY)
+    attestation["runner_capabilities"] = capabilities
     return {**body, "attestation": attestation}
 
 
@@ -49,6 +49,7 @@ async def verified_connection(
     models: tuple[str, ...] = ("provider-model",),
     result: dict[str, Any] | None = None,
     api_key: str = TEST_API_KEY,
+    connection_id: str | None = None,
 ) -> dict[str, Any]:
     """Create ``user_id``'s connection with every model's verification atomically.
 
@@ -59,7 +60,7 @@ async def verified_connection(
     row = await store.model_connections.create_model_connection(
         user_id=user_id,
         values={
-            "id": new_connection_id(),
+            "id": connection_id or new_connection_id(),
             "name": name,
             "base_url": "https://provider.example/v1",
             "models": list(models),

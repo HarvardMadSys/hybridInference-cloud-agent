@@ -418,11 +418,9 @@ export const en = {
   'nav.aria': 'Product navigation',
   'nav.skipToWorkspace': 'Skip to workspace',
   'nav.status': 'Status',
-  'nav.docsAssistant': 'Docs Assistant',
   'nav.docs': 'Documentation',
   'nav.agents': 'Agents',
   'nav.admin': 'Admin',
-  'nav.dashboard': 'Dashboard',
   'nav.logOut': 'Log out',
   'nav.logOutFailed': 'Could not log out. You are still signed in; try again.',
   'nav.switchAccount': 'Switch account',
@@ -439,9 +437,6 @@ export const en = {
   'nav.expandTaskList': 'Expand task list',
   'nav.collapseTaskList': 'Collapse task list',
 
-  'shell.accessRequired.title': 'Agent access required',
-  'shell.accessRequired.body': 'This account has not been granted access to this Agent deployment.',
-  'shell.accessRequired.back': 'Back to Dashboard',
   'shell.renderError.title': 'This page could not be displayed',
   'shell.renderError.body':
     'Something on it failed to render. Retry, or open another chat or page.',

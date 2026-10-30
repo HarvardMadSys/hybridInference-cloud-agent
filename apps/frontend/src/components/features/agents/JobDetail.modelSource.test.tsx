@@ -89,8 +89,6 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     runtime: 'codex',
     model: 'shared',
     modelConnectionId: OTHER,
-    spentUsd: 0,
-    hasLedger: false,
     timeoutLabel: '',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'finished' }],
@@ -99,7 +97,6 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     diffFiles: [],
     diffStat: { add: 0, del: 0 },
     gates: [],
-    usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 1 },
     ...overrides,
   };
 }
@@ -116,10 +113,6 @@ function laterTurn(overrides: Partial<AgentJobApi> = {}): AgentJobApi {
     metadata: null,
     created_at: null,
     updated_at: null,
-    spent_usd: null,
-    tokens_in: null,
-    tokens_out: null,
-    model_calls: null,
     turn_no: 2,
     state: 'succeeded',
     task_prompt: 'Later',

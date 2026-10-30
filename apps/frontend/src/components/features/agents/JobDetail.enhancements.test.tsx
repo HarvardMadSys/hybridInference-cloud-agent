@@ -84,8 +84,6 @@ function job(threadId = 'thread-first', overrides: Partial<AgentJob> = {}): Agen
     runtime: 'claude-code',
     model: 'qwen-test',
     modelConnectionId: TEST_CONNECTION,
-    spentUsd: 0,
-    hasLedger: false,
     timeoutLabel: '',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
@@ -94,7 +92,6 @@ function job(threadId = 'thread-first', overrides: Partial<AgentJob> = {}): Agen
     diffFiles: [],
     diffStat: { add: 0, del: 0 },
     gates: [],
-    usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 1 },
     ...overrides,
   };
 }

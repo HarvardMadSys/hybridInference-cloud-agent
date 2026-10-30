@@ -3,87 +3,52 @@ import { config } from '@/config/env';
 
 const API_BASE = config.apiBase;
 
-export type AgentLedgerStatus = 'pending' | 'available' | 'partial' | 'unavailable' | 'stale';
+/** How much of a turn's usage its agent has reported. */
+export type AgentUsageStatus = 'pending' | 'available' | 'partial' | 'unavailable';
 
-export interface AgentLedgerTotalsApi {
-  calls: number;
+/**
+ * Known metric sums of what agents reported. A metric nothing reported stays
+ * null, never zero. Agents report no cost and count no model calls, so
+ * `spent_usd` and `calls` are null; `reasoning` is part of `tokens_out`.
+ */
+export interface AgentUsageTotalsApi {
+  calls: number | null;
   tokens_in: number | null;
   tokens_out: number | null;
   cache_read: number | null;
   cache_write: number | null;
   reasoning: number | null;
-  /** Decimal USD, preserving the Gateway's precision. */
   spent_usd: string | null;
 }
 
-export type AgentLedgerUnknownRowsApi = Record<
-  Exclude<keyof AgentLedgerTotalsApi, 'calls'>,
-  number
->;
+export type AgentUsageUnknownRowsApi = Record<Exclude<keyof AgentUsageTotalsApi, 'calls'>, number>;
 
-export interface AgentAttemptUsageApi {
-  attempt_id: number;
-  attempt_no: number;
-  status: AgentLedgerStatus;
-  reason: string | null;
-  totals: AgentLedgerTotalsApi | null;
-  unknown_rows: AgentLedgerUnknownRowsApi | null;
-  estimated_calls: number;
-  queried_at: string | null;
-  refreshing?: boolean;
-  next_refresh_at?: string | null;
-  windows: Array<{ since: string; until: string; basis: 'request_started_at' }>;
-}
-
-/** Cached job-scoped usage, including retries. The browser never queries the Gateway. */
+/**
+ * What one job's agent reported about its own model calls, across its
+ * retries. A counter is null when no call reported it: unknown, never zero.
+ */
 export interface AgentJobUsageApi {
-  ledger: {
-    status: AgentLedgerStatus;
-    source: 'gateway_api_logs';
-    attribution: 'grant_time_window';
-    finalized: false;
-    totals: AgentLedgerTotalsApi | null;
-    unknown_rows: AgentLedgerUnknownRowsApi | null;
-    estimated_calls: number;
-    queried_at: string | null;
-    missing_attempts: number;
-    refreshing?: boolean;
-    next_refresh_at?: string | null;
-    attempts: AgentAttemptUsageApi[];
-  };
   runtime: {
     source: 'runtime';
     input_tokens: number | null;
     output_tokens: number | null;
     cache_read_tokens: number | null;
-    /** Cache-inclusive input, null when the harness counters cannot establish it. */
+    cache_write_tokens?: number | null;
+    /** Of `output_tokens`, those reported as reasoning (Codex only). */
+    reasoning_tokens?: number | null;
+    /** Cache-inclusive input, null when the agent's counters cannot establish it. */
     normalized_input_tokens?: number | null;
   };
-  /**
-   * The turn ran on its owner's own model connection: that provider bills it.
-   */
+  /** The turn ran on its owner's own model connection: that provider bills it. */
   external_provider?: boolean;
   /**
    * Orders two reads of this job's usage, asked for or pushed: the one whose
    * version compares greater saw everything the other did. Opaque.
    */
   version?: string | null;
-  conversation?: {
-    totals: AgentLedgerTotalsApi | null;
-    unknown_rows: AgentLedgerUnknownRowsApi | null;
-    estimated_calls: number;
-    queried_at: string | null;
-    turn_count: number;
-    incomplete: boolean;
-    refreshing: boolean;
-    next_refresh_at?: string | null;
-    active?: boolean;
-    /** Some turn ran on the owner's own connection. */
-    external_provider?: boolean;
-  } | null;
 }
 
-/** Read cached snapshots; a pre-ledger control plane returns null, never zero usage. */
+/** Read what a job's agent reported; a job that is not the caller's reads as null. */
 export async function getAgentJobUsage(
   jobId: string,
   signal?: AbortSignal,

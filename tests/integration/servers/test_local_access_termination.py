@@ -31,7 +31,6 @@ from tests.support.model_connections import (
     verified_connection,
     with_connection_capability,
 )
-from tests.support.owners import on_connection
 
 from cloud_agent.accounts import config
 from cloud_agent.accounts.directory import (
@@ -435,9 +434,7 @@ async def test_a_turn_without_a_connection_is_refused_and_runs_only_on_the_owner
     """There is no platform model: the source is never silently swapped."""
     response = await api.client.post(
         "/v1/agent/jobs",
-        json=on_connection(
-            {"repo": queue._REPO, "task_prompt": "fix it", "model": MODEL, "base_sha": "a" * 40}
-        ),
+        json={"repo": queue._REPO, "task_prompt": "fix it", "model": MODEL, "base_sha": "a" * 40},
     )
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["error"]["type"] == "model_connection_required"

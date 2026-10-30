@@ -19,7 +19,8 @@ from tests.integration.servers.test_pending_message_queue import (
     _Gateway,
     pool as pool,
 )
-from tests.support.owners import on_connection
+from tests.support.model_connections import verified_connection
+from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, on_connection
 
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
@@ -42,7 +43,10 @@ async def http(pool, monkeypatch):
     """The real application with one owner, one team, environment and chat."""
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "unstorable-parameters-key")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", _REPO)
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "true")
     store = Storage(pool)
+    # The owner's verified connection, the one `on_connection` names.
+    await verified_connection(store, _OWNER, connection_id=CONNECTION_ID, models=CONNECTION_MODELS)
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_owner_directory] = _Gateway

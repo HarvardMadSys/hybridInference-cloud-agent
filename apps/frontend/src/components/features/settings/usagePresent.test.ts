@@ -54,7 +54,7 @@ function aggregate(overrides: Partial<AdminUsageAggregate> = {}): AdminUsageAggr
     oldest_queried_at: null,
     runs_with_snapshot: 2,
     missing_attempts: 0,
-    status_counts: { available: 2, partial: 0, stale: 0, pending: 0, unavailable: 0 },
+    status_counts: { available: 2, partial: 0, pending: 0, unavailable: 0 },
     active_runs: 0,
     refreshing_runs: 0,
     ...overrides,

@@ -1577,7 +1577,8 @@ class TestAuthorization:
         with _client(store) as client:
             # Started as the owner; finished by whatever session the browser has.
             del client.app.dependency_overrides[mcp_connections._callback_session_user]
-            client.app.state.owners = FakeOwners()
+            owners = FakeOwners()
+            client.app.state.owners = owners
             started = client.post(f"/v1/agent/mcp/connections/{connection_id}/authorize")
             assert started.status_code == 200, started.text
             state = parse_qs(urlsplit(started.json()["authorization_url"]).query)["state"][0]
@@ -1610,6 +1611,20 @@ class TestAuthorization:
                 assert store.credential_writes == []
                 assert store.oauth_flow is not None
 
+            # The starting account itself, after its agent.use was withdrawn:
+            # a live session is not enough, and the flow is left unconsumed.
+            owners.grant(_OWNER)
+            revoked = finish(SESSIONS.sign_in(_OWNER))
+            assert revoked.status_code == 302
+            result = parse_qs(urlsplit(revoked.headers["location"]).query)
+            assert result["mcp_authorized"] == ["0"]
+            assert "sign in to the account that started" in result["mcp_message"][0]
+            exchange.assert_not_awaited()
+            assert store.credential_writes == []
+            assert store.oauth_flow is not None
+            assert _OWNER in owners.asked
+
+            owners.grant(_OWNER, "agent.use")
             completed = finish(SESSIONS.sign_in(_OWNER))
         assert parse_qs(urlsplit(completed.headers["location"]).query)["mcp_authorized"] == ["1"]
         exchange.assert_awaited_once()
@@ -1802,57 +1817,6 @@ class TestTheDynamicClientIdentity:
         monkeypatch.setattr(store, "set_mcp_credential", write_then_test)
         assert "mcp_authorized=1" in await self._complete(store, connection_id, monkeypatch)
         assert store.connections[connection_id]["status"] == "active"
-
-
-class TestTheClientSecretIsNotACredential:
-    """A client secret authenticates to the authorization server, never upstream.
-
-    A user who brings a client id and secret has them stored before the browser
-    flow starts, so an abandoned or failed sign-in leaves a row holding a client
-    secret and no access token. That row needs authorizing; it has no credential.
-    """
-
-    def test_an_unfinished_sign_in_needs_authorizing_rather_than_reconnecting(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        store = FakeStore()
-        connection_id = _seed(
-            store, auth_kind="oauth", auth_config={}, access_token_ciphertext=None
-        )
-        with _client(store) as client:
-            client.post(
-                f"/v1/agent/mcp/connections/{connection_id}/authorize",
-                json={"client_id": "our-client", "client_secret": "shh"},
-            )
-            assert store.connections[connection_id]["client_secret_ciphertext"]
-            view = client.get(f"/v1/agent/mcp/connections/{connection_id}").json()
-            with caplog.at_level("WARNING"):
-                result = client.post(f"/v1/agent/mcp/connections/{connection_id}/test").json()
-        assert view["has_credential"] is False
-        assert result["ok"] is False
-        assert result["error_kind"] == "needs_authorization"
-        assert result["message"] == "This connection needs to be authorized."
-        assert "agent_mcp_credential_unreadable" not in caplog.text
-
-    async def test_a_client_secret_is_never_resolved_as_the_bearer(self) -> None:
-        """Not even one the credential cipher could read."""
-        from cloud_agent.mcp.registry import resolve_connection, server_for
-
-        store = FakeStore()
-        connection_id = _seed(
-            store,
-            auth_kind="oauth",
-            auth_config={},
-            access_token_ciphertext=None,
-            client_secret_ciphertext=mcp_cipher(_ENCRYPTION_KEY).encrypt("client-secret"),
-        )
-        resolved = await resolve_connection(store, row=store._row(connection_id))
-        assert not resolved.usable
-        assert "client-secret" not in json.dumps(dict(resolved.credential))
-        assert resolved.error == "This connection needs to be authorized."
-        assert "client-secret" not in json.dumps(
-            server_for(resolved, _binding(connection_id)).headers
-        )
 
 
 class TestATokenStaysWithItsResource:

@@ -44,7 +44,7 @@ BREAKDOWN_TOP_GROUPS = 20
 #: The grouped model of a job whose configured model is empty or missing.
 UNKNOWN_MODEL_GROUP = None
 
-UsageStatus = Literal["pending", "available", "partial", "unavailable", "stale"]
+UsageStatus = Literal["pending", "available", "partial", "unavailable"]
 BreakdownDimension = Literal["user_id", "model"]
 DayBucket = tuple[datetime, datetime]
 
@@ -53,7 +53,6 @@ DayBucket = tuple[datetime, datetime]
 _STATUS_ORDER: tuple[UsageStatus, ...] = (
     "available",
     "partial",
-    "stale",
     "pending",
     "unavailable",
 )

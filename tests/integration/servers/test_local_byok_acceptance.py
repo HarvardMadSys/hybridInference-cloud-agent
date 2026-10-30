@@ -92,7 +92,6 @@ class _Provider:
 async def byok(monkeypatch):
     reset_settings()
     for name, value in {
-        "AGENT_AUTH_MODE": "local",
         "AGENT_LOCAL_SESSION_SECRET": LOCAL_SECRET,
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": LOCAL_SECRET,
         "AGENT_MODEL_CONNECTIONS_ENABLED": "true",

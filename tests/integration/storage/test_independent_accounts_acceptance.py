@@ -51,7 +51,6 @@ async def acceptance(monkeypatch):
     async with pool.acquire() as connection:
         await reset_agent_tables(connection)
     for key, value in {
-        "AGENT_AUTH_MODE": "local",
         "AGENT_LOCAL_SESSION_SECRET": "independent-test-session-secret-over-32-bytes",
         "AGENT_WEB_BASE_URL": "https://agents.example",
         "AGENT_LOCAL_SIGNUP_ENABLED": "true",

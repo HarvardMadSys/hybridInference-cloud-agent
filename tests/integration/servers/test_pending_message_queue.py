@@ -31,7 +31,12 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
-from tests.support.owners import on_connection
+from tests.support.model_connections import (
+    use_test_cipher,
+    verified_connection,
+    with_connection_capability,
+)
+from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, on_connection
 from tests.support.uploads import thread_uploads
 
 from cloud_agent.api import routes, uploads, worker
@@ -109,35 +114,22 @@ class _Gateway:
         return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
 
 
-class _Grants:
-    async def mint(self, **kwargs: Any) -> dict[str, Any]:
-        return {
-            "grant_id": f"agr_{kwargs['attempt_id']}",
-            "token": "agr.token",
-            "allowed_models": list(kwargs.get("models") or []),
-        }
-
-    async def renew(self, grant_id: str) -> dict[str, Any]:
-        return {"grant_id": grant_id}
-
-    async def revoke(self, grant_id: str) -> bool:
-        return True
-
-
 def _claim_body(worker_id: str) -> dict[str, Any]:
-    return {
-        "worker_id": worker_id,
-        "attestation": {
-            "sandbox_image_digest": _IMAGE_DIGEST,
-            "runner_capabilities": [
-                SHARED_SANDBOX_CAPABILITY,
-                NATIVE_FORK_AT_ANCHOR_CAPABILITY,
-                shared_deployment_capability("test-deployment"),
-            ],
-            "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
-            "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
-        },
-    }
+    return with_connection_capability(
+        {
+            "worker_id": worker_id,
+            "attestation": {
+                "sandbox_image_digest": _IMAGE_DIGEST,
+                "runner_capabilities": [
+                    SHARED_SANDBOX_CAPABILITY,
+                    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+                    shared_deployment_capability("test-deployment"),
+                ],
+                "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
+                "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
+            },
+        }
+    )
 
 
 @pytest_asyncio.fixture
@@ -170,6 +162,8 @@ class Api:
         self.pool = pool
         self.gateway = gateway
         self.app = app
+        #: The owner's verified connection, listing every model these cases use.
+        self.connection: dict[str, Any] = {}
         #: The retained sandbox of each conversation, once its first turn made it.
         self._sandboxes: dict[str, dict[str, Any]] = {}
 
@@ -184,6 +178,7 @@ class Api:
                 "repo": _REPO,
                 "task_prompt": prompt,
                 "model": "glm-5.1",
+                "model_connection_id": self.connection.get("id"),
                 "base_sha": "a" * 40,
                 **fields,
             },
@@ -194,6 +189,9 @@ class Api:
     async def send(
         self, thread_id: str, prompt: str, *, key: str | None = None, **fields: Any
     ) -> Any:
+        if "model" in fields:
+            # Another model is picked from the owner's same connection.
+            fields = {"model_connection_id": self.connection.get("id"), **fields}
         return await self.client.post(
             f"/v1/agent/threads/{thread_id}/messages",
             json={"prompt": prompt, **fields},
@@ -389,6 +387,8 @@ async def api(pool, monkeypatch):
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "queue-test-secret")
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "queue-sandbox-manager-secret")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", _REPO)
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "true")
+    use_test_cipher(monkeypatch)
     store = Storage(pool)
     await store.host_pool.register_host(
         host=_HOST,
@@ -423,7 +423,15 @@ async def api(pool, monkeypatch):
         "credential_hash": _HOST_CREDENTIAL,
     }
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        yield Api(client, store, pool, gateway, app)
+        api = Api(client, store, pool, gateway, app)
+        # The connection `on_connection` names, so every body built with it runs.
+        api.connection = await verified_connection(
+            store,
+            _OWNER,
+            connection_id=CONNECTION_ID,
+            models=tuple(dict.fromkeys(("glm-5.1", "glm-4.6", *CONNECTION_MODELS))),
+        )
+        yield api
 
 
 # -- 10.1: a held message holds the line, FIFO resumes after save --------------
@@ -1805,9 +1813,7 @@ async def test_guarded_submit_preserves_resolved_turn_choices_and_attachment_own
     original_upload = await api.store.attachments.create_attachment(
         user_id=_OWNER, path="original.txt", content=b"original", content_type="text/plain"
     )
-    job = await api.create(
-        reasoning_effort="high", skill_ids=[skill["id"]], attachment_ids=[original_upload["id"]]
-    )
+    job = await api.create(skill_ids=[skill["id"]], attachment_ids=[original_upload["id"]])
     thread_id = job["thread_id"]
     await api.run(job)
     await _publish_workspace(api, thread_id)
@@ -1831,7 +1837,6 @@ async def test_guarded_submit_preserves_resolved_turn_choices_and_attachment_own
         )
         fields = {
             "model": "glm-4.6",
-            "reasoning_effort": "auto",
             "skill_ids": [skill["id"]],
             "attachment_ids": [upload["id"]],
         }
@@ -1871,7 +1876,8 @@ async def test_guarded_submit_preserves_resolved_turn_choices_and_attachment_own
             "pending_message_id": None,
         }
     else:
-        assert (made["model"], made["reasoning_effort"]) == ("glm-5.1", "high")
+        # A connection turn runs at its provider's default: no effort to inherit.
+        assert (made["model"], made["reasoning_effort"]) == ("glm-5.1", None)
         assert made_skills == previous_skills
         assert made_skills[0]["instructions"] == "Inspect the original tests."
         assert made["attachments"] is None
@@ -2071,28 +2077,33 @@ async def test_an_idle_only_message_says_why_its_upload_was_refused(api: Api):
 # -- 10.1: each message keeps its own model and effort -----------------------------
 
 
-async def test_each_message_runs_with_its_own_model_and_effort(api: Api):
+async def test_each_message_runs_with_its_own_model(api: Api):
     job = await api.create()
     thread_id = job["thread_id"]
     running = await api.start(job)
-    a = await api.send(thread_id, "A on the smaller model", model="glm-4.6", reasoning_effort="low")
-    b = await api.send(thread_id, "B back on the default", model="glm-5.1", reasoning_effort="max")
+    a = await api.send(thread_id, "A on the smaller model", model="glm-4.6")
+    b = await api.send(thread_id, "B back on the default", model="glm-5.1")
     assert a.status_code == b.status_code == 201, (a.text, b.text)
 
     await api.finish(running)
     a_turn = (await api.turns(thread_id))[1]
-    assert (a_turn["task_prompt"], a_turn["model"], a_turn["reasoning_effort"]) == (
-        "A on the smaller model",
-        "glm-4.6",
-        "low",
-    )
+    assert (a_turn["task_prompt"], a_turn["model"]) == ("A on the smaller model", "glm-4.6")
     await api.run({"id": a_turn["id"]})
     b_turn = (await api.turns(thread_id))[2]
-    assert (b_turn["task_prompt"], b_turn["model"], b_turn["reasoning_effort"]) == (
-        "B back on the default",
-        "glm-5.1",
-        "max",
+    assert (b_turn["task_prompt"], b_turn["model"]) == ("B back on the default", "glm-5.1")
+
+
+async def test_a_message_naming_an_effort_on_a_connection_is_refused(api: Api):
+    """A connection turn runs at its provider's default; an effort is refused, not dropped."""
+    job = await api.create()
+    running = await api.start(job)
+    refused = await api.send(
+        job["thread_id"], "think hard", model="glm-5.1", reasoning_effort="max"
     )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["detail"]["error"]["reason"] == "effort_unsupported"
+    await api.finish(running)
+    assert len(await api.turns(job["thread_id"])) == 1
 
 
 async def test_a_message_the_checks_refuse_when_it_is_sent_is_held_with_the_reason(api: Api):
@@ -2101,14 +2112,16 @@ async def test_a_message_the_checks_refuse_when_it_is_sent_is_held_with_the_reas
     running = await api.start(job)
     await api.send(thread_id, "use the smaller model", model="glm-4.6")
     behind = (await api.send(thread_id, "and then this")).json()["pending"]
-    # The model is withdrawn while the message waits.
-    api.gateway.models = ["glm-5.1"]
+    # The owner removes the model from the connection while the message waits.
+    assert await api.store.model_connections.update_model_connection(
+        user_id=_OWNER, connection_id=api.connection["id"], changes={"models": ["glm-5.1"]}
+    )
 
     await api.finish(running)
 
     queue = await api.queue(thread_id)
     assert [row["state"] for row in queue["messages"]] == ["held", "queued"]
-    assert "glm-4.6" in queue["messages"][0]["last_error"]
+    assert "not listed on its connection" in queue["messages"][0]["last_error"]
     assert queue["messages"][1]["id"] == behind["id"]
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
     thread = await api.thread(job["id"])

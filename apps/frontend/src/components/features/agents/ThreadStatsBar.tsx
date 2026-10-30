@@ -15,11 +15,8 @@
 //      the model's own thinking; the split is honest about that rather than
 //      presenting itself as execution time.
 //
-// Every number but one comes from events the platform already stored, so a
-// thread that ran months ago fills this bar in as completely as one running
-// now. TTFT is the exception: it is the gateway's own per-request measurement,
-// read separately and only when the conversation changes state, because event
-// timestamps include sandbox startup and whole-block completion.
+// Every number comes from events the platform already stored, so a thread
+// that ran months ago fills this bar in as completely as one running now.
 
 import { useEffect, useState } from 'react';
 

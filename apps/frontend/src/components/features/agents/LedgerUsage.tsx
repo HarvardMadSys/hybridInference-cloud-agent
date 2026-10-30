@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   getAgentJobUsage,
   type AgentJobUsageApi,
-  type AgentLedgerTotalsApi,
+  type AgentUsageTotalsApi,
 } from '@/lib/api/agents';
 
 import { useT } from '@/components/providers';
@@ -27,7 +27,7 @@ interface LoadedUsage {
   failed: boolean;
 }
 
-type DisplayTotals = Omit<AgentLedgerTotalsApi, 'calls'> & { calls: number | null };
+type DisplayTotals = AgentUsageTotalsApi;
 
 function known(value: number | null | undefined): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
@@ -50,8 +50,9 @@ function runtimeTotals(runtime: AgentJobUsageApi['runtime'] | undefined): Displa
     tokens_in: runtime.normalized_input_tokens ?? null,
     tokens_out: runtime.output_tokens,
     cache_read: runtime.cache_read_tokens,
-    cache_write: null,
-    reasoning: null,
+    cache_write: runtime.cache_write_tokens ?? null,
+    reasoning: runtime.reasoning_tokens ?? null,
+    // Agents report no cost: the owner's provider bills the turn.
     spent_usd: null,
   };
 }

@@ -247,8 +247,6 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     runtime: 'claude-code',
     model: 'qwen-test',
     modelConnectionId: TEST_CONNECTION,
-    spentUsd: 0.1,
-    hasLedger: true,
     timeoutLabel: '',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
@@ -275,7 +273,6 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     ],
     diffStat: { add: 1, del: 0 },
     gates: [],
-    usage: { tokensIn: '1.2k', tokensOut: '80', cachePct: 0, turns: 2 },
     ...overrides,
   };
 }
@@ -293,10 +290,6 @@ function laterTurn(overrides: Partial<AgentJobApi> = {}): AgentJobApi {
     metadata: null,
     created_at: null,
     updated_at: null,
-    spent_usd: null,
-    tokens_in: null,
-    tokens_out: null,
-    model_calls: null,
     turn_no: 2,
     state: 'succeeded',
     task_prompt: 'Later',
@@ -384,40 +377,7 @@ function sideChatFixture() {
 }
 
 function measuredUsage(): AgentJobUsageApi {
-  const totals = {
-    calls: 2,
-    tokens_in: 1200,
-    tokens_out: 80,
-    cache_read: null,
-    cache_write: null,
-    reasoning: null,
-    spent_usd: null,
-  };
   return {
-    ledger: {
-      status: 'available',
-      source: 'gateway_api_logs',
-      attribution: 'grant_time_window',
-      finalized: false,
-      totals,
-      unknown_rows: null,
-      estimated_calls: 0,
-      queried_at: null,
-      missing_attempts: 0,
-      attempts: [
-        {
-          attempt_id: 1,
-          attempt_no: 1,
-          status: 'available',
-          reason: null,
-          totals,
-          unknown_rows: null,
-          estimated_calls: 0,
-          queried_at: null,
-          windows: [],
-        },
-      ],
-    },
     runtime: {
       source: 'runtime',
       input_tokens: 1200,
@@ -1767,10 +1727,6 @@ describe('JobDetail', () => {
             metadata: null,
             created_at: null,
             updated_at: null,
-            spent_usd: null,
-            tokens_in: null,
-            tokens_out: null,
-            model_calls: null,
             turn_no: 2,
             state: 'queued',
             task_prompt: 'Later',

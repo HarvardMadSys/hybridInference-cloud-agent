@@ -140,10 +140,9 @@ export {
 } from './agents/resources';
 
 export type {
-  AgentLedgerStatus,
-  AgentLedgerTotalsApi,
-  AgentLedgerUnknownRowsApi,
-  AgentAttemptUsageApi,
+  AgentUsageStatus,
+  AgentUsageTotalsApi,
+  AgentUsageUnknownRowsApi,
   AgentJobUsageApi,
 } from './agents/usage';
 

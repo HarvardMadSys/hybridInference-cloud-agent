@@ -90,51 +90,6 @@ function run(overrides: Partial<AdminRun> = {}): AdminRun {
 
 function usage(): AgentJobUsageApi {
   return {
-    ledger: {
-      status: 'partial',
-      source: 'gateway_api_logs',
-      attribution: 'grant_time_window',
-      finalized: false,
-      totals: {
-        calls: 2,
-        tokens_in: 40086,
-        tokens_out: 413,
-        cache_read: 19712,
-        cache_write: null,
-        reasoning: null,
-        spent_usd: '0.00978569',
-      },
-      unknown_rows: {
-        tokens_in: 0,
-        tokens_out: 0,
-        cache_read: 0,
-        cache_write: 0,
-        reasoning: 2,
-        spent_usd: 0,
-      },
-      estimated_calls: 0,
-      queried_at: '2026-09-10T08:03:00Z',
-      missing_attempts: 0,
-      attempts: [
-        {
-          attempt_id: 10,
-          attempt_no: 1,
-          status: 'partial',
-          reason: null,
-          totals: null,
-          unknown_rows: null,
-          estimated_calls: 0,
-          queried_at: '2026-09-10T08:03:00Z',
-          windows: [
-            {
-              since: '2026-09-10T08:00:00Z',
-              until: '2026-09-10T08:02:00Z',
-              basis: 'request_started_at',
-            },
-          ],
-        },
-      ],
-    },
     runtime: {
       source: 'runtime',
       input_tokens: 20374,
@@ -142,7 +97,6 @@ function usage(): AgentJobUsageApi {
       output_tokens: 413,
       cache_read_tokens: 19712,
     },
-    conversation: null,
   };
 }
 

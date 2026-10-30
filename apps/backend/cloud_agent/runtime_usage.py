@@ -21,7 +21,7 @@ rollups into the totals the usage pages add up:
 
 An attempt that reported nothing is coverage, never zero usage. Which of an
 agent's model calls a turn can be credited with is the runtime driver's call;
-see ``CodexAppServerSession._turn_usage`` for Codex's limits.
+see ``cloud_agent_host.codex_app_server`` for Codex's limits.
 """
 
 from __future__ import annotations

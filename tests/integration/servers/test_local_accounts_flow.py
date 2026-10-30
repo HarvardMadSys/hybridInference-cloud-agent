@@ -194,7 +194,8 @@ async def test_the_whole_waiting_list_lifecycle(env):
     assert profile.status_code == 200, profile.text
     assert profile.json()["email"] == "Flow.Person@example.edu"
     config_body = (await http.get("/v1/agent/config")).json()
-    assert config_body["models"] == [] and config_body["model_connection_required"] is True
+    # No platform catalog: models come only from the account's own connections.
+    assert "models" not in config_body and config_body["model_connection_required"] is True
 
     granted = await _admin(http, account_id, "grant_admin", await _version(http))
     assert granted.status_code == 200 and granted.json()["is_admin"] is True

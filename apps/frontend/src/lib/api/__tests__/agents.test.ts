@@ -193,12 +193,10 @@ describe('agents api', () => {
   });
 
   it('reads owner-scoped usage as sent', async () => {
-    const body = { ledger: { totals: { spent_usd: '0.12345678' } } };
+    const body = { runtime: { source: 'runtime', output_tokens: 42 } };
     fetchWithAuth.mockResolvedValue(jsonResponse(body));
     const { signal } = new AbortController();
-    expect((await getAgentJobUsage('job/one', signal))?.ledger.totals?.spent_usd).toBe(
-      '0.12345678',
-    );
+    expect((await getAgentJobUsage('job/one', signal))?.runtime.output_tokens).toBe(42);
     expect(fetchWithAuth).toHaveBeenLastCalledWith(
       expect.any(String),
       '/v1/agent/jobs/job%2Fone/usage',

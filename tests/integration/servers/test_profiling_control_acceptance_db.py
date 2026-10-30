@@ -155,6 +155,10 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "acceptance-control-secret-of-32-bytes")
     monkeypatch.setenv("ADMIN_TOKEN", "acceptance-admin-token")
     monkeypatch.setenv(ENV_LOCAL_SESSION_SECRET, LOCAL_SECRET)
+    monkeypatch.setenv("AGENT_SETTINGS_ENCRYPTION_KEY", "acceptance-settings-key-of-32-bytes!")
+    monkeypatch.setenv(
+        "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "acceptance-credential-key-of-32-bytes"
+    )
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", REPO)
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "acceptance-sandbox-manager-token")
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(tmp_path / "records.jsonl"))

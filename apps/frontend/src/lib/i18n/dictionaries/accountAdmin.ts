@@ -5,7 +5,6 @@
 export const accountAdminEn = {
   'adminAccounts.section': 'Accounts',
   'adminAccounts.description': 'Review Cloud Agent applications and manage independent accounts.',
-  'adminAccounts.notLocal': 'Independent accounts are not enabled on this deployment.',
   'adminAccounts.navigation': 'Account administration',
   'adminAccounts.policyLink': 'Sign-up policy and sign-in records',
   'adminAccounts.mailLink': 'Mail to accounts',
@@ -180,7 +179,6 @@ export const accountAdminEn = {
 export const accountAdminZh: Record<keyof typeof accountAdminEn, string> = {
   'adminAccounts.section': '账号',
   'adminAccounts.description': '审核 Cloud Agent 使用申请，管理独立账号。',
-  'adminAccounts.notLocal': '本部署未启用独立账号。',
   'adminAccounts.navigation': '账号管理',
   'adminAccounts.policyLink': '注册策略与登录记录',
   'adminAccounts.mailLink': '发送邮件给账号',

@@ -3172,8 +3172,7 @@
                 "pending",
                 "available",
                 "partial",
-                "unavailable",
-                "stale"
+                "unavailable"
               ]
             },
             "title": "Status Counts",
@@ -3192,7 +3191,7 @@
           "unknown_rows": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/GrantUsageUnknownRows"
+                "$ref": "#/components/schemas/UsageUnknownRows"
               },
               {
                 "type": "null"
@@ -3209,7 +3208,7 @@
       },
       "AdminUsageBreakdown": {
         "additionalProperties": false,
-        "description": "The largest groups by recorded cost and the remainder as one row.",
+        "description": "The largest groups by reported tokens and the remainder as one row.",
         "properties": {
           "group_count": {
             "minimum": 0.0,
@@ -3301,12 +3300,6 @@
         "additionalProperties": false,
         "description": "One read view's totals, UTC day buckets and two independent breakdowns.",
         "properties": {
-          "attribution": {
-            "const": "grant_time_window",
-            "default": "grant_time_window",
-            "title": "Attribution",
-            "type": "string"
-          },
           "by_model": {
             "$ref": "#/components/schemas/AdminUsageBreakdown"
           },
@@ -3332,8 +3325,8 @@
             "type": "string"
           },
           "schema_version": {
-            "const": 1,
-            "default": 1,
+            "const": 2,
+            "default": 2,
             "title": "Schema Version",
             "type": "integer"
           },
@@ -3341,8 +3334,8 @@
             "$ref": "#/components/schemas/AdminUsageSelection"
           },
           "source": {
-            "const": "gateway_api_logs",
-            "default": "gateway_api_logs",
+            "const": "runtime_reported",
+            "default": "runtime_reported",
             "title": "Source",
             "type": "string"
           },
@@ -3473,9 +3466,16 @@
             "title": "Cache Write"
           },
           "calls": {
-            "minimum": 0.0,
-            "title": "Calls",
-            "type": "integer"
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calls"
           },
           "reasoning": {
             "anyOf": [
@@ -3528,7 +3528,6 @@
           }
         },
         "required": [
-          "calls",
           "tokens_in",
           "tokens_out",
           "cache_read",
@@ -5208,17 +5207,6 @@
             "title": "Model",
             "type": "string"
           },
-          "model_calls": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Model Calls"
-          },
           "model_connection_id": {
             "anyOf": [
               {
@@ -5391,17 +5379,6 @@
             "title": "Skills",
             "type": "array"
           },
-          "spent_usd": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Spent Usd"
-          },
           "started_at": {
             "anyOf": [
               {
@@ -5474,28 +5451,6 @@
               }
             ],
             "title": "Title Source"
-          },
-          "tokens_in": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Tokens In"
-          },
-          "tokens_out": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Tokens Out"
           },
           "turn_no": {
             "default": 1,
@@ -8819,109 +8774,6 @@
         "title": "AttachmentView",
         "type": "object"
       },
-      "AttemptLedgerSummary": {
-        "description": "A retry's snapshots, without service credentials or grant identifiers.",
-        "properties": {
-          "attempt_id": {
-            "title": "Attempt Id",
-            "type": "integer"
-          },
-          "attempt_no": {
-            "title": "Attempt No",
-            "type": "integer"
-          },
-          "estimated_calls": {
-            "default": 0,
-            "title": "Estimated Calls",
-            "type": "integer"
-          },
-          "next_refresh_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Next Refresh At"
-          },
-          "queried_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Queried At"
-          },
-          "reason": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Reason"
-          },
-          "refreshing": {
-            "default": false,
-            "title": "Refreshing",
-            "type": "boolean"
-          },
-          "status": {
-            "enum": [
-              "pending",
-              "available",
-              "partial",
-              "unavailable",
-              "stale"
-            ],
-            "title": "Status",
-            "type": "string"
-          },
-          "totals": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/GrantUsageDerivedTotals"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "unknown_rows": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/GrantUsageUnknownRows"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "windows": {
-            "items": {
-              "$ref": "#/components/schemas/GrantUsageWindow"
-            },
-            "title": "Windows",
-            "type": "array"
-          }
-        },
-        "required": [
-          "status",
-          "attempt_id",
-          "attempt_no"
-        ],
-        "title": "AttemptLedgerSummary",
-        "type": "object"
-      },
       "AttemptResources": {
         "description": "Attempt telemetry across historical samples and current guest observations.\n\nEvery aggregate counter is optional and ``coverage`` is not. Current shared\nmember turns intentionally report ``coverage = 0`` with null aggregate\ncounters, then carry per-tool timing and optional UID-filtered Kata process\nrows. A reader must render that as \"turn totals unavailable\", not zero use.\n\n``turn_summary`` is separate from all of the above. It is the whole-turn\nmember execution window: this member's own CPU and PSS peak, reported by\nthe guest helper through its own endpoint. It is populated independently,\nso a turn may have a complete ``turn_summary`` with no tool rows, or tool\nrows with no ``turn_summary`` at all.",
         "properties": {
@@ -10495,87 +10347,6 @@
         "title": "ConnectionsResponse",
         "type": "object"
       },
-      "ConversationUsage": {
-        "description": "Cached usage for the owned conversation, without per-attempt diagnostics.",
-        "properties": {
-          "active": {
-            "default": false,
-            "title": "Active",
-            "type": "boolean"
-          },
-          "estimated_calls": {
-            "default": 0,
-            "title": "Estimated Calls",
-            "type": "integer"
-          },
-          "external_provider": {
-            "default": false,
-            "title": "External Provider",
-            "type": "boolean"
-          },
-          "incomplete": {
-            "default": false,
-            "title": "Incomplete",
-            "type": "boolean"
-          },
-          "next_refresh_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Next Refresh At"
-          },
-          "queried_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Queried At"
-          },
-          "refreshing": {
-            "default": false,
-            "title": "Refreshing",
-            "type": "boolean"
-          },
-          "totals": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/GrantUsageDerivedTotals"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "turn_count": {
-            "default": 0,
-            "title": "Turn Count",
-            "type": "integer"
-          },
-          "unknown_rows": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/GrantUsageUnknownRows"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "title": "ConversationUsage",
-        "type": "object"
-      },
       "CopyInput": {
         "additionalProperties": false,
         "description": "Copy a reviewed environment to an entitled repository.",
@@ -11977,172 +11748,6 @@
           "rounds_used"
         ],
         "title": "GoalView",
-        "type": "object"
-      },
-      "GrantUsageDerivedTotals": {
-        "description": "Sums of valid reports, which may be wider than any single report.",
-        "properties": {
-          "cache_read": {
-            "anyOf": [
-              {
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cache Read"
-          },
-          "cache_write": {
-            "anyOf": [
-              {
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cache Write"
-          },
-          "calls": {
-            "minimum": 0.0,
-            "title": "Calls",
-            "type": "integer"
-          },
-          "reasoning": {
-            "anyOf": [
-              {
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Reasoning"
-          },
-          "spent_usd": {
-            "anyOf": [
-              {
-                "maxLength": 384,
-                "pattern": "^[0-9]+(?:\\.[0-9]+)?$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Spent Usd"
-          },
-          "tokens_in": {
-            "anyOf": [
-              {
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Tokens In"
-          },
-          "tokens_out": {
-            "anyOf": [
-              {
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Tokens Out"
-          }
-        },
-        "required": [
-          "calls",
-          "tokens_in",
-          "tokens_out",
-          "cache_read",
-          "cache_write",
-          "reasoning",
-          "spent_usd"
-        ],
-        "title": "GrantUsageDerivedTotals",
-        "type": "object"
-      },
-      "GrantUsageUnknownRows": {
-        "description": "How many request rows lack each metric; never a fabricated zero.",
-        "properties": {
-          "cache_read": {
-            "minimum": 0.0,
-            "title": "Cache Read",
-            "type": "integer"
-          },
-          "cache_write": {
-            "minimum": 0.0,
-            "title": "Cache Write",
-            "type": "integer"
-          },
-          "reasoning": {
-            "minimum": 0.0,
-            "title": "Reasoning",
-            "type": "integer"
-          },
-          "spent_usd": {
-            "minimum": 0.0,
-            "title": "Spent Usd",
-            "type": "integer"
-          },
-          "tokens_in": {
-            "minimum": 0.0,
-            "title": "Tokens In",
-            "type": "integer"
-          },
-          "tokens_out": {
-            "minimum": 0.0,
-            "title": "Tokens Out",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "tokens_in",
-          "tokens_out",
-          "cache_read",
-          "cache_write",
-          "reasoning",
-          "spent_usd"
-        ],
-        "title": "GrantUsageUnknownRows",
-        "type": "object"
-      },
-      "GrantUsageWindow": {
-        "description": "The half-open interval selected by gateway request start time.",
-        "properties": {
-          "basis": {
-            "const": "request_started_at",
-            "title": "Basis",
-            "type": "string"
-          },
-          "since": {
-            "format": "date-time",
-            "title": "Since",
-            "type": "string"
-          },
-          "until": {
-            "format": "date-time",
-            "title": "Until",
-            "type": "string"
-          }
-        },
-        "required": [
-          "since",
-          "until",
-          "basis"
-        ],
-        "title": "GrantUsageWindow",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -13824,131 +13429,13 @@
         "title": "IssueHostEnrollTokenResponse",
         "type": "object"
       },
-      "JobLedgerSummary": {
-        "description": "One job's ledger usage across every execution attempt, including failures.",
-        "properties": {
-          "attempts": {
-            "items": {
-              "$ref": "#/components/schemas/AttemptLedgerSummary"
-            },
-            "title": "Attempts",
-            "type": "array"
-          },
-          "attribution": {
-            "const": "grant_time_window",
-            "default": "grant_time_window",
-            "title": "Attribution",
-            "type": "string"
-          },
-          "estimated_calls": {
-            "default": 0,
-            "title": "Estimated Calls",
-            "type": "integer"
-          },
-          "finalized": {
-            "const": false,
-            "default": false,
-            "title": "Finalized",
-            "type": "boolean"
-          },
-          "missing_attempts": {
-            "default": 0,
-            "title": "Missing Attempts",
-            "type": "integer"
-          },
-          "next_refresh_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Next Refresh At"
-          },
-          "queried_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Queried At"
-          },
-          "refreshing": {
-            "default": false,
-            "title": "Refreshing",
-            "type": "boolean"
-          },
-          "source": {
-            "const": "gateway_api_logs",
-            "default": "gateway_api_logs",
-            "title": "Source",
-            "type": "string"
-          },
-          "status": {
-            "enum": [
-              "pending",
-              "available",
-              "partial",
-              "unavailable",
-              "stale"
-            ],
-            "title": "Status",
-            "type": "string"
-          },
-          "totals": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/GrantUsageDerivedTotals"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "unknown_rows": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/GrantUsageUnknownRows"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "status"
-        ],
-        "title": "JobLedgerSummary",
-        "type": "object"
-      },
       "JobUsageResponse": {
-        "description": "Usage sources and a cached conversation total for an owner's run.",
+        "description": "What one owner's run reported about its model use.",
         "properties": {
-          "conversation": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ConversationUsage"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "external_provider": {
             "default": false,
             "title": "External Provider",
             "type": "boolean"
-          },
-          "ledger": {
-            "$ref": "#/components/schemas/JobLedgerSummary"
           },
           "runtime": {
             "$ref": "#/components/schemas/RuntimeUsage"
@@ -13967,7 +13454,6 @@
           }
         },
         "required": [
-          "ledger",
           "runtime"
         ],
         "title": "JobUsageResponse",
@@ -15731,6 +15217,12 @@
             "title": "Since",
             "type": "string"
           },
+          "source": {
+            "const": "runtime_reported",
+            "default": "runtime_reported",
+            "title": "Source",
+            "type": "string"
+          },
           "summary": {
             "$ref": "#/components/schemas/AdminUsageAggregate"
           },
@@ -17089,7 +16581,7 @@
         "type": "object"
       },
       "RuntimeUsage": {
-        "description": "Runtime self-reported tokens for the same job and retries.",
+        "description": "The agent's own token report for one job, across its retries.\n\nA counter is ``None`` when no model call reported it: unknown, never zero.\n``reasoning_tokens`` is part of ``output_tokens``.",
         "properties": {
           "cache_read_tokens": {
             "anyOf": [
@@ -17101,6 +16593,17 @@
               }
             ],
             "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
           },
           "input_tokens": {
             "anyOf": [
@@ -17134,6 +16637,17 @@
               }
             ],
             "title": "Output Tokens"
+          },
+          "reasoning_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Tokens"
           },
           "source": {
             "const": "runtime",
@@ -20941,6 +20455,51 @@
           "revision"
         ],
         "title": "UpdateSkill",
+        "type": "object"
+      },
+      "UsageUnknownRows": {
+        "description": "How many reporting rows lack each metric; never a fabricated zero.",
+        "properties": {
+          "cache_read": {
+            "minimum": 0.0,
+            "title": "Cache Read",
+            "type": "integer"
+          },
+          "cache_write": {
+            "minimum": 0.0,
+            "title": "Cache Write",
+            "type": "integer"
+          },
+          "reasoning": {
+            "minimum": 0.0,
+            "title": "Reasoning",
+            "type": "integer"
+          },
+          "spent_usd": {
+            "minimum": 0.0,
+            "title": "Spent Usd",
+            "type": "integer"
+          },
+          "tokens_in": {
+            "minimum": 0.0,
+            "title": "Tokens In",
+            "type": "integer"
+          },
+          "tokens_out": {
+            "minimum": 0.0,
+            "title": "Tokens Out",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tokens_in",
+          "tokens_out",
+          "cache_read",
+          "cache_write",
+          "reasoning",
+          "spent_usd"
+        ],
+        "title": "UsageUnknownRows",
         "type": "object"
       },
       "UserAvatar": {
@@ -27524,7 +27083,7 @@
     },
     "/admin/agent/runs/{job_id}": {
       "get": {
-        "description": "Read a turn's metadata and existing accounting without owner impersonation.",
+        "description": "Read a turn's metadata and its agent's usage report without owner impersonation.",
         "operationId": "get_admin_run_admin_agent_runs__job_id__get",
         "parameters": [
           {
@@ -35462,7 +35021,7 @@
     },
     "/v1/agent/jobs/{job_id}/usage": {
       "get": {
-        "description": "Read the runtime usage and conversation statistics of one owned job.",
+        "description": "Read what one owned job's agent reported about its model use.",
         "operationId": "get_job_usage_v1_agent_jobs__job_id__usage_get",
         "parameters": [
           {
@@ -38212,7 +37771,7 @@
     },
     "/v1/agent/site-config": {
       "get": {
-        "description": "Return only the allowlisted site identity and display feature switch.",
+        "description": "Return only the allowlisted site identity.",
         "operationId": "site_config_v1_agent_site_config_get",
         "responses": {
           "200": {
@@ -41546,7 +41105,7 @@
     },
     "/v1/agent/usage/tokens": {
       "get": {
-        "description": "Model usage and cost of the owner's runs created in the period.\n\nRaises:\n    HTTPException: 422 when the selection or its response exceeds the\n        aggregation's bounds, 503 when it cannot be read inside them.\n        Neither returns a partial sum.",
+        "description": "Agent-reported model usage of the owner's runs created in the period.\n\nRaises:\n    HTTPException: 422 when the selection or its response exceeds the\n        aggregation's bounds, 503 when it cannot be read inside them.\n        Neither returns a partial sum.",
         "operationId": "read_owner_tokens_v1_agent_usage_tokens_get",
         "parameters": [
           {

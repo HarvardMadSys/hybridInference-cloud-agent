@@ -80,14 +80,11 @@ async def _session(storage: Storage, account_id: str, **proof: str):
 
 async def _stopped(storage: Storage, account_id: str) -> None:
     """Run the real termination pass for the account's open record until it closes."""
-    from cloud_agent.accounts.directory import LocalModeGrantClient
     from cloud_agent.application.owner_termination import terminate_owner_access
 
     for account, generation in await storage.local_accounts.open_terminations(limit=50):
         if account == account_id:
-            assert await terminate_owner_access(
-                storage, LocalModeGrantClient(), account_id, generation
-            )
+            assert await terminate_owner_access(storage, account_id, generation)
     assert not await storage.local_accounts.termination_open(account_id)
 
 

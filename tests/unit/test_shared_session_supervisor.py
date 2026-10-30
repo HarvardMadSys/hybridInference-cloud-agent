@@ -2462,10 +2462,9 @@ def test_guest_network_fail_stop_archives_once_and_does_not_duplicate_on_listing
 def test_the_sweep_names_its_running_groups_to_the_host_rule_check():
     """A table the check reinstalls comes back without any group's relay or SSH exceptions.
 
-    A firewall reload flushes the host's ruleset; the check puts the table
-    back, but a group still running behind it stays cut off from its gateway
-    and MCP relays, and from its SSH servers, until something syncs its bridge
-    again. Only the sweep knows which groups are running, so it names them.
+    A firewall reload flushes the host's ruleset; a group still running behind
+    the reinstalled table stays cut off from its MCP relay and SSH servers until
+    its bridge is synced. Only the sweep knows which groups run, so it names them.
     """
     manager, supervisor = _running_group()
 

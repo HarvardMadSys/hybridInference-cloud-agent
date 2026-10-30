@@ -8,8 +8,8 @@ own concurrency semantics are pinned separately by the ``dbtest`` suite.
 Ported from the gateway with assertions untouched. Two things the router no
 longer holds are supplied by the test app instead of by an import:
 
-- **The model catalog and the MCP registry** arrive over HTTP now, so the
-  route registry the source stubbed is a fake ``GatewayClient`` here.
+- **The owner's models and the MCP registry** come from the owner's own
+  connections now, so the test app stands in an owner directory and a store.
 - **The auth dependencies** are real now, so nothing stands in for them
   any more: ``get_current_user`` verifies this service's own session token and
   ``verify_admin_access`` compares ``ADMIN_TOKEN``. There is no API-key branch

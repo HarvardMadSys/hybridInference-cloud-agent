@@ -1,12 +1,12 @@
 import { config } from '@/config/env';
 
-import type { AgentLedgerStatus, AgentLedgerTotalsApi } from './agents';
+import type { AgentUsageStatus, AgentUsageTotalsApi } from './agents';
 import { fetchWithAuth, jsonOrThrow } from './client';
 
 const USAGE = '/admin/agent/usage';
 
 /** Known metric sums. An unreported metric stays null and is never a zero. */
-export type AdminUsageTotals = AgentLedgerTotalsApi;
+export type AdminUsageTotals = AgentUsageTotalsApi;
 
 export type AdminUsageUnknownRows = Record<Exclude<keyof AdminUsageTotals, 'calls'>, number>;
 
@@ -19,7 +19,7 @@ export interface AdminUsageAggregate {
   oldest_queried_at: string | null;
   runs_with_snapshot: number;
   missing_attempts: number;
-  status_counts: Record<AgentLedgerStatus, number>;
+  status_counts: Record<AgentUsageStatus, number>;
   active_runs: number;
   refreshing_runs: number;
 }
@@ -58,9 +58,9 @@ export interface AdminUsageSelection {
 }
 
 export interface AdminUsage {
-  schema_version: 1;
-  source: 'gateway_api_logs';
-  attribution: 'grant_time_window';
+  schema_version: 2;
+  /** Every number is what agents reported about their own model calls. */
+  source: 'runtime_reported';
   finalized: false;
   selection: AdminUsageSelection;
   generated_at: string;

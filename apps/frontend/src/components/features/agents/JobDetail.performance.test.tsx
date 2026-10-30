@@ -194,8 +194,6 @@ function conversation(streamed: AgentEvent[] = []): AgentJob {
     runtime: 'claude-code',
     model: 'qwen-test',
     modelConnectionId: TEST_CONNECTION,
-    spentUsd: 0,
-    hasLedger: false,
     timeoutLabel: '',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
@@ -207,7 +205,6 @@ function conversation(streamed: AgentEvent[] = []): AgentJob {
     diffFileDetails: DIFF_DETAILS,
     diffStat: { add: 4002, del: 0 },
     gates: [],
-    usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 1 },
   };
 }
 

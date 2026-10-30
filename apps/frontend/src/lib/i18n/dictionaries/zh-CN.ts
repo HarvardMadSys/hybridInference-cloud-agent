@@ -396,11 +396,9 @@ export const zhCN: Record<TranslationKey, string> = {
   'nav.aria': '产品导航',
   'nav.skipToWorkspace': '跳转到工作区',
   'nav.status': '服务状态',
-  'nav.docsAssistant': '文档助手',
   'nav.docs': '使用文档',
   'nav.agents': 'Agents',
   'nav.admin': '管理后台',
-  'nav.dashboard': '控制台',
   'nav.logOut': '退出登录',
   'nav.logOutFailed': '退出登录失败，你仍处于登录状态，请重试。',
   'nav.switchAccount': '切换账号',
@@ -415,9 +413,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'nav.expandTaskList': '展开任务列表',
   'nav.collapseTaskList': '收起任务列表',
 
-  'shell.accessRequired.title': '需要 Agent 使用权限',
-  'shell.accessRequired.body': '当前账户尚未获得此 Agent 部署的使用权限。',
-  'shell.accessRequired.back': '返回控制台',
   'shell.renderError.title': '无法显示此页面',
   'shell.renderError.body': '页面中的部分内容渲染失败。请重试，或打开其他对话或页面。',
 
