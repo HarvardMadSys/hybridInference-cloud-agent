@@ -2,8 +2,8 @@
 
 The control plane's routes run in-process over the per-worker test database.
 Agents are the real agent code on temporary roots; Docker Compose is recorded,
-while the PostgreSQL client programs really run (``psql`` on this machine,
-``pg_dump``/``pg_restore`` from the local ``postgres:15`` image), against
+while the PostgreSQL client programs really run (``psql``, ``pg_dump`` and
+``pg_restore`` from the local ``postgres:15`` image), against
 disposable databases created for each test and dropped after it.
 """
 
@@ -205,7 +205,7 @@ async def _empty() -> list[Any]:
 
 
 def _postgres_tools() -> dict[str, list[str]] | None:
-    if not shutil.which("docker") or not shutil.which("psql"):
+    if not shutil.which("docker"):
         return None
     probe = subprocess.run(
         ["docker", "image", "inspect", "postgres:15"], capture_output=True, check=False
@@ -216,7 +216,7 @@ def _postgres_tools() -> dict[str, list[str]] | None:
     for name in ("PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"):
         run += ["-e", name]
     return {
-        "psql": ["psql"],
+        "psql": [*run, "postgres:15", "psql"],
         "pg_dump": [*run, "postgres:15", "pg_dump"],
         "pg_restore": [*run, "postgres:15", "pg_restore"],
     }

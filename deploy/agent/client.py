@@ -88,6 +88,8 @@ def _operation_summaries(store: AgentStore, limit: int = 50) -> list[dict[str, A
             "state": record.get("state"),
             "detail": str(record.get("detail") or "")[:2000],
             "origin": record.get("origin"),
+            # A migration's last finished step; its journal stays on this machine.
+            "phase": ((record.get("migration") or {}).get("done") or [None])[-1],
             "created_at": record.get("created_at"),
             "updated_at": record.get("updated_at"),
         }
@@ -104,6 +106,7 @@ def sync_once(executor: Executor, client: ControlPlaneClient, *, now: float | No
     """
     store = executor.store
     client.report(executor.observed(), _operation_summaries(store))
+    deliver_results(client, store)
     handled = 0
     for intent in client.intents(int(store.state().get("last_seq", 0))):
         handled += 1
@@ -134,14 +137,75 @@ def sync_once(executor: Executor, client: ControlPlaneClient, *, now: float | No
             origin="intent",
         )
         client.result(intent_id, outcome.state, outcome.detail, outcome.evidence)
+        _mark_delivered(store, intent_id)
     if handled:
         client.report(executor.observed(), _operation_summaries(store))
     return handled
 
 
 def pending_results(store: AgentStore) -> list[dict[str, Any]]:
-    """Journal entries for intents whose final state may not have reached the control plane."""
-    return [r for r in store.operations() if r.get("intent_id") and r.get("state") != "running"]
+    """Journal entries for intents whose final state has not reached the control plane."""
+    return [
+        r
+        for r in store.operations()
+        if r.get("intent_id") and r.get("state") != "running" and not r.get("delivered")
+    ]
 
 
-__all__ = ["ControlPlaneClient", "ControlPlaneUnavailable", "pending_results", "sync_once"]
+def _mark_delivered(store: AgentStore, record_id: str) -> None:
+    record = store.operation(record_id)
+    if record is not None:
+        record["delivered"] = True
+        store.save_operation(record)
+
+
+def deliver_results(client: ControlPlaneClient, store: AgentStore) -> None:
+    """Send every final state the control plane has not acknowledged.
+
+    A result can miss the control plane: a migration finishes while the service
+    restarts on the target. It stays in the journal until a call succeeds; one
+    the control plane already holds is simply not accepted again.
+    """
+    for record in pending_results(store):
+        client.result(
+            str(record["intent_id"]),
+            str(record["state"]),
+            str(record.get("detail") or ""),
+            dict(record.get("evidence") or {}),
+        )
+        _mark_delivered(store, str(record["id"]))
+
+
+def recover_interrupted(executor: Executor) -> list[str]:
+    """Settle what the last run left ``running``: resume a migration, fail anything else.
+
+    Run once before the agent's first sync. Nothing but a migration resumes by
+    itself: the rest may have stopped anywhere, so it is reported as interrupted
+    with the configuration version in force, and the workflow decides what next.
+    """
+    from deploy.agent.database import recover
+
+    settled = []
+    for record in executor.store.operations():
+        if record.get("state") != "running":
+            continue
+        outcome = recover(executor, record)
+        if outcome is None:
+            record.update(
+                state="failed",
+                detail="interrupted when the agent restarted; configuration version "
+                f"{executor.store.state().get('config_rev')} is in force",
+            )
+            executor.store.save_operation(record)
+        settled.append(str(record["id"]))
+    return settled
+
+
+__all__ = [
+    "ControlPlaneClient",
+    "ControlPlaneUnavailable",
+    "deliver_results",
+    "pending_results",
+    "recover_interrupted",
+    "sync_once",
+]

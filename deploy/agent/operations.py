@@ -76,6 +76,8 @@ class Executor:
     handlers: dict[str, Callable[..., Outcome]] = field(default_factory=dict)
     #: How a loopback health endpoint is asked (replaced in tests).
     http_check: Callable[[str], bool] = http_ok
+    #: Called as a long operation passes a step, so the control plane sees it.
+    progress: Callable[[], None] = field(default=lambda: None)
 
     @property
     def role(self) -> str:
@@ -100,11 +102,12 @@ class Executor:
         sealed: dict[str, Any] | None = None,
         *,
         intent_id: str | None = None,
+        record_id: str | None = None,
         seq: int | None = None,
         origin: str = "local",
     ) -> Outcome:
         """Validate, journal, run and judge one operation."""
-        record_id = intent_id or uuid.uuid4().hex
+        record_id = record_id or intent_id or uuid.uuid4().hex
         record = {
             "id": record_id,
             "intent_id": intent_id,
@@ -237,6 +240,10 @@ class Executor:
 
     def _restart_and_check(self, services: list[str]) -> tuple[bool, dict[str, bool]]:
         compose = self.compose()
+        if self.role == "host":
+            drained = compose.drain(services)
+            if not drained.ok:
+                return False, dict.fromkeys(services, False)
         result = compose.recreate(services)
         if not result.ok:
             return False, dict.fromkeys(services, False)

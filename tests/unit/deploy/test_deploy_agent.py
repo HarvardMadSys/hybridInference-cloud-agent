@@ -377,6 +377,20 @@ def test_a_sandbox_manager_credential_rotation_stages_then_promotes(tmp_path) ->
     assert new not in json.dumps(host.store.operations())
 
 
+def test_a_host_restart_drains_the_runner_before_the_sandbox_manager(tmp_path) -> None:
+    """A Compose stop would kill a long turn at its grace; a rotation must not."""
+    host, machine = _agent(tmp_path, role="host", env="AGENT_RUNNER_HOST=gpu-1\n")
+    healthy, _states = host._restart_and_check(["sandbox-manager", "runner"])
+    assert healthy
+    stops = [call for call in machine.calls if call[:2] == ["docker", "stop"]]
+    assert stops == [
+        ["docker", "stop", "--time=-1", "runner-container"],
+        ["docker", "stop", "--time=-1", "sandbox-manager-container"],
+    ]
+    recreate = next(i for i, c in enumerate(machine.calls) if "--force-recreate" in c)
+    assert machine.calls.index(stops[1]) < recreate
+
+
 def test_the_sandbox_manager_accepts_the_next_credential_during_a_rotation(monkeypatch) -> None:
     from fastapi.testclient import TestClient
     from tests.unit.test_agent_sandbox_manager import _SharedSupervisor

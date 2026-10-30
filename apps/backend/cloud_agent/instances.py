@@ -126,8 +126,11 @@ class RestartTracker:
 
 def report_details() -> dict[str, Any]:
     """Evidence beside the revision: one-way identifiers of the keys this process holds."""
+    from cloud_agent.maintenance import seen_workflow
+
     return {
         **root_key_state(),
+        "maintenance_seen": seen_workflow(),
         "admin_token_id": key_identifier((os.environ.get("ADMIN_TOKEN") or "").strip()),
         "database_url_id": key_identifier(os.environ.get("AGENT_DATABASE_URL") or ""),
     }

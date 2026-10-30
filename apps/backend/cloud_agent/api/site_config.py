@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Response
 
+from cloud_agent import maintenance
 from cloud_agent.settings import boolean_setting, text_setting
 
 router = APIRouter(prefix="/v1/agent")
@@ -22,4 +23,9 @@ async def site_config(response: Response) -> dict[str, object]:
             "gatewayUrl": text_setting("site.gateway_url"),
         },
         "features": {"rag": boolean_setting("site.feature_rag")},
+        # Whether changes are refused for maintenance now, and since when;
+        # never which database or why beyond that.
+        "maintenance": {
+            k: v for k, v in maintenance.current().items() if k in {"active", "kind", "since"}
+        },
     }

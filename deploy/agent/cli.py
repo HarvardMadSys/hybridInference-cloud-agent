@@ -10,6 +10,7 @@ already edit ``.env``); they need no control-plane credential.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import json
 import socket
@@ -20,7 +21,13 @@ from pathlib import Path
 from typing import Any
 
 from deploy.agent import releases
-from deploy.agent.client import ControlPlaneClient, ControlPlaneUnavailable, sync_once
+from deploy.agent.client import (
+    ControlPlaneClient,
+    ControlPlaneUnavailable,
+    _operation_summaries,
+    recover_interrupted,
+    sync_once,
+)
 from deploy.agent.deployment_contract import generate_keypair, seal, sealed_purpose
 from deploy.agent.operations import Executor
 from deploy.agent.store import AgentStore, StoreError, write_json
@@ -94,6 +101,13 @@ def _client(store: AgentStore) -> ControlPlaneClient:
 def cmd_run(args: argparse.Namespace) -> int:
     executor = _executor(args)
     client = _client(executor.store)
+
+    def report_progress() -> None:
+        with contextlib.suppress(ControlPlaneUnavailable):
+            client.report(executor.observed(), _operation_summaries(executor.store))
+
+    executor.progress = report_progress
+    recover_interrupted(executor)
     while True:
         try:
             sync_once(executor, client)

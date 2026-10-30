@@ -8,13 +8,16 @@ verifier, and every control-plane machine switches; done when every current
 process reports the new connection's identifier. Once the password changed a
 failure is fixed forward: the old password no longer works.
 
-``database_migration`` (WP12): the leader machine's agent fences every writer
-by making the source read-only, copies into an empty target, verifies every
-table's row count and the migration revision, and switches; the other
-machines then switch; done when every current process reports the target's
-identifier. The source stays read-only and is never switched back to once
-writes resume on the target. The journal is on the agent, so the control
-plane losing its database mid-copy loses nothing the migration needs.
+``database_migration`` (WP12): every control-plane process first enters
+maintenance (:mod:`cloud_agent.maintenance`) and confirms it refuses writes;
+only then the leader machine's agent fences every writer by making the source
+read-only, copies into an empty target, verifies it, marks maintenance over in
+the target, and switches; the other machines then switch; done when every
+current process reports the target's identifier. The source stays read-only
+and is never switched back to once writes resume on the target. The journal is
+on the agent, with the target connection sealed to the agent's own key, so the
+control plane restarting or losing its database mid-copy loses nothing the
+migration needs, and the agent resumes by itself.
 """
 
 from __future__ import annotations
@@ -74,7 +77,7 @@ async def start_database_workflow(
     workflow = await storage.deployments.create_workflow(
         workflow_id=workflow_id,
         kind=kind,
-        step="probe" if kind == "database_connection" else "migrate",
+        step="probe" if kind == "database_connection" else "maintenance",
         params=prepared,
         created_by=admin_id,
     )
@@ -177,11 +180,43 @@ async def _advance_connection(storage: Any, workflow: dict[str, Any]) -> None:
             return
 
 
+async def _leave_maintenance(storage: Any, workflow: dict[str, Any]) -> None:
+    """The move stopped with the source still authoritative: writes may resume."""
+    await storage.maintenance.finish(
+        workflow_id=workflow["workflow_id"], state="aborted", detail=workflow["detail"][:2000]
+    )
+
+
+async def _enter_maintenance(storage: Any, workflow: dict[str, Any]) -> bool:
+    """Every process refuses writes before anything is fenced; ``True`` to go on."""
+    workflow_id = workflow["workflow_id"]
+    if not await storage.maintenance.begin(
+        workflow_id=workflow_id, kind="database_migration", detail="moving to another database"
+    ):
+        await save(storage, workflow, state="failed", detail="another maintenance is running")
+        return False
+    moved = await _verify(
+        storage,
+        workflow,
+        lambda instances: [
+            _label(i) for i in instances if i["details"].get("maintenance_seen") != workflow_id
+        ],
+        "migrate",
+        "waiting for every process to stop accepting changes",
+    )
+    if not moved and workflow["state"] == "failed":
+        await _leave_maintenance(storage, workflow)
+    return moved
+
+
 async def _advance_migration(storage: Any, workflow: dict[str, Any]) -> None:
     params = workflow["params"]
     while workflow["state"] in {"running", "waiting"}:
         step = workflow["step"]
-        if step == "migrate":
+        if step == "maintenance":
+            if not await _enter_maintenance(storage, workflow):
+                return
+        elif step == "migrate":
             outcome = await _run_agent_step(
                 storage,
                 workflow,
@@ -191,6 +226,8 @@ async def _advance_migration(storage: Any, workflow: dict[str, Any]) -> None:
                 {"operation_id": workflow["workflow_id"]},
                 sealed_for=_sealed_for(workflow, _URL),
             )
+            if outcome == "failed":
+                await _leave_maintenance(storage, workflow)
             if outcome != "succeeded":
                 return
             await save(storage, workflow, state="running", step="switch_others", detail="")

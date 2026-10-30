@@ -62,6 +62,8 @@ class FakeMachine:
             from deploy.agent.system import SubprocessRunner
 
             return SubprocessRunner().run(argv, cwd=cwd, env=env, timeout=timeout)
+        if argv[:2] == ["docker", "compose"] and argv[-3:-1] == ["ps", "-q"]:
+            return CommandResult(0, f"{argv[-1]}-container\n")
         if argv[:2] == ["docker", "compose"] and "ps" in argv:
             services = argv[argv.index("json") + 1 :]
             current = self._env()

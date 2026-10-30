@@ -151,6 +151,7 @@ def _forget_background_task(task: asyncio.Task[Any]) -> None:
 _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "settings_task",
     "instance_report_task",
+    "maintenance_task",
     "workflow_task",
     "mcp_maintenance_task",
     "mcp_catalog_task",
@@ -458,6 +459,9 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             setattr(app.state, name, None)
         _spawn(app, "settings_task", synchronize_settings(storage.settings))
         _spawn(app, "instance_report_task", report_forever(storage.instances, identity.role))
+        from cloud_agent.maintenance import watch_forever
+
+        _spawn(app, "maintenance_task", watch_forever(storage.maintenance))
         # One pool, shared by both gateway clients. Each call used to build its own
         # client and pay a connect — and a TLS handshake, where the gateway is
         # behind TLS — and admission is not an occasional call: `require_agent_owner`

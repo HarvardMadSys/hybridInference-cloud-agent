@@ -9,11 +9,14 @@ read.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
+from asyncpg.exceptions import ReadOnlySQLTransactionError
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from cloud_agent import maintenance
 from cloud_agent.api.deps import (
     get_client_ip,
     get_storage,
@@ -102,6 +105,7 @@ async def overview(store: Any = Depends(get_storage)) -> dict[str, Any]:
     storage = require_store(store)
     agents = await storage.deployments.list_agents()
     return {
+        "maintenance": {**maintenance.current(), "progress": maintenance.progress()},
         "agents": [deployments.agent_view(agent) for agent in agents],
         "intents": [_intent_view(i) for i in await storage.deployments.list_intents(limit=100)],
         "workflows": [
@@ -295,7 +299,9 @@ async def read_workflow(workflow_id: str, store: Any = Depends(get_storage)) -> 
     workflow = await storage.deployments.get_workflow(workflow_id)
     if workflow is None:
         raise HTTPException(status_code=404, detail="No such workflow.")
-    await workflows.advance_workflow(storage, workflow)
+    with contextlib.suppress(ReadOnlySQLTransactionError):
+        # A fenced database still shows where the workflow stands.
+        await workflows.advance_workflow(storage, workflow)
     return {
         **{k: v for k, v in workflow.items() if k != "data"},
         "progress": {k: v for k, v in workflow["data"].items() if k not in _UNSHOWN_PROGRESS},

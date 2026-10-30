@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from asyncpg.exceptions import ReadOnlySQLTransactionError
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from cloud_agent import maintenance
 from cloud_agent.api.deps import bearer_token, get_storage, require_store
 from cloud_agent.application import deployments
 from cloud_agent.application.key_rotation import register_advancers
@@ -95,8 +97,15 @@ async def report(
     if len(str(body.observed)) > 262144:
         raise HTTPException(status_code=413, detail="The report is too large.")
     storage = require_store(store)
-    await storage.deployments.record_report(agent["agent_id"], body.observed, body.operations)
-    await advance_after_agent_update(storage, agent["agent_id"])
+    if maintenance.current().get("active"):
+        maintenance.record_progress(agent["agent_id"], body.operations)
+    try:
+        await storage.deployments.record_report(agent["agent_id"], body.observed, body.operations)
+        await advance_after_agent_update(storage, agent["agent_id"])
+    except ReadOnlySQLTransactionError:
+        # The source is fenced during a database move. Progress lives in this
+        # process and on the agent until a writable database takes reports.
+        return {"ok": True, "persisted": False}
     return {"ok": True}
 
 
@@ -107,9 +116,12 @@ async def intents(
     store: Any = Depends(get_storage),
 ) -> dict[str, Any]:
     """Pending intents for this agent above ``after_seq``, now marked delivered."""
-    delivered = await require_store(store).deployments.deliver_intents(
-        agent["agent_id"], max(0, after_seq)
-    )
+    try:
+        delivered = await require_store(store).deployments.deliver_intents(
+            agent["agent_id"], max(0, after_seq)
+        )
+    except ReadOnlySQLTransactionError:
+        return {"intents": []}  # marking one delivered needs a writable database
     return {
         "intents": [
             {
@@ -135,13 +147,17 @@ async def result(
 ) -> dict[str, Any]:
     """Record one intent's state; only a forward transition is accepted."""
     storage = require_store(store)
-    moved = await storage.deployments.update_intent(
-        agent_id=agent["agent_id"],
-        intent_id=intent_id,
-        state=body.state,
-        detail=body.detail,
-        evidence=body.evidence,
-    )
-    if moved:
-        await advance_after_agent_update(storage, agent["agent_id"])
+    try:
+        moved = await storage.deployments.update_intent(
+            agent_id=agent["agent_id"],
+            intent_id=intent_id,
+            state=body.state,
+            detail=body.detail,
+            evidence=body.evidence,
+        )
+        if moved:
+            await advance_after_agent_update(storage, agent["agent_id"])
+    except ReadOnlySQLTransactionError:
+        # 503 keeps it undelivered on the agent, which sends it again later.
+        raise HTTPException(status_code=503, detail="The database is read-only.") from None
     return {"accepted": moved}

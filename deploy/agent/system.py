@@ -126,6 +126,10 @@ class SubprocessRunner:
         return CommandResult(completed.returncode, output[-OUTPUT_TAIL:])
 
 
+#: A turn may run for hours; the deadline only frees the agent from a stuck daemon.
+DRAIN_TIMEOUT_S = 7 * 24 * 3600.0
+
+
 @dataclass
 class Compose:
     """``docker compose`` for this machine's project, as its local policy names it."""
@@ -158,6 +162,33 @@ class Compose:
     def stop(self, services: list[str]) -> CommandResult:
         """Stop named services, honouring their configured stop grace."""
         return self.runner.run([*self._base(), "stop", *services], cwd=self.deploy_root)
+
+    def drain(self, services: list[str]) -> CommandResult:
+        """Stop the runner, then the sandbox manager, with no forced-kill deadline.
+
+        The same order and the same unbounded stop as ``sandbox_host.sh``: the
+        runner treats SIGTERM as a drain and waits for its turns, which still
+        use the sandbox manager. A Compose stop would turn a long turn into a
+        SIGKILL at its stop grace.
+        """
+        docker = str((self.policy.get("compose") or {}).get("docker") or "docker")
+        result = CommandResult(0, "")
+        for service in ("runner", "sandbox-manager"):
+            if service not in services:
+                continue
+            found = self.runner.run([*self._base(), "ps", "-q", service], cwd=self.deploy_root)
+            if not found.ok:
+                return found
+            containers = found.output.split()
+            if containers:
+                result = self.runner.run(
+                    [docker, "stop", "--time=-1", *containers],
+                    cwd=self.deploy_root,
+                    timeout=DRAIN_TIMEOUT_S,
+                )
+                if not result.ok:
+                    return result
+        return result
 
     def running(self, services: list[str]) -> dict[str, bool]:
         """Whether each named service has a running (and, if checked, healthy) container."""

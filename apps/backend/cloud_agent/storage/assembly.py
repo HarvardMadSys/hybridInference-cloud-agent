@@ -74,6 +74,7 @@ from cloud_agent.storage.repositories.environments import PostgresEnvironmentRep
 from cloud_agent.storage.repositories.host_credentials import PostgresHostCredentials
 from cloud_agent.storage.repositories.instances import InstanceRepository
 from cloud_agent.storage.repositories.key_rotation import PostgresRootKeyFamilies
+from cloud_agent.storage.repositories.maintenance import PostgresMaintenance
 
 if TYPE_CHECKING:
     import asyncpg
@@ -138,6 +139,7 @@ class Storage:
         self.root_key_families: RootKeyFamilies = PostgresRootKeyFamilies(pool)
         self.credential_rotation = PostgresCredentialRotation(pool)
         self.host_credentials = PostgresHostCredentials(pool)
+        self.maintenance = PostgresMaintenance(pool)
         self.database_probes: DatabaseProbes = PostgresDatabaseProbes(pool)
 
     def __init__(self, pool: asyncpg.Pool) -> None:

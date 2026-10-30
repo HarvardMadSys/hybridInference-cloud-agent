@@ -25,6 +25,7 @@ from cloud_agent.api._parameters import refuse_unstorable_parameters
 from cloud_agent.api._sensitive_routes import no_store
 from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.logging_utils import configure_process_logging, get_logger
+from cloud_agent.maintenance import MaintenanceGuard, install_read_only_handler
 from cloud_agent_shared.storable_text import encodable_json
 
 logger = get_logger(__name__)
@@ -249,6 +250,8 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     # admits it from any page on the same site. Machine callers send bearers
     # and pass untouched; see the module for the exact rule.
     app.add_middleware(_cross_site.CrossSiteWriteGuard)
+    app.add_middleware(MaintenanceGuard)
+    install_read_only_handler(app)
     app.include_router(routes.router)
     app.include_router(usage.router)
     app.include_router(owner_usage.router)
@@ -430,4 +433,6 @@ def create_mcp_app() -> FastAPI:
         """Liveness, so the tunnel's health check has something to ask."""
         return {"status": "ok"}
 
+    app.add_middleware(MaintenanceGuard)
+    install_read_only_handler(app)
     return app
