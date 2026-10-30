@@ -109,7 +109,7 @@ export const contextDashboardEn = {
   'dashboard.trend.areas': 'Areas',
   'dashboard.trend.dnaTip': 'Each request as the stored items it carried, keyed by item.',
   'dashboard.trend.dnaDisabled':
-    'DNA draws up to {max} requests per step: narrow the window below.',
+    'DNA shows single requests (Step), up to {max} at a time: narrow the window below.',
   'dashboard.trend.extras': 'Overlay',
   'dashboard.trend.noOverlay': 'Tokens',
   'dashboard.trend.duration': 'Duration',
@@ -258,7 +258,7 @@ export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, strin
   'dashboard.trend.view': '面积或条目',
   'dashboard.trend.areas': '面积',
   'dashboard.trend.dnaTip': '每次请求画成它带上的存储条目，按条目对应。',
-  'dashboard.trend.dnaDisabled': 'DNA 每次最多画 {max} 个按步的请求：请在下方缩小范围。',
+  'dashboard.trend.dnaDisabled': 'DNA 只按步显示单次请求，每次最多 {max} 个：请在下方缩小范围。',
   'dashboard.trend.extras': '叠加',
   'dashboard.trend.noOverlay': 'Token',
   'dashboard.trend.duration': '时长',
