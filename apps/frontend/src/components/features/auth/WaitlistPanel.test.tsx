@@ -11,7 +11,6 @@ const auth = vi.hoisted(() => ({
     user: {
       id: 'owner',
       email: 'owner@example.test',
-      auth_mode: 'local',
       waitlist: undefined as WaitlistEntry | undefined,
     },
   },

@@ -121,6 +121,23 @@ class GrantUsageDerivedTotals(_UsageTotals):
     spent_usd: DerivedAmount | None
 
 
+class UsageSums(_UsageModel):
+    """Known metric sums over many turns; a metric no turn reported stays null.
+
+    ``calls`` is null when nothing in the sum counted model calls: an agent's
+    own usage report says how many tokens it used, not how many requests made
+    them.
+    """
+
+    calls: NonnegativeInt | None = None
+    tokens_in: NonnegativeInt | None
+    tokens_out: NonnegativeInt | None
+    cache_read: NonnegativeInt | None
+    cache_write: NonnegativeInt | None
+    reasoning: NonnegativeInt | None
+    spent_usd: DerivedAmount | None
+
+
 class GrantUsageUnknownRows(_UsageModel):
     """How many request rows lack each metric; never a fabricated zero."""
 

@@ -45,7 +45,6 @@
     {
       "files": [
         "src/app/(agents)/admin/database/PgAdminTools.tsx",
-        "src/app/(agents)/admin/runs/LLMRequests.tsx",
         "src/components/features/agents/NativeQuestionPrompt.tsx",
         "src/components/features/agents/TerminalWorkspace.tsx",
         "src/components/features/agents/job-detail/JobDetailHeader.tsx",
@@ -161,7 +160,6 @@
     {
       "files": [
         "src/app/(agents)/admin/hosts/HostSettings.tsx",
-        "src/components/features/agents/PromptRewrite.tsx",
         "src/components/features/agents/TrajectoryInspector.tsx",
         "src/components/features/agents/mcp/McpAddDialog.tsx"
       ],

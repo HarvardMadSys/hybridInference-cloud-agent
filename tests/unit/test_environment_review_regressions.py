@@ -920,8 +920,7 @@ async def test_empty_binding_fork_reaches_coordination_without_environment_prepa
         "group_members": [{"thread_id": "thread"}],
     }
     with pytest.raises(HTTPException) as failure:
-        await session_fork.materialize_session_fork(
-            operation, job_id="job", job_store=store)
+        await session_fork.materialize_session_fork(operation, job_id="job", job_store=store)
     assert failure.value.detail["error"]["type"] == "fork_in_progress"
     broker.prepare_environment.assert_not_awaited()
     store.session_fork.claim_session_fork_materialization.assert_awaited_once()

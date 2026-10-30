@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createAgentJob,
   getAgentJobUsage,
-  refreshAgentJobUsage,
   type AgentJobApi,
   type AgentJobUsageApi,
   type AgentThreadEventApi,
@@ -28,12 +27,10 @@ vi.mock('next/navigation', () => ({
 vi.mock('@/lib/api/agents', () => ({
   createAgentJob: vi.fn(),
   getAgentJobUsage: vi.fn(),
-  refreshAgentJobUsage: vi.fn(),
 }));
 
 beforeEach(() => {
   vi.mocked(getAgentJobUsage).mockReset();
-  vi.mocked(refreshAgentJobUsage).mockReset();
   vi.mocked(createAgentJob).mockReset();
   navigation.push.mockReset();
 });
@@ -128,19 +125,14 @@ function usage(overrides: Partial<AgentJobUsageApi['ledger']> = {}): AgentJobUsa
       ],
       ...overrides,
     },
-    runtime: { source: 'runtime', input_tokens: 900, output_tokens: null, cache_read_tokens: null },
+    runtime: { source: 'runtime', input_tokens: 1000, output_tokens: 200, cache_read_tokens: null },
   };
 }
 
-/** The ledger as it reads while a queued refresh has not run yet. */
-function pendingUsage(): AgentJobUsageApi {
-  return usage({ status: 'pending', refreshing: true, totals: null });
-}
-
-/** A settled ledger whose input-token total names the snapshot, for assertions. */
+/** Usage whose runtime-reported input names the snapshot, for assertions. */
 function usageWithTokens(tokensIn: number): AgentJobUsageApi {
   const snapshot = usage();
-  snapshot.ledger.totals = { ...snapshot.ledger.totals!, tokens_in: tokensIn };
+  snapshot.runtime = { ...snapshot.runtime, input_tokens: tokensIn };
   return snapshot;
 }
 
@@ -396,20 +388,8 @@ describe('RunDetails', () => {
     expect(onOpenGitDiff).toHaveBeenCalled();
   });
 
-  it('keeps every ledger field that was recorded and never invents a zero cost', async () => {
-    vi.mocked(getAgentJobUsage).mockResolvedValue(
-      usage({
-        totals: {
-          calls: 3,
-          tokens_in: 1000,
-          tokens_out: 200,
-          cache_read: null,
-          cache_write: null,
-          reasoning: null,
-          spent_usd: null,
-        },
-      }),
-    );
+  it('shows what the agent reported and says the provider bills the cost', async () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
     renderPanel(
       <RunDetails
         jobId="ajob_0"
@@ -422,8 +402,12 @@ describe('RunDetails', () => {
     );
 
     await waitFor(() => expect(screen.getByText('1,000')).toBeInTheDocument());
-    expect(screen.queryByText('$0')).toBeNull();
+    expect(screen.getByText('200')).toBeInTheDocument();
+    expect(screen.getByText(/your provider bills it/)).toBeInTheDocument();
+    // An unreported counter is not recorded, never zero; no cost is shown.
     expect(screen.getAllByText('Not recorded').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/\$/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull();
   });
 
   it('says a turn on an owner connection is billed by that provider, and stops polling', async () => {
@@ -472,7 +456,7 @@ describe('RunDetails', () => {
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
 
     const pushed = usage();
-    pushed.ledger.totals = { ...pushed.ledger.totals!, tokens_in: 4321 };
+    pushed.runtime = { ...pushed.runtime, input_tokens: 4321 };
     act(() => receiveHint('usage', 'ajob_pushed', pushed));
     await act(async () => vi.advanceTimersByTimeAsync(PUSH_BATCH_MS));
 
@@ -485,7 +469,7 @@ describe('RunDetails', () => {
     vi.useFakeTimers();
     const read = usage();
     read.version = '0005';
-    read.ledger.totals = { ...read.ledger.totals!, tokens_in: 5555 };
+    read.runtime = { ...read.runtime, input_tokens: 5555 };
     vi.mocked(getAgentJobUsage).mockResolvedValue(read);
     await act(async () => {
       renderPanel(
@@ -504,71 +488,12 @@ describe('RunDetails', () => {
     // Computed before that read, delivered after it.
     const older = usage();
     older.version = '0004';
-    older.ledger.totals = { ...older.ledger.totals!, tokens_in: 4444 };
+    older.runtime = { ...older.runtime, input_tokens: 4444 };
     act(() => receiveHint('usage', 'ajob_versions', older));
     await act(async () => vi.advanceTimersByTimeAsync(PUSH_BATCH_MS));
     expect(screen.getByText('5,555')).toBeInTheDocument();
     expect(screen.queryByText('4,444')).toBeNull();
     resetAgentPush();
-  });
-
-  it("keeps a newer pushed usage over the answer to the reader's refresh", async () => {
-    vi.useFakeTimers();
-    const before = usage();
-    before.version = '0002';
-    before.ledger.totals = { ...before.ledger.totals!, tokens_in: 2000 };
-    vi.mocked(getAgentJobUsage)
-      .mockResolvedValueOnce(before)
-      // Later reads are slow: only the refresh's answer can change what is shown.
-      .mockImplementation(() => new Promise(() => undefined));
-    await act(async () => {
-      renderPanel(
-        <RunDetails
-          jobId="ajob_refreshed"
-          turnNo={2}
-          tab="usage"
-          job={HISTORY_JOB}
-          events={[]}
-          onOpenGitDiff={vi.fn()}
-        />,
-      );
-    });
-    expect(screen.getByText('2,000')).toBeInTheDocument();
-
-    const pushed = usage();
-    pushed.version = '0003';
-    pushed.ledger.totals = { ...pushed.ledger.totals!, tokens_in: 3000 };
-    act(() => receiveHint('usage', 'ajob_refreshed', pushed));
-    await act(async () => vi.advanceTimersByTimeAsync(PUSH_BATCH_MS));
-    expect(screen.getByText('3,000')).toBeInTheDocument();
-
-    // The refresh answers with the cached usage as it was before that push.
-    let answer!: (value: AgentJobUsageApi) => void;
-    vi.mocked(refreshAgentJobUsage).mockImplementation(
-      () => new Promise((resolve) => (answer = resolve)),
-    );
-    fireEvent.click(screen.getAllByRole('button', { name: 'Refresh' })[0]);
-    await act(async () => answer(before));
-
-    expect(screen.getByText('3,000')).toBeInTheDocument();
-    expect(screen.queryByText('2,000')).toBeNull();
-    resetAgentPush();
-  });
-
-  it('says the deployment has no ledger instead of showing nothing', async () => {
-    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
-    renderPanel(
-      <RunDetails
-        jobId="ajob_without_ledger"
-        turnNo={2}
-        tab="usage"
-        job={HISTORY_JOB}
-        events={[]}
-        onOpenGitDiff={vi.fn()}
-      />,
-    );
-
-    await waitFor(() => expect(screen.getByText(/no billing ledger/)).toBeInTheDocument());
   });
 
   it('exports only this turn and groups it by attempt', () => {
@@ -598,138 +523,6 @@ describe('RunDetails', () => {
     expect(screen.getByRole('button', { name: 'Download' })).toBeInTheDocument();
   });
 
-  it('reads the finished ledger instead of stopping at the queued snapshot', async () => {
-    vi.useFakeTimers();
-    vi.mocked(getAgentJobUsage).mockResolvedValue(pendingUsage());
-    vi.mocked(refreshAgentJobUsage).mockResolvedValue(pendingUsage());
-    await act(async () => {
-      renderPanel(
-        <RunDetails
-          jobId="ledger-refresh"
-          turnNo={2}
-          tab="usage"
-          events={[]}
-          onOpenGitDiff={vi.fn()}
-        />,
-      );
-    });
-    expect(screen.getByText('Pending')).toBeInTheDocument();
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    });
-    // Asking for a refresh only queues it. The read that follows is the one
-    // that can see what the worker wrote.
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-
-    vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(15_000);
-    });
-    expect(screen.queryByText('Available')).toBeInTheDocument();
-  });
-
-  it('keeps reading an available ledger whose next refresh is already scheduled', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-09-11T10:00:00.000Z'));
-    const scheduled = usage({ next_refresh_at: '2026-09-11T10:00:05.000Z' });
-    vi.mocked(getAgentJobUsage).mockResolvedValue(scheduled);
-    vi.mocked(refreshAgentJobUsage).mockResolvedValue(scheduled);
-    await act(async () => {
-      renderPanel(
-        <RunDetails
-          jobId="ledger-scheduled"
-          turnNo={2}
-          tab="usage"
-          events={[]}
-          onOpenGitDiff={vi.fn()}
-        />,
-      );
-    });
-    expect(screen.getByText('Available')).toBeInTheDocument();
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    });
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-
-    // Available but with a refresh the server has already scheduled is a
-    // snapshot that is going to change, so the panel reads it when it is due
-    // instead of caching the old total for the next open.
-    vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(6_000);
-    });
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
-
-    // With nothing queued and nothing scheduled, the reads stop.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(60_000);
-    });
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
-  });
-
-  it('waits out a scheduled refresh instead of spending its reads before it', async () => {
-    vi.useFakeTimers();
-    // A terminal turn: its 30-second refresh has just completed and the server
-    // scheduled the last one five minutes after the turn finished.
-    const openedAt = Date.parse('2026-09-11T10:00:30.000Z');
-    const refreshAt = '2026-09-11T10:05:00.000Z';
-    const due = Date.parse(refreshAt);
-    vi.setSystemTime(new Date(openedAt));
-    const reads: number[] = [];
-    vi.mocked(getAgentJobUsage).mockImplementation(async () => {
-      reads.push(Date.now());
-      return Date.now() >= due ? usage() : usage({ next_refresh_at: refreshAt });
-    });
-    await act(async () => {
-      renderPanel(
-        <RunDetails
-          jobId="ledger-far-schedule"
-          turnNo={2}
-          tab="usage"
-          events={[]}
-          onOpenGitDiff={vi.fn()}
-        />,
-      );
-    });
-    expect(reads).toHaveLength(1);
-
-    // Polling towards the schedule would spend the panel's reads long before
-    // the answer exists. The read belongs at the time the server named.
-    for (let elapsed = 0; elapsed < 285_000; elapsed += 15_000) {
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(15_000);
-      });
-    }
-    expect(reads).toHaveLength(2);
-    expect(reads[1]).toBeGreaterThanOrEqual(due);
-  });
-
-  it('revalidates an unfinished cached ledger when the panel is reopened', async () => {
-    vi.mocked(getAgentJobUsage).mockResolvedValue(pendingUsage());
-    const panel = (
-      <RunDetails
-        jobId="ledger-reopen"
-        turnNo={2}
-        tab="usage"
-        events={[]}
-        onOpenGitDiff={vi.fn()}
-      />
-    );
-    // The shell keeps the provider mounted while the panel itself closes.
-    const view = renderPanel(panel);
-    await waitFor(() => expect(screen.getByText('Pending')).toBeInTheDocument());
-
-    // A settled snapshot is worth reusing; one still waiting for the worker is
-    // not, or reopening the panel would show yesterday's state for good.
-    vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
-    view.rerender(<AgentReadProvider>{null}</AgentReadProvider>);
-    view.rerender(<AgentReadProvider>{panel}</AgentReadProvider>);
-    await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument());
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
-  });
-
   it('reuses a settled snapshot when the same account reopens the panel', async () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
     const panel = (
@@ -742,14 +535,14 @@ describe('RunDetails', () => {
       />
     );
     const view = render(<AgentReadProvider>{panel}</AgentReadProvider>);
-    await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('1,000')).toBeInTheDocument());
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
 
     // The shell keeps the provider mounted across one panel closing; the same
     // account reopening the turn reads nothing new.
     view.rerender(<AgentReadProvider>{null}</AgentReadProvider>);
     view.rerender(<AgentReadProvider>{panel}</AgentReadProvider>);
-    await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('1,000')).toBeInTheDocument());
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
   });
 
@@ -862,38 +655,4 @@ describe('RunDetails', () => {
     expect(screen.queryByText('1,111')).toBeNull();
   });
 
-  it('ignores a refresh answer that outlives its account', async () => {
-    let answer!: (value: AgentJobUsageApi) => void;
-    vi.mocked(getAgentJobUsage).mockResolvedValue(usageWithTokens(1111));
-    vi.mocked(refreshAgentJobUsage).mockImplementation(
-      () =>
-        new Promise<AgentJobUsageApi>((resolve) => {
-          answer = resolve;
-        }),
-    );
-    const panel = (userId: string) => (
-      <AgentReadProvider userId={userId}>
-        <RunDetails
-          jobId="ajob_refresh_rejoin"
-          turnNo={2}
-          tab="usage"
-          events={[]}
-          onOpenGitDiff={vi.fn()}
-        />
-      </AgentReadProvider>
-    );
-    const view = render(panel('alice'));
-    await waitFor(() => expect(screen.getByText('1,111')).toBeInTheDocument());
-    fireEvent.click(screen.getAllByRole('button', { name: 'Refresh' })[0]);
-
-    vi.mocked(getAgentJobUsage).mockResolvedValue(usageWithTokens(2222));
-    view.rerender(panel('bob'));
-    await waitFor(() => expect(screen.getByText('2,222')).toBeInTheDocument());
-
-    // The refresh Alice asked for finishes while Bob's panel is mounted. Its
-    // snapshot and its failure text are both Alice's, not Bob's.
-    answer(usageWithTokens(1111));
-    await waitFor(() => expect(screen.getByText('2,222')).toBeInTheDocument());
-    expect(screen.queryByText('1,111')).toBeNull();
-  });
 });

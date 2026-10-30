@@ -92,8 +92,7 @@ async def _one_pass(store: _Store, monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(attempts.asyncio, "sleep", _sleep)
     with pytest.raises(asyncio.CancelledError):
-        await attempts.reap_expired_attempts(
-            store, interval_seconds=0, max_attempts=1)
+        await attempts.reap_expired_attempts(store, interval_seconds=0, max_attempts=1)
     assert sleeps == 2
 
 

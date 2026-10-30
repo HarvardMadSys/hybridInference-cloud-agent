@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { offering, TEST_CONNECTION } from '@/test/connectionConfig';
 import '@testing-library/jest-dom/vitest';
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -33,7 +34,7 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentConfig: vi.fn().mockResolvedValue({
     repos: ['owner/repository'],
     runtimes: ['claude-code'],
-    models: ['qwen-test'],
+    ...offering(['qwen-test']),
     github_connected: true,
   }),
   getAgentJobUsage: vi.fn().mockResolvedValue(null),

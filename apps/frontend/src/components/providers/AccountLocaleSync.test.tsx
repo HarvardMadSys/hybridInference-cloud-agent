@@ -6,7 +6,7 @@ import { LOCALE_CHOSEN_AT_KEY } from '@/lib/i18n/locales';
 import { AccountLocaleSync } from './AccountLocaleSync';
 
 const state = vi.hoisted(() => ({
-  user: { id: 'acct', auth_mode: 'local', identity: { locale: 'zh-CN' } } as Record<
+  user: { id: 'acct', identity: { locale: 'zh-CN' } } as Record<
     string,
     unknown
   > | null,
@@ -31,7 +31,7 @@ describe('the language follows the account', () => {
     expect(self.saveAccountLocale).not.toHaveBeenCalled();
   });
   it('saves the browser’s language for an account that has none', async () => {
-    state.user = { id: 'other', auth_mode: 'local', identity: { locale: null } };
+    state.user = { id: 'other', identity: { locale: null } };
     vi.mocked(self.saveAccountLocale).mockResolvedValue({ locale: 'en', chosen_at: null });
     render(<AccountLocaleSync />);
     await waitFor(() => expect(self.saveAccountLocale).toHaveBeenCalledWith('en'));
@@ -40,7 +40,6 @@ describe('the language follows the account', () => {
     window.localStorage.setItem(LOCALE_CHOSEN_AT_KEY, '2026-10-29T10:00:05.000Z');
     state.user = {
       id: 'carried',
-      auth_mode: 'local',
       identity: { locale: 'en', locale_chosen_at: '2026-10-29T10:00:00.000Z' },
     };
     state.locale = 'zh-CN';
@@ -58,7 +57,6 @@ describe('the language follows the account', () => {
     window.localStorage.setItem(LOCALE_CHOSEN_AT_KEY, '2026-10-29T09:00:00.000Z');
     state.user = {
       id: 'older',
-      auth_mode: 'local',
       identity: { locale: 'en', locale_chosen_at: '2026-10-29T10:00:00.000Z' },
     };
     state.locale = 'zh-CN';

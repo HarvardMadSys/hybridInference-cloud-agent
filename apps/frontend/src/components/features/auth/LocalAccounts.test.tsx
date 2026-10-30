@@ -141,14 +141,4 @@ describe('independent account forms', () => {
     );
     expect(screen.queryByText(/identity provider/)).toBeNull();
   });
-  it('does not show a local signup form in Gateway mode', async () => {
-    vi.mocked(api.getAuthConfig).mockResolvedValue({ mode: 'gateway', signup_enabled: false });
-    render(
-      <LocalAccountGate signup>
-        <SignupForm />
-      </LocalAccountGate>,
-    );
-    await screen.findByText('Account registration unavailable');
-    expect(screen.queryByLabelText('Password')).toBeNull();
-  });
 });

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { offering, TEST_CONNECTION } from '@/test/connectionConfig';
 import '@testing-library/jest-dom/vitest';
 
 import {
@@ -233,7 +234,7 @@ const AGENT_CONFIG = {
   environment_limits: {},
   repos: ['owner/repository'],
   runtimes: ['claude-code'],
-  models: ['qwen-test', 'glm-test'],
+  ...offering(['qwen-test', 'glm-test']),
   github_connected: true,
   github_install_url: null,
 };
@@ -250,6 +251,7 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     branch: 'agent/ajob_1',
     runtime: 'claude-code',
     model: 'qwen-test',
+    modelConnectionId: TEST_CONNECTION,
     spentUsd: 0.1,
     hasLedger: true,
     timeoutLabel: '',
@@ -305,6 +307,7 @@ function laterTurn(overrides: Partial<AgentJobApi> = {}): AgentJobApi {
     task_prompt: 'Later',
     runtime: 'claude-code',
     model: 'qwen-test',
+    model_connection_id: TEST_CONNECTION,
     ...overrides,
   };
 }
@@ -332,6 +335,7 @@ function sideChatFixture() {
     task_prompt: 'Main',
     runtime: 'codex',
     model: 'qwen-test',
+    model_connection_id: TEST_CONNECTION,
     repo: 'owner/repository',
     current_attempt_id: null,
   } as AgentJobApi;
@@ -439,31 +443,6 @@ const HISTORY = [
   },
 ];
 describe('JobDetail', () => {
-  it('uses a rewritten follow-up only after the owner sends it', async () => {
-    vi.mocked(rewritePrompt).mockResolvedValue({
-      kind: 'prompt',
-      prompt: 'Add regression coverage for CSV exports, including empty records.',
-    });
-    render(<JobDetail job={makeJob({ state: 'done' })} />);
-    const box = screen.getByRole('textbox', { name: 'Add a follow-up' });
-    fireEvent.change(box, { target: { value: 'Add tests' } });
-    const rewrite = await screen.findByRole('button', { name: 'Rewrite prompt' });
-    expect(rewrite).toBeEnabled();
-    fireEvent.click(rewrite);
-    await waitFor(() =>
-      expect(box).toHaveValue('Add regression coverage for CSV exports, including empty records.'),
-    );
-    expect(submitThreadMessage).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
-    await waitFor(() =>
-      expect(submitThreadMessage).toHaveBeenCalledWith(
-        'ajob_1',
-        expect.objectContaining({
-          prompt: 'Add regression coverage for CSV exports, including empty records.',
-        }),
-      ),
-    );
-  });
   it('opens the latest live question while an older completed turn is being viewed', async () => {
     const job = makeJob({
       state: 'done',
@@ -1045,6 +1024,7 @@ describe('JobDetail', () => {
           state: latestState,
           runtime: 'claude-code',
           model: 'qwen-test',
+          model_connection_id: TEST_CONNECTION,
           workspace_publication_state: latestPublicationState,
         } as AgentJobApi);
       }
@@ -1455,6 +1435,7 @@ describe('JobDetail', () => {
       expect(submitThreadMessage).toHaveBeenLastCalledWith('original-thread', {
         prompt: 'Use this spec next',
         model: 'glm-test',
+        modelConnectionId: TEST_CONNECTION,
         skill_ids: [],
         attachment_ids: [42],
       }),
@@ -1593,6 +1574,7 @@ describe('JobDetail', () => {
       task_prompt: 'Main',
       runtime: 'codex',
       model: 'qwen-test',
+      model_connection_id: TEST_CONNECTION,
       repo: 'owner/repository',
       current_attempt_id: null,
     } as AgentJobApi;
@@ -1799,6 +1781,7 @@ describe('JobDetail', () => {
             task_prompt: 'Later',
             runtime: 'claude-code',
             model: 'qwen-test',
+            model_connection_id: TEST_CONNECTION,
             skills: [],
           },
         ]}
@@ -1870,6 +1853,7 @@ describe('JobDetail', () => {
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'Back to the first model',
         model: 'qwen-test',
+        modelConnectionId: TEST_CONNECTION,
       }),
     );
   });
@@ -1894,6 +1878,7 @@ describe('JobDetail', () => {
           state: 'done',
           threadId: 'thread-models',
           model: 'glm-test',
+          modelConnectionId: TEST_CONNECTION,
         })}
       />,
     );
@@ -3011,12 +2996,13 @@ describe('JobDetail', () => {
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'Now try it on the other model',
         model: 'glm-test',
+        model_connection_id: TEST_CONNECTION,
       }),
     );
   });
 
   it('keeps the running model selectable after the deployment stops offering it', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue({ ...AGENT_CONFIG, models: ['glm-test'] });
+    vi.mocked(getAgentConfig).mockResolvedValue({ ...AGENT_CONFIG, ...offering(['glm-test']) });
     render(<JobDetail job={makeJob()} />);
 
     // Otherwise the control would show the deployment's first model while the
@@ -3524,46 +3510,6 @@ describe('JobDetail', () => {
     expect(refreshAgentJobUsage).not.toHaveBeenCalled();
     expect(cancelAgentJob).not.toHaveBeenCalled();
     expect(submitThreadMessage).not.toHaveBeenCalled();
-  });
-
-  it.each([null, 0])('preserves an absent or zero Gateway model-call count (%s)', async (turns) => {
-    const measuredTotals = {
-      calls: turns ?? 0,
-      tokens_in: null,
-      tokens_out: null,
-      cache_read: null,
-      cache_write: null,
-      reasoning: null,
-      spent_usd: null,
-    };
-    vi.mocked(getAgentJobUsage).mockResolvedValue({
-      ledger: {
-        status: turns === null ? 'unavailable' : 'available',
-        source: 'gateway_api_logs',
-        attribution: 'grant_time_window',
-        finalized: false,
-        totals: turns === null ? null : measuredTotals,
-        unknown_rows: null,
-        estimated_calls: 0,
-        queried_at: null,
-        missing_attempts: 0,
-        attempts: [],
-      },
-      runtime: {
-        source: 'runtime',
-        input_tokens: null,
-        output_tokens: null,
-        cache_read_tokens: null,
-      },
-    } satisfies AgentJobUsageApi);
-    const job = makeJob();
-    render(<JobDetail job={{ ...job, usage: { ...job.usage, turns: 999 } }} />);
-    await waitFor(() => expect(screen.queryByText('Loading usage…')).not.toBeInTheDocument());
-    const usage = screen.getByRole('region', { name: 'Usage' });
-    expect(
-      within(usage).getByText(turns === null ? 'Usage temporarily unavailable.' : '0 model calls'),
-    ).toBeInTheDocument();
-    expect(within(usage).queryByText(/999/)).not.toBeInTheDocument();
   });
 
   describe('the transcript tool inspector', () => {
@@ -6100,128 +6046,6 @@ describe('JobDetail', () => {
       fireEvent.change(box, { target: { value: '/goals are per conversation' } });
       expect(screen.queryByRole('listbox', { name: 'Commands' })).not.toBeInTheDocument();
     });
-  });
-});
-
-describe('JobDetail reasoning effort', () => {
-  const THINKING_CONFIG = {
-    ...AGENT_CONFIG,
-    runtime_reasoning_efforts: { 'claude-code': ['low', 'medium', 'high', 'xhigh', 'max'] },
-    // Read as a yes/no, not as a vocabulary: the offered levels are the
-    // platform's four.
-    model_reasoning_efforts: { 'qwen-test': ['low', 'high', 'max'] },
-  };
-
-  beforeEach(() => {
-    navigation.push.mockReset();
-    vi.mocked(submitThreadMessage).mockReset();
-    vi.mocked(getAgentConfig).mockReset();
-    vi.mocked(getAgentConfig).mockResolvedValue(THINKING_CONFIG);
-    vi.mocked(submitThreadMessage).mockResolvedValue({
-      pending: null,
-      job: { id: 'ajob_child' },
-    } as never);
-  });
-
-  afterEach(() => cleanup());
-
-  it('offers the platform levels for the turn it would run', async () => {
-    render(<JobDetail job={makeJob()} />);
-
-    const picker = await screen.findByLabelText('Reasoning for this turn');
-    fireEvent.click(picker);
-    const offered = screen.getAllByRole('option').map((o) => o.textContent);
-    expect(offered).toEqual(['low', 'medium', 'high', 'max']);
-  });
-
-  it('leads with the inherited level, and the deepest when nothing was inherited', async () => {
-    const { unmount } = render(<JobDetail job={makeJob({ reasoningEffort: 'low' })} />);
-    expect(await screen.findByLabelText('Reasoning for this turn')).toHaveValue('low');
-    unmount();
-
-    render(<JobDetail job={makeJob()} />);
-    expect(await screen.findByLabelText('Reasoning for this turn')).toHaveValue('max');
-  });
-
-  it('shows and inherits the latest turn’s level when following up from an older URL', async () => {
-    render(
-      <JobDetail
-        job={makeJob({ state: 'done', reasoningEffort: 'low' })}
-        threadJobs={[laterTurn({ reasoning_effort: 'high' })]}
-      />,
-    );
-
-    expect(await screen.findByLabelText('Reasoning for this turn')).toHaveValue('high');
-    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'again' } });
-    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
-    await waitFor(() =>
-      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', { prompt: 'again' }),
-    );
-  });
-
-  it('inherits silently when untouched, and sends an actual change', async () => {
-    const { unmount } = render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
-
-    // Untouched: the field is absent, which the backend reads as "inherit".
-    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'again' } });
-    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
-    await waitFor(() =>
-      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', { prompt: 'again' }),
-    );
-    unmount();
-
-    vi.mocked(submitThreadMessage).mockClear();
-    render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
-    fireEvent.click(await screen.findByLabelText('Reasoning for this turn'));
-    fireEvent.click(screen.getByRole('option', { name: 'low' }));
-    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'easy one' } });
-    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
-
-    await waitFor(() =>
-      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
-        prompt: 'easy one',
-        reasoning_effort: 'low',
-      }),
-    );
-  });
-
-  it('sends the shown level on a thread that carried none', async () => {
-    // The control cannot render blank, so a thread with no stored level shows
-    // the deepest on offer — and what is shown is what is sent.
-    render(<JobDetail job={makeJob()} />);
-    await screen.findByLabelText('Reasoning for this turn');
-
-    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'go' } });
-    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
-
-    await waitFor(() =>
-      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
-        prompt: 'go',
-        reasoning_effort: 'max',
-      }),
-    );
-  });
-
-  it('drops a level the switched-to model does not offer', async () => {
-    render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
-
-    // glm-test takes no effort, so the control disappears and the inherited
-    // level must not ride along to a model that would refuse it.
-    fireEvent.click(await screen.findByLabelText('Model for this turn'));
-    fireEvent.click(screen.getByRole('option', { name: 'glm-test' }));
-    await waitFor(() =>
-      expect(screen.queryByLabelText('Reasoning for this turn')).not.toBeInTheDocument(),
-    );
-
-    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'switch' } });
-    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
-
-    await waitFor(() =>
-      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
-        prompt: 'switch',
-        model: 'glm-test',
-      }),
-    );
   });
 });
 

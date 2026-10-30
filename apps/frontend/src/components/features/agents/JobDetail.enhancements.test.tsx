@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { offering, TEST_CONNECTION } from '@/test/connectionConfig';
 import '@testing-library/jest-dom/vitest';
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -141,7 +142,7 @@ beforeEach(() => {
   vi.mocked(getAgentConfig).mockResolvedValue({
     repos: ['owner/repository'],
     runtimes: ['claude-code'],
-    models: ['qwen-test'],
+    ...offering(['qwen-test']),
     github_connected: true,
     github_install_url: null,
   });
@@ -432,13 +433,13 @@ describe('visible send modes', () => {
     vi.mocked(getAgentConfig).mockResolvedValue({
       repos: ['owner/repository'],
       runtimes: ['claude-code'],
-      models: ['qwen-test'],
+      ...offering(['qwen-test']),
       model_connections_enabled: true,
       model_connections: [
         {
           id: mine,
           name: 'Mine',
-          models: ['qwen-test'],
+          ...offering(['qwen-test']),
           model_runtimes: { 'qwen-test': ['claude-code'] },
         },
       ],

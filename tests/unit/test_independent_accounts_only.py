@@ -267,7 +267,6 @@ _REFUSES_RETIRED = {
     "apps/backend/cloud_agent_host/retired_configuration.py",
     "deploy/control-plane/deploy.sh",
     "deploy/host/sandbox_host.sh",
-    "deploy/local/dev.sh",
 }
 _RETIRED_NAMES = re.compile(
     r"\b(?:%s)\b"

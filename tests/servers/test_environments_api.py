@@ -21,6 +21,7 @@ pytestmark = pytest.mark.asyncio
 #: The owner these direct calls run as, still allowed when a terminal opens.
 _ALICE = SimpleNamespace(get_account=AsyncMock(return_value=account_record("alice")))
 
+
 @pytest.fixture
 async def client():
     repository = SimpleNamespace(

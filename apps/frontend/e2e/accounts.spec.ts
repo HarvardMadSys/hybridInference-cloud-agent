@@ -12,7 +12,7 @@ const pending = {
 test.beforeEach(async ({ request, page }) => {
   await request.post('/__fixture/reset');
   await page.route('**/api/v1/auth/config', (route) =>
-    route.fulfill({ json: { mode: 'local', signup_enabled: true } }),
+    route.fulfill({ json: { signup_enabled: true } }),
   );
 });
 
@@ -26,7 +26,6 @@ test('independent login reaches the waiting list without mounting protected Agen
   });
   const user = {
     id: 'local-applicant',
-    auth_mode: 'local',
     email: 'applicant@example.test',
     agent_access: { allowed: false, permissions: [] },
     waitlist: pending,

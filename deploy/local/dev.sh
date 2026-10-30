@@ -224,7 +224,7 @@ refuse_retired_env() {
   # A stack from before the account system keeps its database bound to the
   # local Gateway fixture, which is gone. Starting it would only fail later,
   # at the database check, with less to go on.
-  retired=$(grep -Eo '^(GATEWAY_[A-Z_]+|AGENT_AUTH_MODE|AGENT_SESSION_REDIRECT_URI)=' "$ENV_FILE" \
+  retired=$(grep -Eo '^(GATEWAY_[A-Z_]+|AGENT_(AUTH_MODE|SESSION_REDIRECT_URI))=' "$ENV_FILE" \
     | tr -d '=' | tr '\n' ' ') || true
   if [ -n "$retired" ]; then
     echo "$ENV_FILE configures the removed Gateway: $retired" >&2

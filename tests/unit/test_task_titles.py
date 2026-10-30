@@ -26,7 +26,7 @@ def test_fallback_is_short_and_keeps_first_meaningful_line(prompt, expected):
     ("value", "expected"),
     [
         ("⏳ The model is starting up — this takes about 14 minutes. Please wait…", True),
-        ("\"⏳ The model is starting up", True),
+        ('"⏳ The model is starting up', True),
         ("Investigate model startup", False),
         (None, False),
     ],

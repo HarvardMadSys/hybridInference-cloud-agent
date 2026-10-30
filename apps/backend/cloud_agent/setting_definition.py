@@ -137,9 +137,8 @@ class Setting:
         if self.mailto and value[:7].lower() == "mailto:":
             return bool(_CONTACT_MAILTO.fullmatch(value))
         parsed = _web_url(value)
-        return (
-            parsed is not None
-            and (not self.https_only or (parsed.scheme == "https" and not parsed.query))
+        return parsed is not None and (
+            not self.https_only or (parsed.scheme == "https" and not parsed.query)
         )
 
     def definition(self) -> dict[str, Any]:

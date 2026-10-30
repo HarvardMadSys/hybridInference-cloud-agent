@@ -1,152 +1,55 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-// The page exists so that a visitor is told what they are signing into, and so
-// that a deployment whose sign-in is misconfigured has somewhere to say so.
-// Both of those are what these cases check; the styling is not.
+// The login page is the account sign-in form, whatever the deployment: there
+// is no other authority to send a visitor to, and an outage reading the sign-in
+// settings says so instead of guessing.
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-let search = '';
+import * as api from '@/lib/api/accounts';
+
+vi.mock('next/navigation', () => ({ useSearchParams: () => new URLSearchParams() }));
+vi.mock('@/lib/auth/sessionSync', () => ({ announceSession: vi.fn() }));
 vi.mock('@/lib/api/accounts', () => ({
-  getAuthConfig: vi.fn(async () => ({ mode: 'gateway', signup_enabled: false })),
+  getAuthConfig: vi.fn(),
+  getAuthOptions: vi.fn(() => new Promise(() => {})),
+  listBrowserAccounts: vi.fn(() => new Promise(() => {})),
+  loginAccount: vi.fn(),
 }));
 
-vi.mock('next/navigation', () => ({
-  useSearchParams: () => new URLSearchParams(search),
-}));
-
-// Spread the real module and override only what this test decides. A factory
-// that lists exports goes stale the moment one is added.
-vi.mock('@/config/env', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/config/env')>()),
-  agentApiBase: 'https://agents.example.org/api',
-}));
-
-import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
-import type { RuntimeSiteConfig } from '@/config/site';
 import LoginPage from '@/components/features/auth/LoginPageClient';
-
-// The deployment identity now arrives as a provider prop rather than from
-// build-time environment, so the test supplies it the same way the root layout
-// does. This is also what proves the page reads the runtime config and not a
-// module-level constant.
-const SITE_CONFIG: RuntimeSiteConfig = {
-  branding: {
-    appName: 'Cloud Agent',
-    orgName: '',
-    orgUrl: '',
-    statusUrl: '',
-    docsUrl: '',
-    contactUrl: '',
-    gatewayUrl: 'https://gateway.example.org',
-  },
-  features: { rag: false },
-};
-
-function renderLogin() {
-  return render(
-    <SiteConfigProvider config={SITE_CONFIG}>
-      <LoginPage />
-    </SiteConfigProvider>,
-  );
-}
 
 describe('the login page', () => {
   afterEach(() => {
-    search = '';
     cleanup();
+    vi.mocked(api.getAuthConfig).mockReset();
   });
 
-  it('names the authority, so nobody is sent to a stranger unannounced', async () => {
-    renderLogin();
-
+  it('is the account sign-in form, with no other authority to go to', async () => {
+    vi.mocked(api.getAuthConfig).mockResolvedValue({ signup_enabled: true });
+    render(<LoginPage />);
+    expect(await screen.findByLabelText('Password')).toBeInTheDocument();
     expect(
-      await screen.findByRole('link', { name: /sign in with gateway.example.org/i }),
-    ).toBeInTheDocument();
-    expect(screen.getByText('Cloud Agent')).toBeInTheDocument();
-    expect(screen.getByRole('main').closest('[lang]')).toHaveAttribute('lang', 'en');
+      screen
+        .queryAllByRole('link')
+        .some((link) => /session\/login|authorize/.test(link.getAttribute('href') ?? '')),
+    ).toBe(false);
   });
 
-  it('carries the page the visitor was trying to reach', async () => {
-    search = 'return_to=%2Fajob_123%3Ftab%3Ddiff';
-
-    renderLogin();
-
-    const link = await screen.findByRole('link', { name: /sign in/i });
-    const url = new URL(link.getAttribute('href') ?? '', 'https://agents.example.org');
-    expect(url.pathname).toBe('/api/v1/session/login');
-    expect(url.searchParams.get('return_to')).toBe('/ajob_123?tab=diff');
+  it('shows the form at once from the settings the server read for the first document', () => {
+    vi.mocked(api.getAuthConfig).mockReturnValue(new Promise(() => {}));
+    render(<LoginPage initialConfig={{ signup_enabled: false }} />);
+    expect(screen.getByLabelText('Password')).toBeInTheDocument();
   });
 
-  it('refuses to carry an off-site destination', async () => {
-    // `return_to` reaches this page through a redirect chain, so it is
-    // attacker-influenced. The control plane checks it again — that is the copy
-    // that counts — but sending it is already wrong.
-    search = 'return_to=https%3A%2F%2Fevil.example%2Fx';
-
-    renderLogin();
-
-    const link = await screen.findByRole('link', { name: /sign in/i });
-    const url = new URL(link.getAttribute('href') ?? '', 'https://agents.example.org');
-    expect(url.searchParams.get('return_to')).toBe('/');
-  });
-
-  it('explains an unconfigured deployment instead of offering a dead button', async () => {
-    // The control plane sends the visitor here with this flag when it cannot
-    // sign anyone in. Offering the button anyway would loop them straight back.
-    search = 'sign_in_error=unavailable';
-
-    renderLogin();
-
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Sign-in is not configured correctly for this deployment.',
-    );
-    expect(screen.queryByRole('link', { name: /sign in/i })).not.toBeInTheDocument();
-  });
-
-  it('offers a fresh sign-in attempt after an outage and preserves the destination', async () => {
-    search = 'sign_in_error=temporary&return_to=%2Fajob_123%3Ftab%3Ddiff';
-    renderLogin();
-    expect(await screen.findByRole('alert')).toHaveTextContent('temporarily unavailable');
-    const link = screen.getByRole('link', { name: 'Try again' });
-    const url = new URL(link.getAttribute('href') ?? '', 'https://agents.example.org');
-    expect(url.pathname).toBe('/api/v1/session/login');
-    expect(url.searchParams.get('return_to')).toBe('/ajob_123?tab=diff');
-    expect(url.searchParams.has('sign_in_error')).toBe(false);
-  });
-
-  it('explains account denial without sending the user back through sign-in', async () => {
-    search = 'sign_in_error=account_unavailable';
-    renderLogin();
-    expect(await screen.findByRole('alert')).toHaveTextContent('This account cannot sign in');
-    expect(screen.queryByRole('link', { name: /sign in|try again/i })).not.toBeInTheDocument();
-  });
-
-  // The control plane sends four codes. Any other value came from somebody's
-  // link, and must not take the way in away from whoever opened it.
-  it('keeps sign-in available for a code the control plane never sends', async () => {
-    search = 'sign_in_error=bogus&return_to=%2Fajob_123';
-    renderLogin();
-    const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('Sign-in did not finish');
-    expect(alert).not.toHaveTextContent('not configured');
-    const link = screen.getByRole('link', { name: /sign in with gateway.example.org/i });
-    const url = new URL(link.getAttribute('href') ?? '', 'https://agents.example.org');
-    expect(url.pathname).toBe('/api/v1/session/login');
-    expect(url.searchParams.get('return_to')).toBe('/ajob_123');
-  });
-
-  it('starts a fresh flow for expired login without carrying the old code', async () => {
-    search = 'sign_in_error=expired&return_to=%2Fajob_123&code=spent&state=old';
-    renderLogin();
-    expect(await screen.findByRole('alert')).toHaveTextContent('expired or is no longer valid');
-    const target = new URL(
-      screen.getByRole('link', { name: 'Start again' }).getAttribute('href') ?? '',
-      'https://agents.example.org',
-    );
-    expect(target.pathname).toBe('/api/v1/session/login');
-    expect([...target.searchParams.entries()]).toEqual([['return_to', '/ajob_123']]);
+  it('says the sign-in settings could not be read and offers a retry', async () => {
+    vi.mocked(api.getAuthConfig)
+      .mockRejectedValueOnce(new Error('Cannot load sign-in options.'))
+      .mockResolvedValueOnce({ signup_enabled: false });
+    render(<LoginPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+    expect(await screen.findByLabelText('Password')).toBeInTheDocument();
   });
 });

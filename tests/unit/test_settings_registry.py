@@ -376,8 +376,7 @@ def test_a_url_policy_is_declared_only_on_url_settings():
     misdeclared = [
         definition.key
         for definition in settings.SETTINGS
-        if (definition.https_only or definition.mailto)
-        and not definition.url
+        if (definition.https_only or definition.mailto) and not definition.url
     ]
     assert misdeclared == []
 

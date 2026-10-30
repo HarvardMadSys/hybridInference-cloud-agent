@@ -7,7 +7,7 @@ import type { AccountEntry } from '@/lib/api/accounts';
 import { APIError } from '@/lib/utils/errors';
 import AccountsPage from './page';
 const auth = vi.hoisted(() => ({
-  state: { user: { id: 'admin', auth_mode: 'local' } },
+  state: { user: { id: 'admin' } },
   refreshUser: vi.fn(),
 }));
 vi.mock('@/components/providers/AuthProvider', () => ({

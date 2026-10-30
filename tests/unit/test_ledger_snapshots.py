@@ -7,7 +7,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from cloud_agent import ledger
-from cloud_agent.admin_usage import MAX_USAGE_LEDGER_ROWS
+from cloud_agent.admin_usage import MAX_USAGE_ATTEMPTS
 from cloud_agent.grant_usage import (
     DECIMAL_DIGITS,
     DERIVED_AMOUNT_CHARS,
@@ -374,20 +374,20 @@ def test_the_derived_width_covers_every_amount_valid_reports_can_add_up_to():
     """Stored reports cannot outgrow the derived amount contract.
 
     One operand carries at most ``DECIMAL_DIGITS`` digits and a selection holds at
-    most ``MAX_USAGE_LEDGER_ROWS`` of them, so the widest possible amount is 133
+    most ``MAX_USAGE_ATTEMPTS`` of them, so the widest possible amount is 133
     integer digits plus its point and two places. No real selection is ever
     refused; the guard only exists so that an impossible input still cannot
     produce a rounded total.
     """
-    widest = _sum_amounts(["9" * DECIMAL_DIGITS] * MAX_USAGE_LEDGER_ROWS)
+    widest = _sum_amounts(["9" * DECIMAL_DIGITS] * MAX_USAGE_ATTEMPTS)
     # 50,000 whole operands of 128 nines need len(str(49999)) more integer
     # digits than one operand, and no fractional places at all.
-    assert len(widest) == len(str(MAX_USAGE_LEDGER_ROWS - 1)) + DECIMAL_DIGITS
+    assert len(widest) == len(str(MAX_USAGE_ATTEMPTS - 1)) + DECIMAL_DIGITS
     assert len(widest) == 133 <= DERIVED_AMOUNT_CHARS
     # A full-width fraction stays a fraction: 50,000 of them sum just below
     # 50,000, so its 128 places need five integer digits and no more.
-    fractional = _sum_amounts(["0." + "9" * DECIMAL_DIGITS] * MAX_USAGE_LEDGER_ROWS)
-    assert len(fractional) == len(str(MAX_USAGE_LEDGER_ROWS - 1)) + 1 + DECIMAL_DIGITS
+    fractional = _sum_amounts(["0." + "9" * DECIMAL_DIGITS] * MAX_USAGE_ATTEMPTS)
+    assert len(fractional) == len(str(MAX_USAGE_ATTEMPTS - 1)) + 1 + DECIMAL_DIGITS
     assert len(fractional) == 134 <= DERIVED_AMOUNT_CHARS
 
 

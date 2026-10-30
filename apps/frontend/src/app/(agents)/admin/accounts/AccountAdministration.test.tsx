@@ -12,7 +12,7 @@ import { AccountNotes } from './AccountDetails';
 import AccountPolicyPage from './policy/page';
 import { MailComposer } from './mail/MailComposer';
 
-const auth = vi.hoisted(() => ({ state: { user: { id: 'admin', auth_mode: 'local' } } }));
+const auth = vi.hoisted(() => ({ state: { user: { id: 'admin' } } }));
 vi.mock('@/components/providers/AuthProvider', () => ({
   useAuth: () => auth,
   useSignedInAuthMode: () => 'local',

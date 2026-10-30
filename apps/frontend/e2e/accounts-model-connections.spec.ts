@@ -57,14 +57,13 @@ test.beforeEach(async ({ context, request }) => {
     route.fulfill({
       json: {
         id: 'browser-owner',
-        auth_mode: 'local',
         email: 'owner@example.test',
         agent_access: { allowed: true, permissions: ['agent.use'] },
       },
     }),
   );
   await context.route('**/api/v1/auth/config', (route) =>
-    route.fulfill({ json: { mode: 'local', signup_enabled: true } }),
+    route.fulfill({ json: { signup_enabled: true } }),
   );
   await context.route('**/api/v1/agent/environment-globals', (route) => {
     expect(route.request().method()).toBe('GET');

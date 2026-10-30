@@ -46,13 +46,13 @@ describe('local account HTTP contract', () => {
     expect(expired).not.toHaveBeenCalled();
     window.removeEventListener(AUTH_EXPIRED_EVENT, expired);
   });
-  it('does not fall back to Gateway when the auth mode service is unavailable', async () => {
+  it('reports an unavailable sign-in settings service instead of guessing', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 503 })));
     await expect(getAuthConfig()).rejects.toMatchObject({ statusCode: 503 });
   });
-  it('supports the previous Gateway-only backend without a config route', async () => {
+  it('refuses a control plane without the sign-in settings route rather than guessing', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 404 })));
-    await expect(getAuthConfig()).resolves.toEqual({ mode: 'gateway', signup_enabled: false });
+    await expect(getAuthConfig()).rejects.toMatchObject({ statusCode: 404 });
   });
   it('keeps reset tokens in a JSON body, never the request URL', async () => {
     const fetch = vi.fn().mockResolvedValue(new Response('{"ok":true}'));

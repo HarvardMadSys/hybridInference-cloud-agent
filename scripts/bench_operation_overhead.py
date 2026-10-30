@@ -178,7 +178,8 @@ ALLOWED_DATABASE_PATTERN = "_test_"
 DATABASE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 #: Roles this process plays in the seeded fixture.
-BENCH_USER_ID = "user-overhead-bench"
+#: A fixed account id, in the ULID form every account id takes.
+BENCH_USER_ID = "01JBENCH0VERHEAD000000000A"
 BENCH_REPO = "bench/overhead-repo"
 BENCH_HOST = "bench-overhead-runner"
 BENCH_HOST_CREDENTIAL = "bench-overhead-credential-hash"
@@ -193,6 +194,7 @@ BENCH_SESSION_SECRET = "bench-overhead-session-secret-32-bytes-minimum"
 BENCH_CONTROL_TOKEN_SECRET = "bench-overhead-control-token-secret"
 BENCH_SANDBOX_MANAGER_TOKEN = "bench-overhead-sandbox-manager-token"
 BENCH_ENCRYPTION_KEY = "bench-overhead-encryption-key-32-bytes-minimum"
+BENCH_SETTINGS_KEY = "bench-overhead-settings-root-key-32-bytes"
 
 #: The terminal id the sandbox manager stand-in answers with. The route validates ids
 #: against ``^term_[A-Za-z0-9_-]{1,80}$``.
@@ -469,6 +471,10 @@ class BenchSandboxManager:
         """Accept the manifest re-registration a shared workspace request makes."""
         return None
 
+    def with_start_seq(self, _start_seq: int | None) -> BenchSandboxManager:
+        """The start fence labels a run on a real host; nothing here starts one."""
+        return self
+
     def _open(self, context: Any, *operations: str) -> operation_call.SandboxManagerCall:
         """Validate the inherited selection the way the sandbox manager route does."""
         call = operation_call.open_call(context, operations=operations)
@@ -642,12 +648,45 @@ class DestinationStorage:
         return getattr(self._storage, name)
 
 
-class BenchOwners:
-    """Account admission that always grants the one benchmark user ``agent.use``."""
+async def _seed_bench_account(storage: Any) -> None:
+    """Make the benchmark user a verified, approved account, as an operator would.
 
-    async def agent_access(self, user_id: str) -> dict[str, Any]:
-        """Return the decision the owner routes require."""
-        return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
+    The owner routes are authenticated by override, but admission is not: the
+    account directory and the terminal fence read this row, and an owner with
+    no account has no access.
+    """
+    from cloud_agent.accounts import tokens
+    from cloud_agent.accounts.passwords import hash_password
+
+    accounts = storage.local_accounts
+    email = "overhead-bench@example.invalid"
+    created = await accounts.create_account(
+        account_id=BENCH_USER_ID,
+        email=email,
+        email_normalized=email,
+        password_hash=await hash_password(tokens.new_session_token()),
+    )
+    if not created:  # pragma: no cover - fixture failure
+        raise RuntimeError("the benchmark account could not be created")
+    token = tokens.new_email_token()
+    await accounts.issue_email_token(
+        account_id=BENCH_USER_ID,
+        purpose="verify_email",
+        token_hash=tokens.email_token_hash(token),
+        ttl_s=60,
+    )
+    await accounts.verify_email(token_hash=tokens.email_token_hash(token))
+    await accounts.submit_application(account_id=BENCH_USER_ID, purpose="benchmark")
+    record = await accounts.get_account(BENCH_USER_ID)
+    await accounts.apply_admin_action(
+        account_id=BENCH_USER_ID,
+        action="approve",
+        reason=None,
+        expected_version=record.version,
+        actor_id="admin-token",
+        actor_account_id=None,
+        admin_ip="127.0.0.1",
+    )
 
 
 # --------------------------------------------------------------------------
@@ -730,6 +769,7 @@ def _open_session_environment(config: dict[str, Any], args: argparse.Namespace) 
             "ADMIN_TOKEN": BENCH_ADMIN_TOKEN,
             "AGENT_LOCAL_SESSION_SECRET": BENCH_SESSION_SECRET,
             "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": BENCH_ENCRYPTION_KEY,
+            "AGENT_SETTINGS_ENCRYPTION_KEY": BENCH_SETTINGS_KEY,
             "AGENT_SANDBOX_MANAGER_TOKEN": BENCH_SANDBOX_MANAGER_TOKEN,
             "AGENT_REPO_ALLOWLIST": BENCH_REPO,
             "AGENT_OPERATION_PROFILING_ENABLED": "",
@@ -846,7 +886,7 @@ async def _open_session(config: dict[str, Any], args: argparse.Namespace) -> Ben
     import httpx
 
     from cloud_agent.api._owner_auth import authenticate_agent_owner
-    from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory
+    from cloud_agent.api.deps import get_agent_app_credentials
     from cloud_agent.app import create_app
     from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
 
@@ -857,16 +897,17 @@ async def _open_session(config: dict[str, Any], args: argparse.Namespace) -> Ben
     await _truncate(pool)
 
     app = create_app()
-    # The one benchmark user, with no account row: every cohort skips the same
-    # session read, and what they differ in is the measured operation.
+    # The one benchmark user: every cohort skips the same session read, and
+    # what they differ in is the measured operation. Admission is the account
+    # directory's, over the approved account seeded below.
     app.dependency_overrides[authenticate_agent_owner] = lambda: {
         "user_id": BENCH_USER_ID,
         "authenticated": True,
     }
-    app.dependency_overrides[get_owner_directory] = lambda: BenchOwners()
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     server, task, url = await _serve(app)
     storage = app.state.storage
+    await _seed_bench_account(storage)
     rows = await _seed_workspace_rows(storage)
     client = httpx.AsyncClient(
         base_url=url,

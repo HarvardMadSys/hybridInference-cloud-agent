@@ -68,16 +68,24 @@ export function offeredChoices(config: AgentConfigApi | null, runtime: string): 
   );
 }
 
-/** A choice stays blocked until the current catalog confirms its exact source. */
+/**
+ * Whether a choice may not run here: a loaded catalog that is being read again,
+ * or one that does not offer its exact source.
+ *
+ * Before any catalog has loaded nothing is known, and a turn inheriting its
+ * source is left to the server, which checks that connection again on every
+ * message and refuses one that cannot serve it. A choice the owner made was
+ * picked from a loaded catalog, so it is always checked against one.
+ */
 export function isModelUnavailable(
   config: AgentConfigApi | null,
   runtime: string,
   choice: ModelChoice,
   refreshing = false,
 ): boolean {
-  return (
-    refreshing || !offeredChoices(config, runtime).some((option) => sameChoice(option, choice))
-  );
+  if (config === null) return false;
+  if (refreshing) return true;
+  return !offeredChoices(config, runtime).some((option) => sameChoice(option, choice));
 }
 
 /** What the server resolved for a new task, as a choice. */
@@ -92,10 +100,16 @@ export interface LabelOptions {
   runtime?: string;
 }
 
+/** The connections that list a model, among the owner's enabled ones. */
+function sourcesOf(config: AgentConfigApi | null, model: string): number {
+  return (config?.model_connections ?? []).filter((entry) => entry.models.includes(model)).length;
+}
+
 /**
- * A choice names its connection, so it never reads as the same model on
- * another; one that cannot run here says so. Which API the
- * agent reaches it on is the platform's business and is not part of the label.
+ * A choice's model, and its connection's name where another connection lists
+ * the same model, so two sources of one name never read alike; one that
+ * cannot run here says so. Which API the agent reaches it on is the
+ * platform's business and is not part of the label.
  */
 export function choiceLabel(
   config: AgentConfigApi | null,
@@ -105,9 +119,11 @@ export function choiceLabel(
 ): string {
   if (!choice.connectionId) return choice.model;
   const connection = config?.model_connections?.find((entry) => entry.id === choice.connectionId);
-  const label = connection
-    ? t('modelSource.personal', { model: choice.model, name: connection.name })
-    : t('modelSource.personalUnknown', { model: choice.model });
+  const label = !connection
+    ? t('modelSource.personalUnknown', { model: choice.model })
+    : sourcesOf(config, choice.model) > 1
+      ? t('modelSource.personal', { model: choice.model, name: connection.name })
+      : choice.model;
   return unavailable ? t('modelSource.unavailable', { label }) : label;
 }
 
@@ -133,18 +149,27 @@ export function modelPicker(
 ): ModelPickerProps {
   const missing = kept.model && !offered.some((choice) => sameChoice(choice, kept));
   const choices = missing ? [kept, ...offered] : offered;
+  // A model offered once keys by its own name; one offered by several sources
+  // keys by the pair, so the picker can tell them apart.
+  const named = new Map<string, number>();
+  for (const choice of choices) named.set(choice.model, (named.get(choice.model) ?? 0) + 1);
+  const keyOf = (choice: ModelChoice) =>
+    named.get(choice.model) === 1 && !choice.model.startsWith('[')
+      ? choice.model
+      : choiceKey(choice);
   const optionLabels: Record<string, string> = {};
   const byKey = new Map<string, ModelChoice>();
   for (const choice of choices) {
-    const key = choiceKey(choice);
+    const key = keyOf(choice);
     byKey.set(key, choice);
     optionLabels[key] = choiceLabel(config, choice, t, {
       unavailable: missing === true && choice === kept,
       runtime,
     });
   }
+  const shown = choices.find((choice) => sameChoice(choice, current));
   return {
-    value: choiceKey(current),
+    value: shown ? keyOf(shown) : choiceKey(current),
     options: [...byKey.keys()],
     optionLabels,
     onChange: (key) => {

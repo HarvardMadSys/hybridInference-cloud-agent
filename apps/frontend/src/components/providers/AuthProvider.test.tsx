@@ -135,7 +135,7 @@ describe('AuthProvider current decision', () => {
   });
 });
 
-it('does not retain profile fields from an older API response', async () => {
+it('retains only the documented identity fields of a session', async () => {
   getMe.mockResolvedValue(
     Object.assign(
       { id: 'u1', agent_access: { allowed: true, permissions: ['agent.use' as const] } },
@@ -148,10 +148,14 @@ it('does not retain profile fields from an older API response', async () => {
     </AuthProvider>,
   );
   await waitFor(() => expect(current().loading).toBe(false));
+  // The account's email is part of its identity; a stray name or role is not.
   expect(current().user).toEqual({
     id: 'u1',
+    email: 'sentinel@example.test',
     agent_access: { allowed: true, permissions: ['agent.use'] },
   });
+  expect(current().user).not.toHaveProperty('role');
+  expect(current().user).not.toHaveProperty('user_name');
 });
 
 it('clears only the signing-out user’s unsent side drafts', async () => {
@@ -387,7 +391,6 @@ describe('AuthProvider and the browser’s other Agents tabs', () => {
 it('same-account local approval and revocation update on focus without a loading remount', async () => {
   getMe.mockResolvedValue({
     id: 'local',
-    auth_mode: 'local',
     email: 'local@example.test',
     agent_access: { allowed: false, permissions: [] },
   });
@@ -399,7 +402,6 @@ it('same-account local approval and revocation update on focus without a loading
   await waitFor(() => expect(current().loading).toBe(false));
   getMe.mockResolvedValue({
     id: 'local',
-    auth_mode: 'local',
     email: 'local@example.test',
     agent_access: { allowed: true, permissions: ['agent.use'] },
   });
@@ -408,7 +410,6 @@ it('same-account local approval and revocation update on focus without a loading
   expect(current().loading).toBe(false);
   getMe.mockResolvedValue({
     id: 'local',
-    auth_mode: 'local',
     email: 'local@example.test',
     agent_access: { allowed: false, permissions: [] },
   });

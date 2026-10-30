@@ -32,12 +32,10 @@ const tree = () => (
 );
 const A = {
   id: 'A',
-  auth_mode: 'local',
   identity: { locale: 'zh-CN', locale_chosen_at: '2026-10-29T10:00:00.000Z' },
 };
 const B = {
   id: 'B',
-  auth_mode: 'local',
   identity: { locale: 'en', locale_chosen_at: '2026-10-29T09:00:00.000Z' },
 };
 
@@ -96,7 +94,7 @@ describe('two accounts on one browser', () => {
     const view = render(tree());
     await waitFor(() => expect(shown).toBe('zh-CN'));
     await signIn(view, null);
-    await signIn(view, { id: 'C', auth_mode: 'local', identity: { locale: null } });
+    await signIn(view, { id: 'C', identity: { locale: null } });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(self.saveAccountLocale).not.toHaveBeenCalled();
   });

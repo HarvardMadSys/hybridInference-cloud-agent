@@ -112,9 +112,7 @@ async def test_a_hanging_queue_sweep_does_not_hold_up_the_reaper(
     store.attempt_commands = SimpleNamespace(reap_expired=reap_expired)
     store.pending_messages = SimpleNamespace(threads_to_settle=hang)
 
-    reaper_task = asyncio.create_task(
-        attempts._run_attempt_reaper(store, interval_seconds=0.001)
-    )
+    reaper_task = asyncio.create_task(attempts._run_attempt_reaper(store, interval_seconds=0.001))
     try:
         await asyncio.wait_for(second_pass.wait(), timeout=1)
     finally:

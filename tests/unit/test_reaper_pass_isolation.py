@@ -33,9 +33,7 @@ async def test_each_stalled_work_reaper_runs_when_the_ones_before_it_fail() -> N
         reap_stalled_snapshot_publishes=AsyncMock(side_effect=RuntimeError("publish pass failed")),
         reap_stalled_session_forks=AsyncMock(return_value=[]),
     )
-    task = asyncio.create_task(
-        reap_expired_attempts(OneFake(inner), interval_seconds=0.001)
-    )
+    task = asyncio.create_task(reap_expired_attempts(OneFake(inner), interval_seconds=0.001))
     try:
         async with asyncio.timeout(10):
             while not inner.reap_stalled_session_forks.await_count:

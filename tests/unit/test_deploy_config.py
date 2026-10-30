@@ -289,12 +289,17 @@ def test_local_up_stops_before_full_stack_when_retained_database_auth_fails(
     assert "cannot authenticate to the existing Postgres volume" in result.stderr
 
 
-def test_a_stack_from_before_the_account_system_stops_with_directions(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "retired", ["GATEWAY_ISSUER", "AGENT_AUTH_MODE", "AGENT_SESSION_REDIRECT_URI"]
+)
+def test_a_stack_from_before_the_account_system_stops_with_directions(
+    tmp_path: Path, retired: str
+) -> None:
     script = tmp_path / "repo/deploy/local/dev.sh"
     script.parent.mkdir(parents=True)
     shutil.copy2(_LOCAL_DEV_SCRIPT, script)
     dotenv = script.parent / ".env.local"
-    dotenv.write_text("GATEWAY_ISSUER=freeinference-local\nAGENT_POSTGRES_PASSWORD=keep\n")
+    dotenv.write_text(f"{retired}=freeinference-local\nAGENT_POSTGRES_PASSWORD=keep\n")
     before = dotenv.read_text()
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -311,7 +316,7 @@ def test_a_stack_from_before_the_account_system_stops_with_directions(tmp_path: 
     )
 
     assert result.returncode != 0
-    assert "GATEWAY_ISSUER" in result.stderr
+    assert retired in result.stderr
     assert "Nothing was deleted" in result.stderr
     assert dotenv.read_text() == before
 
