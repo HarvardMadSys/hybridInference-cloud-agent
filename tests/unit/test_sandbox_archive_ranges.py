@@ -7,9 +7,11 @@ import io
 import os
 import threading
 import time
+from functools import partial
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 
 from cloud_agent_host import sandbox_archive_ranges, sandbox_archive_s3
 from cloud_agent_host.sandbox_archive_s3 import (
@@ -24,8 +26,15 @@ _BODY = os.urandom(10 * _RANGE + 17)
 _OWNER = "123456789012"
 
 
-class _Replaced(Exception):
+def _replaced() -> ClientError:
     """What S3 answers a ranged read whose If-Match no longer holds."""
+    return ClientError(
+        {
+            "Error": {"Code": "PreconditionFailed", "Message": "At least one condition failed"},
+            "ResponseMetadata": {"HTTPStatusCode": 412},
+        },
+        "GetObject",
+    )
 
 
 class _RangedS3:
@@ -42,7 +51,7 @@ class _RangedS3:
             self.requests.append(kwargs)
             start, end = (int(part) for part in kwargs["Range"].removeprefix("bytes=").split("-"))
             if kwargs.get("IfMatch", self.etag) != self.etag:
-                raise _Replaced("PreconditionFailed")
+                raise _replaced()
             piece = self.body[start : end + 1]
             if self.breaks.get(start):
                 self.breaks[start] -= 1
@@ -134,8 +143,48 @@ def test_an_object_replaced_mid_download_is_never_mixed_into_it(tmp_path):
 
     client.get_object = replaced_after_the_first  # type: ignore[method-assign]
 
-    with (tmp_path / "spool").open("w+b") as output, pytest.raises(_Replaced):
+    with (
+        (tmp_path / "spool").open("w+b") as output,
+        pytest.raises(SandboxArchiveDownloadError, match="changed while it downloaded"),
+    ):
         _download(client, output, version_id=None)
+
+    # Another object cannot become this one: no refused range is asked again.
+    assert len(client.requests) == len(_ranges(client))
+
+
+@pytest.mark.parametrize(
+    "late_call",
+    [2, len(range(0, len(_BODY), _RANGE)) + 1],
+    ids=["reading-back-a-later-range", "accepting-the-digest"],
+)
+def test_the_deadline_holds_while_the_file_is_read_back(tmp_path, late_call):
+    """A download whose deadline passes as its ranges are hashed does not succeed late."""
+    client = _RangedS3()
+    calls = 0
+
+    class _Expired(Exception):
+        pass
+
+    def expires() -> None:
+        # The workers check the deadline in their own threads. The caller's
+        # checks it before each chunk it reads back, then once more.
+        nonlocal calls
+        if threading.current_thread() is threading.main_thread():
+            calls += 1
+            if calls == late_call:
+                raise _Expired
+
+    with (tmp_path / "spool").open("w+b") as output, pytest.raises(_Expired):
+        sandbox_archive_ranges.download_ranges(
+            partial(client.get_object, VersionId="version-1"),
+            fd=output.fileno(),
+            size=len(_BODY),
+            sha256=hashlib.sha256(_BODY).hexdigest(),
+            pinned=True,
+            check_deadline=expires,
+            what="sandbox checkpoint",
+        )
 
 
 def test_a_range_whose_stream_breaks_is_fetched_again(tmp_path):
@@ -227,10 +276,10 @@ def test_a_first_range_that_cannot_be_read_back_stops_the_others(tmp_path, monke
     client.get_object = slow  # type: ignore[method-assign]
     hashed = sandbox_archive_ranges._hash
 
-    def unreadable_first(fd: int, hasher: Any, start: int, size: int) -> None:
+    def unreadable_first(fd: int, hasher: Any, start: int, size: int, check: Any) -> None:
         if start == 0:
             raise OSError("the spool cannot be read back")
-        hashed(fd, hasher, start, size)
+        hashed(fd, hasher, start, size, check)
 
     monkeypatch.setattr(sandbox_archive_ranges, "_hash", unreadable_first)
 

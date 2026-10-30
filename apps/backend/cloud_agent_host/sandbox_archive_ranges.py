@@ -64,8 +64,10 @@ def download_ranges(
     version when ``pinned``. Without a version, the ranges after the first
     are read only while the object keeps the first one's ETag, so a replaced
     object can never be mixed into this one. Raises ``RangeMismatch`` for an
-    object that is not the receipt's, and a range's last error once it has
-    failed ``RANGE_ATTEMPTS`` times.
+    object that is not the receipt's, replaced ones included, and a range's
+    last error once it has failed ``RANGE_ATTEMPTS`` times.
+    ``check_deadline`` runs before every chunk fetched or read back, and once
+    more before the digest is accepted.
     """
     starts = list(range(0, size, RANGE_BYTES))
     condition: dict[str, str] = {}
@@ -96,10 +98,10 @@ def download_ranges(
         pending = [(start, pool.submit(fetch, start)) for start in starts[0 if pinned else 1 :]]
         try:
             if not pinned:
-                _hash(fd, hasher, 0, size)
+                _hash(fd, hasher, 0, size, check_deadline)
             for start, future in pending:
                 future.result()
-                _hash(fd, hasher, start, size)
+                _hash(fd, hasher, start, size, check_deadline)
         except BaseException as exc:
             failed.set()
             for _start, future in pending:
@@ -109,6 +111,7 @@ def download_ranges(
             if isinstance(exc, _Stopped) and causes:
                 raise causes[0] from None
             raise
+    check_deadline()
     if hasher.hexdigest() != sha256:
         raise RangeMismatch(f"{what} object does not match its digest")
 
@@ -130,7 +133,9 @@ def _fetch(
             return _write_range(get_range, fd, start, size, condition, check, what)
         except (RangeMismatch, _Stopped):
             raise
-        except Exception:
+        except Exception as exc:
+            if _precondition_failed(exc):
+                raise RangeMismatch(f"{what} object changed while it downloaded") from None
             if attempt == RANGE_ATTEMPTS:
                 raise
             attempt += 1
@@ -173,10 +178,20 @@ def _write_range(
     return str(response.get("ETag") or "")
 
 
-def _hash(fd: int, hasher: Any, start: int, size: int) -> None:
+def _precondition_failed(exc: Exception) -> bool:
+    """Whether S3 refused a range's ``If-Match``: the object is no longer the first range's."""
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+    return (response.get("Error") or {}).get("Code") == "PreconditionFailed" or status == 412
+
+
+def _hash(fd: int, hasher: Any, start: int, size: int, check: Callable[[], None]) -> None:
     """Fold the range at ``start``, as written, into ``hasher``."""
     end = min(start + RANGE_BYTES, size)
     while start < end:
+        check()
         chunk = os.pread(fd, min(_CHUNK_BYTES, end - start), start)
         if not chunk:
             raise RangeTruncated("downloaded range is shorter than was written")
