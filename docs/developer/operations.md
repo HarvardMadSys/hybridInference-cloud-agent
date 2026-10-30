@@ -109,10 +109,11 @@ The import of registered environment settings refuses a
 `AGENT_CONTROL_TOKEN_SECRET` or `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` shorter
 than 32 bytes: the listener stops with an error naming the variable before
 anything is written, so rolling back is safe. Check their lengths before the
-first deployment of this release. Replacing one has its usual cost: the
-dispatch token changes on both sides, a new control key needs hosts
-re-enrolled, and a new encryption key orphans saved user connections. Values
-already saved in Admin Settings keep working. The same import refuses an
+first deployment of this release. Replacing one by hand has its usual cost:
+the dispatch token changes on both sides, a new control key needs hosts
+re-enrolled, and a new encryption key orphans saved user connections; the
+[rotations](#rotating-keys-and-credentials) avoid the last two. Values already
+saved in Admin Settings keep working. The same import refuses an
 `AGENT_GITHUB_APP_INSTALL_URL` that is not an `https://github.com` URL and an
 `AGENT_GITLAB_OAUTH_REDIRECT_URI` that is not HTTPS (or HTTP on localhost),
 which their connect flows could never use.
@@ -150,19 +151,91 @@ The shared-live deployment gate continues to require qualified host readiness.
 Existing installations can retain the environment `AGENT_SESSION_SECRET`
 fallback for the settings root. Before removing that legacy environment entry,
 set `AGENT_SETTINGS_ENCRYPTION_KEY` to the **same original value**. Both listeners must receive the
-same effective key. Back it up with the database. Before changing that key,
-re-encrypt stored settings from the old key to the new one and coordinate the
-listener rollout; replacing the environment value alone makes existing
-ciphertext unreadable. The saved session signing key can be changed separately
-from this stable root. The saved user/compute encryption keys continue to protect
-their separate credential stores; the API rejects replacing or resetting an
-existing encryption key without a separate credential re-encryption procedure.
+same effective key. Back it up with the database. Change that key with its
+[rotation](#rotating-keys-and-credentials); replacing the environment value
+alone makes existing ciphertext unreadable. The saved session signing key can
+be changed separately from this stable root. The saved user/compute encryption
+keys continue to protect their separate credential stores; the API refuses to
+replace or reset one except through its rotation.
 
 Database access, the settings encryption root, recovery authentication,
 host provisioning, networking/listeners, actual host isolation,
 build routing, mounted files, and trusted compute
 deployment profiles remain deployment configuration. These bootstrap names
 appear on the page with hidden values. See [the environment inventory](../../ENVIRONMENT.md#settings-and-bootstrap-configuration).
+
+### Rotating keys and credentials
+
+**Admin → Deployment** rotates every key the deployment holds. Each rotation
+keeps the old material working until every process and server has moved, and
+says which ones it is waiting for; new values are generated in the browser and
+are not shown, except `ADMIN_TOKEN`, once. Every step can be retried, and a
+rotation that stops says what state it left.
+
+| Material | What happens | What it waits for |
+|---|---|---|
+| `ADMIN_TOKEN` | Each control-plane machine's agent writes it and restarts the API and MCP listeners. | Every process reports the new identifier. |
+| Settings root key | Separated from `AGENT_SESSION_SECRET` with the same bytes, then replaced, with saved secrets re-encrypted. | Every process holds both keys before re-encryption, and drops the old one after. |
+| User and compute credential keys | Both keys decrypt while every stored value is re-encrypted; the user key's environment fingerprints are then rebuilt. | Every process declares it can do this and adopts each step. |
+| Host and worker signing key | The new key signs; each server receives a renewed credential at its next heartbeat. | Every enrolled server holds a renewed credential, and every turn and resident session that started earlier has finished. |
+| Sandbox manager credential | Servers accept both, then the control plane switches, then servers drop the old one. Managed compute servers change over SSH, others through their deployment agent. | Each server answers an authenticated check with the new credential. |
+| Tunnel SSH keys | New keys are authorized beside the old ones, the server switches, then the old keys are revoked. | A heartbeat over the new tunnel. |
+
+The last two restart services, one server at a time, and each server finishes
+its running turns first, so a long turn makes the rotation take as long as that
+turn. A server with neither a deployment agent nor the SSH executor stops the
+start, by name. So does a managed server whose deployment inputs are files
+rather than stored in the database.
+
+The signing key's previous key is retired automatically. An offline server, a
+runner too old to renew, or a credential injected through the environment keeps
+it waiting, by name: bring the server back, or remove it. A single server's
+credential can also be renewed on its own from the same page; the old one stops
+working ten minutes after the new one is first used.
+
+A control-plane agent edits a tunnel's `authorized_keys` only if its local
+policy names that tunnel (`tunnel_authorized_keys`, with the file and the
+restrictions to use). For any other far end, typically the inference gateway,
+the rotation stops and shows the keys to add or remove until an administrator
+confirms; the server's own test of the new key still has to pass.
+
+### Moving the database
+
+**Admin → Deployment** also changes the connection to the same database, rotates
+its password, and moves the data to another database. A connection change first
+proves, with a live probe, that the new connection reaches this same database;
+a clone cannot pass. Once a new password is set the old one no longer works, so
+a failure after that is fixed forward with the new connection, never rolled back.
+
+A move needs the PostgreSQL client programs in the control-plane machine's
+policy (`database_tools`). It runs in this order:
+
+1. Every control-plane process enters maintenance and confirms it. Writes are
+   answered with 503 and `Retry-After`, including hosts' claims and heartbeats,
+   and every page shows a banner. Reading keeps working.
+2. The agent refuses a target that holds any table, runs an older PostgreSQL or
+   lacks an extension the source uses. It then makes the source read-only and
+   ends its other sessions.
+3. It copies the data and compares every table's row count, the migration
+   revision and the identity namespace.
+4. It marks maintenance over in the target and switches the control plane to it.
+
+The switch restarts the control plane, so the service stops answering for as
+long as the restart takes, usually a minute or two; that outage is separate from
+the maintenance before it. The Deployment page reconnects and shows the result
+from the new database.
+
+Until the switch, a failure reopens the source and removes the partial copy.
+After writes resume on the target, the source stays read-only and is never
+switched back to: keep it until you have confirmed the move, then drop it
+yourself.
+
+The agent journals each step under `<DEPLOY_ROOT>/agent/`, with both connections
+sealed to its own key, so a move survives the control plane, and the agent
+itself, restarting: the agent resumes by itself. On the machine,
+`python -m deploy.agent --root "$DEPLOY_ROOT" database status` shows where it
+stands, and `database unfence --operation-id <id>` reopens the source before the
+switch. Keep `<DEPLOY_ROOT>/agent/` in the recovery set.
 
 ## Sandbox archive storage
 

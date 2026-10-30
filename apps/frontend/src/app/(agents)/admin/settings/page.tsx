@@ -25,6 +25,7 @@ import {
 } from './ApplicationSettings';
 import CloudLabSettings from './CloudLabSettings';
 import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
+import { SettingsAdoption, SettingsManagementProvider } from './settingsManagement';
 import { SettingsSearch } from './SettingsSearchPanel';
 import { useRuntimeUpgrades } from './useRuntimeUpgrades';
 import { useRuntimeVersions } from './useRuntimeVersions';
@@ -49,7 +50,9 @@ export default function AdminSettingsPage() {
   }
   return (
     <Suspense>
-      <SettingsView key={state.user?.id ?? 'admin'} />
+      <SettingsManagementProvider>
+        <SettingsView key={state.user?.id ?? 'admin'} />
+      </SettingsManagementProvider>
     </Suspense>
   );
 }
@@ -439,6 +442,7 @@ function SettingsView() {
           >
             <ApplicationSettingsHeader settings={applicationSettings} title={activeCategory} />
             <ApplicationSettingsFeedback settings={applicationSettings} />
+            <SettingsAdoption />
             {applicationCategories.map((category) => {
               const id = categoryTabId(category);
               return (

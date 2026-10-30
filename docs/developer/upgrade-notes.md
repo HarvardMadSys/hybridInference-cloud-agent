@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0111_database_probes`. The supported deployment scripts run migrations
+`0112_rotation_closure`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -54,6 +54,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0112_rotation_closure` | Narrows the immutability trigger on `agent_environment_version_variables` so a credential key rotation can rewrite `value_ciphertext` alone, inside a transaction that asks for it; every other write is still refused. Adds `credential_key_id`, `pending_credential_hash`, `pending_credential_key_id`, `previous_credential_hash`, `previous_credential_expires_at` and `credential_renewal_requested` to `agent_runner_hosts` for host credential renewal, the single-row `agent_maintenance` table every control-plane process reads during a database move, and the `tunnel_keys` workflow kind. Nothing is rewritten. Hosts start renewing their credentials only once every control-plane process runs this release; a previous release still authenticates hosts as before until then. |
 | `0111_database_probes` | Adds `agent_database_probes`: the token a database connection change writes over the control plane's connection and the replies deployment agents write over the candidate connection, which prove both reach the same live database. |
 | `0110_admin_credentials` | Adds `agent_admin_credentials` for named, revocable administrator API credentials, stored as SHA-256 verifiers. `ADMIN_TOKEN` is unchanged. |
 | `0109_deployment_agents` | Adds `agent_deploy_agents`, `agent_deploy_enroll_tokens`, `agent_deploy_intents` and `agent_deploy_workflows` for deployment agents (`deploy/agent/`). Nothing uses them until an administrator enrolls an agent; credentials and tokens are stored as SHA-256 digests, and sealed values are ciphertext only the agent opens, cleared when an intent finishes. |

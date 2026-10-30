@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as client from './client';
 import {
   createIntent,
+  databaseUrl,
   deriveSealKey,
   fromBase64,
   keyIdentifier,
@@ -100,5 +101,21 @@ describe('deployment requests', () => {
     const workflow = JSON.parse(String((fetch.mock.calls[1][2] as RequestInit).body));
     expect(workflow.confirm).toBe('root_key');
     expect(fetch.mock.calls[1][1]).toBe('/admin/agent/deployments/workflows');
+  });
+});
+
+describe('database address', () => {
+  it('escapes what a URL cannot hold and keeps the connection options', () => {
+    const url = databaseUrl({
+      host: 'db.internal',
+      port: 6432,
+      database: 'agent db',
+      user: 'ca@team',
+      password: 'p@ss/word:1',
+      query: 'sslmode=require',
+    });
+    expect(url).toBe(
+      'postgresql://ca%40team:p%40ss%2Fword%3A1@db.internal:6432/agent%20db?sslmode=require',
+    );
   });
 });

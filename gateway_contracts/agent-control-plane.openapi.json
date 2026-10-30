@@ -11298,6 +11298,23 @@
         "title": "ExtendComputeRequest",
         "type": "object"
       },
+      "FarEndConfirmation": {
+        "additionalProperties": false,
+        "description": "An administrator changed a tunnel's far end as the workflow asked.",
+        "properties": {
+          "token": {
+            "maxLength": 256,
+            "minLength": 3,
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "FarEndConfirmation",
+        "type": "object"
+      },
       "GitHubConnectRequest": {
         "description": "The callback values GitHub hands back after the user authorizes.",
         "properties": {
@@ -12671,6 +12688,19 @@
       "HostHeartbeatResponse": {
         "description": "What the control plane thinks of this host after the heartbeat.",
         "properties": {
+          "credential_renewal": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A renewed credential for this host, signed with the current key. The host stores it in its credential file and presents it from then on; its first use replaces the current one. Sent only to a host that advertises host-credential-renewal-v1, again on each beat until it is used.",
+            "title": "Credential Renewal"
+          },
           "heartbeat_interval_seconds": {
             "description": "How often to report in. Missing three consecutive intervals is what moves a host to offline.",
             "title": "Heartbeat Interval Seconds",
@@ -23089,7 +23119,7 @@
             "type": "string"
           },
           "kind": {
-            "pattern": "^(admin_token|root_key|sandbox_manager_token|control_signing|database_connection|database_migration)$",
+            "pattern": "^(admin_token|root_key|sandbox_manager_token|control_signing|credential_key|tunnel_keys|database_connection|database_migration)$",
             "title": "Kind",
             "type": "string"
           },
@@ -25792,6 +25822,123 @@
         "summary": "Enroll Token"
       }
     },
+    "/admin/agent/deployments/host-credentials": {
+      "get": {
+        "description": "Every enrolled server's credential: which signing key minted it, whether a renewal waits.",
+        "operationId": "host_credentials_admin_agent_deployments_host_credentials_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Host Credentials Admin Agent Deployments Host Credentials Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Host Credentials"
+      }
+    },
+    "/admin/agent/deployments/host-credentials/{host}/renew": {
+      "post": {
+        "description": "Give one server a fresh credential at its next heartbeat; the old one lapses after a grace.\n\nThe renewal replaces re-enrollment for a server whose runner can renew:\nno enrollment token, no restart, and the old credential stops working\nshortly after the new one's first use.",
+        "operationId": "renew_host_credential_admin_agent_deployments_host_credentials__host__renew_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "title": "Host",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Renew Host Credential Admin Agent Deployments Host Credentials  Host  Renew Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Renew Host Credential"
+      }
+    },
     "/admin/agent/deployments/intents/{intent_id}/cancel": {
       "post": {
         "description": "Cancel an intent the agent has not fetched yet.",
@@ -26024,6 +26171,74 @@
           }
         },
         "summary": "Read Workflow"
+      }
+    },
+    "/admin/agent/deployments/workflows/{workflow_id}/confirm-far-end": {
+      "post": {
+        "description": "Tell a tunnel key rotation the requested far-end change is made.",
+        "operationId": "confirm_tunnel_far_end_admin_agent_deployments_workflows__workflow_id__confirm_far_end_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FarEndConfirmation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Confirm Tunnel Far End Admin Agent Deployments Workflows  Workflow Id  Confirm Far End Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirm Tunnel Far End"
       }
     },
     "/admin/agent/deployments/workflows/{workflow_id}/retire": {

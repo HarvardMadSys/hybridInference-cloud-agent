@@ -42,13 +42,23 @@ a line it does not manage. Edit `<DEPLOY_ROOT>/agent/policy.json` on the machine
   "kata_helper": ["sudo", "-n", "/opt/cloud-agent/libexec/kata-install-helper.sh"],
   "python": "/opt/cloud-agent/deployer/bin/python",
   "release_lock_file": "/etc/cloud-agent/release-lock.json",
-  "database_tools": {"pg_dump": ["docker", "run", "--rm", "--network", "host", "postgres:15", "pg_dump"]},
+  "database_tools": {
+    "psql": ["docker", "run", "--rm", "-i", "--network", "host", "-e", "PGHOST", "-e", "PGPORT", "-e", "PGUSER", "-e", "PGPASSWORD", "-e", "PGDATABASE", "postgres:15", "psql"],
+    "pg_dump": ["docker", "run", "--rm", "-i", "--network", "host", "-e", "PGHOST", "-e", "PGPORT", "-e", "PGUSER", "-e", "PGPASSWORD", "-e", "PGDATABASE", "postgres:15", "pg_dump"],
+    "pg_restore": ["docker", "run", "--rm", "-i", "--network", "host", "-e", "PGHOST", "-e", "PGPORT", "-e", "PGUSER", "-e", "PGPASSWORD", "-e", "PGDATABASE", "postgres:15", "pg_restore"]
+  },
+  "tunnel_authorized_keys": {
+    "mcp": {"path": "/home/ca-mcp/.ssh/authorized_keys", "options": "command=\"\",restrict,port-forwarding,permitopen=\"127.0.0.1:8001\""}
+  },
   "report_services": ["control-plane", "mcp-relay", "web"]
 }
 ```
 
 The control plane can only read this file's summary. Changing a boundary is a
-change on the machine.
+change on the machine. `tunnel_authorized_keys` names, on a control-plane machine,
+the file and the fixed restrictions a tunnel key rotation may use; any tunnel not
+listed asks an administrator to change its far end by hand. Tunnel key rotation
+on a host needs `ssh` and `ssh-keygen` on the agent's `PATH`.
 
 ## Releases
 
@@ -71,6 +81,11 @@ journal: `status`, `apply NAME=VALUE`, `apply --secret NAME`, `rollback --rev N`
 can run them can already edit `.env`. When the control plane is back, the agent
 reports what was done locally; the Admin page shows it as run on the machine
 and does not undo it.
+
+A restart settles what it interrupted: a database move continues from its
+journal by itself, with both connections sealed to this agent's key, and any
+other operation is reported as interrupted. A result the control plane could
+not receive stays in the journal and is sent again.
 
 ## Backups
 

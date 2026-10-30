@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { useContext, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useModalDialog } from '@/components/ui/useModalDialog';
@@ -14,6 +14,7 @@ import type {
 
 import type { ApplicationSettingsState } from './ApplicationSettings';
 import { DefaultModelHints, fieldHints } from './DefaultModelHints';
+import { type SettingsManagement, SettingsManagementContext } from './settingsManagement';
 import { ARCHIVE_BUCKET, DEFAULT_MODEL, displayValue, parseValue } from './settingValues';
 import { useModelSuggestions } from './useModelSuggestions';
 
@@ -255,6 +256,7 @@ export function ApplicationSettingGroup({
   settings: ApplicationSettingsState;
 }) {
   const { snapshot, saved, busy, save } = settings;
+  const management = useContext(SettingsManagementContext);
   const [editing, setEditing] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [replacing, setReplacing] = useState<Record<string, boolean>>({});
@@ -460,7 +462,7 @@ export function ApplicationSettingGroup({
                 <p id={`${id}-help`} className="mt-1 break-words text-xs leading-5 text-muted">
                   {field.description}
                   {keySourceNote(key, configured)}
-                  {applyNote(field)}
+                  {applyNote(field, management)}
                   {editable &&
                     key === ARCHIVE_BUCKET &&
                     ' Saving an S3 URI replaces the prefix; a bucket-root URI clears it.'}
@@ -666,8 +668,12 @@ const APPLY_LABELS: Record<string, string> = {
 };
 
 /** When a saved value takes effect, only where its readers were checked. */
-function applyNote(field: { apply_mode?: string; apply_description?: string }): string {
+function applyNote(
+  field: { key: string; apply_mode?: string; apply_description?: string },
+  management: SettingsManagement | null,
+): string {
   const label = field.apply_mode ? APPLY_LABELS[field.apply_mode] : undefined;
-  if (!label) return '';
-  return ` ${label}${field.apply_description ? ` ${field.apply_description}` : ''}`;
+  const reported = management?.fieldNote(field.key) ?? '';
+  if (!label) return reported;
+  return ` ${label}${field.apply_description ? ` ${field.apply_description}` : ''}${reported}`;
 }

@@ -5,25 +5,25 @@ import {
   type AdminCredential,
   type DeploymentAgent,
   type DeploymentOverview,
+  type ManagementCatalog,
   type ManagementStatus,
   cancelIntent,
   createCredential,
   createEnrollToken,
   createIntent,
   getDeployments,
+  getManagementCatalog,
   getManagementStatus,
-  keyIdentifier,
   listCredentials,
-  randomSecret,
-  retireSigningKey,
   revokeAgent,
   revokeCredential,
-  seal,
-  sealForAgents,
-  sealedPurpose,
   startRollout,
-  startWorkflow,
 } from '@/lib/api/adminManagement';
+import { ConfigurationMap } from './ConfigurationMap';
+import { DatabaseOperations, MaintenancePanel } from './DatabaseOperations';
+import { MachineConfiguration } from './MachineConfiguration';
+import { SecurityKeys } from './SecurityKeys';
+import { WorkflowProgress } from './WorkflowProgress';
 
 const BUTTON =
   'rounded-md border border-border px-3 py-1.5 text-sm font-medium text-foreground hover:bg-surface-hover disabled:opacity-50';
@@ -38,8 +38,15 @@ export function DeploymentManagement() {
   const [overview, setOverview] = useState<DeploymentOverview | null>(null);
   const [status, setStatus] = useState<ManagementStatus | null>(null);
   const [credentials, setCredentials] = useState<AdminCredential[]>([]);
+  const [catalog, setCatalog] = useState<ManagementCatalog | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+
+  useEffect(() => {
+    // The catalog never changes while the page is open, and an earlier
+    // control plane has none: the page then simply goes without the map.
+    getManagementCatalog().then(setCatalog, () => setCatalog(null));
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -53,7 +60,7 @@ export function DeploymentManagement() {
       setCredentials(creds.credentials);
       setError('');
     } catch (caught) {
-      setError(message(caught));
+      setError(`The control plane is not answering; it may be restarting. ${message(caught)}`);
     }
   }, []);
 
@@ -93,6 +100,7 @@ export function DeploymentManagement() {
           {notice}
         </p>
       )}
+      <MaintenancePanel maintenance={overview?.maintenance} />
       <AdoptionSummary status={status} />
       <EnrollMachine onIssued={(token) => setNotice(`Enrollment token (shown once): ${token}`)} />
       <section className={SECTION} aria-labelledby="machines">
@@ -110,14 +118,27 @@ export function DeploymentManagement() {
               key={agent.agent_id}
               agent={agent}
               contract={overview?.contract}
+              catalog={catalog}
               run={run}
             />
           ))
         )}
       </section>
       <Releases agents={agents} run={run} />
-      <Workflows overview={overview} controlPlane={controlPlane} hosts={hosts} run={run} />
+      <SecurityKeys
+        controlPlane={controlPlane}
+        hosts={hosts}
+        workflows={overview?.workflows ?? []}
+        run={run}
+      />
+      <DatabaseOperations
+        controlPlane={controlPlane}
+        workflows={overview?.workflows ?? []}
+        run={run}
+      />
+      <Operations overview={overview} run={run} />
       <Credentials credentials={credentials} run={run} onCreated={setNotice} />
+      <ConfigurationMap catalog={catalog} />
     </div>
   );
 }
@@ -216,21 +237,16 @@ type Run = (work: () => Promise<string | void>) => Promise<void>;
 function AgentPanel({
   agent,
   contract,
+  catalog,
   run,
 }: {
   agent: DeploymentAgent;
   contract: DeploymentOverview['contract'] | undefined;
+  catalog: ManagementCatalog | null;
   run: Run;
 }) {
-  const keys = contract?.config_keys[agent.role] ?? {};
-  const names = Object.keys(keys).sort();
-  const [name, setName] = useState(names[0] ?? '');
-  const [value, setValue] = useState('');
   const [rev, setRev] = useState('');
   const observed = agent.observed;
-  const spec = keys[name];
-  const secret = spec?.kind === 'secret';
-  const allowed = observed.policy?.allowed?.[name];
   return (
     <div className="mt-3 rounded-md border border-border p-3">
       <div className="flex flex-wrap items-baseline gap-2">
@@ -240,60 +256,7 @@ function AgentPanel({
         </span>
       </div>
       <ObservedFacts agent={agent} />
-      <form
-        className="mt-3 flex flex-wrap items-end gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void run(async () => {
-            if (secret) {
-              const box = await seal(agent.public_key, value, sealedPurpose(agent.agent_id, name));
-              await createIntent(agent.agent_id, {
-                operation: 'apply_config',
-                params: { changes: {} },
-                sealed: { [name]: box },
-              });
-            } else {
-              await createIntent(agent.agent_id, {
-                operation: 'apply_config',
-                params: { changes: { [name]: value } },
-              });
-            }
-            setValue('');
-          });
-        }}
-      >
-        <label className="text-xs">
-          Setting
-          <select
-            className={`${INPUT} ml-1`}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          >
-            {names.map((key) => (
-              <option key={key} value={key}>
-                {key}
-              </option>
-            ))}
-          </select>
-        </label>
-        <ValueInput
-          spec={spec}
-          allowed={allowed}
-          secret={secret}
-          value={value}
-          onChange={setValue}
-        />
-        <button type="submit" className={BUTTON} disabled={!name || !value}>
-          Apply
-        </button>
-        {spec && (
-          <span className="text-xs text-muted">
-            Restarts {spec.services.join(', ')}
-            {spec.boundary === 'grow' ? '; ranges can only be added' : ''}
-            {secret ? '; sealed to this machine before it leaves the browser' : ''}
-          </span>
-        )}
-      </form>
+      <MachineConfiguration agent={agent} contract={contract} catalog={catalog} run={run} />
       <div className="mt-2 flex flex-wrap gap-2">
         <select
           className={INPUT}
@@ -386,204 +349,23 @@ function Releases({ agents, run }: { agents: DeploymentAgent[]; run: Run }) {
   );
 }
 
-function Workflows({
-  overview,
-  controlPlane,
-  hosts,
-  run,
-}: {
-  overview: DeploymentOverview | null;
-  controlPlane: DeploymentAgent[];
-  hosts: DeploymentAgent[];
-  run: Run;
-}) {
-  const [dsn, setDsn] = useState('');
-  const [rotatePassword, setRotatePassword] = useState(false);
+function Operations({ overview, run }: { overview: DeploymentOverview | null; run: Run }) {
   const workflows = overview?.workflows ?? [];
-  const confirmed = (text: string) => window.confirm(text);
   return (
-    <section className={SECTION} aria-labelledby="workflows">
-      <h2 id="workflows" className="text-base font-semibold">
-        Keys and database
+    <section className={SECTION} aria-labelledby="operations">
+      <h2 id="operations" className="text-base font-semibold">
+        Operations
       </h2>
-      <div className="mt-2 flex flex-wrap gap-2">
-        <button
-          type="button"
-          className={BUTTON}
-          disabled={controlPlane.length === 0}
-          onClick={() => {
-            if (
-              !confirmed(
-                'Rotate ADMIN_TOKEN? It grants full administrator access; the new value is shown once.',
-              )
-            )
-              return;
-            void run(async () => {
-              const token = randomSecret();
-              await startWorkflow({
-                kind: 'admin_token',
-                params: { token_id: await keyIdentifier(token) },
-                sealed_by_agent: await sealForAgents(controlPlane, 'ADMIN_TOKEN', token),
-              });
-              return `New ADMIN_TOKEN (shown once, store it with your recovery material): ${token}`;
-            });
-          }}
-        >
-          Rotate ADMIN_TOKEN
-        </button>
-        <button
-          type="button"
-          className={BUTTON}
-          disabled={controlPlane.length === 0}
-          onClick={() => {
-            if (
-              !confirmed(
-                'Rotate the settings root key? Saved secrets are re-encrypted before the old key is dropped.',
-              )
-            )
-              return;
-            void run(async () => {
-              const key = randomSecret();
-              await startWorkflow({
-                kind: 'root_key',
-                params: { new_key_id: await keyIdentifier(key) },
-                sealed_by_agent: await sealForAgents(
-                  controlPlane,
-                  'AGENT_SETTINGS_ENCRYPTION_KEY',
-                  key,
-                ),
-              });
-            });
-          }}
-        >
-          Rotate settings root key
-        </button>
-        <button
-          type="button"
-          className={BUTTON}
-          disabled={hosts.length === 0}
-          onClick={() => {
-            if (!confirmed('Rotate the sandbox manager credential on every server?')) return;
-            void run(async () => {
-              const token = randomSecret();
-              await startWorkflow({
-                kind: 'sandbox_manager_token',
-                sealed_by_agent: await sealForAgents(
-                  hosts,
-                  'AGENT_SANDBOX_MANAGER_TOKEN_NEXT',
-                  token,
-                ),
-                secret: token,
-              });
-            });
-          }}
-        >
-          Rotate sandbox manager credential
-        </button>
-        <button
-          type="button"
-          className={BUTTON}
-          onClick={() => {
-            if (
-              !confirmed(
-                'Rotate the host signing key? The previous key keeps verifying until you retire it.',
-              )
-            )
-              return;
-            void run(() =>
-              startWorkflow({ kind: 'control_signing', secret: randomSecret() }).then(
-                () => undefined,
-              ),
-            );
-          }}
-        >
-          Rotate host signing key
-        </button>
-      </div>
-      <form
-        className="mt-3 flex flex-wrap items-end gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const kind =
-            (event.nativeEvent as SubmitEvent).submitter?.getAttribute('value') ??
-            'database_connection';
-          if (
-            !confirmed(
-              kind === 'database_migration'
-                ? 'Move every record to the empty target database? The current database becomes read-only and is not switched back to.'
-                : 'Change the connection to this same database?',
-            )
-          )
-            return;
-          void run(async () => {
-            await startWorkflow({
-              kind,
-              params: { dsn_id: await keyIdentifier(dsn), rotate_password: rotatePassword },
-              sealed_by_agent: await sealForAgents(controlPlane, 'AGENT_DATABASE_URL', dsn),
-            });
-            setDsn('');
-          });
-        }}
-      >
-        <input
-          className={`${INPUT} min-w-[18rem]`}
-          type="password"
-          placeholder="postgresql://user:password@host:5432/database"
-          value={dsn}
-          onChange={(e) => setDsn(e.target.value)}
-          aria-label="New database connection URL"
-        />
-        <label className="text-xs">
-          <input
-            type="checkbox"
-            checked={rotatePassword}
-            onChange={(e) => setRotatePassword(e.target.checked)}
-          />{' '}
-          The password changes
-        </label>
-        <button
-          type="submit"
-          value="database_connection"
-          className={BUTTON}
-          disabled={!dsn || controlPlane.length === 0}
-        >
-          Change connection
-        </button>
-        <button
-          type="submit"
-          value="database_migration"
-          className={BUTTON}
-          disabled={!dsn || controlPlane.length === 0}
-        >
-          Move to this database
-        </button>
-      </form>
-      <ul className="mt-3 text-sm">
-        {workflows.map((workflow) => (
-          <li key={workflow.workflow_id} className="mt-1">
-            <strong>{workflow.kind}</strong> — {workflow.state} at {workflow.step}
-            {workflow.detail && <span className="text-muted">: {workflow.detail}</span>}
-            {workflow.kind === 'control_signing' && workflow.step === 'retire_pending' && (
-              <button
-                type="button"
-                className={`${BUTTON} ml-2`}
-                onClick={() => {
-                  if (
-                    confirmed(
-                      'Retire the previous signing key? Credentials signed with it stop working.',
-                    )
-                  ) {
-                    void run(() => retireSigningKey(workflow.workflow_id).then(() => undefined));
-                  }
-                }}
-              >
-                Retire previous key
-              </button>
-            )}
-          </li>
-        ))}
-      </ul>
-      <h3 className="mt-4 text-sm font-semibold">Recent operations</h3>
+      {workflows.length === 0 ? (
+        <p className="mt-2 text-sm text-muted">No operation has run yet.</p>
+      ) : (
+        <ul>
+          {workflows.map((workflow) => (
+            <WorkflowProgress key={workflow.workflow_id} workflow={workflow} run={run} />
+          ))}
+        </ul>
+      )}
+      <h3 className="mt-4 text-sm font-semibold">Recent agent steps</h3>
       <ul className="mt-1 text-xs">
         {(overview?.intents ?? []).slice(0, 20).map((intent) => (
           <li key={intent.intent_id}>
@@ -706,58 +488,5 @@ function ObservedFacts({ agent }: { agent: DeploymentAgent }) {
         </>
       )}
     </dl>
-  );
-}
-
-function ValueInput({
-  spec,
-  allowed,
-  secret,
-  value,
-  onChange,
-}: {
-  spec: { choices: string[] } | undefined;
-  allowed: string[] | undefined;
-  secret: boolean;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  const setValue = onChange;
-  return (
-    <>
-      {allowed ? (
-        <select
-          className={INPUT}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          aria-label="Allowed value"
-        >
-          <option value="">Choose…</option>
-          {allowed.map((option) => (
-            <option key={option}>{option}</option>
-          ))}
-        </select>
-      ) : spec?.choices.length ? (
-        <select
-          className={INPUT}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          aria-label="Value"
-        >
-          <option value="">Choose…</option>
-          {spec.choices.map((option) => (
-            <option key={option}>{option}</option>
-          ))}
-        </select>
-      ) : (
-        <input
-          className={INPUT}
-          type={secret ? 'password' : 'text'}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          aria-label="Value"
-        />
-      )}
-    </>
   );
 }

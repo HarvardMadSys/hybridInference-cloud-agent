@@ -260,14 +260,15 @@ msgstr ""
 
 #: ../../ENVIRONMENT.md:86
 
+#: ../../ENVIRONMENT.md
 msgid ""
-"Run `alembic upgrade head` (through `0111_database_probes`) before "
-"starting this release; the [upgrade notes](docs/developer/upgrade-"
-"notes.md) say what each recent migration changes. The main control-plane "
-"listener then initializes the settings document once from its existing "
-"environment. The MCP-only listener waits for that document and uses the "
-"same saved values."
-msgstr "启动这个版本之前，先运行 `alembic upgrade head`（升级到 `0111_database_probes`）；[升级说明](docs/developer/upgrade-notes.md) 写了最近每个迁移改了什么。之后主控制平面监听进程会用现有环境一次性初始化设置文档；MCP 专用监听进程等待这份文档，并使用同样的保存值。"
+"Run `alembic upgrade head` (through `0112_rotation_closure`) before "
+"starting this release; the [upgrade "
+"notes](docs/developer/upgrade-notes.md) say what each recent migration "
+"changes. The main control-plane listener then initializes the settings "
+"document once from its existing environment. The MCP-only listener waits"
+" for that document and uses the same saved values."
+msgstr "启动这个版本之前，先运行 `alembic upgrade head`（升级到 `0112_rotation_closure`）；[升级说明](docs/developer/upgrade-notes.md) 写了最近每个迁移改了什么。之后主控制平面监听进程会用现有环境一次性初始化设置文档；MCP 专用监听进程等待这份文档，并使用同样的保存值。"
 
 #: ../../ENVIRONMENT.md:92
 msgid ""
@@ -349,21 +350,19 @@ msgstr ""
 "认证。IAM、桶版本控制、上线步骤和生命周期规则，见[沙箱归档](docs/developer/operations.md#sandbox-"
 "archives)。"
 
-#: ../../ENVIRONMENT.md:132
+#: ../../ENVIRONMENT.md
 msgid ""
 "The database also stores the control-plane runtime identity, "
 "signing/encryption keys, sandbox manager credentials, cookie/proxy "
 "policy, MCP target policy, and default execution profile. During an "
 "upgrade, the main listener imports only newly migrated fields that are "
-"missing. It never overwrites an existing value, including an empty reset,"
-" and the relay waits for the import to finish. The identity issuer stays "
-"pinned to this database. Existing user/compute encryption keys cannot be "
-"replaced or reset through the settings editor without a separate re-"
-"encryption procedure."
-msgstr ""
-"数据库里还存着控制平面的运行时身份、签名和加密密钥、sandbox manager 凭据、cookie 和代理策略、MCP 目标策略，以及默认的 "
-"execution "
-"profile。升级时，主监听器只导入这次迁移新增、且当前缺失的字段，绝不覆盖已有的值（哪怕是被重置成空的值），中继会等导入完成。身份签发方始终绑定在这个数据库上。已有的用户加密密钥和计算资源加密密钥，不能直接在设置编辑器里替换或重置，必须走单独的重新加密流程。"
+"missing. It never overwrites an existing value, including an empty "
+"reset, and the relay waits for the import to finish. The identity issuer"
+" stays pinned to this database. Existing user/compute encryption keys "
+"cannot be replaced or reset through the settings editor; they change "
+"only through their rotation in Admin → Deployment, which re-encrypts "
+"what they protect."
+msgstr "数据库里还存着控制平面的运行时身份、签名和加密密钥、sandbox manager 凭据、cookie 和代理策略、MCP 目标策略，以及默认的 execution profile。升级时，主监听器只导入这次迁移新增、且当前缺失的字段，绝不覆盖已有的值（哪怕是被重置成空的值），中继会等导入完成。身份签发方始终绑定在这个数据库上。已有的用户和 compute 加密密钥不能在设置编辑器里替换或重置，只能通过 Admin → Deployment 里各自的轮换来更换，轮换会重新加密它们保护的数据。"
 
 #: ../../ENVIRONMENT.md:141
 msgid ""
@@ -930,39 +929,35 @@ msgstr "**新增。** *在轮换根密钥期间由部署代理设置；其余时
 msgid "`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`"
 msgstr ""
 
-#: ../developer/configuration.md:1
+#: ../../ENVIRONMENT.md
 msgid ""
-"Encrypts stored source-control credentials, per-user MCP credentials, and"
-" reusable cloud-environment variables/overrides under separate domain "
-"separators. Generate random 32 bytes, unique per environment. A new value"
-" saved in Admin → Settings must be at least 32 bytes; a shorter value "
-"saved or imported earlier still loads, and startup logs "
+"Encrypts stored source-control credentials, per-user MCP credentials, "
+"and reusable cloud-environment variables/overrides under separate domain"
+" separators. Generate random 32 bytes, unique per environment. A new "
+"value saved in Admin → Settings must be at least 32 bytes; a shorter "
+"value saved or imported earlier still loads, and startup logs "
 "`agent_weak_credential` until it is replaced. Without a key, none store "
 "plaintext; MCP offers an empty picker and value-bearing environment "
 "operations fail closed. Credentials from the pre-extraction gateway key "
-"require re-wrapping, not copying."
-msgstr ""
-"分别用不同的域分隔符，加密存储的代码托管凭据、每个用户的 MCP 凭据，以及可复用云环境里的变量和覆盖值。随机生成 32 "
-"字节，每个环境都不一样。在 Admin → Settings 里保存的新值至少要 32 "
-"字节；以前保存或导入的较短的值仍然可以加载，但启动时会一直记录 "
-"`agent_weak_credential`，直到换掉为止。没有这把密钥时，上面这些都不会以明文保存：MCP "
-"的选择列表会是空的，涉及具体取值的环境操作一律拒绝执行。拆分仓库之前用网关密钥加密的凭据，需要重新加密封装，不能直接复制过来。"
+"require re-wrapping, not copying. Once set, it changes only through its "
+"rotation in Admin → Deployment, which re-encrypts every stored value and"
+" rebuilds the environment fingerprints it keys."
+msgstr "分别用不同的域分隔符，加密存储的代码托管凭据、每个用户的 MCP 凭据，以及可复用云环境里的变量和覆盖值。随机生成 32 字节，每个环境都不一样。在 Admin → Settings 里保存的新值至少要 32 字节；以前保存或导入的较短的值仍然可以加载，但启动时会一直记录 `agent_weak_credential`，直到换掉为止。没有这把密钥时，上面这些都不会以明文保存：MCP 的选择列表会是空的，涉及具体取值的环境操作一律拒绝执行。拆分仓库之前用网关密钥加密的凭据，需要重新加密封装，不能直接复制过来。 设置之后只能通过 Admin → Deployment 里的轮换更换：轮换会重新加密每一条已存数据，并重建以它为密钥的环境指纹。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_CONTROL_TOKEN_SECRET`"
 msgstr ""
 
-#: ../developer/configuration.md:1
+#: ../../ENVIRONMENT.md
 msgid ""
 "Signs host/worker control tokens. Generate random 32 bytes, unique per "
 "environment and independent of gateway secrets. A new value saved in "
-"Admin → Settings must be at least 32 bytes; a shorter value saved earlier"
-" still loads, and startup logs `agent_weak_credential` until it is "
-"replaced."
-msgstr ""
-"用来给主机和 worker 的控制令牌签名。随机生成 32 字节，每个环境都不一样，并且和网关的 secret 无关。在 Admin → "
-"Settings 里保存的新值至少要 32 字节；以前保存的较短的值仍然可以加载，但启动时会一直记录 "
-"`agent_weak_credential`，直到换掉为止。"
+"Admin → Settings must be at least 32 bytes; a shorter value saved "
+"earlier still loads, and startup logs `agent_weak_credential` until it "
+"is replaced. Replace it with the rotation in Admin → Deployment: every "
+"server renews its credential first. A value saved directly invalidates "
+"host and worker credentials at once."
+msgstr "用来给主机和 worker 的控制令牌签名。随机生成 32 字节，每个环境都不一样，并且和网关的 secret 无关。在 Admin → Settings 里保存的新值至少要 32 字节；以前保存的较短的值仍然可以加载，但启动时会一直记录 `agent_weak_credential`，直到换掉为止。 请用 Admin → Deployment 里的轮换替换它：每台服务器先续期自己的凭据。直接保存新值会让主机和 worker 凭据立刻失效。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_SESSION_SECRET`"
@@ -2187,15 +2182,14 @@ msgstr ""
 msgid "`AGENT_COMPUTE_SECRET_KEY`"
 msgstr ""
 
-#: ../developer/configuration.md:1
+#: ../../ENVIRONMENT.md
 msgid ""
 "Independent encryption key, at least 32 bytes, for stored compute "
-"connections and Admin-managed deployment profiles. The supported deployer"
-" generates and persists a random value in `.env` when blank. Preserve it "
-"with database backups."
-msgstr ""
-"一把独立的加密密钥，至少 32 字节，用来加密保存的计算资源连接，以及管理员在界面上管理的部署配置。留空时，官方部署脚本会随机生成一个值，并保存在"
-" `.env` 里。它要和数据库备份一起保存。"
+"connections and Admin-managed deployment profiles. The supported "
+"deployer generates and persists a random value in `.env` when blank. "
+"Preserve it with database backups. Once set, it changes only through its"
+" rotation in Admin → Deployment."
+msgstr "一把独立的加密密钥，至少 32 字节，用来加密保存的计算资源连接，以及管理员在界面上管理的部署配置。留空时，官方部署脚本会随机生成一个值，并保存在 `.env` 里。它要和数据库备份一起保存。 设置之后只能通过 Admin → Deployment 里的轮换更换。"
 
 #: ../developer/configuration.md:1
 msgid "`AGENT_COMPUTE_CONFIG`"
@@ -4538,4 +4532,3 @@ msgstr "PR 检查清单会检查这一点；新增了变量却没有对应的一
 #~ "管理员设置页面用来查询每个 agent 最新版本、并核对指定版本是否存在的 npm "
 #~ "仓库，默认 "
 #~ "`https://registry.npmjs.org`。主机也要设成同样的值，因为主机会从这里下载。仓库访问不了时，页面上会显示出来，并且无法升级；除此之外没有别的功能依赖它。"
-

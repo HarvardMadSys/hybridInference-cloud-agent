@@ -18,10 +18,23 @@ const overview = (agents: api.DeploymentAgent[]): api.DeploymentOverview => ({
     operations: {},
     config_keys: {
       'control-plane': {
-        AGENT_WEB_PORT: { kind: 'port', item: 'x', services: ['web'], choices: [], boundary: '' },
+        AGENT_WEB_PORT: {
+          kind: 'port',
+          item: 'web.listener',
+          services: ['web'],
+          choices: [],
+          boundary: '',
+        },
+        AGENT_WEB_SECRET: {
+          kind: 'secret',
+          item: 'web.oauth',
+          services: ['web'],
+          choices: [],
+          boundary: '',
+        },
         ADMIN_TOKEN: {
           kind: 'secret',
-          item: 'y',
+          item: 'security.admin_token',
           services: ['control-plane'],
           choices: [],
           boundary: '',
@@ -42,11 +55,40 @@ const status: api.ManagementStatus = {
   hosts: [],
 };
 
-function mock(agents: api.DeploymentAgent[]) {
-  vi.spyOn(api, 'getDeployments').mockResolvedValue(overview(agents));
+function mock(agents: api.DeploymentAgent[], extra: Partial<api.DeploymentOverview> = {}) {
+  vi.spyOn(api, 'getDeployments').mockResolvedValue({ ...overview(agents), ...extra });
   vi.spyOn(api, 'getManagementStatus').mockResolvedValue(status);
   vi.spyOn(api, 'listCredentials').mockResolvedValue({ credentials: [] });
+  vi.spyOn(api, 'getManagementCatalog').mockRejectedValue(new Error('not there'));
+  vi.spyOn(api, 'getHostCredentials').mockResolvedValue({
+    signing_key_id: 'k',
+    hosts: [host],
+  });
 }
+
+const host: api.HostCredentialView = {
+  host: 'gpu-1',
+  status: 'online',
+  current_key: false,
+  key_known: true,
+  renews: true,
+  renewal_pending: false,
+  renewal_requested: false,
+  last_heartbeat_at: null,
+  lag: 'gpu-1 has not received a renewal yet',
+};
+
+const workflow = (partial: Partial<api.DeploymentWorkflow>): api.DeploymentWorkflow => ({
+  workflow_id: 'b'.repeat(32),
+  kind: 'credential_key',
+  state: 'waiting',
+  step: 'reencrypt',
+  detail: '',
+  created_by: 'admin:a',
+  created_at: '',
+  updated_at: '',
+  ...partial,
+});
 
 const agent: api.DeploymentAgent = {
   agent_id: 'a'.repeat(32),
@@ -73,25 +115,184 @@ describe('deployment management', () => {
     expect(screen.getByRole('button', { name: 'Issue enrollment token' })).toBeTruthy();
   });
 
-  it('applies a plain value in the clear and a secret only sealed', async () => {
+  it('configures a machine by item, plain values in the clear and a secret only sealed', async () => {
     mock([agent]);
     const intent = vi.spyOn(api, 'createIntent').mockResolvedValue({} as api.DeploymentIntent);
     render(<DeploymentManagement />);
     await screen.findByText('cp-1');
-    fireEvent.change(screen.getByLabelText('Setting'), { target: { value: 'AGENT_WEB_PORT' } });
-    fireEvent.change(screen.getByLabelText('Value'), { target: { value: '3010' } });
+    fireEvent.change(screen.getByLabelText('Configure'), { target: { value: 'web.listener' } });
+    fireEvent.change(screen.getByLabelText('Port (AGENT_WEB_PORT)'), {
+      target: { value: '3010' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
     await waitFor(() => expect(intent).toHaveBeenCalledTimes(1));
     expect(intent.mock.calls[0][1]).toEqual({
       operation: 'apply_config',
       params: { changes: { AGENT_WEB_PORT: '3010' } },
     });
-    fireEvent.change(screen.getByLabelText('Setting'), { target: { value: 'ADMIN_TOKEN' } });
-    fireEvent.change(screen.getByLabelText('Value'), { target: { value: 'a-secret-value' } });
+    fireEvent.change(screen.getByLabelText('Configure'), { target: { value: 'web.oauth' } });
+    fireEvent.change(screen.getByLabelText('Value (AGENT_WEB_SECRET)'), {
+      target: { value: 'a-secret-value' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
     await waitFor(() => expect(intent).toHaveBeenCalledTimes(2));
     const sealedRequest = intent.mock.calls[1][1];
     expect(JSON.stringify(sealedRequest)).not.toContain('a-secret-value');
-    expect(sealedRequest.sealed?.ADMIN_TOKEN?.v).toBe(1);
+    expect(sealedRequest.sealed?.AGENT_WEB_SECRET?.v).toBe(1);
+  });
+
+  it('keeps keys with a guided operation out of direct configuration', async () => {
+    mock([agent]);
+    render(<DeploymentManagement />);
+    await screen.findByText('cp-1');
+    const options = Array.from(
+      (screen.getByLabelText('Configure') as HTMLSelectElement).options,
+    ).map((option) => option.value);
+    expect(options).toEqual(['web.listener', 'web.oauth']);
+    expect(screen.queryByLabelText(/\(ADMIN_TOKEN\)/)).toBeNull();
+  });
+
+  it('starts each key rotation in its own words, with nothing typed', async () => {
+    mock([agent]);
+    const start = vi.spyOn(api, 'startWorkflow').mockResolvedValue(workflow({}));
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<DeploymentManagement />);
+    await screen.findByText('cp-1');
+    await screen.findByText('gpu-1');
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate User credential key' }));
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+    expect(start.mock.calls[0][0]).toMatchObject({
+      kind: 'credential_key',
+      params: { key: 'user' },
+    });
+    expect(start.mock.calls[0][0].secret?.length).toBeGreaterThan(30);
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate Tunnel SSH keys' }));
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+    expect(start.mock.calls[1][0]).toEqual({ kind: 'tunnel_keys' });
+  });
+
+  it('shows where a rotation stands and refuses a second one', async () => {
+    mock([agent], {
+      workflows: [
+        workflow({
+          progress: { totals: { rewritten: 12, unreadable: 1 } },
+          detail: 're-encrypting mcp_access',
+        }),
+      ],
+    });
+    render(<DeploymentManagement />);
+    expect(await screen.findByText('Credential encryption key')).toBeTruthy();
+    const current = screen.getByText('Re-encrypt stored credentials').closest('li');
+    expect(current?.getAttribute('aria-current')).toBe('step');
+    expect(screen.getByText(/12 values re-encrypted, 1 unreadable/)).toBeTruthy();
+    expect(
+      (screen.getByRole('button', { name: 'Rotate User credential key' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it('asks an administrator to change a far end and sends the confirmation', async () => {
+    const key = `ssh-ed25519 ${'A'.repeat(43)}`;
+    mock([agent], {
+      workflows: [
+        workflow({
+          kind: 'tunnel_keys',
+          step: 'rolling',
+          progress: {
+            phases: { 'gpu-1': 'authorize' },
+            attention: {
+              token: 'gpu-1:add',
+              host: 'gpu-1',
+              action: 'add',
+              tunnels: { gateway: key },
+            },
+          },
+        }),
+      ],
+    });
+    const confirm = vi
+      .spyOn(api, 'confirmFarEnd')
+      .mockResolvedValue(workflow({ kind: 'tunnel_keys' }));
+    render(<DeploymentManagement />);
+    expect(await screen.findByText(key)).toBeTruthy();
+    expect(screen.getByText(/gpu-1: Accepted on the far end/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'I added these keys' }));
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith('b'.repeat(32), 'gpu-1:add'));
+  });
+
+  it('renews one server, and sends no password in the clear for a database move', async () => {
+    const withDatabase: api.DeploymentAgent = {
+      ...agent,
+      observed: {
+        ...agent.observed,
+        database: { host: 'db', port: 5432, database: 'cloudagent', user: 'ca', query: '' },
+        policy: { allowed: {}, kata: [], has_kata_helper: false, has_database_tools: true },
+      },
+    };
+    mock([withDatabase]);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const renew = vi.spyOn(api, 'renewHostCredential').mockResolvedValue({ requested: true });
+    const start = vi.spyOn(api, 'startWorkflow').mockResolvedValue(workflow({}));
+    render(<DeploymentManagement />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Renew' }));
+    await waitFor(() => expect(renew).toHaveBeenCalledWith('gpu-1'));
+
+    expect(screen.getByText('cloudagent')).toBeTruthy();
+    fireEvent.click(screen.getByLabelText('Move the data to an empty database'));
+    fireEvent.change(screen.getByLabelText('Database host'), { target: { value: 'db2.example' } });
+    fireEvent.change(screen.getByLabelText('Database name'), { target: { value: 'agent' } });
+    fireEvent.change(screen.getByLabelText('Database user'), { target: { value: 'agent' } });
+    fireEvent.change(screen.getByLabelText('Database password'), {
+      target: { value: 'p@ss word' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Move to this database' }));
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+    const request = start.mock.calls[0][0];
+    expect(request.kind).toBe('database_migration');
+    expect(JSON.stringify(request)).not.toContain('ss word');
+    expect(request.sealed_by_agent?.[agent.agent_id].AGENT_DATABASE_URL.v).toBe(1);
+  });
+
+  it('names the outage during a move and what it has heard', async () => {
+    mock([agent], {
+      maintenance: {
+        active: true,
+        since: '2026-10-30T10:00:00+00:00',
+        progress: { a: { operations: [{ phase: 'copy' }], received_at: '' } },
+      },
+    });
+    render(<DeploymentManagement />);
+    expect(await screen.findByText(/Changes are refused while the database moves/)).toBeTruthy();
+    expect(screen.getByText(/Last step reported: Data copied/)).toBeTruthy();
+    expect(screen.getByText(/may\s+stop answering for a minute or two/)).toBeTruthy();
+  });
+
+  it('maps every item to where it changes, and works without a catalog', async () => {
+    mock([agent]);
+    vi.spyOn(api, 'getManagementCatalog').mockResolvedValue({
+      methods: ['workflow'],
+      apply_modes: [],
+      items: [
+        {
+          id: 'hosts.tunnel_keys',
+          label: 'Tunnel key item',
+          group: 'Security',
+          method: 'workflow',
+          sources: [{ kind: 'deployment_store', reader: 'x', meaning: 'key files' }],
+          owner: 'workflow:tunnel_keys',
+          description: 'd',
+          apply_mode: 'unverified',
+          restart_scope: [],
+          role: 'host',
+          env_names: [],
+          setting_keys: [],
+          bounded: false,
+        },
+      ],
+    });
+    render(<DeploymentManagement />);
+    expect(await screen.findByText('Tunnel key item')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Keys and credentials' })).toBeTruthy();
+    expect(screen.getByText(/Guided operation/)).toBeTruthy();
   });
 });

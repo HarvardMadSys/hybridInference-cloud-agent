@@ -37,6 +37,9 @@ beforeEach(() => {
 let pathname = '/';
 let statusUrl = '/status';
 
+vi.mock('@/components/features/agents/MaintenanceBanner', () => ({
+  MaintenanceBanner: () => null,
+}));
 vi.mock('@/lib/api/agents', async (original) => ({
   ...(await original<typeof import('@/lib/api/agents')>()),
   cancelAgentJob: vi.fn(),

@@ -82,7 +82,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0111_database_probes`) before
+Run `alembic upgrade head` (through `0112_rotation_closure`) before
 starting this release; the [upgrade notes](docs/developer/upgrade-notes.md)
 say what each recent migration changes. The main control-plane listener then
 initializes the settings document once from its existing environment. The
@@ -134,8 +134,8 @@ execution profile. During an upgrade, the main listener imports only newly
 migrated fields that are missing. It never overwrites an existing value,
 including an empty reset, and the relay waits for the import to finish. The
 identity issuer stays pinned to this database. Existing user/compute encryption
-keys cannot be replaced or reset through the settings editor without a separate
-re-encryption procedure.
+keys cannot be replaced or reset through the settings editor; they change only
+through their rotation in Admin → Deployment, which re-encrypts what they protect.
 
 The Settings page identifies missing required fields and incomplete optional
 integrations. If Gateway sign-in is not ready, an administrator can open
@@ -260,8 +260,8 @@ accounts, sessions, and saved connections persist in `agent-pgadmin`.
 |---|---|
 | `AGENT_SETTINGS_ENCRYPTION_KEY` | Optional dedicated key of at least 32 bytes for encrypted admin setting secrets. If absent, `AGENT_SESSION_SECRET` supplies the key. Keep the same effective key on the main API and MCP-only listener, and preserve it with database backups. Changing the effective key requires re-encrypting existing settings first; session-key rotation also changes it when the fallback is in use. |
 | `AGENT_SETTINGS_ENCRYPTION_KEY_PREVIOUS` | **NEW.** *Set by the deployment agent during a root key rotation; leave unset otherwise.* The previous root key, used only to decrypt values not yet re-encrypted under `AGENT_SETTINGS_ENCRYPTION_KEY`. Each process reports a one-way identifier of both keys, never the keys. |
-| `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | Encrypts stored source-control credentials, per-user MCP credentials, and reusable cloud-environment variables/overrides under separate domain separators. Generate random 32 bytes, unique per environment. A new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved or imported earlier still loads, and startup logs `agent_weak_credential` until it is replaced. Without a key, none store plaintext; MCP offers an empty picker and value-bearing environment operations fail closed. Credentials from the pre-extraction gateway key require re-wrapping, not copying. |
-| `AGENT_CONTROL_TOKEN_SECRET` | Signs host/worker control tokens. Generate random 32 bytes, unique per environment and independent of gateway secrets. A new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved earlier still loads, and startup logs `agent_weak_credential` until it is replaced. |
+| `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | Encrypts stored source-control credentials, per-user MCP credentials, and reusable cloud-environment variables/overrides under separate domain separators. Generate random 32 bytes, unique per environment. A new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved or imported earlier still loads, and startup logs `agent_weak_credential` until it is replaced. Without a key, none store plaintext; MCP offers an empty picker and value-bearing environment operations fail closed. Credentials from the pre-extraction gateway key require re-wrapping, not copying. Once set, it changes only through its rotation in Admin → Deployment, which re-encrypts every stored value and rebuilds the environment fingerprints it keys. |
+| `AGENT_CONTROL_TOKEN_SECRET` | Signs host/worker control tokens. Generate random 32 bytes, unique per environment and independent of gateway secrets. A new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved earlier still loads, and startup logs `agent_weak_credential` until it is replaced. Replace it with the rotation in Admin → Deployment: every server renews its credential first. A value saved directly invalidates host and worker credentials at once. |
 | `AGENT_SESSION_SECRET` | Signs the web session cookie. Generate random 32 bytes, unique per environment. |
 | `AGENT_DEFAULT_EXECUTION_PROFILE` | Server-owned policy for new root threads. Application default: `trusted-v1`; supported production Compose default: `untrusted-kata-v1`; local Compose uses `trusted-v1`. The untrusted profile requires the current enrolled Host credential and the exact claiming replica's attestation of `io.containerd.kata.v2` with a guest kernel different from the host. The trusted profile permits runc for trusted internal/dev repositories. Follow-ups and Fork inherit the stored policy; callers cannot select it. |
 | `AGENT_ONCALL_DISPATCH_TOKEN` | Authenticates the gateway alert relay on `/v1/agent/service/oncall/*` — one credential, one door. Random 32 bytes (a new value saved in Admin → Settings must be at least 32 bytes; a shorter value saved or imported earlier still loads, and startup logs `agent_weak_credential` until it is replaced), same value in the relay's `.env.oncall`, distinct per environment. Unset opens nothing (the door then answers only to `ADMIN_TOKEN`). |
@@ -448,7 +448,7 @@ for deployment profiles, verified SSH access and CloudLab endpoint setup.
 | Variable | Meaning |
 | --- | --- |
 | `AGENT_COMPUTE_SANDBOX_IMAGE_REPOSITORY` | Where automatic Server setup looks for the sandbox image this release published, as `<repository>:sandbox-<commit>`. Default `ghcr.io/harvardmadsys/cloud-agent-sandbox`; empty disables the lookup. When the image exists (checked anonymously), the generated Host configuration pulls `<repository>:sandbox-{deployment_sha}` with `AGENT_SANDBOX_IMAGE_PULL=true`, so its chats record a registry digest and can be restored on another Host. Otherwise the Host builds its own image, as before, and its chats stay on it. |
-| `AGENT_COMPUTE_SECRET_KEY` | Independent encryption key, at least 32 bytes, for stored compute connections and Admin-managed deployment profiles. The supported deployer generates and persists a random value in `.env` when blank. Preserve it with database backups. |
+| `AGENT_COMPUTE_SECRET_KEY` | Independent encryption key, at least 32 bytes, for stored compute connections and Admin-managed deployment profiles. The supported deployer generates and persists a random value in `.env` when blank. Preserve it with database backups. Once set, it changes only through its rotation in Admin → Deployment. |
 | `AGENT_COMPUTE_CONFIG` | Absolute path inside the control-plane process to the operator-owned JSON deployment configuration. |
 | `AGENT_COMPUTE_DIRECTORY` | Absolute host directory mounted read-only at `/run/compute` by the optional Compose overlay; `deploy.sh` includes the overlay when this is set. |
 | `AGENT_CONTROL_PLANE_SSH_HOST` | Editable first-time Server setup address for the service node. The supported deployer defaults to the node's FQDN, falling back to its hostname; set an SSH address explicitly when using another deployment system or a different SSH alias. Saved setups take precedence. |

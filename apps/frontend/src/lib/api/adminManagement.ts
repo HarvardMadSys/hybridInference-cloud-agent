@@ -97,7 +97,16 @@ export interface AgentObserved {
     kata: { version: string; sha256: string }[];
     has_kata_helper: boolean;
     has_database_tools: boolean;
+    tunnel_authorized_keys?: string[];
   };
+  /** Where this machine's database connection points; never the password. */
+  database?: {
+    host: string;
+    port: number;
+    database: string;
+    user: string;
+    query: string;
+  } | null;
   secret_ids?: Record<string, string>;
 }
 
@@ -138,6 +147,52 @@ export interface DeploymentWorkflow {
   created_by: string;
   created_at: string;
   updated_at: string;
+  /** Counters and any question for an administrator; never a sealed value. */
+  progress?: WorkflowProgress;
+}
+
+export interface FarEndRequest {
+  token: string;
+  host: string;
+  action: 'add' | 'remove';
+  tunnels: Record<string, string>;
+}
+
+export interface WorkflowProgress {
+  totals?: { rewritten?: number; current?: number; unreadable?: number; raced?: number };
+  reindexed?: { bindings?: number; snapshots?: number };
+  phases?: Record<string, string>;
+  attention?: FarEndRequest | null;
+  public_keys?: Record<string, { old?: Record<string, string>; new?: Record<string, string> }>;
+  [key: string]: unknown;
+}
+
+export interface MaintenanceState {
+  active: boolean;
+  kind?: string;
+  workflow_id?: string;
+  since?: string;
+  detail?: string;
+  /** What this process last heard from agents; it is lost if the process restarts. */
+  progress?: Record<
+    string,
+    {
+      operations: { operation?: string; phase?: string | null; state?: string }[];
+      received_at: string;
+    }
+  >;
+}
+
+export interface HostCredentialView {
+  host: string;
+  status: string;
+  current_key: boolean;
+  key_known: boolean;
+  renews: boolean;
+  renewal_pending: boolean;
+  renewal_requested: boolean;
+  last_heartbeat_at: string | null;
+  lag: string | null;
 }
 
 export interface ConfigKeyContract {
@@ -149,6 +204,8 @@ export interface ConfigKeyContract {
 }
 
 export interface DeploymentOverview {
+  /** Absent from a control plane without maintenance mode. */
+  maintenance?: MaintenanceState;
   agents: DeploymentAgent[];
   intents: DeploymentIntent[];
   workflows: DeploymentWorkflow[];
@@ -246,10 +303,20 @@ export const startWorkflow = (request: {
     confirm: request.kind,
   });
 
-export const retireSigningKey = (workflowId: string) =>
-  post<DeploymentWorkflow>(`${DEPLOYMENTS}/workflows/${encodeURIComponent(workflowId)}/retire`, {
-    confirm: 'retire',
-  });
+export const confirmFarEnd = (workflowId: string, token: string) =>
+  post<DeploymentWorkflow>(
+    `${DEPLOYMENTS}/workflows/${encodeURIComponent(workflowId)}/confirm-far-end`,
+    { token },
+  );
+
+export const getHostCredentials = () =>
+  get<{ signing_key_id: string; hosts: HostCredentialView[] }>(`${DEPLOYMENTS}/host-credentials`);
+
+export const renewHostCredential = (host: string) =>
+  post<{ requested: boolean }>(
+    `${DEPLOYMENTS}/host-credentials/${encodeURIComponent(host)}/renew`,
+    { confirm: host },
+  );
 
 export const listCredentials = () => get<{ credentials: AdminCredential[] }>(CREDENTIALS);
 export const createCredential = (name: string, deployment: boolean, expiresInDays: number | null) =>
@@ -365,6 +432,24 @@ export async function keyIdentifier(secret: string): Promise<string> {
   return Array.from(new Uint8Array(mac), (value) => value.toString(16).padStart(2, '0'))
     .join('')
     .slice(0, 16);
+}
+
+export interface DatabaseAddress {
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password: string;
+  /** Any options the connection already carries, kept as they are. */
+  query?: string;
+}
+
+/** The connection URL an address describes; only ever sealed, never sent as it is. */
+export function databaseUrl(address: DatabaseAddress): string {
+  const part = encodeURIComponent;
+  const host = address.host.includes(':') ? `[${address.host}]` : address.host;
+  const url = `postgresql://${part(address.user)}:${part(address.password)}@${host}:${address.port}/${part(address.database)}`;
+  return address.query ? `${url}?${address.query}` : url;
 }
 
 /** Seal one value to every listed agent, keyed by agent id. */
