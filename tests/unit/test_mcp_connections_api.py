@@ -27,7 +27,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
-from tests.support.owners import SESSIONS, use_session_secret
+from tests.support.owners import SESSIONS, FakeOwners, use_session_secret
 from tests.support.storage import AllCapabilities, OneFake
 
 from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
@@ -78,6 +78,7 @@ class FakeStore(AllCapabilities):
 
     def __init__(self) -> None:
         """Start empty, with connection ids handed out in order."""
+        self.local_accounts = SESSIONS
         self.connections: dict[int, dict[str, Any]] = {}
         self.capabilities: dict[int, dict[str, Any]] = {}
         self.bindings: dict[str, list[dict[str, Any]]] = {}
@@ -1266,7 +1267,7 @@ class TestAuthorization:
         from cloud_agent.mcp import oauth
 
         monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", override)
-        monkeypatch.setenv("AGENT_SESSION_REDIRECT_URI", f"{session_base}/v1/session/callback")
+        monkeypatch.setenv("AGENT_PUBLIC_API_URL", session_base)
         metadata = oauth.AuthorizationServerMetadata(
             issuer="https://mcp.slack.com",
             authorization_endpoint="https://mcp.slack.com/authorize",
@@ -1426,7 +1427,7 @@ class TestAuthorization:
         from cloud_agent.mcp import oauth
 
         monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", override)
-        monkeypatch.setenv("AGENT_SESSION_REDIRECT_URI", f"{session_base}/v1/session/callback")
+        monkeypatch.setenv("AGENT_PUBLIC_API_URL", session_base)
         monkeypatch.setenv("AGENT_WEB_BASE_URL", "https://web.example.com/agents")
         metadata = oauth.AuthorizationServerMetadata(
             issuer="https://mcp.notion.com",
@@ -1493,18 +1494,16 @@ class TestAuthorization:
         )
 
     @pytest.mark.parametrize(
-        "callback",
+        "address",
         [
             "",
-            "https://example.com/integrations",
-            "https://example.com/v1/session/callback?next=other",
+            "example.com/api",
+            "https://example.com/api?next=other",
         ],
     )
-    def test_missing_or_unrecognized_callback_does_not_guess_an_address(
-        self, monkeypatch, callback
-    ):
+    def test_a_missing_or_unusable_public_address_is_not_guessed_at(self, monkeypatch, address):
         monkeypatch.delenv("AGENT_MCP_PUBLIC_BASE_URL", raising=False)
-        monkeypatch.setenv("AGENT_SESSION_REDIRECT_URI", callback)
+        monkeypatch.setenv("AGENT_PUBLIC_API_URL", address)
         assert mcp_connections._public_base_url() == ""
 
     def test_a_client_id_can_be_supplied_before_the_flow(self) -> None:
@@ -1578,6 +1577,7 @@ class TestAuthorization:
         with _client(store) as client:
             # Started as the owner; finished by whatever session the browser has.
             del client.app.dependency_overrides[mcp_connections._callback_session_user]
+            client.app.state.owners = FakeOwners()
             started = client.post(f"/v1/agent/mcp/connections/{connection_id}/authorize")
             assert started.status_code == 200, started.text
             state = parse_qs(urlsplit(started.json()["authorization_url"]).query)["state"][0]

@@ -254,7 +254,7 @@ def on_connection(body: dict[str, Any]) -> dict[str, Any]:
     The body's model is kept, so a case about the model still tests it; a body
     naming none gets the connection's own.
     """
-    return {"model": CONNECTION_MODEL, **body, "model_connection_id": CONNECTION_ID}
+    return {"model": CONNECTION_MODEL, "model_connection_id": CONNECTION_ID, **body}
 
 
 def connection_access(runtime: str = "claude-code", **changes: Any) -> ModelConnectionAccess:

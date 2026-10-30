@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from tests.support.owners import SESSIONS, account_record
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
@@ -17,6 +18,9 @@ from cloud_agent.environments import EnvironmentNotFound
 pytestmark = pytest.mark.asyncio
 
 
+#: The owner these direct calls run as, still allowed when a terminal opens.
+_ALICE = SimpleNamespace(get_account=AsyncMock(return_value=account_record("alice")))
+
 @pytest.fixture
 async def client():
     repository = SimpleNamespace(
@@ -25,7 +29,9 @@ async def client():
     )
     app = FastAPI()
     app.include_router(environments.router)
-    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(environments=repository)
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        local_accounts=SESSIONS, environments=repository
+    )
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "alice"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
         yield http, repository
@@ -114,7 +120,9 @@ async def test_withdrawn_test_owner_gets_no_credentials_or_container(monkeypatch
     credentials = SimpleNamespace(token_for=AsyncMock())
     app = FastAPI()
     app.include_router(environments.router)
-    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(environments=repository)
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        local_accounts=SESSIONS, environments=repository
+    )
     app.dependency_overrides[get_owner_directory] = lambda: gateway
     app.dependency_overrides[get_agent_app_credentials] = lambda: credentials
     app.dependency_overrides[environments.verify_claiming_host] = lambda: {
@@ -144,7 +152,9 @@ async def test_unrelated_job_validation_keeps_field_detail_and_internal_errors_s
     app = FastAPI()
     app.include_router(jobs.router)
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "alice"}
-    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(conversation_commands=commands)
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        local_accounts=SESSIONS, conversation_commands=commands
+    )
     async with AsyncClient(
         transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
     ) as http:
@@ -263,7 +273,9 @@ async def test_an_action_stopped_while_preparing_does_not_run_untracked(monkeypa
         "deploy",
         idempotency_key="key",
         user={"user_id": "alice"},
-        store=SimpleNamespace(environments=repo, conversation_queries=object()),
+        store=SimpleNamespace(
+            environments=repo, conversation_queries=object(), local_accounts=_ALICE
+        ),
         credentials=None,
     )
 
@@ -374,6 +386,7 @@ async def test_empty_binding_terminal_does_not_prepare_or_interrupt_a_running_tu
         ),
     )
     store = SimpleNamespace(
+        local_accounts=_ALICE,
         environments=SimpleNamespace(
             get_environment_binding=AsyncMock(return_value=BoundEnvironment(binding_id="empty"))
         ),
@@ -405,7 +418,9 @@ async def test_test_retry_returns_original_before_github_or_latest_config(monkey
     app = FastAPI()
     app.include_router(environments.router)
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "alice"}
-    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(environments=repository)
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        local_accounts=SESSIONS, environments=repository
+    )
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     entitlement = AsyncMock()
     monkeypatch.setattr(environments, "_entitled", entitlement)
@@ -469,7 +484,9 @@ async def test_a_team_environment_is_created_for_its_team_and_refusals_say_why(m
     )
     app = FastAPI()
     app.include_router(environments.router)
-    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(environments=repository)
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        local_accounts=SESSIONS, environments=repository
+    )
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "alice"}
     monkeypatch.setattr(environments, "_entitled", AsyncMock())
     body = {"name": "Shared", "repo": "org/app", "revision": 0, "team_id": "ateam_1"}

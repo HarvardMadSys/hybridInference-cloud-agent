@@ -145,6 +145,7 @@ def setup(run_setup):  # noqa: F811 — imported pytest fixture
     )
     app.include_router(admin_sandboxes.router)
     app.dependency_overrides[admin_sandboxes.get_admin_sandbox_queries] = lambda: queries
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(local_accounts=SESSIONS)
     return app, queries, gateway
 
 

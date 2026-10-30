@@ -245,7 +245,7 @@ def test_the_sandbox_manager_carries_the_plan_into_the_member_identity(monkeypat
     # A token the process does not hold (a rotated platform key, say) restarts
     # it, so a live process never emits a token this turn does not mask.
     assert not transport.compatible_with(replace(launch, inference_local_token="d" * 64))
-    with pytest.raises(ValueError, match="translated launch"):
+    with pytest.raises(ValueError, match="owner's model connection"):
         replace(launch, inference_source="", inference_base_url="", inference_protocol="")
     with pytest.raises(ValueError, match="token"):
         replace(launch, inference_local_token="")

@@ -68,13 +68,6 @@ class Setting:
     empty_env_imports: bool = False
     #: A URL the code that uses it requires to be HTTPS, with no query.
     https_only: bool = False
-    #: Where the control plane sends its gateway dispatch token, fetches the
-    #: keys that identity tokens are checked against, or sends a browser to
-    #: sign in. A new value must use HTTPS unless it names this machine or a
-    #: private name (see :func:`_private_host`). A value saved or imported
-    #: before this rule still loads, so an internal plain-HTTP gateway keeps
-    #: working.
-    https_unless_private: bool = False
     #: Also takes ``mailto:`` and one address: a support address is as likely
     #: as a support page. One plain address only: header fields would let the
     #: link prefill a message the user did not write.
@@ -147,12 +140,6 @@ class Setting:
         return (
             parsed is not None
             and (not self.https_only or (parsed.scheme == "https" and not parsed.query))
-            and (
-                not self.https_unless_private
-                or saved
-                or parsed.scheme == "https"
-                or _private_host(parsed.hostname or "")
-            )
         )
 
     def definition(self) -> dict[str, Any]:
@@ -214,25 +201,6 @@ def _web_url(value: str) -> SplitResult | None:
     ):
         return None
     return parsed
-
-
-def _issuer(value: str) -> bool:
-    """Exactly what the Gateway signs: no surrounding space or control characters."""
-    return value == value.strip() and not any(ord(char) < 32 for char in value)
-
-
-def _grant_base_path(value: str) -> bool:
-    """A path prefix the grant clients accept.
-
-    They check it during startup as well as on live requests, so an unusable
-    prefix is refused before it can be saved.
-    """
-    return (
-        value.rstrip("/").startswith("/")
-        and not value.startswith("//")
-        and not any(char in value for char in ("?", "#", "\\"))
-        and not any(char.isspace() or ord(char) < 32 for char in value)
-    )
 
 
 def _s3_bucket(value: str) -> bool:

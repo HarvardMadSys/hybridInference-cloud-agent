@@ -6,10 +6,8 @@ request paid a TCP connect — and a TLS handshake, where the peer is behind TLS
 admission runs on every owner route including terminal input, repository
 entitlement runs on every file read, and both were reconnecting each time.
 
-`app.py` already carried a comment saying the grant client shared a pool. It
-did not; the seam existed and nothing was passed to it. That is the reason
-these are tests and not a comment: a claim about pooling that only a human
-reads is a claim nothing checks.
+A claim about pooling that only a human reads is a claim nothing checks, which
+is why these are tests and not a comment.
 """
 
 from __future__ import annotations
@@ -21,6 +19,7 @@ import asyncpg
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.support.owners import use_session_secret
 
 from cloud_agent import sandbox_manager_routing
 from cloud_agent.app import lifespan
@@ -33,24 +32,22 @@ def _credentials(**kwargs) -> GitHubAppCredentials:
     return GitHubAppCredentials(AppConfig(app_id="1", private_key=_KEY), **kwargs)
 
 
-async def test_the_lifespan_gives_both_gateway_clients_one_pool(monkeypatch) -> None:
-    """The sharing `app.py` describes in a comment, now actual."""
+async def test_the_lifespan_owns_the_shared_pool(monkeypatch) -> None:
+    """The pool is open while the application runs and closes with it."""
+    use_session_secret(monkeypatch)
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "pool-test-source-control-key")
     monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
-    monkeypatch.delenv("GATEWAY_BASE_URL", raising=False)
-    monkeypatch.delenv("GATEWAY_ISSUER", raising=False)
     monkeypatch.setattr(asyncpg, "create_pool", AsyncMock(return_value=AsyncMock()))
     # This test's pool is a socket-ownership sentinel, not a settings database.
     # Initialization/import semantics have separate repository-backed tests.
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.identity_namespace.ensure_gateway_namespace", AsyncMock(return_value=None)
+        "cloud_agent.identity_namespace.ensure_local_namespace", AsyncMock(return_value=None)
     )
     app = FastAPI()
 
     async with lifespan(app, background=False):
         shared = app.state.http
-        assert app.state.owners._client is shared
-        assert app.state.grants._client is shared
         assert not shared.is_closed
 
     assert shared.is_closed, "the pool outlived the application that owned it"
@@ -59,19 +56,19 @@ async def test_the_lifespan_gives_both_gateway_clients_one_pool(monkeypatch) -> 
 async def test_the_shared_pool_keeps_no_cookies(monkeypatch) -> None:
     """One owner's answer must not set a cookie that rides on the next owner's request.
 
-    The pool carries owners' grants to the gateway and repositories' tokens to
-    GitHub. Each per-call client it replaced had a jar of its own.
+    The pool carries repositories' tokens to GitHub. Each per-call client it
+    replaced had a jar of its own.
     """
+    use_session_secret(monkeypatch)
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "pool-test-source-control-key")
     monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
-    monkeypatch.delenv("GATEWAY_BASE_URL", raising=False)
-    monkeypatch.delenv("GATEWAY_ISSUER", raising=False)
     monkeypatch.setattr(asyncpg, "create_pool", AsyncMock(return_value=AsyncMock()))
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.identity_namespace.ensure_gateway_namespace", AsyncMock(return_value=None)
+        "cloud_agent.identity_namespace.ensure_local_namespace", AsyncMock(return_value=None)
     )
     app = FastAPI()
-    url = "https://gateway.example/v1/chat/completions"
+    url = "https://api.github.example/repos"
 
     async with lifespan(app, background=False):
         shared = app.state.http
@@ -98,14 +95,14 @@ async def test_the_lifespan_opens_its_database_pool_without_jit(monkeypatch) -> 
     1.9 s compiling a statement that ran in 85 ms, and every reaper pass spent
     170 ms compiling a host-removal check that ran in under one.
     """
+    use_session_secret(monkeypatch)
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "pool-test-source-control-key")
     monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
-    monkeypatch.delenv("GATEWAY_BASE_URL", raising=False)
-    monkeypatch.delenv("GATEWAY_ISSUER", raising=False)
     create_pool = AsyncMock(return_value=AsyncMock())
     monkeypatch.setattr(asyncpg, "create_pool", create_pool)
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.identity_namespace.ensure_gateway_namespace", AsyncMock(return_value=None)
+        "cloud_agent.identity_namespace.ensure_local_namespace", AsyncMock(return_value=None)
     )
 
     async with lifespan(FastAPI(), background=False):

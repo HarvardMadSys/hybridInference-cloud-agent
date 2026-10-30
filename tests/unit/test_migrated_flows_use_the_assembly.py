@@ -101,7 +101,7 @@ async def test_the_reaper_pass_asks_the_assembled_sandbox_repository() -> None:
     """Started the way the lifespan starts it, and cancelled the same way."""
     pool = _RecordingPool()
     task = asyncio.create_task(
-        reap_expired_attempts(_assembled(pool), interval_seconds=0.001, grants=None)
+        reap_expired_attempts(_assembled(pool), interval_seconds=0.001)
     )
     try:
         for _ in range(200):
@@ -126,8 +126,7 @@ async def test_the_fork_flow_refuses_through_the_assembled_host_pool() -> None:
 
     with pytest.raises(HTTPException) as refusal:
         await session_fork.materialize_session_fork(
-            operation, job_id="ajob_1", job_store=_assembled(pool), grants=None
-        )
+            operation, job_id="ajob_1", job_store=_assembled(pool))
 
     assert refusal.value.status_code == 503
     assert refusal.value.detail == {

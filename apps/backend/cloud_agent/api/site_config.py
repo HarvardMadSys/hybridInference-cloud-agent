@@ -19,7 +19,6 @@ async def site_config(response: Response) -> dict[str, object]:
             "statusUrl": text_setting("site.status_url"),
             "docsUrl": text_setting("site.docs_url"),
             "contactUrl": text_setting("site.contact_url"),
-            "gatewayUrl": text_setting("site.gateway_url"),
         },
         "features": {"rag": boolean_setting("site.feature_rag")},
     }

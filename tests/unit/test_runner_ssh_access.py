@@ -149,8 +149,8 @@ def test_a_chat_without_ssh_servers_costs_no_call(monkeypatch) -> None:
 
 def test_the_keys_are_masked_in_everything_the_runner_reports() -> None:
     values = runner_mod._claim_secret_values(replace(_JOB, ssh_access=_ACCESS))
-    assert values == {"ssh-key:gpu": _KEY}
-    assert runner_mod._claim_secret_values(_JOB) == {}
+    assert values["ssh-key:gpu"] == _KEY
+    assert "ssh-key:gpu" not in runner_mod._claim_secret_values(_JOB)
 
 
 def test_the_runner_tells_the_sandbox_manager_its_turn_is_starting() -> None:

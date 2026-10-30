@@ -785,11 +785,6 @@ def automatic_setup_request() -> dict[str, Any]:
     """Use infrastructure descriptors without including deployment credentials."""
     return {
         "request_id": "automatic-setup-once",
-        "gateway": {
-            "connection_id": "gateway-key",
-            "address": "gateway-input-canary.example.org",
-            "username": "gateway_operator",
-        },
         "control": {
             "connection_id": "control-key",
             "address": "control-input-canary.example.org",
@@ -855,15 +850,10 @@ async def test_automatic_setup_parses_targets_and_audits_only_profile_ids(comput
     parsed = service.create.await_args.args[0]
     assert isinstance(parsed, AutomaticDeploymentSetup)
     assert parsed.request_id == body["request_id"]
-    assert parsed.gateway.connection_id == "gateway-key"
-    assert parsed.gateway.address == body["gateway"]["address"]
-    assert parsed.gateway.username == "gateway_operator"
-    assert parsed.gateway.port == 22
     assert parsed.control.connection_id == "control-key"
     assert parsed.control.address == body["control"]["address"]
     assert parsed.control.username == "control_operator"
     assert parsed.control.port == 22
-    assert parsed.gateway_port == 8080
     assert parsed.slots == 2
     assert parsed.protected_cidrs == ["192.0.2.0/24", "198.51.100.0/24"]
     assert len(repo.audit_rows) == 1
@@ -871,7 +861,6 @@ async def test_automatic_setup_parses_targets_and_audits_only_profile_ids(comput
     assert repo.audit_rows[0]["actor_id"] == "admin-token"
     assert repo.audit_rows[0]["details"] == {"profile_id": "automatic-primary,automatic-spare"}
     for canary in (
-        body["gateway"]["address"],
         body["control"]["address"],
         service.sandbox_manager_token,
         service.private_key,

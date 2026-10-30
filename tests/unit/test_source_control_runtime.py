@@ -26,6 +26,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
+from tests.support.owners import use_session_secret
 
 from cloud_agent import github_app
 from cloud_agent.github_app import AppConfig, GitHubAppCredentials
@@ -530,11 +531,11 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     for name, value in _app_env(key).items():
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
-    monkeypatch.delenv("GATEWAY_BASE_URL", raising=False)
-    monkeypatch.delenv("GATEWAY_ISSUER", raising=False)
+    use_session_secret(monkeypatch)
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "lifespan-wiring-encryption-key")
     monkeypatch.setattr(asyncpg, "create_pool", AsyncMock(return_value=AsyncMock()))
     monkeypatch.setattr(
-        "cloud_agent.identity_namespace.ensure_gateway_namespace", AsyncMock(return_value=None)
+        "cloud_agent.identity_namespace.ensure_local_namespace", AsyncMock(return_value=None)
     )
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock(return_value=None))
 
@@ -567,7 +568,6 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         # also stay idle instead of resolving the test-only database hostname.
         "cloud_agent.bootstrap.lifespan.listen",
         "cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots",
-        "cloud_agent.ledger.collect_usage_snapshots",
         "cloud_agent.capacity_history.prune_host_capacity_history",
         "cloud_agent.operational_health.monitor_queue",
         "cloud_agent.mcp.runtime.maintain_host_sessions",

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.support.owners import use_session_secret
 from tests.unit.test_mcp_host_sessions_and_results import Transport, session
 from tests.unit.test_mcp_protocol_and_authorization import _connection
 from tests.unit.test_mcp_transports import _client, _config
@@ -375,11 +376,13 @@ async def test_maintenance_retries_after_expiry_failure_and_stops_on_cancel(monk
 async def test_relay_lifespan_runs_maintenance_and_releases_upstream_sessions(monkeypatch):
     built, (current,) = await _opened(monkeypatch, "job:1")
     monkeypatch.setattr(mcp_runtime, "_HOST_INSTANCE", built)
+    use_session_secret(monkeypatch)
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "relay-lifespan-encryption-key")
     monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
     monkeypatch.setattr("asyncpg.create_pool", AsyncMock(return_value=AsyncMock()))
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.identity_namespace.ensure_gateway_namespace", AsyncMock(return_value=None)
+        "cloud_agent.identity_namespace.ensure_local_namespace", AsyncMock(return_value=None)
     )
     started = asyncio.Event()
 

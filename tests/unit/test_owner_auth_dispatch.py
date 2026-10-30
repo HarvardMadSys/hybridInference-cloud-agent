@@ -20,6 +20,7 @@ made possible to get wrong:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,6 +31,7 @@ from tests.support.owners import SESSIONS, use_session_secret
 
 from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 from cloud_agent.api._owner_auth import authenticate_agent_owner
+from cloud_agent.api.deps import get_storage
 
 pytestmark = pytest.mark.asyncio
 
@@ -47,13 +49,14 @@ def _session_env(monkeypatch):
 
 @pytest_asyncio.fixture()
 async def client():
-    """An app exposing the dispatch directly, with no store of any kind."""
+    """An app exposing the dispatch directly, over the in-memory session store."""
     app = FastAPI()
 
     @app.get("/owner")
     async def owner(user: dict[str, Any] = Depends(authenticate_agent_owner)) -> dict[str, Any]:
         return user
 
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(local_accounts=SESSIONS)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="https://test") as async_client:
         yield async_client
@@ -102,7 +105,8 @@ async def test_an_api_key_authenticates_nobody(client: AsyncClient) -> None:
     response = await client.get("/owner", headers={"Authorization": f"Bearer {_API_KEY}"})
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid authentication token."
+    # Not of a session's shape: it presents no session at all.
+    assert response.json()["detail"] == "Missing authentication token."
 
 
 async def test_the_x_api_key_header_is_not_read_at_all(client: AsyncClient) -> None:

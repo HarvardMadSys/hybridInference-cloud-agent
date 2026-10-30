@@ -160,13 +160,9 @@ def _host(
         "AGENT_EGRESS_CHAT_NETWORK_POOL",
         "AGENT_EGRESS_DNS_SERVER",
         "AGENT_EGRESS_PROTECTED_CIDRS",
-        "AGENT_GATEWAY_HOSTNAME",
         "AGENT_MCP_HOSTNAME",
         "AGENT_CONTROL_PLANE_HOSTNAME",
         "AGENT_SANDBOX_MANAGER_TOKEN",
-        "AGENT_TUNNEL_SSH_DESTINATION",
-        "AGENT_TUNNEL_SSH_KEY",
-        "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
         "AGENT_MCP_TUNNEL_SSH_DESTINATION",
         "AGENT_MCP_TUNNEL_SSH_KEY",
         "AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS",
@@ -191,11 +187,11 @@ def _host(
 
 
 def _add_required_host_paths(env: dict[str, str], tmp_path: Path) -> None:
-    """Populate the three relays and reverse sandbox manager path used by ``up``."""
+    """Populate the two relays and reverse sandbox manager path used by ``up``."""
     app_dir = Path(env["APP_DIR"])
     values = ["AGENT_SANDBOX_MANAGER_TOKEN=test-sandbox-manager-token"]
     for index, prefix in enumerate(
-        ("AGENT_TUNNEL", "AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"),
+        ("AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"),
         start=1,
     ):
         key = tmp_path / f"tunnel-{index}.key"
@@ -298,7 +294,7 @@ def _run_relay_probe(
         "  esac\n"
         "}\n"
         + probe
-        + f"\nprobe_sandbox_relay agent-relays http://agent-gateway:8080/health 'inference gateway' {deadline} diagnostic gateway-tunnel && printf '%s\\n' ready > {str(ready_marker)!r}\n"
+        + f"\nprobe_sandbox_relay agent-relays http://agent-mcp:8000/health 'MCP-only relay' {deadline} diagnostic mcp-tunnel && printf '%s\\n' ready > {str(ready_marker)!r}\n"
     )
     env = {
         **os.environ,
@@ -320,7 +316,7 @@ def test_sandbox_relay_probe_retries_until_compose_creates_relay(tmp_path: Path)
     result = _run_relay_probe(tmp_path, relay_ids="recover", deadline=8)
 
     assert result.returncode == 0, result.stderr
-    assert "can reach the healthy inference gateway" in result.stdout
+    assert "can reach the healthy MCP-only relay" in result.stdout
     assert (tmp_path / "relay-probe-count").read_text().strip() == "2"
 
 
@@ -328,7 +324,7 @@ def test_sandbox_relay_probe_retries_until_compose_assigns_relay_address(tmp_pat
     result = _run_relay_probe(tmp_path, relay_ids="address-recover", deadline=8)
 
     assert result.returncode == 0, result.stderr
-    assert "can reach the healthy inference gateway" in result.stdout
+    assert "can reach the healthy MCP-only relay" in result.stdout
     assert (tmp_path / "relay-probe-count").read_text().strip() == "2"
 
 
@@ -361,7 +357,7 @@ def test_sandbox_relay_probe_retries_when_container_disappears_before_inspect(
     result = _run_relay_probe(tmp_path, relay_ids="inspect-recover", deadline=8)
 
     assert result.returncode == 0, result.stderr
-    assert "can reach the healthy inference gateway" in result.stdout
+    assert "can reach the healthy MCP-only relay" in result.stdout
     assert (tmp_path / "relay-inspect-count").read_text().strip() == "2"
     assert (tmp_path / "relay-run-count").read_text().strip() == "1"
     assert (tmp_path / "ready-marker").read_text().strip() == "ready"
@@ -714,7 +710,7 @@ def test_scoped_relay_aliases_must_be_distinct(tmp_path: Path) -> None:
     env = _host(tmp_path)
     app_dir = Path(env["APP_DIR"])
     with (app_dir / ".env").open("a") as dotenv:
-        dotenv.write("AGENT_GATEWAY_HOSTNAME=same-relay\nAGENT_MCP_HOSTNAME=same-relay\n")
+        dotenv.write("AGENT_CONTROL_PLANE_HOSTNAME=same-relay\nAGENT_MCP_HOSTNAME=same-relay\n")
 
     result = _run(env, "preflight")
 
@@ -874,16 +870,15 @@ def test_shared_live_check_attests_every_runner_and_sandbox_manager(tmp_path: Pa
     assert "cannot run turns" not in result.stderr
 
 
-def test_host_readiness_probes_both_sandbox_relays() -> None:
+def test_host_readiness_probes_the_mcp_relay_from_a_sandbox() -> None:
     script = SANDBOX_HOST.read_text()
     check = script[script.index("cmd_check() {") : script.index("cmd_status() {")]
     probe = script[
         script.index("probe_sandbox_relay() {") : script.index("check_shared_live_stack() {")
     ]
 
-    assert "GATEWAY_HOSTNAME" in check
     assert "MCP_HOSTNAME" in check
-    assert check.count("probe_sandbox_relay") == 2
+    assert check.count("probe_sandbox_relay") == 1
     assert "docker run --rm --network" in probe
     assert "curl -fsS" in probe
     assert '--runtime "$KATA_RUNTIME"' in probe

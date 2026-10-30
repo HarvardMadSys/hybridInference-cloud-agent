@@ -40,7 +40,7 @@ from cloud_agent.accounts.directory import (
     LocalOwnerDirectory,
 )
 from cloud_agent.api._local_auth import terminal_open_fence
-from cloud_agent.api.deps import get_grant_client, get_owner_directory
+from cloud_agent.api.deps import get_owner_directory
 from cloud_agent.application.model_connections import connection_residency_credential
 from cloud_agent.application.owner_termination import (
     enforce_ended_access,
@@ -117,7 +117,6 @@ async def _local_owner(api, monkeypatch):
     await make_account(api.store, "owner@example.org", admission="approved", account_id=OWNER)
     local_gateway = LocalModeGateway(LocalOwnerDirectory(api.store.local_accounts))
     api.app.dependency_overrides[get_owner_directory] = lambda: local_gateway
-    api.app.dependency_overrides[get_grant_client] = LocalModeGrantClient
     connection = await verified_connection(api.store, OWNER, models=(MODEL,))
     api.connection = connection
     create = api.create

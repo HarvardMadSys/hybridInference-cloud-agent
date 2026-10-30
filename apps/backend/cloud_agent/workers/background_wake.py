@@ -16,8 +16,7 @@ import asyncio
 CHANNEL = "agent_background_work"
 SNAPSHOT = "snapshot"
 PUBLISH = "publish"
-LEDGER = "ledger"
-KINDS = (SNAPSHOT, PUBLISH, LEDGER)
+KINDS = (SNAPSHOT, PUBLISH)
 
 
 class BackgroundWake:

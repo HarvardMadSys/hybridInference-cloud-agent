@@ -80,7 +80,6 @@ def setup(tmp_path, *, unsafe_member=None):
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for filename in [
             "deploy/host/sandbox_host.sh",
-            "deploy/host/inference_compose.py",
             "deploy/host/setup_kata_runtime.sh",
             "deploy/host/docker-compose.sandbox.yml",
             "pyproject.toml",
@@ -97,7 +96,7 @@ def setup(tmp_path, *, unsafe_member=None):
     env = dict.fromkeys(_REQUIRED_ENV, "value")
     files = {}
     secrets = {}
-    for prefix in ("AGENT_TUNNEL", "AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
+    for prefix in ("AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
         for suffix in ("SSH_KEY", "SSH_KNOWN_HOSTS"):
             filename = ".compute-secrets/" + prefix.lower() + "-" + suffix.lower()
             ref = "deployment:" + prefix.lower() + "-" + suffix.lower()
@@ -640,11 +639,11 @@ async def test_checked_operator_example_loads_and_renders_real_bootstrap_payload
         )
         assert env["AGENT_MCP_TUNNEL_REMOTE_PORT"] == "8001"
         assert env["AGENT_CONTROL_PLANE_TUNNEL_REMOTE_PORT"] == "8000"
-        assert env["AGENT_TUNNEL_SSH_KEY"] == "/opt/cloud-agent-pilot/.compute-secrets/gateway.key"
+        assert "AGENT_TUNNEL_SSH_KEY" not in env
         assert env["AGENT_SANDBOX_MANAGER_REVERSE_PORT"] == "19092"
         assert "{" not in archive.extractfile(".env").read().decode()
         secrets = [m for m in archive.getmembers() if m.name.startswith(".compute-secrets/")]
-        assert len(secrets) == 6
+        assert len(secrets) == 4
         # The secrets above were written without a final newline, as an Admin
         # request delivers them; OpenSSH cannot read a key in that form.
         for member in secrets:
@@ -1416,26 +1415,12 @@ async def test_a_template_can_name_the_sandbox_image_published_for_the_deployed_
 
 
 @pytest.mark.asyncio
-async def test_local_bootstrap_stamps_the_control_plane_mode_without_gateway_secrets(
-    tmp_path, monkeypatch
-):
-    bootstrap, profile, _transport, secrets = setup(tmp_path)
-    secrets["deployment:env"] = "\n".join(
-        line
-        for line in secrets["deployment:env"].splitlines()
-        if not line.startswith("AGENT_TUNNEL_")
-    )
-    profile = profile.model_copy(
-        update={
-            "files": {
-                name: ref for name, ref in profile.files.items() if "agent_tunnel-" not in name
-            }
-        }
-    )
+async def test_bootstrap_writes_no_account_mode_and_no_inference_relay(tmp_path):
+    bootstrap, profile, _transport, _secrets = setup(tmp_path)
     payload = await bootstrap._archive(profile, INTENT, SecretStr("enrollment"))
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         env = dotenv_values(stream=io.StringIO(archive.extractfile(".env").read().decode()))
-        assert env["AGENT_AUTH_MODE"] == "local"
+        assert "AGENT_AUTH_MODE" not in env
         assert not any(name.startswith("AGENT_TUNNEL_") for name in env)
         assert "AGENT_MCP_TUNNEL_SSH_DESTINATION" in env
         assert "AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION" in env
@@ -1443,20 +1428,19 @@ async def test_local_bootstrap_stamps_the_control_plane_mode_without_gateway_sec
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode,declared", [("local", "gateway"), ("gateway", "local")])
-async def test_profile_cannot_override_the_control_plane_account_mode(
-    tmp_path, monkeypatch, mode, declared
-):
+@pytest.mark.parametrize(
+    "stale",
+    [
+        "AGENT_AUTH_MODE=local",
+        "AGENT_AUTH_MODE=gateway",
+        "AGENT_GATEWAY_URL=http://inference:8080",
+        "AGENT_TUNNEL_SSH_DESTINATION=tunnel@inference.example",
+        "AGENT_TUNNEL_SSH_KEY=/keys/inference",
+    ],
+)
+async def test_a_profile_naming_the_retired_mode_or_inference_relay_is_refused(tmp_path, stale):
     bootstrap, profile, transport, secrets = setup(tmp_path)
-    secrets["deployment:env"] += f"\nAGENT_AUTH_MODE={declared}"
-    with pytest.raises(ProviderError, match="must match"):
-        await bootstrap._archive(profile, INTENT, None)
-    transport.run.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_local_profile_refuses_a_leftover_platform_inference_relay(tmp_path, monkeypatch):
-    bootstrap, profile, transport, _secrets = setup(tmp_path)
-    with pytest.raises(ProviderError, match="must not configure"):
+    secrets["deployment:env"] += "\n" + stale
+    with pytest.raises(ProviderError, match="removed Gateway inference relay"):
         await bootstrap._archive(profile, INTENT, None)
     transport.run.assert_not_awaited()

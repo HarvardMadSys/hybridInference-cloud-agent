@@ -24,12 +24,11 @@ async def test_the_broadcast_loop_uses_the_installed_mailer(monkeypatch):
 
     monkeypatch.setattr(account_broadcasts, "run_account_broadcasts", loop)
     installed = object()
-    tasks = dict(identity.local_identity_tasks(object(), object(), local=True, mailer=installed))
+    tasks = dict(identity.account_tasks(object(), mailer=installed))
     await tasks["account_broadcast_task"]
     tasks["account_access_task"].close()
-    fallback = dict(identity.local_identity_tasks(object(), object(), local=True))
+    fallback = dict(identity.account_tasks(object()))
     await fallback["account_broadcast_task"]
     fallback["account_access_task"].close()
     assert seen[0] is installed
     assert isinstance(seen[1], DeliveryMailer)
-    assert identity.local_identity_tasks(object(), object(), local=False, mailer=installed) == []

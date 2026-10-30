@@ -1317,7 +1317,9 @@ async def _resolve(host: str, port: int) -> list[str]:
     return [str(info[4][0]) for info in infos]
 
 
-async def _callback_session_user(request: Request) -> str | None:
+async def _callback_session_user(
+    request: Request, storage: Any = Depends(get_storage)
+) -> str | None:
     """The Agent account the returning browser is signed in as, or ``None``.
 
     Read by the same verifier as every owner route, but answered rather than
@@ -1327,7 +1329,7 @@ async def _callback_session_user(request: Request) -> str | None:
     local account must also still hold ``agent.use``.
     """
     try:
-        user = await get_current_user(request, authorization=None, storage=get_storage(request))
+        user = await get_current_user(request, authorization=None, storage=storage)
         await require_local_admission(request, str(user["user_id"]))
     except HTTPException:
         return None

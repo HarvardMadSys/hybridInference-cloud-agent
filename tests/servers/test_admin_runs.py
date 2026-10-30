@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from tests.servers.test_owner_revalidation import _AccessGateway
+from tests.servers.test_owner_revalidation import _Directory
 from tests.support.owners import SESSIONS, use_session_secret
 from tests.support.storage import OneFake
 from tests.unit.test_ledger_snapshots import END, START, ledger_row
@@ -136,7 +136,8 @@ def setup(monkeypatch):
             job_usage_reads=AsyncMock(side_effect=job_usage_reads),
         )
     )
-    gateway = _AccessGateway(["agent.use", "agent.admin"])
+    store.local_accounts = SESSIONS
+    gateway = _Directory(["agent.use", "agent.admin"])
     app = FastAPI()
     app.include_router(admin_runs.router)
     app.include_router(usage.router)
@@ -183,7 +184,7 @@ async def test_admin_reads_another_owner_but_owner_routes_are_unchanged(setup):
     assert body["usage"]["runtime"]["input_tokens"] == 200  # two attempts, not six blocks
     assert body["usage"]["runtime"]["normalized_input_tokens"] == 400
     assert body["usage"]["conversation"] is None
-    assert body["capabilities"] == {"llm_requests": True}
+    assert "capabilities" not in body
     assert body["usage"]["ledger"]["finalized"] is False
     assert body["usage"]["ledger"]["unknown_rows"]["reasoning"] == 1
     assert "private" not in admin.text
@@ -456,7 +457,7 @@ def test_admin_observation_routes_are_registered_only_on_the_control_plane():
     control = create_app().openapi()["paths"]
     relay = create_mcp_app().openapi()["paths"]
     paths = {path for path in control if path.startswith(PREFIX)}
-    assert len(paths) == 6
+    assert len(paths) == 3
     assert not paths.intersection(relay)
 
 

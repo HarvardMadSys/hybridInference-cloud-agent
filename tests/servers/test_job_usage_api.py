@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -48,7 +48,6 @@ def store():
                 "events": events,
             }
         ),
-        queue_job_ledger_refresh=AsyncMock(),
     )
 
     async def job_usage_reads(*, job_id: str, user_id: str) -> dict | None:
@@ -84,7 +83,7 @@ def app(store):
 
 
 @pytest.mark.asyncio
-async def test_usage_keeps_runtime_and_gateway_counts_in_separate_same_job_fields(app, store):
+async def test_usage_keeps_runtime_and_ledger_counts_in_separate_same_job_fields(app, store):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/v1/agent/jobs/ajob_1/usage")
     assert response.status_code == 200
@@ -101,7 +100,6 @@ async def test_usage_keeps_runtime_and_gateway_counts_in_separate_same_job_field
     }
     assert body["version"] == VERSION
     store.job_usage_reads.assert_awaited_once_with(job_id="ajob_1", user_id="owner")
-    store.queue_job_ledger_refresh.assert_not_awaited()
     assert "grant_id" not in response.text
     assert "binding_id" not in response.text
 
@@ -117,50 +115,26 @@ async def test_a_usage_read_answers_from_the_scoped_snapshot_alone(app, store):
 
 
 @pytest.mark.asyncio
-async def test_refresh_returns_existing_cache_and_only_enqueues_work(app, store):
-    store.ledger_rows_for_job.return_value = [
-        ledger_row(refreshing=True, queried_at=END - timedelta(seconds=30))
-    ]
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/v1/agent/jobs/ajob_1/usage/refresh")
-    assert response.status_code == 200
-    assert response.json()["ledger"]["refreshing"] is True
-    assert response.json()["ledger"]["totals"]["tokens_in"] == 120
-    store.queue_job_ledger_refresh.assert_awaited_once_with(job_id="ajob_1")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("method,path", [("get", "/usage"), ("post", "/usage/refresh")])
-async def test_another_owner_cannot_read_or_queue_usage(app, store, method, path):
+async def test_another_owner_cannot_read_usage(app, store):
     store.get_job.return_value = {"id": "ajob_other", "user_id": "other"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await getattr(client, method)("/v1/agent/jobs/ajob_other" + path)
+        response = await client.get("/v1/agent/jobs/ajob_other/usage")
     assert response.status_code == 404
     store.ledger_rows_for_job.assert_not_awaited()
-    store.queue_job_ledger_refresh.assert_not_awaited()
-    if method == "post":
-        # The refresh still refuses on the ownership check, before any read.
-        store.job_usage_reads.assert_not_awaited()
-    else:
-        # The read itself is owner-scoped: it refuses by answering None.
-        store.job_usage_reads.assert_awaited_once_with(job_id="ajob_other", user_id="owner")
+    # The read itself is owner-scoped: it refuses by answering None.
+    store.job_usage_reads.assert_awaited_once_with(job_id="ajob_other", user_id="owner")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "method,path",
-    [("get", "/usage"), ("post", "/usage/refresh")],
-)
-async def test_a_deleted_turns_usage_reads_and_queues_nothing(app, store, method, path):
+async def test_a_deleted_turns_usage_reads_nothing(app, store):
     store.get_job.return_value = {
         "id": "ajob_1",
         "user_id": "owner",
         "deleted_at": datetime.now(UTC),
     }
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await getattr(client, method)("/v1/agent/jobs/ajob_1" + path)
+        response = await client.get("/v1/agent/jobs/ajob_1/usage")
     assert response.status_code == 404
-    store.queue_job_ledger_refresh.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -173,7 +147,6 @@ async def test_a_job_deleted_between_the_check_and_the_read_is_not_found(app, st
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method,path", [("get", "/usage"), ("post", "/usage/refresh")])
 @pytest.mark.parametrize(
     "state,expected",
     [
@@ -184,14 +157,14 @@ async def test_a_job_deleted_between_the_check_and_the_read_is_not_found(app, st
     ],
 )
 async def test_jobs_without_attempts_only_wait_for_usage_while_still_runnable(
-    app, store, method, path, state, expected
+    app, store, state, expected
 ):
     """An unexecuted terminal job cannot wait forever for a nonexistent collector row."""
     store.get_job.return_value = {"id": "ajob_1", "user_id": "owner", "state": state}
     store.ledger_rows_for_job.return_value = []
     store.job_usage_inputs.return_value = {"job_ids": ["ajob_1"], "attempts": [], "events": []}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await getattr(client, method)("/v1/agent/jobs/ajob_1" + path)
+        response = await client.get("/v1/agent/jobs/ajob_1/usage")
     assert response.status_code == 200
     body = response.json()
     assert body["ledger"]["status"] == expected
@@ -206,21 +179,18 @@ async def test_jobs_without_attempts_only_wait_for_usage_while_still_runnable(
         "cache_read_tokens": None,
         "normalized_input_tokens": None,
     }
-    if method == "post":
-        # The refresh still fetches the whole job for its ownership check.
-        store.get_job.assert_awaited_once_with("ajob_1")
-    else:
-        # The read answers from the owner-scoped snapshot alone.
-        store.get_job.assert_not_awaited()
+    # The read answers from the owner-scoped snapshot alone.
+    store.get_job.assert_not_awaited()
     store.job_usage_reads.assert_awaited_once_with(job_id="ajob_1", user_id="owner")
 
 
 def test_usage_routes_are_available_only_on_the_control_plane():
     public_paths = create_app().openapi()["paths"]
     relay_paths = create_mcp_app().openapi()["paths"]
-    for path in ("/v1/agent/jobs/{job_id}/usage", "/v1/agent/jobs/{job_id}/usage/refresh"):
-        assert path in public_paths
-        assert path not in relay_paths
+    path = "/v1/agent/jobs/{job_id}/usage"
+    assert path in public_paths
+    assert path not in relay_paths
+    assert "/v1/agent/jobs/{job_id}/usage/refresh" not in public_paths
 
 
 @pytest.mark.asyncio
@@ -254,188 +224,3 @@ async def test_claude_fallback_normalizes_cache_instead_of_changing_input_defini
     runtime = response.json()["runtime"]
     assert runtime["input_tokens"] == 200
     assert runtime["normalized_input_tokens"] == 400
-
-
-@pytest.fixture
-def request_grants(app, store):
-    from tests.unit.test_grant_usage_requests import GRANT, SINCE, UNTIL, page_payload, request_row
-
-    from cloud_agent.api.deps import get_grant_client
-    from cloud_agent.grant_usage import GrantUsageRequestPage
-
-    store.get_job.return_value = {
-        "id": "ajob_1",
-        "user_id": "owner",
-        "thread_id": "athr_requests_1",
-    }
-    store.ledger_rows_for_job.return_value = [
-        ledger_row(grant_id=GRANT, window_since=SINCE, window_until=UNTIL)
-    ]
-    client = SimpleNamespace(
-        binding_id="gw_one",
-        usage_requests=AsyncMock(
-            return_value=GrantUsageRequestPage.model_validate(
-                page_payload(rows=[request_row(response_id="msg_1")], response_id="msg_1")
-            )
-        ),
-    )
-    app.dependency_overrides[get_grant_client] = lambda: client
-    return client
-
-
-MESSAGE_PATH = "/v1/agent/jobs/ajob_1/attempts/10/messages/msg_1/request"
-
-
-@pytest.mark.asyncio
-async def test_message_request_is_owner_scoped_and_reads_exact_identity(app, store, request_grants):
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(MESSAGE_PATH)
-    assert response.status_code == 200
-    assert response.headers["cache-control"] == "no-store"
-    assert response.json()["status"] == "available"
-    assert response.json()["request"]["ttft_ms"] == 240
-    assert response.json()["request"]["tokens_out"] == 413
-    assert response.json()["request"]["reasoning"] is None
-    assert "grant_id" not in response.text
-    assert "binding_id" not in response.text
-    assert request_grants.usage_requests.await_args.kwargs["response_id"] == "msg_1"
-    assert (
-        request_grants.usage_requests.await_args.kwargs["external_job_id"]
-        == "thread:athr_requests_1"
-    )
-    store.queue_job_ledger_refresh.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("other_owner", [True, False])
-async def test_message_request_refuses_other_owner_or_attempt(
-    app, store, request_grants, other_owner
-):
-    if other_owner:
-        store.get_job.return_value["user_id"] = "other"
-    else:
-        store.ledger_rows_for_job.return_value[0]["attempt_id"] = 11
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(MESSAGE_PATH)
-    assert response.status_code == 404
-    request_grants.usage_requests.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "change", [{"binding_id": "old-gateway"}, {"id": None}, {"window_since": None}]
-)
-async def test_message_request_never_guesses_missing_attribution(
-    app, store, request_grants, change
-):
-    store.ledger_rows_for_job.return_value[0].update(change)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(MESSAGE_PATH)
-    assert response.status_code == 200
-    assert response.json()["request"] is None
-    request_grants.usage_requests.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "case,expected",
-    [("duplicate", "ambiguous"), ("missing", "not_recorded"), ("failed", "unavailable")],
-)
-async def test_message_request_does_not_select_arbitrary_or_unavailable_rows(
-    app, request_grants, case, expected
-):
-    from cloud_agent.accounts.directory import OwnerDirectoryError
-
-    page = request_grants.usage_requests.return_value
-    if case == "duplicate":
-        request_grants.usage_requests.return_value = page.model_copy(
-            update={
-                "requests": [
-                    page.requests[0],
-                    page.requests[0].model_copy(update={"request_id": "req_other"}),
-                ]
-            }
-        )
-    elif case == "missing":
-        request_grants.usage_requests.return_value = page.model_copy(update={"requests": []})
-    else:
-        request_grants.usage_requests.side_effect = OwnerDirectoryError(
-            "private diagnostics", error_type="usage_unavailable"
-        )
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(MESSAGE_PATH)
-    assert response.json()["status"] == expected
-    assert response.json()["request"] is None
-    assert "private diagnostics" not in response.text
-
-
-THREAD_TTFT_PATH = "/v1/agent/jobs/ajob_1/thread/model-ttft"
-
-
-@pytest.fixture
-def ttft_grants(app, store):
-    """A thread with one attributed execution whose gateway measured 10.4 s."""
-    from tests.unit.test_grant_usage_requests import page_payload, request_row
-    from tests.unit.test_model_ttft import BINDING, source
-
-    from cloud_agent.api.deps import get_grant_client
-    from cloud_agent.grant_usage import GrantUsageRequestPage
-
-    store.thread_request_sources = AsyncMock(return_value=([source()], False))
-    client = SimpleNamespace(
-        binding_id=BINDING,
-        usage_requests=AsyncMock(
-            return_value=GrantUsageRequestPage.model_validate(
-                page_payload(rows=[request_row(ttft_ms=10_400)])
-            )
-        ),
-    )
-    app.dependency_overrides[get_grant_client] = lambda: client
-    return client
-
-
-@pytest.mark.asyncio
-async def test_thread_model_ttft_is_the_gateway_measurement_for_the_owner(app, store, ttft_grants):
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(THREAD_TTFT_PATH)
-    assert response.status_code == 200
-    assert response.headers["cache-control"] == "no-store"
-    body = response.json()
-    assert body["source"] == "gateway_request_log"
-    assert body["mean_ttft_ms"] == 10_400
-    assert body["samples"] == 1
-    assert body["complete"] is True
-    assert "grant_id" not in response.text
-    assert "binding_id" not in response.text
-    store.thread_request_sources.assert_awaited_once_with(
-        job_id="ajob_1", user_id="owner", limit=usage.THREAD_TTFT_SOURCES
-    )
-    assert (
-        ttft_grants.usage_requests.await_args.kwargs["external_job_id"] == "thread:athr_requests_1"
-    )
-    store.queue_job_ledger_refresh.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_thread_model_ttft_refuses_another_owners_thread(app, store, ttft_grants):
-    # The source read is owner-scoped and answers None for anything else.
-    store.thread_request_sources.return_value = None
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/v1/agent/jobs/ajob_other/thread/model-ttft")
-    assert response.status_code == 404
-    ttft_grants.usage_requests.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_thread_model_ttft_without_gateway_timing_is_null(app, store, ttft_grants):
-    from cloud_agent.accounts.directory import OwnerDirectoryError
-
-    ttft_grants.usage_requests.side_effect = OwnerDirectoryError(
-        "private diagnostics", error_type="request_details_unsupported"
-    )
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(THREAD_TTFT_PATH)
-    assert response.status_code == 200
-    assert response.json()["mean_ttft_ms"] is None
-    assert response.json()["status"] == "unavailable"
-    assert "private diagnostics" not in response.text

@@ -307,19 +307,6 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting("web_base_url", "Web app URL", "Sign-in", "", env="AGENT_WEB_BASE_URL", url=True),
     Setting(
-        "public_api_url",
-        "Public API URL",
-        "Sign-in",
-        "",
-        env="AGENT_PUBLIC_API_URL",
-        url=True,
-        description=(
-            "This API's public address, including any proxy prefix, such as "
-            "https://agent.example.com/api. MCP sign-in callbacks and compute node "
-            "registration are built from it unless they have their own address."
-        ),
-    ),
-    Setting(
         "repo_allowlist",
         "Repository allowlist",
         "Source control",
@@ -591,6 +578,19 @@ SETTINGS: tuple[Setting, ...] = (
     _numeric("task_titles.max_chars", "Maximum task title length", "Task titles", 36, 8, 36),
 )
 MIGRATED_SETTINGS: tuple[Setting, ...] = (
+    Setting(
+        "public_api_url",
+        "Public API URL",
+        "Sign-in",
+        "",
+        env="AGENT_PUBLIC_API_URL",
+        url=True,
+        description=(
+            "This API's public address, including any proxy prefix, such as "
+            "https://agent.example.com/api. MCP sign-in callbacks and compute node "
+            "registration are built from it unless they have their own address."
+        ),
+    ),
     Setting(
         "sandbox_archive.bucket",
         "Sandbox archive S3 bucket",

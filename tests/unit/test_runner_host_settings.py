@@ -11,7 +11,7 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
-from tests.support.owners import connection_access
+from tests.support.owners import connection_access, residency_connection
 
 from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.chat_sandbox import CHAT_UPLOADS_DIR, ChatSandboxManager
@@ -45,6 +45,13 @@ _PAYLOAD = {
     "runtime": "claude-code",
     "model": "m",
     "worker_token": "ajt.a.b",
+    "model_connection": {
+        "connection_id": _JOB.model_connection.connection_id,
+        "revision": _JOB.model_connection.revision,
+        "base_url": _JOB.model_connection.base_url,
+        "protocol": _JOB.model_connection.protocol,
+        "api_key": _JOB.model_connection.api_key,
+    },
 }
 
 
@@ -207,6 +214,12 @@ def _run_new_chat(
     )
     control = Mock(spec=runner_mod.ControlPlane)
     control.mark_chat_sandbox_running.return_value = {}
+    control.establish_shared_residency.return_value = {
+        "credential": _JOB.model_connection.api_key,
+        "generation": 1,
+        "model": job.model,
+        **residency_connection("claude-code"),
+    }
     if job.thread_attachment_count:
         control.list_attachments.return_value = [
             {"id": 17, "path": "replacement.txt", "size_bytes": len(b"replacement")}

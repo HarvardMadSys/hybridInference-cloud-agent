@@ -6,11 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 from starlette.datastructures import Headers
-from tests.support.owners import SESSIONS
 
-from cloud_agent import identity, settings, tokens
+from cloud_agent import settings, tokens
+from cloud_agent.accounts.config import session_cookie_is_secure
 from cloud_agent.api.deps import get_client_ip
-from cloud_agent.api.session import _cookie_is_secure
 from cloud_agent.compute_secrets import ComputeSecretStore
 from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.sandbox_manager_routing import (
@@ -33,19 +32,14 @@ def saved_settings(monkeypatch):
     settings.reset_settings()
 
 
-def test_sessions_and_worker_tokens_use_saved_keys_and_ignore_stale_environment(monkeypatch):
+def test_worker_tokens_use_the_saved_key_and_ignore_a_stale_environment(monkeypatch):
     encoded = settings.encode_changes(
         {
-            "gateway_issuer": "https://identity.example",
-            "session_signing_secret": "test-session-key-longer-than-thirty-two-bytes",
             "control_signing_secret": "test-control-signing-key-longer-than-32-bytes",
         }
     )
     settings.apply_settings(1, encoded)
-    monkeypatch.setenv("GATEWAY_ISSUER", "https://stale.example")
-    monkeypatch.setenv("AGENT_SESSION_SECRET", "stale-session-secret")
-    assert identity.gateway_issuer() == "https://identity.example"
-    assert identity.verify_session(SESSIONS.sign_in("owner"))["sub"] == "owner"
+    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "stale-control-signing-key-of-32-bytes-long")
     assert tokens._signing_key()
     old_key = tokens._signing_key()
     settings.apply_settings(
@@ -91,7 +85,7 @@ def test_saved_cookie_proxy_sandbox_manager_and_execution_policies_are_applied()
             }
         ),
     )
-    assert _cookie_is_secure() is False
+    assert session_cookie_is_secure() is False
     assert (
         get_client_ip(SimpleNamespace(headers=Headers({"x-forwarded-for": "198.51.100.1"})))
         == "198.51.100.1"

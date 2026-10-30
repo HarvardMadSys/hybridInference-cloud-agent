@@ -189,7 +189,7 @@ async def test_a_sandbox_manager_that_never_answers_does_not_hold_up_the_reaper(
     store.list_renewable_grants = AsyncMock(return_value=[])
     grants = SimpleNamespace(renew=AsyncMock(), revoke=AsyncMock(return_value=True))
     task = asyncio.create_task(
-        reap_expired_attempts(store, interval_seconds=0.001, grants=grants)  # type: ignore[arg-type]
+        reap_expired_attempts(store, interval_seconds=0.001)  # type: ignore[arg-type]
     )
     try:
         async with asyncio.timeout(10):

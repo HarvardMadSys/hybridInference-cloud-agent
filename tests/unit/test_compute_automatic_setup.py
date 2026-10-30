@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from dotenv import dotenv_values
+from pydantic import ValidationError
 
 from cloud_agent import settings
 from cloud_agent.application.compute_resources import ComputeCommands
@@ -112,7 +113,6 @@ class FakeTunnels:
     def __init__(self, repository: MemoryRepository) -> None:
         self.repository = repository
         self.endpoint = ENDPOINT
-        self.gateway_identity = "c" * 64
         self.fail_control_once = False
         self.calls: list[tuple[Any, ...]] = []
         self.authorizations: dict[tuple[str, str], str] = {}
@@ -123,11 +123,6 @@ class FakeTunnels:
         self.calls.append(("discover", connection.address, deployment_sha))
         await asyncio.sleep(0)
         return self.endpoint
-
-    async def check_gateway(self, connection: SshConnection, port: int) -> str:
-        self.calls.append(("check", connection.address, port))
-        await asyncio.sleep(0)
-        return self.gateway_identity
 
     def authorize(self, profile_id: str, role: str, key: str) -> None:
         # Remote mutations may begin only after every slot has a durable checkpoint.
@@ -145,13 +140,6 @@ class FakeTunnels:
         )
         previous = self.authorizations.setdefault((profile_id, role), key)
         assert previous == key, "a retry attempted to replace a provisioned tunnel key"
-
-    async def provision_gateway(
-        self, connection: SshConnection, public_key: str, port: int, profile_id: str
-    ) -> None:
-        self.calls.append(("gateway", connection.address, public_key, port, profile_id))
-        self.authorize(profile_id, "gateway", public_key)
-        await asyncio.sleep(0)
 
     async def provision_control(
         self,
@@ -239,11 +227,6 @@ def request(**updates: Any) -> AutomaticDeploymentSetup:
     return AutomaticDeploymentSetup.model_validate(
         {
             "request_id": "prepare-one",
-            "gateway": {
-                "connection_id": "gateway-key",
-                "address": "gateway.example.org",
-                "username": "operator",
-            },
             "control": {
                 "connection_id": "control-key",
                 "address": "control.example.org",
@@ -260,7 +243,6 @@ def request(**updates: Any) -> AutomaticDeploymentSetup:
 
 @pytest.fixture
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Harness]:
-    monkeypatch.delenv("AGENT_AUTH_MODE", raising=False)
     settings.reset_settings()
     monkeypatch.setenv("AGENT_SETTINGS_ENCRYPTION_KEY", "s" * 32)
     settings.apply_settings(
@@ -273,7 +255,6 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Harness
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
         for name in (
             "deploy/host/sandbox_host.sh",
-            "deploy/host/inference_compose.py",
             "deploy/host/setup_kata_runtime.sh",
             "deploy/host/docker-compose.sandbox.yml",
             "pyproject.toml",
@@ -297,10 +278,7 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Harness
     secrets = ComputeSecretStore(repository, key="k" * 32)
     configuration = ComputeConfiguration()
     resolver = ComputeSecretResolver(secrets, configuration)
-    for connection_id, address in (
-        ("gateway-key", "gateway.example.org"),
-        ("control-key", "control.example.org"),
-    ):
+    for connection_id, address in (("control-key", "control.example.org"),):
         repository.connections[connection_id] = {
             "id": connection_id,
             "provider_id": "existing_ssh",
@@ -315,26 +293,14 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Harness
 
 
 @pytest.mark.asyncio
-async def test_initial_machine_defaults_use_saved_gateway_and_service_node_without_provisioning(
+async def test_initial_machine_defaults_use_the_service_node_without_provisioning(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("GATEWAY_BASE_URL", "https://old-gateway.example.org")
     monkeypatch.setenv("AGENT_CONTROL_PLANE_SSH_HOST", "service-node.example.org")
-    monkeypatch.delenv("AGENT_GATEWAY_SSH_HOST", raising=False)
-    settings.apply_settings(
-        2,
-        settings.encode_changes(
-            {
-                "gateway_base_url": "https://freeinference.org",
-                "sandbox_manager_token": SANDBOX_MANAGER_TOKEN,
-            }
-        ),
-    )
 
     status = await harness.commands().automatic_setup_status()
 
     assert status["machine_defaults"] == {
-        "gateway": {"address": "freeinference.org"},
         "control": {"address": "service-node.example.org"},
     }
     assert "defaults" not in status
@@ -343,21 +309,6 @@ async def test_initial_machine_defaults_use_saved_gateway_and_service_node_witho
     assert harness.repository.profiles == {}
     assert harness.repository.defaults == {}
     assert SANDBOX_MANAGER_TOKEN not in json.dumps(status)
-
-
-@pytest.mark.asyncio
-async def test_initial_machine_defaults_allow_a_separate_gateway_ssh_address(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("AGENT_GATEWAY_SSH_HOST", "gateway-ssh.example.org")
-    monkeypatch.setenv("AGENT_CONTROL_PLANE_SSH_HOST", "control-ssh.example.org")
-
-    status = await harness.commands().automatic_setup_status()
-
-    assert status["machine_defaults"] == {
-        "gateway": {"address": "gateway-ssh.example.org"},
-        "control": {"address": "control-ssh.example.org"},
-    }
 
 
 @pytest.mark.asyncio
@@ -376,7 +327,6 @@ async def test_missing_service_node_address_does_not_use_a_container_hostname(
 async def test_failed_provisioning_stays_unavailable_and_restart_reuses_persisted_keys(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("AGENT_GATEWAY_SSH_HOST", "new-gateway.example.org")
     monkeypatch.setenv("AGENT_CONTROL_PLANE_SSH_HOST", "new-control.example.org")
     harness.tunnels.fail_control_once = True
     with pytest.raises(ProviderError, match="temporarily unavailable"):
@@ -427,8 +377,8 @@ async def test_responses_expose_only_profile_names_and_credentials_are_encrypted
     assert "OPENSSH PRIVATE KEY" not in responses
     for profile in result["profiles"]:
         assets = harness.assets(profile["id"])
-        assert len(set(assets["public_keys"].values())) == 3
-        assert len(assets["files"]) == 6
+        assert len(set(assets["public_keys"].values())) == 2
+        assert len(assets["files"]) == 4
         for value in assets["files"].values():
             assert value not in responses
         row = harness.repository.profiles[profile["id"]]
@@ -545,35 +495,7 @@ async def test_concurrent_checkpoint_discovery_rejects_changed_endpoint_before_a
     assert exc.value.code == "automatic_infrastructure_changed"
     assert harness.repository.profiles == before
     assert harness.tunnels.authorizations == authorized
-    assert all(call[0] not in {"gateway", "control"} for call in harness.tunnels.calls[calls:])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("same_machine", "gateway_port", "accepted"),
-    [
-        (True, ENDPOINT.main_port, False),
-        (True, ENDPOINT.mcp_port, False),
-        (False, ENDPOINT.main_port, True),
-        (True, 8080, True),
-    ],
-)
-async def test_gateway_and_control_plane_need_distinct_listeners_when_co_located(
-    harness: Harness, same_machine: bool, gateway_port: int, accepted: bool
-) -> None:
-    harness.tunnels.gateway_identity = ENDPOINT.machine_identity if same_machine else "c" * 64
-    if accepted:
-        result = await harness.restart().create(request(slots=1, gateway_port=gateway_port))
-        assert len(result["profiles"]) == 1
-    else:
-        with pytest.raises(ComputeRefusal) as exc:
-            await harness.restart().create(request(slots=1, gateway_port=gateway_port))
-        assert exc.value.code == "automatic_listener_conflict"
-        assert exc.value.status == 422
-        assert harness.repository.profiles == {}
-        assert harness.repository.defaults == {}
-        assert harness.tunnels.authorizations == {}
-        assert all(call[0] not in {"gateway", "control"} for call in harness.tunnels.calls)
+    assert all(call[0] != "control" for call in harness.tunnels.calls[calls:])
 
 
 @pytest.mark.asyncio
@@ -660,7 +582,7 @@ async def test_concurrent_identical_requests_reuse_the_winners_saved_keys(harnes
     )
     assert first == second
     assert len(harness.repository.profiles) == 2
-    assert len(harness.tunnels.authorizations) == 6
+    assert len(harness.tunnels.authorizations) == 4
 
 
 @pytest.mark.asyncio
@@ -678,7 +600,7 @@ async def test_concurrent_different_inputs_for_one_request_admit_only_the_winner
     assert len(successes) == len(refusals) == 1
     assert refusals[0].code == "idempotency_conflict"
     assert len(harness.repository.profiles) == 1
-    assert len(harness.tunnels.authorizations) == 3
+    assert len(harness.tunnels.authorizations) == 2
 
 
 @pytest.mark.asyncio
@@ -744,15 +666,10 @@ async def test_hosts_pull_the_release_s_published_sandbox_image_when_there_is_on
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sent_gateway", [False, True])
-async def test_local_setup_only_uses_control_and_mcp_and_never_records_gateway_inputs(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch, sent_gateway: bool
+async def test_setup_only_uses_control_and_mcp_and_records_no_inference_machine(
+    harness: Harness,
 ) -> None:
-    # Removing its connection makes any accidental Gateway lookup fail, even
-    # before the tunnel provider could be called.
-    harness.repository.connections.pop("gateway-key")
-    setup_request = request() if sent_gateway else request(gateway=None)
-    result = await harness.restart().create(setup_request)
+    result = await harness.restart().create(request())
     assert result["profiles"]
     assert {call[0] for call in harness.tunnels.calls} == {"discover", "control"}
     saved = harness.repository.defaults["automatic_setup"]["request"]
@@ -760,7 +677,7 @@ async def test_local_setup_only_uses_control_and_mcp_and_never_records_gateway_i
     for profile in result["profiles"]:
         assets = harness.assets(profile["id"])
         env = dotenv_values(stream=io.StringIO(assets["environment"]))
-        assert env["AGENT_AUTH_MODE"] == "local"
+        assert "AGENT_AUTH_MODE" not in env
         assert not any(name.startswith("AGENT_TUNNEL_") for name in env)
         assert set(assets["public_keys"]) == {"mcp", "control"}
         assert set(assets["files"]) == {
@@ -769,29 +686,24 @@ async def test_local_setup_only_uses_control_and_mcp_and_never_records_gateway_i
             ".compute-secrets/control.key",
             ".compute-secrets/control.known_hosts",
         }
-        assert "gateway.example.org" not in json.dumps(assets)
     calls = len(harness.tunnels.calls)
-    assert await harness.restart().create(request(gateway=None)) == result
+    assert await harness.restart().create(request()) == result
     assert len(harness.tunnels.calls) == calls
 
 
-@pytest.mark.asyncio
-async def test_gateway_setup_still_requires_its_machine_before_any_effect(harness: Harness) -> None:
-    with pytest.raises(ComputeRefusal) as refused:
-        await harness.restart().create(request(gateway=None))
-    assert refused.value.code == "automatic_gateway_required"
-    assert harness.tunnels.calls == []
-    assert harness.repository.defaults == {}
-    assert harness.repository.profiles == {}
+@pytest.mark.parametrize("stale", ["gateway", "gateway_port"])
+def test_a_setup_request_naming_an_inference_machine_is_refused(stale: str) -> None:
+    with pytest.raises(ValidationError):
+        request(**{stale: 8080})
 
 
 @pytest.mark.asyncio
-async def test_local_setup_status_does_not_suggest_a_gateway(
+async def test_setup_status_does_not_suggest_an_inference_machine(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     status = await harness.restart().read_status()
     assert set(status["machine_defaults"]) == {"control"}
-    await harness.restart().create(request(gateway=None))
+    await harness.restart().create(request())
     status = await harness.restart().read_status()
     assert "gateway" not in status["defaults"]
     assert "gateway_port" not in status["defaults"]

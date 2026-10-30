@@ -90,7 +90,7 @@ def test_effort_stays_auto_on_a_connection():
     assert "--effort" not in argv
 
 
-def test_the_gateway_relay_is_unchanged_for_claude_code():
+def test_a_plain_address_is_normalized_for_claude_code():
     _argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/workspace",
         model="glm-5.1",
@@ -150,7 +150,6 @@ def _launch(**changes: object) -> ResidentLaunch:
         "native_session_id": "native-1",
         "model": "claude-sonnet-4-5",
         "reasoning_effort": None,
-        "model_base_url": "http://relay.local:8080",
         "credential": _KEY,
         "inference_base_url": "https://api.example.com/v1",
         "inference_protocol": "anthropic_messages",
@@ -166,5 +165,3 @@ def test_rotation_or_a_protocol_change_restarts_the_claude_member():
     assert transport.compatible_with(replace(launch, credential=None))
     assert not transport.compatible_with(replace(launch, inference_source=f"{_CONNECTION}@3"))
     assert not transport.compatible_with(replace(launch, inference_protocol="chat_completions"))
-    gateway = replace(launch, inference_base_url="", inference_protocol="", inference_source="")
-    assert not transport.compatible_with(gateway)

@@ -31,7 +31,6 @@ from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_grant_client,
     get_owner_directory,
     get_storage,
 )
@@ -165,7 +164,6 @@ async def api(monkeypatch):
     app.include_router(agent_jobs_router.router)
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_owner_directory] = _FakeOwners
-    app.dependency_overrides[get_grant_client] = _FakeGrants
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     # The source overrode ``verify_api_key`` with ``role: "pro"``, which never
     # took effect: ``authenticate_agent_owner`` calls that dependency directly,

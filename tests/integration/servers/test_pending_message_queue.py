@@ -38,7 +38,6 @@ from cloud_agent.api import routes, uploads, worker
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_grant_client,
     get_owner_directory,
     get_storage,
 )
@@ -413,7 +412,6 @@ async def api(pool, monkeypatch):
     app.include_router(uploads.router)
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_owner_directory] = lambda: gateway
-    app.dependency_overrides[get_grant_client] = _Grants
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[authenticate_agent_owner] = lambda: {
         "user_id": _OWNER,
