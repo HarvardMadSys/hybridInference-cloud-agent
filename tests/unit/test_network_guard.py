@@ -16,12 +16,17 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from collections import Counter
+from concurrent.futures import Future
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from cloud_agent_host.network_guard import GUARD_RECHECK_S, HostNetworkGuard, NetworkGuardError
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _ENV = {
     "AGENT_SANDBOX_NAMESPACE": "stack-a",
@@ -1399,3 +1404,408 @@ def test_a_sweep_during_another_checks_reinstall_reads_what_it_left() -> None:
     sweeping.join(5)
     assert swept, "the sweep never finished"
     assert swept[0] is not None, "the sweep read nothing to restore from"
+
+
+# ── updates of different bridges, side by side ──────────────────────────
+
+_X = _network().bridge_name("freeinference-chat-net-x")
+_Y = _network().bridge_name("freeinference-chat-net-y")
+#: Every kind of update of one bridge the guard makes.
+_KINDS = ["relays", "ssh", "restore", "release"]
+#: The helpers of an install, which runs alone.
+_EXCLUSIVE = {"install", "routes"}
+#: Helpers no exclusion is asserted about: the sweep's read-back runs beside
+#: updates by design, and the image is looked up under a lock of its own.
+_UNCHECKED = {"read", "inspect"}
+
+
+def _helper_name(argv: list[str], stdin: str | None) -> str:
+    """What one of the guard's Docker processes does: the bridge it updates, or its kind."""
+    if "--entrypoint" not in argv:
+        return "inspect"
+    if argv[argv.index("--entrypoint") + 1] == "ip":
+        return "routes"
+    request = json.loads(stdin or "{}")
+    if "install" in request:
+        return "install"
+    update = request.get("relays") or request.get("ssh_targets")
+    return str(update["bridge"]) if update else "read"
+
+
+class _Call(Future[Any]):
+    """A guard call on a thread of its own: what it returns or raises, and the thread."""
+
+    def __init__(self, call: Callable[[], Any]) -> None:
+        super().__init__()
+        self.thread = threading.Thread(target=self._run, args=(call,), daemon=True)
+
+    def _run(self, call: Callable[[], Any]) -> None:
+        try:
+            self.set_result(call())
+        except Exception as exc:
+            self.set_exception(exc)
+
+
+def _in_thread(call: Callable[[], Any]) -> _Call:
+    """Start ``call`` on a thread of its own."""
+    started = _Call(call)
+    started.thread.start()
+    return started
+
+
+class _HeldHelpers:
+    """The guard's runner, holding every helper it starts until the test lets them all go.
+
+    It shows each exclusion by what happened, never by a pause. A helper that
+    starts beside one the guard's lock must keep it from is recorded in
+    :attr:`overlaps`, and a thread that has to wait in one of the guard's
+    locks is recorded as parked (:meth:`watch`). So a test waits until the
+    second caller has either parked or started its helper, and only then
+    lets the first one finish.
+
+    Route reads and plain read-backs pass at once. Only the holding overlaps:
+    the model of nft runs one helper at a time, because it swaps the process's
+    streams while a helper's script runs.
+    """
+
+    def __init__(self, run: Any) -> None:
+        self.run = run
+        #: Every helper started, named by :func:`_helper_name`, in order.
+        self.started: list[str] = []
+        #: The helpers started and not yet finished.
+        self.running: Counter[str] = Counter()
+        #: Each helper that started beside one it must never run beside.
+        self.overlaps: list[str] = []
+        self._parked: set[threading.Thread] = set()
+        self._released = False
+        self._changed = threading.Condition()
+        self._model = threading.Lock()
+
+    def __call__(self, argv: list[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+        name = _helper_name(argv, stdin)
+        with self._changed:
+            if name not in _UNCHECKED:
+                running = {other for other, count in self.running.items() if count}
+                updates = running - _EXCLUSIVE - _UNCHECKED
+                beside = running & _EXCLUSIVE
+                beside |= updates if name in _EXCLUSIVE else updates & {name}
+                self.overlaps += [f"{name} beside {other}" for other in sorted(beside)]
+            self.started.append(name)
+            self.running[name] += 1
+            self._changed.notify_all()
+            if name not in ("routes", "read"):
+                assert self._changed.wait_for(lambda: self._released, 5), f"{name} held too long"
+        try:
+            with self._model:
+                return self.run(argv, stdin)
+        finally:
+            with self._changed:
+                self.running[name] -= 1
+                self._changed.notify_all()
+
+    def watch(self, lock: Any) -> None:
+        """Record each thread that has to wait in ``lock``, a guard's helper lock.
+
+        It waits in two ways: for its bridge's turn, a plain lock, and on its
+        condition, for the installs and updates it must not run beside. Turns
+        are handed out watched (:class:`_WatchedTurns`), and a wait on the
+        condition whose predicate does not yet hold is a thread about to block.
+        """
+        lock._bridges = _WatchedTurns(self)
+        wait_for = lock._changed.wait_for
+
+        def waiting_for(predicate: Callable[[], bool], timeout: float | None = None) -> bool:
+            if not predicate():
+                self.park()
+            return wait_for(predicate, timeout)
+
+        lock._changed.wait_for = waiting_for
+
+    def park(self) -> None:
+        """Record that the calling thread has to wait in one of the guard's locks."""
+        with self._changed:
+            self._parked.add(threading.current_thread())
+            self._changed.notify_all()
+
+    def parked(self, call: _Call) -> bool:
+        return call.thread in self._parked
+
+    def wait_for(self, predicate: Callable[[], bool], timeout: float = 5) -> bool:
+        """Whether ``predicate`` comes to hold within ``timeout``, a bound and not a pause.
+
+        Checked again at every helper start, finish and park, and every 10 ms
+        for what changes without a word to this runner, such as a call returning.
+        """
+        deadline = time.monotonic() + timeout
+        with self._changed:
+            while not predicate():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                self._changed.wait(min(left, 0.01))
+            return True
+
+    def release(self) -> None:
+        """Let every helper held now, and every later one, finish."""
+        with self._changed:
+            self._released = True
+            self._changed.notify_all()
+
+
+class _WatchedLock:
+    """A plain lock that tells the held helpers when a thread has to wait for it."""
+
+    def __init__(self, lock: Any, helpers: _HeldHelpers) -> None:
+        self._lock = lock
+        self._helpers = helpers
+
+    def __enter__(self) -> None:
+        if not self._lock.acquire(blocking=False):
+            self._helpers.park()
+            self._lock.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self._lock.release()
+
+
+class _WatchedTurns(dict[str, tuple[Any, int]]):
+    """A helper lock's bridge turns, each handed out as a :class:`_WatchedLock`."""
+
+    def __init__(self, helpers: _HeldHelpers) -> None:
+        super().__init__()
+        self._helpers = helpers
+
+    def get(self, name: str, default: tuple[Any, int]) -> tuple[Any, int]:
+        turn, users = super().get(name, default)
+        if not isinstance(turn, _WatchedLock):
+            turn = _WatchedLock(turn, self._helpers)
+        return turn, users
+
+
+def _hold(guard: HostNetworkGuard) -> _HeldHelpers:
+    """Hold every helper the guard starts from now on, and watch who waits in its locks."""
+    helpers = _HeldHelpers(guard._run)
+    guard._run = helpers
+    helpers.watch(guard._lock)
+    guard._image_lock = _WatchedLock(guard._image_lock, helpers)
+    return helpers
+
+
+def _ssh_guard() -> tuple[FakeNft, HostNetworkGuard]:
+    """A verified guard that wrote SSH targets for both bridges, on :data:`_NET`."""
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    for bridge in (_X, _Y):
+        guard.sync_ssh_targets(bridge, {("93.184.216.34", 22)}, network_id=_NET)
+    return nft, guard
+
+
+def _update(kind: str, guard: HostNetworkGuard, bridge: str) -> None:
+    if kind == "relays":
+        guard.sync_relays(bridge, {("10.240.0.3", 8080)})
+    elif kind == "ssh":
+        guard.sync_ssh_targets(bridge, {("93.184.216.35", 22)}, network_id=_NET)
+    elif kind == "restore":
+        guard.restore_ssh_targets(bridge, network_id=_NET)
+    else:
+        guard.release_bridge(bridge)
+
+
+@pytest.mark.parametrize("kind", _KINDS)
+def test_updates_of_different_bridges_run_their_helpers_together(kind) -> None:
+    """Groups starting together on different bridges do not queue behind each other.
+
+    Each keeps its own record, as if they had run in turn.
+    """
+    nft, guard = _ssh_guard()
+    helpers = _hold(guard)
+
+    first = _in_thread(lambda: guard.sync_relays(_X, {("10.240.0.3", 8080)}, network_id=_NET))
+    assert helpers.wait_for(lambda: helpers.running[_X] == 1)
+    second = _in_thread(lambda: _update(kind, guard, _Y))
+    try:
+        assert helpers.wait_for(lambda: helpers.running[_Y] or helpers.parked(second))
+        assert not helpers.parked(second), "one bridge's update waited for the other's helper"
+        assert helpers.running[_X] == helpers.running[_Y] == 1
+    finally:
+        helpers.release()
+    first.result(5)
+    second.result(5)
+    calls = len(nft.calls)
+
+    guard.sync_relays(_X, {("10.240.0.3", 8080)}, network_id=_NET)
+
+    assert len(nft.calls) == calls, "the update made beside another bridge's is remembered"
+    assert helpers.overlaps == []
+    assert guard._lock._bridges == {}, "a bridge's turn is kept only while an update needs it"
+
+
+def test_updates_of_one_bridge_take_turns_so_its_record_is_what_the_kernel_holds() -> None:
+    """A restore of a lost selection never lands after the owner's change that replaced it."""
+    _nft, guard = _ssh_guard()
+    helpers = _hold(guard)
+
+    restore = _in_thread(lambda: guard.restore_ssh_targets(_X, network_id=_NET))
+    assert helpers.wait_for(lambda: helpers.running[_X] == 1)
+    change = _in_thread(lambda: _update("ssh", guard, _X))
+    try:
+        assert helpers.wait_for(lambda: helpers.parked(change) or helpers.started.count(_X) == 2)
+    finally:
+        helpers.release()
+    restore.result(5)
+    change.result(5)
+
+    assert helpers.overlaps == [], "two updates of one bridge ran their helpers together"
+    assert guard.ssh_target_endpoints(_X) == {("93.184.216.35", 22)}
+    assert guard.written_ssh_targets(_X) == (_NET, frozenset({("93.184.216.35", 22)}))
+
+
+@pytest.mark.parametrize("kind", _KINDS)
+def test_an_install_waits_for_an_update_under_way(kind) -> None:
+    _nft, guard = _ssh_guard()
+    helpers = _hold(guard)
+
+    update = _in_thread(lambda: _update(kind, guard, _X))
+    assert helpers.wait_for(lambda: helpers.running[_X] == 1)
+    install = _in_thread(lambda: guard.ensure(max_age_s=0))
+    try:
+        assert helpers.wait_for(lambda: helpers.parked(install) or helpers.running["install"])
+    finally:
+        helpers.release()
+    update.result(5)
+    install.result(5)
+    assert helpers.overlaps == [], "an install ran beside an update"
+    assert helpers.started == [_X, "install", "routes"]
+
+
+@pytest.mark.parametrize("kind", _KINDS)
+def test_an_update_waits_for_an_install_and_everything_checked_after_it(kind) -> None:
+    """The table is installed and read back before any bridge's exceptions change."""
+    _nft, guard = _ssh_guard()
+    helpers = _hold(guard)
+
+    install = _in_thread(lambda: guard.ensure(max_age_s=0))
+    assert helpers.wait_for(lambda: helpers.running["install"] == 1)
+    update = _in_thread(lambda: _update(kind, guard, _X))
+    try:
+        assert helpers.wait_for(lambda: helpers.parked(update) or helpers.running[_X])
+    finally:
+        helpers.release()
+    install.result(5)
+    update.result(5)
+    assert helpers.overlaps == [], "an update ran beside an install"
+    assert helpers.started == ["install", "routes", _X]
+
+
+def test_an_install_that_waits_holds_back_the_updates_that_come_after_it() -> None:
+    """A stream of updates on other bridges cannot keep an install waiting."""
+    _nft, guard = _ssh_guard()
+    helpers = _hold(guard)
+
+    first = _in_thread(lambda: guard.sync_relays(_X, {("10.240.0.3", 8080)}))
+    assert helpers.wait_for(lambda: helpers.running[_X] == 1)
+    install = _in_thread(lambda: guard.ensure(max_age_s=0))
+    assert helpers.wait_for(lambda: helpers.parked(install) or helpers.running["install"])
+    later = _in_thread(lambda: guard.sync_relays(_Y, {("10.240.0.11", 8080)}))
+    try:
+        assert helpers.wait_for(lambda: helpers.parked(later) or helpers.running[_Y])
+    finally:
+        helpers.release()
+    for call in (first, install, later):
+        call.result(5)
+    assert helpers.overlaps == []
+    assert helpers.parked(later), "an update overtook an install waiting for the one before it"
+    assert helpers.started == [_X, "install", "routes", _Y]
+
+
+def test_a_handover_checks_the_rules_inside_its_own_exclusive_hold() -> None:
+    """The hold is re-entrant, so the check runs; no update starts until the handover is made."""
+    nft = FakeNft()
+    guard = _guard(nft)
+    helpers = _hold(guard)
+
+    handover = _in_thread(guard.handover)
+    assert helpers.wait_for(lambda: helpers.running["install"] or helpers.parked(handover))
+    assert not helpers.parked(handover), "the handover waited on its own hold"
+    update = _in_thread(lambda: guard.sync_relays(_X, {("10.240.0.3", 8080)}))
+    try:
+        assert helpers.wait_for(lambda: helpers.parked(update) or helpers.running[_X])
+    finally:
+        helpers.release()
+    handed = handover.result(5)
+    update.result(5)
+    assert helpers.overlaps == [], "an update ran inside a handover"
+    assert set(handed) == {"verified_at", "helper_image"}
+    assert helpers.started == ["install", "routes", _X]
+
+
+def test_the_ssh_targets_written_for_a_bridge_wait_only_for_that_bridges_update() -> None:
+    """The sweep never reads an update's gap between forgetting one record and keeping the next."""
+    _nft, guard = _ssh_guard()
+    helpers = _hold(guard)
+
+    change = _in_thread(lambda: _update("ssh", guard, _X))
+    assert helpers.wait_for(lambda: helpers.running[_X] == 1)
+    other = _in_thread(lambda: guard.written_ssh_targets(_Y))
+    own = _in_thread(lambda: guard.written_ssh_targets(_X))
+    try:
+        assert helpers.wait_for(
+            lambda: (other.done() or helpers.parked(other)) and (own.done() or helpers.parked(own))
+        )
+        assert not helpers.parked(other), "waited for another bridge's update"
+        assert helpers.parked(own) and not own.done(), "read while its bridge's update ran"
+    finally:
+        helpers.release()
+    change.result(5)
+    assert other.result(5) == (_NET, frozenset({("93.184.216.34", 22)}))
+    assert own.result(5) == (_NET, frozenset({("93.184.216.35", 22)}))
+
+
+def test_updates_that_start_before_the_image_is_known_inspect_this_container_once(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HOSTNAME", "runner-1")
+    nft = FakeNft()
+    _guard(nft).ensure()  # the tables, as an earlier process left them
+    guard = HostNetworkGuard(_network(), run=nft)
+    helpers = _hold(guard)
+
+    first = _in_thread(lambda: guard.sync_relays(_X, {("10.240.0.3", 8080)}))
+    assert helpers.wait_for(lambda: helpers.running["inspect"] == 1)
+    second = _in_thread(lambda: guard.sync_relays(_Y, {("10.240.0.11", 8080)}))
+    try:
+        assert helpers.wait_for(
+            lambda: helpers.parked(second) or helpers.started.count("inspect") == 2
+        )
+    finally:
+        helpers.release()
+    first.result(5)
+    second.result(5)
+    assert helpers.started.count("inspect") == 1, "each update inspected the container"
+    assert sorted(helpers.started) == sorted(["inspect", _X, _Y])
+
+
+def test_the_helper_lock_nests_only_its_exclusive_side() -> None:
+    """Re-entrant where a handover needs it; any other nesting raises rather than deadlock."""
+    from cloud_agent_host.network_guard import _HelperLock
+
+    lock = _HelperLock()
+    helpers = _HeldHelpers(run=None)
+    helpers.watch(lock)
+
+    def nest(outer: Callable[[], Any], inner: Callable[[], Any]) -> None:
+        with outer(), inner():
+            pass
+
+    for outer, inner, outcome in [
+        (lock.exclusive, lock.exclusive, type(None)),
+        (lock.exclusive, lambda: lock.bridge(_X), RuntimeError),
+        (lambda: lock.bridge(_X), lock.exclusive, RuntimeError),
+        (lambda: lock.bridge(_X), lambda: lock.bridge(_Y), RuntimeError),
+    ]:
+        attempt = _in_thread(lambda outer=outer, inner=inner: nest(outer, inner))
+        assert helpers.wait_for(lambda attempt=attempt: attempt.done() or helpers.parked(attempt))
+        assert not helpers.parked(attempt), "a nested hold waited on its own thread"
+        assert isinstance(attempt.exception(), outcome)
+    assert (lock._owner, lock._waiting, lock._updating, lock._bridges) == (None, 0, set(), {})

@@ -30,6 +30,14 @@ seconds while groups run) confirms or forgets those remembered exceptions, so
 the memory is never trusted longer than the rules themselves are, and a stalled
 sweep sends the next update back to the kernel.
 
+**Bridges update side by side.** A bridge's relay or SSH update changes only
+that bridge's elements, so groups starting together on different bridges run
+their updates at the same time, and only updates of one bridge take turns. An
+install and its read-back still run alone: they wait for the updates under
+way, and no update starts while one runs or waits, so no update can slip
+between the install and the check that must pass before a group joins its
+bridge.
+
 **A turn's child starts no helper.** The host service hands each turn's child
 its own verification (:meth:`HostNetworkGuard.handover`), made again first once
 it is :data:`GUARD_RENEW_S` old. The child adopts it
@@ -57,6 +65,7 @@ drawing the host's own traffic for those addresses.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
 import math
@@ -65,7 +74,7 @@ import re
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -220,6 +229,94 @@ class NetworkGuardError(SandboxError):
     """The host's sandbox rules are missing, wrong, or cannot be changed."""
 
 
+class _HelperLock:
+    """Who may run a helper now: an install or a read-back alone, or updates of different bridges.
+
+    An update changes only its own bridge's elements (see :data:`_NFT_BATCH`),
+    so updates of different bridges cannot undo each other and run side by
+    side, while updates of one bridge take turns. An install, a read-back and
+    what the guard concludes from them hold the lock exclusively. They wait
+    for the updates under way, and while one waits or runs no update starts,
+    so a stream of updates cannot hold an install back.
+
+    The exclusive side is re-entrant, as :meth:`HostNetworkGuard.handover`
+    needs. Nothing else nests: an update inside an exclusive hold or inside
+    another update, or an exclusive hold inside an update, raises rather than
+    deadlock.
+    """
+
+    def __init__(self) -> None:
+        self._changed = threading.Condition(threading.Lock())
+        #: The thread holding the lock exclusively, and how many times over.
+        self._owner: int | None = None
+        self._depth = 0
+        #: Threads waiting to hold it exclusively. No update starts while any does.
+        self._waiting = 0
+        #: The threads running an update.
+        self._updating: set[int] = set()
+        #: Each bridge's turn, with the number of updates holding or awaiting it,
+        #: so a bridge's lock is kept only while an update of it needs one.
+        self._bridges: dict[str, tuple[threading.Lock, int]] = {}
+
+    @contextlib.contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Hold off every update: wait for those under way, and start none meanwhile."""
+        me = threading.get_ident()
+        with self._changed:
+            if me in self._updating:
+                raise RuntimeError("a network guard update cannot take the guard exclusively")
+            if self._owner != me:
+                self._waiting += 1
+                try:
+                    self._changed.wait_for(lambda: self._owner is None and not self._updating)
+                finally:
+                    # Should the wait end in an exception, the updates it held
+                    # back may start.
+                    self._waiting -= 1
+                    self._changed.notify_all()
+                self._owner = me
+            self._depth += 1
+        try:
+            yield
+        finally:
+            with self._changed:
+                self._depth -= 1
+                if not self._depth:
+                    self._owner = None
+                    self._changed.notify_all()
+
+    @contextlib.contextmanager
+    def bridge(self, name: str) -> Iterator[None]:
+        """Update one bridge: after its earlier updates, beside other bridges' updates."""
+        me = threading.get_ident()
+        with self._changed:
+            if self._owner == me or me in self._updating:
+                raise RuntimeError("a network guard update cannot run inside another guard step")
+            turn, users = self._bridges.get(name, (threading.Lock(), 0))
+            self._bridges[name] = (turn, users + 1)
+        try:
+            # The bridge's turn first, so an update queued behind another of its
+            # bridge is not one that an install waits for.
+            with turn:
+                with self._changed:
+                    self._changed.wait_for(lambda: self._owner is None and not self._waiting)
+                    self._updating.add(me)
+                try:
+                    yield
+                finally:
+                    with self._changed:
+                        self._updating.discard(me)
+                        if not self._updating:
+                            self._changed.notify_all()
+        finally:
+            with self._changed:
+                turn, users = self._bridges[name]
+                if users > 1:
+                    self._bridges[name] = (turn, users - 1)
+                else:
+                    del self._bridges[name]
+
+
 def _run(argv: list[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -326,13 +423,21 @@ class HostNetworkGuard:
         self._helper_image = helper_image
         self._run = run or _run
         #: Held across every helper run and the record kept of it, so kernel
-        #: writes and what this guard remembers of them never interleave.
-        self._lock = threading.RLock()
-        #: Guards ``_verified_at``, ``_held`` and ``_relays_written``, and is
-        #: never held across a helper: a check that a fresh verification or a
-        #: fresh relay record answers does not wait behind another bridge's
-        #: helper run. Taken after ``_lock`` when both are needed, never before.
+        #: writes and what this guard remembers of them never interleave. An
+        #: install, a read-back and what is concluded from them hold it
+        #: exclusively; a relay or SSH update holds only its bridge's turn,
+        #: beside other bridges' updates.
+        self._lock = _HelperLock()
+        #: Guards ``_verified_at``, ``_held``, ``_relays_written`` and
+        #: ``_ssh_written``, and is never held across a helper: a check that a
+        #: fresh verification or a fresh relay record answers does not wait
+        #: behind another bridge's helper run, and updates of different bridges
+        #: keep their records side by side. Taken after ``_lock`` when both are
+        #: needed, never before.
         self._state = threading.Lock()
+        #: Held while the helpers' image is looked up, so updates that start
+        #: together before it is known inspect this container once.
+        self._image_lock = threading.Lock()
         self._verified_at: float | None = None
         self._held: dict[str, _HeldRelays] = {}
         #: The SSH exceptions this guard last wrote for each bridge, with the
@@ -356,7 +461,7 @@ class HostNetworkGuard:
         with self._state:
             if self._verified_within(max_age_s):
                 return None
-        with self._lock:
+        with self._lock.exclusive():
             with self._state:
                 if self._verified_within(max_age_s):
                     return None
@@ -407,14 +512,14 @@ class HostNetworkGuard:
         if verified_at is None:
             # An install under way clears the verification until its read-back.
             # Wait for it, so this pass reads the table it leaves.
-            with self._lock, self._state:
+            with self._lock.exclusive(), self._state:
                 verified_at = self._verified_at
         if verified_at is not None and time.monotonic() - verified_at < GUARD_RENEW_S:
             try:
                 read_at = time.monotonic()
                 listings = self._list_many(self._verification_reads())
                 self._verify(render_ruleset(self.network), listings=listings)
-                with self._lock, self._state:
+                with self._lock.exclusive(), self._state:
                     self._observe_relays(listings[: len(RELAY_FAMILIES)], read_at=read_at)
                 return _read_exceptions(listings[: len(RELAY_FAMILIES)])
             except NetworkGuardError as exc:
@@ -436,7 +541,7 @@ class HostNetworkGuard:
 
     def invalidate(self) -> None:
         """Forget the last verification, so the next activation reads the kernel."""
-        with self._lock, self._state:
+        with self._lock.exclusive(), self._state:
             self._verified_at = None
             self._held = {}
 
@@ -454,7 +559,7 @@ class HostNetworkGuard:
         would wait out its lease instead of going straight back.
         """
         try:
-            with self._lock:
+            with self._lock.exclusive():
                 self.ensure(max_age_s=GUARD_RENEW_S)
                 with self._state:
                     verified_at = self._verified_at
@@ -519,7 +624,7 @@ class HostNetworkGuard:
                 },
             )
             return False
-        with self._lock:
+        with self._lock.exclusive():
             self._helper_image = self._helper_image or image
             with self._state:
                 self._verified_at = float(verified_at)
@@ -547,7 +652,7 @@ class HostNetworkGuard:
             if self._relays_held(bridge, wanted, network_id):
                 self._relays_written[bridge] = wanted
                 return
-        with self._lock:
+        with self._lock.bridge(bridge):
             with self._state:
                 if self._relays_held(bridge, wanted, network_id):
                     self._relays_written[bridge] = wanted
@@ -603,15 +708,17 @@ class HostNetworkGuard:
         belongs to, a successful write is kept for :meth:`restore_ssh_targets`.
         """
         self._require_own_bridge(bridge)
-        with self._lock:
-            self._ssh_written.pop(bridge, None)
+        with self._lock.bridge(bridge):
+            with self._state:
+                self._ssh_written.pop(bridge, None)
             update = self._target_update(bridge, endpoints)
             self._batch([], ssh_targets=update)
             if network_id:
-                self._ssh_written[bridge] = (
-                    network_id,
-                    frozenset((address, port) for address, port in update["wanted"]),
-                )
+                with self._state:
+                    self._ssh_written[bridge] = (
+                        network_id,
+                        frozenset((address, port) for address, port in update["wanted"]),
+                    )
 
     def written_relays(self, bridge: str) -> frozenset[tuple[str, int]] | None:
         """The relay exceptions this guard last wrote for one bridge, if any."""
@@ -619,8 +726,12 @@ class HostNetworkGuard:
             return self._relays_written.get(bridge)
 
     def written_ssh_targets(self, bridge: str) -> tuple[str, frozenset[tuple[str, int]]] | None:
-        """The SSH exceptions this guard last wrote for one bridge, and for which network."""
-        with self._lock:
+        """The SSH exceptions this guard last wrote for one bridge, and for which network.
+
+        After any update of that bridge under way, so never the gap between
+        an update forgetting the old record and keeping the new one.
+        """
+        with self._lock.bridge(bridge), self._state:
             return self._ssh_written.get(bridge)
 
     def restore_ssh_targets(self, bridge: str, *, network_id: str) -> None:
@@ -632,23 +743,24 @@ class HostNetworkGuard:
         synced meanwhile is never undone.
         """
         self._require_own_bridge(bridge)
-        with self._lock:
-            written = self._ssh_written.get(bridge)
-            if written is None:
-                return
-            if written[0] != network_id:
-                del self._ssh_written[bridge]
-                return
+        with self._lock.bridge(bridge):
+            with self._state:
+                written = self._ssh_written.get(bridge)
+                if written is None:
+                    return
+                if written[0] != network_id:
+                    del self._ssh_written[bridge]
+                    return
             self._batch([], ssh_targets=self._target_update(bridge, set(written[1])))
 
     def release_bridge(self, bridge: str) -> None:
         """Drop every exception a removed bridge had, relays and SSH alike, in one helper."""
         self._require_own_bridge(bridge)
-        with self._lock:
+        with self._lock.bridge(bridge):
             with self._state:
                 self._held.pop(bridge, None)
                 self._relays_written.pop(bridge, None)
-            self._ssh_written.pop(bridge, None)
+                self._ssh_written.pop(bridge, None)
             self._batch(
                 [],
                 relays={
@@ -663,7 +775,7 @@ class HostNetworkGuard:
     def ssh_target_endpoints(self, bridge: str) -> set[tuple[str, int]]:
         """The SSH exceptions the kernel currently holds for one bridge."""
         table = self.network.table
-        with self._lock:
+        with self._lock.exclusive():
             (listing,) = self._list_many([["list", "set", "inet", table, SSH_TARGETS_SET]])
         elements = _relay_elements(self._set_elements(listing, "inet", table, SSH_TARGETS_SET))
         return {(address, port) for owner, address, port in elements if owner == bridge}
@@ -691,7 +803,7 @@ class HostNetworkGuard:
 
     def relay_endpoints(self, bridge: str) -> set[tuple[str, int]]:
         """The exceptions both tables currently hold for one bridge."""
-        with self._lock:
+        with self._lock.exclusive():
             held = [
                 {(address, port) for owner, address, port in elements if owner == bridge}
                 for elements in self._relay_sets().values()
@@ -855,7 +967,7 @@ class HostNetworkGuard:
         order, read starting at ``read_at``. An exception is confirmed only
         when every table holds exactly what was remembered for its bridge.
         Anything unreadable forgets everything, so the next update reads the
-        kernel itself. The caller holds ``_lock`` and ``_state``.
+        kernel itself. The caller holds ``_lock`` exclusively, and ``_state``.
         """
         try:
             per_family = [
@@ -962,20 +1074,24 @@ class HostNetworkGuard:
         """This process's own image: the same trusted build runs the helper."""
         if self._helper_image:
             return self._helper_image
-        container = os.environ.get("HOSTNAME", "")
-        inspected = self._run(
-            [self.docker_binary, "container", "inspect", "--format", "{{.Image}}", container],
-            None,
-        )
-        image = inspected.stdout.strip()
-        if inspected.returncode != 0 or not image.startswith("sha256:"):
-            raise NetworkGuardError(
-                "the network guard runs its helper from this container's own image, and "
-                f"could not inspect container {container!r}: "
-                + (inspected.stderr or inspected.stdout).strip()[:200]
+        with self._image_lock:
+            # Another bridge's update may have found it while this one waited.
+            if self._helper_image:
+                return self._helper_image
+            container = os.environ.get("HOSTNAME", "")
+            inspected = self._run(
+                [self.docker_binary, "container", "inspect", "--format", "{{.Image}}", container],
+                None,
             )
-        self._helper_image = image
-        return image
+            image = inspected.stdout.strip()
+            if inspected.returncode != 0 or not image.startswith("sha256:"):
+                raise NetworkGuardError(
+                    "the network guard runs its helper from this container's own image, and "
+                    f"could not inspect container {container!r}: "
+                    + (inspected.stderr or inspected.stdout).strip()[:200]
+                )
+            self._helper_image = image
+            return image
 
 
 __all__ = [
