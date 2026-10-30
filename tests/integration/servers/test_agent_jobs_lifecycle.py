@@ -14,6 +14,8 @@ override the source wrote.
 
 from __future__ import annotations
 
+from tests.support.owners import on_connection
+
 import asyncio
 import contextlib
 import os
@@ -30,7 +32,7 @@ from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_gateway_client,
+    get_owner_directory,
     get_grant_client,
     get_storage,
 )
@@ -69,7 +71,7 @@ def _claim_body(worker_id: str) -> dict[str, Any]:
     }
 
 
-class _FakeGateway:
+class _FakeOwners:
     """Explicit Agent access and the catalog used by job creation."""
 
     async def model_catalog(self, user_id: str) -> list[str]:
@@ -163,7 +165,7 @@ async def api(monkeypatch):
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_gateway_client] = _FakeGateway
+    app.dependency_overrides[get_owner_directory] = _FakeOwners
     app.dependency_overrides[get_grant_client] = _FakeGrants
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     # The source overrode ``verify_api_key`` with ``role: "pro"``, which never
@@ -203,7 +205,7 @@ async def test_reaped_worker_token_is_rejected_end_to_end(api):
 
     created = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "slow task", "model": "glm-5.1"},
+        json=on_connection({"repo": "owner/name", "task_prompt": "slow task", "model": "glm-5.1"}),
     )
     job_id = created.json()["id"]
     claim = await client.post("/v1/agent/worker/claim", json=_claim_body("w1"))
@@ -251,7 +253,7 @@ async def test_a_runners_batch_is_stored_in_order_through_the_real_endpoint(api)
     client, _store, pool = api
     created = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "batched task", "model": "glm-5.1"},
+        json=on_connection({"repo": "owner/name", "task_prompt": "batched task", "model": "glm-5.1"}),
     )
     job_id = created.json()["id"]
     claim = await client.post("/v1/agent/worker/claim", json=_claim_body("w1"))
@@ -296,7 +298,7 @@ async def test_environment_maintenance_lock_does_not_delay_attempt_reaper(api, m
     client, store, pool = api
     created = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "lock test", "model": _TEST_MODEL},
+        json=on_connection({"repo": "owner/name", "task_prompt": "lock test", "model": _TEST_MODEL}),
     )
     assert created.status_code == 201
     claim = await client.post("/v1/agent/worker/claim", json=_claim_body("lock-test"))
@@ -394,7 +396,7 @@ async def test_cancel_running_job_is_delivered_via_heartbeat(api):
 
     created = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "long task", "model": "glm-5.1"},
+        json=on_connection({"repo": "owner/name", "task_prompt": "long task", "model": "glm-5.1"}),
     )
     job_id = created.json()["id"]
     claim = await client.post("/v1/agent/worker/claim", json=_claim_body("w1"))

@@ -36,6 +36,12 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import (
+    CONNECTION_ID,
+    SessionAccounts,
+    on_connection,
+    use_session_secret,
+)
 from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary, NoAccounts
 
 from cloud_agent import sandbox_manager_routing
@@ -45,7 +51,7 @@ from cloud_agent.api.deps import get_storage
 from cloud_agent.attachments.models import AttachmentError
 from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.pending_messages import SettleOutcome
-from cloud_agent.gateway import GatewayError
+from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.model_preference import ModelPreferenceView
@@ -2133,19 +2139,13 @@ def _api_key_secret(monkeypatch):
     """
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "api-test-secret")
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "api-test-sandbox-manager-secret")
-    monkeypatch.setenv("AGENT_SESSION_SECRET", "session-test-secret-32-bytes-minimum!")
+    use_session_secret(monkeypatch)
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name,o/n,private/repo")
     # The key stored MCP credentials are wrapped under. Without it a deployment
     # can hold nobody's credential, and the composer legitimately offers
     # nothing — which would make every MCP case here pass for the wrong reason.
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", _MCP_ENCRYPTION_KEY)
     yield
-
-
-@pytest.fixture(autouse=True)
-def _configured_identity_issuer(monkeypatch):
-    """Pin the gateway namespace for every owner-facing route case."""
-    monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
 
 
 @pytest.fixture()
@@ -2175,90 +2175,14 @@ _TEST_MODELS = ("glm-5.1", "qwen-next", "m")
 _TEST_MODEL_EFFORTS = {"glm-5.1": ["low", "high", "max"]}
 
 
-class _FakeGateway:
-    """The gateway's internal contracts, answered in-process.
-
-    Replaces the source's ``_fake_route_exec``: the model catalog and the MCP
-    registry are HTTP calls now, not registry objects the router holds.
-
-    No MCP here: the registry moved to this service with its credentials and
-    its relay, so a fake gateway that still offered one would suggest the
-    gateway is still asked — which is the call this change removed.
-    """
-
-    async def model_catalog(self, user_id: str) -> list[str]:
-        return list(_TEST_MODELS)
-
-    #: Profile metadata remains separate from the explicit admission decision.
-    status: ClassVar[dict[str, Any]] = {"exists": True, "active": True, "role": "admin"}
+class _FakeOwners:
+    """The account directory, answered in-process: every owner holds ``agent.use``."""
 
     async def agent_access(self, user_id: str) -> dict[str, Any]:
         return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
 
-    async def user_status(self, user_id: str) -> dict[str, Any]:
-        return dict(self.status)
-
-    aliases: ClassVar[dict[str, str]] = {}
-
-    async def model_catalog_with_aliases(self, user_id: str) -> tuple[list[str], dict[str, str]]:
-        """The catalog plus the gateway's alias translation table.
-
-        No aliases here: these tests name canonical ids, and resolution has its
-        own file. What matters is that the shape is the real one — a fake that
-        answered only the older method sent every job-creation path down a
-        `AttributeError` the moment the caller started asking for the table.
-        """
-        return list(_TEST_MODELS), dict(self.aliases)
-
-    async def model_catalog_bundle(
-        self, user_id: str
-    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
-        """The one-read admission bundle (issue #781): names, aliases, efforts."""
-        return list(_TEST_MODELS), dict(self.aliases), await self.model_reasoning_efforts(user_id)
-
-    async def model_reasoning_efforts(self, user_id: str) -> dict[str, list[str]]:
-        """Which models take a reasoning effort, and which values.
-
-        Same reason the alias method exists here: the real client asks, so a
-        fake that does not answer sends every composer and create path into an
-        ``AttributeError`` rather than the behaviour under test.
-        """
-        return {model: list(values) for model, values in _TEST_MODEL_EFFORTS.items()}
-
-    async def model_catalog_with_reasoning_efforts(
-        self, user_id: str
-    ) -> tuple[list[str], dict[str, list[str]]]:
-        """The composer's model options, returned by one current catalog read."""
-        return await self.model_catalog(user_id), await self.model_reasoning_efforts(user_id)
-
-
-class _FakeGrants:
-    """The gateway's grant contract, answered in-process.
-
-    The claim asks for the sandbox's credential now instead of minting one, so
-    an app with no grant client cannot claim at all — the same shape as the
-    fake gateway above, and for the same reason.
-    """
-
-    def __init__(self) -> None:
-        self.minted: list[dict[str, Any]] = []
-
-    async def mint(self, **kwargs: Any) -> dict[str, Any]:
-        self.minted.append(kwargs)
-        return {
-            "grant_id": f"agr_{len(self.minted)}",
-            "token": f"agr.{kwargs['job_id']}.{kwargs['attempt_id']}",
-            # The gateway returns the *effective* scope, and the claim refuses
-            # a grant that does not cover the job's model. A fake omitting it
-            # models a gateway that does not exist.
-            "allowed_models": list(kwargs.get("models") or []),
-        }
-
-    async def renew(self, grant_id: str) -> dict[str, Any]:
-        return {"grant_id": grant_id}
-
-    async def revoke(self, grant_id: str) -> bool:
-        return True
+    async def user_email(self, user_id: str) -> str:
+        return f"{user_id}@example.org"
 
 
 def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
@@ -2269,24 +2193,19 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     """
     from cloud_agent.api.deps import (
         get_agent_app_credentials,
-        get_gateway_client,
-        get_grant_client,
+        get_owner_directory,
     )
 
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
     app.dependency_overrides[get_storage] = lambda: store
-    # The create endpoints fail fast on models the deployment cannot serve, so
-    # the gateway the test answers with must contain what the tests submit.
-    app.dependency_overrides[get_gateway_client] = _FakeGateway
-    # The sandbox credential comes from the gateway; without this the
-    # claim would correctly refuse, having no configured grant client.
-    app.dependency_overrides[get_grant_client] = _FakeGrants
+    # Every owner request and claim is admitted on the account's permissions.
+    app.dependency_overrides[get_owner_directory] = _FakeOwners
     # No GitHub App by default — the configuration most deployments start in,
     # and the one where a public repository still clones fine.
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     identity = {"user_id": _OWNER, "role": role, "authenticated": True}
-    # Override identity only; every request still exercises Gateway admission.
+    # Override identity only; every request still exercises account admission.
     app.dependency_overrides[authenticate_agent_owner] = lambda: identity
     if claim_auth:
         app.dependency_overrides[worker.verify_claiming_host] = lambda: {
@@ -2296,26 +2215,11 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     return app
 
 
-def _browser_session(*, expires_delta=None) -> str:
-    """Mint the browser credential this service issues.
-
-    The gateway's ``create_access_token`` is ``identity.mint_session`` here —
-    the same compact three-segment JWT with ``sub``/``email``/``exp``, signed
-    with this service's own secret instead of the gateway's. ``mint_session``
-    has no expiry parameter, so an expired one is the same claims re-signed.
-    """
-    import jwt
-
-    from cloud_agent.identity import mint_session
-
-    token = mint_session(user_id=_OWNER)
-    if expires_delta is None:
-        return token
-    import os
-
-    claims = jwt.decode(token, options={"verify_signature": False})
-    claims["exp"] = int((datetime.now(UTC) + expires_delta).timestamp())
-    return jwt.encode(claims, os.environ["AGENT_SESSION_SECRET"], algorithm="HS256")
+def _browser_session(store: FakeStorage) -> str:
+    """A live account session for the owner, as sign-in issues one."""
+    if not isinstance(getattr(store, "local_accounts", None), SessionAccounts):
+        store.local_accounts = SessionAccounts()
+    return store.local_accounts.sign_in(_OWNER)
 
 
 @pytest_asyncio.fixture()
@@ -2331,7 +2235,7 @@ async def _create_job_raw(client: AsyncClient, *, model: str = "glm-5.1"):
     """Post a job and hand back the raw response, refusals included."""
     return await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix it", "model": model},
+        json=on_connection({"repo": "owner/name", "task_prompt": "fix it", "model": model}),
     )
 
 
@@ -2420,7 +2324,7 @@ async def test_execution_profile_is_server_owned_and_reserved_metadata_is_droppe
     monkeypatch.setenv("AGENT_DEFAULT_EXECUTION_PROFILE", "untrusted-kata-v1")
     created = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "task_prompt": "fix it",
             "model": "glm-5.1",
@@ -2430,7 +2334,7 @@ async def test_execution_profile_is_server_owned_and_reserved_metadata_is_droppe
                 "sandbox_runtime": "runc",
                 "guest_kernel": "forged",
             },
-        },
+        }),
     )
 
     assert created.status_code == 201
@@ -2440,12 +2344,12 @@ async def test_execution_profile_is_server_owned_and_reserved_metadata_is_droppe
 
     rejected = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "task_prompt": "try to downgrade",
             "model": "glm-5.1",
             "execution_profile": "trusted-v1",
-        },
+        }),
     )
     assert rejected.status_code == 422
     assert "server-owned" in rejected.text
@@ -2470,7 +2374,7 @@ async def test_jobs_page_by_repo_and_projects_summarize_the_task_tree(client: As
     first = await _create_job(client)
     second = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "o/n", "task_prompt": "a second project", "model": "glm-5.1"},
+        json=on_connection({"repo": "o/n", "task_prompt": "a second project", "model": "glm-5.1"}),
     )
     assert second.status_code == 201
 
@@ -2584,7 +2488,7 @@ async def test_conversation_search_requires_owner_and_accepts_browser_session(
         assert anonymous.status_code == 401
         search.assert_not_awaited()
         response = await client.get(
-            "/v1/agent/conversations", headers={"Authorization": f"Bearer {_browser_session()}"}
+            "/v1/agent/conversations", headers={"Authorization": f"Bearer {_browser_session(store)}"}
         )
     assert response.status_code == 200
     assert response.json() == {"conversations": [], "next_cursor": None}
@@ -3007,7 +2911,7 @@ async def test_a_waiting_message_is_held_when_its_owners_agent_access_was_withdr
     async def withdrawn(self: Any, user_id: str) -> dict[str, Any]:
         return {"user_id": user_id, "allowed": False, "permissions": []}
 
-    monkeypatch.setattr(_FakeGateway, "agent_access", withdrawn)
+    monkeypatch.setattr(_FakeOwners, "agent_access", withdrawn)
     finished = await client.post(
         f"/v1/agent/worker/jobs/{parent_id}/finish",
         json={"state": "succeeded"},
@@ -3068,7 +2972,7 @@ async def test_create_fails_fast_on_a_model_this_deployment_cannot_serve(client:
     """An unknown model is a 400 at create, not a dead job after claim+clone."""
     response = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix it", "model": "gpt-nonexistent"},
+        json=on_connection({"repo": "owner/name", "task_prompt": "fix it", "model": "gpt-nonexistent"}),
     )
     assert response.status_code == 400
     detail = response.json()["detail"]["error"]
@@ -3093,13 +2997,13 @@ async def test_create_during_a_catalog_outage_is_unavailable_not_refused(
 ):
     """A catalog that could not be read is no verdict on the model: try again, not fix it."""
 
-    async def outage(self: _FakeGateway, user_id: str) -> Any:
-        raise GatewayError("gateway timed out")
+    async def outage(self: _FakeOwners, user_id: str) -> Any:
+        raise OwnerDirectoryError("gateway timed out")
 
-    monkeypatch.setattr(_FakeGateway, read, outage)
+    monkeypatch.setattr(_FakeOwners, read, outage)
     response = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1", **choices},
+        json=on_connection({"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1", **choices}),
     )
     assert response.status_code == 503, response.text
     assert response.json()["detail"]["error"]["type"] == "model_catalog_unavailable"
@@ -3122,12 +3026,12 @@ async def test_an_unregistered_runtime_is_refused_at_create(client: AsyncClient)
     """An arbitrary runtime string dies here, not as a claimed-then-dead job."""
     response = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "task_prompt": "fix it",
             "model": "glm-5.1",
             "runtime": "no-such-harness",
-        },
+        }),
     )
     assert response.status_code == 400
     assert "no-such-harness" in response.json()["detail"]["error"]["message"]
@@ -3155,7 +3059,7 @@ async def test_a_first_turn_is_bounded_like_every_later_message(
     """
     response = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1", **change},
+        json=on_connection({"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1", **change}),
     )
     assert response.status_code == 422, response.text
     assert store.jobs == {}
@@ -3180,12 +3084,12 @@ async def test_an_upload_lost_between_resolving_and_claiming_is_a_400(
 
     response = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "task_prompt": "read the notes",
             "model": "glm-5.1",
             "attachment_ids": [7],
-        },
+        }),
     )
 
     assert response.status_code == 400, response.text
@@ -3199,7 +3103,7 @@ async def test_a_first_turn_keeps_the_trimmed_task(client: AsyncClient, store: F
     """The same trimming a message gets, so a first turn reads like the rest."""
     response = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "  fix it \n", "model": "glm-5.1"},
+        json=on_connection({"repo": "owner/name", "task_prompt": "  fix it \n", "model": "glm-5.1"}),
     )
     assert response.status_code == 201, response.text
     assert store.jobs[response.json()["id"]]["task_prompt"] == "fix it"
@@ -3243,7 +3147,7 @@ async def test_config_reads_one_current_catalog_for_each_admitted_owner_read(
     """
     from httpx import MockTransport, Response
 
-    from cloud_agent.api.deps import get_gateway_client
+    from cloud_agent.api.deps import get_owner_directory
     from cloud_agent.gateway import GatewayClient
 
     catalog_owners: list[str] = []
@@ -3268,7 +3172,7 @@ async def test_config_reads_one_current_catalog_for_each_admitted_owner_read(
     app.dependency_overrides[authenticate_agent_owner] = lambda: identity
     async with AsyncClient(transport=MockTransport(handler)) as upstream:
         gateway = GatewayClient("https://gateway.example", "config-dispatch-token", client=upstream)
-        app.dependency_overrides[get_gateway_client] = lambda: gateway
+        app.dependency_overrides[get_owner_directory] = lambda: gateway
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             admitted_after = ([_OWNER], [_OWNER], [_OWNER, _OTHER])
             for index, owner in enumerate((_OWNER, _OWNER, _OTHER), start=1):
@@ -3293,7 +3197,7 @@ async def test_config_catalog_failure_offers_no_models_or_efforts(
     """Catalog failure cannot widen options or discard the remaining config."""
     from httpx import MockTransport, Response
 
-    from cloud_agent.api.deps import get_gateway_client
+    from cloud_agent.api.deps import get_owner_directory
     from cloud_agent.gateway import GatewayClient
 
     def handler(request):
@@ -3306,7 +3210,7 @@ async def test_config_catalog_failure_offers_no_models_or_efforts(
     app = _build_app(store)
     async with AsyncClient(transport=MockTransport(handler)) as upstream:
         gateway = GatewayClient("https://gateway.example", "config-dispatch-token", client=upstream)
-        app.dependency_overrides[get_gateway_client] = lambda: gateway
+        app.dependency_overrides[get_owner_directory] = lambda: gateway
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.get("/v1/agent/config")
     assert response.status_code == 200, response.text
@@ -3469,7 +3373,7 @@ async def test_config_reads_independent_sources_concurrently(
         return ModelPreferenceView.of(None, "glm-5.1")
 
     monkeypatch.setattr(config_api, "repos_for_user", repositories)
-    monkeypatch.setattr(_FakeGateway, "model_catalog_with_reasoning_efforts", model_options)
+    monkeypatch.setattr(_FakeOwners, "model_catalog_with_reasoning_efforts", model_options)
     monkeypatch.setattr(store, "list_mcp_connections", connections)
     monkeypatch.setattr(store, "get_model_preference", preference)
     monkeypatch.setattr(store, "get_github_account", account)
@@ -4010,7 +3914,7 @@ async def test_browser_jwt_can_list_agent_jobs(store: FakeStorage):
     """Regression: the web login JWT was interpreted as an invalid API key."""
     app = _build_app(store)
     app.dependency_overrides.pop(authenticate_agent_owner)
-    token = _browser_session()
+    token = _browser_session(store)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as jwt_client:
@@ -4023,22 +3927,23 @@ async def test_browser_jwt_can_list_agent_jobs(store: FakeStorage):
     assert response.json() == {"jobs": []}
 
 
-async def test_expired_browser_jwt_is_not_reinterpreted_as_api_key(store: FakeStorage):
-    """Credential dispatch must preserve a JWT's own expiry failure."""
+async def test_an_ended_session_is_refused(store: FakeStorage):
+    """A session ended server-side (sign-out, password change) authenticates nothing."""
 
     app = _build_app(store)
     app.dependency_overrides.pop(authenticate_agent_owner)
-    token = _browser_session(expires_delta=timedelta(seconds=-1))
+    token = _browser_session(store)
+    store.local_accounts.revoke_all()
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as jwt_client:
-        response = await jwt_client.get(
+    async with AsyncClient(transport=transport, base_url="http://test") as session_client:
+        response = await session_client.get(
             "/v1/agent/jobs",
             headers={"Authorization": f"Bearer {token}"},
         )
 
     assert response.status_code == 401
-    assert response.json()["detail"].startswith("Token has expired")
+    assert response.json()["detail"] == "Invalid authentication token."
 
 
 # ``test_normal_api_key_still_authenticates_agent_owner`` stood here. It minted
@@ -5426,25 +5331,10 @@ async def test_marking_a_group_running_pushes_its_ssh_state_as_it_is_now(
     assert len(pushes) == 1
 
 
-async def test_shared_abandon_releases_the_exact_residency_and_grant(
-    store: FakeStorage, monkeypatch
-):
-    """A pre-admission process failure must not leave a renewable grant live."""
+async def test_shared_abandon_releases_the_exact_residency(store: FakeStorage, monkeypatch):
+    """A pre-admission process failure must not leave its residency open."""
 
-    class RecordingGrants(_FakeGrants):
-        def __init__(self) -> None:
-            super().__init__()
-            self.revoked: list[str] = []
-
-        async def revoke(self, grant_id: str) -> bool:
-            self.revoked.append(grant_id)
-            return True
-
-    grants = RecordingGrants()
     app = _build_app(store)
-    from cloud_agent.api.deps import get_grant_client
-
-    app.dependency_overrides[get_grant_client] = lambda: grants
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         job_id = await _create_job(client)
@@ -5506,7 +5396,6 @@ async def test_shared_abandon_releases_the_exact_residency_and_grant(
 
     assert response.status_code == 200, response.text
     assert releases == [(job["thread_id"], 11, "runner-a")]
-    assert grants.revoked == ["agr_resident_shared"]
 
 
 async def test_worker_api_bounds_oversized_events_without_failing_or_duplicating_the_turn(
@@ -6106,12 +5995,12 @@ async def test_a_worker_cannot_overwrite_a_base_the_owner_pinned(
     pinned = "b" * 40
     created = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "o/n",
             "task_prompt": "do the thing",
             "model": "m",
             "base_sha": pinned,
-        },
+        }),
     )
     job_id = created.json()["id"]
 
@@ -6135,7 +6024,7 @@ async def test_an_unentitled_repo_is_refused_at_creation(client: AsyncClient):
     """
     response = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "someone-else/private", "task_prompt": "exfiltrate", "model": "m"},
+        json=on_connection({"repo": "someone-else/private", "task_prompt": "exfiltrate", "model": "m"}),
     )
 
     assert response.status_code == 403

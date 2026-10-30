@@ -49,7 +49,7 @@ async def test_the_lifespan_gives_both_gateway_clients_one_pool(monkeypatch) -> 
 
     async with lifespan(app, background=False):
         shared = app.state.http
-        assert app.state.gateway._client is shared
+        assert app.state.owners._client is shared
         assert app.state.grants._client is shared
         assert not shared.is_closed
 

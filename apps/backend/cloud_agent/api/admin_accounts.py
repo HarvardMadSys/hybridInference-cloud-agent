@@ -33,11 +33,9 @@ from cloud_agent.api._local_auth import (
     local_accounts,
     local_flows,
     require_json,
-    require_local_mode,
 )
 from cloud_agent.api.deps import (
     get_client_ip,
-    get_grant_client,
     get_storage,
     require_store,
     verify_admin_access,
@@ -69,7 +67,6 @@ router = APIRouter(
     prefix="/v1/admin/accounts",
     tags=["admin-accounts"],
     route_class=LocalAuthRoute,
-    dependencies=[Depends(require_local_mode)],
 )
 
 AdmissionFilter = Literal["not_applied", "pending", "approved", "rejected", "revoked"]
@@ -215,7 +212,6 @@ async def change_account(
     request: Request,
     background: BackgroundTasks,
     admin: str = Depends(verify_admin_access),
-    grants: Any = Depends(get_grant_client),
 ) -> AccountEntry:
     """Apply one action at the version the administrator read.
 
@@ -239,7 +235,6 @@ async def change_account(
         background.add_task(
             _terminate,
             require_store(get_storage(request)),
-            grants,
             account_id,
             result.account.version,
         )
@@ -371,9 +366,9 @@ async def transfer_team(
     return OwnedTeamsResponse(teams=[OwnedTeamEntry(**team) for team in teams])
 
 
-async def _terminate(storage: Any, grants: Any, account_id: str, generation: int) -> None:
+async def _terminate(storage: Any, account_id: str, generation: int) -> None:
     try:
-        await terminate_owner_access(storage, grants, account_id, generation=generation)
+        await terminate_owner_access(storage, account_id, generation=generation)
     except Exception:
         logger.warning(
             "agent_owner_access_termination_deferred",

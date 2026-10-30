@@ -81,7 +81,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         *,
         workdir: str,
         model: str,
-        gateway_base_url: str,
+        model_base_url: str,
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
@@ -103,8 +103,8 @@ class ClaudeCodeRuntime(AgentRuntime):
         an earlier native session after the resident process was replaced.
         """
         del workdir, provides_isolation
-        anthropic_url = self.inference_base_url(gateway_base_url)
-        translated = isinstance(gateway_base_url, MessagesViaChatUrl)
+        anthropic_url = self.inference_base_url(model_base_url)
+        translated = isinstance(model_base_url, MessagesViaChatUrl)
         argv = [
             self.binary,
             "-p",
@@ -157,7 +157,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             # Passed even when empty, so the pairing has no gap.
             "--mcp-config",
             json.dumps(
-                {"mcpServers": self._mcp_endpoints(mcp_config, gateway_base_url=gateway_base_url)}
+                {"mcpServers": self._mcp_endpoints(mcp_config, model_base_url=model_base_url)}
             ),
             # AskUserQuestion and ExitPlanMode require owner interaction even in
             # bypassPermissions. The pinned CLI sends its can_use_tool request
@@ -209,13 +209,13 @@ class ClaudeCodeRuntime(AgentRuntime):
             # Session files land in the retained container layer instead of a
             # process-private HOME, so docker stop/start can resume them.
             env["CLAUDE_CONFIG_DIR"] = config_dir
-        if isinstance(gateway_base_url, MessagesViaChatUrl):
+        if isinstance(model_base_url, MessagesViaChatUrl):
             # The model is pinned later through ``--model``; the helper locks to it.
-            return compat_launch(argv, env, gateway_base_url, credential, model=model)
+            return compat_launch(argv, env, model_base_url, credential, model=model)
         return argv, env
 
     @staticmethod
-    def inference_base_url(gateway_base_url: str) -> str:
+    def inference_base_url(model_base_url: str) -> str:
         """``ANTHROPIC_BASE_URL``: the Gateway relay's, or an owner connection's.
 
         The SDK appends ``/v1/messages``, so both drop one trailing ``/v1``.
@@ -224,16 +224,16 @@ class ClaudeCodeRuntime(AgentRuntime):
         accepted: the control plane refuses any other pairing, and this is
         the last stop before a key reached a protocol it is not for.
         """
-        if isinstance(gateway_base_url, MessagesBaseUrl):
-            return anthropic_base_url(str(gateway_base_url))
-        if isinstance(gateway_base_url, MessagesViaChatUrl):
+        if isinstance(model_base_url, MessagesBaseUrl):
+            return anthropic_base_url(str(model_base_url))
+        if isinstance(model_base_url, MessagesViaChatUrl):
             # The member's compatibility helper, at the origin its launcher binds.
             return COMPAT_ORIGIN
-        if isinstance(gateway_base_url, ExactBaseUrl):
+        if isinstance(model_base_url, ExactBaseUrl):
             raise RuntimeConnectionUnsupportedError(
                 "Claude Code speaks Anthropic Messages, which this connection does not offer"
             )
-        return gateway_base_url.rstrip("/").removesuffix("/v1")
+        return model_base_url.rstrip("/").removesuffix("/v1")
 
     @staticmethod
     def user_message_line(text: str) -> str:

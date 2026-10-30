@@ -178,7 +178,6 @@ def test_the_claim_masks_this_members_token_with_the_key():
             "runtime": "codex",
             "model": "chat-model",
             "worker_token": "w",
-            "sandbox_token": "",
             "model_connection": access.model_dump(),
         }
     )

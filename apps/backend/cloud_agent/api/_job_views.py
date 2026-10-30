@@ -7,8 +7,7 @@ catalog, workspace and config routers share one definition of what a job looks
 like to its owner.
 
 ``_EVENT_PAGE_SIZE`` and ``_SAFE_EVENT_TYPE`` travel with the event envelope:
-``service_jobs`` pages the same events this module renders, and the aggregator's
-SSE writer validates event names against the same pattern.
+the aggregator's SSE writer validates event names against the same pattern.
 """
 
 from __future__ import annotations

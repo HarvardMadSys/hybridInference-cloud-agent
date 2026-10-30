@@ -3,7 +3,7 @@
 The first supported bootstrap OS is Ubuntu 22.04/24.04 amd64 with passwordless
 sudo and KVM. Docker/Compose and pinned Kata can be installed by the trusted
 profile. Tunnel permissions and sandbox manager routing must already be provisioned on
-the stable control-plane/gateway machines and supplied through the profile.
+the stable control-plane machine and supplied through the profile.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from cloud_agent.ports.external.host_bootstrap import (
     RecordedHostState,
     TransferResult,
 )
-from cloud_agent.providers.compute.host_inference import profile_tunnel_prefixes
 from cloud_agent.providers.compute.release_scripts import _INVENTORY, _QUIESCE
 from cloud_agent.providers.compute.ssh import known_hosts_line
 from cloud_agent.providers.compute.transfer_scripts import (
@@ -607,9 +606,6 @@ print(json.dumps({'ready': ready, 'blocked_reasons': [] if ready else ['host_rea
 _REQUIRED_ENV = {
     "AGENT_SANDBOX_IMAGE",
     "AGENT_SANDBOX_MANAGER_TOKEN",
-    "AGENT_TUNNEL_SSH_DESTINATION",
-    "AGENT_TUNNEL_SSH_KEY",
-    "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
     "AGENT_MCP_TUNNEL_SSH_DESTINATION",
     "AGENT_MCP_TUNNEL_SSH_KEY",
     "AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS",
@@ -634,6 +630,9 @@ _ALLOWED_NON_AGENT_ENV = {
     "OPENCODE_EXTRA_VERSIONS",
     "KILO_EXTRA_VERSIONS",
 }
+#: The relays a host's sandboxes and runner reach: the MCP-only relay and the
+#: control-plane API. Each has its own key and known_hosts file.
+_TUNNEL_PREFIXES = ("AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL")
 _FORBIDDEN_ENV = {
     "AGENT_COMPUTE_SECRET_KEY",
     "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
@@ -647,7 +646,30 @@ _FORBIDDEN_ENV = {
 }
 
 
-def _repack(source: bytes, assets: dict[str, bytes], *, local: bool = False) -> bytes:
+#: Host settings of the removed Gateway inference relay and account mode. The
+#: host recipe refuses them too (``sandbox_host.sh``).
+_RETIRED_ENV = frozenset(
+    {
+        "AGENT_AUTH_MODE",
+        "AGENT_GATEWAY_URL",
+        "AGENT_GATEWAY_HOSTNAME",
+        "AGENT_TUNNEL_SSH_DESTINATION",
+        "AGENT_TUNNEL_SSH_PORT",
+        "AGENT_TUNNEL_SSH_KEY",
+        "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
+        "AGENT_TUNNEL_REMOTE_HOST",
+        "AGENT_TUNNEL_REMOTE_PORT",
+        "AGENT_TUNNEL_LISTEN_PORT",
+    }
+)
+
+
+def _retired_inference(values: dict[str, str | None]) -> bool:
+    """Whether a profile still configures the removed Gateway inference relay or mode."""
+    return any(value for name, value in values.items() if name in _RETIRED_ENV)
+
+
+def _repack(source: bytes, assets: dict[str, bytes]) -> bytes:
     """Rebuild a verified release bundle with this deployment's private files.
 
     CPU-bound and synchronous: callers run it in a worker thread.
@@ -698,8 +720,6 @@ def _repack(source: bytes, assets: dict[str, bytes], *, local: bool = False) -> 
                 "deploy/host/docker-compose.sandbox.yml",
                 "pyproject.toml",
             }
-            if local:
-                required_files.add("deploy/host/inference_compose.py")
             if not required_files <= found:
                 raise ProviderError(
                     "deployment_profile_invalid",
@@ -911,7 +931,13 @@ class SshHostBootstrap:
         }.items():
             template = template.replace("{" + key + "}", value)
         values = manager_environment(dotenv_values(stream=io.StringIO(template), interpolate=False))
-        tunnel_prefixes = profile_tunnel_prefixes(values)
+        if _retired_inference(values):
+            raise ProviderError(
+                "deployment_profile_invalid",
+                "Deployment profile still configures the removed Gateway inference relay "
+                "or account mode (AGENT_AUTH_MODE, AGENT_GATEWAY_*, AGENT_TUNNEL_SSH_* and "
+                "the relay's ports); remove those settings",
+            )
         if (
             any(
                 not name.startswith("AGENT_") and name not in _ALLOWED_NON_AGENT_ENV
@@ -924,12 +950,7 @@ class SshHostBootstrap:
                 "deployment_profile_invalid",
                 "Deployment profile violates the approved host security boundary",
             )
-        required = {
-            name
-            for name in _REQUIRED_ENV
-            if not name.startswith("AGENT_TUNNEL_") or "AGENT_TUNNEL" in tunnel_prefixes
-        }
-        if any(not values.get(name) for name in required):
+        if any(not values.get(name) for name in _REQUIRED_ENV):
             raise ProviderError(
                 "deployment_profile_invalid",
                 "Deployment profile is missing required relay, sandbox manager or network settings",
@@ -976,7 +997,7 @@ class SshHostBootstrap:
             # OpenSSH refuses a private key without its final newline, and
             # profiles saved before inputs were kept exactly have lost it.
             assets[name] = ((await self._resolver.resolve(ref)).rstrip() + "\n").encode()
-        for prefix in tunnel_prefixes:
+        for prefix in _TUNNEL_PREFIXES:
             for suffix in ("SSH_KEY", "SSH_KNOWN_HOSTS"):
                 path = values[f"{prefix}_{suffix}"] or ""
                 relative = path.removeprefix(profile.deploy_root + "/")
@@ -985,9 +1006,7 @@ class SshHostBootstrap:
                         "deployment_profile_invalid",
                         "Relay credentials must refer to this profile's dedicated deployed files",
                     )
-        return await asyncio.to_thread(
-            _repack, source, assets, local=values["AGENT_AUTH_MODE"] == "local"
-        )
+        return await asyncio.to_thread(_repack, source, assets)
 
     async def deploy(
         self,

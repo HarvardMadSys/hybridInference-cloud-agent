@@ -1,4 +1,4 @@
-"""The administrator settings local accounts read (``Admin → Settings``).
+"""The administrator settings the account system reads (``Admin → Settings``).
 
 HybridInference keeps its signup switches as runtime settings an administrator
 edits, and its mail, SMS and captcha configuration beside them; so does this
@@ -7,9 +7,8 @@ Each value is imported once from its environment variable, the first time the
 registry sees it, and the database is authoritative afterwards. Secrets are
 encrypted and never returned to the browser.
 
-Only ``AGENT_AUTH_MODE`` and ``AGENT_LOCAL_SESSION_SECRET`` stay process
-configuration: choosing the identity source, and the key every local
-credential is hashed under, are deployment decisions, not toggles.
+Only ``AGENT_LOCAL_SESSION_SECRET`` stays process configuration: the key every
+account credential is hashed under is a deployment decision, not a toggle.
 
 Defaults follow HybridInference except where noted: approval stays manual
 (this service's waiting list) until an administrator chooses domain policy,
@@ -24,7 +23,6 @@ from cloud_agent.setting_definition import Setting, _numeric
 
 CATEGORY = "Accounts"
 _SES_TEMPLATE = "0 means no template. Verification and password reset are required."
-_LOCAL = "Local accounts only (AGENT_AUTH_MODE=local). "
 
 _DIGITS = re.compile(r"(?:[1-9][0-9]{0,2})?")
 _PREFIXES = re.compile(r"(?:\s*\+[1-9][0-9]{0,6}\s*)(?:,\s*\+[1-9][0-9]{0,6}\s*)*|")
@@ -43,8 +41,7 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         True,
         kind="boolean",
         env="AGENT_LOCAL_SIGNUP_ENABLED",
-        description=_LOCAL
-        + "Lets anyone create an account with an email or a phone number. Signing up never "
+        description="Lets anyone create an account with an email or a phone number. Signing up never "
         "grants Agent use by itself.",
     ),
     Setting(
@@ -54,8 +51,7 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         True,
         kind="boolean",
         env="AGENT_LOCAL_SIGNUP_REQUIRE_EMAIL_VERIFICATION",
-        description=_LOCAL
-        + "When off, a new email account is treated as verified at sign-up and no verification "
+        description="When off, a new email account is treated as verified at sign-up and no verification "
         "mail is sent, so sign-up works without SMTP. Such an address is accepted, not proven: "
         "it neither matches the signup domain list nor the administrator addresses until a "
         "link sent to it is followed. Accounts created while it was on still verify their "
@@ -68,8 +64,7 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         "manual",
         env="AGENT_LOCAL_SIGNUP_APPROVAL",
         choices=("manual", "domains"),
-        description=_LOCAL
-        + "manual: every account waits for an administrator. domains: an account whose email "
+        description="manual: every account waits for an administrator. domains: an account whose email "
         "domain is on the signup domain list is approved as soon as it is verified, and with "
         "an empty list every verified account is.",
     ),
@@ -80,7 +75,7 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         True,
         kind="boolean",
         env="AGENT_LOCAL_SIGNUP_ADMIN_NOTIFY",
-        description=_LOCAL + "Sent when a sign-up waits for approval, if mail is configured.",
+        description="Sent when a sign-up waits for approval, if mail is configured.",
     ),
     Setting(
         "accounts.signup_notify_emails",
@@ -90,8 +85,7 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         env="AGENT_LOCAL_SIGNUP_NOTIFY_EMAILS",
         check=_emails,
         hint="Use comma-separated email addresses.",
-        description=_LOCAL
-        + "Comma-separated. Empty sends to every local administrator with a verified email.",
+        description="Comma-separated. Empty sends to every local administrator with a verified email.",
     ),
     Setting(
         "accounts.terms_url",
@@ -100,8 +94,7 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_LOCAL_TERMS_URL",
         url=True,
-        description=_LOCAL
-        + "Linked from the sign-up consent. Agreeing is required to sign up either way.",
+        description="Linked from the sign-up consent. Agreeing is required to sign up either way.",
     ),
     Setting(
         "accounts.terms_text",
@@ -109,8 +102,7 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         CATEGORY,
         "",
         env="AGENT_LOCAL_TERMS_TEXT",
-        description=_LOCAL
-        + "Shown on the /terms page and in the sign-up consent step, when no Terms URL is "
+        description="Shown on the /terms page and in the sign-up consent step, when no Terms URL is "
         "set. Plain text; blank lines separate paragraphs.",
     ),
     Setting(
@@ -121,8 +113,7 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         env="AGENT_LOCAL_ADMIN_EMAILS",
         check=_emails,
         hint="Use comma-separated email addresses.",
-        description=_LOCAL
-        + "Comma-separated, as HybridInference's ADMIN_EMAILS: an account whose email is listed "
+        description="Comma-separated, as HybridInference's ADMIN_EMAILS: an account whose email is listed "
         "and proven is approved and made an administrator when it signs in. Proven means a "
         "link sent to the address was followed (verification, address change or password "
         "reset) or the operator created the account; an address accepted while email "
@@ -345,8 +336,7 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         False,
         kind="boolean",
         env="AGENT_LOCAL_SMS_ENABLED",
-        description=_LOCAL
-        + "Sign-up, sign-in and binding with a code sent by text message. Needs a configured "
+        description="Sign-up, sign-in and binding with a code sent by text message. Needs a configured "
         "provider.",
     ),
     Setting(

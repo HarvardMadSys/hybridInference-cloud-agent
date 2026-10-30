@@ -37,7 +37,7 @@ from cloud_agent.api.deps import (
     looks_like_agent_token,
     verify_admin_access,
 )
-from cloud_agent.gateway import GatewayError
+from cloud_agent.accounts.directory import OwnerDirectoryError
 
 pytestmark = pytest.mark.asyncio
 
@@ -76,7 +76,7 @@ async def client():
                 "permissions": ["agent.use", "agent.admin"],
             }
 
-    app.state.gateway = Gateway()
+    app.state.owners = Gateway()
 
     @app.get("/who")
     async def who(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
@@ -564,7 +564,7 @@ async def test_requests_after_a_recorded_denial_do_not_join_the_lookup_before_it
 
 
 async def test_a_failed_lookup_leaves_a_grant_recorded_while_it_waited():
-    gateway = _ScriptedAccessGateway(GatewayError("unavailable", status_code=503))
+    gateway = _ScriptedAccessGateway(OwnerDirectoryError("unavailable", status_code=503))
     admission = deps.AgentAccessAdmission()
     stale = asyncio.create_task(admission.decision(gateway, "u1"))
     await _until(lambda: gateway.asked == 1)

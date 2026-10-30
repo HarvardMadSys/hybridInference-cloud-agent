@@ -1,22 +1,22 @@
-"""Refreshable inference usage snapshots, independent of attempt execution.
+"""A job's usage: what its runtime reported, beside any snapshots earlier releases stored.
 
-The gateway owns the ledger; this service keeps only bounded totals so a
-completed turn remains readable when its grant or gateway is unavailable.
-Snapshots are attribution by time window, never proof of final settlement.
+Turns run on the owner's own model connections, whose provider keeps the
+bill; the runtime's own token report is what this service shows for them.
+Releases that ran Gateway turns stored per-attempt usage snapshots in the
+ledger, and an archived turn's are still summarized here. Nothing refreshes
+or writes a snapshot any more. Snapshots are attribution by time window,
+never proof of final settlement.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import datetime  # noqa: TC003 — Pydantic resolves the field types at runtime.
 from decimal import Decimal, localcontext
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from cloud_agent.gateway import GatewayError
 from cloud_agent.grant_usage import (
     CORE_METRICS,
     DERIVED_AMOUNT_CHARS,
@@ -27,19 +27,10 @@ from cloud_agent.grant_usage import (
     GrantUsageWindow,
 )
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.settings import integer_setting, number_setting
 from cloud_agent.thread_stats import normalized_runtime_input_tokens, summarize_thread
-from cloud_agent.workers.background_wake import LEDGER
-
-if TYPE_CHECKING:
-    from cloud_agent.ports import LedgerRepository
-    from cloud_agent.workers.background_wake import BackgroundWake
 
 logger = get_logger(__name__)
 
-REFRESH_POLL_SECONDS = 2.0
-#: Shortest wait, so a schedule a moment in the past cannot spin the loop.
-REFRESH_MIN_WAIT_S = 0.05
 #: A stored or derived report this service will not add to a total. One reason
 #: covers every rejection so the browser and the stored error stay content-free.
 INVALID_REPORT = "usage_invalid_response"
@@ -50,6 +41,7 @@ NO_MODEL_CALLS = "no_model_calls"
 #: selection can hold, so it is a guard rather than a limit; keeping it in a
 #: module attribute lets its refusal path be tested without impossible inputs.
 _derived_amount_chars = DERIVED_AMOUNT_CHARS
+#: The stored error codes a summary repeats; any other reads as ``refresh_failed``.
 _SAFE_ERRORS = frozenset(
     {
         "usage_unsupported_schema",
@@ -431,97 +423,3 @@ def summarize_conversation(rows: list[dict[str, Any]]) -> ConversationUsage:
             row.get("job_state") in {"queued", "preparing", "running", "publishing"} for row in rows
         ),
     )
-
-
-async def refresh_ledger_entry(store: LedgerRepository, grants: Any, row: dict[str, Any]) -> None:
-    """Fetch a claimed reference, preserving cached data on every failure."""
-    report = None
-    error_code = None
-    try:
-        if row["binding_id"] != grants.binding_id:
-            error_code = "binding_changed"
-        elif row["window_since"] >= row["window_until"]:
-            error_code = "invalid_usage_query"
-        else:
-            result = await asyncio.wait_for(
-                grants.usage(row["grant_id"], since=row["window_since"], until=row["window_until"]),
-                timeout=number_setting("ledger_refresh_timeout_s"),
-            )
-            report = result.model_dump(mode="json")
-    except GatewayError as exc:
-        error_code = exc.error_type if exc.error_type in _SAFE_ERRORS else "refresh_failed"
-    except TimeoutError:
-        error_code = "usage_unavailable"
-    except Exception:
-        # Error strings can contain HTTP headers or arbitrary upstream data.
-        # Store and log only the bounded reason, never the exception message.
-        error_code = "refresh_failed"
-    await store.complete_ledger_refresh(
-        ledger_id=row["id"],
-        refresh_generation=row["refresh_generation"],
-        terminal=row["terminal"],
-        report=report,
-        error_code=error_code,
-    )
-
-
-async def collect_usage_snapshots(
-    store: LedgerRepository, grants: Any, *, wake: BackgroundWake | None = None
-) -> None:
-    """Run ledger reads on their own bounded pool, separate from grant renewal.
-
-    Refill each slot as soon as its query completes, so a slow Gateway read
-    does not hold up other jobs. With ``wake`` a collector with spare capacity
-    waits for an attempt to stop or a refresh to be scheduled, and otherwise
-    until the earliest scheduled one is due, never longer than the
-    ``ledger_idle_s`` setting. Without it, or while nothing listens, it looks
-    every ``REFRESH_POLL_SECONDS``.
-    """
-    inflight: set[asyncio.Task[None]] = set()
-    try:
-        while True:
-            concurrency = integer_setting("ledger_refresh_concurrency")
-            try:
-                while len(inflight) < concurrency:
-                    row = await store.claim_due_ledger_refresh()
-                    if row is None:
-                        break
-                    inflight.add(asyncio.create_task(refresh_ledger_entry(store, grants, row)))
-            except Exception:
-                logger.warning("agent_ledger_snapshot_pass_failed")
-
-            waiter: asyncio.Task[Any] | None = None
-            waiting: set[asyncio.Task[Any]] = set(inflight)
-            if len(inflight) < concurrency:
-                # A free slot must also notice newly due work while another
-                # query is slow, rather than only waiting for that query.
-                idle_s = REFRESH_POLL_SECONDS
-                if wake is not None:
-                    # While nothing listens, look on the old short clock.
-                    idle_s = (
-                        number_setting("ledger_idle_s") if wake.listening else REFRESH_POLL_SECONDS
-                    )
-                    with contextlib.suppress(Exception):
-                        due = await store.next_ledger_refresh_due()
-                        if due is not None:
-                            idle_s = min(idle_s, (due - datetime.now(UTC)).total_seconds())
-                delay = max(idle_s, REFRESH_MIN_WAIT_S)
-                waiter = asyncio.create_task(
-                    asyncio.sleep(delay) if wake is None else wake.wait(LEDGER, delay)
-                )
-                waiting.add(waiter)
-            try:
-                done, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                if waiter is not None:
-                    waiter.cancel()
-                    await asyncio.gather(waiter, return_exceptions=True)
-            completed = inflight.intersection(done)
-            inflight.difference_update(completed)
-            errors = [task.exception() for task in completed if not task.cancelled()]
-            if any(error is not None for error in errors):
-                logger.warning("agent_ledger_snapshot_save_failed")
-    finally:
-        for task in inflight:
-            task.cancel()
-        await asyncio.gather(*inflight, return_exceptions=True)

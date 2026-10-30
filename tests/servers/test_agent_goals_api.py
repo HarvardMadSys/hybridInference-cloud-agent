@@ -10,6 +10,8 @@ routes actually wrote.
 
 from __future__ import annotations
 
+from tests.support.owners import on_connection
+
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
 from typing import TYPE_CHECKING, Any
@@ -156,12 +158,12 @@ async def test_a_job_created_with_a_goal_carries_it_on_the_conversation(client, 
     """The composer's path: one submission sets the objective and starts the work."""
     response = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "task_prompt": "fix it",
             "model": "glm-5.1",
             "goal": GOAL,
-        },
+        }),
     )
     assert response.status_code == 201, response.text
 

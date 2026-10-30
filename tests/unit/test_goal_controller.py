@@ -429,11 +429,11 @@ class FakeGateway:
         self.asked: list[str] = []
 
     async def agent_access(self, user_id: str) -> dict[str, Any]:
-        from cloud_agent.gateway import GatewayError
+        from cloud_agent.accounts.directory import OwnerDirectoryError
 
         self.asked.append(user_id)
         if self.unavailable:
-            raise GatewayError("gateway unreachable")
+            raise OwnerDirectoryError("gateway unreachable")
         return {
             "user_id": user_id,
             "allowed": self.allowed,

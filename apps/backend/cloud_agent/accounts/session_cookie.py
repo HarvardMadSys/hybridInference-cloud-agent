@@ -1,11 +1,10 @@
-"""Where a local session travels: its own cookie, or a bearer of its own shape.
+"""Where a session travels: its own cookie, or a bearer of its own shape.
 
-Gateway-mode cookies (``__Host-cloud_agent_session``) are never read in local
-mode, and a Gateway-mode session presented as a bearer is not the local
-shape, so it is refused before any lookup. The cookie follows the same rules
-as the Gateway-mode one: ``__Host-`` wherever it is ``Secure``, ``HttpOnly``,
-``SameSite=Lax``, ``Path=/``, and the plain development name is read only
-where the cookie is not ``Secure``.
+Any other cookie, including the retired Gateway sign-in's
+(``__Host-cloud_agent_session``), is never read, and a bearer that is not the
+session shape is refused before any lookup. The cookie is ``__Host-`` wherever
+it is ``Secure``, ``HttpOnly``, ``SameSite=Lax``, ``Path=/``, and the plain
+development name is read only where the cookie is not ``Secure``.
 """
 
 from __future__ import annotations
@@ -16,9 +15,9 @@ from cloud_agent.accounts.config import (
     LOCAL_SESSION_COOKIE,
     LOCAL_SESSION_COOKIE_INSECURE,
     local_session_ttl_s,
+    session_cookie_is_secure,
 )
 from cloud_agent.accounts.tokens import looks_like_session_token
-from cloud_agent.identity import session_cookie_is_secure
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

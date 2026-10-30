@@ -18,6 +18,8 @@ not run that file, so this one pins each part without Docker:
 
 from __future__ import annotations
 
+from tests.support.owners import on_connection
+
 import json
 import socket
 import subprocess
@@ -139,7 +141,7 @@ def test_anthropic_stream_reads_to_one_settled_answer(model: httpx.Client, path:
 
 
 def test_anthropic_without_stream_answers_one_message(model: httpx.Client) -> None:
-    response = model.post("/v1/messages", json={"model": MODEL})
+    response = model.post("/v1/messages", json=on_connection({"model": MODEL}))
     assert response.headers["content-type"] == "application/json"
     message = response.json()
     assert message["content"] == [{"type": "text", "text": REPLY}]

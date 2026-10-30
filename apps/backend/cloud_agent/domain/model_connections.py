@@ -46,6 +46,7 @@ UnusableReason = Literal[
     "effort_unsupported",
     "changed",
     "feature_disabled",
+    "no_connection",
 ]
 
 #: What the owner is told when a turn cannot run on its connection. Each names
@@ -73,6 +74,10 @@ UNUSABLE_MESSAGES: dict[str, str] = {
     "changed": (
         "This task's model connection changed while the turn was starting. "
         "The turn did not run on the old key."
+    ),
+    "no_connection": (
+        "This task has no model connection, so it cannot run. Start a new task on a model "
+        "from one of your own model connections."
     ),
 }
 

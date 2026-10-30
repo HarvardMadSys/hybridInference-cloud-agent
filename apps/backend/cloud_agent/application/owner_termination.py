@@ -99,7 +99,7 @@ async def _end_group_terminals(storage: Storage, group: dict[str, Any], token: s
 
 
 async def terminate_owner_access(
-    storage: Storage, grants: Any, user_id: str, generation: int | None = None
+    storage: Storage, user_id: str, generation: int | None = None
 ) -> bool:
     """Stop one owner's work; whether every step is now acknowledged.
 
@@ -116,7 +116,6 @@ async def terminate_owner_access(
 
     Args:
         storage: The assembled storage.
-        grants: The grant client, for revoking released residency grants.
         user_id: The owner whose access ended.
         generation: The termination record's account version, or ``None``
             for a sweep of residual work with no record behind it.
@@ -136,17 +135,13 @@ async def terminate_owner_access(
             # approval allows. (The record barrier makes this unreachable.)
             await _record(storage, user_id, record, complete=True, outcome="superseded")
             return True
-        return await _stop_work(storage, grants, user_id, record)
+        return await _stop_work(storage, user_id, record)
 
 
-async def _stop_work(
-    storage: Storage, grants: Any, user_id: str, record: tuple[int | None, int | None]
-) -> bool:
+async def _stop_work(storage: Storage, user_id: str, record: tuple[int | None, int | None]) -> bool:
     generation = record[0]
     result = await storage.owner_work.end_owner_work(user_id)
-    await close_released_residencies(
-        storage.host_pool, grants, result.get("released_residencies") or []
-    )
+    await close_released_residencies(storage.host_pool, result.get("released_residencies") or [])
     token = terminal_freeze_token(user_id, generation or 0)
     groups_done = True
     for group in result.get("groups") or []:
@@ -194,7 +189,7 @@ async def _record(
     )
 
 
-async def enforce_ended_access(storage: Storage, grants: Any) -> int:
+async def enforce_ended_access(storage: Storage) -> int:
     """One pass: retry every open termination, then sweep residual work.
 
     Returns:
@@ -214,7 +209,7 @@ async def enforce_ended_access(storage: Storage, grants: Any) -> int:
     handled = 0
     for user_id, generation in targets:
         try:
-            await terminate_owner_access(storage, grants, user_id, generation)
+            await terminate_owner_access(storage, user_id, generation)
         except Exception:
             logger.warning(
                 "agent_owner_access_termination_failed",

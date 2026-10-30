@@ -172,13 +172,15 @@ async def create_account(
 async def _run(args: argparse.Namespace) -> str:
     import asyncpg
 
-    from cloud_agent.accounts.config import check_local_configuration, local_mode
+    from cloud_agent.accounts.config import (
+        check_local_configuration,
+        refuse_retired_configuration,
+    )
     from cloud_agent.application.accounts import normalize_email
     from cloud_agent.identity_namespace import ensure_local_namespace
     from cloud_agent.storage.assembly import Storage
 
-    if not local_mode():
-        raise BootstrapRefused("AGENT_AUTH_MODE=local must be set.")
+    refuse_retired_configuration()
     check_local_configuration()
     dsn = os.environ.get("AGENT_DATABASE_URL")
     if not dsn:

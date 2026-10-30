@@ -13,7 +13,7 @@ from fastapi import FastAPI
 
 from cloud_agent import identity
 from cloud_agent.api import teams
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.domain.teams import (
     ApplicantRecord,
     InvitationRecord,
@@ -25,7 +25,7 @@ from cloud_agent.domain.teams import (
     TeamNotFound,
     TeamRecord,
 )
-from cloud_agent.gateway import GatewayError
+from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.user_avatar import generate_user_avatar
 
 NOW = datetime(2026, 10, 15, tzinfo=UTC)
@@ -86,7 +86,7 @@ def app(monkeypatch):
         "permissions": ["agent.use"] if user_id in admitted else [],
     }
     gateway.user_email.side_effect = lambda user_id: f"{user_id}@example.com"
-    application.dependency_overrides[get_gateway_client] = lambda: gateway
+    application.dependency_overrides[get_owner_directory] = lambda: gateway
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(teams=repository)
     application.state.repository = repository
     application.state.gateway = gateway
@@ -197,7 +197,7 @@ async def test_claiming_sends_the_hash_and_shows_only_team_name_and_inviter(app)
     assert body["inviter_display_name"] == "Alice Liddell"
     assert "owner_user_id" not in body and "email" not in body
     # The inviter had a name, so the Gateway was not asked for an email.
-    app.state.gateway.user_email.assert_not_called()
+    app.state.owners.user_email.assert_not_called()
 
 
 async def test_an_old_link_tells_a_former_member_to_ask_for_a_new_one(app):
@@ -216,7 +216,7 @@ async def test_an_old_link_tells_a_former_member_to_ask_for_a_new_one(app):
     assert response.json() == {"error": {"type": "no_longer_member", "message": message}}
     assert response.headers["Cache-Control"] == "no-store"
     assert TOKEN not in response.text
-    app.state.gateway.user_email.assert_not_called()
+    app.state.owners.user_email.assert_not_called()
 
 
 async def test_approval_requires_the_applicants_current_admission(app):
@@ -233,7 +233,7 @@ async def test_approval_requires_the_applicants_current_admission(app):
     assert refused.json()["error"]["type"] == "applicant_not_admitted"
     repository.decide_join_request.assert_not_called()
 
-    app.state.gateway.agent_access.side_effect = GatewayError("down")
+    app.state.owners.agent_access.side_effect = OwnerDirectoryError("down")
     unavailable = await call(
         app,
         "POST",
@@ -258,7 +258,7 @@ async def test_declining_asks_the_gateway_nothing_about_the_applicant(app):
     assert response.status_code == 200
     assert response.json()["state"] == "declined"
     assert response.json()["display_name"] == "bob@example.com"
-    assert [c.args for c in app.state.gateway.agent_access.await_args_list] == [("alice",)]
+    assert [c.args for c in app.state.owners.agent_access.await_args_list] == [("alice",)]
     repository.get_join_request.assert_not_called()
 
 
@@ -275,7 +275,7 @@ async def test_transfer_asks_the_gateway_only_about_an_actual_member(app):
         json={"user_id": "carol", "expected_revision": 3},
     )
     assert outsider.status_code == 404
-    assert [c.args for c in app.state.gateway.agent_access.await_args_list] == [("alice",)]
+    assert [c.args for c in app.state.owners.agent_access.await_args_list] == [("alice",)]
 
     repository.transfer_ownership.return_value = TeamRecord(
         **{**TEAM.__dict__, "owner_user_id": "bob", "role": "member", "revision": 4}
@@ -302,10 +302,10 @@ async def test_roster_shows_names_and_survives_an_email_lookup_failure(app):
 
     async def email(user_id):
         if user_id == "bob":
-            raise GatewayError("unavailable")
+            raise OwnerDirectoryError("unavailable")
         return f"{user_id}@example.com"
 
-    app.state.gateway.user_email.side_effect = email
+    app.state.owners.user_email.side_effect = email
     response = await call(app, "GET", "/v1/agent/teams/ateam_1/members")
     assert response.status_code == 200
     alice, bob = response.json()["members"]
@@ -388,5 +388,5 @@ async def test_admin_cannot_use_transfer_to_probe_a_members_gateway_access(app):
     app.state.repository.transfer_ownership.assert_not_called()
     assert all(
         call.kwargs.get("user_id") != "carol"
-        for call in app.state.gateway.agent_access.call_args_list
+        for call in app.state.owners.agent_access.call_args_list
     )

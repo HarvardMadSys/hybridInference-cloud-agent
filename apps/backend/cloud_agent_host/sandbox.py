@@ -44,42 +44,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Run inside one ephemeral preflight probe on the relay discovery network,
-# with $1 = the URL to probe and $2 = its hostname. Prints exactly one verdict.
-#
-# curl and python3 are both in the shipped sandbox image; a deployment-owned
-# image might have neither, and "dns-only" says so rather than letting a
-# weaker check pass for the same thing. Any HTTP status counts as reachable —
-# the question is whether packets arrive, not what the gateway makes of them.
-_GATEWAY_PROBE_SH = """
-url="$1"; host="$2"
-if command -v curl >/dev/null 2>&1; then
-    # Captured immediately: after an `if`, $? is the compound statement's own
-    # status, not curl's, and every failure would read as the same verdict.
-    curl -sS -o /dev/null --max-time 15 "$url"; rc=$?
-    # 6 is curl's "could not resolve host"; everything else got that far.
-    if [ "$rc" -eq 0 ]; then echo ok
-    elif [ "$rc" -eq 6 ]; then echo unresolved
-    else echo unreachable; fi
-    exit 0
-fi
-if command -v python3 >/dev/null 2>&1; then
-    python3 -I -c 'import socket, sys, urllib.error, urllib.request
-try:
-    urllib.request.urlopen(sys.argv[1], timeout=15)
-except urllib.error.HTTPError:
-    print("ok")
-except urllib.error.URLError as exc:
-    print("unresolved" if isinstance(exc.reason, socket.gaierror) else "unreachable")
-except Exception:
-    print("unreachable")
-else:
-    print("ok")' "$url"
-    exit 0
-fi
-if getent hosts "$host" >/dev/null 2>&1; then echo dns-only; else echo unresolved; fi
-"""
-
 # There is no default image, deliberately. Upstream publishes none, and an
 # unqualified name is not an inert placeholder: `docker run hybridinference/
 # agent-sandbox` resolves through Docker Hub, so anyone who registered that
@@ -953,19 +917,6 @@ class ContainerBackend(SandboxBackend):
             return None
         return guest_kernel
 
-    def _kata_relay_host_args(self, network: str) -> list[str]:
-        """Give disposable Kata probes the same fixed relay resolution as chats."""
-        if self.runtime != KATA_RUNTIME:
-            return []
-        from cloud_agent_host.chat_sandbox import ChatSandboxManager
-
-        addresses = ChatSandboxManager(self).network.relay_addresses(network)
-        return [
-            part
-            for alias, address in sorted(addresses.items())
-            for part in ("--add-host", f"{alias}={address}")
-        ]
-
     def check_network(self) -> None:
         """Revalidate mutable network state even when runtime evidence is inherited."""
         self._check_sandbox_network()
@@ -1066,99 +1017,6 @@ class ContainerBackend(SandboxBackend):
                 f"becomes their default route (client {client or 'unknown'}, daemon API "
                 f"{api or 'unknown'})"
             )
-
-    def check_gateway_reachable(self, base_url: str) -> None:
-        """Fail startup if the sandbox cannot reach the gateway it will be given.
-
-        A sandbox reaches inference only through the fixed relay, which is
-        discovered on the relay network. This method proves that relay answers
-        there. If an operator points
-        AGENT_GATEWAY_URL at an unreachable remote address, every job dies at
-        its first model call and the error reads like a broken model rather
-        than a network that was never going to work.
-
-        Probed rather than inferred: one container on the relay network, making
-        a real request. A heuristic on the URL would be wrong for every
-        deployment that does route out.
-
-        The request matters, not just the name. This used to resolve DNS and
-        stop there, which passes for anything with a DNS record — including a
-        relay container that answers to the name and cannot reach the gateway
-        behind it. That is precisely the shape a cross-machine deployment has,
-        so the one topology needing the check hardest was the one it could not
-        see. Any HTTP response counts, 404 and 401 included: the question is
-        whether packets get there, not what the gateway thinks of them.
-        """
-        from urllib.parse import urlparse
-
-        parsed = urlparse(base_url)
-        host = (parsed.hostname or "").strip()
-        if not host:
-            return
-        network = self.require_sandbox_network().relay_network
-        probe_url = f"{base_url.rstrip('/').removesuffix('/v1')}/health"
-        argv = [self.docker_binary, "run", "--rm", "--network", network]
-        # Probe under the runtime jobs will actually use. Otherwise a Kata
-        # deployment could pass a runc-based probe while every real sandbox
-        # still fails at spawn.
-        if self.runtime:
-            argv += ["--runtime", self.runtime]
-        argv += self.extra_args
-        argv += self._kata_relay_host_args(network)
-        argv += [
-            "--entrypoint",
-            "/bin/sh",
-            self.image,
-            "-c",
-            _GATEWAY_PROBE_SH,
-            "sh",
-            probe_url,
-            host,
-        ]
-        probe = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=90,
-            check=False,
-        )
-        verdict = (probe.stdout or "").strip().splitlines()
-        outcome = verdict[-1] if verdict else ""
-        if outcome == "ok":
-            return
-        if outcome == "dns-only":
-            # A custom sandbox image with neither curl nor python3. Resolving
-            # is all that can be asked of it; say so rather than let the log
-            # imply the stronger check ran.
-            logger.warning(
-                "agent_sandbox_gateway_probe_degraded",
-                extra={
-                    "event": "agent_sandbox_gateway_probe_degraded",
-                    "detail": (
-                        f"{self.image!r} has neither curl nor python3, so the gateway "
-                        f"check for {probe_url!r} confirmed DNS only; a relay that "
-                        "resolves but cannot forward would still pass"
-                    ),
-                },
-            )
-            return
-        detail = {
-            "unresolved": (
-                f"cannot resolve {host!r}. The inference relay has to be on the relay "
-                "network under that name; a gateway on another machine is reached "
-                "through its tunnel container, not directly."
-            ),
-        }.get(
-            outcome,
-            (
-                f"resolves {host!r} but no HTTP response came back from {probe_url!r}. "
-                "Something answers to the name and cannot reach the gateway behind it — "
-                "a relay whose upstream is down, or a port nothing is listening on."
-            ),
-        )
-        raise SandboxError(
-            f"the relay network {network!r} {detail} Every job would fail at its first model call."
-        )
 
     def spawn(self, spec: SandboxSpec) -> SandboxProcess:
         """Reject the removed one-container-per-turn execution topology."""

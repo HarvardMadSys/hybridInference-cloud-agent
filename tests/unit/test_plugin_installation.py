@@ -354,7 +354,6 @@ def test_claim_validates_runtime_plugin_specs_and_preserves_legacy_claims():
         "runtime": "claude-code",
         "model": "model",
         "worker_token": "worker-secret",
-        "sandbox_token": "scoped-inference-secret",
     }
     assert ClaimedJob.from_response(body).plugins == []
     assert ClaimedJob.from_response({**body, "plugins": list(_PLUGINS)}).plugins == list(_PLUGINS)

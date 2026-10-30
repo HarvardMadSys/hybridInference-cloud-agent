@@ -21,7 +21,6 @@ from cloud_agent.storage.repositories.credential_queries import PostgresCredenti
 from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
 from cloud_agent.storage.repositories.goal_wakeups import PostgresGoalWakeupRepository
 from cloud_agent.storage.repositories.goals import PostgresGoalRepository
-from cloud_agent.storage.repositories.grants import PostgresGrantRepository
 from cloud_agent.storage.repositories.host_capacity import PostgresHostCapacityRepository
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
 from cloud_agent.storage.repositories.ledger import PostgresLedgerRepository
@@ -72,7 +71,6 @@ __all__ = [
     "PostgresExecutionQueries",
     "PostgresGoalRepository",
     "PostgresGoalWakeupRepository",
-    "PostgresGrantRepository",
     "PostgresHostCapacityRepository",
     "PostgresHostPoolRepository",
     "PostgresLedgerRepository",

@@ -56,7 +56,6 @@ def test_existing_sandbox_resume_does_not_depend_on_available_disk_space(monkeyp
         runtime="codex",
         model="model",
         worker_token="worker",
-        sandbox_token="sandbox",
         thread_sandbox={"sandbox_id": "asbx_existing"},
     )
     called = []
@@ -85,7 +84,6 @@ def test_low_storage_declines_handover_before_the_turn_starts(monkeypatch):
         "runtime": "codex",
         "model": "model",
         "worker_token": "worker",
-        "sandbox_token": "sandbox",
         "_host_settings": {"storage_min_available_mib": 2048},
     }
     monkeypatch.setattr("sys.stdin", io.StringIO(encode_turn(payload).decode()))
@@ -133,7 +131,6 @@ def test_direct_runner_storage_release_posts_a_valid_audit_reason(monkeypatch):
             "runtime": "codex",
             "model": "model",
             "worker_token": "worker",
-            "sandbox_token": "sandbox",
         }
     )
     monkeypatch.setattr(

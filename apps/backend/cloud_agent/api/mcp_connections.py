@@ -28,7 +28,7 @@ from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
@@ -92,7 +92,7 @@ from cloud_agent.mcp.registry import (
     oauth_cipher,
     resolve_connection,
 )
-from cloud_agent.settings import setting_env
+from cloud_agent.settings import public_api_url, setting_env
 
 logger = get_logger(__name__)
 
@@ -208,26 +208,9 @@ def _public_base_url() -> str:
     explicit = (setting_env(ENV_MCP_PUBLIC_BASE_URL) or "").strip().rstrip("/")
     if explicit:
         return explicit
-    # Session sign-in already needs the public API callback, including its
-    # proxy prefix. Reuse that operator-controlled URL, never Host/Forwarded
-    # headers or the web origin (which may live on a different host).
-    callback = (setting_env("AGENT_SESSION_REDIRECT_URI") or "").strip()
-    suffix = "/v1/session/callback"
-    try:
-        parsed = urlsplit(callback)
-        if (
-            parsed.scheme not in {"https", "http"}
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-            or not parsed.path.endswith(suffix)
-        ):
-            return ""
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path[: -len(suffix)], "", ""))
-    except ValueError:
-        return ""
+    # The operator's public API address, including its proxy prefix; never
+    # Host/Forwarded headers or the web origin (which may live elsewhere).
+    return public_api_url()
 
 
 def _policy() -> EgressPolicy:

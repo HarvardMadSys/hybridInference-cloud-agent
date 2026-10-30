@@ -22,7 +22,7 @@ class LeaseLost(Exception):
 
 
 class ClaimUnreachable(Exception):
-    """The gateway could not be reached *to claim*, so no job was taken.
+    """The control plane could not be reached *to claim*, so no job was taken.
 
     Distinct from a transport failure later in the run: that one leaves an
     attempt running until its lease expires, and an operator needs to be sent
@@ -59,9 +59,6 @@ class ClaimedJob:
     runtime: str
     model: str
     worker_token: str
-    # The attempt's gateway grant. It does not enter the sandbox: each member's
-    # CLI runs on its own residency grant from `establish_shared_residency`.
-    sandbox_token: str
     execution_profile: str = "trusted-v1"
     # How hard the model should think on this turn, in the runtime's own
     # vocabulary. None is Auto: no flag, whatever the CLI and model default to.
@@ -79,8 +76,9 @@ class ClaimedJob:
     # The group's whole SSH state, present only for a group whose chats have
     # ever selected an SSH server. It carries private keys.
     ssh_access: SshAccess | None = field(default=None, repr=False)
-    # The owner's own model connection this turn runs on, key included; None
-    # for a Gateway turn. Its key is the member's credential, not a grant.
+    # The owner's own model connection this turn runs on, key included. None
+    # only for an environment test, which runs no agent. Its key is the
+    # member's credential.
     model_connection: ModelConnectionAccess | None = field(default=None, repr=False)
     # Explicit CLI plugins installed in this chat's private member state.
     plugins: list[dict[str, str]] = field(default_factory=list)
@@ -151,7 +149,6 @@ class ClaimedJob:
             # the same thing as Auto — no separate "unknown" state to carry.
             reasoning_effort=body.get("reasoning_effort"),
             worker_token=body["worker_token"],
-            sandbox_token=body["sandbox_token"],
             clone_token=body.get("clone_token") or None,
             github_token=body.get("github_token") or None,
             mcp_bindings=list(body.get("mcp_bindings") or []),
@@ -178,11 +175,11 @@ def claim_secret_values(job: ClaimedJob) -> dict[str, str]:
 
 
 def model_connection_launch(job: ClaimedJob) -> dict[str, str]:
-    """The process-fixed launch fields of a turn on an owner connection; none otherwise.
+    """The process-fixed launch fields of a turn's owner connection; none without one.
 
     Part of the launch a live process is compared against, so a turn after the
     key or endpoint changed starts a new process instead of borrowing one that
-    holds the old key, and a Gateway turn never borrows one that holds a key.
+    holds the old key.
     """
     return job.model_connection.launch_fields() if job.model_connection is not None else {}
 

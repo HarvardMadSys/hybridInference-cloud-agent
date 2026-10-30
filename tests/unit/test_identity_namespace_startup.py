@@ -63,6 +63,6 @@ async def test_incomplete_gateway_keeps_setup_available_but_requires_an_issuer_f
         ]
         with pytest.raises(IdentityNotConfigured):
             gateway_issuer()
-        assert not app.state.gateway.configured
+        assert not app.state.owners.configured
     check.assert_awaited_once_with(pool, None)
     pool.close.assert_awaited_once()

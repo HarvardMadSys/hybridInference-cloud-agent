@@ -29,7 +29,6 @@ from cloud_agent.ports.environments import (
 from cloud_agent.ports.execution_queries import ExecutionQueries
 from cloud_agent.ports.goal_wakeups import GoalWakeupRepository
 from cloud_agent.ports.goals import GoalRepository
-from cloud_agent.ports.grants import GrantRepository
 from cloud_agent.ports.host_capacity import HostCapacityRepository
 from cloud_agent.ports.host_pool import HostPoolRepository
 from cloud_agent.ports.ledger import LedgerRepository
@@ -86,7 +85,6 @@ __all__ = [
     "ExecutionQueries",
     "GoalRepository",
     "GoalWakeupRepository",
-    "GrantRepository",
     "HostCapacityRepository",
     "HostPoolRepository",
     "LedgerRepository",

@@ -58,7 +58,7 @@ from tests.integration.servers.test_measurement_acceptance_db import (
     _serve,
 )
 
-from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client
+from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory
 from cloud_agent.app import create_app
 from cloud_agent.application.profiling_control import ProfilingControlService
 from cloud_agent.host_pool import hash_secret
@@ -185,7 +185,7 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     sandbox_manager = _SandboxManager()
     monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = create_app()
-    app.dependency_overrides[get_gateway_client] = _Gateway
+    app.dependency_overrides[get_owner_directory] = _Gateway
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     server, task, base_url = await _serve(app)
     store = Storage(pool)

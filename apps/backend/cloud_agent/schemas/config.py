@@ -60,24 +60,8 @@ class AgentConfigResponse(BaseModel):
     model_connection_required: bool = Field(
         default=False,
         description=(
-            "True for a local account (AGENT_AUTH_MODE=local) while none of its own enabled "
-            "model connections has a model verified for any Agent: nothing can run until one "
-            "is set up. Always false in Gateway mode."
-        ),
-    )
-    gateway_inference: bool = Field(
-        default=True,
-        description=(
-            "Whether this deployment offers Gateway models and the features that run on them "
-            "(the default-model pin, prompt rewrite, Gateway usage). False with local accounts, "
-            "whose only models are their own connections."
-        ),
-    )
-    models: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Model ids an agent job can actually call for this user — the same "
-            "predicate the create endpoint enforces, not the /v1/models list."
+            "True while none of this owner's enabled model connections has a model "
+            "verified for any Agent: nothing can run until one is set up."
         ),
     )
     runtime_reasoning_efforts: dict[str, list[str]] = Field(
@@ -87,15 +71,6 @@ class AgentConfigResponse(BaseModel):
             "runtime absent here cannot express one at all."
         ),
     )
-    model_reasoning_efforts: dict[str, list[str]] = Field(
-        default_factory=dict,
-        description=(
-            "Effort levels each model accepts, from the gateway's registry. The "
-            "composer offers the intersection with the chosen runtime's, and no "
-            "control at all when that is empty — which is also what it shows "
-            "against a gateway too old to answer this."
-        ),
-    )
     mcp_connections: list[McpConnectionSummary] = Field(
         default_factory=list,
         description="MCP servers this deployment offers. Empty means none are configured.",
@@ -103,20 +78,16 @@ class AgentConfigResponse(BaseModel):
     default_model: str | None = Field(
         default=None,
         description=(
-            "The model a new task should start on, first available of: this "
-            "owner's pin in My Settings, the model their newest turn used, the "
-            "deployment default. Always one of `models`, so a retired model is "
-            "never pre-selected. Null means none of the three resolves, or the "
-            "catalog was unreadable — the composer then leaves its model "
-            "control empty and asks, rather than choosing one for the owner."
+            "The model a new task should start on: the one this owner's newest turn "
+            "used, while its connection is enabled and still lists it. Null means "
+            "the composer leaves its model control empty and asks."
         ),
     )
     model_connections: list[ModelConnectionOption] = Field(
         default_factory=list,
         description=(
-            "This owner's enabled model connections. A model chosen from one is "
-            "submitted with its `model_connection_id`; the same id may also be a "
-            "Gateway model, which is a different choice."
+            "This owner's enabled model connections, the only inference source. A "
+            "model chosen from one is submitted with its `model_connection_id`."
         ),
     )
     model_connections_enabled: bool = Field(
@@ -126,9 +97,7 @@ class AgentConfigResponse(BaseModel):
     default_model_connection_id: str | None = Field(
         default=None,
         description=(
-            "The source of `default_model`: the owner connection it last ran on, "
-            "or null for the Gateway. When set, `default_model` is one of that "
-            "connection's models, not necessarily one of `models`."
+            "The connection `default_model` last ran on; set exactly when `default_model` is."
         ),
     )
     mcp_runtimes: list[str] = Field(

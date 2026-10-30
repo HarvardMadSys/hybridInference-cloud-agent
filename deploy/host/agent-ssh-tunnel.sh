@@ -1,5 +1,5 @@
 #!/bin/sh
-# One encrypted hop to the gateway, and nothing else.
+# One encrypted hop to one fixed destination, and nothing else.
 #
 # A sandbox runs untrusted repository code on a chat-private network declared
 # `internal: true` — no route off the host at all. Lifecycle code attaches this
@@ -9,15 +9,14 @@
 #
 # It is deliberately not a proxy. There is no CONNECT, no request routing, no
 # destination the caller can choose: this instance's address is fixed at
-# startup. Each chat Agent-phase network contains two such instances, one for
-# inference and one for the MCP-only listener, and no other chat or general
-# route. (Setup runs earlier, on its own tier, and may also reach the allowlist
-# proxy; this tunnel is not on that path.)
+# startup. Each chat group bridge has one such instance attached, for the
+# control plane's MCP-only listener; another carries the runner's control-plane
+# API traffic and is never on a group bridge.
 #
 # SSH rather than plain TCP because the hop crosses a shared network and the
 # traffic is not incidental: every claim carries an enrolled-host credential, and
 # every job call carries a capability token for that job. Those must not cross
-# a lab LAN in the clear, and it lets the gateway keep listening on loopback.
+# a lab LAN in the clear, and it lets the control plane keep listening on loopback.
 set -eu
 
 KEY_SRC="${TUNNEL_SSH_KEY:-/etc/agent-tunnel/id}"

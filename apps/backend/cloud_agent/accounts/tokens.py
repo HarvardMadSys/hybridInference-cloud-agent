@@ -1,9 +1,9 @@
-"""Opaque local credentials: session cookies, emailed tokens and account ids.
+"""Opaque account credentials: session cookies, emailed tokens and account ids.
 
-A local session is a random value the database knows only by its keyed hash.
-It is not a JWT and carries no claims, so it cannot be mistaken for a
-Gateway-mode session (an HS256 JWT) or a worker token (``ajt.``), and nothing
-in it is an authorization cache: every request reads the account afresh.
+A session is a random value the database knows only by its keyed hash. It is
+not a JWT and carries no claims, so it cannot be mistaken for a worker token
+(``ajt.``), and nothing in it is an authorization cache: every request reads
+the account afresh.
 """
 
 from __future__ import annotations

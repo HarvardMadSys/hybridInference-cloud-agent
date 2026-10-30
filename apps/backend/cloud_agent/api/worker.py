@@ -43,8 +43,7 @@ from cloud_agent.api._workspace_access import (
 )
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_gateway_client,
-    get_grant_client,
+    get_owner_directory,
     get_source_control,
     get_storage,
     get_work_signal,
@@ -67,7 +66,6 @@ from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATE
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import EnvironmentAccessRevoked, EnvironmentEncryptionError
 from cloud_agent.execution_profiles import ExecutionProfile
-from cloud_agent.gateway import GatewayError
 from cloud_agent.github_app import AppNotInstalled
 from cloud_agent.goals.controller import continue_after_finish
 from cloud_agent.goals.prompts import prompt_with_goal
@@ -128,7 +126,6 @@ from cloud_agent.skills.selection import prompt_with_skills
 from cloud_agent.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
-from cloud_agent.task_titles import schedule_thread_title
 from cloud_agent.tokens import (
     SCOPE_FULL,
     SCOPE_MCP,
@@ -163,7 +160,6 @@ if TYPE_CHECKING:
         ExecutionQueries,
         GoalRepository,
         GoalWakeupRepository,
-        GrantRepository,
         HostPoolRepository,
         McpConnectionRepository,
         ModelConnectionRepository,
@@ -253,7 +249,6 @@ class _WorkerStorage(Protocol):
     execution_queries: ExecutionQueries
     goal_wakeups: GoalWakeupRepository
     goals: GoalRepository
-    grants: GrantRepository
     host_pool: HostPoolRepository
     mcp: McpConnectionRepository
     model_connections: ModelConnectionRepository
@@ -364,8 +359,8 @@ def _worker_claims(authorization: str | None) -> dict[str, Any]:
     if claims.get("scope") != SCOPE_FULL:
         # Anything that is not the runner's full-scope control token. The one
         # narrower worker scope is ``mcp``, which the sandbox carries to reach
-        # this service's MCP relay. (The old ``model`` scope, which predated
-        # the gateway grant, no longer parses at all: #822.)
+        # this service's MCP relay. (The old ``model`` scope no longer parses
+        # at all: #822.)
         #
         # This is the structural refusal — and the reason the relay's own
         # check is written positively rather than as "not full". A sandbox
@@ -525,16 +520,14 @@ def _warn_on_unbounded_untrusted_group(
 
 async def _require_owner_agent_access(
     job_store: _WorkerStorage,
-    gateway: Any,
+    owners: Any,
     claim: dict[str, Any],
 ) -> None:
-    """Ask the Gateway again whether this job's owner may still use Agent.
+    """Ask the account directory again whether this job's owner may still use Agent.
 
     Admission was decided when the job was written, and a job can sit in the
     queue long after that — or be written by a goal or a waiting message with
-    no request behind it at all. The grant mint does not catch a withdrawal:
-    the Gateway refuses it only for an account that is unknown or inactive, so
-    an active account without ``agent.use`` would still get a working grant.
+    no request behind it at all.
 
     **A denial ends the job rather than handing it back.** Released, it would be
     eligible again at the next claim and refused again, every time; failed, it
@@ -542,15 +535,15 @@ async def _require_owner_agent_access(
     messages pause on it the way they do for any failed turn.
 
     **No answer hands it back**, with the same delay as the other transient
-    claim failures: an unreachable Gateway is not a verdict on the owner, and a
-    released claim spends no attempt.
+    claim failures: an unreadable account store is not a verdict on the owner,
+    and a released claim spends no attempt.
 
     Raises:
         HTTPException: 403 after ending the job when access was withdrawn, or
             503 after releasing the claim when it could not be confirmed.
     """
     try:
-        permitted = await owner_may_use_agent(gateway, user_id=str(claim["user_id"]))
+        permitted = await owner_may_use_agent(owners, user_id=str(claim["user_id"]))
     except AgentAccessUnavailable as exc:
         await job_store.attempt_commands.release_claim(
             job_id=claim["id"],
@@ -594,226 +587,13 @@ async def _require_owner_agent_access(
     )
 
 
-async def _mint_sandbox_grant(
-    job_store: _WorkerStorage,
-    grants: Any,
-    claim: dict[str, Any],
-) -> str:
-    """Ask the gateway for this attempt's inference grant.
-
-    Scoped to exactly the model the job named — not to everything the owner's
-    role could reach. The gateway may narrow that further, and what comes back
-    is what is handed over; the runner never sees what was asked for.
-
-    The sandbox CLI does not run on this grant. Each member's CLI runs on its
-    own residency grant, which ``worker_establish_shared_sandbox_residency``
-    mints before the CLI starts and host heartbeats renew. This one stays with
-    the attempt: the claim returns it as ``sandbox_token``, and the control
-    plane may spend it on the conversation's title.
-
-    **Transient failure hands the job back.** A grant that could not be minted
-    means the gateway is not minting for this owner and model right now, and the
-    member's residency grant comes from the same mint. Starting the attempt
-    would likely burn one of the job's three tries producing an agent that
-    cannot call a model. Releasing the claim costs nothing — a released claim is not a
-    spent attempt — and its next claim waits briefly while later jobs can run.
-    A definitive refusal of the subject or requested model ends this job with
-    an actionable reason instead of retrying the same oldest row indefinitely.
-
-    The grant id is recorded against the attempt under its own fence, because
-    renewal and revocation both need to find it later, and because the fence is
-    what makes "is this attempt still the current one" answerable at all.
-
-    **A grant that cannot be linked is revoked, not handed over.** The link is
-    the only thing that will ever renew or revoke this capability, so a grant
-    without one is a live credential nothing owns: it survives to its TTL, it
-    is not renewed so the run fails anyway, and no operator can find it. Both
-    ways that can happen — a gateway answer with no ``grant_id``, and a fenced
-    UPDATE that matched nothing because the attempt was superseded in between —
-    end the same way: withdraw it and fail the claim.
-
-    Args:
-        job_store: The store holding the attempt.
-        grants: The grant client.
-        claim: The row ``claim_job`` returned.
-
-    Returns:
-        The grant's bearer token. It does not enter the sandbox.
-
-    Raises:
-        HTTPException: 503, after releasing the claim, if no grant could be got
-            or the one that was minted could not be linked to this attempt.
-            A definitive subject/model refusal returns 403 after ending the job.
-    """
-    try:
-        grant = await grants.mint(
-            user_id=claim["user_id"],
-            job_id=claim["id"],
-            attempt_id=claim["attempt_id"],
-            models=[claim["model"]],
-        )
-    except GatewayError as exc:
-        if exc.definitive and exc.error_type == "subject_unavailable":
-            await job_store.attempt_commands.transition(
-                job_id=claim["id"],
-                attempt_id=claim["attempt_id"],
-                lease_generation=claim["lease_generation"],
-                from_states=(RUNNING,),
-                to_state=FAILED,
-                detail="The gateway account can no longer run this job.",
-            )
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error": {
-                        "type": "subject_unavailable",
-                        "message": ("The gateway account can no longer run this job."),
-                    }
-                },
-            ) from exc
-        await job_store.attempt_commands.release_claim(
-            job_id=claim["id"],
-            attempt_id=claim["attempt_id"],
-            lease_generation=claim["lease_generation"],
-            retry_after_seconds=30,
-        )
-        logger.warning(
-            "agent_job_grant_unavailable",
-            exc_info=True,
-            extra={"event": "agent_job_grant_unavailable", "job_id": claim["id"]},
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "credential_unavailable",
-                    "message": (
-                        "Could not mint an inference grant for this job; it has been "
-                        "returned to the queue and no attempt was spent."
-                    ),
-                }
-            },
-        ) from exc
-
-    sandbox_token = str(grant.get("token") or "")
-    grant_id = str(grant.get("grant_id") or "")
-
-    # **What was asked for is not what was granted.** The gateway clamps the
-    # requested models against the role the user has *now*, and a job can sit
-    # in the queue for a long time — long enough for a downgrade, a tier
-    # change, or a model being withdrawn from that tier. The clamp is not an
-    # error there: the request was satisfiable, just not on the caller's terms,
-    # and the response reports the effective list.
-    #
-    # Unchecked, that lands as a sandbox that starts, spends an attempt, and
-    # fails on its first inference call. A definitive scope refusal ends this
-    # job so the same oldest row cannot monopolize every subsequent claim.
-    #
-    # Absence is refusal too. The contract says this field is returned; if it
-    # is not, the scope cannot be verified, and "cannot verify" is not a reason
-    # to proceed with a capability.
-    granted_models = grant.get("allowed_models")
-    if not isinstance(granted_models, list) or claim["model"] not in granted_models:
-        if grant_id:
-            await grants.revoke(grant_id)
-        definitive = isinstance(granted_models, list)
-        if definitive:
-            await job_store.attempt_commands.transition(
-                job_id=claim["id"],
-                attempt_id=claim["attempt_id"],
-                lease_generation=claim["lease_generation"],
-                from_states=(RUNNING,),
-                to_state=FAILED,
-                detail="The gateway no longer grants this job's model; choose an available model.",
-            )
-        else:
-            await job_store.attempt_commands.release_claim(
-                job_id=claim["id"],
-                attempt_id=claim["attempt_id"],
-                lease_generation=claim["lease_generation"],
-                retry_after_seconds=30,
-            )
-        logger.warning(
-            "agent_job_grant_scope_insufficient",
-            extra={
-                "event": "agent_job_grant_scope_insufficient",
-                "job_id": claim["id"],
-                "model": claim["model"],
-                "granted": granted_models if isinstance(granted_models, list) else None,
-            },
-        )
-        raise HTTPException(
-            status_code=403 if definitive else 503,
-            detail={
-                "error": {
-                    "type": "model_not_granted",
-                    "message": (
-                        "The gateway no longer grants this job's model; choose an available model."
-                        if definitive
-                        else "The gateway returned an unreadable model scope; the job will retry shortly."
-                    ),
-                }
-            },
-        )
-
-    try:
-        linked = bool(grant_id) and await job_store.grants.record_attempt_grant(
-            attempt_id=claim["attempt_id"],
-            lease_generation=claim["lease_generation"],
-            grant_id=grant_id,
-        )
-    except Exception:
-        # Not recorded, so nothing would ever renew or revoke it: withdraw it
-        # here, and let the claim's own failure path hand the job back.
-        if grant_id:
-            with contextlib.suppress(Exception):
-                await grants.revoke(grant_id)
-        raise
-    if not linked:
-        # Withdraw it before anything else. This is the one moment the grant id
-        # is known to a process that is about to forget it, and after that only
-        # its TTL can end it.
-        if grant_id:
-            await grants.revoke(grant_id)
-        await job_store.attempt_commands.release_claim(
-            job_id=claim["id"],
-            attempt_id=claim["attempt_id"],
-            lease_generation=claim["lease_generation"],
-            retry_after_seconds=30,
-        )
-        logger.warning(
-            "agent_job_grant_unlinked",
-            extra={
-                "event": "agent_job_grant_unlinked",
-                "job_id": claim["id"],
-                "attempt_id": claim["attempt_id"],
-                "grant_id": grant_id or None,
-            },
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "credential_unavailable",
-                    "message": (
-                        "The inference grant for this job could not be recorded against "
-                        "its attempt; it has been withdrawn and no attempt was spent."
-                    ),
-                }
-            },
-        )
-    return sandbox_token
-
-
 @router.post("/worker/claim", response_model=WorkerClaimResponse | None)
 async def worker_claim(
     body: WorkerClaimRequest,
-    background_tasks: BackgroundTasks,
     claiming_host: dict[str, str] = Depends(verify_claiming_host),
     store: _WorkerStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
-    grants: Any = Depends(get_grant_client),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> WorkerClaimResponse | None:
     """Claim the next queued job and mint this attempt's capability token.
 
@@ -860,10 +640,8 @@ async def worker_claim(
         return await _hand_over_claim(
             job_store,
             claim,
-            background_tasks=background_tasks,
             app_credentials=app_credentials,
-            grants=grants,
-            gateway=gateway,
+            owners=owners,
             attestation=body.attestation,
             host=claiming_host["host"],
         )
@@ -872,11 +650,10 @@ async def worker_claim(
         raise
     except Exception as exc:
         # Anything else that fails between the claim and the answer — a store
-        # read, a malformed MCP binding, a grant link that raised — would
-        # otherwise escape as a 500 with the claim still held: the job would
-        # wait out a lease nothing is using, and the reaper would charge it a
-        # retry for a turn no agent ever started. A grant already linked to
-        # this attempt is revoked by the revocation pass once it is aborted.
+        # read, a malformed MCP binding — would otherwise escape as a 500 with
+        # the claim still held: the job would wait out a lease nothing is
+        # using, and the reaper would charge it a retry for a turn no agent
+        # ever started.
         logger.warning(
             "agent_job_claim_failed",
             exc_info=True,
@@ -912,10 +689,8 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
     job_store: _WorkerStorage,
     claim: dict[str, Any],
     *,
-    background_tasks: BackgroundTasks,
     app_credentials: Any | None,
-    grants: Any,
-    gateway: Any,
+    owners: Any,
     attestation: WorkerClaimAttestation | None,
     host: str,
 ) -> WorkerClaimResponse:
@@ -932,16 +707,13 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
     }
     # Whether the owner may still use Agent at all comes first: it is the one
     # check every turn passes here, including the ones no request admitted.
-    await _require_owner_agent_access(job_store, gateway, claim)
+    await _require_owner_agent_access(job_store, owners, claim)
     # Re-checked at claim time, not just at create time. A row written before
     # this check existed — or while the allowlist was wider — must not be able
     # to produce a credential now.
     #
-    # **And before any credential is minted.** A refusal here used to arrive
-    # after the gateway had already issued this attempt a grant, so every
-    # claim of a job whose repository its owner can no longer reach cost a
-    # mint and, later, a revocation, for a turn that was never going to run.
-    # Nothing below is asked for until the job is known to be runnable.
+    # **And before any credential is minted.** Nothing below is asked for
+    # until the job is known to be runnable.
     try:
         # The same check create used. The allowlist-only variant here meant a
         # job entitled by its owner's own GitHub connection passed creation and
@@ -1062,24 +834,13 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
                 503, "Waiting for an SSH-capable host or available encryption"
             ) from None
 
-    # Two credentials with different powers. The runner keeps the full one. The
-    # sandbox gets neither: its CLI runs on the member's own residency grant
-    # (``worker_establish_shared_sandbox_residency``), so a credential that
-    # leaks from inside the agent can make model calls the gateway already
-    # meters but cannot touch this job's event log, lifecycle, or terminal
-    # state.
-    #
-    # Only the first is ours to mint. ``SCOPE_FULL`` is this service's own
-    # control credential, signed with this service's own secret and verified by
-    # this service — correctly local. A grant is not: it buys inference, which
-    # is the gateway's to authorize and the gateway's to meter, so it is asked
-    # for rather than minted. Before this, the claim minted
-    # a ``SCOPE_MODEL`` token signed with a root the gateway does not know —
-    # which bought nothing, and failed at the sandbox's first model call.)
+    # The runner keeps the full-scope control credential; it never enters the
+    # sandbox, whose CLI runs on its residency's model connection key
+    # (``worker_establish_shared_sandbox_residency``). ``SCOPE_FULL`` is this
+    # service's own credential, signed with this service's own secret.
     token = mint_worker_token(**fence, scope=SCOPE_FULL)
-    # A turn on the owner's own connection runs on that key, not on a grant.
+    # The owner's own connection is the turn's only inference source.
     model_connection = await claim_model_connection(job_store, claim, capabilities)
-    sandbox_token = "" if model_connection else await _mint_sandbox_grant(job_store, grants, claim)
 
     # COMPAT(remove-after=2026-11-30): no host reads the claim's mcp_token, as
     # none since #974 does: each member's CLI reaches the MCP relay with its
@@ -1234,7 +995,6 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         runtime_version=claim.get("runtime_version"),
         thread_sandbox=claim.get("thread_sandbox"),
         worker_token=token,
-        sandbox_token=sandbox_token,
         mcp_token=mcp_token,  # COMPAT(remove-after=2026-11-30): as at its mint above.
         clone_token=clone_token,
         github_token=github_token,
@@ -1244,10 +1004,6 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         mcp_bindings=mcp_aliases,
         metadata=claim["metadata"],
     )
-    if model_connection is None:  # A title is generated on the Gateway grant only.
-        schedule_thread_title(
-            background_tasks, job_store.conversation_commands, claim, sandbox_token=sandbox_token
-        )
     return response
 
 
@@ -1653,9 +1409,8 @@ async def worker_establish_shared_sandbox_residency(
     body: WorkerSandboxResidencyRequest,
     authorization: str | None = Header(None),
     store: _WorkerStorage | None = Depends(get_storage),
-    grants: Any = Depends(get_grant_client),
 ) -> HostResidencyEstablishResponse:
-    """Mint the renewable member grant before the supervisor opens a CLI."""
+    """Bind a member residency to its connection's key before the supervisor opens a CLI."""
     job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
@@ -1675,13 +1430,8 @@ async def worker_establish_shared_sandbox_residency(
     )
     if row is None:
         raise _lease_lost()
-    previous_grant = row.get("previous_grant_id")
-    if previous_grant and grants is not None:
-        with contextlib.suppress(Exception):
-            await grants.revoke(previous_grant)
     credential, revision, plan = await residency_credential(
         job_store,
-        grants,
         job=row,
         row=row,
         host=str(host["host"]),
@@ -1707,13 +1457,11 @@ async def worker_establish_shared_sandbox_residency(
         residency_generation=int(row["generation"]),
     )
     if not recorded:
-        released = await job_store.residency.release_residency(
+        await job_store.residency.release_residency(
             thread_id=thread_id,
             generation=int(row["generation"]),
             host=str(host["host"]),
         )
-        if released and grants is not None:
-            await grants.revoke(released)
         raise _lease_lost()
     return HostResidencyEstablishResponse(
         thread_id=thread_id,
@@ -1832,7 +1580,6 @@ async def worker_abandon_thread_sandbox(
     body: WorkerSandboxAbandonRequest,
     authorization: str | None = Header(None),
     store: _WorkerStorage | None = Depends(get_storage),
-    grants: Any = Depends(get_grant_client),
 ) -> WorkerThreadSandbox:
     """Release a failed activation; ambiguous admission becomes LOST."""
     job_store = _require_store(store)
@@ -1852,18 +1599,14 @@ async def worker_abandon_thread_sandbox(
     if row is None:
         raise _lease_lost()
     if int(row.get("residency_generation") or 0) > 0:
-        # The shared supervisor closes this member's process on abandon. End
-        # its matching renewable capability now instead of leaving a dead
-        # process's grant live until the residency TTL. The generation fence
-        # makes a concurrent successor immune to this cleanup.
-        released = await job_store.residency.release_residency(
+        # The shared supervisor closes this member's process on abandon; the
+        # residency ends with it. The generation fence makes a concurrent
+        # successor immune to this cleanup.
+        await job_store.residency.release_residency(
             thread_id=thread_id,
             generation=int(row["residency_generation"]),
             host=str(row["host"]),
         )
-        if released and grants is not None:
-            with contextlib.suppress(Exception):
-                await grants.revoke(released)
     return WorkerThreadSandbox(**row)
 
 
@@ -2161,7 +1904,7 @@ async def worker_finish(
     authorization: str | None = Header(None),
     store: _WorkerStorage | None = Depends(get_storage),
     source_control: SourceControlRuntime | None = Depends(get_source_control),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> WorkerAckResponse:
     """Drive the fenced terminal transition for this attempt.
 
@@ -2264,7 +2007,7 @@ async def worker_finish(
             await settle_queue_when_possible(
                 job_store,
                 thread_id=str(job["thread_id"]),
-                gateway=gateway,
+                owners=owners,
                 github_app=github_app,
             )
         except Exception:
@@ -2301,7 +2044,7 @@ async def worker_finish(
             job_id=job_id,
             thread_id=job.get("thread_id"),
             github_app=github_app,
-            gateway=gateway,
+            owners=owners,
         )
     except Exception:
         logger.warning(

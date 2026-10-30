@@ -245,7 +245,7 @@ jobs:
           - name: tunnel
             arch: amd64
             smoke_args: --role tunnel
-            dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
+            dockerfile: deploy/host/Dockerfile.agent-ssh-tunnel
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
           # END GENERATED ARTIFACT MATRIX

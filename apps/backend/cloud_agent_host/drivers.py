@@ -105,7 +105,7 @@ class ResidentLiveRuntime(DialectRuntime, Protocol):
         *,
         workdir: str,
         model: str,
-        gateway_base_url: str,
+        model_base_url: str,
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
@@ -409,7 +409,7 @@ class LaunchContext:
     """
 
     workdir: str
-    gateway_base_url: str
+    model_base_url: str
     credential: str
     provides_isolation: bool
     base_env: dict[str, str] = field(default_factory=dict)
@@ -1184,7 +1184,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
         return self.runtime.prepare_live(
             workdir=self._context.workdir,
             model=model,
-            gateway_base_url=self._context.gateway_base_url,
+            model_base_url=self._context.model_base_url,
             credential=self._context.credential,
             provides_isolation=self._context.provides_isolation,
             mcp_config=self._context.mcp_config,
@@ -2769,7 +2769,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         argv, extra_env = self.runtime.prepare_live(
             workdir=context.workdir,
             model="",  # pinned per session below, chosen by the first turn's model
-            gateway_base_url=context.gateway_base_url,
+            model_base_url=context.model_base_url,
             credential=context.credential,
             provides_isolation=context.provides_isolation,
             mcp_config=context.mcp_config,

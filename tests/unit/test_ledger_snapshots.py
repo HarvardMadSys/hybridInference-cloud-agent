@@ -13,7 +13,7 @@ import pytest
 
 from cloud_agent import ledger
 from cloud_agent.admin_usage import MAX_USAGE_LEDGER_ROWS
-from cloud_agent.gateway import GatewayError
+from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.grant_usage import (
     DECIMAL_DIGITS,
     DERIVED_AMOUNT_CHARS,
@@ -441,7 +441,7 @@ async def test_collector_uses_the_saved_grant_and_fixed_window():
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
-    [GatewayError("Bearer SECRET", error_type="usage_unavailable"), RuntimeError("SECRET")],
+    [OwnerDirectoryError("Bearer SECRET", error_type="usage_unavailable"), RuntimeError("SECRET")],
 )
 async def test_collector_records_only_a_safe_failure_and_no_replacement_snapshot(failure):
     store = SimpleNamespace(complete_ledger_refresh=AsyncMock(return_value=True))

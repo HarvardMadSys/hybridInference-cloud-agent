@@ -16,11 +16,9 @@ import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
-from cloud_agent.accounts.config import auth_mode, local_mode
 from cloud_agent.domain.compute import ComputeRefusal, fingerprint
 from cloud_agent.ports.external.compute_provider import SshConnection
 from cloud_agent.providers.compute.sandbox_image import find_published_sandbox_image
@@ -82,25 +80,8 @@ _HostReleaseKey = tuple[str, int, int, int, int, str]
 _HOST_RELEASE_MEMO: dict[str, tuple[_HostReleaseKey, HostRelease]] = {}
 
 
-def _inference_request(request: AutomaticDeploymentSetup) -> AutomaticDeploymentSetup:
-    """The deployment decides whether a Gateway machine may be used."""
-    if local_mode():
-        return request.model_copy(update={"gateway": None, "gateway_port": 8080})
-    if request.gateway is None:
-        raise ComputeRefusal(
-            "automatic_gateway_required",
-            "Gateway deployments require an inference Gateway machine.",
-            status=422,
-        )
-    return request
-
-
 def _request_document(request: AutomaticDeploymentSetup) -> dict[str, Any]:
-    document = request.model_dump(mode="json")
-    if local_mode():
-        document.pop("gateway", None)
-        document.pop("gateway_port", None)
-    return document
+    return request.model_dump(mode="json")
 
 
 def validate_host_bundle(bundle: bytes) -> None:
@@ -125,10 +106,7 @@ def validate_host_bundle(bundle: bytes) -> None:
                 names.add(name)
     except (tarfile.TarError, OSError, ValueError) as exc:
         raise ValueError("invalid") from exc
-    required = _HOST_BUNDLE_FILES | (
-        {"deploy/host/inference_compose.py"} if local_mode() else set()
-    )
-    if not names >= required:
+    if not names >= _HOST_BUNDLE_FILES:
         raise ValueError("incomplete")
 
 
@@ -276,26 +254,13 @@ class AutomaticComputeSetup:
         saved = await self.repository.provider_defaults("automatic_setup")
         request = saved.get("request")
         if not isinstance(request, dict):
-            try:
-                gateway_address = urlsplit(text_setting("gateway_base_url")).hostname or ""
-            except ValueError:
-                gateway_address = ""
             status["machine_defaults"] = {
-                "gateway": {
-                    "address": os.environ.get("AGENT_GATEWAY_SSH_HOST", "").strip()
-                    or gateway_address,
-                },
                 "control": {
                     "address": os.environ.get("AGENT_CONTROL_PLANE_SSH_HOST", "").strip(),
                 },
             }
-            if local_mode():
-                status["machine_defaults"].pop("gateway", None)
             return status
         defaults = {key: value for key, value in request.items() if key != "request_id"}
-        if local_mode():
-            defaults.pop("gateway", None)
-            defaults.pop("gateway_port", None)
         status["defaults"] = defaults
         status["pending_request_id"] = None
         if saved.get("source_commit") == status["deployment_sha"]:
@@ -383,12 +348,10 @@ class AutomaticComputeSetup:
         endpoint: ControlPlaneEndpoint,
         profile_id: str,
         reverse_port: int,
-        gateway_hosts: str,
         control_hosts: str,
         sandbox_image: str | None = None,
     ) -> dict[str, Any]:
         environment = {
-            "AGENT_AUTH_MODE": auth_mode(),
             # The published image when the release has one: its registry
             # digest is what lets another Host restore these chats from their
             # checkpoints. Otherwise the Host builds its own, as before, and
@@ -410,7 +373,6 @@ class AutomaticComputeSetup:
         files = {}
         public_keys = {}
         for role, prefix, machine, port, hosts in (
-            ("gateway", "AGENT_TUNNEL", request.gateway, request.gateway_port, gateway_hosts),
             ("mcp", "AGENT_MCP_TUNNEL", request.control, endpoint.mcp_port, control_hosts),
             (
                 "control",
@@ -420,8 +382,6 @@ class AutomaticComputeSetup:
                 control_hosts,
             ),
         ):
-            if machine is None or (role == "gateway" and local_mode()):
-                continue
             key = generate_tunnel_key()
             files[f".compute-secrets/{role}.key"] = key.private_key.get_secret_value()
             files[f".compute-secrets/{role}.known_hosts"] = hosts
@@ -429,7 +389,7 @@ class AutomaticComputeSetup:
             environment.update(
                 {
                     prefix
-                    + "_SSH_DESTINATION": f"{tunnel_username(profile_id, 'inference' if role == 'gateway' else role)}@{machine.address}",
+                    + "_SSH_DESTINATION": f"{tunnel_username(profile_id, role)}@{machine.address}",
                     prefix + "_SSH_PORT": str(machine.port),
                     prefix + "_SSH_KEY": f"{{deploy_root}}/.compute-secrets/{role}.key",
                     prefix
@@ -471,7 +431,6 @@ class AutomaticComputeSetup:
         request_fingerprint: str,
         slot: int,
         reserved: set[int],
-        gateway_hosts: str,
         control_hosts: str,
         sandbox_image: str | None = None,
     ) -> dict[str, Any]:
@@ -501,7 +460,6 @@ class AutomaticComputeSetup:
                 endpoint,
                 profile_id,
                 reverse_port,
-                gateway_hosts,
                 control_hosts,
                 sandbox_image,
             )
@@ -579,7 +537,6 @@ class AutomaticComputeSetup:
 
     async def create(self, request: AutomaticDeploymentSetup) -> dict[str, Any]:
         """Checkpoint exact inputs, provision scoped access, and activate all slots."""
-        request = _inference_request(request)
         release = self._release()
         status = self.status()
         if not status["available"]:
@@ -620,7 +577,6 @@ class AutomaticComputeSetup:
                 "The detected control-plane bridge address must be included in the sandbox manager host allowlist.",
                 status=422,
             )
-        gateway, gateway_hosts = await self._inference_connection(request, endpoint)
         await self.repository.set_provider_defaults(
             "automatic_setup",
             {"request": _request_document(request), "source_commit": release.sha},
@@ -651,7 +607,6 @@ class AutomaticComputeSetup:
                     request_fingerprint,
                     slot,
                     reserved,
-                    gateway_hosts,
                     control_hosts,
                     sandbox_image,
                 )
@@ -674,10 +629,6 @@ class AutomaticComputeSetup:
                 )
             )
             keys = assets["public_keys"]
-            if gateway is not None:
-                await self.tunnels.provision_gateway(
-                    gateway, keys["gateway"], request.gateway_port, row["id"]
-                )
             await self.tunnels.provision_control(
                 control,
                 keys["mcp"],
@@ -692,26 +643,3 @@ class AutomaticComputeSetup:
             request_fingerprint=request_fingerprint,
         )
         return {"profiles": [{"id": row["id"], "label": row["label"]} for row in rows]}
-
-    async def _inference_connection(
-        self, request: AutomaticDeploymentSetup, endpoint: ControlPlaneEndpoint
-    ) -> tuple[SshConnection | None, str]:
-        """Check the inference listener only where the deployment has one."""
-        if local_mode():
-            return None, ""
-        if request.gateway is None:
-            raise ComputeRefusal(
-                "automatic_gateway_required", "Gateway machine required", status=422
-            )
-        gateway = await self._connection(request.gateway)
-        identity = await self.tunnels.check_gateway(gateway, request.gateway_port)
-        if identity == endpoint.machine_identity and request.gateway_port in {
-            endpoint.main_port,
-            endpoint.mcp_port,
-        }:
-            raise ComputeRefusal(
-                "automatic_listener_conflict",
-                "The gateway must use a different port from the control-plane API and MCP listeners on the same machine.",
-                status=422,
-            )
-        return gateway, await self.resolver.resolve(gateway.known_hosts_ref or "")

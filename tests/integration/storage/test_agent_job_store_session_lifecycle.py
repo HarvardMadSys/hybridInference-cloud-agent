@@ -793,7 +793,7 @@ async def test_side_chat_follow_up_http_receipt_matches_retained_owner_read(
 
     from cloud_agent.api import routes
     from cloud_agent.api._owner_auth import require_agent_owner
-    from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client, get_storage
+    from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory, get_storage
     from cloud_agent.application import follow_ups
 
     job, claim, sandbox = await _reserve_shared_chat(store)
@@ -851,7 +851,7 @@ async def test_side_chat_follow_up_http_receipt_matches_retained_owner_read(
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": job["user_id"]}
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
-    app.dependency_overrides[get_gateway_client] = lambda: None
+    app.dependency_overrides[get_owner_directory] = lambda: None
     monkeypatch.setattr(follow_ups, "require_entitled_repo", AsyncMock())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         path = f"/v1/agent/threads/{job['thread_id']}/messages"

@@ -94,7 +94,7 @@ async def env(pool, monkeypatch):
     app = create_app()
     storage = Storage(pool)
     app.state.storage = storage
-    app.state.gateway = LocalModeGateway(LocalOwnerDirectory(storage.local_accounts))
+    app.state.owners = LocalModeGateway(LocalOwnerDirectory(storage.local_accounts))
     app.state.grants = LocalModeGrantClient()
     app.state.account_mailer = _Mailer()
     app.state.sms_sender = _Texts()

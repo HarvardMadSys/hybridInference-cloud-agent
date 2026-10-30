@@ -195,7 +195,6 @@ def _job(version: str | None) -> ClaimedJob:
         runtime="claude-code",
         model="m",
         worker_token="w",
-        sandbox_token="s",
         runtime_version=version,
     )
 
@@ -344,7 +343,6 @@ def _full_claim() -> WorkerClaimResponse:
             "activation_generation": 1,
             "process_generation": 1,
         },
-        sandbox_token="s",
         mcp_token="t",
         clone_token="c",
         github_token="g",

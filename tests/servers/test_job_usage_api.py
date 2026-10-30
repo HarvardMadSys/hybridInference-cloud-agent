@@ -344,7 +344,7 @@ async def test_message_request_never_guesses_missing_attribution(
 async def test_message_request_does_not_select_arbitrary_or_unavailable_rows(
     app, request_grants, case, expected
 ):
-    from cloud_agent.gateway import GatewayError
+    from cloud_agent.accounts.directory import OwnerDirectoryError
 
     page = request_grants.usage_requests.return_value
     if case == "duplicate":
@@ -359,7 +359,7 @@ async def test_message_request_does_not_select_arbitrary_or_unavailable_rows(
     elif case == "missing":
         request_grants.usage_requests.return_value = page.model_copy(update={"requests": []})
     else:
-        request_grants.usage_requests.side_effect = GatewayError(
+        request_grants.usage_requests.side_effect = OwnerDirectoryError(
             "private diagnostics", error_type="usage_unavailable"
         )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -428,9 +428,9 @@ async def test_thread_model_ttft_refuses_another_owners_thread(app, store, ttft_
 
 @pytest.mark.asyncio
 async def test_thread_model_ttft_without_gateway_timing_is_null(app, store, ttft_grants):
-    from cloud_agent.gateway import GatewayError
+    from cloud_agent.accounts.directory import OwnerDirectoryError
 
-    ttft_grants.usage_requests.side_effect = GatewayError(
+    ttft_grants.usage_requests.side_effect = OwnerDirectoryError(
         "private diagnostics", error_type="request_details_unsupported"
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

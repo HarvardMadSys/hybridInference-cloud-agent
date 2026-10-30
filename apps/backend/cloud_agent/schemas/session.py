@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 from pydantic import BaseModel
 
 from cloud_agent.agent_access import (
@@ -22,14 +20,12 @@ class SessionUserResponse(BaseModel):
     session.ts`` was written against, and it is the contract for all three
     session routes.
 
-    ``auth_mode`` says which identity source answered. ``email`` and
-    ``waitlist`` are present for a local account only, and left out of the
-    body otherwise; the Gateway owns those for its accounts.
+    ``email``, ``waitlist`` and ``identity`` describe the account; a field
+    with no value is left out of the body.
     """
 
     id: str
     agent_access: AgentAccess
-    auth_mode: Literal["local", "gateway"] | None = None
     email: str | None = None
     waitlist: WaitlistEntry | None = None
     identity: AccountIdentity | None = None

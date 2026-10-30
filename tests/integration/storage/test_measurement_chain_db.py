@@ -429,7 +429,6 @@ async def test_live_delivery_reaches_postgres_without_a_jsonl_sink(chain, monkey
         runtime="claude-code",
         model="m",
         worker_token=_token(),
-        sandbox_token="unused",
     )
 
     runner_mod._enqueue_delivery(measurement, job=job, base_url=base_url, drain_s=0)

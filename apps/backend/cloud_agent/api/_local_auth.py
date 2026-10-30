@@ -20,8 +20,8 @@ from fastapi.responses import JSONResponse
 
 from cloud_agent.accounts.config import (
     LocalAuthNotConfigured,
-    local_mode,
     mail_web_base_url,
+    session_cookie_is_secure,
     signup_flag_enabled,
 )
 from cloud_agent.accounts.delivery import DeliveryMailer
@@ -38,8 +38,6 @@ from cloud_agent.api._sensitive_routes import SensitiveRoute
 from cloud_agent.api.deps import get_client_ip, get_storage, require_store
 from cloud_agent.api.errors import (
     AgentConfigurationError,
-    gateway_feature_unavailable,
-    local_auth_disabled,
     typed_error,
 )
 from cloud_agent.application.account_security import (
@@ -77,7 +75,6 @@ from cloud_agent.domain.accounts import (
     SelfDeleteRefused,
     WaitlistNotResubmittable,
 )
-from cloud_agent.identity import session_cookie_is_secure
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.accounts import BrowserFull
 from cloud_agent.schemas.accounts import AccountEntry, AccountIdentity, WaitlistEntry
@@ -204,18 +201,6 @@ def _envelope(status: int, code: str, message: str) -> JSONResponse:
     )
 
 
-def require_local_mode() -> None:
-    """Refuse a local-account route on a Gateway-mode deployment."""
-    if not local_mode():
-        raise local_auth_disabled()
-
-
-def refuse_in_local_mode() -> None:
-    """Refuse a Gateway-only reading surface in local mode, before any Gateway call."""
-    if local_mode():
-        raise gateway_feature_unavailable()
-
-
 async def _access_ended(store: Any, user_id: str) -> bool:
     from cloud_agent.domain.accounts import permissions_for
 
@@ -240,8 +225,7 @@ async def terminal_open_fence(
 ) -> AsyncIterator[dict[str, Any]]:
     """Fence a terminal opened by a request admitted before its owner's access ended.
 
-    Local mode only, read from this database once the open has finished. The
-    caller puts the opened terminal in the yielded dict under ``"terminal"``.
+    Read from this database once the open has finished. The caller puts the opened terminal in the yielded dict under ``"terminal"``.
 
     - Opened, and access has ended: a termination record is reopened first,
       so the enforcement pass kills the group's terminals even if the kill
@@ -257,9 +241,6 @@ async def terminal_open_fence(
         HTTPException: 403 after reopening the cleanup and killing the terminal.
     """
     opened: dict[str, Any] = {}
-    if not local_mode():
-        yield opened
-        return
     try:
         yield opened
     except BaseException:
@@ -321,11 +302,7 @@ def signup_enabled(request: Request) -> bool:
     As HybridInference, sign-up works without SMTP when email verification is
     off: the account is verified at creation and nothing needs mailing.
     """
-    return (
-        local_mode()
-        and signup_flag_enabled()
-        and (not require_email_verification() or mail_available(request))
-    )
+    return signup_flag_enabled() and (not require_email_verification() or mail_available(request))
 
 
 def _admin_notifier(
@@ -485,7 +462,6 @@ def local_session_user(record: AccountRecord, decision: AgentAccessDecision) -> 
     return SessionUserResponse(
         id=record.id,
         agent_access=decision.public(),
-        auth_mode="local",
         email=record.email,
         waitlist=waitlist_entry(record),
         identity=account_identity(record),
@@ -505,9 +481,7 @@ __all__ = [
     "local_flows",
     "local_session_user",
     "mail_available",
-    "refuse_in_local_mode",
     "require_json",
-    "require_local_mode",
     "signup_enabled",
     "sms_sender",
     "terminal_open_fence",

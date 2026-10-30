@@ -28,7 +28,6 @@ from cloud_agent.api._local_auth import (
     local_accounts,
     local_flows,
     require_json,
-    require_local_mode,
     sms_sender,
 )
 from cloud_agent.api._local_browser import complete_sign_in, joinable_browser
@@ -41,7 +40,7 @@ from cloud_agent.api.auth import (
     signed_in_response,
     signup_rules,
 )
-from cloud_agent.api.deps import get_client_ip, get_gateway_client, local_session_owner
+from cloud_agent.api.deps import get_client_ip, get_owner_directory, local_session_owner
 from cloud_agent.api.errors import typed_error
 from cloud_agent.application.accounts import InvalidCredentials
 from cloud_agent.application.phone_accounts import (
@@ -67,7 +66,7 @@ router = APIRouter(
     prefix="/v1/auth/phone",
     tags=["auth"],
     route_class=LocalAuthRoute,
-    dependencies=[Depends(require_local_mode), Depends(require_json)],
+    dependencies=[Depends(require_json)],
 )
 
 
@@ -177,7 +176,7 @@ async def phone_sign_in(
     body: PhoneVerifyRequest,
     request: Request,
     response: Response,
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> SessionUserResponse:
     """Spend a login code and add the account to this browser."""
     flows = phone_flows(request)
@@ -204,7 +203,7 @@ async def phone_sign_in(
     await record_sign_in(
         request, method="phone", identifier=key, account_id=signed_in.account.id, failure=None
     )
-    return await signed_in_response(request, response, gateway, signed_in)
+    return await signed_in_response(request, response, owners, signed_in)
 
 
 __all__ = ["enforce_code_checks", "phone_flows", "router"]

@@ -49,8 +49,8 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent import identity
 from cloud_agent.api import session as session_router
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_gateway_client
-from cloud_agent.gateway import GatewayError
+from cloud_agent.api.deps import get_owner_directory
+from cloud_agent.accounts.directory import OwnerDirectoryError
 
 pytestmark = pytest.mark.asyncio
 
@@ -109,7 +109,7 @@ def _identity_token(key, *, sub: str = _USER, aud: str = identity.AUDIENCE, **ex
     return jwt.encode(claims, key, algorithm="RS256")
 
 
-class _FakeGateway:
+class _FakeOwners:
     """The gateway's code-exchange and Agent-access contracts, in-process."""
 
     def __init__(
@@ -118,7 +118,7 @@ class _FakeGateway:
         *,
         error: bool = False,
         identity_token: str = "",
-        exchange_error: GatewayError | None = None,
+        exchange_error: OwnerDirectoryError | None = None,
         permissions: list[str] | None = None,
     ) -> None:
         self.record = record if record is not None else {"exists": True, "active": True}
@@ -133,9 +133,9 @@ class _FakeGateway:
     async def agent_access(self, user_id: str) -> dict[str, Any]:
         self.access_asked.append(user_id)
         if self.error:
-            raise GatewayError("gateway unavailable")
+            raise OwnerDirectoryError("gateway unavailable")
         if self.record.get("exists") is not True or self.record.get("active") is not True:
-            raise GatewayError(
+            raise OwnerDirectoryError(
                 "subject unavailable", status_code=403, error_type="subject_unavailable"
             )
         return {
@@ -147,7 +147,7 @@ class _FakeGateway:
     async def user_status(self, user_id: str) -> dict[str, Any]:
         self.asked.append(user_id)
         if self.error:
-            raise GatewayError("gateway unreachable: nope")
+            raise OwnerDirectoryError("gateway unreachable: nope")
         return self.record
 
     async def exchange_authorization_code(
@@ -166,10 +166,10 @@ class _FakeGateway:
         return self.identity_token
 
 
-def _app(gateway: _FakeGateway) -> FastAPI:
+def _app(gateway: _FakeOwners) -> FastAPI:
     app = FastAPI()
     app.include_router(session_router.router)
-    app.dependency_overrides[get_gateway_client] = lambda: gateway
+    app.dependency_overrides[get_owner_directory] = lambda: gateway
     return app
 
 
@@ -194,7 +194,7 @@ async def _sign_in(client, *, return_to: str = "/", code: str = "the-code"):
 
 @pytest_asyncio.fixture()
 async def client_and_gateway(key):
-    gateway = _FakeGateway(
+    gateway = _FakeOwners(
         {"exists": True, "active": True, "role": "internal"},
         identity_token=_identity_token(key),
     )
@@ -217,7 +217,7 @@ async def client_and_gateway_named(key):
     the plumbing has to be right before the field exists, or it arrives and
     only one of the two routes reports it.
     """
-    gateway = _FakeGateway(
+    gateway = _FakeOwners(
         {"exists": True, "active": True, "role": "internal", "user_name": "Ada Lovelace"},
         identity_token=_identity_token(key),
     )
@@ -316,7 +316,7 @@ async def test_a_deployment_with_no_gateway_sends_the_visitor_back_with_a_reason
     flag the app can render.
     """
     monkeypatch.delenv(session_router.ENV_AUTHORIZE_URL, raising=False)
-    gateway = _FakeGateway(identity_token=_identity_token(key))
+    gateway = _FakeOwners(identity_token=_identity_token(key))
     transport = ASGITransport(app=_app(gateway))
     async with AsyncClient(
         transport=transport, base_url="https://test", follow_redirects=False
@@ -336,7 +336,7 @@ async def test_with_nowhere_to_send_them_it_is_a_503(monkeypatch, key):
     """No web base URL means no app to carry the message — say it plainly."""
     monkeypatch.delenv(session_router.ENV_AUTHORIZE_URL, raising=False)
     monkeypatch.delenv(session_router.ENV_WEB_BASE_URL, raising=False)
-    gateway = _FakeGateway(identity_token=_identity_token(key))
+    gateway = _FakeOwners(identity_token=_identity_token(key))
     transport = ASGITransport(app=_app(gateway))
     async with AsyncClient(
         transport=transport, base_url="https://test", follow_redirects=False
@@ -525,10 +525,10 @@ async def test_an_account_the_gateway_refuses_at_exchange_is_told_so(key):
     as "please start again" sends the person round the loop forever — consent,
     callback, refusal — with no sentence anywhere that says why.
     """
-    gateway = _FakeGateway(
+    gateway = _FakeOwners(
         {"exists": True, "active": True, "role": "internal"},
         identity_token=_identity_token(key),
-        exchange_error=GatewayError("gateway answered 403 for /v1/identity/token", status_code=403),
+        exchange_error=OwnerDirectoryError("gateway answered 403 for /v1/identity/token", status_code=403),
     )
     transport = ASGITransport(app=_app(gateway))
     async with AsyncClient(
@@ -545,10 +545,10 @@ async def test_an_account_the_gateway_refuses_at_exchange_is_told_so(key):
 async def test_refused_exchange_and_outage_offer_the_right_recovery(key):
     """A stale code is the caller's problem; an outage is the deployment's."""
     for error, expected in (
-        (GatewayError("gateway answered 400 for /v1/identity/token", status_code=400), "expired"),
-        (GatewayError("gateway unreachable: nope"), "temporary"),
+        (OwnerDirectoryError("gateway answered 400 for /v1/identity/token", status_code=400), "expired"),
+        (OwnerDirectoryError("gateway unreachable: nope"), "temporary"),
     ):
-        gateway = _FakeGateway(
+        gateway = _FakeOwners(
             {"exists": True, "active": True, "role": "internal"},
             identity_token=_identity_token(key),
             exchange_error=error,
@@ -570,7 +570,7 @@ async def test_refused_exchange_and_outage_offer_the_right_recovery(key):
 
 async def test_identity_profile_claims_are_not_copied_into_the_session(key):
     """A role in the identity token must not be able to promote its bearer."""
-    gateway = _FakeGateway(
+    gateway = _FakeOwners(
         {"exists": True, "active": True, "role": "internal"},
         identity_token=_identity_token(key, role="admin"),
     )
@@ -602,7 +602,7 @@ async def test_an_account_the_gateway_will_not_vouch_for_gets_no_cookie(
     — and says nothing about a suspension that happened afterwards. An answer
     with no recognizable verdict is not a yes either.
     """
-    gateway = _FakeGateway(record, permissions=permissions, identity_token=_identity_token(key))
+    gateway = _FakeOwners(record, permissions=permissions, identity_token=_identity_token(key))
     transport = ASGITransport(app=_app(gateway))
     async with AsyncClient(
         transport=transport, base_url="https://test", follow_redirects=False
@@ -617,7 +617,7 @@ async def test_an_account_the_gateway_will_not_vouch_for_gets_no_cookie(
 
 async def test_an_unreachable_gateway_mints_no_session(key):
     """Fail closed. An outage must not become a way in."""
-    gateway = _FakeGateway(error=True, identity_token=_identity_token(key))
+    gateway = _FakeOwners(error=True, identity_token=_identity_token(key))
     transport = ASGITransport(app=_app(gateway))
     async with AsyncClient(
         transport=transport, base_url="https://test", follow_redirects=False
@@ -647,7 +647,7 @@ async def test_a_signing_key_fetch_outage_offers_retry_and_mints_no_session(
             raise jwt.PyJWKClientConnectionError("private-upstream-error-sentinel")
 
     monkeypatch.setattr(identity, "_jwks_client", lambda: Unreachable())
-    gateway = _FakeGateway(identity_token=_identity_token(key))
+    gateway = _FakeOwners(identity_token=_identity_token(key))
     async with AsyncClient(
         transport=ASGITransport(app=_app(gateway)), base_url="https://test"
     ) as client:
@@ -668,7 +668,7 @@ async def test_a_signing_key_fetch_outage_offers_retry_and_mints_no_session(
 
 async def test_a_token_for_another_audience_is_refused(key):
     """The audience check is what stops one consumer's token acting as ours."""
-    gateway = _FakeGateway(
+    gateway = _FakeOwners(
         {"exists": True, "active": True, "role": "internal"},
         identity_token=_identity_token(key, aud="some-other-service"),
     )
@@ -721,7 +721,7 @@ async def test_a_jwks_outage_offers_a_retry_and_logs_its_cause(
 
 async def test_a_gateway_clock_a_moment_ahead_still_signs_in(key):
     """``iat`` a second or two in the future is clock skew, not a forged token."""
-    gateway = _FakeGateway(
+    gateway = _FakeOwners(
         {"exists": True, "active": True},
         identity_token=_identity_token(key, iat=int(time.time()) + 2),
     )
@@ -739,7 +739,7 @@ async def test_a_gateway_clock_a_moment_ahead_still_signs_in(key):
 async def test_an_unverified_identity_token_logs_why_without_the_token(key, caplog):
     """The refusal stays a bare 401; the operator still learns which check failed."""
     token = _identity_token(key, aud="some-other-service")
-    gateway = _FakeGateway({"exists": True, "active": True}, identity_token=token)
+    gateway = _FakeOwners({"exists": True, "active": True}, identity_token=token)
     caplog.set_level(logging.WARNING, logger=session_router.__name__)
     transport = ASGITransport(app=_app(gateway))
     async with AsyncClient(
@@ -760,7 +760,7 @@ async def test_an_unverified_identity_token_logs_why_without_the_token(key, capl
 
 async def test_a_garbage_identity_token_is_a_401(key):
     """Not a 500: an unverifiable credential is an ordinary refusal."""
-    gateway = _FakeGateway(
+    gateway = _FakeOwners(
         {"exists": True, "active": True, "role": "internal"}, identity_token="not-a-jwt"
     )
     transport = ASGITransport(app=_app(gateway))
@@ -947,7 +947,7 @@ async def test_a_sign_in_parked_under_the_plain_name_finishes_nothing(key):
     send it to the callback; were that cookie read, the attacker's sign-in
     would finish there and replace the victim's session with the attacker's.
     """
-    gateway = _FakeGateway(identity_token=_identity_token(key))
+    gateway = _FakeOwners(identity_token=_identity_token(key))
     app = _app(gateway)
     async with (
         AsyncClient(
@@ -1009,7 +1009,7 @@ async def test_logout_expires_both_names(client_and_gateway):
 
 async def test_a_deployment_without_a_session_secret_explains_configuration(monkeypatch, key):
     """Unset secret is an operator problem, reported as one — never a pass."""
-    gateway = _FakeGateway(
+    gateway = _FakeOwners(
         {"exists": True, "active": True, "role": "internal"},
         identity_token=_identity_token(key),
     )
@@ -1028,7 +1028,7 @@ async def test_a_deployment_without_a_session_secret_explains_configuration(monk
 async def test_secure_can_be_turned_off_only_deliberately(monkeypatch, key):
     """The dev-only escape hatch, pinned so it stays opt-*out*."""
     monkeypatch.setenv(session_router.ENV_COOKIE_SECURE, "false")
-    gateway = _FakeGateway(
+    gateway = _FakeOwners(
         {"exists": True, "active": True, "role": "internal"},
         identity_token=_identity_token(key),
     )
@@ -1049,7 +1049,7 @@ async def test_secure_can_be_turned_off_only_deliberately(monkeypatch, key):
 async def test_without_secure_both_cookies_keep_their_plain_names(monkeypatch, key):
     """Plain ``http://localhost`` still signs in, since browsers refuse the prefix there."""
     monkeypatch.setenv(session_router.ENV_COOKIE_SECURE, "false")
-    gateway = _FakeGateway(identity_token=_identity_token(key))
+    gateway = _FakeOwners(identity_token=_identity_token(key))
     async with AsyncClient(
         transport=ASGITransport(app=_app(gateway)), base_url="http://test", follow_redirects=False
     ) as client:
@@ -1068,7 +1068,7 @@ async def test_without_secure_both_cookies_keep_their_plain_names(monkeypatch, k
 
 @pytest.mark.parametrize("role", ["free", "admin"])
 async def test_login_preserves_identity_without_granting_agent_access(key, role):
-    gateway = _FakeGateway(
+    gateway = _FakeOwners(
         {"exists": True, "active": True, "role": role},
         permissions=[],
         identity_token=_identity_token(key, role=role),
@@ -1090,7 +1090,7 @@ async def test_login_preserves_identity_without_granting_agent_access(key, role)
 
 
 async def test_login_accepts_a_free_profile_with_explicit_agent_access(key):
-    gateway = _FakeGateway(
+    gateway = _FakeOwners(
         {"exists": True, "active": True, "role": "free"}, identity_token=_identity_token(key)
     )
     async with AsyncClient(
@@ -1120,7 +1120,7 @@ async def test_me_reports_revocation_without_erasing_authenticated_identity(clie
 
 
 async def test_a_withdrawal_me_sees_stops_owner_requests_at_once(key):
-    gateway = _FakeGateway(
+    gateway = _FakeOwners(
         {"exists": True, "active": True, "role": "internal"},
         identity_token=_identity_token(key),
     )
@@ -1144,7 +1144,7 @@ async def test_a_withdrawal_me_sees_stops_owner_requests_at_once(key):
     assert gateway.access_asked == [_USER, _USER, _USER, _USER]
 
 
-class _HeldGateway(_FakeGateway):
+class _HeldGateway(_FakeOwners):
     """Holds the answer to the next Agent-access lookup until released."""
 
     hold: asyncio.Event | None = None
@@ -1221,7 +1221,7 @@ async def test_failed_callback_can_start_a_fresh_flow_and_recover(client_and_gat
 
 async def test_callback_without_a_web_url_keeps_the_service_error(monkeypatch, key):
     monkeypatch.delenv(session_router.ENV_WEB_BASE_URL, raising=False)
-    gateway = _FakeGateway(error=True, identity_token=_identity_token(key))
+    gateway = _FakeOwners(error=True, identity_token=_identity_token(key))
     async with AsyncClient(
         transport=ASGITransport(app=_app(gateway)), base_url="https://test", follow_redirects=False
     ) as client:
@@ -1283,7 +1283,7 @@ async def test_missing_jwks_is_reported_before_starting_login(client_and_gateway
 async def test_expired_flow_can_start_again_without_reusing_a_code(client_and_gateway):
     client, gateway = client_and_gateway
     started = await _begin(client, return_to="/jobs/42")
-    gateway.exchange_error = GatewayError("expired code", status_code=400)
+    gateway.exchange_error = OwnerDirectoryError("expired code", status_code=400)
     failed = await client.get(
         "/v1/session/callback", params={"code": "spent", "state": _state_from(started)}
     )
@@ -1386,7 +1386,7 @@ async def test_callback_exchange_logs_the_refusal_before_redirecting(
     client_and_gateway, caplog, upstream_status, reason, status_code
 ):
     client, gateway = client_and_gateway
-    gateway.exchange_error = GatewayError("exchange failed", status_code=upstream_status)
+    gateway.exchange_error = OwnerDirectoryError("exchange failed", status_code=upstream_status)
     response = await _sign_in(client)
     assert response.status_code == 303
     assert not client.cookies.get(identity.SESSION_COOKIE)

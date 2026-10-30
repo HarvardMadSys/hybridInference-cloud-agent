@@ -52,7 +52,6 @@ _JOB = ClaimedJob(
     runtime="claude-code",
     model="model",
     worker_token="ajt.a.b",
-    sandbox_token="grant",
     thread_id="athr_1",
     runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
 )

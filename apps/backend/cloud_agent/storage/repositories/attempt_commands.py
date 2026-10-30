@@ -67,7 +67,6 @@ from cloud_agent.storage._sql.sandbox import (
     restore_claim_due,
 )
 from cloud_agent.storage.deadlocks import retry_deadlock_victim
-from cloud_agent.task_titles import thread_title_needs_generation
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
     SandboxArchivePolicyError,
@@ -579,9 +578,6 @@ class PostgresAttemptCommands:
         claim["current_attempt_id"] = attempt["id"]
         claim["attempt_id"] = attempt["id"]
         claim["attempt_no"] = attempt["attempt_no"]
-        claim["title_generation_pending"] = thread_title_needs_generation(
-            job_row["title_source"], job_row["title"]
-        )
         claim["lease_generation"] = attempt["lease_generation"]
         # The stamp as written, not as the host row reads later: a rolling
         # upgrade heartbeat can move that row after this attempt starts.

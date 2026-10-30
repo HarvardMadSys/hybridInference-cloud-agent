@@ -16,7 +16,6 @@ from __future__ import annotations
 import secrets
 from typing import TYPE_CHECKING
 
-from cloud_agent.accounts.config import local_mode
 from cloud_agent.logging_utils import get_logger
 
 if TYPE_CHECKING:
@@ -41,8 +40,6 @@ def normalize_setup_code(value: str) -> str:
 
 async def announce_setup_code(accounts: LocalAccountRepository) -> None:
     """Log the pending setup code at startup; nothing once an administrator exists."""
-    if not local_mode():
-        return
     code = await accounts.setup_code(new_setup_code())
     if code is not None:
         logger.warning(

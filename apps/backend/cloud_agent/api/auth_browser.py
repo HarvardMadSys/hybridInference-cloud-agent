@@ -24,14 +24,13 @@ from cloud_agent.api._local_auth import (
     local_accounts,
     local_session_user,
     require_json,
-    require_local_mode,
 )
 from cloud_agent.api._local_browser import (
     MAX_ACCOUNTS_PER_BROWSER,
     current_browser,
     sign_out_of_browser,
 )
-from cloud_agent.api.deps import get_gateway_client, resolve_agent_access
+from cloud_agent.api.deps import get_owner_directory, resolve_agent_access
 from cloud_agent.api.errors import typed_error
 from cloud_agent.domain.accounts import may_sign_in, permissions_for
 from cloud_agent.logging_utils import get_logger
@@ -49,7 +48,6 @@ router = APIRouter(
     prefix="/v1/auth",
     tags=["auth"],
     route_class=LocalAuthRoute,
-    dependencies=[Depends(require_local_mode)],
 )
 
 
@@ -93,7 +91,7 @@ async def list_browser_accounts(request: Request) -> BrowserAccountsResponse:
     dependencies=[Depends(require_json)],
 )
 async def switch_account(
-    body: SwitchAccountRequest, request: Request, gateway: Any = Depends(get_gateway_client)
+    body: SwitchAccountRequest, request: Request, owners: Any = Depends(get_owner_directory)
 ) -> SessionUserResponse:
     """Make another account signed in on this browser the active one."""
     browser = await current_browser(request)
@@ -112,7 +110,7 @@ async def switch_account(
         "agent_local_browser_switched",
         extra={"event": "agent_local_browser_switched", "user_id": member.account.id},
     )
-    decision = await resolve_agent_access(gateway, member.account.id)
+    decision = await resolve_agent_access(owners, member.account.id)
     return local_session_user(member.account, decision)
 
 

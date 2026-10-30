@@ -12,6 +12,8 @@ cannot serve it.
 
 from __future__ import annotations
 
+from tests.support.owners import on_connection
+
 import asyncio
 import copy
 from datetime import UTC, datetime
@@ -26,13 +28,13 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 -- autouse fixture
     _api_key_secret,
     _build_app,
     _configured_identity_issuer,
-    _FakeGateway,
+    _FakeOwners,
 )
 from tests.servers.test_grant_at_claim import _app as _claim_app, _ClaimStore, _Grants
 
 from cloud_agent.api import model_connections as api
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_gateway_client, get_grant_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_grant_client, get_storage
 from cloud_agent.application import (
     model_connection_check as check,
     model_connection_save as save,
@@ -1035,7 +1037,7 @@ async def test_a_listing_dials_only_a_public_ipv4_address(base_url):
 # -- turns ---------------------------------------------------------------------------
 
 
-class _NoCatalogGateway(_FakeGateway):
+class _NoCatalogGateway(_FakeOwners):
     """Agent admission answers; the model catalog must not be asked at all."""
 
     async def model_catalog(self, user_id: str) -> list[str]:
@@ -1086,14 +1088,14 @@ def _connection_row(
 
 def _turn_app(store: _TurnStorage) -> FastAPI:
     app = _build_app(store)
-    app.dependency_overrides[get_gateway_client] = _NoCatalogGateway
+    app.dependency_overrides[get_owner_directory] = _NoCatalogGateway
     return app
 
 
 async def _create_job(client: AsyncClient, **body: Any):
     return await client.post(
         "/v1/agent/jobs",
-        json={"repo": None, "task_prompt": "fix it", "runtime": "opencode", **body},
+        json=on_connection({"repo": None, "task_prompt": "fix it", "runtime": "opencode", **body}),
     )
 
 
@@ -1594,14 +1596,14 @@ async def test_config_offers_the_owners_connections_and_their_last_use_without_t
 
     store.get_model_preference = last_on_connection  # type: ignore[method-assign]
 
-    class _DownGateway(_FakeGateway):
+    class _DownGateway(_FakeOwners):
         async def model_catalog_with_reasoning_efforts(self, user_id: str):
-            from cloud_agent.gateway import GatewayError
+            from cloud_agent.accounts.directory import OwnerDirectoryError
 
-            raise GatewayError("catalog down")
+            raise OwnerDirectoryError("catalog down")
 
     app = _build_app(store)
-    app.dependency_overrides[get_gateway_client] = _DownGateway
+    app.dependency_overrides[get_owner_directory] = _DownGateway
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
         config = (await client.get("/v1/agent/config")).json()
 

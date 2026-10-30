@@ -21,7 +21,7 @@ from tests.support.ssh_keys import host_key, parses_as_ed25519
 
 from cloud_agent import identity
 from cloud_agent.api import ssh_servers as api
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.application.ssh_servers import CheckFailed, ssh_key_cipher
 from cloud_agent.domain.ssh_servers import (
     CHECK_EVENTS,
@@ -202,7 +202,7 @@ def app(monkeypatch, repository, pushes):
         async def agent_access(self, owner):
             return {"user_id": owner, "allowed": True, "permissions": ["agent.use"]}
 
-    application.dependency_overrides[get_gateway_client] = Gateway
+    application.dependency_overrides[get_owner_directory] = Gateway
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
         ssh_servers=repository, host_pool=object()
     )

@@ -16,6 +16,8 @@ database that is not there is a failure to report, never a reason to skip.
 
 from __future__ import annotations
 
+from tests.support.owners import on_connection
+
 import asyncio
 import hashlib
 import json
@@ -37,7 +39,7 @@ from cloud_agent.api import routes, uploads, worker
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_gateway_client,
+    get_owner_directory,
     get_grant_client,
     get_storage,
 )
@@ -411,7 +413,7 @@ async def api(pool, monkeypatch):
     app.include_router(routes.router)
     app.include_router(uploads.router)
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_gateway_client] = lambda: gateway
+    app.dependency_overrides[get_owner_directory] = lambda: gateway
     app.dependency_overrides[get_grant_client] = _Grants
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[authenticate_agent_owner] = lambda: {
@@ -1950,13 +1952,13 @@ async def test_a_new_task_cannot_take_an_upload_a_waiting_message_holds(api: Api
 
     taken = await api.client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": _REPO,
             "task_prompt": "take the spec",
             "model": "glm-5.1",
             "base_sha": "a" * 40,
             "attachment_ids": [upload["id"]],
-        },
+        }),
     )
 
     assert taken.status_code == 400, taken.text

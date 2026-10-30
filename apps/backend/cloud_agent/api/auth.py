@@ -1,7 +1,4 @@
-"""Local sign-up and sign-in: ``/v1/auth/*`` (``AGENT_AUTH_MODE=local``).
-
-``GET /v1/auth/config`` answers in both modes; every other route answers 404
-``local_auth_disabled`` in Gateway mode, where sign-in stays the Gateway's.
+"""Sign-up and sign-in: ``/v1/auth/*``.
 
 Each unsafe route here is checked by the cross-site write guard even without a
 session cookie (sign-in CSRF would otherwise put the attacker's account in the
@@ -25,7 +22,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 
 from cloud_agent.accounts import tokens
 from cloud_agent.accounts.captcha import site_key, verify_captcha
-from cloud_agent.accounts.config import auth_mode, local_session_ttl_s, signup_flag_enabled
+from cloud_agent.accounts.config import local_session_ttl_s, signup_flag_enabled
 from cloud_agent.accounts.device_cookie import recognized_device
 from cloud_agent.accounts.passwords import hash_password
 from cloud_agent.accounts.policy import require_email_verification, terms_url
@@ -40,7 +37,6 @@ from cloud_agent.api._local_auth import (
     local_session_user,
     mail_available,
     require_json,
-    require_local_mode,
     signup_enabled,
     sms_sender,
 )
@@ -51,7 +47,7 @@ from cloud_agent.api._local_browser import (
     joinable_browser,
     prepare_sign_in,
 )
-from cloud_agent.api.deps import get_client_ip, get_gateway_client, resolve_agent_access
+from cloud_agent.api.deps import get_client_ip, get_owner_directory, resolve_agent_access
 from cloud_agent.api.errors import typed_error
 from cloud_agent.application.accounts import (
     AccountDeleted,
@@ -92,7 +88,7 @@ FIFTEEN_MIN = 15 * 60
 HOUR = 60 * 60
 DAY = 24 * HOUR
 
-_LOCAL_WRITE = [Depends(require_local_mode), Depends(require_json)]
+_LOCAL_WRITE = [Depends(require_json)]
 
 #: Why a sign-in failed, as the event log records it.
 _FAILURE_REASONS: dict[type[Exception], str] = {
@@ -179,10 +175,10 @@ async def record_sign_in(
 
 
 async def signed_in_response(
-    request: Request, response: Response, gateway: Any, signed_in: SignedIn
+    request: Request, response: Response, owners: Any, signed_in: SignedIn
 ) -> SessionUserResponse:
     """The session body once a sign-in has joined the browser."""
-    decision = await resolve_agent_access(gateway, signed_in.account.id)
+    decision = await resolve_agent_access(owners, signed_in.account.id)
     logger.info(
         "agent_local_session_established",
         extra={"event": "agent_local_session_established", "user_id": signed_in.account.id},
@@ -200,13 +196,10 @@ async def _setup_pending(request: Request) -> bool:
 @router.get("/config", response_model=AuthConfigResponse)
 async def auth_config(request: Request) -> AuthConfigResponse:
     """Which sign-in this deployment offers: read before every page renders, so kept small."""
-    mode = auth_mode()
-    return AuthConfigResponse(mode=mode, signup_enabled=mode == "local" and signup_enabled(request))
+    return AuthConfigResponse(signup_enabled=signup_enabled(request))
 
 
-@router.get(
-    "/options", response_model=AuthOptionsResponse, dependencies=[Depends(require_local_mode)]
-)
+@router.get("/options", response_model=AuthOptionsResponse)
 async def auth_options(request: Request) -> AuthOptionsResponse:
     """What the sign-in, sign-up and account pages offer. Public; carries no secret."""
     phone_on = sms_enabled(sms_sender(request))
@@ -321,9 +314,8 @@ async def sign_in(
     body: LoginRequest,
     request: Request,
     response: Response,
-    _local: None = Depends(require_local_mode),
     _json: None = Depends(require_json),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> SessionUserResponse:
     """Check the password, add the account to this browser and set the cookie.
 
@@ -368,7 +360,7 @@ async def sign_in(
     await record_sign_in(
         request, method="password", identifier=key, account_id=signed_in.account.id, failure=None
     )
-    return await signed_in_response(request, response, gateway, signed_in)
+    return await signed_in_response(request, response, owners, signed_in)
 
 
 @router.post("/verify-email", response_model=OkResponse, dependencies=_LOCAL_WRITE)
@@ -434,7 +426,7 @@ async def create_setup_admin(
     body: SetupAdminRequest,
     request: Request,
     response: Response,
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> SessionUserResponse:
     """Create the deployment's first administrator with the setup code, and sign them in.
 
@@ -494,7 +486,7 @@ async def create_setup_admin(
         account_id=account_id,
         failure=None,
     )
-    return await signed_in_response(request, response, gateway, signed_in)
+    return await signed_in_response(request, response, owners, signed_in)
 
 
 __all__ = [

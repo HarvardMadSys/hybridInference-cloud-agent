@@ -54,7 +54,7 @@ from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
 from cloud_agent import measurement_writer, operation_measurement, sandbox_manager_routing
-from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client
+from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory
 from cloud_agent.app import create_app
 from cloud_agent.identity import SESSION_COOKIE, mint_session
 from cloud_agent.operation_measurement import INTERACTION_HEADER
@@ -350,7 +350,6 @@ class _Chain:
             runtime=RUNTIME,
             model=MODEL,
             worker_token=self.worker_token(),
-            sandbox_token="unused-by-measurement-delivery",
             execution_profile=str(self.job["execution_profile"]),
             runtime_version=self.claim.get("runtime_version"),
             thread_sandbox=self.job.get("thread_sandbox"),
@@ -509,7 +508,7 @@ async def _running_chain(
     # Only the two external collaborators are replaced. Storage is deliberately
     # not overridden: every route below reads and writes the real repository
     # over the application's own pool.
-    app.dependency_overrides[get_gateway_client] = _Gateway
+    app.dependency_overrides[get_owner_directory] = _Gateway
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     server, task, base_url = await _serve(app)
     store = Storage(pool)

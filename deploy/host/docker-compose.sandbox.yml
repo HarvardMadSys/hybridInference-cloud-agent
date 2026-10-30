@@ -1,93 +1,44 @@
-# Agent runners on a machine that is not the gateway's.
+# Agent runners on a runner host.
 #
-# Standalone, not an overlay on docker-compose.yml, and that is the point.
-# `docker-compose.agent-runner.yml` declares `depends_on: backend`, so pointing
-# it at a machine with no gateway does not fail — it *starts one*, along with
-# whatever else the base file brings, on a box that was only ever meant to run
-# jobs. This file contains exactly what a remote runner host needs: the
-# runners, their sandbox manager, three purpose-scoped tunnels, and the
-# network the sandbox groups discover their two relays on.
+# Standalone, and that is the point: this file contains exactly what a remote
+# runner host needs, and nothing that would start other services on a box that
+# was only ever meant to run jobs: the runners, their sandbox manager, two
+# purpose-scoped tunnels, and the network the sandbox groups discover their
+# MCP relay on.
 #
-#   sandbox ──→ gateway-tunnel ──ssh──→ inference gateway
-#           ├─→ mcp-tunnel ─────ssh──→ MCP-only relay
-#           └─→ host rules and NAT ───→ public IPv4, TCP 80/443
+#   sandbox ──→ mcp-tunnel ─────ssh──→ MCP-only relay
+#           └─→ host rules and NAT ───→ public IPv4, TCP 80/443 (the owner's
+#                                       model connection, and the rest of the
+#                                       public internet)
 #   runner  ──→ control-plane-tunnel ─ssh──→ control-plane API
 #
 # Every sandbox group gets its own routable bridge, created outside Compose by
 # the runner and the sandbox manager. Before anything joins one, they install this
 # deployment's host nftables table, which admits public IPv4 on TCP 80/443,
-# the named resolver, and the two relays' service ports, and refuses the host,
+# the named resolver, and the MCP relay's service port, and refuses the host,
 # private and special-purpose addresses, other groups, and IPv6. There is no
 # proxy and no second network for setup: preparing and running a task share
 # the group's one bridge.
-#
-# Both sides address the tunnel by the same name, because they have to: the
-# runner claims over AGENT_GATEWAY_URL and the sandbox is handed that same
-# value for its model calls. The alias resolves on the runner's network and on
-# every group bridge the relay is attached to.
 #
 # Start it with deploy/host/sandbox_host.sh, which checks the pieces that
 # fail confusingly when missing.
 
 services:
-  gateway-tunnel:
-    build:
-      context: ../..
-      dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
-    restart: unless-stopped
-    environment:
-      # user@host of the gateway machine — the only address anything here can
-      # reach through this container.
-      TUNNEL_SSH_DESTINATION: ${AGENT_TUNNEL_SSH_DESTINATION:?user@gateway-host for the tunnel}
-      TUNNEL_SSH_PORT: ${AGENT_TUNNEL_SSH_PORT:-22}
-      # Where the gateway listens *on that machine*. Loopback by default, which
-      # is the setup this design keeps intact: the gateway need not be exposed
-      # to the network at all.
-      TUNNEL_REMOTE_HOST: ${AGENT_TUNNEL_REMOTE_HOST:-127.0.0.1}
-      TUNNEL_REMOTE_PORT: ${AGENT_TUNNEL_REMOTE_PORT:-8080}
-      TUNNEL_LISTEN_PORT: ${AGENT_TUNNEL_LISTEN_PORT:-8080}
-    volumes:
-      # Read-only, and its own key: this one may open a single forwarded port
-      # and nothing else. Restrict it on the gateway host's authorized_keys
-      # with command="" plus permitopen — a shell on the gateway is not part of
-      # what a runner host needs — and give its account the Match block in
-      # deploy/host/sshd-tunnels.conf.example, which refuses remote forwards.
-      - ${AGENT_TUNNEL_SSH_KEY:?path to the tunnel's ssh private key}:/etc/agent-tunnel/id:ro
-      - ${AGENT_TUNNEL_SSH_KNOWN_HOSTS:?path to a known_hosts for the gateway host}:/etc/agent-tunnel/known_hosts:ro
-    networks:
-      # The alias is declared on BOTH networks, and it has to be. The runner is
-      # only on `internal` and is handed AGENT_GATEWAY_URL pointing at
-      # this name; group lifecycle discovers this alias on the relay network
-      # and attaches the tunnel, under the same name, to each group's bridge.
-      # An alias missing from either network resolves for one side and
-      # NXDOMAINs for the other — which is what this file did until it was
-      # caught in review, while the comment above already claimed both.
-      internal:
-        aliases:
-          - ${AGENT_GATEWAY_HOSTNAME:-agent-gateway}
-      # Together with the MCP-only tunnel below, one of the two endpoints
-      # lifecycle code attaches to every group bridge.
-      agent-relays:
-        aliases:
-          - ${AGENT_GATEWAY_HOSTNAME:-agent-gateway}
-
-  # The second narrow destination. MCP moved to the cloud agent's own relay, so
-  # a sandbox now needs two addresses and reaches nothing else: the gateway for
-  # model calls, this for tools. Two tunnels rather than one wider one, because
+  # The one relay a sandbox reaches: the cloud agent's own MCP relay, for tools.
+  # A tunnel of its own rather than one shared with the control plane, because
   # "the sandbox may reach the control plane" is a much bigger permission than
   # "the sandbox may reach the MCP relay" — and the control plane is where jobs
   # are created and cancelled.
   mcp-tunnel:
     build:
       context: ../..
-      dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
+      dockerfile: deploy/host/Dockerfile.agent-ssh-tunnel
     restart: unless-stopped
     environment:
       TUNNEL_SSH_DESTINATION: ${AGENT_MCP_TUNNEL_SSH_DESTINATION:?user@control-plane-host for the MCP tunnel}
       TUNNEL_SSH_PORT: ${AGENT_MCP_TUNNEL_SSH_PORT:-22}
-      # Where the control plane listens *on that machine*. Loopback by default,
-      # for the same reason the gateway's is: the service need not be exposed
-      # to the network at all.
+      # Where the control plane listens *on that machine*. Loopback by default:
+      # the service need not be exposed to the network at all.
       TUNNEL_REMOTE_HOST: ${AGENT_MCP_TUNNEL_REMOTE_HOST:-127.0.0.1}
       # **8001, the MCP-only listener — never 8000.** A sandbox reaches the far
       # end of this tunnel; 8000 serves jobs, sessions, host registration and
@@ -98,15 +49,17 @@ services:
       TUNNEL_REMOTE_PORT: ${AGENT_MCP_TUNNEL_REMOTE_PORT:-8001}
       TUNNEL_LISTEN_PORT: ${AGENT_MCP_TUNNEL_LISTEN_PORT:-8000}
     volumes:
-      # Its own key, restricted the same way. A key that can open both tunnels
-      # would make the separation above cosmetic.
+      # Its own key, restricted on the far host's authorized_keys with
+      # command="" plus permitopen, and its account given the Match block in
+      # deploy/host/sshd-tunnels.conf.example, which refuses remote forwards. A
+      # key that can open both tunnels would make the separation cosmetic.
       - ${AGENT_MCP_TUNNEL_SSH_KEY:?path to the MCP tunnel's ssh private key}:/etc/agent-tunnel/id:ro
       - ${AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS:?path to a known_hosts for the control-plane host}:/etc/agent-tunnel/known_hosts:ro
     networks:
-      # On both, and aliased on both, for the same reason the gateway tunnel
-      # is: the runner resolves this name on `internal`, lifecycle discovers it
-      # on the relay network, and an alias declared on one NXDOMAINs on the
-      # other.
+      # On both, and aliased on both: the runner resolves this name on
+      # `internal`, lifecycle discovers it on the relay network and attaches it,
+      # under the same name, to each group's bridge. An alias declared on one
+      # NXDOMAINs on the other.
       internal:
         aliases:
           - ${AGENT_MCP_HOSTNAME:-agent-mcp}
@@ -114,20 +67,20 @@ services:
         aliases:
           - ${AGENT_MCP_HOSTNAME:-agent-mcp}
 
-  # The third destination, and the one no sandbox may reach. The runner claims
+  # The second destination, and the one no sandbox may reach. The runner claims
   # jobs, registers this host and heartbeats against the control plane's main
   # listener — the same 8000 the MCP tunnel deliberately stopped pointing at.
   #
   # **Not on the relay network, and that is the entire point.** Splitting the
   # MCP relay onto 8001 was worth nothing if a second alias put 8000 on a group
   # bridge under a different name. Its address on `internal` is a private one,
-  # which the host rules refuse from every group. A sandbox reaches the gateway
-  # and the MCP relay; the machine that runs it reaches the control plane;
-  # those are three permissions and three tunnels.
+  # which the host rules refuse from every group. A sandbox reaches the MCP
+  # relay; the machine that runs it reaches the control plane; those are two
+  # permissions and two tunnels.
   control-plane-tunnel:
     build:
       context: ../..
-      dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
+      dockerfile: deploy/host/Dockerfile.agent-ssh-tunnel
     restart: unless-stopped
     environment:
       TUNNEL_SSH_DESTINATION: ${AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION:?user@control-plane-host for the control-plane tunnel}
@@ -188,7 +141,6 @@ services:
       # file — setting them in the host's .env was a no-op. `json` renders the
       # structured fields these services already log.
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
-      AGENT_AUTH_MODE: ${AGENT_AUTH_MODE:-gateway}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
       AGENT_OPERATION_PROFILING_ENABLED: ${AGENT_OPERATION_PROFILING_ENABLED:-false}
       AGENT_OPERATION_PROFILING_RUN: ${AGENT_OPERATION_PROFILING_RUN:-}
@@ -221,9 +173,8 @@ services:
       # This is distinct from the per-turn AGENT_TIMEOUT_S watchdog.
       AGENT_CHAT_IDLE_TIMEOUT_S: ${AGENT_CHAT_IDLE_TIMEOUT_S:-1800}
       # Fork can wake and native-resume a source without a runner turn.  The
-      # sandbox manager therefore needs the same sandbox-reachable relay addresses the
-      # runner hands to ordinary resident processes.
-      AGENT_GATEWAY_URL: http://${AGENT_GATEWAY_HOSTNAME:-agent-gateway}:${AGENT_TUNNEL_LISTEN_PORT:-8080}
+      # sandbox manager therefore needs the same sandbox-reachable relay address
+      # the runner hands to ordinary resident processes.
       AGENT_SANDBOX_MCP_URL: http://${AGENT_MCP_HOSTNAME:-agent-mcp}:${AGENT_MCP_TUNNEL_LISTEN_PORT:-8000}
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:?name the sandbox image this deployment runs}
@@ -278,7 +229,6 @@ services:
       # file — setting them in the host's .env was a no-op. `json` renders the
       # structured fields these services already log.
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
-      AGENT_AUTH_MODE: ${AGENT_AUTH_MODE:-gateway}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
       AGENT_OPERATION_PROFILING_ENABLED: ${AGENT_OPERATION_PROFILING_ENABLED:-false}
       AGENT_OPERATION_PROFILING_RUN: ${AGENT_OPERATION_PROFILING_RUN:-}
@@ -286,12 +236,6 @@ services:
       # `admin` lets the Admin page's Start and Stop reach this producer
       # without a redeploy. Unset keeps the legacy semantics.
       AGENT_OPERATION_PROFILING_MODE: ${AGENT_OPERATION_PROFILING_MODE:-}
-      # The tunnel, by the name both this container and the sandboxes resolve.
-      # Overriding it with the gateway's real address is a mistake worth naming:
-      # a sandbox reaches the gateway only through the tunnel attached to its
-      # group bridge, so the runner refuses a relay given by address, or one it
-      # cannot find on the relay network, before it claims anything.
-      AGENT_GATEWAY_URL: http://${AGENT_GATEWAY_HOSTNAME:-agent-gateway}:${AGENT_TUNNEL_LISTEN_PORT:-8080}
       # The control plane the runner claims against — its own tunnel, not the
       # MCP one. They were the same relay until MCP moved to the control
       # plane's 8001 listener; the default was left pointing at it, which sent
@@ -299,9 +243,10 @@ services:
       # MCP. Jobs would simply never start, and the 404 names a path rather
       # than a port, so it reads as a routing bug in the control plane.
       AGENT_CONTROL_PLANE_URL: ${AGENT_CONTROL_PLANE_URL:-http://${AGENT_CONTROL_PLANE_HOSTNAME:-agent-control-plane}:${AGENT_CONTROL_PLANE_TUNNEL_LISTEN_PORT:-8000}}
-      # The sandbox's second destination, handed down with its own token. A
-      # separate name and port from the gateway's, so "may call models" and
-      # "may call tools" stay two permissions rather than one.
+      # The sandbox's relay, by the name both this container and the sandboxes
+      # resolve, handed down with its own token. The runner refuses a relay
+      # given by address, or one it cannot find on the relay network, before
+      # it claims anything.
       AGENT_SANDBOX_MCP_URL: http://${AGENT_MCP_HOSTNAME:-agent-mcp}:${AGENT_MCP_TUNNEL_LISTEN_PORT:-8000}
       # --- Enrolled host identity (required) ---
       # A one-time token, spent at first start for a lasting per-host
@@ -370,8 +315,8 @@ services:
       AGENT_GIT_AUTHOR_EMAIL: ${AGENT_GIT_AUTHOR_EMAIL:-}
 
       # --- The sandbox network (one, with nothing to select) ---
-      # Where lifecycle finds the two relays. Sandboxes never join it; each
-      # group's own bridge gets the relays attached under their aliases.
+      # Where lifecycle finds the MCP relay. Sandboxes never join it; each
+      # group's own bridge gets the relay attached under its alias.
       AGENT_RELAY_NETWORK: ${AGENT_RELAY_NETWORK:-${COMPOSE_PROJECT:?the unique host Compose project}-agent-relays}
       # This deployment's RFC1918 pool, cut into one /29 per active group. No
       # default: two deployments on one machine must hold disjoint pools, and
@@ -492,18 +437,17 @@ services:
       # Not the correctness barrier — the runner's live network probes are.
       # This only spares an operator the first crash-loop while a narrow
       # destination is still starting.
-      gateway-tunnel:
+      control-plane-tunnel:
         condition: service_started
 
 networks:
   internal:
-    # Local to this host. Nothing here talks to the gateway's compose network;
-    # the tunnel is the only path off the machine.
+    # Local to this host. The tunnels are its only path to the control plane.
     driver: bridge
   agent-relays:
     name: ${AGENT_RELAY_NETWORK:-${COMPOSE_PROJECT:?the unique host Compose project}-agent-relays}
-    # Discovery only: the two relays, and never a sandbox. Group lifecycle reads
-    # the relays' identities here and attaches them to each group's own bridge.
+    # Discovery only: the MCP relay, and never a sandbox. Group lifecycle reads
+    # the relay's identity here and attaches it to each group's own bridge.
     # `internal` because nothing on it needs a route, and the runner refuses to
     # start if it has one.
     internal: true

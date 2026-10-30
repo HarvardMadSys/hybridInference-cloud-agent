@@ -1,7 +1,6 @@
-# One fixed-destination hop used by the remote-host topology. Separate image
-# instances expose the inference and MCP-only listeners to sandbox groups,
-# attached to each group's bridge; another exposes the control API only to
-# runners.
+# One fixed-destination hop used by the remote-host topology. One instance
+# exposes the MCP-only listener to sandbox groups, attached to each group's
+# bridge; another exposes the control API only to runners.
 #
 # Small on purpose: it sits on every group bridge. The host rules open only its
 # service port to a sandbox there, but the less installed here, the less to
@@ -10,8 +9,8 @@ FROM alpine:3.21
 
 RUN apk add --no-cache openssh-client
 
-COPY deploy/host/agent-gateway-tunnel.sh /usr/local/bin/agent-gateway-tunnel
-RUN chmod +x /usr/local/bin/agent-gateway-tunnel
+COPY deploy/host/agent-ssh-tunnel.sh /usr/local/bin/agent-ssh-tunnel
+RUN chmod +x /usr/local/bin/agent-ssh-tunnel
 
 # No HEALTHCHECK, deliberately. ssh already supervises itself here in ways this
 # image can rely on: ExitOnForwardFailure means it dies rather than sit there
@@ -35,4 +34,4 @@ LABEL org.opencontainers.image.source="https://github.com/HarvardMadSys/hybridIn
       org.opencontainers.image.revision="${SOURCE_COMMIT}" \
       io.hybridinference.artifact.role="tunnel"
 
-ENTRYPOINT ["/usr/local/bin/agent-gateway-tunnel"]
+ENTRYPOINT ["/usr/local/bin/agent-ssh-tunnel"]

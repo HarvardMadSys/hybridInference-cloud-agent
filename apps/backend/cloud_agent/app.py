@@ -166,14 +166,12 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         admin_database,
         admin_database_browser,
         admin_hosts,
-        admin_llm_requests,
         admin_measurements,
         admin_profiling_control,
         admin_runs,
         admin_runtime_upgrades,
         admin_sandboxes,
         admin_settings,
-        admin_steps,
         admin_teams,
         admin_usage,
         agent_memory,
@@ -187,10 +185,8 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         hosts,
         mcp_connections,
         model_connections,
-        model_preferences,
         owner_usage,
         routes,
-        service_jobs,
         session,
         site_config,
         skills,
@@ -264,7 +260,6 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     app.include_router(work_insights.router)
     app.include_router(agent_memory.router)
     app.include_router(user_profile.router)
-    app.include_router(model_preferences.router)
     app.include_router(model_connections.router)
     app.include_router(teams.router)
     app.include_router(uploads.router)
@@ -294,13 +289,6 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     # transaction and audit imports do not load on the read-only page's route
     # table. Same guard, same prefix, same no-store: it is one surface.
     app.include_router(admin_profiling_control.router)
-    # Per-request LLM detail reads a second service and stays in its own module
-    # for the same reason it is a separate page load: the default run detail
-    # must not acquire a gateway I/O path.
-    app.include_router(admin_llm_requests.router)
-    # Steps read the same gateway detail across a page of turns, so they sit
-    # beside it rather than in the runs list's module.
-    app.include_router(admin_steps.router)
     # Read-only, and its own module: the audit trail is written by every admin
     # handler and read by this one page.
     app.include_router(admin_audit.router)
@@ -312,22 +300,16 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
             "/v1/agent/memories",
             "/v1/agent/insights",
             "/v1/agent/profile",
-            "/v1/agent/model-preference",
             "/v1/agent/conversations/read-receipts",
         ),
     )
     install_repository_access_errors(app)
-    # The gateway alert relay's way in: machine-to-machine on-call jobs, pinned
-    # to one configured service account. Its own module because its caller is a
-    # service holding a dispatch token, not a browser holding a session.
-    app.include_router(service_jobs.router)
-    # The web app's way in. Mounted alongside the others rather than inside
-    # ``routes.py`` because it authenticates nothing on entry — it is the route
-    # that *creates* the credential every other route requires.
+    # The session's own reads (``/me``, sign-out). Mounted alongside the
+    # others rather than inside ``routes.py`` because sign-out authenticates
+    # nothing on entry.
     app.include_router(session.router)
-    # Local accounts (AGENT_AUTH_MODE=local): sign-in, phone codes, the
-    # browser's accounts, the owner's own account, the waiting list and their
-    # administration. Each answers 404 in Gateway mode.
+    # The account system: sign-in, phone codes, the browser's accounts, the
+    # owner's own account, the waiting list and their administration.
     for local_router in (
         auth.router,
         auth_account.router,
@@ -345,7 +327,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
         """Liveness only — deliberately not readiness.
 
         A readiness probe here would have to decide what a degraded control
-        plane is (no gateway? no git credential?), and every answer to that
+        plane is (no mail transport? no git credential?), and every answer to that
         belongs to whoever operates it.
         """
         return {"status": "ok"}

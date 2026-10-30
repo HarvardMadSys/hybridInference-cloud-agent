@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from cloud_agent.application.pending_messages import QueueSweep, settle_waiting_queues
 from cloud_agent.goals.controller import run_goal_wakeups
-from cloud_agent.grants import RENEWAL_INTERVAL_S
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.workers.attempts import REAP_INTERVAL_S
 from cloud_agent.workers.periodic import run_every, run_pass
 
 if TYPE_CHECKING:
@@ -82,7 +82,7 @@ async def _run_periodic_loop(
 async def run_queued_follow_up_maintenance(
     store: _FollowUpMaintenanceStore,
     *,
-    interval_seconds: float = RENEWAL_INTERVAL_S,
+    interval_seconds: float = REAP_INTERVAL_S,
     deadline_seconds: float = QUEUED_FOLLOW_UP_DEADLINE_S,
 ) -> None:
     """Fail discontinuous legacy follow-ups without delaying lease recovery."""
@@ -98,14 +98,14 @@ async def run_goal_wakeup_maintenance(
     store: _GoalWakeupStore,
     *,
     github_app: GitHubAppSource | None = None,
-    gateway: Any | None = None,
-    interval_seconds: float = RENEWAL_INTERVAL_S,
+    owners: Any | None = None,
+    interval_seconds: float = REAP_INTERVAL_S,
     deadline_seconds: float = GOAL_WAKEUP_DEADLINE_S,
 ) -> None:
     """Consume durable goal wakeups independently of attempt lease recovery."""
 
     async def consume() -> None:
-        await run_goal_wakeups(store=store, github_app=github_app, gateway=gateway)
+        await run_goal_wakeups(store=store, github_app=github_app, owners=owners)
 
     await _run_periodic_loop(
         "goal_wakeup_maintenance",
@@ -118,7 +118,7 @@ async def run_goal_wakeup_maintenance(
 async def run_goal_scheduling_maintenance(
     store: _GoalSchedulingStore,
     *,
-    interval_seconds: float = RENEWAL_INTERVAL_S,
+    interval_seconds: float = REAP_INTERVAL_S,
     deadline_seconds: float = GOAL_SCHEDULING_DEADLINE_S,
 ) -> None:
     """Recover or pause goals whose scheduling obligation is missing."""
@@ -148,20 +148,20 @@ async def run_pending_message_maintenance(
     store: QueueStorage,
     *,
     github_app: GitHubAppSource | None = None,
-    gateway: Any | None = None,
-    interval_seconds: float = RENEWAL_INTERVAL_S,
+    owners: Any | None = None,
+    interval_seconds: float = REAP_INTERVAL_S,
     deadline_seconds: float = PENDING_MESSAGE_DEADLINE_S,
 ) -> None:
     """Settle owners' waiting queues independently of attempt lease recovery.
 
-    Each queue's check can wait on the gateway and GitHub. One sweep cursor
+    Each queue's check can wait on GitHub. One sweep cursor
     lasts as long as this task, so a pass the deadline cuts short resumes at
     the queue it was on rather than at the start of the page.
     """
     sweep = QueueSweep()
 
     async def settle() -> None:
-        await settle_waiting_queues(store, gateway=gateway, github_app=github_app, sweep=sweep)
+        await settle_waiting_queues(store, owners=owners, github_app=github_app, sweep=sweep)
 
     await _run_periodic_loop(
         "pending_message_maintenance",

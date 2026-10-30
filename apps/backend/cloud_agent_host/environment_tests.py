@@ -286,7 +286,6 @@ def execute_test(
             runtime="claude-code",
             model="",
             worker_token="",
-            sandbox_token="",
             clone_token=run.get("clone_token"),
         )
         source = _SourcePrefetch(job, uid=backend.uid, gid=backend.gid, max_bytes=None)

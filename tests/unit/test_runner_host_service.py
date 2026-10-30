@@ -253,7 +253,6 @@ def _delivered_job() -> dict[str, Any]:
         "task_prompt": "do it",
         "runtime": "claude-code",
         "model": "m",
-        "sandbox_token": "grant",
     }
 
 
@@ -1397,7 +1396,6 @@ def test_a_turn_process_accepts_before_it_runs_the_turn(monkeypatch):
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
     }
     monkeypatch.setattr("sys.stdin", io.StringIO(encode_turn(payload).decode()))
     answered: list[str] = []
@@ -1455,7 +1453,6 @@ def test_a_turn_process_declines_when_its_backend_is_not_usable(monkeypatch, emp
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
     }
     monkeypatch.setattr(
         "sys.stdin", io.StringIO("" if empty_delivery else encode_turn(payload).decode())
@@ -1604,7 +1601,6 @@ def test_the_host_hands_its_selection_to_the_child(monkeypatch):
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
         "execution_profile": "default",
     }
     measurement = operation_profiling.start_operation(
@@ -1781,7 +1777,6 @@ def test_a_parent_side_handover_failure_delivers_its_measurement(monkeypatch, ou
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
     }
     measurement = operation_profiling.start_operation(
         operation=operation_profiling.STARTUP_OPERATION, host="host-a"
@@ -1830,7 +1825,6 @@ def test_an_expired_selection_is_delivered_by_the_parent_before_handoff(monkeypa
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
     }
     measurement = operation_profiling.start_operation(
         operation=operation_profiling.STARTUP_OPERATION
@@ -1890,7 +1884,6 @@ def test_a_turn_process_reattaches_the_selection_it_was_handed(monkeypatch):
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
         "_profiling": {
             "run_id": "run-1",
             "measurement_id": "msm_handed",
@@ -1978,7 +1971,6 @@ def test_a_child_never_refuses_a_turn_over_an_unusable_selection(monkeypatch, se
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
         "_profiling": selection,
     }
     if selection == "another_run":
@@ -2045,7 +2037,6 @@ def test_a_declining_child_does_not_emit_or_refund_the_parent_selection(monkeypa
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
     }
     assert runner_mod._bound_measurement(parent, payload) is parent
     payload["_profiling"] = operation_profiling.handoff_context(parent)
@@ -2353,7 +2344,6 @@ def _claimed(job_id: str = "ajob_1") -> Any:
         runtime="claude-code",
         model="m",
         worker_token="ajt.a.b",
-        sandbox_token="grant",
     )
 
 

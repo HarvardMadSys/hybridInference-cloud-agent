@@ -27,14 +27,12 @@ from cloud_agent.api._local_auth import (
     local_accounts,
     mail_available,
     require_json,
-    require_local_mode,
 )
 from cloud_agent.api._local_browser import current_browser
 from cloud_agent.api.auth import enforce_login_limits
 from cloud_agent.api.auth_phone import enforce_code_checks, phone_flows
 from cloud_agent.api.deps import (
     get_client_ip,
-    get_grant_client,
     get_storage,
     local_session_owner,
     require_store,
@@ -65,7 +63,6 @@ router = APIRouter(
     prefix="/v1/auth/account",
     tags=["auth"],
     route_class=LocalAuthRoute,
-    dependencies=[Depends(require_local_mode)],
 )
 
 
@@ -201,7 +198,6 @@ async def delete_account(
     request: Request,
     response: Response,
     background: BackgroundTasks,
-    grants: Any = Depends(get_grant_client),
 ) -> OkResponse:
     """Delete the signed-in account at its owner's request.
 
@@ -224,7 +220,6 @@ async def delete_account(
     background.add_task(
         _terminate,
         require_store(get_storage(request)),
-        grants,
         deleted.id,
         deleted.version,
     )
@@ -239,9 +234,9 @@ async def delete_account(
     return OkResponse()
 
 
-async def _terminate(storage: Any, grants: Any, account_id: str, generation: int) -> None:
+async def _terminate(storage: Any, account_id: str, generation: int) -> None:
     try:
-        await terminate_owner_access(storage, grants, account_id, generation=generation)
+        await terminate_owner_access(storage, account_id, generation=generation)
     except Exception:
         logger.warning(
             "agent_owner_access_termination_deferred",

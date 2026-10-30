@@ -63,7 +63,6 @@ def _claim_body(**changes: object) -> dict[str, object]:
         "runtime": "opencode",
         "model": "gemini-2.5-pro",
         "worker_token": "w",
-        "sandbox_token": "",
     }
     body.update(changes)
     return body

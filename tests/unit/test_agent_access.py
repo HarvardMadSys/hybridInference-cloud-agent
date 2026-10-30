@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from cloud_agent.gateway import GatewayClient, GatewayError
+from cloud_agent.gateway import GatewayClient, OwnerDirectoryError
 
 
 async def test_access_uses_dispatch_auth_and_encodes_the_subject():
@@ -56,7 +56,7 @@ async def test_malformed_or_role_only_decisions_never_grant_access(payload):
         transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
     ) as http:
         client = GatewayClient("https://gateway.example", "dispatch-test", client=http)
-        with pytest.raises(GatewayError):
+        with pytest.raises(OwnerDirectoryError):
             await client.agent_access("owner")
 
 
@@ -70,7 +70,7 @@ async def test_missing_or_failed_access_endpoint_never_tries_user_status(status)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         client = GatewayClient("https://gateway.example", "dispatch-test", client=http)
-        with pytest.raises(GatewayError) as caught:
+        with pytest.raises(OwnerDirectoryError) as caught:
             await client.agent_access("owner")
     assert caught.value.status_code == status
     assert paths == ["/internal/users/owner/agent-access"]

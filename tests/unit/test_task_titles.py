@@ -74,7 +74,6 @@ async def _generate(store, client):
         attempt_id=7,
         lease_generation=2,
         model="granted-model",
-        sandbox_token="scoped-grant-secret",
         client=client,
     )
 

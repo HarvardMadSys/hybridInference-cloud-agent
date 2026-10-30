@@ -15,6 +15,8 @@ end-to-end acceptance: no real provider, mail server or Kata host is used.
 
 from __future__ import annotations
 
+from tests.support.owners import on_connection
+
 import json
 import os
 import re
@@ -236,7 +238,7 @@ async def test_an_approved_account_sets_up_its_own_model_and_runs_a_task_on_it(e
     assert config["default_model"] is None and config["default_model_connection_id"] is None
     refused = await client.post(
         "/v1/agent/jobs",
-        json={"repo": None, "task_prompt": "fix it", "model": _MODEL, "runtime": "opencode"},
+        json=on_connection({"repo": None, "task_prompt": "fix it", "model": _MODEL, "runtime": "opencode"}),
     )
     assert refused.status_code == 409
     assert refused.json()["detail"]["error"]["type"] == "model_connection_required"
@@ -411,7 +413,7 @@ async def test_follow_ups_keep_their_personal_source_and_never_fall_back(env):
     source = {"model": _MODEL, "model_connection_id": connection_id}
     job = await client.post(
         "/v1/agent/jobs",
-        json={"repo": None, "task_prompt": "fix it", "runtime": "opencode", **source},
+        json=on_connection({"repo": None, "task_prompt": "fix it", "runtime": "opencode", **source}),
     )
     assert job.status_code == 201, job.text
     thread_id = job.json()["thread_id"]
@@ -419,7 +421,7 @@ async def test_follow_ups_keep_their_personal_source_and_never_fall_back(env):
 
     # The same model id without its connection names the Gateway, which has none.
     gateway = await client.post(
-        f"/v1/agent/threads/{thread_id}/messages", json={"prompt": "next", "model": _MODEL}
+        f"/v1/agent/threads/{thread_id}/messages", json=on_connection({"prompt": "next", "model": _MODEL})
     )
     assert gateway.status_code == 409, gateway.text
     assert gateway.json()["detail"]["error"]["type"] == "model_connection_required"
@@ -450,7 +452,7 @@ async def test_follow_ups_keep_their_personal_source_and_never_fall_back(env):
     assert config["model_connections"] == [] and config["model_connection_required"] is True
     refused = await client.post(
         "/v1/agent/jobs",
-        json={"repo": None, "task_prompt": "again", "runtime": "opencode", **source},
+        json=on_connection({"repo": None, "task_prompt": "again", "runtime": "opencode", **source}),
     )
     assert refused.status_code == 400
     assert refused.json()["detail"]["error"]["reason"] == "disabled"

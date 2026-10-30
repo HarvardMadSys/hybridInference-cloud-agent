@@ -18,7 +18,6 @@ from cloud_agent.api._local_auth import (
     LocalAuthRoute,
     local_accounts,
     require_json,
-    require_local_mode,
     waitlist_entry,
 )
 from cloud_agent.api.deps import get_current_user, local_session_owner
@@ -31,7 +30,6 @@ router = APIRouter(
     prefix="/v1/waitlist",
     tags=["waitlist"],
     route_class=LocalAuthRoute,
-    dependencies=[Depends(require_local_mode)],
 )
 
 

@@ -15,7 +15,7 @@ from cloud_agent import identity
 from cloud_agent.admin_observability import encode_cursor
 from cloud_agent.admin_usage import MAX_USAGE_RESPONSE_BYTES, MAX_USAGE_RUNS
 from cloud_agent.api import owner_usage
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.owner_usage import (
     CONTAINER_CURSOR_SCOPE,
     MAX_ALL_TIME_DAYS,
@@ -59,7 +59,7 @@ def app(monkeypatch):
         "allowed": True,
         "permissions": ["agent.use"],
     }
-    application.dependency_overrides[get_gateway_client] = lambda: gateway
+    application.dependency_overrides[get_owner_directory] = lambda: gateway
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
         owner_usage=queries, admin_usage=usage
     )

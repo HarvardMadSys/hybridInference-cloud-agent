@@ -38,7 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._sensitive_routes import SensitiveRoute
-from cloud_agent.api.deps import get_grant_client, get_storage, require_store
+from cloud_agent.api.deps import get_storage, require_store
 from cloud_agent.application.model_connection_check import (
     CHECK_MESSAGES,
     CHECKS_PER_HOUR,
@@ -478,7 +478,6 @@ async def update_connection(
     body: ModelConnectionUpdate,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _Storage | None = Depends(get_storage),
-    grants: Any = Depends(get_grant_client),
 ) -> ModelConnectionView:
     """Edit, rotate the key of, enable or disable a connection.
 
@@ -509,7 +508,7 @@ async def update_connection(
         if plan.verify
         else await _commit_unverified(store, user_id, connection_id, plan.changes)
     )
-    await invalidate_connection(store, grants, user_id=user_id, connection_id=connection_id)
+    await invalidate_connection(store, user_id=user_id, connection_id=connection_id)
     return _view(updated)
 
 
@@ -586,7 +585,6 @@ async def delete_connection(
     connection_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _Storage | None = Depends(get_storage),
-    grants: Any = Depends(get_grant_client),
 ) -> Response:
     """Delete a connection: its key is erased and its running processes are closed.
 
@@ -597,7 +595,7 @@ async def delete_connection(
     await store.model_connections.delete_model_connection(
         user_id=user["user_id"], connection_id=connection_id
     )
-    await invalidate_connection(store, grants, user_id=user["user_id"], connection_id=connection_id)
+    await invalidate_connection(store, user_id=user["user_id"], connection_id=connection_id)
     return Response(status_code=204)
 
 

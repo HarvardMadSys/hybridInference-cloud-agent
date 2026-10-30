@@ -9,6 +9,8 @@ through the application ``create_app`` builds, over the real store.
 
 from __future__ import annotations
 
+from tests.support.owners import on_connection
+
 import json
 from typing import Any
 
@@ -31,7 +33,7 @@ from cloud_agent.api import worker
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_gateway_client,
+    get_owner_directory,
     get_grant_client,
     get_storage,
 )
@@ -72,7 +74,7 @@ async def http(pool, monkeypatch):
     monkeypatch.setattr(worker, "_worker_sandbox_manager", no_sandbox_manager)
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_gateway_client] = _Gateway
+    app.dependency_overrides[get_owner_directory] = _Gateway
     app.dependency_overrides[get_grant_client] = _Grants
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[authenticate_agent_owner] = lambda: {
@@ -94,7 +96,7 @@ async def http(pool, monkeypatch):
         assert environment.status_code == 201, environment.text
         job = await client.post(
             "/v1/agent/jobs",
-            json={"repo": _REPO, "task_prompt": "fix it", "model": "glm-5.1", "base_sha": "a" * 40},
+            json=on_connection({"repo": _REPO, "task_prompt": "fix it", "model": "glm-5.1", "base_sha": "a" * 40}),
         )
         assert job.status_code == 201, job.text
         yield (

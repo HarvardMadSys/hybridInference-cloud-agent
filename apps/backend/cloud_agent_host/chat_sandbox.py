@@ -3990,10 +3990,6 @@ class RetainedChatBackend(SandboxBackend):
         """Use the container backend checks without probing a host bind mount."""
         self.manager.backend.preflight()
 
-    def check_gateway_reachable(self, base_url: str) -> None:
-        """Delegate the backend's isolated gateway reachability probe."""
-        self.manager.backend.check_gateway_reachable(base_url)
-
 
 def member_inference_env_path(slot_id: int) -> str:
     """Where one member's owner inference credentials wait for its bash."""

@@ -11,7 +11,7 @@ from fastapi import FastAPI
 
 from cloud_agent import identity
 from cloud_agent.api import work_insights
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 
 PATH = "/v1/agent/insights"
 
@@ -30,7 +30,7 @@ def app(monkeypatch):
         "allowed": True,
         "permissions": ["agent.use"],
     }
-    application.dependency_overrides[get_gateway_client] = lambda: gateway
+    application.dependency_overrides[get_owner_directory] = lambda: gateway
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
         work_insights=repository
     )

@@ -40,14 +40,13 @@ class PhoneAuthConfig(BaseModel):
 
 
 class AuthConfigResponse(BaseModel):
-    """Which sign-in this deployment offers. Public; carries no secret."""
+    """Whether this deployment offers sign-up. Public; carries no secret."""
 
-    mode: Literal["gateway", "local"]
     signup_enabled: bool
 
 
 class AuthOptionsResponse(BaseModel):
-    """What a local deployment's account pages offer. Public; carries no secret."""
+    """What this deployment's account pages offer. Public; carries no secret."""
 
     signup_enabled: bool
     #: Phone sign-up: sign-up is open and phone sign-in can deliver codes.

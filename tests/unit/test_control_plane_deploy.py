@@ -83,7 +83,7 @@ async def test_saved_gateway_dispatch_credential_needs_no_environment_default(
 ) -> None:
     """An empty import disables grants; a saved credential configures the live client."""
     from cloud_agent import settings
-    from cloud_agent.gateway import GatewayError
+    from cloud_agent.accounts.directory import OwnerDirectoryError
     from cloud_agent.grants import GrantClient
 
     assert control_plane_env["GATEWAY_GRANT_DISPATCH_TOKEN"] == (
@@ -96,7 +96,7 @@ async def test_saved_gateway_dispatch_credential_needs_no_environment_default(
         settings.apply_settings(1, {"gateway_base_url": "https://gateway.example"})
         client = GrantClient()
         assert not client.configured
-        with pytest.raises(GatewayError):
+        with pytest.raises(OwnerDirectoryError):
             await client._post("/internal/agent-grants", {})
         encoded = settings.encode_changes(
             {"gateway_dispatch_token": "saved-gateway-dispatch-credential-32b"}

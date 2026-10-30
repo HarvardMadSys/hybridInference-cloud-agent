@@ -12,7 +12,7 @@ from fastapi import FastAPI
 
 from cloud_agent import identity
 from cloud_agent.api import catalog
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.app import create_app, create_mcp_app
 
 PATH = "/v1/agent/notifications/state"
@@ -57,7 +57,7 @@ def app(monkeypatch):
         "allowed": True,
         "permissions": ["agent.use"],
     }
-    application.dependency_overrides[get_gateway_client] = lambda: gateway
+    application.dependency_overrides[get_owner_directory] = lambda: gateway
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
         conversation_queries=queries
     )

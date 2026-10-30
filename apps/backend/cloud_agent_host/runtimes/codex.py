@@ -40,7 +40,7 @@ class CodexRuntime(AgentRuntime):
         *,
         workdir: str,
         model: str,
-        gateway_base_url: str,
+        model_base_url: str,
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
@@ -64,15 +64,15 @@ class CodexRuntime(AgentRuntime):
         # thread RPC; only where it points changes. Both speak Responses,
         # which is the only wire Codex has -- on a Chat Completions connection
         # through the member's compatibility helper, which this URL then names.
-        translated = isinstance(gateway_base_url, ResponsesViaChatUrl)
-        base_url = f"{COMPAT_ORIGIN}/v1" if translated else openai_base_url(gateway_base_url)
+        translated = isinstance(model_base_url, ResponsesViaChatUrl)
+        base_url = f"{COMPAT_ORIGIN}/v1" if translated else openai_base_url(model_base_url)
         cli_credential = compat_cli_credential(credential) if translated else credential
         provider = "hybridinference"
         argv = [
             self.binary,
             *self.effort_args(reasoning_effort),
             *(self.TRANSLATED_ARGS if translated else ()),
-            *self._mcp_args(mcp_config, gateway_base_url=gateway_base_url),
+            *self._mcp_args(mcp_config, model_base_url=model_base_url),
             "-c",
             f'model_provider="{provider}"',
             "-c",
@@ -93,8 +93,8 @@ class CodexRuntime(AgentRuntime):
         }
         if session_state_dir:
             env["CODEX_HOME"] = session_state_dir
-        if isinstance(gateway_base_url, ResponsesViaChatUrl):
-            return compat_launch(argv, env, gateway_base_url, credential, model=model)
+        if isinstance(model_base_url, ResponsesViaChatUrl):
+            return compat_launch(argv, env, model_base_url, credential, model=model)
         return argv, env
 
     #: What a translated Codex leaves out of its requests: 0.145.0 otherwise
@@ -104,9 +104,9 @@ class CodexRuntime(AgentRuntime):
     #: tool stays, namespaced ones (sub-agents, MCP) included.
     TRANSLATED_ARGS = ("-c", 'web_search="disabled"')
 
-    def _mcp_args(self, config: RuntimeMCPConfig, *, gateway_base_url: str) -> list[str]:
+    def _mcp_args(self, config: RuntimeMCPConfig, *, model_base_url: str) -> list[str]:
         """The authenticated relay entry, as a ``-c`` override; empty without servers."""
-        endpoints = self.relay_urls(config, gateway_base_url=gateway_base_url)
+        endpoints = self.relay_urls(config, model_base_url=model_base_url)
         entries = []
         for name, url in endpoints.items():
             entries.append(

@@ -9,8 +9,8 @@
 # **Thin on purpose.** `sandbox_host.sh up` already is the bring-up: it
 # checks the daemon, requires the environment, runs the isolation preflight
 # fail-closed, builds the sandbox image, starts the stack, and then probes the
-# gateway *from the relay network* the sandbox groups are handed their relays
-# from, and has every runner install and verify this deployment's host rules.
+# MCP relay *from the relay network* the sandbox groups are handed it from,
+# and has every runner install and verify this deployment's host rules.
 # Re-implementing any of that here would give the deploy a second opinion about
 # whether the host is fit to run untrusted code, and the two would drift.
 #
@@ -193,7 +193,7 @@ KNOWN="${EXPECTED_PROJECT},${SIBLING_COMPOSE_PROJECTS}"
 STRAY="$(docker ps --format '{{.Label "com.docker.compose.project"}} {{.Names}}' 2>/dev/null \
   | awk -v known="${KNOWN}" '
       BEGIN { n = split(known, k, ","); for (i = 1; i <= n; i++) if (k[i] != "") ok[k[i]] = 1 }
-      !($1 in ok) && $2 ~ /-(runner|sandbox-manager|gateway-tunnel|mcp-tunnel|control-plane-tunnel)-[0-9]+$/ {
+      !($1 in ok) && $2 ~ /-(runner|sandbox-manager|mcp-tunnel|control-plane-tunnel)-[0-9]+$/ {
         print "  " $2 "  (project: " $1 ")"
       }')"
 if [ -n "${STRAY}" ]; then
@@ -291,7 +291,7 @@ restore_recorded_generation() {
 
 # Everything that makes this a deployment rather than a `git pull` lives in
 # there, including the refusal to start runners on a host that cannot isolate
-# them. It exits non-zero on a failed gateway probe, which is what turns a
+# them. It exits non-zero on a failed relay probe, which is what turns a
 # broken tunnel into a red deploy instead of jobs that claim and then fail.
 if ! runs_phase activate; then
   log "handing over to sandbox_host.sh prepare"

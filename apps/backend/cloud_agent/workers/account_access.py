@@ -1,13 +1,13 @@
-"""The local-mode pass that keeps ended Agent access ended.
+"""The pass that keeps ended Agent access ended.
 
-Runs only in the process that owns background work, and only in local mode.
+Runs only in the process that owns background work.
 See :mod:`cloud_agent.application.owner_termination` for what one pass does
 and the stopping bound it gives.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from cloud_agent.application.owner_termination import (
     ENFORCEMENT_INTERVAL_S,
@@ -20,15 +20,15 @@ if TYPE_CHECKING:
 
 
 async def run_account_access_enforcement(
-    storage: Storage, grants: Any, *, interval_seconds: float = ENFORCEMENT_INTERVAL_S
+    storage: Storage, *, interval_seconds: float = ENFORCEMENT_INTERVAL_S
 ) -> None:
     """Repeat the enforcement pass until cancelled."""
 
     async def one_pass() -> None:
         await run_pass(
-            lambda: enforce_ended_access(storage, grants),
+            lambda: enforce_ended_access(storage),
             deadline_seconds=max(interval_seconds, 10.0),
-            description="Local account access enforcement",
+            description="Account access enforcement",
             event="agent_account_access_enforcement",
         )
 

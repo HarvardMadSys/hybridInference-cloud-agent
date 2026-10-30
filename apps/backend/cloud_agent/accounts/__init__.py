@@ -1,7 +1,6 @@
-"""Cloud Agent's own accounts: email/password sign-in, sessions and the waiting list.
+"""Cloud Agent's accounts: sign-up, sign-in, sessions, the waiting list and administration.
 
-Off unless a deployment sets ``AGENT_AUTH_MODE=local``. Gateway mode, the
-default, never reads these tables or routes.
+They are this service's only identity source.
 
 The password, session-lifecycle, mail and abuse-control behaviour is adapted
 from HybridInference's sign-in (``HarvardMadSys/hybridInference`` at

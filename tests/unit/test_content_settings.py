@@ -218,7 +218,6 @@ async def test_title_request_uses_saved_url_bounds_and_retry_count(saved_setting
             attempt_id=1,
             lease_generation=1,
             model="model",
-            sandbox_token="grant",
             client=client,
         )
     assert len(requests) == 2

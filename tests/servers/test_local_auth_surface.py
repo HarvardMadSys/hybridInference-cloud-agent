@@ -38,7 +38,7 @@ async def client(monkeypatch):
     from cloud_agent.app import create_app
 
     app = create_app()
-    app.state.gateway = _NoGateway()
+    app.state.owners = _NoGateway()
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="https://test", follow_redirects=False
     ) as http:

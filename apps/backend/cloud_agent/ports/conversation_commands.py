@@ -139,18 +139,6 @@ class ConversationCommands(Protocol):
         """Rename the owned conversation without changing any turn's prompt."""
         ...
 
-    async def get_thread_title_prompt(
-        self, *, job_id: str, attempt_id: int, lease_generation: int
-    ) -> str | None:
-        """Return the first prompt if this fenced attempt may still name its thread."""
-        ...
-
-    async def set_generated_thread_title(
-        self, *, job_id: str, attempt_id: int, lease_generation: int, title: str
-    ) -> bool:
-        """Save a missing/recovered title while its attempt remains current."""
-        ...
-
     async def set_thread_pinned(
         self, *, job_id: str, user_id: str, pinned: bool
     ) -> dict[str, Any] | None:

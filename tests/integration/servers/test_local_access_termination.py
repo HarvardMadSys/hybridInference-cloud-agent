@@ -12,6 +12,8 @@ acknowledged — without a later retry touching work the new approval allows.
 
 from __future__ import annotations
 
+from tests.support.owners import on_connection
+
 import asyncio
 from typing import Any
 
@@ -39,7 +41,7 @@ from cloud_agent.accounts.directory import (
     LocalOwnerDirectory,
 )
 from cloud_agent.api._local_auth import terminal_open_fence
-from cloud_agent.api.deps import get_gateway_client, get_grant_client
+from cloud_agent.api.deps import get_owner_directory, get_grant_client
 from cloud_agent.application.model_connections import connection_residency_credential
 from cloud_agent.application.owner_termination import (
     enforce_ended_access,
@@ -115,7 +117,7 @@ async def _local_owner(api, monkeypatch):
     monkeypatch.setattr(queue, "_claim_body", _claim_body)
     await make_account(api.store, "owner@example.org", admission="approved", account_id=OWNER)
     local_gateway = LocalModeGateway(LocalOwnerDirectory(api.store.local_accounts))
-    api.app.dependency_overrides[get_gateway_client] = lambda: local_gateway
+    api.app.dependency_overrides[get_owner_directory] = lambda: local_gateway
     api.app.dependency_overrides[get_grant_client] = LocalModeGrantClient
     connection = await verified_connection(api.store, OWNER, models=(MODEL,))
     api.connection = connection
@@ -449,7 +451,7 @@ async def test_a_turn_without_a_connection_is_refused_and_never_reaches_a_gatewa
     """A local account has no Gateway models: the source is never silently swapped."""
     response = await api.client.post(
         "/v1/agent/jobs",
-        json={"repo": queue._REPO, "task_prompt": "fix it", "model": MODEL, "base_sha": "a" * 40},
+        json=on_connection({"repo": queue._REPO, "task_prompt": "fix it", "model": MODEL, "base_sha": "a" * 40}),
     )
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["error"]["type"] == "model_connection_required"

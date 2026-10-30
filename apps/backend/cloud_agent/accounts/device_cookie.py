@@ -37,8 +37,11 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cloud_agent.accounts.config import LocalAuthNotConfigured, derived_key
-from cloud_agent.identity import session_cookie_is_secure
+from cloud_agent.accounts.config import (
+    LocalAuthNotConfigured,
+    derived_key,
+    session_cookie_is_secure,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping

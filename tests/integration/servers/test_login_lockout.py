@@ -49,7 +49,7 @@ async def http(pool, monkeypatch):
     app = create_app()
     storage = Storage(pool)
     app.state.storage = storage
-    app.state.gateway = LocalModeGateway(LocalOwnerDirectory(storage.local_accounts))
+    app.state.owners = LocalModeGateway(LocalOwnerDirectory(storage.local_accounts))
     app.state.grants = LocalModeGrantClient()
     await make_account(storage, _EMAIL)
     async with AsyncClient(

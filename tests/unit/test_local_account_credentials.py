@@ -127,16 +127,6 @@ async def test_credentials_never_appear_in_a_repr():
 # ── Configuration ───────────────────────────────────────────────────────
 
 
-async def test_gateway_is_the_default_and_an_unknown_mode_stops(monkeypatch):
-    monkeypatch.delenv(config.ENV_AUTH_MODE, raising=False)
-    assert config.auth_mode() == "gateway"
-    monkeypatch.setenv(config.ENV_AUTH_MODE, "LOCAL")
-    assert config.auth_mode() == "local"
-    monkeypatch.setenv(config.ENV_AUTH_MODE, "both")
-    with pytest.raises(config.LocalAuthNotConfigured):
-        config.auth_mode()
-
-
 @pytest.mark.parametrize(
     "value",
     ["", "/relative", "https://x.example/?q=1", "https://x.example/#f", "https://u:p@x.example"],

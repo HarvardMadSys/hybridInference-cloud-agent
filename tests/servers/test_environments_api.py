@@ -92,7 +92,7 @@ async def test_pydantic_extra_value_errors_do_not_echo_submitted_secret(client):
 
 
 async def test_withdrawn_test_owner_gets_no_credentials_or_container(monkeypatch):
-    from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client
+    from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory
 
     run = {
         "id": "test-run",
@@ -115,7 +115,7 @@ async def test_withdrawn_test_owner_gets_no_credentials_or_container(monkeypatch
     app = FastAPI()
     app.include_router(environments.router)
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace(environments=repository)
-    app.dependency_overrides[get_gateway_client] = lambda: gateway
+    app.dependency_overrides[get_owner_directory] = lambda: gateway
     app.dependency_overrides[get_agent_app_credentials] = lambda: credentials
     app.dependency_overrides[environments.verify_claiming_host] = lambda: {
         "host": "runner",

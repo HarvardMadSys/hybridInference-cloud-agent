@@ -12,8 +12,8 @@
 #     Both describe the image *variant* — where this app is mounted — so a
 #     deployment that changes one rebuilds.
 #   * **Runtime environment** is read by the server on every request. The
-#     deployment's identity — product name, organisation, status page, the
-#     gateway's origin — is in this class. Setting one of those on the running
+#     deployment's identity — product name, organisation, status page,
+#     contact — is in this class. Setting one of those on the running
 #     container changes the site with no rebuild, and this image carries no
 #     deployment's brand at build time.
 #

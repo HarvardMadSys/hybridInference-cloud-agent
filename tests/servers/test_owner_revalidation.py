@@ -20,13 +20,13 @@ from cloud_agent.api._owner_auth import (
 from cloud_agent.api.deps import (
     AGENT_ACCESS_ALLOW_TTL_S,
     AgentAccessAdmission,
-    get_gateway_client,
+    get_owner_directory,
     verify_admin_access,
 )
 from cloud_agent.api.hosts import authenticate_host
 from cloud_agent.api.service_jobs import verify_oncall_dispatch
 from cloud_agent.api.worker import _worker_claims, verify_claiming_host
-from cloud_agent.gateway import GatewayError
+from cloud_agent.accounts.directory import OwnerDirectoryError
 
 pytestmark = pytest.mark.asyncio
 _OWNER = "user_1"
@@ -47,7 +47,7 @@ class _AccessGateway:
     async def agent_access(self, user_id: str) -> dict[str, Any]:
         self.asked.append(user_id)
         if self.error is not None:
-            raise GatewayError("unavailable", status_code=self.error, error_type=self.error_type)
+            raise OwnerDirectoryError("unavailable", status_code=self.error, error_type=self.error_type)
         return {
             "user_id": user_id,
             "allowed": "agent.use" in self.permissions,
@@ -73,7 +73,7 @@ def _app(gateway: _AccessGateway, role: str = "admin") -> FastAPI:
         "role": role,
         "authenticated": True,
     }
-    app.dependency_overrides[get_gateway_client] = lambda: gateway
+    app.dependency_overrides[get_owner_directory] = lambda: gateway
     return app
 
 

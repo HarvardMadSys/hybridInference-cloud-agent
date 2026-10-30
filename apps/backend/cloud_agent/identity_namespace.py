@@ -1,10 +1,15 @@
-"""Pin an Agent database to one identity source: a Gateway issuer, or local accounts.
+"""Pin an Agent database to Cloud Agent's own accounts, and refuse any other.
 
-The two never share a database. Gateway mode refuses a database bound to local
-accounts, and local mode (``AGENT_AUTH_MODE=local``) initializes only a
-database with no Gateway binding and no owner data. Moving an existing
-Gateway-bound database to local accounts is a separate, reviewed identity
-migration; there is no switch that skips these checks.
+An empty database is bound to the account system the first time it starts. A
+database whose owners are Gateway accounts (one recording a Gateway issuer, or
+one holding owner data with no binding, as every Gateway-era database does) is
+refused with the cutover instructions: its owner ids name people in another
+identity system, and nothing here can prove which account each would become.
+There is no switch that adopts such a database.
+
+``python -m cloud_agent.identity_namespace --check`` answers the same question
+read-only, on any schema revision, before an operator migrates or starts
+anything against a database.
 """
 
 from __future__ import annotations
@@ -14,12 +19,28 @@ import asyncio
 import os
 from typing import TYPE_CHECKING
 
+from cloud_agent.accounts.config import CUTOVER_RUNBOOK
+
 if TYPE_CHECKING:
     import asyncpg
 
 
 class IdentityNamespaceError(RuntimeError):
-    """The configured Gateway cannot own this database's existing identities."""
+    """This database's owners are not Cloud Agent accounts."""
+
+
+GATEWAY_BOUND = (
+    "This Agent database's owners are Gateway accounts. Cloud Agent now has its own "
+    "accounts only, and does not adopt or map Gateway owners. Leave this database "
+    "untouched as the retained archive, point AGENT_DATABASE_URL at a new empty "
+    f"database, and create the first administrator there. See {CUTOVER_RUNBOOK}."
+)
+UNBOUND_OWNER_DATA = (
+    "This Agent database has owner data but no account binding, so its owners are "
+    "from a Gateway-era deployment. Cloud Agent does not adopt them. Leave this "
+    "database untouched, point AGENT_DATABASE_URL at a new empty database, and "
+    f"create the first administrator there. See {CUTOVER_RUNBOOK}."
+)
 
 
 async def _has_owner_data(conn: asyncpg.Connection) -> bool:
@@ -44,8 +65,32 @@ async def _bound_to_local_accounts(conn: asyncpg.Connection) -> bool:
     return bool(await conn.fetchval("SELECT EXISTS (SELECT 1 FROM agent_local_identity_namespace)"))
 
 
+async def _gateway_issuer(conn: asyncpg.Connection) -> str | None:
+    if await conn.fetchval("SELECT to_regclass('agent_identity_namespace')") is None:
+        return None
+    return await conn.fetchval("SELECT gateway_issuer FROM agent_identity_namespace")
+
+
+async def check_namespace(conn: asyncpg.Connection) -> bool:
+    """Whether the database is already bound to accounts; never writes.
+
+    Returns:
+        ``True`` when bound, ``False`` when empty and so safe to bind.
+
+    Raises:
+        IdentityNamespaceError: Gateway-bound, or owner data without a binding.
+    """
+    if await _gateway_issuer(conn) is not None:
+        raise IdentityNamespaceError(GATEWAY_BOUND)
+    if await _bound_to_local_accounts(conn):
+        return True
+    if await _has_owner_data(conn):
+        raise IdentityNamespaceError(UNBOUND_OWNER_DATA)
+    return False
+
+
 async def ensure_local_namespace(pool: asyncpg.Pool) -> None:
-    """Bind an empty database to local accounts exactly once, or check it already is.
+    """Bind an empty database to accounts exactly once, or check it already is.
 
     Raises:
         IdentityNamespaceError: The database is bound to a Gateway issuer, or
@@ -53,123 +98,39 @@ async def ensure_local_namespace(pool: asyncpg.Pool) -> None:
     """
     async with pool.acquire() as conn, conn.transaction():
         await conn.execute("LOCK TABLE agent_identity_namespace IN EXCLUSIVE MODE")
-        if await conn.fetchval("SELECT gateway_issuer FROM agent_identity_namespace") is not None:
-            raise IdentityNamespaceError(
-                "This Agent database's owners are Gateway accounts, so AGENT_AUTH_MODE=local "
-                "cannot serve it. Use a separate database for local accounts; moving these "
-                "owners needs the identity migration, not a configuration change."
-            )
-        if await _bound_to_local_accounts(conn):
+        if await check_namespace(conn):
             return
-        if await _has_owner_data(conn):
-            raise IdentityNamespaceError(
-                "This Agent database has owner data but no identity binding. "
-                "AGENT_AUTH_MODE=local initializes only an empty database."
-            )
         await conn.execute("INSERT INTO agent_local_identity_namespace (singleton) VALUES (TRUE)")
 
 
-async def ensure_gateway_namespace(
-    pool: asyncpg.Pool, issuer: str | None, *, adopt_existing: bool = False
-) -> str | None:
-    """Check the stored issuer, or initialize an empty database exactly once.
-
-    Existing owner data requires an explicit operator adoption. That operation
-    can fill an absent binding but can never change a recorded issuer.
-    Concurrent initializers serialize on the singleton table.
-    """
-    async with pool.acquire() as conn, conn.transaction():
-        return await check_gateway_namespace(conn, issuer, adopt_existing=adopt_existing)
-
-
-async def check_gateway_namespace(
-    conn: asyncpg.Connection, issuer: str | None, *, adopt_existing: bool = False
-) -> str | None:
-    """Bind or check the issuer in the same transaction as its settings update."""
-    await conn.execute("LOCK TABLE agent_identity_namespace IN EXCLUSIVE MODE")
-    if await _bound_to_local_accounts(conn):
-        raise IdentityNamespaceError(
-            "This Agent database's owners are local accounts. Start it with "
-            "AGENT_AUTH_MODE=local, or use a separate database for Gateway sign-in."
-        )
-    stored = await conn.fetchval("SELECT gateway_issuer FROM agent_identity_namespace")
-    if stored is not None:
-        if issuer != stored:
-            raise IdentityNamespaceError(
-                "GATEWAY_ISSUER does not match this Agent database's identity issuer. "
-                "Restore the original configuration or use a separate database."
-            )
-        return stored
-    if issuer is None:
-        return None
-    if not adopt_existing and await _has_owner_data(conn):
-        raise IdentityNamespaceError(
-            "This Agent database has existing owner data but no identity issuer. "
-            "Verify its original Gateway issuer and explicitly initialize that binding with "
-            "python -m cloud_agent.identity_namespace --adopt-existing --issuer <original-issuer>."
-        )
-    await conn.execute(
-        "INSERT INTO agent_identity_namespace (singleton, gateway_issuer) VALUES (TRUE, $1)", issuer
-    )
-    return issuer
-
-
-async def _check_or_adopt(issuer: str | None, *, adopt_existing: bool) -> None:
+async def _check(dsn: str) -> str:
     import asyncpg
 
-    from cloud_agent.accounts.config import local_mode
-    from cloud_agent.settings import setting_env
-
-    dsn = os.environ.get("AGENT_DATABASE_URL")
-    if not dsn:
-        raise IdentityNamespaceError("AGENT_DATABASE_URL must be set.")
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
+    conn = await asyncpg.connect(dsn)
     try:
-        if local_mode():
-            if adopt_existing:
-                raise IdentityNamespaceError("--adopt-existing applies only to Gateway sign-in.")
-            await ensure_local_namespace(pool)
-            return
-        from cloud_agent.settings import apply_settings
-        from cloud_agent.storage.assembly import Storage
-
-        revision, encoded = await Storage(pool).settings.read_settings()
-        if revision >= 0 and "gateway_issuer" in encoded:
-            apply_settings(revision, encoded)
-        configured_issuer = (setting_env("GATEWAY_ISSUER") or "").strip() or None
-        if configured_issuer is None and "gateway_issuer" not in encoded:
-            # Before the main listener imports new fields, an existing database's
-            # recorded namespace is already the authoritative identity source.
-            configured_issuer = await pool.fetchval(
-                "SELECT gateway_issuer FROM agent_identity_namespace"
-            )
-        if configured_issuer is None:
-            raise IdentityNamespaceError(
-                "Gateway identity issuer is missing. Configure it in Admin Settings before checking this deployment."
-            )
-        if adopt_existing and issuer != configured_issuer:
-            raise IdentityNamespaceError("The adoption issuer must exactly match GATEWAY_ISSUER.")
-        await ensure_gateway_namespace(pool, configured_issuer, adopt_existing=adopt_existing)
+        async with conn.transaction(readonly=True):
+            bound = await check_namespace(conn)
     finally:
-        await pool.close()
+        await conn.close()
+    if bound:
+        return "Agent database is bound to Cloud Agent accounts; nothing was changed."
+    return "Agent database is empty and will be bound to Cloud Agent accounts on first start; nothing was changed."
 
 
 def main() -> None:
-    """Check deployment readiness or explicitly adopt the original namespace."""
+    """Check, read-only, whether this release can serve ``AGENT_DATABASE_URL``."""
     parser = argparse.ArgumentParser(description=__doc__)
-    action = parser.add_mutually_exclusive_group(required=True)
-    action.add_argument(
-        "--check", action="store_true", help="Check the issuer; initialize only an empty database"
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        required=True,
+        help="Read-only: refuse a Gateway-era database, never change one",
     )
-    action.add_argument("--adopt-existing", action="store_true")
-    parser.add_argument("--issuer", help="Original Gateway issuer, exactly as signed")
-    args = parser.parse_args()
-    if args.adopt_existing and not args.issuer:
-        parser.error("--adopt-existing requires --issuer")
-    if args.check and args.issuer is not None:
-        parser.error("--issuer is only used with --adopt-existing")
-    asyncio.run(_check_or_adopt(args.issuer, adopt_existing=args.adopt_existing))
-    print("Agent database identity issuer verified; owner data was not changed.")
+    parser.parse_args()
+    dsn = os.environ.get("AGENT_DATABASE_URL")
+    if not dsn:
+        raise IdentityNamespaceError("AGENT_DATABASE_URL must be set.")
+    print(asyncio.run(_check(dsn)))
 
 
 if __name__ == "__main__":

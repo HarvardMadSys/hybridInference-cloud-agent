@@ -324,7 +324,7 @@ class AgentRuntime:
         return []
 
     @staticmethod
-    def relay_urls(config: RuntimeMCPConfig, *, gateway_base_url: str) -> dict[str, str]:
+    def relay_urls(config: RuntimeMCPConfig, *, model_base_url: str) -> dict[str, str]:
         """Resolve one run's MCP configuration into the sandbox-local relay URL.
 
         The agent is told this service's fixed MCP-only relay URL, and nothing
@@ -376,7 +376,7 @@ class AgentRuntime:
 
     @classmethod
     def _mcp_endpoints(
-        cls, config: RuntimeMCPConfig, *, gateway_base_url: str
+        cls, config: RuntimeMCPConfig, *, model_base_url: str
     ) -> dict[str, dict[str, Any]]:
         """The relay endpoint in Claude Code's own dialect and header syntax.
 
@@ -397,7 +397,7 @@ class AgentRuntime:
                 "timeout": 1560000,
                 "headers": {"Authorization": f"Bearer ${{{MCP_TOKEN_ENV}}}"},
             }
-            for server_id, url in cls.relay_urls(config, gateway_base_url=gateway_base_url).items()
+            for server_id, url in cls.relay_urls(config, model_base_url=model_base_url).items()
         }
 
     def parse_event(self, line: str) -> NormalizedEvent | None:
@@ -419,7 +419,7 @@ class AgentRuntime:
         self,
         config: RuntimeMCPConfig,
         *,
-        gateway_base_url: str,
+        model_base_url: str,
         env: dict[str, str],
     ) -> None:
         """Carry the relay endpoints into the run, or refuse to.
@@ -431,14 +431,14 @@ class AgentRuntime:
         with no MCP at all, so there is no override that supplies endpoints
         without a verified suppression.
         """
-        del gateway_base_url, env
+        del model_base_url, env
         self._require_empty_mcp_config(config)
 
     def _wrapper_mcp_env(
         self,
         config: RuntimeMCPConfig,
         *,
-        gateway_base_url: str,
+        model_base_url: str,
         env: dict[str, str],
     ) -> None:
         """Publish the relay endpoint for an image-shipped wrapper to merge.
@@ -448,7 +448,7 @@ class AgentRuntime:
         for itself on the turns where it is absent, which is the shape the
         suppression exists to prevent.
         """
-        endpoints = self.relay_urls(config, gateway_base_url=gateway_base_url)
+        endpoints = self.relay_urls(config, model_base_url=model_base_url)
         env[MCP_SERVERS_ENV] = json.dumps(endpoints, sort_keys=True)
         # The wrapper's config references this name; it has to resolve, to the
         # token or to the empty string when the run has no servers. Setting it
@@ -457,19 +457,19 @@ class AgentRuntime:
         env[MCP_TOKEN_ENV] = config.credential
 
     @staticmethod
-    def _wrapper_env(gateway_base_url: str, credential: str) -> dict[str, str]:
+    def _wrapper_env(model_base_url: str, credential: str) -> dict[str, str]:
         """The gateway and credential an image-shipped wrapper configures its CLI from.
 
         Both the OpenAI and the Anthropic spelling, and the MCP tool timeout.
         An owner connection speaks only the OpenAI one, so it gets only that.
         """
-        if isinstance(gateway_base_url, ExactBaseUrl):
+        if isinstance(model_base_url, ExactBaseUrl):
             return {
-                "OPENAI_BASE_URL": openai_base_url(gateway_base_url),
+                "OPENAI_BASE_URL": openai_base_url(model_base_url),
                 "OPENAI_API_KEY": credential,
                 "MCP_TOOL_TIMEOUT": "1560000",
             }
-        base = gateway_base_url.rstrip("/").removesuffix("/v1")
+        base = model_base_url.rstrip("/").removesuffix("/v1")
         return {
             "OPENAI_BASE_URL": f"{base}/v1",
             "OPENAI_API_KEY": credential,

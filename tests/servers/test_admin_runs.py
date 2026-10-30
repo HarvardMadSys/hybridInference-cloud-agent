@@ -20,7 +20,7 @@ from cloud_agent.admin_observability import (
 )
 from cloud_agent.api import admin_runs, usage
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.app import create_app, create_mcp_app
 from cloud_agent.schemas import ResourceMetricBrief, RunResourceSummary
 
@@ -142,7 +142,7 @@ def setup(monkeypatch):
     app.include_router(usage.router)
     app.dependency_overrides[admin_runs.get_admin_run_queries] = lambda: queries
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_gateway_client] = lambda: gateway
+    app.dependency_overrides[get_owner_directory] = lambda: gateway
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "admin-person"}
     return app, queries, store, gateway
 

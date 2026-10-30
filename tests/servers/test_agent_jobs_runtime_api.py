@@ -6,6 +6,8 @@ telemetry and session lifecycle independently schedulable.
 
 from __future__ import annotations
 
+from tests.support.owners import on_connection
+
 import hashlib
 from types import SimpleNamespace
 from unittest.mock import call
@@ -770,12 +772,12 @@ async def test_effort_is_offered_only_where_runtime_and_model_both_deliver(clien
 async def test_a_turn_records_the_effort_it_was_created_with(client: AsyncClient):
     response = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "task_prompt": "fix it",
             "model": "glm-5.1",
             "reasoning_effort": "high",
-        },
+        }),
     )
 
     assert response.status_code == 201, response.text
@@ -800,12 +802,12 @@ async def test_a_level_outside_the_platform_list_is_refused(client: AsyncClient)
     """
     response = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "task_prompt": "fix it",
             "model": "glm-5.1",
             "reasoning_effort": "xhigh",
-        },
+        }),
     )
 
     assert response.status_code == 400
@@ -827,12 +829,12 @@ async def test_the_platform_list_is_offered_whatever_the_model_documents(
     """
     response = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "task_prompt": "fix it",
             "model": "glm-5.1",
             "reasoning_effort": "medium",
-        },
+        }),
     )
 
     assert response.status_code == 201, response.text
@@ -842,12 +844,12 @@ async def test_the_platform_list_is_offered_whatever_the_model_documents(
 async def test_an_effort_on_a_model_that_takes_none_is_refused(client: AsyncClient):
     response = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "task_prompt": "fix it",
             "model": "qwen-next",
             "reasoning_effort": "high",
-        },
+        }),
     )
 
     assert response.status_code == 400
@@ -859,12 +861,12 @@ async def test_a_follow_up_inherits_the_efforts_of_the_turn_before_it(
 ):
     created = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "task_prompt": "fix it",
             "model": "glm-5.1",
             "reasoning_effort": "high",
-        },
+        }),
     )
     parent_id = created.json()["id"]
 
@@ -883,12 +885,12 @@ async def test_a_follow_up_can_reset_an_inherited_effort_to_auto(
     """Null already means "inherit", so clearing takes the explicit sentinel."""
     created = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "task_prompt": "fix it",
             "model": "glm-5.1",
             "reasoning_effort": "max",
-        },
+        }),
     )
     parent_id = created.json()["id"]
 
@@ -905,12 +907,12 @@ async def test_a_follow_up_effort_is_checked_against_the_model_it_switches_to(
     """A pair offered last turn need not be offered this one."""
     created = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "task_prompt": "fix it",
             "model": "glm-5.1",
             "reasoning_effort": "high",
-        },
+        }),
     )
     parent_id = created.json()["id"]
 
@@ -936,13 +938,13 @@ async def test_a_level_the_runtime_cannot_express_is_refused_at_create(client: A
     """
     response = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "task_prompt": "fix it",
             "runtime": "pi",
             "model": "glm-5.1",
             "reasoning_effort": "xhigh",
-        },
+        }),
     )
 
     assert response.status_code == 400
@@ -954,12 +956,12 @@ async def test_every_runtime_still_takes_ordinary_turns(client: AsyncClient):
     for runtime in ("pi", "opencode", "kilo", "codex"):
         response = await client.post(
             "/v1/agent/jobs",
-            json={
+            json=on_connection({
                 "repo": "owner/name",
                 "task_prompt": "fix it",
                 "runtime": runtime,
                 "model": "glm-5.1",
-            },
+            }),
         )
         assert response.status_code == 201, f"{runtime}: {response.text}"
         assert response.json()["reasoning_effort"] is None
@@ -1500,7 +1502,7 @@ async def test_a_submission_key_reaches_the_store_with_a_fingerprint(
     """The ``Idempotency-Key`` header becomes the job's submission key."""
     response = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
+        json=on_connection({"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"}),
         headers={"Idempotency-Key": "submit-1"},
     )
     assert response.status_code == 201, response.text
@@ -1574,7 +1576,7 @@ async def test_a_reused_key_under_different_content_is_a_409(
     monkeypatch.setattr(store, "create_job", conflict)
     response = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
+        json=on_connection({"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"}),
         headers={"Idempotency-Key": "submit-1"},
     )
     assert response.status_code == 409
@@ -1689,7 +1691,7 @@ async def test_selected_skills_are_snapshotted_and_delivered_only_to_worker(
     monkeypatch.setattr(store, "select_skills", lookup)
     created = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+        json=on_connection({"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"}),
         headers={"Idempotency-Key": "skill-submit"},
     )
     assert created.status_code == 201, created.text
@@ -1706,7 +1708,7 @@ async def test_selected_skills_are_snapshotted_and_delivered_only_to_worker(
     lookup.reset_mock()
     replay = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+        json=on_connection({"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"}),
         headers={"Idempotency-Key": "skill-submit"},
     )
     assert replay.json()["id"] == job["id"]
@@ -1733,12 +1735,12 @@ async def test_selected_skills_are_snapshotted_and_delivered_only_to_worker(
 async def test_invalid_skill_selections_never_create_jobs(client, store, selection, status):
     result = await client.post(
         "/v1/agent/jobs",
-        json={
+        json=on_connection({
             "repo": "owner/name",
             "model": "glm-5.1",
             "task_prompt": "fix it",
             "skill_ids": selection,
-        },
+        }),
     )
     assert result.status_code == status
     assert not store.jobs
@@ -1942,7 +1944,7 @@ async def test_claim_puts_durable_memories_with_their_ids_before_the_task(
     monkeypatch.setattr(store, "mark_memories_used", mark, raising=False)
     created = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+        json=on_connection({"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"}),
     )
     assert created.status_code == 201, created.text
     claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
@@ -1962,7 +1964,7 @@ async def test_unavailable_durable_memory_never_blocks_a_claim(client, store, mo
     )
     created = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+        json=on_connection({"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"}),
     )
     assert created.status_code == 201, created.text
     claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})

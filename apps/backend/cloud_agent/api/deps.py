@@ -1,72 +1,39 @@
 """Dependencies the routers ask for.
 
-The routers moved from the gateway unchanged, so they still ask for the
-dependencies they asked for there. Three kinds arrive at this module:
+Two kinds arrive at this module:
 
 - **Wiring this service owns.** The job store, the source-control runtime
-  (GitHub App credentials and GitLab OAuth), the gateway client and the grant
-  client are all objects this repository builds; they are read off
-  ``app.state``, exactly as the source read them off its own services
-  container. ``None`` is a working answer for the optional ones — a deployment
-  without a configured database or App is a supported shape, and the routes
+  (GitHub App credentials and GitLab OAuth), the account directory and the
+  shared HTTP pool are all objects this repository builds; they are read off
+  ``app.state``. ``None`` is a working answer for the optional ones: a
+  deployment without a configured App is a supported shape, and the routes
   already handle it. A configured App this process could not load is *not*
   ``None``: see :func:`get_agent_app_credentials`. The attribute names
-  (``store``, ``gateway``, ``grants``, ``renewal_schedule``,
-  ``source_control``, ``http``) are the contract with the lifespan;
-  renaming one there without renaming it here degrades silently to "not
-  configured" rather than failing.
+  (``storage``, ``owners``, ``source_control``, ``http``) are the contract
+  with the lifespan.
 
-- **Identity and admin auth, which this service answers from its own world.**
-  There is no ``users`` table here and no ``api_keys`` table: the gateway kept
-  both. So the browser credential is the session token
-  :mod:`cloud_agent.identity` mints — carried in an ``HttpOnly`` cookie, or as a
-  bearer for programmatic callers holding one — and the admin door is the
-  deployment's ``ADMIN_TOKEN`` or a session with current Gateway agent.admin permission.
-  Nothing here consults a user table, because there is none to consult.
+- **Identity and admin auth.** The browser credential is an account session,
+  a server-side row in this database carried in an ``HttpOnly`` cookie or as
+  a bearer of the session's own shape. Agent permissions are read from the
+  account on every protected request. The admin door is the deployment's
+  ``ADMIN_TOKEN`` or a session whose account currently holds ``agent.admin``.
 
-  There used to be a third: ``verify_api_key``, resolving an ``hyi-*`` key
-  through a ``get_operational_store`` that nothing in this repository ever set.
-  **Both were deleted on 2026-08-04.** A dependency that answers 503 in every
-  real deployment is dead code that looks alive, and the only way to "fix" it
-  from inside this repository is to reach back into the gateway's database.
-  Resolving a key to a user needs a gateway contract in ``gateway_contracts/`` and a
-  ``GatewayClient`` method; until one exists the session is the only owner
-  credential. See the extraction record's deferred register and its discarded-test row.
-
- - **One contract that did not come across, and is honest about it.**
-   ``get_log_store`` named a gateway-side table (``api_logs``). Nothing in this
-   repository produces it, so it answered ``None`` in every real deployment
-   and the code path behind it degraded the way it was written to: job spend
-   was reported as *absent* rather than as a fabricated zero. It is gone now
-   (#823): the job read sources spend from the grant ledger, the same
-   accounting the usage and admin surfaces use.
-
-**Every decision below fails closed.** An unset secret, an unreachable gateway,
-an unconfigured store: each is a refusal, never a pass. That is the one property
-worth re-reading a diff of this file for.
+**Every decision below fails closed.** An unset secret, an unreadable account
+store, an unconfigured store: each is a refusal, never a pass. That is the one
+property worth re-reading a diff of this file for.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import hmac
-import itertools
 import os
-import time
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
-import jwt
 from fastapi import Depends, Header, HTTPException, Request
 
-from cloud_agent import identity
-
-#: Whatever a surface narrowed the store to; this only removes the ``None``.
-_StoreT = TypeVar("_StoreT")
-from cloud_agent.accounts.config import local_mode
+from cloud_agent.accounts.directory import LocalOwnerDirectory, OwnerDirectoryError
 from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.api.errors import AgentConfigurationError
-from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, setting_env
 from cloud_agent.source_control_runtime import (
@@ -76,13 +43,12 @@ from cloud_agent.source_control_runtime import (
     SourceControlUnavailable,
 )
 
-if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+#: Whatever a surface narrowed the store to; this only removes the ``None``.
+_StoreT = TypeVar("_StoreT")
 
+if TYPE_CHECKING:
     import httpx
 
-    from cloud_agent.gateway import GatewayClient
-    from cloud_agent.grants import GrantClient, RenewalSchedule
     from cloud_agent.ports import AuditRepository
     from cloud_agent.ports.accounts import SessionOwner
     from cloud_agent.storage.assembly import Storage
@@ -117,66 +83,32 @@ def get_storage(request: Request) -> Storage | None:
     return getattr(request.app.state, "storage", None)
 
 
-def get_gateway_client(request: Request) -> GatewayClient:
-    """Dependency to obtain the client for the gateway's internal contracts.
+def get_owner_directory(request: Request) -> LocalOwnerDirectory:
+    """Dependency to obtain the account directory every owner check reads.
 
-    Not optional: the catalog, the user's status and the MCP registry are all
-    answered over HTTP now, so a control plane with no gateway client cannot
-    answer for a job at all. An unconfigured client still constructs, and
-    refuses at call time naming the variables it needs — which is where the
-    operator can act on it, unlike a dependency that returned ``None``.
+    The lifespan installs it as ``app.state.owners``. An application that
+    did not (a test application with only a store) gets one over its store,
+    built once; with no store there is no account to admit, so it refuses
+    with 503 rather than admitting anyone.
     """
-    client = getattr(request.app.state, "gateway", None)
-    if client is None:
-        from cloud_agent.gateway import GatewayClient as _GatewayClient
-
-        client = _GatewayClient()
-        request.app.state.gateway = client
-    return client
-
-
-def get_grant_client(request: Request) -> GrantClient:
-    """Dependency to obtain the client that asks the gateway for grants.
-
-    Built like the gateway client and for the same reason: an unconfigured one
-    constructs fine and refuses at the call, naming the two variables it needs.
-    A claim that cannot mint a grant hands the job back to the queue rather
-    than sending a runner off with no credential — see ``worker_claim``.
-    """
-    client = getattr(request.app.state, "grants", None)
-    if client is None:
-        from cloud_agent.grants import GrantClient as _GrantClient
-
-        client = _GrantClient()
-        request.app.state.grants = client
-    return client
+    owners = getattr(request.app.state, "owners", None)
+    if owners is None:
+        storage = get_storage(request)
+        if storage is None:
+            raise AgentConfigurationError()
+        owners = LocalOwnerDirectory(storage.local_accounts)
+        request.app.state.owners = owners
+    return owners
 
 
 def get_http_client(request: Request) -> httpx.AsyncClient | None:
     """Dependency to obtain the process's shared outbound connection pool.
 
-    The one the gateway and grant clients use, lent to calls that used to
-    open a client of their own. ``None`` in a test application that has not
-    set one: those callers then open a client for the call, as they always did.
+    Lent to calls that would otherwise open a client of their own. ``None`` in
+    a test application that has not set one: those callers then open a client
+    for the call.
     """
     return getattr(request.app.state, "http", None)
-
-
-def get_renewal_schedule(request: Request) -> RenewalSchedule:
-    """Dependency to obtain this process's record of what each grant's renewal bought.
-
-    The lifespan builds one per process and gives the same one to the grant
-    renewal task. Built here, like the grant client, when the lifespan did not:
-    an empty record renews every grant it is asked about, which is what every
-    heartbeat did before there was one.
-    """
-    schedule = getattr(request.app.state, "renewal_schedule", None)
-    if schedule is None:
-        from cloud_agent.grants import RenewalSchedule as _RenewalSchedule
-
-        schedule = _RenewalSchedule()
-        request.app.state.renewal_schedule = schedule
-    return schedule
 
 
 def get_work_signal(request: Request) -> WorkSignal | None:
@@ -312,36 +244,28 @@ def get_gitlab_load_status(
     return "ready" if gitlab_oauth is not None else "unconfigured"
 
 
-# ── The gateway-side contract that did not move ────────────────────────
-
-
-# ── Agent permissions and credential namespaces ────────────────────────
+# ── Agent permissions ──────────────────────────────────────────────────
 
 
 async def resolve_agent_access(
-    gateway: Any, user_id: str, *, reject_unavailable_subject: bool = False
+    owners: Any, user_id: str, *, reject_unavailable_subject: bool = False
 ) -> AgentAccessDecision:
-    """Read current Agent permissions, with no session or role fallback.
+    """Read the account's current Agent permissions, with no session or role fallback.
 
-    Login additionally rejects an unavailable subject. A policy denial for an
-    active account may still establish identity for the access-required page.
+    An account that cannot sign in (unknown, unverified, suspended, deleted)
+    answers as a denial, or a 403 where ``reject_unavailable_subject`` asks
+    for one. A store that cannot answer is 503: no verdict, so no admission.
     """
     try:
-        decision = AgentAccessDecision.model_validate(await gateway.agent_access(user_id))
+        decision = AgentAccessDecision.model_validate(await owners.agent_access(user_id))
         if decision.user_id != user_id:
             raise ValueError("Agent access subject mismatch")
         return decision
-    except GatewayError as exc:
+    except OwnerDirectoryError as exc:
         if exc.status_code == 403 and exc.error_type == "subject_unavailable":
             if reject_unavailable_subject:
                 raise HTTPException(status_code=403, detail="This account cannot sign in.") from exc
             return AgentAccessDecision(user_id=user_id, allowed=False, permissions=[])
-        if exc.status_code in (401, 404) or exc.error_type == "gateway_not_configured":
-            get_logger(__name__).warning(
-                "agent_access_configuration_error",
-                extra={"event": "agent_access_configuration_error", "status_code": exc.status_code},
-            )
-            raise AgentConfigurationError() from None
     except ValueError:
         pass
     get_logger(__name__).warning(
@@ -349,15 +273,15 @@ async def resolve_agent_access(
     )
     raise HTTPException(
         status_code=503,
-        detail="Cannot confirm Agent access with the gateway; try again shortly.",
+        detail="Cannot confirm Agent access; try again shortly.",
     )
 
 
 async def require_agent_access(
-    gateway: Any, user_id: str, permission: str = "agent.use"
+    owners: Any, user_id: str, permission: str = "agent.use"
 ) -> AgentAccessDecision:
-    """Require an explicit current Gateway permission before accessing Agent data."""
-    return _permitted(await resolve_agent_access(gateway, user_id), permission)
+    """Require an explicit current permission before accessing Agent data."""
+    return _permitted(await resolve_agent_access(owners, user_id), permission)
 
 
 def _permitted(decision: AgentAccessDecision, permission: str) -> AgentAccessDecision:
@@ -372,151 +296,6 @@ def _permitted(decision: AgentAccessDecision, permission: str) -> AgentAccessDec
             ),
         )
     return decision
-
-
-#: How long an owner request may be admitted on an earlier ``agent.use`` grant.
-#: A page load sends a burst of owner requests, and a running turn makes every
-#: open tab send more; each used to wait on its own Gateway round trip. A
-#: withdrawal therefore reaches owner requests within this bound — well inside
-#: the one an open stream already has (see agent-access-policy.md).
-AGENT_ACCESS_ALLOW_TTL_S = 10.0
-
-
-class AgentAccessAdmission:
-    """Owner-request admission that shares Gateway lookups and briefly keeps a grant.
-
-    Two things, both per process and per account:
-
-    - **Concurrent lookups are shared.** Requests that arrive while a lookup
-      for their account is in flight wait for that lookup instead of starting
-      their own.
-    - **A grant is kept for** :data:`AGENT_ACCESS_ALLOW_TTL_S`. Only a decision
-      that grants ``agent.use`` is kept. A denial, an unknown account and an
-      unavailable Gateway are never kept, and any fresh answer that is not a
-      grant drops the one kept before it. A grant from a lookup that began
-      before the account's last recorded denial is older than that denial,
-      and is not kept either.
-
-    Only owner admission reads it. Sign-in, ``/v1/session/me``, the admin
-    surface and the checks made when a turn starts all ask the Gateway every
-    time; ``/v1/session/me`` also records what it was told, so a withdrawal it
-    sees ends the kept grant at once.
-    """
-
-    def __init__(
-        self,
-        ttl_s: float = AGENT_ACCESS_ALLOW_TTL_S,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._ttl_s = ttl_s
-        self._clock = clock
-        self._granted: dict[str, tuple[float, AgentAccessDecision]] = {}
-        self._lookups: dict[str, asyncio.Task[AgentAccessDecision]] = {}
-        # Every Gateway ask takes the next ticket when it starts; a denial takes
-        # one when it is recorded. A grant asked for before the account's last
-        # recorded denial is older than that denial, and is not kept. Each ask
-        # under way maps to when it started: a grant is kept from then, not from
-        # when a slow answer arrived, so it is never older than the bound.
-        self._tickets = itertools.count(1)
-        self._asking: dict[int, float] = {}
-        self._denied: dict[str, int] = {}
-
-    async def decision(self, gateway: Any, user_id: str) -> AgentAccessDecision:
-        """The kept grant if still fresh, else the Gateway's current decision."""
-        kept = self._granted.get(user_id)
-        if kept is not None and self._clock() < kept[0]:
-            return kept[1]
-        lookup = self._lookups.get(user_id)
-        if lookup is None:
-            lookup = asyncio.get_running_loop().create_task(self._look_up(gateway, user_id))
-            self._lookups[user_id] = lookup
-            lookup.add_done_callback(lambda done: self._finished(user_id, done))
-        # A caller that gives up (a closed connection) must not cancel the
-        # lookup the other callers are waiting on.
-        return await asyncio.shield(lookup)
-
-    @contextlib.contextmanager
-    def asking(self) -> Iterator[int]:
-        """A ticket for one Gateway lookup, held while it is under way."""
-        ticket = next(self._tickets)
-        self._asking[ticket] = self._clock()
-        try:
-            yield ticket
-        finally:
-            self._asking.pop(ticket, None)
-
-    def record(self, decision: AgentAccessDecision, asked: int) -> None:
-        """Keep a fresh grant, or drop the kept one if this decision is not a grant.
-
-        Args:
-            decision: What the Gateway answered.
-            asked: The :meth:`asking` ticket of the lookup that answered.
-        """
-        user_id = decision.user_id
-        if not decision.permits("agent.use"):
-            self._granted.pop(user_id, None)
-            # A lookup already under way may have been answered before this
-            # denial. Requests from now on start one of their own; those
-            # already waiting on it still get its answer.
-            self._lookups.pop(user_id, None)
-            if len(self._denied) >= 1024:
-                # A denial matters only to a lookup that began before it and
-                # is still under way.
-                oldest = min(self._asking, default=None)
-                self._denied = {
-                    user: ticket
-                    for user, ticket in self._denied.items()
-                    if oldest is not None and oldest < ticket
-                }
-            self._denied[user_id] = next(self._tickets)
-            return
-        if asked < self._denied.get(user_id, 0):
-            return
-        now = self._clock()
-        expires = self._asking.get(asked, now) + self._ttl_s
-        if now >= expires:
-            return
-        if len(self._granted) >= 1024:
-            self._granted = {user: kept for user, kept in self._granted.items() if now < kept[0]}
-        self._granted[user_id] = (expires, decision)
-
-    async def _look_up(self, gateway: Any, user_id: str) -> AgentAccessDecision:
-        # A failure is no verdict on the owner, and drops nothing: a lookup
-        # starts only when no grant is fresh, so a fresh one now was recorded
-        # while it waited, and is newer than anything it could have said.
-        with self.asking() as asked:
-            decision = await resolve_agent_access(gateway, user_id)
-            self.record(decision, asked)
-        return decision
-
-    def _finished(self, user_id: str, lookup: asyncio.Task[AgentAccessDecision]) -> None:
-        if self._lookups.get(user_id) is lookup:
-            del self._lookups[user_id]
-        # Retrieve a failure even when every waiter has gone, so it is not
-        # reported as never retrieved.
-        if not lookup.cancelled():
-            lookup.exception()
-
-
-def agent_access_admission(request: Request) -> AgentAccessAdmission:
-    """The application's :class:`AgentAccessAdmission`, created on first use."""
-    admission = getattr(request.app.state, "agent_access_admission", None)
-    if admission is None:
-        admission = AgentAccessAdmission()
-        request.app.state.agent_access_admission = admission
-    return admission
-
-
-async def admit_agent_owner(request: Request, gateway: Any, user_id: str) -> AgentAccessDecision:
-    """Admit an owner request on a current or briefly kept ``agent.use`` grant.
-
-    Local mode keeps nothing: the decision is one primary-key read of this
-    database, so every request is admitted on the account as it is now.
-    """
-    if local_mode():
-        return await require_agent_access(gateway, user_id)
-    decision = await agent_access_admission(request).decision(gateway, user_id)
-    return _permitted(decision, "agent.use")
 
 
 #: The namespace :func:`cloud_agent.tokens.mint_worker_token` mints into. Kept
@@ -557,83 +336,27 @@ def bearer_token(authorization: str | None) -> str | None:
 # ── Identity ───────────────────────────────────────────────────────────
 
 
-def session_token(request: Request, authorization: str | None = None) -> str | None:
-    """Find this service's session credential on a request.
-
-    The cookie is preferred: it is what the web app sends, it is ``HttpOnly``,
-    and it is the only credential the browser holds. It is read under the name
-    it is set with, only the ``__Host-`` one where it carries ``Secure``
-    (:func:`identity.session_from_cookies`). A bearer is accepted too, for the
-    programmatic caller that has one and for the router's existing credential
-    dispatch — a session token is this service's own credential whichever way
-    it travels, and reading it from a header weakens nothing that reading it
-    from a cookie does not.
-    """
-    cookie = identity.session_from_cookies(request.cookies)
-    if cookie:
-        return cookie
-    presented = bearer_token(authorization)
-    if presented and not looks_like_agent_token(presented):
-        return presented
-    return None
-
-
 async def get_current_user(
     request: Request,
     authorization: str | None = Header(None),
 ) -> dict[str, Any]:
-    """Verify the minimal session identity.
+    """Verify the account session a request presents.
 
-    Agent permissions are resolved separately at the Gateway on every
-    protected request. A role in an old session never grants Agent access.
-    In local mode the session is a server-side row instead; see
-    :func:`local_session_owner`.
+    Agent permissions are resolved separately on every protected request; see
+    :func:`local_session_owner` for the session itself.
     """
-    if local_mode():
-        return await _local_current_user(request, authorization)
-    token = session_token(request, authorization)
-    if not token:
-        raise HTTPException(
-            status_code=401,
-            detail="Missing authentication token. Use 'Authorization: Bearer {token}' header.",
-        )
-
-    try:
-        claims = identity.verify_session(token)
-    except identity.IdentityNotConfigured:
-        # A deployment with no session secret cannot verify anyone. 503, not
-        # 401: the caller did nothing wrong and retrying with another
-        # credential will not help.
-        raise AgentConfigurationError() from None
-    except identity.IdentityError as exc:
-        cause = exc.__cause__ if exc.__cause__ is not None else exc
-        if isinstance(cause, jwt.ExpiredSignatureError):
-            # An expired session must stay an expired session. The dispatch in
-            # ``authenticate_agent_owner`` exists so this is never retried as
-            # an API key, and the message is what tells a client which it was.
-            raise HTTPException(
-                status_code=401,
-                detail="Token has expired. Please refresh your token or login again.",
-            ) from None
-        raise HTTPException(status_code=401, detail="Invalid authentication token.") from None
-
-    user_id = str(claims.get("sub") or "")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token payload.")
-
-    return {"user_id": user_id, "authenticated": True}
+    return await _local_current_user(request, authorization)
 
 
 async def verify_admin_access(
     request: Request,
     authorization: str | None = Header(None),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> str:
     """Authenticate an infrastructure token or a current Agent administrator.
 
-    ADMIN_TOKEN remains independent of the Gateway for local operations.
-    Browser sessions require a fresh agent.admin decision for reads and writes;
-    their identity/profile claims confer no administrative authority.
+    ``ADMIN_TOKEN`` is the operator's recovery door. A browser session needs
+    its account's current ``agent.admin`` for reads and writes alike.
     """
     presented = bearer_token(authorization)
     configured = (os.environ.get(ENV_ADMIN_TOKEN) or "").strip()
@@ -641,32 +364,10 @@ async def verify_admin_access(
     # header value is whatever latin-1 the caller sent. A refusal, not a 500.
     if configured and presented and hmac.compare_digest(presented.encode(), configured.encode()):
         return "admin-token"
-    if local_mode():
-        return await _local_admin(request, authorization, gateway)
-
-    token = session_token(request, authorization)
-    if token:
-        try:
-            claims = identity.verify_session(token)
-        except identity.IdentityNotConfigured:
-            raise AgentConfigurationError() from None
-        except identity.IdentityError:
-            claims = None
-        if claims is not None:
-            user_id = str(claims.get("sub") or "")
-            if user_id:
-                await require_agent_access(gateway, user_id, "agent.admin")
-                return f"admin:{user_id}"
-
-    if not presented and token is None:
-        raise HTTPException(
-            status_code=401,
-            detail="Missing authentication. Provide a JWT or admin token via Authorization header.",
-        )
-    raise HTTPException(status_code=401, detail="Invalid authentication token.")
+    return await _local_admin(request, authorization, owners)
 
 
-# ── Local accounts (AGENT_AUTH_MODE=local) ─────────────────────────────
+# ── Account sessions ───────────────────────────────────────────────────
 
 
 #: The account a tab is showing. A request naming one is refused with 409
@@ -689,10 +390,10 @@ def pinned_local_account(request: Request) -> str | None:
 
 
 async def local_session_owner(request: Request, authorization: str | None) -> SessionOwner | None:
-    """The live local session a request presents, read from this database.
+    """The live account session a request presents, read from this database.
 
-    The local cookie, or a bearer of the local session's shape; a Gateway-mode
-    cookie or JWT is neither, and finds nothing. The cookie names a browser,
+    The session cookie, or a bearer of the session's shape; anything else
+    finds nothing. The cookie names a browser,
     and the request acts as its active account (or the account it pins, which
     must be the active one). One read per request: the answer is kept on the
     request, never across requests.
@@ -778,18 +479,14 @@ async def _local_current_user(request: Request, authorization: str | None) -> di
 
 
 async def require_local_admission(request: Request, user_id: str) -> None:
-    """In local mode, refuse an identity-only route to an account without ``agent.use``.
-
-    Gateway mode is unchanged: those routes keep their identity-only check.
-    """
-    if local_mode():
-        await require_agent_access(get_gateway_client(request), user_id)
+    """Refuse an identity-only route to an account without ``agent.use``."""
+    await require_agent_access(get_owner_directory(request), user_id)
 
 
-async def _local_admin(request: Request, authorization: str | None, gateway: Any) -> str:
-    """Admit a local session holding current local ``agent.admin``, never a Gateway role."""
+async def _local_admin(request: Request, authorization: str | None, owners: Any) -> str:
+    """Admit a session whose account currently holds ``agent.admin``."""
     user = await _local_current_user(request, authorization)
-    await require_agent_access(gateway, user["user_id"], "agent.admin")
+    await require_agent_access(owners, user["user_id"], "agent.admin")
     return f"admin:{user['user_id']}"
 
 
@@ -836,9 +533,7 @@ async def log_admin_action(
 ) -> None:
     """Append one admin action to this service's audit trail.
 
-    The gateway's ``admin_audit_log`` stayed with the gateway, so this service
-    grew its own rather than a documented no-op: the ``agent_admin_audit_log``
-    table, created with the rest of the schema by
+    Rows go to the ``agent_admin_audit_log`` table, created with the rest of the schema by
     ``migrations/versions/0001_schema_baseline.py``. The
     actions logged here revoke a machine's credential, retarget every future
     claim and remove hosts from the pool; a service that owns that surface and

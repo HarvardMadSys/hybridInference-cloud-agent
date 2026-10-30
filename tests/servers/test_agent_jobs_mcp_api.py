@@ -22,7 +22,7 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     _build_app,
     _configured_identity_issuer,
     _create_job,
-    _FakeGateway,
+    _FakeOwners,
     _next_turn,
     _send,
     client,
@@ -660,7 +660,7 @@ async def test_a_job_created_with_an_alias_stores_the_canonical_id(
 
     Resolution translates once; everything after it works in canonical ids.
     """
-    monkeypatch.setitem(_FakeGateway.aliases, "legacy-name", _TEST_MODELS[0])
+    monkeypatch.setitem(_FakeOwners.aliases, "legacy-name", _TEST_MODELS[0])
 
     await _create_job(client, model="legacy-name")
 

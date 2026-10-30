@@ -28,7 +28,7 @@ from cloud_agent.api._project_filter import TemporaryFilter, require_single_proj
 from cloud_agent.api._workspace_access import _sandbox_manager_for_job, _workspace_id
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_gateway_client,
+    get_owner_directory,
     get_source_control,
     get_storage,
     require_store,
@@ -172,7 +172,6 @@ async def create_agent_job(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _JobsStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
-    gateway: Any = Depends(get_gateway_client),
 ) -> AgentJobResponse:
     """Queue a new agent job for the authenticated user.
 
@@ -186,7 +185,6 @@ async def create_agent_job(
         user,
         job_store=job_store,
         app_credentials=app_credentials,
-        gateway=gateway,
         client_request_id=idempotency_key,
     )
     return _job_response(job)
@@ -316,7 +314,7 @@ async def cancel_agent_job(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _JobsStorage | None = Depends(get_storage),
     source_control: SourceControlRuntime | None = Depends(get_source_control),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> AgentJobCancelResponse:
     """Request cancellation of one of the caller's agent jobs.
 
@@ -333,7 +331,7 @@ async def cancel_agent_job(
     await _settle_after_cancel(
         job_store,
         owned,
-        gateway=gateway,
+        owners=owners,
         github_app=None if source_control is None else source_control.github,
     )
     if state in TERMINAL_STATES:
@@ -350,7 +348,7 @@ async def _settle_after_cancel(
     job_store: _JobsStorage,
     job: dict[str, Any],
     *,
-    gateway: Any,
+    owners: Any,
     github_app: GitHubAppSource | None,
 ) -> None:
     """Act on a cancel that may already have ended a turn.
@@ -367,7 +365,7 @@ async def _settle_after_cancel(
         await settle_queue_when_possible(
             job_store,
             thread_id=str(thread_id),
-            gateway=gateway,
+            owners=owners,
             github_app=github_app,
         )
     except Exception:

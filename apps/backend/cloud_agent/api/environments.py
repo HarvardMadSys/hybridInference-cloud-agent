@@ -14,7 +14,7 @@ from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._workspace_access import fence_workspace_start
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_gateway_client,
+    get_owner_directory,
     get_storage,
     require_agent_access,
     require_store,
@@ -632,7 +632,7 @@ async def claim_environment_test(
     host: dict[str, str] = Depends(verify_claiming_host),
     store: Any = Depends(get_storage),
     credentials: Any = Depends(get_agent_app_credentials),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> dict[str, Any] | None:
     """Hand only an environment-capable enrolled host a test or prebuild lease."""
     if ENVIRONMENT_CAPABILITY not in body.capabilities:
@@ -645,7 +645,7 @@ async def claim_environment_test(
     if run is None:
         return None
     try:
-        await require_agent_access(gateway, run["user_id"])
+        await require_agent_access(owners, run["user_id"])
         await _entitled(store, run["user_id"], run["repo"], credentials)
         bound = await store.environments.get_environment_binding(run["user_id"], run["binding_id"])
         from cloud_agent.environment_source import read_repository_token

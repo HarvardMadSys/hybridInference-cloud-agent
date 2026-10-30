@@ -304,14 +304,6 @@ class WorkerClaimResponse(BaseModel):
         ),
     )
     worker_token: str
-    sandbox_token: str = Field(
-        "",
-        description=(
-            "This attempt's gateway grant, scoped to the models it may call. It does "
-            "not enter the sandbox: each member's CLI runs on its own residency grant "
-            "from the sandbox residency route."
-        ),
-    )
     mcp_token: str = Field(
         "",
         description=(

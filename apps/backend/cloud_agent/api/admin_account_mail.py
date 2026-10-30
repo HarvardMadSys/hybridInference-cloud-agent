@@ -22,7 +22,6 @@ from cloud_agent.api._local_auth import (
     account_mailer,
     local_accounts,
     require_json,
-    require_local_mode,
 )
 from cloud_agent.api.deps import get_client_ip, verify_admin_access
 from cloud_agent.api.errors import typed_error
@@ -41,7 +40,6 @@ router = APIRouter(
     prefix="/v1/admin/account-mail",
     tags=["admin-accounts"],
     route_class=LocalAuthRoute,
-    dependencies=[Depends(require_local_mode)],
 )
 
 
