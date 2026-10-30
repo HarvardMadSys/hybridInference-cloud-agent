@@ -2,7 +2,7 @@
 
 - 日期：2026-10-30（修订于 2026-10-29 开始，因额度中断，2026-10-30 续完）
 - 基线：分支 `codex/config/env-inventory-gates@322a8fd0`；盘点数字的基线仍是 `dev@4b7b826d` 加本分支扫描器
-- 机器：freeinference-gpu（rtx6000b）；Python 3.13.13（项目 `.venv`，`uv sync --frozen` 建立）、uv 0.13.6
+- 机器：Linux GPU 测试环境；Python 3.13.13（项目 `.venv`，`uv sync --frozen` 建立）、uv 0.13.6
 - 性质：用户纠正产品目标后的文档修订。没有产品代码改动，没有实现计划中的任何工作包。
 
 ## 用户的纠正

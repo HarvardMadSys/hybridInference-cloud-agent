@@ -3,7 +3,7 @@
 - 日期：2026-10-29
 - 基线：`dev@4b7b826d`（与远端 `dev` 相同）
 - 提交（分支 `codex/config/env-inventory-gates`）：实现 `17ece88f`，更正 `a27ea2c2`，shell 覆盖 `5bf2800c`；本记录的更新是其后的纯文档提交
-- 机器：spark2；Python 3.13.12（项目 venv）、uv 0.10.6、ruff 0.16.10、mypy 2.3.0、pytest 9.1.1
+- 机器：Linux 验证环境；Python 3.13.12（项目 venv）、uv 0.10.6、ruff 0.16.10、mypy 2.3.0、pytest 9.1.1
 - 设计与盘点：[2026-10-29-env-inventory-and-gates.zh-CN.md](../specs/2026-10-29-env-inventory-and-gates.zh-CN.md)
 
 ## 改了什么
