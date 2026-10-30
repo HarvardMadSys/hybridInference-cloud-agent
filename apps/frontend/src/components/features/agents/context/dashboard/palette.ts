@@ -25,9 +25,9 @@ export const PALETTE: Record<string, Swatch> = {
   reasoning: swatch('bg-violet-500', 'fill-violet-500', 'stroke-violet-500'),
   tool_calls: swatch('bg-sky-500', 'fill-sky-500', 'stroke-sky-500'),
   tool_results: swatch('bg-teal-500', 'fill-teal-500', 'stroke-teal-500'),
-  other: swatch('bg-slate-400', 'fill-slate-400', 'stroke-slate-400'),
+  other: swatch('bg-slate-400 dark:bg-slate-500', 'fill-slate-400', 'stroke-slate-400'),
   /** A DNA column's earliest items, folded into one band by the server. */
-  folded: swatch('bg-slate-300', 'fill-slate-300', 'stroke-slate-300'),
+  folded: swatch('bg-slate-300 dark:bg-slate-600', 'fill-slate-300', 'stroke-slate-300'),
 };
 
 /** The reconstruction's (and Insights') category names, as the dashboard keys them. */
@@ -77,6 +77,6 @@ export const TIMING_SWATCH: Record<string, Swatch> = {
   toolarg: swatch('bg-amber-500', 'fill-amber-500', 'stroke-amber-500'),
   gen: swatch('bg-fuchsia-400', 'fill-fuchsia-400', 'stroke-fuchsia-400'),
   tools: swatch('bg-teal-500', 'fill-teal-500', 'stroke-teal-500'),
-  unsplit: swatch('bg-slate-500', 'fill-slate-500', 'stroke-slate-500'),
-  other: swatch('bg-slate-300', 'fill-slate-300', 'stroke-slate-300'),
+  unsplit: swatch('bg-slate-500 dark:bg-slate-400', 'fill-slate-500', 'stroke-slate-500'),
+  other: swatch('bg-slate-300 dark:bg-slate-600', 'fill-slate-300', 'stroke-slate-300'),
 };
