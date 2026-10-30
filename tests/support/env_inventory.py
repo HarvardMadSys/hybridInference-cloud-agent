@@ -163,9 +163,9 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family(
         "admin",
-        "Built-in web search. Registered, but neither ENVIRONMENT.md nor the supported "
-        "control-plane Compose file passes them, so their first import only happens "
-        "through an override.",
+        "Built-in web search (MIGRATED_SETTINGS since they were registered without an "
+        "import). The supported control-plane Compose file does not pass them, so an "
+        "environment value only arrives through an override.",
         names=(
             "WEB_SEARCH_PROVIDER",
             "SERPER_API_KEY",
@@ -203,6 +203,13 @@ FAMILIES: tuple[Family, ...] = (
             "AGENT_DEFAULT_EXECUTION_PROFILE",
             "AGENT_DEFAULT_MODEL",
         ),
+    ),
+    Family(
+        "admin",
+        "Control-plane request limits and developer surfaces (MIGRATED_SETTINGS), read on "
+        "every stream acquire and every documentation request; an unusable environment "
+        "value imports the default, as the readers they replaced did.",
+        names=("AGENT_MAX_STREAMS_PER_USER", "AGENT_API_DOCS"),
     ),
     # -- host_admin: heartbeat-delivered host settings --------------------
     Family(
@@ -251,13 +258,6 @@ FAMILIES: tuple[Family, ...] = (
     # -- candidate: could move with existing machinery --------------------
     Family(
         "candidate",
-        "Per-process cap on one account's open event streams, read on every acquire by "
-        "the control plane only. Ready for MIGRATED_SETTINGS so existing deployments "
-        "import their value once.",
-        names=("AGENT_MAX_STREAMS_PER_USER",),
-    ),
-    Family(
-        "candidate",
         "The lease the runner asks for on each claim (the control plane caps it at 900 s). "
         "Read once into an argparse default; HOST_SETTINGS can carry it once each claim "
         "uses the effective value and the bound stays above one heartbeat plus a request.",
@@ -276,12 +276,6 @@ FAMILIES: tuple[Family, ...] = (
         "environment. Safe enablement depends on every control-plane replica in the "
         "cluster understanding model connections, which nothing records yet.",
         names=("AGENT_MODEL_CONNECTIONS_ENABLED",),
-    ),
-    Family(
-        "design",
-        "Read while the FastAPI app is built, before any settings snapshot exists; moving "
-        "it means deciding the documentation routes per request.",
-        names=("AGENT_API_DOCS",),
     ),
     # -- deployment -------------------------------------------------------
     Family(
@@ -868,8 +862,6 @@ UNMIGRATED_ENV_SETTINGS: frozenset[str] = frozenset(
         "AGENT_GIT_AUTHOR_NAME",
         "AGENT_LOG_FORMAT",
         "AGENT_LOG_LEVEL",
-        "AGENT_MCP_GITHUB_CLIENT_ID",
-        "AGENT_MCP_GITHUB_CLIENT_SECRET",
         "AGENT_MCP_PUBLIC_BASE_URL",
         "AGENT_ONCALL_DISPATCH_TOKEN",
         "AGENT_ONCALL_USER_ID",
@@ -879,22 +871,16 @@ UNMIGRATED_ENV_SETTINGS: frozenset[str] = frozenset(
         "AGENT_SESSION_REDIRECT_URI",
         "AGENT_WEB_APP_NAME",
         "AGENT_WEB_BASE_URL",
-        "AGENT_WEB_CONTACT_URL",
-        "AGENT_WEB_DOCS_URL",
         "AGENT_WEB_FEATURE_RAG",
         "AGENT_WEB_GATEWAY_URL",
         "AGENT_WEB_ORG_NAME",
         "AGENT_WEB_ORG_URL",
         "AGENT_WEB_STATUS_URL",
-        "BRAVE_SEARCH_API_KEY",
         "GATEWAY_AUTHORIZE_URL",
         "GATEWAY_BASE_URL",
         "GATEWAY_GRANT_BASE_PATH",
         "GATEWAY_GRANT_BINDING_ID",
         "GATEWAY_GRANT_DISPATCH_TOKEN",
-        "PARALLEL_API_KEY",
-        "SERPER_API_KEY",
-        "WEB_SEARCH_PROVIDER",
     }
 )
 
