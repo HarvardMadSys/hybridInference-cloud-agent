@@ -33,21 +33,24 @@ def ready_boot(
     terminal or an action at its admission, a Fork at its own start. So this
     answer needs neither the start nor the proof of the full path. It needs
     the group's exact container, running the boot the receipt prepared, read
-    after the receipt, while the member, its activation's lease and the
-    group's lifecycle are the ones the reads began under. Pending lifecycle
-    work, or anything unreadable, takes the full path, which then answers or
-    fails as it always has.
+    after the receipt, while the group's own inspection, the member, its
+    activation's lease and the group's lifecycle are the ones the reads began
+    under. A start finishing meanwhile replaces that inspection without a new
+    lifecycle generation, and its boot is then the one to prepare. Pending
+    lifecycle work, or anything unreadable, takes the full path, which then
+    answers or fails as it always has.
     """
     with supervisor._lock:
         group, member = supervisor._member(thread_id)
+        observed = group.inspection
         generation = group.lifecycle_generation
-        fenced = group.inspection.container_id
+        if not observed.running or not _admitted(supervisor, group):
+            return None
     try:
         backend = RetainedChatBackend(supervisor._manager, group.spec)
         receipt = preparer.status(backend, environment.binding_id)
-        # Docker is asked only for a receipt that can answer, so a request that
-        # takes the full path costs no more for having looked.
-        if not receipt.get("ready") or receipt.get("container_id") != fenced:
+        # Docker is asked only once the receipt could answer.
+        if not receipt.get("ready") or receipt.get("container_id") != observed.container_id:
             return None
         current = supervisor._manager.inspect(group.spec.container_name)
     except Exception:
@@ -55,19 +58,26 @@ def ready_boot(
     with supervisor._lock:
         if (
             current is None
-            or current.container_id != group.inspection.container_id
+            or current.container_id != observed.container_id
             or not prepared_in(receipt, current)
+            or group.inspection != observed
             or supervisor._members.get(thread_id) is not group
             or group.members.get(thread_id) is not member
             or group.lifecycle_generation != generation
             or (activation_owner is not None and member.lease_token != activation_owner)
-            or group.container_lost
-            or group.start_failed
+            or not _admitted(supervisor, group)
         ):
-            return None
-        try:
-            supervisor._require_mutation_admission(group)
-        except SessionBusy:
             return None
         supervisor._accept_inspection_locked(group, current)
     return receipt
+
+
+def _admitted(supervisor: SharedChatSessionSupervisor, group: Any) -> bool:
+    """Whether the group is still its container's, started cleanly, and open to mutations."""
+    if group.container_lost or group.start_failed:
+        return False
+    try:
+        supervisor._require_mutation_admission(group)
+    except SessionBusy:
+        return False
+    return True

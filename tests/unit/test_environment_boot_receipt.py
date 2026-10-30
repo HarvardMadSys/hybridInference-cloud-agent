@@ -129,20 +129,25 @@ def test_a_receipt_prepares_only_the_running_boot_it_names(receipt, inspection, 
     assert prepared_in(_installed(**receipt), seen) is expected
 
 
-def test_environment_preparation_reads_docker_outside_the_supervisor_lock(monkeypatch):
+@pytest.mark.parametrize("running", [True, False], ids=["prepared-boot", "start-first"])
+def test_environment_preparation_reads_docker_outside_the_supervisor_lock(monkeypatch, running):
     """Preparation inspects the container and reads its receipt without the lock.
 
     Every turn with an environment binding prepares first, and so does every
     terminal that requires its environment. Holding the supervisor-wide lock
     across those reads stalled every other group for as long as Docker took.
+    A running group's prepared boot is answered on those reads alone; a stopped
+    one is started, and then read the same way.
     """
     manager = _Manager()
+    name = _spec().container_name
+    manager.items[name] = replace(
+        manager._inspection(_spec(), running=running), started_at="boot-one"
+    )
     supervisor = SharedChatSessionSupervisor(manager)
     supervisor.register_manifest(_spec(), _members())
     other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
     supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
-    name = _spec().container_name
-    manager.items[name] = replace(manager._inspection(_spec()), started_at="boot-one")
     inspect = manager.inspect
     locked_inspections: list[str] = []
 

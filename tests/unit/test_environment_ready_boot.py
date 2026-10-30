@@ -15,6 +15,7 @@ from tests.unit.test_shared_session_supervisor import (
     _spec,
 )
 
+from cloud_agent_host import shared_session_supervisor
 from cloud_agent_host.chat_sandbox import ChatSandboxStatus
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_shared.environment import BoundEnvironment
@@ -66,6 +67,19 @@ def _status(receipt: dict):
 
 def _started_or_proved(manager: _Manager) -> int:
     return len(manager.starts) + len(manager.network_proofs)
+
+
+def _answers(monkeypatch) -> list:
+    """What the shortcut answered, once per preparation: ``None`` takes the full path."""
+    answered: list = []
+    shortcut = shared_session_supervisor.ready_boot
+
+    def recorded(*args):
+        answered.append(shortcut(*args))
+        return answered[-1]
+
+    monkeypatch.setattr(shared_session_supervisor, "ready_boot", recorded)
+    return answered
 
 
 def test_a_prepared_boot_is_answered_without_a_start_or_a_proof(tmp_path):
@@ -128,6 +142,18 @@ def _fall_through_cases():
         supervisor._started_archive_hook = lambda *_args: None
         return _ready(), lease.token
 
+    def container_lost(manager, supervisor, lease):
+        supervisor._members["athr_source"].container_lost = True
+        return _ready(), lease.token
+
+    def capturing(manager, supervisor, lease):
+        supervisor._members["athr_source"].snapshotting = True
+        return _ready(), lease.token
+
+    def removed(manager, supervisor, lease):
+        del manager.items[_spec().container_name]
+        return _ready(), lease.token
+
     return {
         "an-earlier-boot": other_boot,
         "another-container": other_container,
@@ -138,22 +164,78 @@ def _fall_through_cases():
         "replaced-since-the-receipt": replaced_since_the_receipt,
         "failed-start": failed_start,
         "archive-completion-pending": archive_completion,
+        "container-lost": container_lost,
+        "capturing-a-snapshot": capturing,
+        "removed": removed,
     }
 
 
 @pytest.mark.parametrize("case", sorted(_fall_through_cases()))
-def test_anything_short_of_this_exact_prepared_boot_starts_and_proves_as_before(case):
+def test_anything_short_of_this_exact_prepared_boot_takes_the_full_path(monkeypatch, case):
     manager, supervisor, lease = _leased()
     receipt, owner = _fall_through_cases()[case](manager, supervisor, lease)
-    preparer = _status(receipt)
+    answered = _answers(monkeypatch)
 
     # The full path's own outcome is not under test here, only that it ran.
     with contextlib.suppress(Exception):
         supervisor.prepare_environment(
-            "athr_source", _ENVIRONMENT, preparer, activation_owner=owner
+            "athr_source", _ENVIRONMENT, _status(receipt), activation_owner=owner
         )
 
-    assert _started_or_proved(manager) >= 1
+    assert answered == [None]
+
+
+def test_a_start_finishing_during_the_reads_gets_its_own_boot_prepared(monkeypatch):
+    """A start replaces the group's inspection without a new lifecycle generation."""
+    manager, supervisor, lease = _leased()
+    name = _spec().container_name
+    group = supervisor._members["athr_source"]
+    inspect = manager.inspect
+
+    def raced(container_name):
+        seen = inspect(container_name)
+        # Another request's start finishes just after this read, on a new boot.
+        with supervisor._lock:
+            group.inspection = manager.items[name] = replace(seen, started_at="boot-three")
+        manager.inspect = inspect
+        return seen
+
+    manager.inspect = raced
+    answered = _answers(monkeypatch)
+
+    with contextlib.suppress(Exception):
+        supervisor.prepare_environment(
+            "athr_source", _ENVIRONMENT, _status(_ready()), activation_owner=lease.token
+        )
+
+    assert answered == [None]
+    assert group.inspection.started_at == "boot-three"
+
+
+def test_a_group_known_to_be_stopped_is_left_to_the_full_path_unread(monkeypatch):
+    _manager, supervisor, lease = _leased()
+    group = supervisor._members["athr_source"]
+    with supervisor._lock:
+        group.inspection = replace(
+            group.inspection, running=False, status=ChatSandboxStatus.STOPPED
+        )
+    reads: list[str] = []
+
+    def status(_backend, binding_id):
+        reads.append(binding_id)
+        return _ready()
+
+    answered = _answers(monkeypatch)
+    with contextlib.suppress(Exception):
+        supervisor.prepare_environment(
+            "athr_source",
+            _ENVIRONMENT,
+            SimpleNamespace(status=status),
+            activation_owner=lease.token,
+        )
+
+    assert answered == [None]
+    assert reads == ["bound"], "only the full path read the receipt"
 
 
 def test_a_lifecycle_change_during_the_reads_takes_the_full_path():
