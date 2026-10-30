@@ -460,6 +460,7 @@ export function ApplicationSettingGroup({
                 <p id={`${id}-help`} className="mt-1 break-words text-xs leading-5 text-muted">
                   {field.description}
                   {keySourceNote(key, configured)}
+                  {applyNote(field)}
                   {editable &&
                     key === ARCHIVE_BUCKET &&
                     ' Saving an S3 URI replaces the prefix; a bucket-root URI clears it.'}
@@ -655,4 +656,18 @@ export function ApplicationSettingGroup({
       )}
     </div>
   );
+}
+
+const APPLY_LABELS: Record<string, string> = {
+  next_operation: 'Takes effect on the next use after settings synchronize.',
+  new_session: 'Applies to new sessions; existing ones keep theirs.',
+  restart: 'Takes effect after a restart.',
+  host_reenroll: 'Hosts must re-enroll after a change.',
+};
+
+/** When a saved value takes effect, only where its readers were checked. */
+function applyNote(field: { apply_mode?: string; apply_description?: string }): string {
+  const label = field.apply_mode ? APPLY_LABELS[field.apply_mode] : undefined;
+  if (!label) return '';
+  return ` ${label}${field.apply_description ? ` ${field.apply_description}` : ''}`;
 }
