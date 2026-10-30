@@ -638,22 +638,22 @@ _WORKFLOW_ITEMS = (
     ),
     CatalogItem(
         id="security.key_rotation",
-        label="Signing and encryption key rotation",
+        label="Signing key and sandbox credential rotation",
         group="Security",
         method="workflow",
         sources=(Source("settings", "control plane", "saved keys"),),
         owner="workflow:key_rotation",
         env_names=("AGENT_SANDBOX_MANAGER_TOKEN_NEXT",),
         description=(
-            "Host signing key (two keys during the switch), sandbox manager credential (two "
-            "accepted during the switch) and the two credential encryption keys (re-encrypt "
-            "every owning record)."
+            "Host signing key (two keys during the switch, then a confirmed retire) and "
+            "sandbox manager credential (two accepted during the switch). The two credential "
+            "encryption keys are not rotated here: their MAC-indexed data needs its own "
+            "re-keying design, so replacing them stays refused once set."
         ),
         setting_keys=(
             "control_signing_secret",
+            "control_signing_secret_previous",
             "sandbox_manager_token",
-            "source_control_encryption_key",
-            "compute_encryption_key",
         ),
     ),
     CatalogItem(
