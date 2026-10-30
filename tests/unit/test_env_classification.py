@@ -569,9 +569,9 @@ class _Setting:
 
 
 def test_a_new_environment_import_outside_migrated_settings_fails() -> None:
-    settings = [*SETTINGS, _Setting("streams.max_per_user", "AGENT_MAX_STREAMS_PER_USER")]
+    settings = [*SETTINGS, _Setting("example.new_import", "AGENT_EXAMPLE_NEW_IMPORT")]
     assert unmigrated_registrations(settings, MIGRATED_SETTINGS) == [
-        "AGENT_MAX_STREAMS_PER_USER is a new environment import outside MIGRATED_SETTINGS: "
+        "AGENT_EXAMPLE_NEW_IMPORT is a new environment import outside MIGRATED_SETTINGS: "
         "an existing database would never read it. Register it in MIGRATED_SETTINGS"
     ]
     assert unmigrated_registrations(settings, [*MIGRATED_SETTINGS, settings[-1]]) == []
