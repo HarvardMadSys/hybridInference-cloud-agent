@@ -6,13 +6,22 @@
 // for another conversation or window is dropped.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { getThreadContextDna } from '@/lib/api/agents';
+import { getThreadContextDna, type DnaBandsApi } from '@/lib/api/agents';
 import type { DnaItems } from './trendModel';
 
 /** Visible requests DNA draws at once (two reads). */
 export const DNA_MAX_COLUMNS = 120;
 const CHUNK = 60;
 const CACHE_MAX = 512;
+
+/** The key of the band that stands for a request's earliest, folded items. */
+export const FOLDED_KEY = 'folded';
+
+/** A request's bands, its folded earliest items first as one band, so the column keeps its size. */
+export function withFolded(request: DnaBandsApi['requests'][number]): DnaItems {
+  if (request.folded_tokens <= 0) return request.items;
+  return [[FOLDED_KEY, FOLDED_KEY, request.folded_tokens], ...request.items];
+}
 
 /** Ranges of at most `CHUNK` request indexes covering every missing one. */
 export function dnaRanges(missing: number[]): [number, number][] {
@@ -59,7 +68,7 @@ export function useDnaBands(
         if (controller.signal.aborted || cache.current !== store) return;
         for (const reply of replies) {
           for (const request of reply?.requests ?? [])
-            store.bands.set(request.index, request.items);
+            store.bands.set(request.index, withFolded(request));
         }
         while (store.bands.size > CACHE_MAX)
           store.bands.delete(store.bands.keys().next().value as number);

@@ -39,7 +39,7 @@ import {
   MIN_WINDOW,
   zoomWindow,
 } from './trendModel';
-import { DNA_MAX_COLUMNS, useDnaBands } from './useDnaBands';
+import { DNA_MAX_COLUMNS, FOLDED_KEY, useDnaBands } from './useDnaBands';
 
 const H = 168;
 const PAD_TOP = 8;
@@ -174,6 +174,7 @@ export function ContextTrend({
         missing={visible.filter((c) => !c.cats).length}
         dna={dnaOn}
         dnaLoading={dna.loading}
+        folded={dnaOn && [...dna.bands.values()].some((items) => items[0]?.[0] === FOLDED_KEY)}
         overlay={state.overlay}
       />
       {n > 0 ? (
@@ -468,12 +469,14 @@ function Legend({
   missing,
   dna,
   dnaLoading,
+  folded,
   overlay,
 }: {
   keys: string[];
   missing: number;
   dna: boolean;
   dnaLoading: boolean;
+  folded: boolean;
   overlay: Overlay;
 }) {
   const { t } = useLocale();
@@ -493,6 +496,12 @@ function Legend({
         <span className="inline-flex items-center gap-1">
           <span aria-hidden="true" className="h-0.5 w-3 bg-amber-500" />
           {t('dashboard.trend.durationLegend')}
+        </span>
+      ) : null}
+      {folded ? (
+        <span className="inline-flex items-center gap-1">
+          <span aria-hidden="true" className={`h-2 w-2 rounded-sm ${swatchOf(FOLDED_KEY).bg}`} />
+          {t('dashboard.cat.folded')}
         </span>
       ) : null}
       {missing > 0 ? <span>{t('dashboard.trend.missing', { count: missing })}</span> : null}

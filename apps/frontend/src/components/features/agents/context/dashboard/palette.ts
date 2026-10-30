@@ -26,6 +26,8 @@ export const PALETTE: Record<string, Swatch> = {
   tool_calls: swatch('bg-sky-500', 'fill-sky-500', 'stroke-sky-500'),
   tool_results: swatch('bg-teal-500', 'fill-teal-500', 'stroke-teal-500'),
   other: swatch('bg-slate-400', 'fill-slate-400', 'stroke-slate-400'),
+  /** A DNA column's earliest items, folded into one band by the server. */
+  folded: swatch('bg-slate-300', 'fill-slate-300', 'stroke-slate-300'),
 };
 
 /** The reconstruction's (and Insights') category names, as the dashboard keys them. */
@@ -56,6 +58,7 @@ export const CATEGORY_LABEL: Record<string, TranslationKey> = {
   tool_calls: 'dashboard.cat.tool_calls',
   tool_results: 'dashboard.cat.tool_results',
   other: 'dashboard.cat.other',
+  folded: 'dashboard.cat.folded',
 };
 
 export function swatchOf(key: string): Swatch {

@@ -10,7 +10,7 @@ import { timingRows } from './TimingStats';
 import { providerValues } from './TokenStats';
 import { coverageOf } from './WindowCard';
 import { bandAt, stripBands, stripGradient } from './timingModel';
-import { dnaRanges } from './useDnaBands';
+import { FOLDED_KEY, dnaRanges, withFolded } from './useDnaBands';
 import {
   clampWindow,
   deltaColumns,
@@ -366,5 +366,22 @@ describe('dnaRanges', () => {
       [60, 100],
     ]);
     for (const [from, to] of ranges) expect(to - from).toBeLessThan(60);
+  });
+});
+
+describe('withFolded', () => {
+  it('keeps a column its size: folded earliest items become one band at its base', () => {
+    const request = {
+      index: 4,
+      event_id: 9,
+      items: [['e1', 'user', 5]] as [string, string, number][],
+    };
+    expect(withFolded({ ...request, folded_items: 0, folded_tokens: 0 })).toEqual([
+      ['e1', 'user', 5],
+    ]);
+    expect(withFolded({ ...request, folded_items: 300, folded_tokens: 4200 })).toEqual([
+      [FOLDED_KEY, FOLDED_KEY, 4200],
+      ['e1', 'user', 5],
+    ]);
   });
 });

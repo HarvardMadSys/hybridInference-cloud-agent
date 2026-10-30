@@ -21,6 +21,7 @@ export const contextDashboardEn = {
   'dashboard.cat.tool_calls': 'Tool calls',
   'dashboard.cat.tool_results': 'Tool results',
   'dashboard.cat.other': 'Other',
+  'dashboard.cat.folded': 'Earlier items (folded)',
 
   'dashboard.tokens.title': 'Token Stats',
   'dashboard.tokens.basis': 'What the ring counts',
@@ -173,6 +174,7 @@ export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, strin
   'dashboard.cat.tool_calls': '工具调用',
   'dashboard.cat.tool_results': '工具结果',
   'dashboard.cat.other': '其他',
+  'dashboard.cat.folded': '更早的条目（已合并）',
 
   'dashboard.tokens.title': 'Token 统计',
   'dashboard.tokens.basis': '圆环统计的是什么',
