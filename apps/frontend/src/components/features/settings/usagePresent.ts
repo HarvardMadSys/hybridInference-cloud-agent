@@ -3,10 +3,31 @@
 // from the component so the arithmetic is tested directly.
 
 import type { AdminUsageAggregate, AdminUsageDay } from '@/lib/api/adminUsage';
-import type { ContainerState, OwnerResourceDay, OwnerResourceTotals } from '@/lib/api/ownerUsage';
+import type {
+  ContainerState,
+  HistoryQuery,
+  OwnerHistoryPeriod,
+  OwnerResourceDay,
+  OwnerResourceTotals,
+} from '@/lib/api/ownerUsage';
+import type { TranslationKey, TranslationVars } from '@/lib/i18n/translate';
+import { APIError } from '@/lib/utils/errors';
 
-export const USAGE_PERIODS = [7, 30] as const;
+// Named, not counted: "today" is not "1 days", and all time is no number of days.
+export const USAGE_PERIODS = ['today', '7d', '30d', 'all'] as const;
 export type UsagePeriod = (typeof USAGE_PERIODS)[number];
+
+const PERIOD_QUERY: Record<UsagePeriod, HistoryQuery> = {
+  today: { days: 1 },
+  '7d': { days: 7 },
+  '30d': { days: 30 },
+  all: { all: true },
+};
+
+/** What a period asks the server for. */
+export function periodQuery(period: UsagePeriod): HistoryQuery {
+  return PERIOD_QUERY[period];
+}
 
 export const CHART_METRICS = ['cost', 'tokens', 'running', 'cpu', 'memory'] as const;
 export type ChartMetric = (typeof CHART_METRICS)[number];
@@ -94,15 +115,36 @@ export function tokenTotal(usage: AdminUsageAggregate): number | null {
 }
 
 /**
- * Turns whose usage the Gateway has not reported yet: pending or unavailable.
+ * The share of input tokens read from the cache, as the Admin Usage page's
+ * `cachedShare` reads it.
  *
- * Only those two statuses mean a turn has no readable report. A turn with one is
- * available, partial or stale, even while it is read again. A turn that ended
- * before its agent called a model has no report and needs none, and is available,
- * so counting turns without a snapshot named it unrecorded for good.
+ * Only a ratio both sides fully report is shown: a call that did not report
+ * one of the two would make it a guess, and a cache read larger than the input
+ * means the two were not counted the same way. Input already includes cached
+ * input, so the cache read is a part of it and is never added to it.
  */
-export function unrecordedTurns(usage: AdminUsageAggregate): number {
-  return (usage.status_counts.pending ?? 0) + (usage.status_counts.unavailable ?? 0);
+export function cachedShare(usage: AdminUsageAggregate): number | null {
+  const totals = usage.totals;
+  const unknown = usage.unknown_rows;
+  if (!totals || totals.tokens_in == null || totals.cache_read == null) return null;
+  if (unknown && (unknown.tokens_in > 0 || unknown.cache_read > 0)) return null;
+  if (totals.tokens_in <= 0 || totals.cache_read > totals.tokens_in) return null;
+  return totals.cache_read / totals.tokens_in;
+}
+
+/** `42%`; a share above zero that rounds to none reads `<1%`, and an unknown one a dash. */
+export function formatShare(share: number | null): string {
+  if (share === null || !Number.isFinite(share)) return '—';
+  const percent = Math.round(share * 100);
+  return share > 0 && percent === 0 ? '<1%' : `${percent}%`;
+}
+
+/**
+ * Whether a known reasoning total leaves out calls that did not report one.
+ * An unknown total already reads as a dash and needs no such note.
+ */
+export function reasoningPartly(usage: AdminUsageAggregate): boolean {
+  return usage.totals?.reasoning != null && (usage.unknown_rows?.reasoning ?? 0) > 0;
 }
 
 export interface ChartDay {
@@ -160,15 +202,121 @@ export function formatDayValue(metric: ChartMetric, value: number | null): strin
   return metric === 'tokens' ? compactCount(value) : decimal(value);
 }
 
-/** `Oct 9`, for a UTC calendar date. */
-export function shortDay(date: string, locale: string): string {
+/** `Oct 9`, or `Oct 9, 2025` with ``withYear``, for a UTC calendar date. */
+export function shortDay(date: string, locale: string, withYear = false): string {
   const time = Date.parse(`${date}T00:00:00Z`);
   if (!Number.isFinite(time)) return date;
   return new Date(time).toLocaleDateString(locale, {
+    year: withYear ? 'numeric' : undefined,
     month: 'short',
     day: 'numeric',
     timeZone: 'UTC',
   });
+}
+
+/**
+ * Past this many days the chart draws one bar per week. Thirty days still fit
+ * a phone as bars wide enough to point at; ninety, or a year, do not.
+ */
+export const MAX_DAILY_BARS = 31;
+const DAY_MS = 86_400_000;
+
+/** One bar of the chart: a UTC day, or the days of one week inside the period. */
+export interface ChartBar {
+  /** The first and last UTC date the bar sums; the same date for a day. */
+  first: string;
+  last: string;
+  days: number;
+  /** False when the bar covers only part of its day or week. */
+  whole: boolean;
+  /** Null is unknown: a week with one unknown day is unknown as a whole. */
+  value: number | null;
+}
+
+/** The Monday (UTC) that starts ``date``'s week, as ISO weeks do. */
+function weekOf(date: string): string {
+  const time = Date.parse(`${date}T00:00:00Z`);
+  const sinceMonday = (new Date(time).getUTCDay() + 6) % 7;
+  return new Date(time - sinceMonday * DAY_MS).toISOString().slice(0, 10);
+}
+
+/**
+ * A metric's bars: one per day, or one per calendar week past
+ * ``MAX_DAILY_BARS`` days.
+ *
+ * A week sums only the days the period has. Days before the period are not
+ * drawn as zero; the week the period starts in is partial instead, and so is
+ * the week that holds today. Like ``tokenTotal``, a sum with one unknown day
+ * in it is unknown.
+ */
+export function chartBars(days: ChartDay[], metric: ChartMetric): ChartBar[] {
+  const bars: ChartBar[] = [];
+  const weekly = days.length > MAX_DAILY_BARS;
+  let week: string | null = null;
+  for (const day of days) {
+    const value = dayValue(day, metric);
+    const start = weekly ? weekOf(day.date) : null;
+    const bar = bars.at(-1);
+    if (bar && start !== null && start === week) {
+      bar.last = day.date;
+      bar.days += 1;
+      bar.whole &&= day.whole;
+      bar.value = bar.value === null || value === null ? null : bar.value + value;
+      continue;
+    }
+    week = start;
+    bars.push({ first: day.date, last: day.date, days: 1, whole: day.whole, value });
+  }
+  return weekly ? bars.map((bar) => ({ ...bar, whole: bar.whole && bar.days === 7 })) : bars;
+}
+
+/** Whether a chart's labels need their year: the bars cross a new year. */
+export function crossesYear(bars: ChartBar[]): boolean {
+  return bars.length > 0 && bars[0].first.slice(0, 4) !== bars[bars.length - 1].last.slice(0, 4);
+}
+
+/** The UTC date an instant falls on, as `2026-04-12`. */
+function utcDate(iso: string): string {
+  const time = Date.parse(iso);
+  return Number.isFinite(time) ? new Date(time).toISOString().slice(0, 10) : iso;
+}
+
+/**
+ * What an all-time period covers, said as it is.
+ *
+ * All time is shown as all only when it starts at the owner's first run.
+ * Narrowed, it names the first day it holds and why earlier days are left out.
+ * A period of some number of days needs no note: its button says it.
+ */
+export function rangeNote(
+  period: OwnerHistoryPeriod | null | undefined,
+): { key: TranslationKey; vars?: TranslationVars } | null {
+  if (period?.kind !== 'all') return null;
+  if (period.first_activity_at === null) return { key: 'settings.usage.range.noRuns' };
+  const date = utcDate(period.since);
+  if (period.limited_by === 'runs') return { key: 'settings.usage.range.runs', vars: { date } };
+  if (period.limited_by === 'days') {
+    const span = Date.parse(`${utcDate(period.until)}T00:00:00Z`) - Date.parse(period.since);
+    return { key: 'settings.usage.range.days', vars: { date, count: span / DAY_MS + 1 } };
+  }
+  return { key: 'settings.usage.range.first', vars: { date } };
+}
+
+const ERROR_KEY: Partial<Record<string, TranslationKey>> = {
+  usage_query_too_large: 'settings.usage.error.tooLarge',
+  usage_response_too_large: 'settings.usage.error.responseTooLarge',
+  usage_temporarily_unavailable: 'settings.usage.error.unavailable',
+};
+
+/**
+ * The words for a history read the server refused, in the reader's language.
+ * The server's own message is English prose for logs and is never shown.
+ */
+export function historyErrorKey(cause: unknown): TranslationKey {
+  if (!(cause instanceof APIError)) return 'settings.usage.loadError';
+  const key = ERROR_KEY[cause.code];
+  if (key) return key;
+  return cause.statusCode === 503 ? 'settings.usage.error.unavailable' : 'settings.usage.loadError';
 }
 
 /**

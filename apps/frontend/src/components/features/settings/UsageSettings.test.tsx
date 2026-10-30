@@ -13,10 +13,12 @@ import {
   getOwnerTokens,
   type OwnerContainer,
   type OwnerContainerList,
+  type OwnerHistoryPeriod,
   type OwnerResourceHistory,
   type OwnerTokenUsage,
 } from '@/lib/api/ownerUsage';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
+import { APIError } from '@/lib/utils/errors';
 
 import { CONTAINER_REFRESH_MS, UsageSettings } from './UsageSettings';
 
@@ -104,6 +106,14 @@ function aggregate(overrides: Partial<AdminUsageAggregate> = {}): AdminUsageAggr
   };
 }
 
+const WEEK: OwnerHistoryPeriod = {
+  kind: 'days',
+  since: '2026-10-09T00:00:00Z',
+  until: '2026-10-15T12:00:00Z',
+  first_activity_at: null,
+  limited_by: null,
+};
+
 function tokens(): OwnerTokenUsage {
   return {
     since: '2026-10-09T00:00:00Z',
@@ -111,6 +121,7 @@ function tokens(): OwnerTokenUsage {
     day_timezone: 'UTC',
     time_basis: 'job_created_at',
     generated_at: '2026-10-15T12:00:00Z',
+    period: WEEK,
     summary: aggregate(),
     days: [
       {
@@ -137,6 +148,7 @@ function resources(): OwnerResourceHistory {
     until: '2026-10-15T12:00:00Z',
     day_timezone: 'UTC',
     generated_at: '2026-10-15T12:00:00Z',
+    period: WEEK,
     totals: {
       running_seconds: 10 * 3600,
       measured_seconds: 4 * 3600,
@@ -297,19 +309,152 @@ describe('UsageSettings', () => {
     );
   });
 
+  it('shows the cache hit rate, and reasoning tokens as a part of output', async () => {
+    const usage = tokens();
+    usage.summary.totals = { ...usage.summary.totals!, cache_read: 36_000, reasoning: 5_000 };
+    vi.mocked(getOwnerTokens).mockResolvedValue(usage);
+    section();
+    await waitFor(async () => expect(await tile('Cache hit rate')).toBe('30%'));
+    expect(screen.getByText('36K of 120K input from cache')).toBeInTheDocument();
+    expect(await tile('Reasoning tokens')).toBe('5,000');
+    expect(screen.getByText('Included in output tokens')).toBeInTheDocument();
+    expect(await tile('Tokens')).toBe('150K');
+  });
+
+  it('reads a cache hit rate or reasoning it cannot know as a dash, not zero', async () => {
+    const usage = tokens();
+    usage.summary.unknown_rows = {
+      tokens_in: 0,
+      tokens_out: 0,
+      cache_read: 2,
+      cache_write: 0,
+      reasoning: 0,
+      spent_usd: 0,
+    };
+    vi.mocked(getOwnerTokens).mockResolvedValue(usage);
+    section();
+    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
+    expect(await tile('Cache hit rate')).toBe('—');
+    expect(await tile('Reasoning tokens')).toBe('—');
+  });
+
+  it('says when reasoning is only partly reported, still as a part of output', async () => {
+    const usage = tokens();
+    usage.summary.totals = { ...usage.summary.totals!, reasoning: 5_000 };
+    usage.summary.unknown_rows = {
+      tokens_in: 0,
+      tokens_out: 0,
+      cache_read: 0,
+      cache_write: 0,
+      reasoning: 3,
+      spent_usd: 0,
+    };
+    vi.mocked(getOwnerTokens).mockResolvedValue(usage);
+    section();
+    await waitFor(async () => expect(await tile('Reasoning tokens')).toBe('5,000'));
+    expect(
+      screen.getByText('Some calls did not report it · included in output tokens'),
+    ).toBeInTheDocument();
+    expect(await tile('Tokens')).toBe('150K');
+  });
+
   it('reads both histories again for another period', async () => {
     section();
     await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
+    expect(getOwnerTokens).toHaveBeenLastCalledWith({ days: 7 }, expect.anything());
+    const periods = screen.getByRole('group', { name: 'Period' });
+    expect(
+      within(periods)
+        .getAllByRole('button')
+        .map((button) => button.textContent),
+    ).toEqual(['Today', '7 days', '30 days', 'All']);
     fireEvent.click(screen.getByRole('button', { name: '30 days' }));
-    await waitFor(() => expect(getOwnerTokens).toHaveBeenLastCalledWith(30, expect.anything()));
-    expect(getOwnerResources).toHaveBeenLastCalledWith(30, expect.anything());
+    await waitFor(() =>
+      expect(getOwnerTokens).toHaveBeenLastCalledWith({ days: 30 }, expect.anything()),
+    );
+    expect(getOwnerResources).toHaveBeenLastCalledWith({ days: 30 }, expect.anything());
     expect(screen.getByRole('button', { name: '30 days' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'All' }));
+    await waitFor(() =>
+      expect(getOwnerTokens).toHaveBeenLastCalledWith({ all: true }, expect.anything()),
+    );
+    expect(getOwnerResources).toHaveBeenLastCalledWith({ all: true }, expect.anything());
+  });
+
+  it('draws no chart for today, only its totals', async () => {
+    const yesterday = {
+      date: '2026-10-14',
+      since: '2026-10-14T00:00:00Z',
+      until: '2026-10-15T00:00:00Z',
+    };
+    vi.mocked(getOwnerTokens).mockResolvedValue({
+      ...tokens(),
+      days: [{ ...tokens().days[0], ...yesterday }, ...tokens().days],
+    });
+    vi.mocked(getOwnerResources).mockResolvedValue({
+      ...resources(),
+      days: [{ ...resources().days[0], ...yesterday }, ...resources().days],
+    });
+    section();
+    expect(await screen.findByRole('region', { name: 'Cost by day' })).toBeInTheDocument();
+    vi.mocked(getOwnerTokens).mockResolvedValue(tokens());
+    vi.mocked(getOwnerResources).mockResolvedValue(resources());
+    fireEvent.click(screen.getByRole('button', { name: 'Today' }));
+    await waitFor(() =>
+      expect(getOwnerTokens).toHaveBeenLastCalledWith({ days: 1 }, expect.anything()),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole('region', { name: 'Cost by day' })).not.toBeInTheDocument(),
+    );
+    expect(await tile('Model cost')).toBe('$12.35');
+  });
+
+  it('says where a narrowed all-time period starts, and sums weeks', async () => {
+    const period: OwnerHistoryPeriod = {
+      kind: 'all',
+      since: '2026-08-10T00:00:00Z',
+      until: '2026-10-15T12:00:00Z',
+      first_activity_at: '2026-02-01T09:00:00Z',
+      limited_by: 'runs',
+    };
+    const start = Date.parse(period.since);
+    const dates = Array.from({ length: 67 }, (_, index) =>
+      new Date(start + index * 86_400_000).toISOString().slice(0, 10),
+    );
+    vi.mocked(getOwnerTokens).mockResolvedValue({
+      ...tokens(),
+      since: period.since,
+      period,
+      days: dates.map((date) => ({ ...tokens().days[0], date, since: `${date}T00:00:00Z` })),
+    });
+    vi.mocked(getOwnerResources).mockResolvedValue({
+      ...resources(),
+      since: period.since,
+      period,
+      days: dates.map((date) => ({ ...resources().days[0], date, since: `${date}T00:00:00Z` })),
+    });
+    section();
+    fireEvent.click(await screen.findByRole('button', { name: 'All' }));
+    const note = await screen.findByRole('note');
+    expect(note).toHaveTextContent(
+      'Since 2026-08-10 · Earlier usage is more than one summary can add up and is not included.',
+    );
+    const chart = await screen.findByRole('region', { name: 'Cost by week' });
+    // Monday 2026-08-10 to Thursday 2026-10-15: nine whole weeks and a partial one.
+    expect(within(chart).getAllByRole('row')).toHaveLength(10);
   });
 
   it('keeps container history when model usage cannot be read', async () => {
-    vi.mocked(getOwnerTokens).mockRejectedValue(new Error('Too many runs to sum.'));
+    vi.mocked(getOwnerTokens).mockRejectedValue(
+      new APIError('usage_query_too_large', 'Too many runs to sum.', 422),
+    );
     section();
-    expect(await screen.findByText('Too many runs to sum.')).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        'This period has too many turns to add up at once. Choose a shorter period.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Too many runs to sum.')).not.toBeInTheDocument();
     expect(await screen.findByText('10 h')).toBeInTheDocument();
     vi.mocked(getOwnerTokens).mockResolvedValue(tokens());
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
@@ -324,8 +469,23 @@ describe('UsageSettings', () => {
     expect(await screen.findByText('1 个运行中 · 1 个已停止')).toBeInTheDocument();
     expect(screen.getByText('最后使用：3小时前')).toBeInTheDocument();
     expect(await screen.findByText('估算，不是账单')).toBeInTheDocument();
+    expect(await tile('缓存命中率')).toBe('0%');
+    expect(await tile('推理 Token')).toBe('—');
+    expect(screen.getByText('已计入输出 Token')).toBeInTheDocument();
     expect(
       await screen.findByText(/^每天从 UTC 零点开始算.*和每日额度重置的时间一致/),
     ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '今天' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '全部' })).toBeInTheDocument();
+  });
+
+  it('tells a refusal in Chinese rather than the server’s English', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
+    vi.mocked(getOwnerResources).mockRejectedValue(
+      new APIError('usage_temporarily_unavailable', 'Usage could not be read right now.', 503),
+    );
+    section();
+    expect(await screen.findByText('暂时无法读取用量，请稍后再试。')).toBeInTheDocument();
+    expect(screen.queryByText(/could not be read/)).not.toBeInTheDocument();
   });
 });

@@ -1,6 +1,8 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useId, useRef, useState } from 'react';
+import { MENU_ACTIONS, MENU_POSITIONED, MENU_ROW } from '@/components/ui/menuStyles';
+import { usePopupMenu } from '@/components/ui/usePopupMenu';
 
 export default function ServerActions({
   items,
@@ -8,70 +10,49 @@ export default function ServerActions({
   items: { label: string; onSelect: () => void }[];
 }) {
   const [open, setOpen] = useState(false);
-  const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    root.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
-    const dismiss = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener('pointerdown', dismiss);
-    return () => document.removeEventListener('pointerdown', dismiss);
-  }, [open]);
+  const menu = useRef<HTMLDivElement>(null);
+  const id = useId();
+  const popup = usePopupMenu({
+    open,
+    onOpenChange: setOpen,
+    triggerRef: trigger,
+    menuRef: menu,
+    placement: { gap: 6, width: 192, maxWidth: 260, preferredHeight: 120, maxHeight: 320 },
+  });
   if (!items.length) return null;
   return (
-    <div
-      ref={root}
-      className="relative"
-      onKeyDown={(event) => {
-        if (event.key === 'Escape' && open) {
-          event.preventDefault();
-          event.stopPropagation();
-          setOpen(false);
-          trigger.current?.focus();
-        } else if (open && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
-          event.preventDefault();
-          const buttons = Array.from(
-            root.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [],
-          );
-          const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-          const next =
-            event.key === 'Home'
-              ? 0
-              : event.key === 'End'
-                ? buttons.length - 1
-                : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
-          buttons[next]?.focus();
-        } else if (event.key === 'Tab' && open) {
-          setOpen(false);
-          trigger.current?.focus();
-        }
-      }}
-    >
+    <div className="relative">
       <button
         ref={trigger}
         type="button"
         aria-label="Server actions"
         aria-haspopup="menu"
         aria-expanded={open}
-        className="rounded-lg px-3 py-1 text-xl hover:bg-gray-100 dark:hover:bg-white/5"
+        aria-controls={open ? id : undefined}
+        className="ui-icon-button ui-button-ghost h-8 w-8 text-base"
         onClick={() => setOpen(!open)}
+        onKeyDown={popup.triggerKeyDown}
       >
         ⋯
       </button>
       {open && (
         <div
+          ref={menu}
+          id={id}
           role="menu"
           aria-label="Server actions"
-          className="absolute right-0 top-full z-10 mt-2 w-48 rounded-xl border border-gray-200 bg-white p-1 shadow-lg dark:border-white/10 dark:bg-gray-900"
+          style={popup.style}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-48`}
+          onKeyDown={popup.onKeyDown}
         >
           {items.map((item) => (
             <button
               key={item.label}
               role="menuitem"
               type="button"
-              className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-gray-50 focus:bg-gray-50 dark:hover:bg-white/5 dark:focus:bg-white/5"
+              tabIndex={-1}
+              className={MENU_ROW}
               onClick={() => {
                 setOpen(false);
                 trigger.current?.focus();

@@ -14,16 +14,18 @@ child checks the network before it accepts its turn.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
 import stat
 import subprocess
+import threading
 import time
 import uuid
 from typing import Any
 
 from cloud_agent_host.host_runtime import LAUNCH_BACKOFF_CAP_S, LAUNCH_BACKOFF_S
-from cloud_agent_host.network_guard import VERIFICATION_KEY
+from cloud_agent_host.network_guard import GUARD_RENEW_S, VERIFICATION_KEY
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxBackend
 from cloud_agent_shared.errors import SandboxError
 
@@ -35,6 +37,13 @@ VERDICT_KEY = "_runtime"
 #: long a change made outside the installer, which no marker records, can go
 #: unnoticed.
 RECHECK_S = 1800.0
+#: How often the host looks at its network verification between claims, and
+#: the age at which it renews it there: before a handover would find it
+#: ``GUARD_RENEW_S`` old and renew it inside the claim it hands over.
+NETWORK_RENEW_CHECK_S = 5.0
+NETWORK_RENEW_AGE_S = GUARD_RENEW_S - 2 * NETWORK_RENEW_CHECK_S
+
+logger = logging.getLogger(__name__)
 
 
 def _file_identity(observed: os.stat_result) -> list[int]:
@@ -141,8 +150,19 @@ class HostQualification:
     """The host service's proof that its Kata runtime is sound, renewed on change."""
 
     def __init__(
-        self, backend: ContainerBackend, *, runtime_state_path: str = RUNTIME_STATE_PATH
+        self,
+        backend: ContainerBackend,
+        *,
+        runtime_state_path: str = RUNTIME_STATE_PATH,
+        renew_network: bool = False,
     ) -> None:
+        """Hold ``backend``'s proofs; ``renew_network`` keeps its network one fresh between claims.
+
+        A handover renews a network verification ``GUARD_RENEW_S`` old itself,
+        inside the claim it hands over: about half a second of the first turn
+        after any quiet minute. The host service renews it ahead instead, on a
+        thread of its own (:meth:`renew_network_ahead`).
+        """
         self.backend = backend
         self.runtime_state_path = runtime_state_path
         self._verdict: dict[str, Any] | None = None
@@ -153,6 +173,42 @@ class HostQualification:
         self._failure = ""
         self._failures = 0
         self._retry_at = 0.0
+        if renew_network and backend.sandbox_network is not None:
+            threading.Thread(
+                target=self.renew_network_ahead,
+                args=(threading.Event(),),
+                daemon=True,
+                name="network-guard-renewal",
+            ).start()
+
+    def renew_network_ahead(self, stop: threading.Event) -> None:
+        """Renew the network verification a handover carries until ``stop`` is set.
+
+        It is renewed at :data:`NETWORK_RENEW_AGE_S`, so a claim never finds
+        it old enough to renew itself. The first look waits that long too: the
+        host service's startup check has just verified the rules. A failure is
+        logged once until a renewal succeeds, and tried again only after
+        ``GUARD_RENEW_S``: a handover still checks for itself, and hands its
+        failure to the turn to decline with.
+        """
+        guard = self.backend.network_guard()
+        failing = False
+        wait = NETWORK_RENEW_AGE_S
+        while not stop.wait(wait):
+            try:
+                guard.ensure(max_age_s=NETWORK_RENEW_AGE_S)
+            except Exception as exc:
+                if not failing:
+                    logger.warning(
+                        "agent_network_guard_renewal_failed",
+                        extra={
+                            "event": "agent_network_guard_renewal_failed",
+                            "detail": str(exc)[:300],
+                        },
+                    )
+                failing, wait = True, GUARD_RENEW_S
+            else:
+                failing, wait = False, NETWORK_RENEW_CHECK_S
 
     def refresh(self) -> bool:
         """Keep the proof current before a claim.

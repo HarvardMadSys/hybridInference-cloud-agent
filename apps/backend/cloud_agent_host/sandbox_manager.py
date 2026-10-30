@@ -3178,8 +3178,8 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         body: EnvironmentPrepareRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        # The supervisor's lock stays off the event loop. Its preparation
-        # starts the group, which proves the network for it.
+        # The supervisor's lock stays off the event loop. Preparing starts the
+        # group, which proves its network; a boot already prepared runs nothing.
         owner = await endpoint_calls.run(retained_owner, workspace_id)
         return await endpoint_calls.run(
             owner.prepare_environment,

@@ -1,9 +1,123 @@
 'use client';
 
-import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type RefObject,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { useT } from '@/components/providers/LocaleProvider';
-import { usePickerLayout } from './usePickerLayout';
+import { popoverContainer, useAnchoredPopover } from '@/components/ui/anchoredPopover';
+import { useTopLayerEscape } from '@/components/ui/useTopLayerEscape';
+import {
+  MENU_EMPTY,
+  MENU_LABEL,
+  MENU_POSITIONED,
+  MENU_SCROLL,
+  MENU_SEARCH,
+  MENU_SEARCH_INPUT,
+  MENU_SURFACE,
+  menuOptionClass,
+} from '@/components/ui/menuStyles';
+
+/** The menu's shared keyboard contract, kept out of the component's own branching. */
+function pickerKeyDown(
+  event: KeyboardEvent,
+  {
+    searchable,
+    matches,
+    current,
+    options,
+    optionLabels,
+    typeahead,
+    setActive,
+    choose,
+    close,
+  }: {
+    searchable: boolean;
+    matches: string[];
+    current: string;
+    options: string[];
+    optionLabels: Record<string, string>;
+    typeahead: { current: { text: string; at: number } };
+    setActive: (value: string) => void;
+    choose: (value: string) => void;
+    close: () => void;
+  },
+) {
+  if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    close();
+  } else if (event.key === 'Tab') {
+    // The panel is portalled. Resume tab order from its composer trigger.
+    close();
+  } else if (event.key === 'Enter' || (event.key === ' ' && !searchable)) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (matches.length) choose(current);
+  } else if (
+    ['ArrowDown', 'ArrowUp'].includes(event.key) ||
+    (!searchable && ['Home', 'End'].includes(event.key))
+  ) {
+    event.preventDefault();
+    moveActive(event.key, matches, current, setActive);
+  } else if (
+    !searchable &&
+    event.key.length === 1 &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey
+  ) {
+    event.preventDefault();
+    typeAhead(event.key, options, optionLabels, typeahead, setActive);
+  }
+}
+
+function moveActive(
+  key: string,
+  matches: string[],
+  current: string,
+  setActive: (value: string) => void,
+) {
+  const index = matches.indexOf(current);
+  const step = key === 'ArrowDown' ? 1 : -1;
+  let next = key === 'Home' ? 0 : key === 'End' ? matches.length - 1 : index + step;
+  next = Math.max(0, Math.min(matches.length - 1, next));
+  setActive(matches[next] ?? '');
+}
+
+function typeAhead(
+  key: string,
+  options: string[],
+  optionLabels: Record<string, string>,
+  typeahead: { current: { text: string; at: number } },
+  setActive: (value: string) => void,
+) {
+  const now = Date.now();
+  const text = (now - typeahead.current.at < 500 ? typeahead.current.text : '') + key;
+  typeahead.current = { text, at: now };
+  const match = options.find((option) =>
+    (optionLabels[option] ?? option).toLocaleLowerCase().startsWith(text.toLocaleLowerCase()),
+  );
+  if (match) setActive(match);
+}
+
+/** The menu width follows the control: form fields match themselves, chips stay compact. */
+function pickerPlacement(variant: 'compact' | 'field', searchable: boolean) {
+  return {
+    gap: 6,
+    preferredHeight: 240,
+    maxHeight: 384,
+    width: variant === 'field' ? undefined : searchable ? 320 : 240,
+    maxWidth: 384,
+  };
+}
 
 function pickerClasses(variant: 'compact' | 'field', open: boolean, hasValue: boolean) {
   const field = variant === 'field';
@@ -16,6 +130,50 @@ function pickerClasses(variant: 'compact' | 'field', open: boolean, hasValue: bo
     value: `min-w-0 truncate text-left font-medium ${field ? 'flex-1' : 'max-w-[11rem]'} ${hasValue ? '' : empty}`,
     chevron: `shrink-0 text-muted transition-transform ${field ? 'h-4 w-4' : 'h-3 w-3'} ${open ? 'rotate-180' : ''}`,
   };
+}
+
+/** Keep the active option in the list, never moving the page or toolbar. */
+function useRevealActive(
+  visible: boolean,
+  activeId: string | undefined,
+  current: string,
+  style: unknown,
+  list: RefObject<HTMLDivElement>,
+) {
+  useLayoutEffect(() => {
+    if (!visible || !style || !activeId || !list.current) return;
+    const option = document.getElementById(activeId);
+    if (!option) return;
+    // Measure after the viewport height is applied. Scroll only the list, so
+    // opening a picker cannot move the page or its horizontal toolbar.
+    const bounds = option.getBoundingClientRect();
+    const viewport = list.current.getBoundingClientRect();
+    if (bounds.top < viewport.top) list.current.scrollTop -= viewport.top - bounds.top;
+    else if (bounds.bottom > viewport.bottom)
+      list.current.scrollTop += bounds.bottom - viewport.bottom;
+  }, [visible, activeId, current, style, list]);
+}
+
+/** Dismiss on a press or focus anywhere outside the trigger and its panel. */
+function useDismissOutside(
+  visible: boolean,
+  panel: RefObject<HTMLDivElement>,
+  trigger: RefObject<HTMLButtonElement | null>,
+  setOpen: (open: boolean) => void,
+) {
+  useEffect(() => {
+    if (!visible) return;
+    function dismiss(event: Event) {
+      const target = event.target as Node;
+      if (!panel.current?.contains(target) && !trigger.current?.contains(target)) setOpen(false);
+    }
+    document.addEventListener('pointerdown', dismiss);
+    document.addEventListener('focusin', dismiss);
+    return () => {
+      document.removeEventListener('pointerdown', dismiss);
+      document.removeEventListener('focusin', dismiss);
+    };
+  }, [visible, panel, trigger, setOpen]);
 }
 
 /** A compact composer control with a themed, keyboard-accessible option list. */
@@ -74,40 +232,21 @@ export function Picker({
   const activeId = matches.length ? `${id}-option-${matches.indexOf(current)}` : undefined;
   const visible = open && !disabled && options.length > 0;
   const classes = pickerClasses(variant, visible, Boolean(value));
-  const style = usePickerLayout(visible, trigger, panel, searchable, options.length, variant);
+  const style = useAnchoredPopover(visible, trigger, panel, pickerPlacement(variant, searchable));
+  const [container, setContainer] = useState<HTMLElement | null>(null);
 
+  const placed = style.visibility !== 'hidden';
   useLayoutEffect(() => {
-    if (visible) (search.current ?? list.current)?.focus();
-  }, [visible]);
+    // A hidden popup cannot take focus; only focus it once placement has run.
+    if (visible && placed) (search.current ?? list.current)?.focus();
+  }, [visible, placed]);
 
-  useLayoutEffect(() => {
-    if (!visible || !style || !activeId || !list.current) return;
-    const option = document.getElementById(activeId);
-    if (!option) return;
-    // Measure after the viewport height is applied. Scroll only the list, so
-    // opening a picker cannot move the page or its horizontal toolbar.
-    const bounds = option.getBoundingClientRect();
-    const viewport = list.current.getBoundingClientRect();
-    if (bounds.top < viewport.top) list.current.scrollTop -= viewport.top - bounds.top;
-    else if (bounds.bottom > viewport.bottom)
-      list.current.scrollTop += bounds.bottom - viewport.bottom;
-  }, [visible, activeId, current, style]);
-
-  useEffect(() => {
-    if (!visible) return;
-    function dismiss(event: Event) {
-      const target = event.target as Node;
-      if (!panel.current?.contains(target) && !trigger.current?.contains(target)) setOpen(false);
-    }
-    document.addEventListener('pointerdown', dismiss);
-    document.addEventListener('focusin', dismiss);
-    return () => {
-      document.removeEventListener('pointerdown', dismiss);
-      document.removeEventListener('focusin', dismiss);
-    };
-  }, [visible]);
+  useRevealActive(visible, activeId, current, style, list);
+  useDismissOutside(visible, panel, trigger, setOpen);
+  useTopLayerEscape(visible, () => close(), trigger);
 
   function show() {
+    setContainer(popoverContainer(trigger.current));
     setQuery('');
     setActive(value);
     typeahead.current = { text: '', at: 0 };
@@ -125,45 +264,17 @@ export function Picker({
   }
 
   function onKeyDown(event: KeyboardEvent) {
-    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      close();
-    } else if (event.key === 'Tab') {
-      // The panel is portalled. Resume tab order from its composer trigger.
-      close();
-    } else if (event.key === 'Enter' || (event.key === ' ' && !searchable)) {
-      event.preventDefault();
-      event.stopPropagation();
-      if (matches.length) choose(current);
-    } else if (
-      ['ArrowDown', 'ArrowUp'].includes(event.key) ||
-      (!searchable && ['Home', 'End'].includes(event.key))
-    ) {
-      event.preventDefault();
-      const index = matches.indexOf(current);
-      let next = index + (event.key === 'ArrowDown' ? 1 : -1);
-      if (event.key === 'Home') next = 0;
-      if (event.key === 'End') next = matches.length - 1;
-      next = Math.max(0, Math.min(matches.length - 1, next));
-      setActive(matches[next] ?? '');
-    } else if (
-      !searchable &&
-      event.key.length === 1 &&
-      !event.metaKey &&
-      !event.ctrlKey &&
-      !event.altKey
-    ) {
-      event.preventDefault();
-      const now = Date.now();
-      const text = (now - typeahead.current.at < 500 ? typeahead.current.text : '') + event.key;
-      typeahead.current = { text, at: now };
-      const match = options.find((option) =>
-        (optionLabels[option] ?? option).toLocaleLowerCase().startsWith(text.toLocaleLowerCase()),
-      );
-      if (match) setActive(match);
-    }
+    pickerKeyDown(event, {
+      searchable,
+      matches,
+      current,
+      options,
+      optionLabels,
+      typeahead,
+      setActive,
+      choose,
+      close,
+    });
   }
 
   if (!options.length && variant !== 'field') return null;
@@ -218,11 +329,11 @@ export function Picker({
             role="dialog"
             aria-label={label}
             style={style}
-            className="ui-popover fixed z-[100] flex flex-col overflow-hidden rounded-xl border border-border bg-surface-raised shadow-card"
+            className={`${MENU_SURFACE} ${MENU_POSITIONED}`}
             onKeyDown={onKeyDown}
           >
-            <div className="flex shrink-0 items-center justify-between gap-3 px-3.5 pb-2 pt-3">
-              <span className="text-xs font-medium text-muted">{label}</span>
+            <div className="flex shrink-0 items-center justify-between gap-3 px-3.5 pb-1 pt-3">
+              <span className={MENU_LABEL}>{label}</span>
               {searchable ? (
                 <span className="text-[11px] tabular-nums text-muted" aria-hidden>
                   {options.length}
@@ -230,7 +341,7 @@ export function Picker({
               ) : null}
             </div>
             {searchable ? (
-              <div className="mx-2 mb-2 flex shrink-0 items-center gap-2 rounded-lg border border-border bg-surface-muted px-2.5 focus-within:border-accent/40">
+              <div className={`${MENU_SEARCH} !my-0`}>
                 <svg
                   aria-hidden
                   viewBox="0 0 20 20"
@@ -258,7 +369,7 @@ export function Picker({
                     setQuery(event.target.value);
                     setActive('');
                   }}
-                  className="h-9 min-w-0 flex-1 bg-transparent text-base text-foreground outline-none placeholder:text-muted sm:text-[13px]"
+                  className={`${MENU_SEARCH_INPUT} h-9`}
                 />
               </div>
             ) : null}
@@ -269,7 +380,7 @@ export function Picker({
               aria-label={label}
               tabIndex={searchable ? undefined : 0}
               aria-activedescendant={searchable ? undefined : activeId}
-              className="min-h-0 overflow-y-auto overscroll-contain px-1.5 pb-1.5 outline-none"
+              className={MENU_SCROLL}
             >
               {matches.map((option, index) => (
                 <div
@@ -280,7 +391,7 @@ export function Picker({
                   onPointerMove={() => setActive(option)}
                   onPointerDown={(event) => event.preventDefault()}
                   onClick={() => choose(option)}
-                  className={`flex min-h-9 cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2 text-[13px] transition-colors [@media(pointer:coarse)]:min-h-11 ${option === value ? 'bg-accent-subtle font-medium text-accent' : 'text-foreground'} ${option === current ? (option === value ? 'ring-1 ring-inset ring-accent/20' : 'bg-surface-hover') : ''}`}
+                  className={menuOptionClass(option === value, option === current, false)}
                 >
                   <span className="min-w-0 flex-1 break-words">
                     {optionLabels[option] ?? option}
@@ -300,13 +411,13 @@ export function Picker({
                 </div>
               ))}
               {!matches.length ? (
-                <p role="status" className="px-2.5 py-6 text-center text-[13px] text-muted">
+                <p role="status" className={MENU_EMPTY}>
                   {t('picker.noResults')}
                 </p>
               ) : null}
             </div>
           </div>,
-          document.body,
+          container ?? document.body,
         )}
     </>
   );

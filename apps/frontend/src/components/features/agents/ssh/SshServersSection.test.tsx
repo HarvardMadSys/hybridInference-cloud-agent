@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createSshServer,
@@ -147,7 +147,8 @@ describe('SshServersSection', () => {
     vi.mocked(rotateSshServerKey).mockResolvedValue(rotating);
     vi.mocked(verifySshServer).mockResolvedValue({ ...ready, revision: 3 });
     render(<SshServersSection />);
-    fireEvent.click(await screen.findByRole('button', { name: 'New key' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'New key' }));
 
     expect(await screen.findByText(rotating.pending_install_command)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Read host key' })).not.toBeInTheDocument();
@@ -160,11 +161,31 @@ describe('SshServersSection', () => {
     await waitFor(() => expect(verifySshServer).toHaveBeenCalledWith(rotating, FINGERPRINT));
   });
 
+  it('opens its actions with the shared keyboard contract and closes on Escape', async () => {
+    vi.mocked(listSshServers).mockResolvedValue({
+      configured: true,
+      servers: [
+        server({ status: 'ready', host_key: { type: 'ssh-ed25519', fingerprint: FINGERPRINT } }),
+      ],
+    });
+    render(<SshServersSection />);
+    const trigger = await screen.findByRole('button', { name: 'Manage' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    const menu = screen.getByRole('menu', { name: 'Manage' });
+    expect(within(menu).getByRole('menuitem', { name: 'Edit' })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'End' });
+    expect(within(menu).getByRole('menuitem', { name: 'Delete' })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
   it('asks before deleting and tells the owner to remove the key line', async () => {
     vi.mocked(listSshServers).mockResolvedValue({ configured: true, servers: [server()] });
     vi.mocked(deleteSshServer).mockResolvedValue(undefined);
     render(<SshServersSection />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
     expect(deleteSshServer).not.toHaveBeenCalled();
     expect(screen.getByText(/Delete gpu\? Chats lose access at once/)).toBeInTheDocument();
 

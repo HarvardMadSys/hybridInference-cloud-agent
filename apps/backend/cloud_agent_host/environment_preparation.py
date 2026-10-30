@@ -67,6 +67,23 @@ def runs_no_script(
     )
 
 
+def prepared_in(receipt: dict[str, Any], inspection: Any) -> bool:
+    """Whether ``receipt`` prepared exactly the boot ``inspection`` saw running.
+
+    :meth:`EnvironmentPreparation.status` answers from an inspection it keeps
+    for 15 s, stopped or not, so its ``ready`` can still name the boot before
+    a start made since: a status read just before a restart would make the new
+    boot look prepared, and its start script would never run. Only an
+    inspection taken after the start says which boot is running now.
+    :meth:`EnvironmentPreparation.prepare` records no boot without its identity.
+    """
+    return bool(
+        inspection.running
+        and receipt.get("container_id") == inspection.container_id
+        and receipt.get("boot_id") == inspection.started_at
+    )
+
+
 def run_step(
     backend: RetainedChatBackend,
     environment: BoundEnvironment,

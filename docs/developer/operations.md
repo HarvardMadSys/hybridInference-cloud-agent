@@ -3817,15 +3817,16 @@ rules, not the host's.
   startup preflight install the tables and read them back — every chain, its
   hook and its rule count, the protected set, the registered pool — and any
   difference stops the runner claiming and the sandbox manager starting. Group network
-  work repeats the check and trusts a pass for 60 seconds. While anything of this
-  deployment runs — a group, one that is stopping, or an environment test or
-  prebuild — the sandbox manager's sweep renews that pass after 45 seconds, so a
-  start or wake never waits for the install and read-back itself. A host where
-  nothing runs starts no helper for it: the next start or wake renews a lapsed
-  pass before its group joins a bridge. The runner renews its own pass when it
-  hands a turn over and that pass is 45 seconds old. The turn's process
-  normally runs no helper of its own: it takes the runner's pass, and declines
-  the turn if the runner's check failed or its pass is missing or unreadable. A
+  work repeats the check and trusts a pass for 60 seconds. The sandbox manager's
+  sweep renews that pass after 45 seconds, whether anything of this deployment
+  runs or not, so a start or wake never waits for the install and read-back
+  itself; on a host where nothing runs, that is one install and read-back about
+  every 45 seconds. The runner renews its own pass between claims once it is 35
+  seconds old, so a turn it hands over does not wait for it either; a pass still
+  45 seconds old at a handover, after a failed renewal say, is renewed then. The
+  turn's process normally runs no helper of its own: it takes the runner's pass,
+  and declines the turn if the runner's check failed or its pass is missing or
+  unreadable. A
   process that starts so slowly that the pass is 60 seconds old when it reads
   it logs `network_guard_verification_aged_out`, runs the install and
   read-back itself, and accepts the turn only if that check passes.

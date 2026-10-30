@@ -9,13 +9,16 @@ import {
   type ForwardedRef,
   type InputHTMLAttributes,
   type KeyboardEvent,
+  type CSSProperties,
   type ReactNode,
   type RefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { assignRef, Check, menuName, optionClass, POPUP_CLASS } from './Select';
+import { keepInView, useAnchoredPopover } from './anchoredPopover';
+import { useTopLayerEscape } from './useTopLayerEscape';
+import { MENU_SCROLL } from './menuStyles';
 import { MODAL_POPUP } from './useModalDialog';
-import { keepInView, useSelectPlacement } from './useSelectPlacement';
 
 export interface SuggestionInputProps extends InputHTMLAttributes<HTMLInputElement> {
   /** Values offered while typing. The field still takes any text; none offers nothing. */
@@ -47,6 +50,7 @@ function SuggestionList({
   refs,
   matches,
   position,
+  style,
   value,
   name,
   onActive,
@@ -56,6 +60,7 @@ function SuggestionList({
   refs: { popup: RefObject<HTMLDivElement>; list: RefObject<HTMLDivElement> };
   matches: readonly string[];
   position: number;
+  style: CSSProperties;
   value: unknown;
   name: { label?: string; labelledBy?: string };
   onActive: (suggestion: string) => void;
@@ -65,6 +70,7 @@ function SuggestionList({
     <div
       ref={refs.popup}
       {...{ [MODAL_POPUP]: ids.owner }}
+      style={style}
       className={POPUP_CLASS}
       // Pointing at a suggestion keeps focus, and the caret, in the field.
       onMouseDown={(event) => event.preventDefault()}
@@ -76,7 +82,7 @@ function SuggestionList({
         role="listbox"
         aria-label={name.label}
         aria-labelledby={name.label ? undefined : name.labelledBy}
-        className="min-h-0 overflow-y-auto overscroll-contain p-1"
+        className={MENU_SCROLL}
       >
         {matches.map((suggestion, index) => (
           <div
@@ -122,7 +128,9 @@ function SuggestionInputImpl(
   const visible = open && editable && matches.length > 0 && container !== null;
   const activeId = visible && position >= 0 ? `${generated}option-${position}` : undefined;
 
-  useSelectPlacement(visible, input, popup, matches.length);
+  const popoverStyle = useAnchoredPopover(visible, input, popup);
+  // The caret stays in the field; Escape dismisses the list, not the page.
+  useTopLayerEscape(visible, () => setOpen(false), input);
   useLayoutEffect(() => {
     if (activeId) keepInView(list.current, document.getElementById(activeId));
   }, [activeId]);
@@ -182,6 +190,7 @@ function SuggestionInputImpl(
         refs={{ popup, list }}
         matches={matches}
         position={position}
+        style={popoverStyle}
         value={props.value}
         name={{ label: listLabel, labelledBy: props['aria-labelledby'] }}
         onActive={setActive}

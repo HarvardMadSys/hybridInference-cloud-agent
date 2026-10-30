@@ -8,6 +8,7 @@ import { SshSubmenu } from './ssh/SshSubmenu';
 import type { ComposerSsh } from './ssh/useComposerSsh';
 import { useComposerMenuLayout } from './useComposerMenuLayout';
 import type { McpChoice } from './mcp/useComposerMcp';
+import { menuRowClass } from '@/components/ui/menuStyles';
 import {
   COMPOSER_MENU_SURFACE,
   COMPOSER_MENU_HEADING,
@@ -127,7 +128,7 @@ function ChevronIcon() {
       stroke="currentColor"
       strokeWidth={1.6}
       aria-hidden="true"
-      className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500"
+      className="h-3.5 w-3.5 shrink-0 text-muted"
     >
       <path strokeLinecap="round" strokeLinejoin="round" d="m8 6 4 4-4 4" />
     </svg>
@@ -151,6 +152,11 @@ function PaperclipIcon() {
       />
     </svg>
   );
+}
+
+/** A blocked MCP row reads as inert; an available one is an ordinary action. */
+function mcpRowClass(blocked: boolean): string {
+  return blocked ? menuRowClass({ disabled: true }) : COMPOSER_MENU_ROW;
 }
 
 export function ComposerPlusMenu({
@@ -294,8 +300,8 @@ export function ComposerPlusMenu({
         }}
         className={`ui-focus-ring inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-50 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 ${
           open
-            ? 'bg-gray-100 text-gray-900 dark:bg-white/10 dark:text-gray-100'
-            : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-200'
+            ? 'bg-surface-hover text-foreground'
+            : 'text-muted hover:bg-surface-hover hover:text-foreground'
         }`}
       >
         <PlusIcon />
@@ -352,6 +358,7 @@ export function ComposerPlusMenu({
                 <span className={COMPOSER_MENU_DETAIL}>{t('attach.ssh')}</span>
               </button>
               <SshSubmenu
+                embedded
                 choices={ssh.choices}
                 loading={ssh.loading}
                 saving={ssh.saving}
@@ -440,7 +447,7 @@ export function ComposerPlusMenu({
                     tabIndex={-1}
                     aria-haspopup="dialog"
                     aria-disabled={mcpBlockedReason ? true : undefined}
-                    className={COMPOSER_MENU_ROW}
+                    className={mcpRowClass(Boolean(mcpBlockedReason))}
                     onClick={() => {
                       if (!mcpBlockedReason) setSubmenu('mcp');
                     }}

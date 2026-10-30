@@ -29,8 +29,7 @@ import {
   type SandboxSortKey,
 } from './inventory';
 
-const FILTER_SELECT =
-  'mt-1 block rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground';
+const FILTER_SELECT = 'ui-input mt-1 block min-h-9 w-full';
 const STATE_OPTIONS: { value: AdminSandboxState | 'all'; label: string }[] = [
   { value: 'running', label: 'Running' },
   { value: 'all', label: 'All states' },
