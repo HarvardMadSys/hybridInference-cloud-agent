@@ -312,44 +312,84 @@ class CaptureGate:
     waiting ``urgent`` capture goes before any other; within each kind the
     earliest goes first. A capture overtaken ``max_overtaken`` times goes next
     regardless, so a stream of new chats cannot starve a stop's final archive.
+
+    Going first still waited for a capture already spooling, up to its whole
+    deadline. With a ``spool_budget_bytes``, one urgent capture may also spool
+    beside the ``capacity`` others, whenever the worst cases of all of them
+    (``spool_bytes`` each) fit that budget, so the budget, not the count,
+    bounds the scratch disk. Background work never takes that place, and an
+    urgent capture taking it overtakes nobody waiting for the others.
     """
 
-    def __init__(self, capacity: int = 1, *, max_overtaken: int = 2) -> None:
+    def __init__(
+        self, capacity: int = 1, *, max_overtaken: int = 2, spool_budget_bytes: int = 0
+    ) -> None:
         self._capacity = capacity
         self._free = capacity
         self._max_overtaken = max_overtaken
+        self._spool_budget_bytes = spool_budget_bytes
+        self._spooling: list[_CaptureWaiter] = []
         self._waiting: list[_CaptureWaiter] = []
         self._changed = threading.Condition()
 
     def acquire(
-        self, blocking: bool = True, timeout: float | None = None, *, urgent: bool = False
-    ) -> bool:
-        """Take a slot once this capture is next, or return False at the timeout."""
-        waiter = _CaptureWaiter(urgent=urgent)
+        self,
+        blocking: bool = True,
+        timeout: float | None = None,
+        *,
+        urgent: bool = False,
+        spool_bytes: int = 0,
+    ) -> _CaptureWaiter | None:
+        """Take a slot once this capture is next, or return ``None`` at the timeout.
+
+        The slot is what :meth:`release` takes back. ``spool_bytes`` is the
+        most this capture can spool at once.
+        """
+        waiter = _CaptureWaiter(urgent=urgent, spool_bytes=spool_bytes)
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._changed:
             self._waiting.append(waiter)
             try:
-                while self._free == 0 or self._next() is not waiter:
+                while not self._admit(waiter):
                     remaining = None if deadline is None else deadline - time.monotonic()
                     if not blocking or (remaining is not None and remaining <= 0):
-                        return False
+                        return None
                     self._changed.wait(remaining)
-                self._free -= 1
-                for earlier in self._waiting[: self._waiting.index(waiter)]:
-                    earlier.overtaken += 1
-                return True
+                self._spooling.append(waiter)
+                return waiter
             finally:
                 self._waiting.remove(waiter)
                 self._changed.notify_all()
 
-    def release(self) -> None:
-        """Return a slot, as ``BoundedSemaphore`` does: never more than were taken."""
+    def release(self, slot: _CaptureWaiter | None = None) -> None:
+        """Return ``slot``, or any shared one, as ``BoundedSemaphore`` does: never more than taken."""
         with self._changed:
-            if self._free >= self._capacity:
+            if slot is None:
+                slot = next((held for held in self._spooling if not held.beside), None)
+            if slot is None or slot not in self._spooling:
                 raise ValueError("capture gate released too many times")
-            self._free += 1
+            self._spooling.remove(slot)
+            if not slot.beside:
+                self._free += 1
             self._changed.notify_all()
+
+    def _admit(self, waiter: _CaptureWaiter) -> bool:
+        if self._free and self._next() is waiter:
+            self._free -= 1
+            for earlier in self._waiting[: self._waiting.index(waiter)]:
+                earlier.overtaken += 1
+            return True
+        if (
+            self._spool_budget_bytes > 0
+            and waiter.urgent
+            and waiter is next(each for each in self._waiting if each.urgent)
+            and not any(held.beside for held in self._spooling)
+            and sum(held.spool_bytes for held in self._spooling) + waiter.spool_bytes
+            <= self._spool_budget_bytes
+        ):
+            waiter.beside = True
+            return True
+        return False
 
     def _next(self) -> _CaptureWaiter:
         for waiter in self._waiting:
@@ -360,10 +400,13 @@ class CaptureGate:
 
 @dataclass(eq=False)
 class _CaptureWaiter:
-    """One capture waiting for a slot. Identity, not value, tells two apart."""
+    """One capture waiting for a slot, then holding it. Identity tells two apart."""
 
     urgent: bool
+    spool_bytes: int = 0
     overtaken: int = 0
+    #: Holds the urgent place beside the shared slots, not one of them.
+    beside: bool = False
 
 
 class SandboxArchiveService:
@@ -520,14 +563,13 @@ class SandboxArchiveService:
         operation = _Capture(self._new_deadline())
         if phase is not None:
             self._admit_capture(phase)
-        acquired = False
+        slot = None
         try:
-            self._acquire_capture_slot(operation.deadline, urgent=urgent)
-            acquired = True
+            slot = self._acquire_capture_slot(operation.deadline, urgent=urgent)
             yield operation
         finally:
-            if acquired:
-                self._capture_slots.release()
+            if slot is not None:
+                self._capture_slots.release(slot)
             if phase is not None:
                 self._finish_capture(phase, uploaded=operation.outcome)
 
@@ -939,18 +981,25 @@ class SandboxArchiveService:
             generation=spec.generation,
         )
 
-    def _acquire_capture_slot(self, deadline: float, *, urgent: bool = False) -> None:
+    def _acquire_capture_slot(self, deadline: float, *, urgent: bool = False) -> _CaptureWaiter:
         """Backpressure before Docker copy, then fence a concurrent close."""
         self._require_accepting()
-        acquired = self._capture_slots.acquire(timeout=self._remaining(deadline), urgent=urgent)
-        if not acquired:
+        # At peak a build holds its input streams and its bundle, each up to
+        # the object limit (the construction check above).
+        slot = self._capture_slots.acquire(
+            timeout=self._remaining(deadline),
+            urgent=urgent,
+            spool_bytes=2 * self._config.max_archive_bytes,
+        )
+        if slot is None:
             raise SandboxError("sandbox archive operation timed out waiting for capture capacity")
         try:
             self._check_deadline(deadline)
             self._require_accepting()
         except BaseException:
-            self._capture_slots.release()
+            self._capture_slots.release(slot)
             raise
+        return slot
 
     def _exact_inspection(
         self,

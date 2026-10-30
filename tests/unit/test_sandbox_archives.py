@@ -35,6 +35,7 @@ from cloud_agent_host.sandbox_archives import (
     CaptureGate,
     SandboxArchiveService,
     SandboxInitialArchiveMarker,
+    _CaptureWaiter,
 )
 from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
 from cloud_agent_shared.errors import SandboxError
@@ -279,15 +280,21 @@ class _ContendedSlot(CaptureGate):
         self.urgent: list[bool] = []
 
     def acquire(
-        self, blocking: bool = True, timeout: float | None = None, *, urgent: bool = False
-    ) -> bool:
+        self,
+        blocking: bool = True,
+        timeout: float | None = None,
+        *,
+        urgent: bool = False,
+        spool_bytes: int = 0,
+    ) -> _CaptureWaiter | None:
         self.urgent.append(urgent)
-        if super().acquire(blocking=False, urgent=urgent):
-            return True
-        if not blocking:
-            return False
+        slot = super().acquire(blocking=False, urgent=urgent, spool_bytes=spool_bytes)
+        if slot is not None or not blocking:
+            return slot
         self.contended.set()
-        return super().acquire(blocking=True, timeout=timeout, urgent=urgent)
+        return super().acquire(
+            blocking=True, timeout=timeout, urgent=urgent, spool_bytes=spool_bytes
+        )
 
 
 def _service(
@@ -504,6 +511,67 @@ def test_the_capture_gate_is_a_bounded_semaphore_otherwise() -> None:
     with pytest.raises(ValueError, match="released too many times"):
         gate.release()
     assert gate.acquire(blocking=False, urgent=True)
+
+
+def test_an_urgent_capture_spools_beside_a_background_one_while_both_fit() -> None:
+    gate = CaptureGate(1, spool_budget_bytes=8)
+    final = gate.acquire(blocking=False, spool_bytes=4)
+    assert final is not None
+
+    first = gate.acquire(blocking=False, urgent=True, spool_bytes=4)
+    assert first is not None and first.beside
+    # One urgent place, and the budget is spent: anything more waits as before.
+    assert gate.acquire(blocking=False, urgent=True) is None
+    assert gate.acquire(blocking=False) is None
+
+    gate.release(first)
+    assert gate.acquire(blocking=False, spool_bytes=4) is None, "the shared slot is still held"
+    gate.release(final)
+    assert gate.acquire(blocking=False, spool_bytes=4) is not None
+
+
+@pytest.mark.parametrize(
+    ("budget", "urgent", "beside"),
+    [
+        pytest.param(8, True, True, id="both-fit"),
+        pytest.param(7, True, False, id="the-two-would-not-fit"),
+        pytest.param(8, False, False, id="background-work-never"),
+        pytest.param(0, True, False, id="no-budget-no-place"),
+    ],
+)
+def test_only_an_urgent_capture_whose_worst_case_fits_spools_beside(
+    budget: int, urgent: bool, beside: bool
+) -> None:
+    gate = CaptureGate(1, spool_budget_bytes=budget)
+    assert gate.acquire(blocking=False, spool_bytes=4) is not None
+
+    assert (gate.acquire(blocking=False, urgent=urgent, spool_bytes=4) is not None) is beside
+
+
+def test_a_first_prompt_does_not_wait_for_a_background_capture_that_leaves_room() -> None:
+    """The place beside the shared slot, with the bound the runtime gives every service."""
+    config = _config()
+    gate = CaptureGate(1, spool_budget_bytes=4 * config.max_archive_bytes)
+    background = gate.acquire(blocking=False, spool_bytes=2 * config.max_archive_bytes)
+    assert background is not None, "a stopped chat's final archive is spooling"
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(config)
+    service = _service(manager, uploader, capture_slots=gate, operation_timeout_s=2)
+    service.start()
+    try:
+        service.capture_initial(
+            RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            base_sha=_BASE_SHA,
+            members=(),
+        )
+    finally:
+        service.close()
+        gate.release(background)
+
+    assert [call["phase"] for call in uploader.calls] == ["initial"]
 
 
 def test_initial_already_exists_is_a_successful_idempotent_result() -> None:
