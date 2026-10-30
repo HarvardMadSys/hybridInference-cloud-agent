@@ -357,7 +357,7 @@ async function fullPage(page: Page, name: string, anchor: Locator = content(page
     width: viewport.width,
     height: viewport.height + (await hiddenHeight(anchor)),
   });
-  await page.screenshot({ path: `${evidence}/${name}.png` });
+  await page.screenshot({ path: `${evidence}/${name}.png`, animations: 'disabled' });
   await page.setViewportSize(viewport);
 }
 
@@ -371,7 +371,7 @@ async function closeup(locator: Locator, name: string) {
     height: viewport.height + (await hiddenHeight(locator)),
   });
   await locator.scrollIntoViewIfNeeded();
-  await locator.screenshot({ path: `${evidence}/${name}.png` });
+  await locator.screenshot({ path: `${evidence}/${name}.png`, animations: 'disabled' });
   await page.setViewportSize(viewport);
 }
 
