@@ -343,7 +343,7 @@ describe('UsageSettings', () => {
     );
   });
 
-  it('shows the cache hit rate and reasoning tokens apart from the token total', async () => {
+  it('shows the cache hit rate, and reasoning tokens as a part of output', async () => {
     const usage = tokens();
     usage.summary.totals = { ...usage.summary.totals!, cache_read: 36_000, reasoning: 5_000 };
     vi.mocked(getOwnerTokens).mockResolvedValue(usage);
@@ -351,7 +351,7 @@ describe('UsageSettings', () => {
     await waitFor(async () => expect(await tile('Cache hit rate')).toBe('30%'));
     expect(screen.getByText('36K of 120K input from cache')).toBeInTheDocument();
     expect(await tile('Reasoning tokens')).toBe('5,000');
-    expect(screen.getByText('Not added to Tokens')).toBeInTheDocument();
+    expect(screen.getByText('Included in output tokens')).toBeInTheDocument();
     expect(await tile('Tokens')).toBe('150K');
   });
 
@@ -372,50 +372,24 @@ describe('UsageSettings', () => {
     expect(await tile('Reasoning tokens')).toBe('—');
   });
 
-  it('says what keeps the model numbers from being final', async () => {
+  it('says when reasoning is only partly reported, still as a part of output', async () => {
     const usage = tokens();
-    usage.summary = aggregate({
-      run_count: 5,
-      active_runs: 1,
-      estimated_calls: 2,
-      oldest_queried_at: '2026-10-15T09:00:00Z',
-      status_counts: { available: 2, partial: 1, stale: 0, pending: 1, unavailable: 1 },
-      unknown_rows: {
-        tokens_in: 0,
-        tokens_out: 0,
-        cache_read: 0,
-        cache_write: 0,
-        reasoning: 0,
-        spent_usd: 4,
-      },
-    });
+    usage.summary.totals = { ...usage.summary.totals!, reasoning: 5_000 };
+    usage.summary.unknown_rows = {
+      tokens_in: 0,
+      tokens_out: 0,
+      cache_read: 0,
+      cache_write: 0,
+      reasoning: 3,
+      spent_usd: 0,
+    };
     vi.mocked(getOwnerTokens).mockResolvedValue(usage);
     section();
-    const note = await screen.findByRole('note', {
-      name: 'These model numbers are not final yet.',
-    });
-    expect(within(note).getByText('Turns still running: 1')).toBeInTheDocument();
-    expect(within(note).getByText('Turns not fully counted: 3')).toBeInTheDocument();
-    expect(within(note).getByText('Model calls without a recorded cost: 4')).toBeInTheDocument();
-    expect(within(note).getByText('Model calls with estimated tokens: 2')).toBeInTheDocument();
+    await waitFor(async () => expect(await tile('Reasoning tokens')).toBe('5,000'));
     expect(
-      within(note).getByText(
-        'Usage is read from a cache; the oldest read in these numbers was 3 hours ago.',
-      ),
+      screen.getByText('Some calls did not report it · included in output tokens'),
     ).toBeInTheDocument();
-  });
-
-  it('shows no note when the model numbers have nothing outstanding', async () => {
-    const usage = tokens();
-    usage.summary = aggregate({ oldest_queried_at: '2026-10-15T09:00:00Z' });
-    vi.mocked(getOwnerTokens).mockResolvedValue(usage);
-    section();
-    await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
-    // The range note stays; the not-final note does not appear.
-    expect(
-      screen.queryByRole('note', { name: 'These model numbers are not final yet.' }),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText(/not final/)).not.toBeInTheDocument();
+    expect(await tile('Tokens')).toBe('150K');
   });
 
   it('reads both histories and the insights again for another range', async () => {
@@ -512,7 +486,7 @@ describe('UsageSettings', () => {
     expect(await screen.findByText('估算，不是账单')).toBeInTheDocument();
     expect(await tile('缓存命中率')).toBe('0%');
     expect(await tile('推理 Token')).toBe('—');
-    expect(screen.getByText('不计入 Token 合计')).toBeInTheDocument();
+    expect(screen.getByText('已计入输出 Token')).toBeInTheDocument();
     expect(
       await screen.findByText(/^每天从 UTC 零点开始算.*和每日额度重置的时间一致/),
     ).toBeInTheDocument();
