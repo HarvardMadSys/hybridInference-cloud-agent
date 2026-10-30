@@ -184,7 +184,6 @@ export function JobDetail({
       ? t('attach.mcpUnsupported', { runtime: job.runtime })
       : undefined;
   const [submitting, setSubmitting] = useState(false);
-  const [rewriting, setRewriting] = useState(false);
   const sendRequestedRef = useRef(false);
   const watchPrRequestedRef = useRef(false);
   const [watchPrAcceptedJobId, setWatchPrAcceptedJobId] = useState<string | null>(null);
@@ -327,7 +326,6 @@ export function JobDetail({
   async function sendDraft(command: GoalCommand): Promise<ThreadMessageResultApi | null> {
     if (
       sendRequestedRef.current ||
-      rewriting ||
       watchPrRequestedRef.current ||
       contextLost ||
       isArchived ||
@@ -407,7 +405,7 @@ export function JobDetail({
   }
   const selectedAttemptIsCurrent = attemptNo === 0 || attemptNo === liveAttempt;
   const usageFooter = selectedAttemptIsCurrent ? (
-    <LedgerUsage job={job} usage={usage} />
+    <LedgerUsage usage={usage} />
   ) : undefined;
 
   const conversation = useJobConversation({ job, panels, attemptNo, liveAttempt, setAttemptNo });
@@ -601,7 +599,6 @@ export function JobDetail({
     !isArchived &&
     !contextLost &&
     !submitting &&
-    !rewriting &&
     !mcp.saving &&
     !ssh.saving &&
     !publicationPending &&
@@ -828,10 +825,8 @@ export function JobDetail({
                 setChosenSkills={setChosenSkills}
                 mcpBlockedReason={mcpBlockedReason}
                 submitting={submitting}
-                rewriting={rewriting}
                 readingFiles={readingFiles}
                 setReadingFiles={setReadingFiles}
-                setRewriting={setRewriting}
                 actionError={actionError}
                 setActionError={setActionError}
                 submitFollowUp={submitFollowUp}

@@ -343,18 +343,6 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
                   {profile.email}
                 </div>
               ) : null}
-              {state.user?.auth_mode !== 'local' && branding.gatewayUrl ? (
-                <a
-                  role="menuitem"
-                  href={`${branding.gatewayUrl}/dashboard`}
-                  className={ITEM}
-                  onClick={() => close(false)}
-                  {...plain}
-                >
-                  <HomeIcon className="h-4 w-4 shrink-0 text-muted" />
-                  <span className="min-w-0 flex-1 truncate">{t('nav.dashboard')}</span>
-                </a>
-              ) : null}
               <Link
                 role="menuitem"
                 href={SETTINGS_PATHS.profile}
@@ -383,7 +371,7 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
               <div role="separator" className={SEPARATOR} />
               <a
                 role="menuitem"
-                href={accountSignInUrl(state.user?.auth_mode, pathname)}
+                href={accountSignInUrl(pathname)}
                 className={ITEM}
                 onClick={() => close(false)}
                 {...plain}

@@ -347,7 +347,7 @@ export interface AgentJob {
   runtime: string;
   runtimeVersion?: string;
   model: string;
-  /** The owner's connection `model` runs on; undefined is the Gateway. */
+  /** The owner's connection `model` runs on. */
   modelConnectionId?: string;
   /**
    * How hard this turn asked the model to think. Undefined is Auto — nobody

@@ -264,14 +264,6 @@ SETTINGS: tuple[Setting, ...] = (
         ),
     ),
     Setting(
-        "site.feature_rag",
-        "Docs assistant",
-        "Appearance",
-        False,
-        kind="boolean",
-        env="AGENT_WEB_FEATURE_RAG",
-    ),
-    Setting(
         "compute.cloudlab_api_url",
         "CloudLab API URL",
         "Compute",

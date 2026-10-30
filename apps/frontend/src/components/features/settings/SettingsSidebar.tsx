@@ -3,7 +3,6 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useT } from '@/components/providers';
-import { useSignedInAuthMode } from '@/components/providers/AuthProvider';
 import { AccountMenu } from '@/components/features/agents/AccountMenu';
 import { PaneResizer } from '@/components/features/agents/PaneResizer';
 import type { ResizablePane } from '@/components/features/agents/useResizablePane';
@@ -20,7 +19,6 @@ const ITEMS = [
     href: SETTINGS_PATHS.account,
     label: 'security.title',
     icon: 'M12 3 4 6v6c0 5 3.4 8.5 8 9 4.6-.5 8-4 8-9V6l-8-3ZM9 12l2 2 4-4',
-    localOnly: true,
   },
   {
     href: SETTINGS_PATHS.memory,
@@ -77,7 +75,6 @@ export function SettingsSidebar({
 }) {
   const t = useT();
   const pathname = usePathname();
-  const local = useSignedInAuthMode() === 'local';
   if (collapsed) return null;
   const itemClass = (current: boolean) =>
     `ui-focus-ring flex min-h-10 items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors [@media(pointer:coarse)]:min-h-11 ${current ? 'bg-surface-hover font-medium text-foreground' : 'text-muted hover:bg-surface-hover hover:text-foreground'}`;
@@ -113,7 +110,7 @@ export function SettingsSidebar({
             {t('settings.navigation')}
           </p>
           <div className="space-y-1">
-            {ITEMS.filter((item) => local || !('localOnly' in item)).map(
+            {ITEMS.map(
               ({ href, label, icon }) => (
                 <Link
                   key={href}

@@ -8,7 +8,7 @@ import { DeploymentFooter } from '@/components/DeploymentFooter';
 function Content() {
   const { state } = useAuth();
   const t = useT();
-  if (state.user?.auth_mode !== 'local')
+  if (!state.user)
     return (
       <div className="m-auto p-6">
         <Link className="ui-button ui-button-secondary" href="/">

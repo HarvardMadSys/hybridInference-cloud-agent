@@ -2,7 +2,6 @@
 import type { AuthConfig } from '@/lib/api/accounts';
 import { Suspense } from 'react';
 import { useAuthConfig } from '@/components/features/auth/useAuthConfig';
-import { GatewayLoginPage } from '@/components/features/auth/GatewayLoginPage';
 import { LocalLogin } from '@/components/features/auth/LocalLogin';
 import { AccountFrame, AccountNotice } from '@/components/features/auth/AccountFrame';
 import { useT } from '@/components/providers/LocaleProvider';
@@ -29,7 +28,6 @@ export default function LoginPageClient({
         )}
       </AccountFrame>
     );
-  if (config.mode === 'gateway') return <GatewayLoginPage />;
   return (
     <Suspense fallback={null}>
       <LocalLogin signupEnabled={config.signup_enabled} />

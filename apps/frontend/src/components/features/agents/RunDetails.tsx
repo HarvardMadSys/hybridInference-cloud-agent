@@ -16,7 +16,6 @@ import type { TranslationKey } from '@/lib/i18n/dictionaries/en';
 import {
   createAgentJob,
   getAgentJobUsage,
-  refreshAgentJobUsage,
   type AgentJobApi,
   type AgentJobApiState,
   type AgentJobUsageApi,
@@ -65,22 +64,14 @@ const FALLBACK_STATE: Record<AgentJob['state'], AgentJobApiState> = {
   cancelled: 'cancelled',
 };
 
-const LEDGER_LABEL: Record<AgentJobUsageApi['ledger']['status'], string> = {
-  pending: 'Pending',
-  available: 'Available',
-  partial: 'Partial',
-  unavailable: 'Unavailable',
-  stale: 'Stale',
-};
-
 /**
  * Cache `next` for a job unless what is cached is newer, and return what is
- * kept. Every write goes through here: a read, a refresh's answer and a push
- * can arrive in any order, and their versions say which is newer.
+ * kept. Every write goes through here: a read and a push can arrive in any
+ * order, and their versions say which is newer.
  *
  * Snapshots live in the signed-in owner's read scope, so they are dropped when
  * that scope is replaced by a sign-out or an account switch; the panel keeps
- * no ledger across owners.
+ * no usage across owners.
  */
 function rememberUsage(
   reads: AgentReadScope,
@@ -93,77 +84,18 @@ function rememberUsage(
   return kept;
 }
 
-/** How long to wait before reading a ledger whose work has not finished. */
-const LEDGER_POLL_MS = 15_000;
-/** Floor for an overdue read, so a timestamp in the past cannot spin. */
-const LEDGER_POLL_FLOOR_MS = 1_000;
-/**
- * Reads to spend retrying work that should already have finished, and separate
- * scheduled reads to honor.
- *
- * The two are not the same kind of wait. A retry is a guess that the worker is
- * late; a schedule is the server naming the time it will have an answer, and a
- * terminal turn's schedule runs half a minute and then five minutes after it
- * finished. Spending one budget on both means polling towards a five-minute
- * refresh until the budget runs out before the answer exists.
- */
-const MAX_LEDGER_RETRIES = 8;
-const MAX_LEDGER_WAITS = 8;
-
-/** A read the panel still owes this ledger, and what it is waiting for. */
-interface LedgerRead {
-  delayMs: number;
-  /** True for a retry of overdue work, false for a schedule to wait out. */
-  retry: boolean;
-}
-
-/**
- * When this ledger should be read again, or null when it has settled.
- *
- * A refresh request only queues the work, and the answer to that request is the
- * snapshot from before the worker ran, so a read after it is what turns the
- * queued answer into the finished one. The server also schedules its own
- * refreshes: an `available` snapshot whose `next_refresh_at` is still ahead is
- * going to change, and stopping at it is what left a stale total in the cache
- * for the next open.
- */
-function ledgerNextRead(
-  usage: AgentJobUsageApi | null | undefined,
-  now: number,
-): LedgerRead | null {
-  // A provider the owner pays directly reports nothing to the Gateway ledger.
-  if (!usage || usage.external_provider) return null;
-  if (usage.ledger.refreshing || usage.ledger.status === 'pending') {
-    return { delayMs: LEDGER_POLL_MS, retry: true };
-  }
-  if (!usage.ledger.next_refresh_at) return null;
-  const due = Date.parse(usage.ledger.next_refresh_at);
-  if (!Number.isFinite(due)) return null;
-  // A schedule ahead is worth waiting out exactly: the answer does not exist
-  // before it, so reading earlier only spends budget on the same snapshot.
-  if (due > now) return { delayMs: due - now, retry: false };
-  // Overdue, so the worker is late: read now, counted as a retry so a server
-  // that keeps reporting an overdue schedule cannot spin.
-  return { delayMs: LEDGER_POLL_FLOOR_MS, retry: true };
-}
-
 function useJobUsage(jobId: string): {
   usage: AgentJobUsageApi | null;
   loaded: boolean;
-  refreshing: boolean;
   error: string | null;
-  refresh: () => void;
 } {
   const reads = useAgentReads();
   const cached = reads.getUsage(jobId);
   const [usage, setUsage] = useState<AgentJobUsageApi | null>(cached ?? null);
   const [loaded, setLoaded] = useState(cached !== undefined);
-  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [read, setRead] = useState(0);
   const requested = useRef(false);
-  const retries = useRef(0);
-  const waits = useRef(0);
   const currentJob = useRef(jobId);
   // The scope this render joined; an answer that outlives it is dropped.
   const readsRef = useRef(reads);
@@ -178,35 +110,21 @@ function useJobUsage(jobId: string): {
     if (currentJob.current !== jobId) {
       currentJob.current = jobId;
       requested.current = false;
-      retries.current = 0;
-      waits.current = 0;
     }
     const known = reads.getUsage(jobId);
-    const mustRead =
-      requested.current || known === undefined || ledgerNextRead(known, Date.now()) !== null;
+    const mustRead = requested.current || known === undefined;
     requested.current = false;
     setUsage(known ?? null);
     setLoaded(known !== undefined);
     if (!mustRead) return undefined;
     const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const pushesBefore = pushes.current;
     getAgentJobUsage(jobId, controller.signal)
       .then((read) => {
         if (controller.signal.aborted || pushes.current !== pushesBefore) return;
         // A usage pushed while this read was on its way may be the newer one.
-        const result = rememberUsage(reads, jobId, read);
-        setUsage(result);
+        setUsage(rememberUsage(reads, jobId, read));
         setError(null);
-        const next = ledgerNextRead(result, Date.now());
-        const budget = next?.retry
-          ? retries.current < MAX_LEDGER_RETRIES
-          : waits.current < MAX_LEDGER_WAITS;
-        if (next && budget) {
-          if (next.retry) retries.current += 1;
-          else waits.current += 1;
-          timer = setTimeout(() => setRead((value) => value + 1), next.delayMs);
-        }
       })
       .catch((cause: unknown) => {
         if (!controller.signal.aborted && pushes.current === pushesBefore) {
@@ -216,15 +134,11 @@ function useJobUsage(jobId: string): {
       .finally(() => {
         if (!controller.signal.aborted) setLoaded(true);
       });
-    return () => {
-      controller.abort();
-      if (timer) clearTimeout(timer);
-    };
+    return () => controller.abort();
   }, [jobId, read, reads]);
 
   // A pushed change to this job's usage is shown as sent, or read at once when
-  // it came without a value, outside the budget above: it is the server saying
-  // there is something new, not a guess.
+  // it came without a value: it is the server saying there is something new.
   useEffect(
     () =>
       onAgentRecordsChanged((change) => {
@@ -243,37 +157,7 @@ function useJobUsage(jobId: string): {
     [jobId, reads],
   );
 
-  const refresh = useCallback(() => {
-    const scope = reads;
-    setRefreshing(true);
-    // A reader who asks for fresh accounting restarts the panel's own budget.
-    retries.current = 0;
-    waits.current = 0;
-    refreshAgentJobUsage(jobId)
-      .then((result) => {
-        // A sign-out or account switch replaced the scope while this answer
-        // was on its way: it belongs to the account that asked for it.
-        if (readsRef.current !== scope) return;
-        // The answer is cached usage as it was; a push may already be newer.
-        const kept = rememberUsage(scope, jobId, result);
-        if (currentJob.current === jobId) setUsage(kept);
-      })
-      .catch((cause: unknown) => {
-        // A stale account's failure text must not land on the new account's
-        // panel either.
-        if (readsRef.current !== scope) return;
-        setError(cause instanceof Error ? cause.message : 'Could not refresh usage');
-      })
-      .finally(() => {
-        setRefreshing(false);
-        // The queued refresh has not run yet, so read the ledger again. Further
-        // reads follow while it still reports work in flight.
-        requested.current = true;
-        setRead((value) => value + 1);
-      });
-  }, [jobId, reads]);
-
-  return { usage, loaded, refreshing, error, refresh };
+  return { usage, loaded, error };
 }
 
 function elapsedLabel(started: string | null, finished: string | null): string {
@@ -282,46 +166,6 @@ function elapsedLabel(started: string | null, finished: string | null): string {
   const to = Date.parse(finished);
   if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) return 'Not recorded';
   return formatDuration(to - from) ?? 'Not recorded';
-}
-
-function UsageTotals({ usage }: { usage: AgentJobUsageApi }) {
-  const t = useT();
-  const totals = usage.ledger.totals;
-  // Not "not recorded" and not $0: this turn's cost is the provider's to report.
-  if (usage.external_provider) {
-    return (
-      <DetailRows>
-        <DetailRow label="Cost">{t('modelSource.usageExternal')}</DetailRow>
-      </DetailRows>
-    );
-  }
-  return (
-    <>
-      <DetailRows>
-        <DetailRow label="Ledger">{LEDGER_LABEL[usage.ledger.status]}</DetailRow>
-        {usage.ledger.status !== 'available' ? (
-          <DetailRow label="Completeness" tone="muted">
-            {usage.ledger.missing_attempts > 0
-              ? `${usage.ledger.missing_attempts} attempt${usage.ledger.missing_attempts === 1 ? '' : 's'} not covered by the ledger`
-              : 'The ledger has not finalized this turn yet.'}
-          </DetailRow>
-        ) : null}
-        <DetailRow label="Model calls">{recordedCount(totals?.calls ?? null)}</DetailRow>
-        <DetailRow label="Input tokens">{recordedCount(totals?.tokens_in ?? null)}</DetailRow>
-        <DetailRow label="Output tokens">{recordedCount(totals?.tokens_out ?? null)}</DetailRow>
-        <DetailRow label="Cache read">{recordedCount(totals?.cache_read ?? null)}</DetailRow>
-        <DetailRow label="Cache write">{recordedCount(totals?.cache_write ?? null)}</DetailRow>
-        <DetailRow label="Reasoning">{recordedCount(totals?.reasoning ?? null)}</DetailRow>
-        <DetailRow label="Cost">
-          {totals?.spent_usd ? `$${totals.spent_usd}` : 'Not recorded'}
-        </DetailRow>
-      </DetailRows>
-      <p className="text-[11px] text-gray-400 dark:text-gray-500">
-        These totals belong to this turn, including its retries. Conversation totals are not
-        substituted when this turn&rsquo;s snapshot is incomplete.
-      </p>
-    </>
-  );
 }
 
 export function RunDetails({
@@ -345,7 +189,7 @@ export function RunDetails({
   const router = useRouter();
   const account = useSignedInAccount();
   const idPrefix = `run-${jobId}`;
-  const { usage, loaded, refreshing, error, refresh } = useJobUsage(jobId);
+  const { usage, loaded, error } = useJobUsage(jobId);
   const [restarting, setRestarting] = useState(false);
   const [restartError, setRestartError] = useState<string | null>(null);
 
@@ -443,37 +287,19 @@ export function RunDetails({
     if (!usage) {
       return (
         <TabPanel idPrefix={idPrefix} tab="usage">
-          <EmptyNote>
-            {error ?? 'This deployment has no billing ledger, so usage was not recorded.'}
-          </EmptyNote>
-          <button
-            type="button"
-            onClick={refresh}
-            disabled={refreshing}
-            className="rounded border border-gray-200 px-2 py-0.5 text-[11px] text-gray-500 hover:border-gray-300 hover:text-gray-900 disabled:opacity-50 dark:border-white/10 dark:text-gray-400 dark:hover:border-white/20 dark:hover:text-gray-100"
-          >
-            {refreshing ? 'Refreshing…' : 'Refresh'}
-          </button>
+          <EmptyNote>{error ?? 'Usage was not recorded.'}</EmptyNote>
         </TabPanel>
       );
     }
     return (
       <TabPanel idPrefix={idPrefix} tab="usage">
-        <div className="flex items-center justify-between gap-2">
-          <h4 className="text-[11px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
-            Turn {turnNo} usage
-          </h4>
-          <button
-            type="button"
-            onClick={refresh}
-            disabled={refreshing}
-            className="rounded border border-gray-200 px-2 py-0.5 text-[11px] text-gray-500 hover:border-gray-300 hover:text-gray-900 disabled:opacity-50 dark:border-white/10 dark:text-gray-400 dark:hover:border-white/20 dark:hover:text-gray-100"
-          >
-            {refreshing ? 'Refreshing…' : 'Refresh'}
-          </button>
-        </div>
+        <h4 className="text-[11px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+          Turn {turnNo} usage
+        </h4>
         {error ? <p className="text-[11px] text-red-600 dark:text-red-400">{error}</p> : null}
-        <UsageTotals usage={usage} />
+        <DetailRows>
+          <DetailRow label="Cost">{t('modelSource.usageExternal')}</DetailRow>
+        </DetailRows>
         <DetailSection title="Reported by the runtime">
           <DetailRows>
             <DetailRow label="Input tokens">{recordedCount(usage.runtime.input_tokens)}</DetailRow>
@@ -485,39 +311,10 @@ export function RunDetails({
             </DetailRow>
           </DetailRows>
           <p className="text-[11px] text-gray-400 dark:text-gray-500">
-            The runtime counters are the harness&rsquo; own report and can differ from the Gateway
-            ledger above.
+            The runtime counters are the harness&rsquo; own report and can differ from your
+            provider&rsquo;s bill.
           </p>
         </DetailSection>
-        {usage.ledger.attempts.length ? (
-          <DetailSection title="By attempt">
-            <ul className="space-y-2">
-              {usage.ledger.attempts.map((attempt) => (
-                <li
-                  key={attempt.attempt_id}
-                  className="rounded border border-gray-200 px-2.5 py-2 dark:border-white/10"
-                >
-                  <p className="text-[12px] font-medium text-gray-800 dark:text-gray-200">
-                    Attempt {attempt.attempt_no} · {LEDGER_LABEL[attempt.status]}
-                  </p>
-                  <p className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
-                    {recordedCount(attempt.totals?.calls ?? null)} calls ·{' '}
-                    {recordedCount(attempt.totals?.tokens_in ?? null)} in ·{' '}
-                    {recordedCount(attempt.totals?.tokens_out ?? null)} out ·{' '}
-                    {attempt.totals?.spent_usd
-                      ? `$${attempt.totals.spent_usd}`
-                      : 'cost not recorded'}
-                  </p>
-                  {attempt.reason ? (
-                    <p className="mt-0.5 text-[11px] text-gray-400 dark:text-gray-500">
-                      {attempt.reason}
-                    </p>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          </DetailSection>
-        ) : null}
       </TabPanel>
     );
   }

@@ -4,7 +4,6 @@ import type {
   AgentAttemptTelemetryApi,
   AgentJobApiState,
   AgentJobUsageApi,
-  ModelTtftApi,
   RunResourceSummaryApi,
 } from './agents';
 import { fetchWithAuth, jsonOrThrow } from './client';
@@ -27,7 +26,6 @@ export type {
 } from './agents';
 
 const RUNS = '/admin/agent/runs';
-const STEPS = '/admin/agent/steps';
 
 /** Metadata only: never the turn's prompt, result or raw error. */
 export interface AdminRun {
@@ -102,99 +100,6 @@ export interface AdminRunDetail {
   usage: AgentJobUsageApi;
   /** Older control planes do not include session statistics. */
   session_statistics?: AdminSessionStatistics | null;
-  capabilities: { llm_requests: boolean };
-}
-
-/** One stored gateway attribution reference for a run's execution. */
-export interface AdminLlmRequestSource {
-  source_id: string | null;
-  attempt_id: number;
-  attempt_no: number;
-  window_since: string | null;
-  window_until: string | null;
-  window_state: 'open' | 'closed' | 'unknown';
-  availability: 'queryable' | 'pending' | 'unavailable';
-  reason: string | null;
-}
-
-export interface AdminLlmRequestSourcesPage {
-  job_id: string;
-  observed_at: string;
-  sources: AdminLlmRequestSource[];
-  next_cursor: string | null;
-  reason: string | null;
-}
-
-/** One logged gateway request. Safe metadata only: never a prompt or response. */
-export interface AdminLlmRequest {
-  request_id: string;
-  request_started_at: string;
-  logged_at: string;
-  model: string | null;
-  served_model_id: string | null;
-  tokens_in: number | null;
-  tokens_out: number | null;
-  cache_read: number | null;
-  cache_write: number | null;
-  reasoning: number | null;
-  spent_usd: string | null;
-  ttft_ms: number | null;
-  latency_ms: number | null;
-  status_code: number | null;
-  usage_estimated: boolean;
-}
-
-export interface AdminLlmRequestPage {
-  job_id: string;
-  source_id: string;
-  attempt_id: number;
-  attempt_no: number;
-  window: { since: string; until: string; basis: 'request_started_at' };
-  source: 'gateway_api_logs';
-  fetched_at: string;
-  gateway_as_of: string;
-  pagination_consistency: 'live_keyset';
-  finalized: false;
-  requests: AdminLlmRequest[];
-  next_cursor: string | null;
-}
-
-/** One model request of a turn, with the turn and the run of it that made it. */
-export interface AdminStep extends AdminLlmRequest {
-  job_id: string;
-  attempt_no: number;
-}
-
-/**
- * How completely a steps page read one turn's requests. `partial`: a run had
- * more requests than a page reads, and the turn's own page lists them all.
- * `unavailable`: a run's requests could not be read, and `reason` says why.
- */
-export type StepCoverage = 'complete' | 'partial' | 'unavailable' | 'not_started';
-
-export interface AdminStepTurn {
-  job_id: string;
-  thread_id: string | null;
-  turn_no: number;
-  user_id: string;
-  /** Null for a temporary workspace. */
-  repo: string | null;
-  runtime: string;
-  state: AgentJobApiState;
-  created_at: string;
-  coverage: StepCoverage;
-  reason: string | null;
-}
-
-/** The steps of one page of turns, newest request first. */
-export interface AdminStepsPage {
-  since: string;
-  until: string;
-  fetched_at: string;
-  source: 'gateway_api_logs';
-  turns: AdminStepTurn[];
-  steps: AdminStep[];
-  next_cursor: string | null;
 }
 
 function query(values: Record<string, string | number | undefined>): string {
@@ -220,19 +125,6 @@ export function getAdminRuns(
   return read(`${RUNS}${query({ ...filters })}`, signal);
 }
 
-/**
- * One page of steps: the model requests of the next few turns in a selection.
- *
- * The page size counts turns and is the server's to choose, so the list's own
- * `limit` is not sent; the cursor is the runs list's.
- */
-export function getAdminSteps(
-  filters: AdminRunFilters,
-  signal?: AbortSignal,
-): Promise<AdminStepsPage> {
-  return read(`${STEPS}${query({ ...filters, limit: undefined })}`, signal);
-}
-
 export function getAdminRun(jobId: string, signal?: AbortSignal): Promise<AdminRunDetail> {
   return read(runPath(jobId), signal);
 }
@@ -245,25 +137,3 @@ export function getAdminAttemptResources(
   return read(`${runPath(jobId)}/attempts/${attemptId}/resources`, signal);
 }
 
-/** Which stored references this execution can be read through; no gateway call. */
-export function getAdminLlmRequestSources(
-  jobId: string,
-  filters: { attempt_id?: number; cursor?: string; limit?: number } = {},
-  signal?: AbortSignal,
-): Promise<AdminLlmRequestSourcesPage> {
-  return read(`${runPath(jobId)}/llm-request-sources${query(filters)}`, signal);
-}
-
-/** This run's mean gateway time to first token, read through its stored references. */
-export function getAdminRunModelTtft(jobId: string, signal?: AbortSignal): Promise<ModelTtftApi> {
-  return read(`${runPath(jobId)}/model-ttft`, signal);
-}
-
-/** One page of gateway request rows for one stored reference. */
-export function getAdminLlmRequests(
-  jobId: string,
-  filters: { source_id: string | number; cursor?: string; limit?: number },
-  signal?: AbortSignal,
-): Promise<AdminLlmRequestPage> {
-  return read(`${runPath(jobId)}/llm-requests${query(filters)}`, signal);
-}

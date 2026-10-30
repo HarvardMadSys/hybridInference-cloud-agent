@@ -20,7 +20,6 @@ import { getErrorMessage } from '@/lib/utils/errors';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import { TurnResults } from '../runs/AllRuns';
-import { StepResults } from '../runs/StepResults';
 import { SandboxResults } from '../sandboxes/SandboxResults';
 import { presetKey } from '../usage/present';
 import {
@@ -88,8 +87,8 @@ function windowFilters(
 /**
  * The levels Activity lists, one selection at a time.
  *
- * A session is made of turns, and a turn of steps (its model requests), so
- * those levels share a turn selection. Sandboxes show the current fleet.
+ * A session is made of turns, so those levels share a turn selection.
+ * Sandboxes show the current fleet.
  */
 const LEVELS = [
   {
@@ -108,12 +107,6 @@ const LEVELS = [
     label: 'Turns',
     description: 'Turns created in the selected window from every session, newest first.',
   },
-  {
-    key: 'steps',
-    label: 'Steps',
-    description:
-      'Model requests of the turns created in the selected window, newest first, read a few turns at a time.',
-  },
 ] as const;
 
 type Level = (typeof LEVELS)[number]['key'];
@@ -131,7 +124,7 @@ export default function AdminConversationsPage() {
 /**
  * Read the linked filters once, keyed by the query so a new link remounts.
  *
- * `level=sandboxes`, `level=turns` or `level=steps` opens that level. It chooses
+ * `level=sandboxes` or `level=turns` opens that level. It chooses
  * what is listed rather than which turns match, so it is taken off before the
  * filters are read.
  */
@@ -323,10 +316,8 @@ function ConversationsList({
           <SandboxResults onDenied={onDenied} />
         ) : level === 'sessions' ? (
           <SessionResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
-        ) : level === 'turns' ? (
-          <TurnResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
         ) : (
-          <StepResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
+          <TurnResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
         )}
       </section>
     </div>

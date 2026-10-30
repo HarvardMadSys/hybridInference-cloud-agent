@@ -31,7 +31,6 @@ import { DeferredCreateRepositoryDialog } from './DeferredCreateRepositoryDialog
 import { ComposerDialogLoading } from './ComposerDialogLoading';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
-import { PromptRewrite } from './PromptRewrite';
 import { composerCommandMatches } from './composerCommands';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
@@ -184,7 +183,6 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const { model, connectionId } = composerModel.choice;
   const [effort, setEffort] = useState(draft?.effort ?? '');
   const [submitting, setSubmitting] = useState(false);
-  const [rewriting, setRewriting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const attachments = useAttachments(t, config?.attachment_limits);
   const mcp = useComposerMcp(t);
@@ -392,7 +390,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // take, not a connection to make again.
   const noRepositories = config?.github_connected === true && config.repos.length === 0;
   const busy =
-    submitting || goalCommand.busy || rewriting || Boolean(repo && environmentStatus === 'loading');
+    submitting || goalCommand.busy || Boolean(repo && environmentStatus === 'loading');
   const missingRepository = config?.github_connected === true && !repo;
   const canRun =
     canRunInRepository(config, repo, configRefreshing) &&
@@ -653,9 +651,9 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           />
           <button
             type="button"
-            disabled={rewriting || submitting}
+            disabled={submitting}
             onClick={() => {
-              if (!rewriting && !submitting) setCreateRepositoryOpen(true);
+              if (!submitting) setCreateRepositoryOpen(true);
             }}
             className="mt-3 rounded-lg px-3 py-2 text-sm font-medium text-crimson-dark hover:bg-crimson/5 disabled:cursor-not-allowed disabled:opacity-50 dark:text-rose-300 dark:hover:bg-white/5"
           >
@@ -743,17 +741,6 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           disabled={submitting}
         />
 
-        <PromptRewrite
-          value={task}
-          {...composerModel.rewrite}
-          disabled={submitting || goalCommand.busy || /^\s*\//.test(task)}
-          onActiveChange={setRewriting}
-          onApply={(prompt) => {
-            setTask(prompt);
-            taskBox.current?.focus();
-          }}
-        />
-
         <EnvironmentPicker
           key={repo}
           repo={temporary ? '' : repo}
@@ -801,14 +788,14 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
               onRefresh={() => void refreshRepositories()}
               onConfigure={config?.github_install_url ? () => void goToGitHub('manage') : undefined}
               onCreate={() => {
-                if (!rewriting && !submitting) setCreateRepositoryOpen(true);
+                if (!submitting) setCreateRepositoryOpen(true);
               }}
               // Repository access is GitHub's to give; until it is connected
               // the picker offers the connection instead of managing any.
               disconnected={disconnected}
               onConnect={canConnect ? () => void goToGitHub('connect') : undefined}
               refreshing={refreshing}
-              createDisabled={rewriting || submitting}
+              createDisabled={submitting}
               returnFocusTo={repoPickerFromTask ? taskBox : undefined}
             />
             {temporary ? null : (

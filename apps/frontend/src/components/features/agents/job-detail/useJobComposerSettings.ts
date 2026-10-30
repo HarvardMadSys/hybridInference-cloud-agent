@@ -8,7 +8,6 @@ import { highestEffort, offeredEfforts } from '../effort';
 import {
   choiceLabel,
   isModelUnavailable,
-  rewriteProps,
   turnChoice,
   turnModelPicker,
   type ModelChoice,
@@ -67,7 +66,7 @@ export function useJobComposerSettings(job: AgentJob, inherited: InheritedModel)
   // The parent's model leads even when this deployment has stopped offering
   // it, so the control cannot show one model while the turn would run another.
   // A personal one that can no longer run is marked so, and is still never
-  // swapped for the Gateway model of the same name.
+  // swapped for another source's model of the same name.
   const modelPickerProps = turnModelPicker(
     config,
     job.runtime,
@@ -105,7 +104,6 @@ export function useJobComposerSettings(job: AgentJob, inherited: InheritedModel)
     // Holds Send while the turn would inherit a source that can no longer run.
     inheritedUnavailable: choiceUnavailable,
     choice,
-    rewrite: rewriteProps(choice, t, config),
     effort,
     setChosenEffort,
     modelPicker: modelPickerProps,

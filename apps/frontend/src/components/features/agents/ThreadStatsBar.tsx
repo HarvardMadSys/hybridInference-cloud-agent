@@ -25,13 +25,10 @@ import { useEffect, useState } from 'react';
 
 import { formatDuration } from './TurnFooter';
 import { isActiveConversationState, isActiveJobState } from './conversationJob';
-import { modelTtftDisplay } from './modelTtft';
 import type { AgentJob } from './types';
 import {
-  getAgentThreadModelTtft,
   getAgentThreadStats,
   type AgentThreadStatsApi,
-  type ModelTtftApi,
 } from '@/lib/api/agents';
 
 /** Compact count: 5_800_000 → "5.8M", 89_700 → "89.7k". */
@@ -72,10 +69,7 @@ interface Segment {
  * rendered text: what matters is which facts a given thread can state, and
  * that an unavailable one is absent rather than zero.
  */
-export function statSegments(
-  stats: AgentThreadStatsApi,
-  modelTtft?: ModelTtftApi | null,
-): Segment[] {
+export function statSegments(stats: AgentThreadStatsApi): Segment[] {
   const segments: Segment[] = [
     {
       key: 'shape',
@@ -101,19 +95,12 @@ export function statSegments(
   }
 
   const rate = stats.output_tokens_per_second;
-  const ttft = modelTtftDisplay(modelTtft);
-  const speed: string[] = [];
-  const titles: string[] = [];
-  if (ttft) {
-    speed.push(`TTFT ${ttft.value}${ttft.complete ? '' : ' (partial)'}`);
-    titles.push(ttft.title);
-  }
   if (typeof rate === 'number') {
-    speed.push(`${Math.round(rate)} tok/s`);
-    titles.push('Output tokens per second of model time.');
-  }
-  if (speed.length > 0) {
-    segments.push({ key: 'speed', text: speed.join(' · '), title: titles.join(' ') });
+    segments.push({
+      key: 'speed',
+      text: `${Math.round(rate)} tok/s`,
+      title: 'Output tokens per second of model time.',
+    });
   }
 
   if (typeof stats.cache_hit_ratio === 'number') {
@@ -150,30 +137,7 @@ export function ThreadStatsBar({ job }: { job: AgentJob }) {
     jobId: string;
     stats: AgentThreadStatsApi | null;
   } | null>(null);
-  const [ttftSnapshot, setTtftSnapshot] = useState<{
-    jobId: string;
-    ttft: ModelTtftApi | null;
-  } | null>(null);
   const active = isActiveJobState(job.state) || isActiveConversationState(job.conversationState);
-
-  // Model TTFT is a gateway read, several per call, so it follows state
-  // transitions only and never the two-second totals poll.
-  useEffect(() => {
-    // A reading from the previous state cannot describe the new state's
-    // request set, especially when the final refresh fails.
-    setTtftSnapshot(null);
-    const controller = new AbortController();
-    const load = async () => {
-      try {
-        const ttft = await getAgentThreadModelTtft(job.id, controller.signal);
-        if (!controller.signal.aborted) setTtftSnapshot({ jobId: job.id, ttft });
-      } catch {
-        // A missing reading is not shown; never retain an earlier state's mean.
-      }
-    };
-    void load();
-    return () => controller.abort();
-  }, [job.id, job.state, job.conversationState]);
 
   // The aggregate endpoint includes the running turn, but streaming events
   // do not change job.state. Refresh all totals together while work is active,
@@ -212,9 +176,8 @@ export function ThreadStatsBar({ job }: { job: AgentJob }) {
   // A delayed response or failed load for another conversation must never
   // leave that conversation displaying the previous one's totals.
   const stats = snapshot?.jobId === job.id ? snapshot.stats : null;
-  const modelTtft = ttftSnapshot?.jobId === job.id ? ttftSnapshot.ttft : null;
   if (!stats) return null;
-  const segments = statSegments(stats, modelTtft);
+  const segments = statSegments(stats);
   if (segments.length === 0) return null;
 
   return (

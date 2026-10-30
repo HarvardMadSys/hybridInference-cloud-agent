@@ -153,7 +153,6 @@ services:
       AGENT_WEB_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
       AGENT_WEB_DOCS_URL: ${AGENT_WEB_DOCS_URL:-}
       AGENT_WEB_CONTACT_URL: ${AGENT_WEB_CONTACT_URL:-}
-      AGENT_WEB_FEATURE_RAG: ${AGENT_WEB_FEATURE_RAG:-}
       # Optional compute management runs only on this stable main listener.
       # Mount the operator configuration using docker-compose.compute.yml.
       AGENT_COMPUTE_CONFIG: ${AGENT_COMPUTE_CONFIG:-}
@@ -397,7 +396,6 @@ services:
       AGENT_WEB_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
       AGENT_WEB_DOCS_URL: ${AGENT_WEB_DOCS_URL:-}
       AGENT_WEB_CONTACT_URL: ${AGENT_WEB_CONTACT_URL:-}
-      AGENT_WEB_FEATURE_RAG: ${AGENT_WEB_FEATURE_RAG:-}
       AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:-}
       AGENT_WEB_DEPLOYED_AT: ${AGENT_WEB_DEPLOYED_AT:-}
     restart: unless-stopped

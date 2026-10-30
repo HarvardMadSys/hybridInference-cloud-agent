@@ -25,7 +25,7 @@ export interface ComposerDraft {
   runtime: string;
   /** Picked by the owner, never a model the server filled in; see TaskComposer. */
   chosenModel: string;
-  /** The connection `chosenModel` was picked from; empty is the Gateway. */
+  /** The connection `chosenModel` was picked from. */
   chosenModelConnectionId: string;
 }
 
@@ -95,7 +95,7 @@ export function peekComposerDraft(userId?: string): ComposerDraft | null {
     // A receipt written before this field has only `model`, which could be a
     // model the server filled in. It is ignored, so the server resolves again.
     chosenModel: typeof draft.chosenModel === 'string' ? draft.chosenModel : '',
-    // Absent from a receipt written before sources: that pick was the Gateway's.
+    // Absent from a receipt written before sources: that pick has no connection.
     chosenModelConnectionId:
       typeof draft.chosenModelConnectionId === 'string' ? draft.chosenModelConnectionId : '',
   };

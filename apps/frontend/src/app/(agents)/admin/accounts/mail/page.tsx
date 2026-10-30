@@ -3,7 +3,6 @@
 // page at a time. Cancelling a scheduled message is confirmed first.
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { useAuth } from '@/components/providers/AuthProvider';
 import { useT } from '@/components/providers/LocaleProvider';
 import { AccountNotice } from '@/components/features/auth/AccountFrame';
 import {
@@ -200,9 +199,7 @@ function MailList({ reload }: { reload: number }) {
 }
 
 export default function AccountMailPage() {
-  const { state } = useAuth();
   const t = useT();
-  const local = state.user?.auth_mode === 'local';
   const [reload, setReload] = useState(0);
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
@@ -216,14 +213,8 @@ export default function AccountMailPage() {
           <Link className="text-sm text-accent underline" href="/admin/accounts">
             {t('adminAccounts.back')}
           </Link>
-          {local ? (
-            <>
               <MailComposer onSent={() => setReload((v) => v + 1)} />
               <MailList reload={reload} />
-            </>
-          ) : (
-            <p className="text-sm text-muted">{t('adminAccounts.notLocal')}</p>
-          )}
         </div>
       </section>
     </div>

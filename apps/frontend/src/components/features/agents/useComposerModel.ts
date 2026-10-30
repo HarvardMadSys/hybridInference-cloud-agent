@@ -6,7 +6,6 @@ import {
   NO_MODEL,
   offeredChoices,
   resolvedChoice,
-  rewriteProps,
   sameChoice,
   storedChoice,
   type ModelChoice,
@@ -38,8 +37,8 @@ interface DraftedPick {
  * Both values carry their source (see `modelSource`). A model on the owner's
  * own connection that cannot run here — another agent was chosen, or the
  * connection was disabled or no longer lists it — stays on screen marked
- * unavailable and holds Run. It never gives way to the resolved model, or to
- * the Gateway model of the same name: either would bill someone else.
+ * unavailable and holds Run. It never gives way to the resolved model: that
+ * would bill another account.
  */
 export function useComposerModel(drafted: DraftedPick | null, runtime: string) {
   const t = useT();
@@ -67,7 +66,7 @@ export function useComposerModel(drafted: DraftedPick | null, runtime: string) {
       choice = candidate;
       break;
     }
-    // A Gateway model no longer offered gives way, as it always has.
+    // A pick with no connection cannot run, and gives way.
     if (candidate.connectionId) {
       unavailable = candidate;
       break;
@@ -101,7 +100,6 @@ export function useComposerModel(drafted: DraftedPick | null, runtime: string) {
       model: choice.model,
       ...(choice.connectionId ? { model_connection_id: choice.connectionId } : {}),
     },
-    rewrite: rewriteProps(choice, t, config),
     // Said beside the composer while a personal pick holds Run.
     unavailableHint: unavailable
       ? t('modelSource.unavailableHint', { label: picker.optionLabels[picker.value], runtime })

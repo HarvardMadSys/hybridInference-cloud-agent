@@ -2,7 +2,6 @@
 
 import Link from 'next/link';
 import { useEffect, useRef } from 'react';
-import { useSignedInAuthMode } from '@/components/providers/AuthProvider';
 import { AdminSetupNotice } from './AdminSetupNotice';
 
 const SECTIONS = [
@@ -34,7 +33,6 @@ export function AdminNavigation({
     | 'database'
     | 'audit';
 }) {
-  const authMode = useSignedInAuthMode();
   const section = current === 'runs' ? 'activity' : current;
   const selected = useRef<HTMLAnchorElement>(null);
   const navigation = useRef<HTMLElement>(null);
@@ -76,7 +74,7 @@ export function AdminNavigation({
         aria-label="Admin sections"
         className="mt-3 flex gap-1 overflow-x-auto overflow-y-hidden border-b border-border"
       >
-        {SECTIONS.filter((item) => item.key !== 'accounts' || authMode === 'local').map((item) => {
+        {SECTIONS.map((item) => {
           const active = section === item.key;
           return (
             <Link

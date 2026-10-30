@@ -395,7 +395,6 @@ def verify_web(image: str, *, variant: str, suffix: str, keep: bool) -> list[str
                 "AGENT_WEB_ORG_NAME": "",
                 "AGENT_WEB_ORG_URL": "",
                 "AGENT_WEB_STATUS_URL": "",
-                "AGENT_WEB_FEATURE_RAG": "false",
             },
             publish=(3000,),
         )

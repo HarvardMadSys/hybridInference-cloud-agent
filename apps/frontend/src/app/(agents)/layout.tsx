@@ -5,7 +5,6 @@ import { WaitlistPanel } from '@/components/features/auth/WaitlistPanel';
 
 import { usePathname, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
-import { GatewayAccountBanner } from '@/components/features/auth/GatewayAccountBanner';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { SessionSwitchWatcher } from '@/components/features/auth/SessionSwitchWatcher';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
@@ -42,18 +41,6 @@ const NAV_ITEM_CURRENT =
 // App-mode shell (same fixed-overlay pattern as the playground): slim header +
 // repo/task sidebar + main pane. Deep links keep working — /agents/* are real
 // routes; only the marketing chrome is replaced.
-function DocsAssistantLink() {
-  const { state } = useAuth();
-  const { branding, features } = useSiteConfig();
-  const t = useT();
-  if (state.user?.auth_mode === 'local' || !features.rag || !branding.gatewayUrl) return null;
-  return (
-    <a href={`${branding.gatewayUrl}/chat`} className={NAV_ITEM}>
-      {t('nav.docsAssistant')}
-    </a>
-  );
-}
-
 function AgentsHeader({
   sidebarToggle,
   accountMenu,
@@ -141,9 +128,6 @@ function AgentsHeader({
             {t('nav.status')}
           </a>
         )}
-        {/* The Docs Assistant uses Gateway identity. A local Agent account
-            does not gain access through a configured Gateway address. */}
-        <DocsAssistantLink />
         <Link
           href="/"
           className={onTasks ? NAV_ITEM_CURRENT : NAV_ITEM}
@@ -157,8 +141,7 @@ function AgentsHeader({
             className={pathname === '/approvals' ? NAV_ITEM_CURRENT : NAV_ITEM}
           />
         )}
-        {/* This service's own operations page, so it is a route rather than a
-            link back to the gateway. Admin-only, matching the endpoints it
+        {/* Admin-only, matching the endpoints it
             calls — the guard on the page is the one that counts; hiding the
             link only keeps it out of the way of everyone else. */}
         {hasAgentPermission(state.user?.agent_access, 'agent.admin') && (
@@ -247,25 +230,9 @@ function AgentsShell({
   const { branding } = useSiteConfig();
   const t = useT();
 
-  // Current admission decides access independently of the login provider.
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.use')) {
-    if (state.user?.auth_mode === 'local') return <WaitlistPanel key={state.user.id} />;
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3">
-        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-          {t('shell.accessRequired.title')}
-        </h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">{t('shell.accessRequired.body')}</p>
-        {branding.gatewayUrl && (
-          <a
-            href={`${branding.gatewayUrl}/dashboard`}
-            className="text-sm font-medium text-crimson hover:underline dark:text-crimson-light"
-          >
-            {t('shell.accessRequired.back')}
-          </a>
-        )}
-      </div>
-    );
+  // Current admission decides access; without it the account applies or waits.
+  if (!hasAgentPermission(state.user?.agent_access, 'agent.use') && state.user) {
+    return <WaitlistPanel key={state.user.id} />;
   }
 
   // One first-run answer for the sidebar and every page, asked for here once
@@ -462,7 +429,6 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
                 ) : undefined
               }
             />
-            <GatewayAccountBanner />
             <AgentsShell
               settingsNavigation={
                 onSettings

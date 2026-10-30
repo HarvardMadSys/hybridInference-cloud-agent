@@ -157,7 +157,6 @@ function Counts({ counts }: { counts: Record<string, number> | undefined }) {
 }
 
 function useAccounts(
-  local: boolean,
   status: WaitlistStatus | '',
   offset: number,
   filters: AccountFilters,
@@ -171,10 +170,6 @@ function useAccounts(
   const [loading, setLoading] = useState(true);
   const { accountStatus, q, sort } = filters;
   useEffect(() => {
-    if (!local) {
-      setLoading(false);
-      return;
-    }
     const controller = new AbortController();
     setLoading(true);
     setError(null);
@@ -193,7 +188,7 @@ function useAccounts(
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [local, status, offset, accountStatus, q, sort, reload, userId]);
+  }, [status, offset, accountStatus, q, sort, reload, userId]);
   return { accounts, total, counts, error, loading };
 }
 
@@ -211,9 +206,7 @@ export default function AccountsPage() {
   // Kept at the page: the list refreshes and closes the editor after an
   // erasure, and the operator still needs its result and archive keys.
   const [erasure, setErasure] = useState<{ label: string; result: ErasureResult } | null>(null);
-  const local = state.user?.auth_mode === 'local';
   const { accounts, total, counts, error, loading } = useAccounts(
-    local,
     status,
     offset,
     { accountStatus, q, sort },
@@ -233,9 +226,6 @@ export default function AccountsPage() {
           description={t('adminAccounts.description')}
         />
         <AdminNavigation current="accounts" />
-        {!local ? (
-          <p className="mt-6 text-sm text-muted">{t('adminAccounts.notLocal')}</p>
-        ) : (
           <div className="mt-5 space-y-4">
             <nav
               className="flex flex-wrap gap-3 text-sm"
@@ -360,7 +350,6 @@ export default function AccountsPage() {
               </button>
             </div>
           </div>
-        )}
       </section>
     </div>
   );

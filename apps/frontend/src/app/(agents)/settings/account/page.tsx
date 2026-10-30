@@ -8,11 +8,7 @@ export default function AccountSettingsPage() {
   const { state } = useAuth();
   return (
     <SettingsPage title={t('security.title')} description={t('security.description')}>
-      {state.user?.auth_mode === 'local' ? (
-        <AccountSecurity isAdmin={state.user.is_local_admin === true} />
-      ) : (
-        <p className="text-sm text-muted">{t('security.gatewayManaged')}</p>
-      )}
+      <AccountSecurity isAdmin={state.user?.is_local_admin === true} />
     </SettingsPage>
   );
 }

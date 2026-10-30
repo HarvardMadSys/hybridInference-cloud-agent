@@ -28,7 +28,7 @@ export function LocalAccountGate({
         <p role="status">{t('common.loading')}</p>
       </AccountFrame>
     );
-  if (config.mode !== 'local' || (signup && !config.signup_enabled))
+  if (signup && !config.signup_enabled)
     return (
       <AccountFrame title={t('account.unavailable')}>
         <p className="text-sm text-muted">{t('account.registrationClosed')}</p>

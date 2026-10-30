@@ -1,29 +1,14 @@
 // Centralized HTTP client.
 //
-// **Rewritten rather than moved.** The source repo's client kept the gateway's
-// access token in `sessionStorage`, attached it as a bearer header, and ran its
-// own refresh loop. This service has no bearer token to keep: sign-in ends in
-// an HttpOnly session cookie minted by the control plane (see
-// `cloud_agent/identity.py`), which JavaScript cannot read and
+// Sign-in ends in an HttpOnly session cookie, which JavaScript cannot read and
 // therefore cannot leak. Every request simply carries `credentials: 'include'`
-// and the browser attaches the cookie.
+// and the browser attaches the cookie. A 401 here means the session is over,
+// and the caller is sent back to sign in.
 //
-// What that removes, deliberately:
-//   * `setAccessToken` / `getAccessToken` and the `sessionStorage` they used;
-//   * the JWT expiry peek — the cookie's expiry is the server's business;
-//   * the refresh-and-retry dance. A 401 here means the session is over, and
-//     the caller is sent back through the gateway's `/authorize` flow.
-//
-// `jsonOrThrow` below was carried over verbatim from the source client, and
-// its legacy `error_code` branch still is. Its plain-`detail` branch no longer
-// infers a code from the wording: the gateway-era patterns (password reset,
-// email verification, duplicate signup, the catch-all "expired") could only
-// match endpoints this service does not call, and the catch-all replaced the
-// server's own refusal with a different instruction. A plain detail is now
-// shown as sent with UNKNOWN_ERROR. The structured `{ error: { type, message } }`
-// branch is this service's own shape, and it classifies by `type` alone: the
-// source's message patterns ran first there and replaced typed reasons callers
-// recover on.
+// In `jsonOrThrow` below, a plain `detail` is shown as sent with UNKNOWN_ERROR:
+// no code is inferred from the wording. The structured
+// `{ error: { type, message } }` branch is this service's own shape, and it
+// classifies by `type` alone.
 
 import { APIError, httpStatusToErrorCode } from '@/lib/utils/errors';
 
@@ -160,8 +145,7 @@ export async function jsonOrThrow<T>(resp: Response): Promise<T> {
       // fork failed, and `agent_configuration_error` is an operator's to fix.
       // The message is prose for people, so it is shown and never parsed.
       // Reading it here turned "That page expired" into a signed-out session
-      // and every typed 401 into a wrong password — the gateway's
-      // email-and-password codes, which no endpoint of this service issues.
+      // and every typed 401 into a wrong password.
       const error = structuredError;
       errorMessage = (error.message as string) || errorMessage;
       if (typeof error.type === 'string' && error.type) errorCode = error.type;
@@ -173,12 +157,7 @@ export async function jsonOrThrow<T>(resp: Response): Promise<T> {
     } else if (data.detail) {
       // FastAPI validation error format: { detail: "..." }
       //
-      // Shown as sent, with no code inferred from the wording. The gateway-era
-      // patterns that used to live here (password reset, email verification,
-      // duplicate signup, and the catch-all "expired" → TOKEN_EXPIRED) matched
-      // only endpoints this service does not call, and the catch-all replaced
-      // the server's own refusal — "This sign-in has expired. Please start
-      // again." — with "Session has expired. Please login again". Which sign-in
+      // Shown as sent, with no code inferred from the wording. Which sign-in
       // flow a refusal belongs to is carried by the status; a 401 is announced
       // by fetchWithAuth (AUTH_EXPIRED_EVENT), not by string matching.
       errorMessage = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);

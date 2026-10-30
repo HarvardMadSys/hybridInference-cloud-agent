@@ -6,7 +6,6 @@
 // Admin → Settings → Accounts.
 import Link from 'next/link';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { useAuth } from '@/components/providers/AuthProvider';
 import { useT } from '@/components/providers/LocaleProvider';
 import { AccountNotice } from '@/components/features/auth/AccountFrame';
 import {
@@ -160,9 +159,7 @@ function SignInRetention() {
 }
 
 export default function AccountPolicyPage() {
-  const { state } = useAuth();
   const t = useT();
-  const local = state.user?.auth_mode === 'local';
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
       <section className={ADMIN_PAGE}>
@@ -175,14 +172,8 @@ export default function AccountPolicyPage() {
           <Link className="text-sm text-accent underline" href="/admin/accounts">
             {t('adminAccounts.back')}
           </Link>
-          {local ? (
-            <>
               <DomainList />
               <SignInRetention />
-            </>
-          ) : (
-            <p className="text-sm text-muted">{t('adminAccounts.notLocal')}</p>
-          )}
         </div>
       </section>
     </div>

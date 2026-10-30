@@ -1,6 +1,4 @@
-import { modelTtftDisplay } from '@/components/features/agents/modelTtft';
 import { formatDuration } from '@/components/features/agents/TurnFooter';
-import type { ModelTtftApi } from '@/lib/api/agents';
 import type { AdminSessionStatistics } from '@/lib/api/adminRuns';
 
 import { CARD, number } from './shared';
@@ -12,14 +10,10 @@ function duration(seconds: number | null | undefined): string {
 /** Turn-scoped presentation only: the totals cover every run of the turn. */
 export function SessionStatistics({
   statistics,
-  modelTtft,
 }: {
   statistics?: AdminSessionStatistics | null;
-  /** The gateway's reading; absent while loading or when it could not be read. */
-  modelTtft?: ModelTtftApi | null;
 }) {
   const rate = statistics?.output_tokens_per_second;
-  const ttft = modelTtftDisplay(modelTtft);
   const rows = [
     {
       label: 'LLM time',
@@ -31,13 +25,6 @@ export function SessionStatistics({
       value: duration(statistics?.tool_seconds),
       description:
         'Estimated from recorded tool calls and results. Overlapping intervals are counted once.',
-    },
-    {
-      label: 'Avg model time to first token (TTFT)',
-      value: ttft ? `${ttft.value}${ttft.complete ? '' : ' (partial)'}` : 'Unavailable',
-      description:
-        ttft?.title ??
-        'Measured by the gateway for each streamed model request. Unavailable when no request recorded one; startup is never substituted.',
     },
     {
       label: 'Avg time to first output',

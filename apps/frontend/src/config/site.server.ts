@@ -41,7 +41,7 @@ import {
 // Keep it only as a failure fallback: every render still asks for fresh saved
 // settings. Keying by the control-plane URL keeps deployments separate, and
 // omitting deployment metadata lets each render attach its current image data.
-type PublicAppearance = Pick<RuntimeSiteConfig, 'branding' | 'features'>;
+type PublicAppearance = Pick<RuntimeSiteConfig, 'branding'>;
 let lastKnownGood: { api: string; sequence: number; appearance: PublicAppearance } | null = null;
 let readSequence = 0;
 const APPEARANCE_READ_BUDGET_MS = 400;

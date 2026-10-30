@@ -4,7 +4,6 @@ import { APIError } from '@/lib/utils/errors';
 import type { SessionUserApi } from './session';
 
 export interface AuthConfig {
-  mode: 'gateway' | 'local';
   signup_enabled: boolean;
 }
 export type WaitlistStatus = 'not_applied' | 'pending' | 'approved' | 'rejected' | 'revoked';
@@ -105,14 +104,8 @@ export interface SignupDetails {
 
 export async function getAuthConfig(signal?: AbortSignal): Promise<AuthConfig> {
   const response = await safeFetch(`${agentApiBase}/v1/auth/config`, { cache: 'no-store', signal });
-  // Frontend may be rolled out ahead of the local-account backend.
-  if (response.status === 404) return { mode: 'gateway', signup_enabled: false };
   const result = await jsonOrThrow<AuthConfig>(response);
-  if (
-    !result ||
-    !['gateway', 'local'].includes(result.mode) ||
-    typeof result.signup_enabled !== 'boolean'
-  )
+  if (!result || typeof result.signup_enabled !== 'boolean')
     throw new APIError('invalid_auth_config', 'Cannot load sign-in options.');
   return result;
 }

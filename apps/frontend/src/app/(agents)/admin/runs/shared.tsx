@@ -139,7 +139,7 @@ export function number(value: number | null | undefined): string {
 }
 
 /**
- * Format a recorded amount without losing what the Gateway reported.
+ * Format a recorded amount without losing what was reported.
  *
  * The value is a decimal string and is never parsed as a float: the display
  * keeps at most four places, a smaller non-zero amount reads as such rather

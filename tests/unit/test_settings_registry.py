@@ -562,7 +562,6 @@ async def test_public_site_settings_expose_only_display_allowlist():
             "site.app_name": "Configured app",
             "site.docs_url": "https://docs.example.com/agents/",
             "site.contact_url": "mailto:support@example.com",
-            "site.feature_rag": True,
         },
     )
     async with httpx.AsyncClient(
@@ -572,7 +571,7 @@ async def test_public_site_settings_expose_only_display_allowlist():
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "no-store"
     view = response.json()
-    assert set(view) == {"branding", "features"}
+    assert set(view) == {"branding"}
     assert set(view["branding"]) == {
         "appName",
         "orgName",

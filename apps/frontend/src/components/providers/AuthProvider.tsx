@@ -2,9 +2,9 @@
 
 // Session state for the app.
 //
-// Both local and Gateway sign-in establish an HttpOnly cookie. Identity and
-// current admission are read through /v1/session/me; no password or token is
-// retained by this provider.
+// Sign-in establishes an HttpOnly cookie. Identity and current admission are
+// read through /v1/session/me; no password or token is retained by this
+// provider.
 //
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { clearSideChatDrafts } from '@/components/features/agents/sideChatStorage';
@@ -22,17 +22,16 @@ import {
 
 type User = SessionUserApi;
 
-/** Admit only the documented identity fields, never legacy Gateway role claims. */
+/** Admit only the documented identity fields. */
 function sessionIdentity(me: SessionUserApi): User {
-  const user: User = { id: me.id, agent_access: me.agent_access };
-  if (me.auth_mode === 'local') {
-    user.auth_mode = 'local';
-    user.email = me.email;
-    user.waitlist = me.waitlist;
-    user.identity = me.identity;
-    user.is_local_admin = me.is_local_admin;
-  } else if (me.auth_mode === 'gateway') user.auth_mode = 'gateway';
-  return user;
+  return {
+    id: me.id,
+    agent_access: me.agent_access,
+    email: me.email,
+    waitlist: me.waitlist,
+    identity: me.identity,
+    is_local_admin: me.is_local_admin,
+  };
 }
 
 interface AuthState {
@@ -117,7 +116,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (previous !== undefined) setSessionSwitched(true);
       }
       accountId.current = me.id;
-      pinAccount(me.auth_mode === 'local' ? me.id : null);
+      pinAccount(me.id);
       setState({
         isAuthenticated: true,
         loading: false,
@@ -158,9 +157,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const me = await getSessionUser();
       if (epoch !== sessionEpoch.current || check !== checkEpoch.current || reading.current) return;
       if ((me?.id ?? undefined) !== accountId.current) await refreshUser();
-      else if (me?.auth_mode === 'local') {
-        // Local admission can change while identity stays the same. Apply the
-        // fresh answer without unmounting the page or losing an edited draft.
+      else if (me) {
+        // Admission can change while identity stays the same. Apply the fresh
+        // answer without unmounting the page or losing an edited draft.
         setState((previous) => ({ ...previous, user: sessionIdentity(me) }));
       }
     } catch {
@@ -238,11 +237,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-}
-
-/** Auth mode for optional navigation, including consumers outside the provider. */
-export function useSignedInAuthMode(): SessionUserApi['auth_mode'] {
-  return useContext(AuthContext)?.state.user?.auth_mode;
 }
 
 /** The signed-in account, for scoping what a component keeps; none outside the provider. */

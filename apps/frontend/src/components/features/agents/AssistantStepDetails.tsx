@@ -6,7 +6,6 @@
 // absent — a per-turn number placed on one step reads as this step's cost, and
 // the ledger already answers the per-turn question in Run details.
 
-import { useMessageRequest } from './useMessageRequest';
 import { Markdown } from '@/components/ui/Markdown';
 
 import {
@@ -77,16 +76,6 @@ export function AssistantStepDetails({
   const idPrefix = `step-${step.key}`;
   const blocks = step.blocks ?? [];
   const usage = step.usage;
-  const { detail, loading, retry } = useMessageRequest(step, tab === 'summary');
-  const request = detail?.status === 'available' ? detail.request : null;
-  const outputTokens = request ? request.tokens_out : usage?.outputTokens;
-  const reasoningTokens = request ? request.reasoning : usage?.reasoningTokens;
-  const generationMs =
-    request?.latency_ms != null && request.ttft_ms != null && request.latency_ms >= request.ttft_ms
-      ? request.latency_ms - request.ttft_ms
-      : null;
-  const throughput =
-    generationMs && request?.tokens_out != null ? (request.tokens_out * 1000) / generationMs : null;
   const hasContent = blocks.some((block) => block.text.trim().length > 0);
 
   if (tab === 'preview') {
@@ -181,24 +170,14 @@ export function AssistantStepDetails({
         >
           {STATUS_LABEL[step.status]}
         </DetailRow>
-        <DetailRow label="Output tokens">{recordedCount(outputTokens)}</DetailRow>
-        {request?.tokens_in != null ? (
-          <DetailRow label="Input tokens">{recordedCount(request.tokens_in)}</DetailRow>
-        ) : null}
-        {reasoningTokens != null ? (
-          <DetailRow label="Reasoning tokens">{recordedCount(reasoningTokens)}</DetailRow>
+        <DetailRow label="Output tokens">{recordedCount(usage?.outputTokens)}</DetailRow>
+        {usage?.reasoningTokens != null ? (
+          <DetailRow label="Reasoning tokens">{recordedCount(usage.reasoningTokens)}</DetailRow>
         ) : null}
         {usage?.contentTokens != null ? (
-          <DetailRow label={request ? 'Content tokens (runtime)' : 'Content tokens'}>
-            {recordedCount(usage.contentTokens)}
-          </DetailRow>
+          <DetailRow label="Content tokens">{recordedCount(usage.contentTokens)}</DetailRow>
         ) : null}
-        <DetailRow label="Usage source">
-          {request ? (request.usage_estimated ? 'Gateway estimate' : 'Gateway') : 'Runtime report'}
-        </DetailRow>
-        {request?.spent_usd != null ? (
-          <DetailRow label="Cost">${request.spent_usd}</DetailRow>
-        ) : null}
+        <DetailRow label="Usage source">Runtime report</DetailRow>
       </DetailRows>
 
       <DetailSection title="Preview" onOpen={() => onSelectTab('preview')}>
@@ -218,58 +197,6 @@ export function AssistantStepDetails({
         ) : null}
         <ToolCallList tools={tools} onSelectStep={onSelectStep} />
       </DetailSection>
-
-      {request ? (
-        <DetailSection title="Request timing">
-          <DetailRows>
-            <DetailRow label="Gateway request">
-              <span className="font-mono">{request.request_id}</span>
-            </DetailRow>
-            <DetailRow label="Started">{recordedAt(request.request_started_at)}</DetailRow>
-            {request.latency_ms !== null ? (
-              <DetailRow label="Total duration">{formatDuration(request.latency_ms)}</DetailRow>
-            ) : null}
-            {request.ttft_ms !== null ? (
-              <DetailRow label="TTFT">{formatDuration(request.ttft_ms)}</DetailRow>
-            ) : null}
-            {generationMs !== null ? (
-              <DetailRow label="Generation">{formatDuration(generationMs)}</DetailRow>
-            ) : null}
-            {throughput !== null ? (
-              <DetailRow label="Throughput">
-                {throughput.toLocaleString(undefined, { maximumFractionDigits: 1 })} tok/s
-              </DetailRow>
-            ) : null}
-          </DetailRows>
-          <p className="text-[11px] text-gray-400 dark:text-gray-500">
-            Gateway measurements for this message. Generation is the interval from first token to
-            request completion; throughput is output tokens divided by that interval.
-          </p>
-        </DetailSection>
-      ) : (
-        <div className="text-[12px] text-gray-500 dark:text-gray-400">
-          <p role="status">
-            {loading
-              ? 'Loading request statistics…'
-              : detail?.status === 'ambiguous'
-                ? 'Multiple requests share this message identity; statistics cannot be attributed.'
-                : detail?.reason === 'message_correlation_unsupported'
-                  ? 'This gateway does not yet support message request statistics.'
-                  : detail?.status === 'unavailable'
-                    ? 'Request statistics are temporarily unavailable.'
-                    : 'No request statistics were recorded for this message.'}
-          </p>
-          {step.nativeMessageId && !loading ? (
-            <button
-              type="button"
-              onClick={retry}
-              className="mt-1 text-crimson hover:underline dark:text-crimson-light"
-            >
-              Retry request statistics
-            </button>
-          ) : null}
-        </div>
-      )}
     </TabPanel>
   );
 }

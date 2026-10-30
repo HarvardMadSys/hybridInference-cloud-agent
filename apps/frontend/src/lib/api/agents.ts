@@ -145,15 +145,10 @@ export type {
   AgentLedgerUnknownRowsApi,
   AgentAttemptUsageApi,
   AgentJobUsageApi,
-  AgentMessageRequestApi,
-  ModelTtftApi,
 } from './agents/usage';
 
 export {
-  getAgentMessageRequest,
   getAgentJobUsage,
-  getAgentThreadModelTtft,
-  refreshAgentJobUsage,
 } from './agents/usage';
 
 export type {

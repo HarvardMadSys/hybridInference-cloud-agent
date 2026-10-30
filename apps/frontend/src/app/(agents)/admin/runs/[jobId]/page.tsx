@@ -7,10 +7,8 @@ import { Suspense, useCallback, useEffect, useState, type ReactNode } from 'reac
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { listMeasurements, type MeasurementSummary } from '@/lib/api/adminMeasurements';
-import type { ModelTtftApi } from '@/lib/api/agents';
 import {
   getAdminRun,
-  getAdminRunModelTtft,
   type AdminAttempt,
   type AdminRunDetail,
 } from '@/lib/api/adminRuns';
@@ -20,7 +18,6 @@ import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../../AdminPageHeader';
-import { LLMRequests } from '../LLMRequests';
 import { Resources } from '../Resources';
 import { SessionStatistics } from '../SessionStatistics';
 import {
@@ -96,29 +93,6 @@ function useStartupSample(jobId: string, attemptId: number | null, revision: num
     return () => controller.abort();
   }, [jobId, attemptId, revision]);
   return sample;
-}
-
-/**
- * The run's gateway-measured model TTFT, read apart from the run detail.
- *
- * A gateway read can be slow or fail; the rest of the page never waits for it,
- * and a failure shows the metric as unavailable rather than any other timing.
- */
-function useModelTtft(jobId: string, revision: number) {
-  const [ttft, setTtft] = useState<ModelTtftApi | null>(null);
-  useEffect(() => {
-    setTtft(null);
-    const controller = new AbortController();
-    getAdminRunModelTtft(jobId, controller.signal)
-      .then((summary) => {
-        if (!controller.signal.aborted) setTtft(summary);
-      })
-      .catch(() => {
-        // Shown as unavailable; the request panel below says why per run.
-      });
-    return () => controller.abort();
-  }, [jobId, revision]);
-  return ttft;
 }
 
 /** "3.73 s", linked to the sample's breakdown, and its result when it did not succeed. */
@@ -197,7 +171,6 @@ function RunDetails({ jobId }: { jobId: string }) {
   const first = attempts[attempts.length - 1];
   const restarted = restartNote(attempts);
   const startup = useStartupSample(jobId, latest?.attempt_id ?? null, revision);
-  const modelTtft = useModelTtft(jobId, revision);
   if (denied) return <AdminRequired />;
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
@@ -286,24 +259,8 @@ function RunDetails({ jobId }: { jobId: string }) {
                 onAccessDenied={onAccessDenied}
               />
             )}
-            <SessionStatistics statistics={detail.session_statistics} modelTtft={modelTtft} />
+            <SessionStatistics statistics={detail.session_statistics} />
             <UsageSnapshot usage={detail.usage} />
-            {detail.capabilities.llm_requests ? (
-              <LLMRequests
-                refreshKey={revision}
-                jobId={jobId}
-                running={latest?.finished_at == null}
-                skipAttemptIds={attempts
-                  .filter((attempt) => attempt.status === 'aborted')
-                  .map((attempt) => attempt.attempt_id)}
-                onAccessDenied={onAccessDenied}
-              />
-            ) : (
-              <p className="mt-4 text-xs text-gray-500 dark:text-gray-400">
-                Per-request LLM records are not served by this build. Gateway usage above is an
-                aggregate snapshot.
-              </p>
-            )}
           </>
         )}
       </section>

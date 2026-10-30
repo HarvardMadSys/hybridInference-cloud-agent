@@ -2,7 +2,6 @@ import type { AdminSettingDefinition, AdminSettingValue } from '@/lib/api/adminS
 
 export const ARCHIVE_BUCKET = 'sandbox_archive.bucket';
 export const ARCHIVE_PREFIX = 'sandbox_archive.prefix';
-export const DEFAULT_MODEL = 'default_model';
 
 type ParsedValue =
   | { value: AdminSettingValue; additionalChanges?: Record<string, AdminSettingValue> }
@@ -56,13 +55,6 @@ export function parseValue(definition: AdminSettingDefinition, draft: string): P
   if (definition.kind === 'boolean') return { value: draft === 'true' };
   if (definition.kind === 'string') {
     if (definition.key === ARCHIVE_BUCKET) return parseArchiveBucket(draft);
-    if (definition.key === DEFAULT_MODEL) {
-      // A model id is one token. A pasted trailing space or newline would
-      // otherwise save a value that matches no model for anyone.
-      const model = draft.trim();
-      if (/\s/.test(model)) return { error: 'Enter one model id, without spaces.' };
-      return { value: model };
-    }
     if (definition.choices?.length && !definition.choices.includes(draft)) {
       return { error: 'Choose one of the available values.' };
     }

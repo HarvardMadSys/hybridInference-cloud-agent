@@ -59,7 +59,6 @@ export const accountParityEn = {
   'security.title': 'Account & security',
   'security.description':
     'How you sign in, your password, email and phone, and deleting your account.',
-  'security.gatewayManaged': 'Your account is managed by the sign-in service of this deployment.',
   'security.back': 'Back',
   'security.signInWith': 'You sign in with',
   'security.methodEmail': 'Email: {value}',
@@ -149,7 +148,6 @@ export const accountParityZh: Record<keyof typeof accountParityEn, string> = {
 
   'security.title': '账号与安全',
   'security.description': '登录方式、密码、邮箱和手机号，以及删除账号。',
-  'security.gatewayManaged': '你的账号由本部署的登录服务管理。',
   'security.back': '返回',
   'security.signInWith': '你的登录方式',
   'security.methodEmail': '邮箱：{value}',

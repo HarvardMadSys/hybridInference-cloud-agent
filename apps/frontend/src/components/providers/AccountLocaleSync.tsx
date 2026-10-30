@@ -56,7 +56,7 @@ function planSignIn(
 export function AccountLocaleSync() {
   const { state } = useAuth();
   const { locale, setLocale } = useLocale();
-  const user = state.user?.auth_mode === 'local' ? state.user : null;
+  const user = state.user;
   const applied = useRef<string | null>(null);
   const saved = useRef<string | null>(null);
   useEffect(() => {

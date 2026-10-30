@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { Select } from '@/components/ui/Select';
-import { useSignedInAuthMode } from '@/components/providers/AuthProvider';
 import { config } from '@/config/env';
 import {
   createAutomaticComputeSetup,
@@ -18,8 +17,6 @@ import { getErrorMessage } from '@/lib/utils/errors';
 import { buttonClass, ErrorNotice, inputClass, primaryClass } from './compute-ui';
 
 const CREDENTIALS = [
-  ['gateway.key', 'Inference tunnel private key'],
-  ['gateway.known_hosts', 'Inference tunnel verified hosts'],
   ['mcp.key', 'MCP tunnel private key'],
   ['mcp.known_hosts', 'MCP tunnel verified hosts'],
   ['control.key', 'Control tunnel private key'],
@@ -33,32 +30,12 @@ type SavedAutomaticSetup = {
   parameters: AutomaticSetupParameters;
 };
 
-/** Local hosts connect only to the control plane; never submit a hidden Gateway target. */
-function gatewayParameters(
-  local: boolean,
-  machine: { connection_id: string; address: string; port: string; username: string },
-  port: string,
-): Pick<AutomaticSetupParameters, 'gateway' | 'gateway_port'> {
-  if (local) return {};
-  return {
-    gateway: {
-      connection_id: machine.connection_id,
-      address: machine.address.trim(),
-      port: Number(machine.port),
-      username: machine.username.trim(),
-    },
-    gateway_port: Number(port),
-  };
-}
-
 function AutomaticSetupIntro({
-  local,
   hasConnections,
 }: {
-  local: boolean;
   hasConnections: boolean;
 }) {
-  const machines = local ? 'control-plane machine' : 'gateway and control-plane machines';
+  const machines = 'control-plane machine';
   return (
     <>
       <p className="text-sm text-gray-600 dark:text-gray-300">
@@ -73,40 +50,9 @@ function AutomaticSetupIntro({
       )}
       <p className="text-sm text-gray-600 dark:text-gray-300">
         Use SSH accounts with passwordless sudo on the stable machines.{' '}
-        {local
-          ? 'The control plane runs the main API and MCP listener. Owners provide their own inference connections.'
-          : 'The gateway serves inference; the control plane runs the main API and MCP listener.'}
+        {'The control plane runs the main API and MCP listener. Owners provide their own inference connections.'}
       </p>
     </>
-  );
-}
-
-function GatewayInferencePort({
-  local,
-  value,
-  onChange,
-}: {
-  local: boolean;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  if (local) return null;
-  return (
-    <details>
-      <summary className="cursor-pointer text-sm">Custom inference port</summary>
-      <label className="mt-3 block text-sm">
-        <span className="mb-1 block font-medium">Gateway inference port</span>
-        <input
-          className={inputClass}
-          type="number"
-          min={1}
-          max={65535}
-          required
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-        />
-      </label>
-    </details>
   );
 }
 
@@ -122,9 +68,7 @@ function setupSignature(parameters: AutomaticSetupParameters) {
     machine.username,
   ];
   return JSON.stringify([
-    parameters.gateway ? target(parameters.gateway) : null,
     target(parameters.control),
-    parameters.gateway_port,
     parameters.chat_network_pool,
     parameters.dns_server,
     parameters.protected_cidrs,
@@ -145,9 +89,7 @@ function isSetupParameters(value: unknown): value is AutomaticSetupParameters {
     );
   };
   return (
-    (parameters.gateway == null || isMachine(parameters.gateway)) &&
     isMachine(parameters.control) &&
-    (parameters.gateway_port === undefined || Number.isInteger(parameters.gateway_port)) &&
     typeof parameters.chat_network_pool === 'string' &&
     typeof parameters.dns_server === 'string' &&
     Array.isArray(parameters.protected_cidrs) &&
@@ -246,24 +188,16 @@ function AutomaticComputeSetup({
   onSaved: () => void;
   onBusy: (busy: boolean) => void;
 }) {
-  const local = useSignedInAuthMode() === 'local';
   const sshConnections = connections.filter(
     (connection) => connection.provider_id === 'existing_ssh',
   );
   const [status, setStatus] = useState<AutomaticComputeSetupStatus | null>(null);
-  const [gateway, setGateway] = useState({
-    connection_id: '',
-    address: '',
-    port: '22',
-    username: '',
-  });
   const [control, setControl] = useState({
     connection_id: '',
     address: '',
     port: '22',
     username: '',
   });
-  const [gatewayPort, setGatewayPort] = useState('8080');
   const [networkPool, setNetworkPool] = useState('');
   const [dnsServer, setDnsServer] = useState('');
   const [protectedCidrs, setProtectedCidrs] = useState('');
@@ -288,10 +222,7 @@ function AutomaticComputeSetup({
             ? result.pending_request_id
             : saved?.request_id;
         if (parameters) {
-          if (parameters.gateway)
-            setGateway({ ...parameters.gateway, port: String(parameters.gateway.port) });
           setControl({ ...parameters.control, port: String(parameters.control.port) });
-          setGatewayPort(String(parameters.gateway_port ?? 8080));
           setNetworkPool(parameters.chat_network_pool);
           setDnsServer(parameters.dns_server);
           setProtectedCidrs(parameters.protected_cidrs.join('\n'));
@@ -302,7 +233,6 @@ function AutomaticComputeSetup({
           }
         } else if (result.machine_defaults) {
           const machines = result.machine_defaults;
-          setGateway((current) => ({ ...current, address: machines.gateway?.address ?? '' }));
           setControl((current) => ({ ...current, address: machines.control.address }));
         }
         setStatus(result);
@@ -320,7 +250,6 @@ function AutomaticComputeSetup({
     setError(null);
     try {
       const parameters = {
-        ...gatewayParameters(local, gateway, gatewayPort),
         control: {
           connection_id: control.connection_id,
           address: control.address.trim(),
@@ -365,7 +294,7 @@ function AutomaticComputeSetup({
         void submit();
       }}
     >
-      <AutomaticSetupIntro local={local} hasConnections={sshConnections.length > 0} />
+      <AutomaticSetupIntro hasConnections={sshConnections.length > 0} />
       {!status && !error && <p role="status">Checking automatic setup availability…</p>}
       {status && !status.available && (
         <div role="alert" className="space-y-2 text-sm text-amber-700 dark:text-amber-300">
@@ -379,11 +308,9 @@ function AutomaticComputeSetup({
         <div className="grid gap-4 sm:grid-cols-2">
           {(
             [
-              ['Gateway', gateway, setGateway],
               ['Control-plane', control, setControl],
             ] as const
           )
-            .filter(([name]) => !local || name !== 'Gateway')
             .map(([name, value, update]) => (
               <fieldset className="space-y-3" key={name}>
                 <legend className="mb-2 text-sm font-semibold">{name} machine</legend>
@@ -439,7 +366,6 @@ function AutomaticComputeSetup({
               </fieldset>
             ))}
         </div>
-        <GatewayInferencePort local={local} value={gatewayPort} onChange={setGatewayPort} />
         <div className="grid gap-4 sm:grid-cols-2">
           <label className="text-sm">
             <span className="mb-1 block font-medium">Server setup capacity</span>

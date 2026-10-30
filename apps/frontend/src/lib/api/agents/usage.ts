@@ -60,8 +60,7 @@ export interface AgentJobUsageApi {
     normalized_input_tokens?: number | null;
   };
   /**
-   * The turn ran on its owner's own model connection: that provider bills it,
-   * and an empty or zero Gateway ledger says nothing about its cost.
+   * The turn ran on its owner's own model connection: that provider bills it.
    */
   external_provider?: boolean;
   /**
@@ -79,74 +78,9 @@ export interface AgentJobUsageApi {
     refreshing: boolean;
     next_refresh_at?: string | null;
     active?: boolean;
-    /** Some turn ran on the owner's own connection: `totals` is the Gateway's share only. */
+    /** Some turn ran on the owner's own connection. */
     external_provider?: boolean;
   } | null;
-}
-
-/** One gateway request, correlated by the delivered response ID. */
-export interface AgentMessageRequestApi {
-  status: 'available' | 'not_recorded' | 'ambiguous' | 'unavailable';
-  reason: string | null;
-  request: {
-    request_id: string;
-    response_id: string | null;
-    request_started_at: string;
-    tokens_in: number | null;
-    tokens_out: number | null;
-    reasoning: number | null;
-    spent_usd: string | null;
-    ttft_ms: number | null;
-    latency_ms: number | null;
-    usage_estimated: boolean;
-  } | null;
-}
-
-export async function getAgentMessageRequest(
-  jobId: string,
-  attemptId: number,
-  messageId: string,
-  signal?: AbortSignal,
-): Promise<AgentMessageRequestApi> {
-  const resp = await fetchWithAuth(
-    API_BASE,
-    `/v1/agent/jobs/${encodeURIComponent(jobId)}/attempts/${attemptId}/messages/${encodeURIComponent(messageId)}/request`,
-    { signal },
-  );
-  return jsonOrThrow<AgentMessageRequestApi>(resp);
-}
-
-/**
- * Mean gateway time to first token over the requests that measured one.
- *
- * Read from the gateway's own request log, so sandbox, workspace and CLI
- * startup are never in it. `mean_ttft_ms` is null whenever no request was
- * measured; `complete` is false when only part of the scope could be read.
- */
-export interface ModelTtftApi {
-  source: 'gateway_request_log';
-  status: 'available' | 'not_recorded' | 'unavailable';
-  mean_ttft_ms: number | null;
-  samples: number;
-  requests_read: number;
-  sources_read: number;
-  sources_total: number;
-  complete: boolean;
-  reason: string | null;
-}
-
-/** A thread's model TTFT; null for a thread this caller cannot read. */
-export async function getAgentThreadModelTtft(
-  jobId: string,
-  signal?: AbortSignal,
-): Promise<ModelTtftApi | null> {
-  const resp = await fetchWithAuth(
-    API_BASE,
-    `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread/model-ttft`,
-    { signal },
-  );
-  if (resp.status === 404) return null;
-  return jsonOrThrow<ModelTtftApi>(resp);
 }
 
 /** Read cached snapshots; a pre-ledger control plane returns null, never zero usage. */
@@ -161,16 +95,3 @@ export async function getAgentJobUsage(
   return jsonOrThrow<AgentJobUsageApi>(resp);
 }
 
-/** Queue a refresh in the control plane and return the current cached snapshots. */
-export async function refreshAgentJobUsage(
-  jobId: string,
-  signal?: AbortSignal,
-): Promise<AgentJobUsageApi | null> {
-  const resp = await fetchWithAuth(
-    API_BASE,
-    `/v1/agent/jobs/${encodeURIComponent(jobId)}/usage/refresh`,
-    { method: 'POST', signal },
-  );
-  if (resp.status === 404) return null;
-  return jsonOrThrow<AgentJobUsageApi>(resp);
-}

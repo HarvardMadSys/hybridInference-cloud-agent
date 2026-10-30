@@ -3,16 +3,14 @@ import type { Translator } from '@/lib/i18n/translate';
 
 // Where a model runs is part of the choice, not a detail of it.
 //
-// The Gateway and each of the owner's own connections are separate sources,
-// and the same model id may be offered by several of them: `gpt-5` on the
-// Gateway and `gpt-5` on a personal key bill different accounts. So a choice
-// is always the pair, and two choices are equal only when both halves are.
-// Drafts, requests and API state keep the two fields as they are; the encoded
-// key below exists only so a picker, which deals in strings, can tell two
-// same-named options apart. A raw model string saved before sources existed
-// is a Gateway model and is never decoded as a key.
+// Each of the owner's connections is a separate source, and the same model id
+// may be offered by several of them: `gpt-5` on two keys bills two accounts.
+// So a choice is always the pair, and two choices are equal only when both
+// halves are. Drafts, requests and API state keep the two fields as they are;
+// the encoded key below exists only so a picker, which deals in strings, can
+// tell two same-named options apart.
 
-/** A model and the source it runs on. `connectionId` null is the Gateway. */
+/** A model and the connection it runs on; null names no connection, so it cannot run. */
 export interface ModelChoice {
   model: string;
   connectionId: string | null;
@@ -35,9 +33,9 @@ export function turnChoice(turn: {
 /**
  * A picker's identity for a choice; `''` for none. Never stored or sent.
  *
- * A Gateway model keeps its own name, as before sources existed; a personal
- * one is the JSON pair, which starts `["mconn_`. A Gateway name that itself
- * starts with `[` is encoded as `[null, name]`, so the two can never collide.
+ * A choice on a connection is the JSON pair, which starts `["mconn_`. One with
+ * no connection keeps its name, or `[null, name]` if that starts with `[`, so
+ * the two can never collide.
  */
 export function choiceKey(choice: ModelChoice): string {
   if (!choice.model) return '';
@@ -55,35 +53,30 @@ export function storedChoice(model: unknown, connectionId: unknown): ModelChoice
 }
 
 /**
- * What a runtime can run: the Gateway's models, then each enabled connection's
- * models this runtime can run now. A model is offered only once its own
+ * What a runtime can run: each enabled connection's models this runtime can
+ * run now. A model is offered only once its own
  * verification found a way for this agent to use it — exactly what the server
  * accepts — so nothing is offered and then refused on Run.
  */
 export function offeredChoices(config: AgentConfigApi | null, runtime: string): ModelChoice[] {
-  const gatewayModels = config?.gateway_inference === false ? [] : (config?.models ?? []);
-  const gateway = gatewayModels.map((model) => ({ model, connectionId: null }));
   const connections =
     config?.model_connections_enabled === false ? [] : (config?.model_connections ?? []);
-  const personal = connections.flatMap((connection) =>
+  return connections.flatMap((connection) =>
     connection.models
       .filter((model) => connection.model_runtimes?.[model]?.includes(runtime))
       .map((model) => ({ model, connectionId: connection.id })),
   );
-  return [...gateway, ...personal];
 }
 
-/** A personal choice stays blocked until the current catalog confirms its exact source. */
+/** A choice stays blocked until the current catalog confirms its exact source. */
 export function isModelUnavailable(
   config: AgentConfigApi | null,
   runtime: string,
   choice: ModelChoice,
   refreshing = false,
 ): boolean {
-  const mustConfirm = Boolean(choice.connectionId) || config?.gateway_inference === false;
   return (
-    mustConfirm &&
-    (refreshing || !offeredChoices(config, runtime).some((option) => sameChoice(option, choice)))
+    refreshing || !offeredChoices(config, runtime).some((option) => sameChoice(option, choice))
   );
 }
 
@@ -100,8 +93,8 @@ export interface LabelOptions {
 }
 
 /**
- * A personal choice names its connection, so it never reads as the Gateway
- * model of the same name; one that cannot run here says so. Which API the
+ * A choice names its connection, so it never reads as the same model on
+ * another; one that cannot run here says so. Which API the
  * agent reaches it on is the platform's business and is not part of the label.
  */
 export function choiceLabel(
@@ -162,17 +155,6 @@ export function modelPicker(
 }
 
 /**
- * The prompt rewriter's model. It runs on the Gateway, so a personal choice
- * turns it off and says why, rather than sending that model to the Gateway.
- */
-export function rewriteProps(choice: ModelChoice, t: Translator, config?: AgentConfigApi | null) {
-  if (config === null || config?.gateway_inference === false) return { model: '', hidden: true };
-  return choice.connectionId
-    ? { model: '', disabledReason: t('modelSource.rewriteUnavailable') }
-    : { model: choice.model };
-}
-
-/**
  * The picker for one turn of a conversation on `runtime`, or null when there
  * is nothing to offer — the caller then names the model it inherits.
  */
@@ -197,8 +179,7 @@ export function turnModelPicker(
  *
  * Nothing when both match: an omitted model inherits the model and its source
  * together. Otherwise the model always goes, with its connection when it has
- * one — a switch between sources of the same model name is still a switch,
- * and a model sent without a connection is the Gateway's.
+ * one — a switch between sources of the same model name is still a switch.
  */
 export function modelOverride(
   parent: { model: string; modelConnectionId?: string | null },
