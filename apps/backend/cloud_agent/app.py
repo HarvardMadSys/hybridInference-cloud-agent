@@ -177,9 +177,7 @@ def _install_api_docs(app: FastAPI) -> None:
             oauth2_redirect_url="/docs/oauth2-redirect",
         )
 
-    @app.get(
-        "/docs/oauth2-redirect", include_in_schema=False, dependencies=[Depends(require_docs)]
-    )
+    @app.get("/docs/oauth2-redirect", include_in_schema=False, dependencies=[Depends(require_docs)])
     def swagger_ui_redirect() -> Any:
         return get_swagger_ui_oauth2_redirect_html()
 

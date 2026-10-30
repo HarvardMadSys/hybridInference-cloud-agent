@@ -231,3 +231,60 @@ async def test_migration_backfills_valid_custom_values_and_keeps_admin_overrides
     downgrade_to(config, "0035_admin_settings")
     apply_migrations(config)
     assert (await hosts.get_host(host="runner-a"))["settings_desired"] == row["settings_desired"]
+
+
+async def test_a_late_setting_imports_once_for_a_host_whose_first_import_is_done(store):
+    """The runner lease arrived after hosts imported their environment (0107)."""
+    hosts = store.host_pool
+    credential = hash_secret("legacy")
+    await hosts.register_host(host="runner-a", credential_hash=credential)
+    # A runner from before the lease setting reports everything but the lease.
+    old_report = {
+        key: value
+        for key, value in {**default_values(RUNNER_SETTING_KEYS), "agent_timeout_s": 7200}.items()
+        if key != "lease_ttl_s"
+    }
+    first = await hosts.record_host_heartbeat(
+        host="runner-a", credential_hash=credential, settings_local=old_report
+    )
+    assert await _imported(store, "runner-a")
+    assert first["settings_desired"] == {"agent_timeout_s": 7200}
+
+    # The upgraded runner reports AGENT_LEASE_TTL=300 for the first time.
+    new_report = {**old_report, "lease_ttl_s": 300}
+    second = await hosts.record_host_heartbeat(
+        host="runner-a", credential_hash=credential, settings_local=new_report
+    )
+    assert second["settings_desired"] == {"agent_timeout_s": 7200, "lease_ttl_s": 300}
+
+    # An admin resets it; the same report must not bring it back.
+    await hosts.set_runner_host_settings(host="runner-a", changes={"lease_ttl_s": None})
+    third = await hosts.record_host_heartbeat(
+        host="runner-a", credential_hash=credential, settings_local=new_report
+    )
+    assert third["settings_desired"] == {"agent_timeout_s": 7200}
+    assert (
+        merge_admin_values(await hosts.host_settings(), third["settings_desired"])["lease_ttl_s"]
+        == 120
+    )
+
+
+async def test_a_host_reports_the_registry_it_downloads_from(store):
+    hosts = store.host_pool
+    credential = hash_secret("legacy")
+    await hosts.register_host(host="runner-a", credential_hash=credential)
+    first = await hosts.record_host_heartbeat(host="runner-a", credential_hash=credential)
+    assert first["config_reports"] == {}
+    second = await hosts.record_host_heartbeat(
+        host="runner-a",
+        credential_hash=credential,
+        config_reports={"runtime_registry_url": "https://npm.example.org"},
+    )
+    assert second["config_reports"] == {"runtime_registry_url": "https://npm.example.org"}
+    # A beat without the report leaves it in place.
+    third = await hosts.record_host_heartbeat(host="runner-a", credential_hash=credential)
+    assert third["config_reports"] == {"runtime_registry_url": "https://npm.example.org"}
+    listed = {row["host"]: row for row in await hosts.list_runner_hosts()}
+    assert listed["runner-a"]["config_reports"]["runtime_registry_url"] == (
+        "https://npm.example.org"
+    )

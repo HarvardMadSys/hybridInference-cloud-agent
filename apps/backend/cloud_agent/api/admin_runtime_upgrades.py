@@ -19,6 +19,7 @@ from cloud_agent.runtime_upgrades import (
     RegistryClient,
     default_version,
     is_newer,
+    registry_lagging_hosts,
     update_runtimes,
     upgrade_state,
 )
@@ -154,6 +155,17 @@ async def request_runtime_upgrade(
     if definition is None:
         raise HTTPException(
             status_code=422, detail=f"{payload.runtime} cannot be updated from this page."
+        )
+    lagging = registry_lagging_hosts(await job_store.host_pool.list_runner_hosts())
+    if lagging:
+        # A version listed from the saved registry might not be one these
+        # servers can download, so no update starts until they all use it.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "These online servers do not yet report downloading from the saved "
+                "agent package registry: " + ", ".join(lagging[:10])
+            ),
         )
     published = await registry.has_version(definition.npm_package, payload.version)
     if published is False:

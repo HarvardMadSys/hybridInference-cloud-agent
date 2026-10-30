@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import time
 from dataclasses import dataclass
@@ -64,9 +63,45 @@ _ABBREVIATED = "application/vnd.npm.install-v1+json; q=1.0, application/json; q=
 _STABLE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
 
+def configured_registry_url() -> str:
+    """The saved registry (``runtime_registry_url``), ``""`` for the public one.
+
+    Before this process adopts a settings snapshot the registry reads the
+    environment, as it always did.
+    """
+    from cloud_agent.settings import text_setting
+
+    return text_setting("runtime_registry_url").strip().rstrip("/")
+
+
 def registry_url() -> str:
     """The npm registry this deployment reads, without a trailing slash."""
-    return (os.environ.get(ENV_RUNTIME_REGISTRY_URL) or DEFAULT_REGISTRY_URL).strip().rstrip("/")
+    return configured_registry_url() or DEFAULT_REGISTRY_URL
+
+
+def registry_lagging_hosts(hosts: list[dict[str, Any]]) -> list[str]:
+    """Online hosts not known to download from the saved registry, by name.
+
+    A host reports the registry its next download uses (``config_reports``).
+    One that reports another value is lagging. One that reports nothing runs a
+    release from before the report; it uses its own environment value, which
+    is unknown here. With the public registry saved that is how every
+    deployment worked before, so such a host is not counted; with any other
+    registry saved, it is, since nothing shows it has the same one.
+    """
+    configured = configured_registry_url()
+    lagging: list[str] = []
+    for host in hosts:
+        if host.get("status") != HOST_ONLINE:
+            continue
+        reported = (host.get("config_reports") or {}).get("runtime_registry_url")
+        if reported is None:
+            if configured:
+                lagging.append(str(host.get("host")))
+            continue
+        if str(reported).strip().rstrip("/") != configured:
+            lagging.append(str(host.get("host")))
+    return sorted(lagging)
 
 
 def _package_path(package: str) -> str:
@@ -146,6 +181,10 @@ class RegistryClient:
         self._version_reads: dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
 
+    def _cache_key(self, package: str) -> str:
+        """Cache per registry: a changed registry setting reads afresh."""
+        return f"{self._base_url or registry_url()} {package}"
+
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             base_url=self._base_url or registry_url(),
@@ -157,7 +196,7 @@ class RegistryClient:
     async def latest(self, package: str) -> tuple[str | None, str | None]:
         """``(version, None)``, or ``(None, why it is unknown)``."""
         async with self._lock:
-            cached = self._latest.get(package)
+            cached = self._latest.get(self._cache_key(package))
             if cached is not None and self._clock() - cached[0] < REGISTRY_CACHE_S:
                 return cached[1], cached[2]
         version: str | None = None
@@ -183,7 +222,7 @@ class RegistryClient:
                 if version
                 else self._clock() - REGISTRY_CACHE_S + REGISTRY_FAILURE_CACHE_S
             )
-            self._latest[package] = (stamp, version, error)
+            self._latest[self._cache_key(package)] = (stamp, version, error)
         return version, error
 
     async def versions(self, package: str) -> NpmVersions:
@@ -192,7 +231,7 @@ class RegistryClient:
             read = self._version_reads.setdefault(package, asyncio.Lock())
         async with read:
             async with self._lock:
-                cached = self._versions.get(package)
+                cached = self._versions.get(self._cache_key(package))
                 if cached is not None and self._clock() - cached[0] < REGISTRY_CACHE_S:
                     return cached[1]
             result = await self._read_versions(package)
@@ -202,7 +241,7 @@ class RegistryClient:
                     if result.error is None
                     else self._clock() - REGISTRY_CACHE_S + REGISTRY_FAILURE_CACHE_S
                 )
-                self._versions[package] = (stamp, result)
+                self._versions[self._cache_key(package)] = (stamp, result)
             return result
 
     async def _read_versions(self, package: str) -> NpmVersions:
