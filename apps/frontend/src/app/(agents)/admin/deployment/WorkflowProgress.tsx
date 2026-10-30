@@ -98,7 +98,9 @@ export function WorkflowProgress({ workflow, run }: { workflow: DeploymentWorkfl
     <li className="mt-3 rounded-md border border-border p-3" data-workflow={workflow.kind}>
       <div className="flex flex-wrap items-baseline gap-2 text-sm">
         <strong>{definition?.title ?? workflow.kind}</strong>
-        <span className={workflow.state === 'failed' ? 'text-red-700' : 'text-muted'}>
+        <span
+          className={workflow.state === 'failed' ? 'text-red-700 dark:text-red-400' : 'text-muted'}
+        >
           {WORKFLOW_STATES[workflow.state]}
         </span>
       </div>

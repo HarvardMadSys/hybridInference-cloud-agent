@@ -142,8 +142,9 @@ export function createFixture() {
     if (!path.startsWith('/api/')) return false;
     const api = path.slice(4);
     // A control plane without management reports, and with no maintenance.
-    if (api.startsWith('/admin/agent/management/')) return json(res, {}, 404), true;
-    if (api === '/v1/agent/site-config') return json(res, { maintenance: { active: false } }), true;
+    if (api.startsWith('/admin/agent/management/')) return (json(res, {}, 404), true);
+    if (api === '/v1/agent/site-config')
+      return (json(res, { maintenance: { active: false } }), true);
     if (api === '/v1/session/me')
       json(res, {
         id: 'browser-owner',

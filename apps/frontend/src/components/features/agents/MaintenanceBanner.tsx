@@ -36,7 +36,10 @@ export function MaintenanceBanner() {
   }, []);
   if (!active) return null;
   return (
-    <div role="status" className="bg-amber-100 px-3 py-1.5 text-center text-sm text-amber-900">
+    <div
+      role="status"
+      className="bg-amber-100 px-3 py-1.5 text-center text-sm text-amber-900 dark:bg-amber-500/15 dark:text-amber-200"
+    >
       Maintenance: the database is moving. You can read everything, but changes are refused until it
       finishes, and the service restarts briefly at the end.
     </div>
